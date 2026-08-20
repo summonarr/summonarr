@@ -360,6 +360,76 @@ async function fixPlexMatch(
   );
 }
 
+type JellyfinVirtualFolder = {
+  Name?: string;
+  Locations?: string[];
+  LibraryOptions?: {
+    SaveLocalMetadata?: boolean;
+    MetadataSavers?: string[] | null;
+    DisabledLocalMetadataReaders?: string[] | null;
+  };
+};
+
+// Post-mortem for a fix-match apply that Jellyfin did not confirm in the poll
+// window. Field data (2026-08, 13 series across three days) says an item still
+// reporting the OLD id at this point is USUALLY a slow series refresh settling
+// after our window — every sampled "failure" had actually landed when inspected
+// later — so the message leads with "re-sync and check before retrying". A
+// REPEATED landing back on the old id is the genuine-revert signature (a stale
+// .nfo re-imported by the Nfo reader, or a locked item), so the probe still
+// names those as the repeat-offender explanation. Field semantics verified
+// against the Jellyfin 10.11 LibraryOptions model: local metadata READERS are
+// on by default and DisabledLocalMetadataReaders lists the ones turned off; the
+// SAVER is MetadataSavers / SaveLocalMetadata. Every probe failure degrades
+// back to the generic message — diagnosis must never mask the original failure.
+async function describeUnconfirmedJellyfinMatch(opts: {
+  baseUrl: string;
+  headers: Record<string, string>;
+  previousTmdbId: number;
+  correctTmdbId: number;
+  lastSeenTmdbId: string | null;
+  itemLocked: boolean;
+  filePath: string | null;
+}): Promise<string> {
+  const { baseUrl, headers, previousTmdbId, correctTmdbId, lastSeenTmdbId, itemLocked, filePath } = opts;
+
+  if (itemLocked) {
+    return `Jellyfin did not keep TMDB #${correctTmdbId} — the item is locked in Jellyfin ("Lock this item" in Edit metadata), so refreshes preserve its old data. Unlock it and retry.`;
+  }
+
+  if (lastSeenTmdbId === String(previousTmdbId)) {
+    // Still the old id — most likely still settling (see the header comment).
+    // Probe the owning library's config so the repeat-offender hint is specific.
+    const folders = await safeFetchAdminConfigured(`${baseUrl}/Library/VirtualFolders`, { headers, timeoutMs: 10_000 })
+      .then((r) => (r.ok ? (r.json() as Promise<JellyfinVirtualFolder[]>) : null))
+      .catch(() => null);
+    if (Array.isArray(folders)) {
+      const normalizedPath = filePath ? filePath.replace(/\\/g, "/") : null;
+      const owns = (f: JellyfinVirtualFolder) =>
+        !!normalizedPath && (f.Locations ?? []).some((loc) => {
+          const l = loc.replace(/\\/g, "/").replace(/\/$/, "");
+          return !!l && (normalizedPath === l || normalizedPath.startsWith(l + "/"));
+        });
+      const nfoReaderOn = (f: JellyfinVirtualFolder) =>
+        !(f.LibraryOptions?.DisabledLocalMetadataReaders ?? []).some((r) => r.toLowerCase() === "nfo");
+      const nfoSaverOn = (f: JellyfinVirtualFolder) =>
+        f.LibraryOptions?.SaveLocalMetadata === true ||
+        (f.LibraryOptions?.MetadataSavers ?? []).some((s) => s.toLowerCase() === "nfo");
+
+      const lib = folders.find(owns) ?? null;
+      if (lib && nfoReaderOn(lib)) {
+        const saverNote = nfoSaverOn(lib)
+          ? " That library also has the Nfo metadata SAVER enabled, which keeps rewriting those files."
+          : "";
+        return `Jellyfin still reported the previous match (TMDB #${previousTmdbId}) after the confirmation window. Slow refreshes settle late — run a library re-sync in a few minutes and check whether the new match landed before retrying. If it keeps ending up at TMDB #${previousTmdbId}, a stale .nfo is the likely cause: the "${lib.Name ?? "matching"}" library has the Nfo metadata reader enabled, and such a file re-asserts the old id on every refresh.${saverNote}`;
+      }
+    }
+    return `Jellyfin still reported the previous match (TMDB #${previousTmdbId}) after the confirmation window. Slow refreshes settle late — run a library re-sync in a few minutes and check whether the new match landed before retrying. If it keeps ending up at TMDB #${previousTmdbId}, something local is re-asserting it (a stale .nfo file, another metadata provider, or a plugin) — check the Jellyfin server log for this item.`;
+  }
+
+  return `Jellyfin did not confirm TMDB #${correctTmdbId} after applying the match — library mapping not updated. Retry, or check that Jellyfin can reach its metadata provider.`;
+}
+
 // Remaps a Jellyfin library item to the correct TMDB id: remote-search for a
 // candidate carrying correctTmdbId, apply it, refresh, then poll until Jellyfin
 // confirms — throws if it never confirms. Returns the (possibly new) item id.
@@ -367,12 +437,16 @@ async function fixPlexMatch(
 // `instance` selects WHICH configured Jellyfin server gets rewritten — same rule
 // as the Plex path: the item id came from one server's library row and is only
 // meaningful against that server.
+//
+// `previousTmdbId` is the row's current (wrong) id — only used to diagnose an
+// unconfirmed apply (did the server revert to it?), never sent to Jellyfin.
 async function fixJellyfinMatch(
   itemId: string,
   correctTmdbId: number,
   mediaType: "MOVIE" | "TV",
   instance: MediaInstanceKey,
   filePath: string | null,
+  previousTmdbId: number,
 ): Promise<{ newItemId: string; baseUrl: string; apiKey: string }> {
   // Strip itemId to UUID-safe chars to break taint from a DB-read string before
   // it's interpolated into any admin-token URL below.
@@ -458,8 +532,18 @@ async function fixJellyfinMatch(
 
   let resolvedItemId = safeItemId;
   let confirmed = false;
-  // ~2 extra minutes of polling when the refresh outlived the apply window.
-  const confirmAttempts = applyTimedOut ? 24 : 4;
+  // Post-mortem inputs: the last TMDB id the item reported, and whether it is
+  // metadata-locked — both read off the confirmation polls we already make.
+  let lastSeenTmdbId: string | null = null;
+  let itemLocked = false;
+  // ~2 extra minutes of polling when the refresh outlived the apply window, and
+  // for EVERY series: a Series identify cascades across seasons/episodes, so its
+  // new provider ids can become readable minutes after the Apply call returns.
+  // Field-verified (2026-08): 13 series applies that "failed to confirm" in the
+  // old 20s window had ALL landed correctly when inspected later. Success still
+  // breaks out of the loop on the first confirming poll, so a fast confirm pays
+  // nothing for the longer window.
+  const confirmAttempts = applyTimedOut || mediaType === "TV" ? 24 : 4;
   for (let attempt = 0; attempt < confirmAttempts; attempt++) {
     await new Promise((r) => setTimeout(r, 5_000));
 
@@ -504,9 +588,12 @@ async function fixJellyfinMatch(
       continue;
     }
 
-    const checkJson = await checkRes.json() as { ProviderIds?: Record<string, string> };
+    const checkJson = await checkRes.json() as { ProviderIds?: Record<string, string>; LockData?: boolean };
     const providerIds = checkJson?.ProviderIds;
-    confirmed = (providerIds?.Tmdb ?? providerIds?.tmdb) === String(correctTmdbId);
+    const seenTmdb = providerIds?.Tmdb ?? providerIds?.tmdb ?? null;
+    if (seenTmdb !== null) lastSeenTmdbId = seenTmdb;
+    if (checkJson?.LockData === true) itemLocked = true;
+    confirmed = seenTmdb === String(correctTmdbId);
     if (confirmed) break;
   }
 
@@ -516,7 +603,9 @@ async function fixJellyfinMatch(
     if (applyTimedOut) {
       throw new Error(`Jellyfin was still processing the match for TMDB #${correctTmdbId} when we stopped waiting — the refresh continues server-side and may finish on its own. Check the item in Jellyfin or run a library re-sync before retrying; an immediate retry only queues another full refresh.`);
     }
-    throw new Error(`Jellyfin did not confirm TMDB #${correctTmdbId} after applying the match — library mapping not updated. Retry, or check that Jellyfin can reach its metadata provider.`);
+    throw new Error(await describeUnconfirmedJellyfinMatch({
+      baseUrl, headers, previousTmdbId, correctTmdbId, lastSeenTmdbId, itemLocked, filePath,
+    }));
   }
   if (applyTimedOut) {
     // The image-replacement refresh deferred above, now that the server has
@@ -660,7 +749,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
       const failedCopies: string[] = [];
       for (const targetId of targetItemIds) {
         try {
-          applied.push(await fixJellyfinMatch(targetId, correctTmdbId, mediaType, serverInstance, item?.filePath ?? null));
+          applied.push(await fixJellyfinMatch(targetId, correctTmdbId, mediaType, serverInstance, item?.filePath ?? null, tmdbId));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           console.error("[fix-match]", `jellyfin copy ${targetId} failed:`, msg);

@@ -593,6 +593,76 @@ test("POST (jellyfin): apply timeout that never confirms → 502, NO DB write, N
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+// Unconfirmed-apply diagnosis (jellyfin) — an item still reporting the OLD id
+// when the window expires is USUALLY a slow series refresh settling late (field
+// data: every sampled "failure" had actually landed when inspected afterwards),
+// so the error must lead with re-sync-and-check guidance — and only name the
+// repeat-offender explanations (an enabled Nfo reader re-importing a stale
+// .nfo, or a metadata-locked item) as what to look at if it KEEPS happening.
+// ════════════════════════════════════════════════════════════════════════════
+
+test("POST (jellyfin): old-id-after-window failure says re-sync-first and names the library's enabled Nfo reader (and saver)", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/media/movies/Wrong (1999)/wrong.mkv", jellyfinItemId: "aaaaaaaa" });
+
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) return new Response("", { status: 200 });
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Correct Title" }]);
+    if (p === "/Items/aaaaaaaa/Refresh") return new Response("", { status: 200 });
+    if (p === "/Items/aaaaaaaa") return okJson({ ProviderIds: { Tmdb: "111" } }); // the server reverted
+    if (p === "/Library/VirtualFolders") return okJson([
+      { Name: "Shows", Locations: ["/media/shows"], LibraryOptions: { DisabledLocalMetadataReaders: [] } },
+      // Owning library: Nfo reader ON (not in the disabled list) + Nfo saver ON.
+      { Name: "Movies", Locations: ["/media/movies"], LibraryOptions: { DisabledLocalMetadataReaders: ["Collections"], MetadataSavers: ["Nfo"] } },
+    ]);
+    throw new Error(`unexpected Jellyfin path ${p}`);
+  };
+
+  const res = await fixMatch(postBody(
+    { server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222 },
+    a.header,
+  ), undefined);
+
+  assert.equal(res.status, 502);
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 0, "an unconfirmed match must not touch the DB");
+  const msg = errors.find((e) => e.includes("still reported the previous match"));
+  assert.ok(msg, `the error must say the old id was still reported, got: ${errors.join(" | ")}`);
+  assert.ok(msg.includes("re-sync"), "slow-settle is the common case — re-sync-and-check guidance must lead");
+  assert.ok(msg.includes('"Movies"'), "the OWNING library must be named, not the first one in the list");
+  assert.ok(msg.includes("Nfo metadata reader"), "the reader must be called out as the cause");
+  assert.ok(msg.includes("SAVER"), "an enabled Nfo saver must be flagged too — it keeps rewriting the stale files");
+  assert.ok(msg.includes("TMDB #111"), "the id the server restored must be shown");
+});
+
+test("POST (jellyfin): a metadata-locked item is diagnosed as locked, without probing library config", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/media/movies/Wrong (1999)/wrong.mkv", jellyfinItemId: "aaaaaaaa" });
+
+  let virtualFoldersCalls = 0;
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) return new Response("", { status: 200 });
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Correct Title" }]);
+    if (p === "/Items/aaaaaaaa/Refresh") return new Response("", { status: 200 });
+    if (p === "/Items/aaaaaaaa") return okJson({ ProviderIds: { Tmdb: "111" }, LockData: true });
+    if (p === "/Library/VirtualFolders") { virtualFoldersCalls++; return okJson([]); }
+    throw new Error(`unexpected Jellyfin path ${p}`);
+  };
+
+  const res = await fixMatch(postBody(
+    { server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222 },
+    a.header,
+  ), undefined);
+
+  assert.equal(res.status, 502);
+  assert.ok(errors.some((e) => e.includes("locked in Jellyfin")), "a lock explains everything — say so");
+  assert.equal(virtualFoldersCalls, 0, "the lock short-circuits the library-config probe");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // candidates
 // ════════════════════════════════════════════════════════════════════════════
 
