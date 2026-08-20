@@ -515,6 +515,84 @@ test("POST with NO serverInstance targets the default server (jellyfin)", async 
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+// Apply-timeout tolerance (jellyfin) — Jellyfin runs the identify's FullRefresh
+// synchronously INSIDE the Apply request with CancellationToken.None, so a
+// client-side timeout means "still working", not "failed". The route must keep
+// polling on that signal, defer the extra image refresh until confirmation, and
+// when even the extended window expires, say "still processing" rather than
+// implying a revert.
+// ════════════════════════════════════════════════════════════════════════════
+
+// The same TimeoutError shape undici's AbortSignal.timeout produces, which
+// safe-fetch maps to SafeFetchError("timeout").
+const timeoutError = () => Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+
+test("POST (jellyfin): apply timeout → extended poll confirms → 200, DB written, image refresh deferred until after confirmation", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", jellyfinItemId: "aaaaaaaa" });
+
+  let checks = 0;
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) throw timeoutError();
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Correct Title" }]);
+    if (p === "/Items/aaaaaaaa/Refresh") return new Response("", { status: 200 });
+    if (p === "/Items/aaaaaaaa") {
+      checks++;
+      // Old id for the first five polls — past the NORMAL path's 4-attempt
+      // window, so a pass here proves the extended window did the confirming.
+      return okJson({ ProviderIds: { Tmdb: checks <= 5 ? "111" : "222" } });
+    }
+    throw new Error(`unexpected Jellyfin path ${p}`);
+  };
+
+  const res = await fixMatch(postBody(
+    { server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222 },
+    a.header,
+  ), undefined);
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+  assert.ok(checks >= 6, `the poll must continue past the normal 4-attempt window (got ${checks} checks)`);
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 1, "the DB rewrite must land once confirmed");
+  assert.ok(warns.some((w) => w.includes("apply timed out client-side")), "the timeout must be surfaced as a warn, not swallowed silently");
+  // The image refresh is deferred: exactly one, and only AFTER a confirming read.
+  const calls = fetchCalls.map((c) => c.url.pathname);
+  const refreshCalls = calls.filter((p) => p === "/Items/aaaaaaaa/Refresh");
+  assert.equal(refreshCalls.length, 1, "exactly one deferred image refresh");
+  assert.ok(
+    calls.indexOf("/Items/aaaaaaaa/Refresh") > calls.indexOf("/Items/aaaaaaaa"),
+    "the image refresh must fire only after confirmation, never while the server is mid-apply",
+  );
+});
+
+test("POST (jellyfin): apply timeout that never confirms → 502, NO DB write, NO extra refresh, still-processing error", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", jellyfinItemId: "aaaaaaaa" });
+
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) throw timeoutError();
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Correct Title" }]);
+    if (p === "/Items/aaaaaaaa") return okJson({ ProviderIds: { Tmdb: "111" } }); // never flips
+    throw new Error(`unexpected Jellyfin path ${p}`);
+  };
+
+  const res = await fixMatch(postBody(
+    { server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222 },
+    a.header,
+  ), undefined);
+
+  assert.equal(res.status, 502);
+  assert.equal(opsOf("jellyfinLibraryItem.delete").length, 0, "an unconfirmed match must not touch the DB");
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 0);
+  assert.ok(fetchCalls.every((c) => !c.url.pathname.endsWith("/Refresh")), "no refresh may be queued on a box that is already mid-apply");
+  assert.ok(errors.some((e) => e.includes("still processing the match")), "the failure must say the server is still working, not imply a revert");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // candidates
 // ════════════════════════════════════════════════════════════════════════════
 

@@ -3,7 +3,7 @@ import { getMediaInstances } from "@/lib/media-instance-registry";
 import { readJsonCapped } from "@/lib/body-size";
 import { withIssueAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
+import { safeFetchAdminConfigured, safeFetchTrusted, SafeFetchError } from "@/lib/safe-fetch";
 
 import { tmdbAuth } from "@/lib/tmdb-auth";
 import { getPlexEpisodesForShow } from "@/lib/plex";
@@ -421,22 +421,46 @@ async function fixJellyfinMatch(
     throw new Error(`Jellyfin remote search returned no candidate matching TMDB #${correctTmdbId} — refusing to apply a different match`);
   }
 
-  const applyRes = await safeFetchAdminConfigured(`${baseUrl}/Items/RemoteSearch/Apply/${safeItemId}?replaceAllImages=false`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(target),
-    timeoutMs: 90_000,
-  });
-  if (!applyRes.ok) throw new Error(`Jellyfin apply match failed: ${applyRes.status}`);
+  // Jellyfin runs the identify's FullRefresh SYNCHRONOUSLY inside the Apply
+  // request, with CancellationToken.None (ItemLookupController.ApplySearchCriteria,
+  // verified against the 10.11.x source) — so a client-side timeout does NOT
+  // cancel the server-side work, and the match routinely lands moments after we
+  // hang up (large series, busy box, slow metadata provider). Treat a timeout as
+  // "still applying" and fall through to a LONGER confirmation poll instead of
+  // failing an operation that is usually still succeeding. Any other apply
+  // failure (non-2xx, network, SSRF) still throws as before.
+  let applyTimedOut = false;
+  try {
+    const applyRes = await safeFetchAdminConfigured(`${baseUrl}/Items/RemoteSearch/Apply/${safeItemId}?replaceAllImages=false`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(target),
+      timeoutMs: 90_000,
+    });
+    if (!applyRes.ok) throw new Error(`Jellyfin apply match failed: ${applyRes.status}`);
+  } catch (err) {
+    if (!(err instanceof SafeFetchError) || err.reason !== "timeout") throw err;
+    applyTimedOut = true;
+    console.warn("[fix-match]", tag, "apply timed out client-side; Jellyfin is still refreshing — extending the confirmation poll");
+  }
 
-  await safeFetchAdminConfigured(
-    `${baseUrl}/Items/${safeItemId}/Refresh?MetadataRefreshMode=FullRefresh&ReplaceAllMetadata=true&ImageRefreshMode=FullRefresh&ReplaceAllImages=true`,
-    { method: "POST", headers, timeoutMs: 30_000 },
-  ).catch((e: unknown) => { console.warn("[fix-match]", tag, "Refresh call failed (non-fatal):", e); return null; });
+  const refreshUrl = (id: string) =>
+    `${baseUrl}/Items/${id}/Refresh?MetadataRefreshMode=FullRefresh&ReplaceAllMetadata=true&ImageRefreshMode=FullRefresh&ReplaceAllImages=true`;
+  // When the apply timed out, the server is already >90s deep in that apply's own
+  // refresh — queueing a second one now only grows the backlog. Defer it to after
+  // confirmation (below) so the image-replacement pass still happens on success.
+  if (!applyTimedOut) {
+    await safeFetchAdminConfigured(
+      refreshUrl(safeItemId),
+      { method: "POST", headers, timeoutMs: 30_000 },
+    ).catch((e: unknown) => { console.warn("[fix-match]", tag, "Refresh call failed (non-fatal):", e); return null; });
+  }
 
   let resolvedItemId = safeItemId;
   let confirmed = false;
-  for (let attempt = 0; attempt < 4; attempt++) {
+  // ~2 extra minutes of polling when the refresh outlived the apply window.
+  const confirmAttempts = applyTimedOut ? 24 : 4;
+  for (let attempt = 0; attempt < confirmAttempts; attempt++) {
     await new Promise((r) => setTimeout(r, 5_000));
 
     const checkRes = await safeFetchAdminConfigured(
@@ -489,7 +513,18 @@ async function fixJellyfinMatch(
   if (!confirmed) {
     // Throw when unconfirmed so the caller's DB write aborts — otherwise we'd persist
     // a tmdbId Jellyfin never confirmed. Matches the Plex path.
+    if (applyTimedOut) {
+      throw new Error(`Jellyfin was still processing the match for TMDB #${correctTmdbId} when we stopped waiting — the refresh continues server-side and may finish on its own. Check the item in Jellyfin or run a library re-sync before retrying; an immediate retry only queues another full refresh.`);
+    }
     throw new Error(`Jellyfin did not confirm TMDB #${correctTmdbId} after applying the match — library mapping not updated. Retry, or check that Jellyfin can reach its metadata provider.`);
+  }
+  if (applyTimedOut) {
+    // The image-replacement refresh deferred above, now that the server has
+    // confirmed the match and is no longer busy with the apply's own refresh.
+    await safeFetchAdminConfigured(
+      refreshUrl(resolvedItemId),
+      { method: "POST", headers, timeoutMs: 30_000 },
+    ).catch((e: unknown) => { console.warn("[fix-match]", tag, "Refresh call failed (non-fatal):", e); return null; });
   }
   return { newItemId: resolvedItemId, baseUrl, apiKey };
 }
