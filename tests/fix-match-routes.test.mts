@@ -718,6 +718,67 @@ test("candidates rejects an invalid serverInstance with 400 and reads no library
   assert.equal(fetchCalls.length, 0);
 });
 
+// candidates?server=jellyfin — the confirmation-card payload. Jellyfin has no
+// candidate list (the POST applies the exact TMDB id), so this mode returns the
+// target's details + the file about to be re-identified, from the DB alone: no
+// media-server config read, no upstream call.
+
+test("candidates?server=jellyfin: confirm-card payload from the INSTANCE row — zero network, zero media-server config reads", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/media/def/wrong.mkv", jellyfinItemId: "aaaaaaaa" });
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote", filePath: "/media/rem/wrong.mkv", jellyfinItemId: "bbbbbbbb" });
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/media/plex/wrong.mkv", plexRatingKey: "1001" });
+  tmdbCacheRows.set("movie:222:details", JSON.stringify({
+    title: "Correct Title", releaseYear: "2010", imdbId: "tt0000222",
+    posterPath: "/p222.jpg", overview: "The right film.", releaseDate: "2010-05-01", voteAverage: 7.4,
+  }));
+
+  const res = await candidates(req(candidatesUrl({
+    server: "jellyfin", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: "222", serverInstance: "remote",
+  }), { headers: a.header }), undefined);
+
+  assert.equal(res.status, 200);
+  const body = await res.json() as {
+    candidates: unknown[]; ratingKey: string; serverInstance: string;
+    jellyfinFilePath: string | null; plexFilePath: string | null;
+    targetTitle: string; targetYear: string; targetImdbId: string;
+    targetPosterPath: string | null; targetVoteAverage: number | null;
+  };
+  assert.deepEqual(body.candidates, [], "jellyfin mode has no candidate list");
+  assert.equal(body.ratingKey, "", "the Plex-only field stays neutral");
+  assert.equal(body.serverInstance, "remote");
+  assert.equal(body.jellyfinFilePath, "/media/rem/wrong.mkv", "the file shown must be the REQUESTED instance's copy");
+  assert.equal(body.plexFilePath, "/media/plex/wrong.mkv", "cross-server hint mirrors the Plex mode's Jellyfin hint");
+  assert.equal(body.targetTitle, "Correct Title");
+  assert.equal(body.targetYear, "2010");
+  assert.equal(body.targetImdbId, "tt0000222");
+  assert.equal(body.targetPosterPath, "/p222.jpg");
+  assert.equal(body.targetVoteAverage, 7.4);
+
+  const read = opsOf("jellyfinLibraryItem.findFirst")[0].args as { where: Record<string, unknown> };
+  assert.deepEqual(read.where, { tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote" });
+  assert.equal(fetchCalls.length, 0, "the confirm card is DB-only — no TMDB, no arr, no media server");
+  assert.equal(
+    settingReads.filter((k) => k.startsWith("plex") || k.startsWith("jellyfin")).length, 0,
+    "no media-server config may even be read",
+  );
+});
+
+test("candidates?server=jellyfin 404s when the instance has no row (re-sync first)", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", jellyfinItemId: "aaaaaaaa" });
+
+  const res = await candidates(req(candidatesUrl({
+    server: "jellyfin", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: "222", serverInstance: "remote",
+  }), { headers: a.header }), undefined);
+
+  assert.equal(res.status, 404);
+  assert.match((await res.json()).error, /re-sync/);
+  assert.equal(fetchCalls.length, 0);
+});
+
 // ════════════════════════════════════════════════════════════════════════════
 // file-info
 // ════════════════════════════════════════════════════════════════════════════

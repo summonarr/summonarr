@@ -36,18 +36,24 @@ const LEVEL_STYLES: Record<CandidateMatch, { border: string; bg: string; badge: 
 };
 
 interface ModalProps {
+  server:        "plex" | "jellyfin";
   data:          CandidatesResponse;
+  // The library row's current (wrong) id — shown in the Jellyfin confirmation
+  // card so the admin sees the direction of the remap, not just the destination.
+  currentTmdbId: number;
   correctTmdbId: number;
   arrTmdbId:     number | null;
-  // "plex:<slug>" for a named server, empty for the default one — surfaced so the
-  // admin can see WHICH server this picker is about to rewrite.
+  // "plex:<slug>"/"jellyfin:<slug>" for a named server, empty for the default one
+  // — surfaced so the admin can see WHICH server this modal is about to rewrite.
   instanceLabel: string;
   onSelect:      (guid: string) => void;
+  // Jellyfin mode only: fires the single-target apply from the confirm footer.
+  onConfirm:     () => void;
   onCancel:      () => void;
   applying:      boolean;
 }
 
-function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, instanceLabel, onSelect, onCancel, applying }: ModalProps) {
+function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, instanceLabel, onSelect, onConfirm, onCancel, applying }: ModalProps) {
   const {
     candidates, targetTitle, targetYear, targetImdbId, targetPosterPath,
     targetOverview, targetReleaseDate, targetVoteAverage, targetRuntime, targetGenres,
@@ -66,7 +72,7 @@ function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, instanceLabel, on
         <DialogBackdrop />
         <DialogPopup className="max-w-3xl">
           <DialogTitle className="sr-only">
-            Select the correct match for {targetTitle || `TMDB #${correctTmdbId}`}
+            {server === "jellyfin" ? "Confirm the new match for" : "Select the correct match for"} {targetTitle || `TMDB #${correctTmdbId}`}
           </DialogTitle>
 
         <div className="px-6 pt-5 pb-4 border-b border-zinc-700 flex-shrink-0 flex gap-4 items-start">
@@ -157,6 +163,20 @@ function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, instanceLabel, on
           </div>
         )}
 
+        {server === "jellyfin" ? (
+          <div className="px-6 py-4 flex-1 overflow-y-auto">
+            <p className="text-sm text-zinc-300 leading-snug">
+              Re-identify this Jellyfin item from{" "}
+              <span className="font-mono text-zinc-500">TMDB #{currentTmdbId}</span> to{" "}
+              <span className="font-mono text-zinc-100">TMDB #{correctTmdbId}</span>
+              {instanceLabel && <span className="text-orange-400"> on {instanceLabel}</span>}.
+            </p>
+            <p className="text-xs text-zinc-500 mt-2 leading-snug">
+              Jellyfin applies this exact TMDB id and runs a full metadata refresh — there are no
+              alternative candidates to choose from. Large items can take a few minutes to confirm.
+            </p>
+          </div>
+        ) : (<>
         <div className="px-6 py-3 flex-shrink-0 flex items-center justify-between">
           <p className="text-xs font-medium text-zinc-500 uppercase tracking-wide">
             Plex candidates — select the correct match
@@ -178,8 +198,9 @@ function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, instanceLabel, on
             ))
           )}
         </div>
+        </>)}
 
-        <div className="px-6 py-4 border-t border-zinc-700 flex justify-end flex-shrink-0">
+        <div className="px-6 py-4 border-t border-zinc-700 flex justify-end gap-2 flex-shrink-0">
           <DialogClose
             disabled={applying}
             className="text-sm px-4 py-2 rounded border border-zinc-600 text-zinc-400
@@ -187,6 +208,18 @@ function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, instanceLabel, on
           >
             Cancel
           </DialogClose>
+          {server === "jellyfin" && (
+            <button
+              onClick={onConfirm}
+              disabled={applying}
+              className="text-sm px-4 py-2 rounded border font-medium transition-colors
+                bg-orange-500/10 border-orange-600/30 text-orange-400
+                hover:bg-orange-500/20 hover:border-orange-500/50
+                disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {applying ? "Applying…" : "Apply match"}
+            </button>
+          )}
         </div>
         </DialogPopup>
       </DialogPortal>
@@ -316,7 +349,9 @@ function CandidateRow({
 }
 
 // Admin control to correct a wrong library→TMDB match. Plex opens a candidate
-// picker (fetch → select → apply); Jellyfin applies directly with no picker.
+// picker (fetch → select → apply); Jellyfin opens a confirmation card for the
+// exact target (fetch → confirm → apply) — there are no candidates to choose
+// from because the apply is deterministic by TMDB id.
 export function FixMatchButton({
   server, tmdbId, mediaType, correctTmdbId, label, arrTmdbId = null,
   serverInstance = DEFAULT_MEDIA_INSTANCE,
@@ -340,8 +375,10 @@ export function FixMatchButton({
   }, []);
 
   async function handleClick() {
-    // Jellyfin has no candidate-picker UI; apply the fix directly with the correct TMDB ID
-    if (server === "jellyfin") { await applyFix(undefined); return; }
+    // Both servers fetch first and open the modal: Plex gets the candidate
+    // picker, Jellyfin gets a confirmation card (its target is already exact, so
+    // there is nothing to pick — but the admin sees WHAT will be applied before
+    // a heavyweight full refresh fires).
     setPhase("fetching");
     setErrorMsg("");
     try {
@@ -408,12 +445,15 @@ export function FixMatchButton({
   return (
     <>
       {(phase === "selecting" || phase === "applying") && candidates && (
-        <PlexCandidatesModal
+        <FixMatchModal
+          server={server}
           data={candidates}
+          currentTmdbId={tmdbId}
           correctTmdbId={correctTmdbId}
           arrTmdbId={arrTmdbId}
           instanceLabel={instanceLabel}
           onSelect={(guid) => applyFix(guid)}
+          onConfirm={() => applyFix(undefined)}
           onCancel={reset}
           applying={phase === "applying"}
         />

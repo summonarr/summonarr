@@ -181,88 +181,23 @@ function assessCandidate(
   return { matchLevel, confidence: score, titleSimilarity: ts };
 }
 
-export const GET = withIssueAdmin(async (request, _ctx, _session) => {
-  const { searchParams } = new URL(request.url);
-  const server             = searchParams.get("server");
-  const mediaType          = searchParams.get("mediaType") as "MOVIE" | "TV" | null;
-  const tmdbIdRaw          = parseInt(searchParams.get("tmdbId") ?? "", 10);
-  const correctTmdbIdRaw   = parseInt(searchParams.get("correctTmdbId") ?? "", 10);
-  const arrTmdbIdParam     = searchParams.get("arrTmdbId");
-  const arrTmdbIdHintRaw   = arrTmdbIdParam ? parseInt(arrTmdbIdParam, 10) : null;
+type TargetDetails = {
+  targetTitle:       string;
+  targetYear:        string;
+  targetImdbId:      string;
+  targetPosterPath:  string | null;
+  targetOverview:    string;
+  targetReleaseDate: string | null;
+  targetVoteAverage: number | null;
+  targetRuntime:     number | null;
+  targetGenres:      string[];
+};
 
-  const tmdbId        = Number.isInteger(tmdbIdRaw)        && tmdbIdRaw        > 0 ? tmdbIdRaw        : 0;
-  const correctTmdbId = Number.isInteger(correctTmdbIdRaw) && correctTmdbIdRaw > 0 ? correctTmdbIdRaw : 0;
-  const arrTmdbIdHint = arrTmdbIdHintRaw !== null && Number.isInteger(arrTmdbIdHintRaw) && arrTmdbIdHintRaw > 0
-    ? arrTmdbIdHintRaw
-    : null;
-
-  if (!server || !tmdbId || !mediaType || !correctTmdbId) {
-    return NextResponse.json({ error: "Missing required params" }, { status: 400 });
-  }
-  if (server !== "plex") {
-    return NextResponse.json({ error: "Candidate listing only supported for Plex" }, { status: 400 });
-  }
-
-  // Which configured server's library row (and therefore whose ratingKey and
-  // whose /matches endpoint) this listing is for. Absent ⇒ the default server,
-  // so every pre-multi-server caller keeps its exact behaviour.
-  const serverInstanceParam = searchParams.get("serverInstance");
-  if (serverInstanceParam !== null && !isValidMediaInstanceSlug(serverInstanceParam)) {
-    return NextResponse.json({ error: `invalid serverInstance: ${serverInstanceParam}` }, { status: 400 });
-  }
-  const serverInstance = serverInstanceParam ?? DEFAULT_MEDIA_INSTANCE;
-
-  const [item, jellyfinRows] = await Promise.all([
-    prisma.plexLibraryItem.findFirst({
-      where: { tmdbId, mediaType, serverInstance },
-      select: { plexRatingKey: true, filePath: true },
-    }),
-    // Deliberately NOT scoped by `serverInstance`: that slug names the PLEX
-    // server this listing is for, and the two sides of a bad match are
-    // independent instances — bad-matches.ts pairs library rows by relative
-    // path across every configured server and gives each side its own
-    // `serverInstance`. Scoping the Jellyfin read with the Plex slug therefore
-    // blanked (or mis-sourced) the hint on exactly the cross-instance mismatch
-    // an admin opens this picker to resolve. Widening is safe because
-    // `jellyfinFilePath` is display-only — nothing is written from it, and the
-    // POST that applies a fix targets Plex alone (`server !== "plex"` is
-    // rejected above).
-    prisma.jellyfinLibraryItem.findMany({
-      where: { tmdbId, mediaType },
-      select: { serverInstance: true, filePath: true },
-      orderBy: { serverInstance: "asc" },
-    }),
-  ]);
-  // Requested instance first, so every answer this route already gives is
-  // unchanged — a single-server deployment (every row on "") is byte-identical
-  // (guardrail 35), and a multi-server one only gains a path where it used to
-  // report none.
-  const jellyfinItem =
-    jellyfinRows.find((r) => r.serverInstance === serverInstance && r.filePath)
-    ?? jellyfinRows.find((r) => r.filePath)
-    ?? null;
-  if (!item?.plexRatingKey) {
-    return NextResponse.json({ error: "Plex rating key not found — re-sync first" }, { status: 404 });
-  }
-  // Coerce to break taint from the DB-read string before interpolating into the
-  // Plex admin-token URL below (rating keys are always integers).
-  const safeRatingKey = String(parseInt(item.plexRatingKey, 10) || 0);
-
-  const plexConfig = await getPlexConfig(serverInstance);
-  if (!plexConfig.url || !plexConfig.token) {
-    return NextResponse.json({ error: "Plex server not configured" }, { status: 500 });
-  }
-
-  const serverUrl = plexConfig.url.replace(/\/$/, "");
-
-  const plexHeaders = {
-    Accept: "application/json",
-    "X-Plex-Token": plexConfig.token,
-    "X-Plex-Client-Identifier": "summonarr-server",
-    "X-Plex-Product": "Summonarr",
-    "User-Agent": "Summonarr/1.0 (Node.js)",
-  };
-
+// TMDB details for the CORRECT id — the entry the Plex picker or the Jellyfin
+// confirmation card is about to bind. Cached details row first, live TMDB fills
+// the gaps when a token is configured; everything degrades to empty so the UI
+// can still render a bare "TMDB #<id>".
+async function resolveTargetDetails(correctTmdbId: number, mediaType: "MOVIE" | "TV"): Promise<TargetDetails> {
   const tAuth = tmdbAuth();
 
   let targetTitle        = "";
@@ -301,6 +236,7 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
       if (!targetYear)     targetYear    = (details.release_date ?? details.first_air_date ?? "").slice(0, 4);
       if (!targetOverview) targetOverview = details.overview ?? "";
       if (!targetVoteAverage && details.vote_average) targetVoteAverage = details.vote_average;
+      if (!targetPosterPath) targetPosterPath = details.poster_path ?? null;
       targetRuntime = details.runtime
         ?? (details.episode_run_time?.[0] ?? null);
       targetGenres  = details.genres?.map((g) => g.name) ?? [];
@@ -322,6 +258,22 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
     }
   }
 
+  return {
+    targetTitle, targetYear, targetImdbId, targetPosterPath, targetOverview,
+    targetReleaseDate, targetVoteAverage, targetRuntime, targetGenres,
+  };
+}
+
+// Live Radarr/Sonarr cross-check for the folder being re-matched — an additive
+// trust signal for both the Plex picker and the Jellyfin confirmation card.
+// Null everywhere when no arr is configured or nothing matched.
+async function resolveArrConfirmation(
+  mediaType: "MOVIE" | "TV",
+  tmdbId: number,
+  correctTmdbId: number,
+  filePath: string | null,
+  targetTitle: string,
+): Promise<{ arrConfirmedTmdbId: number | null; arrConfirmedTitle: string | null; arrPathAgrees: boolean | null }> {
   let arrConfirmedTmdbId: number | null = null;
   // Whether the arr entry's folder path agrees with the library item's — an
   // additive diagnostic; null when no arr confirmation was possible at all.
@@ -335,13 +287,13 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
   ]);
 
   if (arrUrlRow?.value && arrKeyRow?.value) {
-    if (item.filePath) {
+    if (filePath) {
       // Route Arr library lookups through arrFetch so they inherit the 30s
       // timeout, 50 MB cap (guardrail 5), X-Api-Key injection, and
       // ArrResponseError handling instead of a bare safeFetchAdminConfigured
       // (which defaulted to an 8s timeout + 10 MB cap and raw Response handling).
       const arrCfg = { url: arrUrlRow.value.replace(/\/$/, ""), apiKey: arrKeyRow.value };
-      const folderPath = nodePath.posix.normalize(item.filePath.replace(/\/[^/]+$/, ""));
+      const folderPath = nodePath.posix.normalize(filePath.replace(/\/[^/]+$/, ""));
       const endpoint   = mediaType === "MOVIE" ? "movie" : "series";
 
       type ArrMovie = { tmdbId?: number; path?: string; hasFile?: boolean; statistics?: { episodeFileCount?: number } };
@@ -419,6 +371,142 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
   } else if (arrConfirmedTmdbId === correctTmdbId) {
     arrConfirmedTitle = targetTitle || null;
   }
+
+  return { arrConfirmedTmdbId, arrConfirmedTitle, arrPathAgrees };
+}
+
+export const GET = withIssueAdmin(async (request, _ctx, _session) => {
+  const { searchParams } = new URL(request.url);
+  const server             = searchParams.get("server");
+  const mediaType          = searchParams.get("mediaType") as "MOVIE" | "TV" | null;
+  const tmdbIdRaw          = parseInt(searchParams.get("tmdbId") ?? "", 10);
+  const correctTmdbIdRaw   = parseInt(searchParams.get("correctTmdbId") ?? "", 10);
+  const arrTmdbIdParam     = searchParams.get("arrTmdbId");
+  const arrTmdbIdHintRaw   = arrTmdbIdParam ? parseInt(arrTmdbIdParam, 10) : null;
+
+  const tmdbId        = Number.isInteger(tmdbIdRaw)        && tmdbIdRaw        > 0 ? tmdbIdRaw        : 0;
+  const correctTmdbId = Number.isInteger(correctTmdbIdRaw) && correctTmdbIdRaw > 0 ? correctTmdbIdRaw : 0;
+  const arrTmdbIdHint = arrTmdbIdHintRaw !== null && Number.isInteger(arrTmdbIdHintRaw) && arrTmdbIdHintRaw > 0
+    ? arrTmdbIdHintRaw
+    : null;
+
+  if (!server || !tmdbId || !mediaType || !correctTmdbId) {
+    return NextResponse.json({ error: "Missing required params" }, { status: 400 });
+  }
+  if (server !== "plex" && server !== "jellyfin") {
+    return NextResponse.json({ error: "server must be 'plex' or 'jellyfin'" }, { status: 400 });
+  }
+
+  // Which configured server's library row (and therefore whose ratingKey and
+  // whose /matches endpoint) this listing is for. Absent ⇒ the default server,
+  // so every pre-multi-server caller keeps its exact behaviour.
+  const serverInstanceParam = searchParams.get("serverInstance");
+  if (serverInstanceParam !== null && !isValidMediaInstanceSlug(serverInstanceParam)) {
+    return NextResponse.json({ error: `invalid serverInstance: ${serverInstanceParam}` }, { status: 400 });
+  }
+  const serverInstance = serverInstanceParam ?? DEFAULT_MEDIA_INSTANCE;
+
+  // Jellyfin mode: there is no candidate list to pick from — the fix-match POST
+  // applies the exact TMDB id deterministically (it refuses any search result
+  // carrying a different id; see that route). This branch instead feeds the
+  // pre-apply CONFIRMATION card: the target's TMDB details, the file about to be
+  // re-identified, and the same live arr cross-check the Plex picker shows. Same
+  // response shape with the Plex-only fields neutral, so every existing
+  // CandidatesResponse consumer is unchanged.
+  if (server === "jellyfin") {
+    const [jfItem, plexRows] = await Promise.all([
+      prisma.jellyfinLibraryItem.findFirst({
+        where: { tmdbId, mediaType, serverInstance },
+        select: { jellyfinItemId: true, filePath: true },
+      }),
+      // Cross-server display hint — deliberately unscoped, mirroring (and for
+      // the same reason as) the Jellyfin read in the Plex mode below.
+      prisma.plexLibraryItem.findMany({
+        where: { tmdbId, mediaType },
+        select: { serverInstance: true, filePath: true },
+        orderBy: { serverInstance: "asc" },
+      }),
+    ]);
+    if (!jfItem?.jellyfinItemId) {
+      return NextResponse.json({ error: "Jellyfin item ID not found — re-sync first" }, { status: 404 });
+    }
+    const plexHint =
+      plexRows.find((r) => r.serverInstance === serverInstance && r.filePath)
+      ?? plexRows.find((r) => r.filePath)
+      ?? null;
+    const target = await resolveTargetDetails(correctTmdbId, mediaType);
+    const arr = await resolveArrConfirmation(mediaType, tmdbId, correctTmdbId, jfItem.filePath ?? null, target.targetTitle);
+    return NextResponse.json({
+      candidates: [],
+      ...target,
+      ...arr,
+      ratingKey: "",
+      plexFilePath: plexHint?.filePath ?? null,
+      jellyfinFilePath: jfItem.filePath ?? null,
+      serverInstance,
+    } satisfies CandidatesResponse);
+  }
+
+  const [item, jellyfinRows] = await Promise.all([
+    prisma.plexLibraryItem.findFirst({
+      where: { tmdbId, mediaType, serverInstance },
+      select: { plexRatingKey: true, filePath: true },
+    }),
+    // Deliberately NOT scoped by `serverInstance`: that slug names the PLEX
+    // server this listing is for, and the two sides of a bad match are
+    // independent instances — bad-matches.ts pairs library rows by relative
+    // path across every configured server and gives each side its own
+    // `serverInstance`. Scoping the Jellyfin read with the Plex slug therefore
+    // blanked (or mis-sourced) the hint on exactly the cross-instance mismatch
+    // an admin opens this picker to resolve. Widening is safe because
+    // `jellyfinFilePath` is display-only — nothing is written from it, and the
+    // POST that applies a fix targets Plex alone (`server !== "plex"` is
+    // rejected above).
+    prisma.jellyfinLibraryItem.findMany({
+      where: { tmdbId, mediaType },
+      select: { serverInstance: true, filePath: true },
+      orderBy: { serverInstance: "asc" },
+    }),
+  ]);
+  // Requested instance first, so every answer this route already gives is
+  // unchanged — a single-server deployment (every row on "") is byte-identical
+  // (guardrail 35), and a multi-server one only gains a path where it used to
+  // report none.
+  const jellyfinItem =
+    jellyfinRows.find((r) => r.serverInstance === serverInstance && r.filePath)
+    ?? jellyfinRows.find((r) => r.filePath)
+    ?? null;
+  if (!item?.plexRatingKey) {
+    return NextResponse.json({ error: "Plex rating key not found — re-sync first" }, { status: 404 });
+  }
+  // Coerce to break taint from the DB-read string before interpolating into the
+  // Plex admin-token URL below (rating keys are always integers).
+  const safeRatingKey = String(parseInt(item.plexRatingKey, 10) || 0);
+
+  const plexConfig = await getPlexConfig(serverInstance);
+  if (!plexConfig.url || !plexConfig.token) {
+    return NextResponse.json({ error: "Plex server not configured" }, { status: 500 });
+  }
+
+  const serverUrl = plexConfig.url.replace(/\/$/, "");
+
+  const plexHeaders = {
+    Accept: "application/json",
+    "X-Plex-Token": plexConfig.token,
+    "X-Plex-Client-Identifier": "summonarr-server",
+    "X-Plex-Product": "Summonarr",
+    "User-Agent": "Summonarr/1.0 (Node.js)",
+  };
+
+  const tAuth = tmdbAuth();
+
+  const {
+    targetTitle, targetYear, targetImdbId, targetPosterPath, targetOverview,
+    targetReleaseDate, targetVoteAverage, targetRuntime, targetGenres,
+  } = await resolveTargetDetails(correctTmdbId, mediaType);
+
+  const { arrConfirmedTmdbId, arrConfirmedTitle, arrPathAgrees } =
+    await resolveArrConfirmation(mediaType, tmdbId, correctTmdbId, item.filePath ?? null, targetTitle);
 
   type RawResult = {
     guid: string; name?: string; year?: number; thumb?: string | null; score?: number | null;
