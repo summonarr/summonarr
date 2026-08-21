@@ -6,6 +6,7 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import type { PlexCandidate, CandidateMatch, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";
 import { withBasePath } from "@/lib/base-path";
+import { runFixMatch } from "@/lib/client/fix-match";
 import { DEFAULT_MEDIA_INSTANCE, mediaInstanceLabel } from "@/lib/media-instances";
 
 type Phase = "idle" | "fetching" | "selecting" | "applying" | "success" | "conflated" | "error";
@@ -402,19 +403,15 @@ export function FixMatchButton({
     setPhase("applying");
     setErrorMsg("");
     try {
-      const res = await fetch(withBasePath("/api/admin/fix-match"), {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        // serverInstance omitted when default — same byte-identical rationale as
-        // the candidates query above.
-        body:    JSON.stringify({
-          server, tmdbId, mediaType, correctTmdbId, canonicalGuid,
-          ...(serverInstance ? { serverInstance } : {}),
-        }),
+      // Background job + status poll (guardrail 37a): a series remap can take
+      // minutes on the media server — longer than a reverse proxy keeps one
+      // request open — so the old single POST came back as a 502 while the
+      // remap quietly succeeded. serverInstance omitted when default — same
+      // byte-identical rationale as the candidates query above.
+      const json = await runFixMatch({
+        server, tmdbId, mediaType, correctTmdbId, canonicalGuid,
+        ...(serverInstance ? { serverInstance } : {}),
       });
-      let json: { ok?: boolean; error?: string; warning?: string } = {};
-      try { json = await res.json() as { ok?: boolean; error?: string; warning?: string }; } catch { }
-      if (!res.ok || !json.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
       setCandidates(null);
       if (json.warning) {
         setErrorMsg(json.warning);

@@ -1882,6 +1882,12 @@ const spec = {
                   mediaType: { $ref: "#/components/schemas/MediaType" },
                   correctTmdbId: { type: "integer" },
                   canonicalGuid: { type: "string", description: "Plex only — a candidate GUID preselected from /admin/fix-match/candidates" },
+                  async: {
+                    type: "boolean",
+                    default: false,
+                    description:
+                      "Run the remap as a background job: answers 202 with a `jobId` immediately; poll /admin/fix-match/status. Use this from browsers — a series remap can outlive a reverse proxy's request timeout. Absent/false keeps the synchronous response.",
+                  },
                   serverInstance: {
                     type: "string",
                     default: "",
@@ -1895,10 +1901,23 @@ const spec = {
         },
         responses: {
           "200": { description: "Match updated (may carry a `warning` when Plex conflated both TMDB IDs)" },
+          "202": { description: "`async: true` — the job was started (or an identical one was already running); body carries `jobId`" },
           "400": { description: "Bad body, or an invalid serverInstance slug" },
           "404": { description: "No library row for that tmdbId on that instance — re-sync first" },
           "429": { description: "Rate limited (10/min/admin)" },
           "502": { description: "Remote remap or the follow-up cache write failed" },
+        },
+      },
+    },
+    "/admin/fix-match/status": {
+      get: {
+        tags: ["Admin – Fix Match"],
+        summary: "Status of a background fix-match job started with `async: true` (ADMIN / ISSUE_ADMIN)",
+        parameters: [{ name: "id", in: "query", required: true, schema: { type: "string", format: "uuid" } }],
+        responses: {
+          "200": { description: "`status` is running | done | failed; `result` when done (same shape as the synchronous POST), `error` + `errorStatus` when failed" },
+          "400": { description: "Missing or malformed id" },
+          "404": { description: "Unknown or expired job — jobs are in-process and do not survive a restart; re-sync to see whether the remap landed" },
         },
       },
     },

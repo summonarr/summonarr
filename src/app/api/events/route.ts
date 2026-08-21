@@ -10,7 +10,12 @@ const MAX_CONNECTIONS_PER_USER = 5;
 // Kept in lockstep with the emitter's max-listener cap (one listener per
 // connection); tune both via SSE_MAX_LISTENERS. See @/lib/sse-emitter.
 const MAX_TOTAL_CONNECTIONS = SSE_MAX_LISTENERS;
-const HEARTBEAT_INTERVAL_MS = 60_000;
+// 25s, not 60: a reverse proxy's default idle/read timeout is commonly 60s
+// (nginx, Nginx Proxy Manager) and a heartbeat on exactly that cadence loses
+// the race often enough that admin browsers logged "[live-events] SSE
+// connection error" and reconnected every minute. Stay well under the
+// shortest common timeout.
+const HEARTBEAT_INTERVAL_MS = 25_000;
 const MAX_CONNECTION_DURATION_MS = 3_600_000;
 // Re-validate the session against the DB on this cadence so a revoked or role-demoted
 // session stops receiving events (and admin-only streams) mid-connection rather than

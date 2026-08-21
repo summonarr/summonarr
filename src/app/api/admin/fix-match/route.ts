@@ -13,6 +13,7 @@ import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { FixMatchError, fixMatchJobKey, startFixMatchJob, type FixMatchJobResult } from "@/lib/fix-match-jobs";
 import {
   DEFAULT_MEDIA_INSTANCE,
   isValidMediaInstanceSlug,
@@ -29,6 +30,10 @@ type FixMatchBody = {
   correctTmdbId:  number;
 
   canonicalGuid?: string;
+  // Run the remap as a background job and answer 202 + jobId at once (guardrail
+  // 37a); the caller polls /api/admin/fix-match/status. Absent/false keeps the
+  // synchronous contract the iOS client pins.
+  async?: boolean;
   // Multi-server support: which configured server's library row to remap.
   // Optional + defaults to the default server ("") so an existing caller that
   // doesn't send it yet keeps targeting the only server that existed before
@@ -619,43 +624,23 @@ async function fixJellyfinMatch(
 }
 
 // ISSUE_ADMIN intentionally has fix-match access to resolve wrong-match issues without full admin privileges
-export const POST = withIssueAdmin(async (request, _ctx, session) => {
-  // fix-match runs ~60s of Plex/Jellyfin remap calls plus DB writes — without
-  // a rate limit, an admin loop (intentional or scripted) can saturate the
-  // upstream servers and pile up partial two-phase commits (remote rewrite
-  // succeeds, DB tx fails). 10/min/admin matches the broader admin-write cap.
-  if (!checkRateLimit(`fix-match:${session.user.id}`, 10, 60_000)) {
-    return NextResponse.json(
-      { error: "Too many fix-match operations — try again in a minute." },
-      { status: 429 },
-    );
-  }
+type FixMatchInput = {
+  server: "plex" | "jellyfin";
+  tmdbId: number;
+  mediaType: "MOVIE" | "TV";
+  correctTmdbId: number;
+  canonicalGuid?: string;
+  serverInstance: string;
+};
+type FixMatchActor = { userId: string; userName: string | null | undefined };
 
-  const parsed = await readJsonCapped<FixMatchBody>(request, 16384);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed;
-
-  const { server, tmdbId, mediaType, correctTmdbId, canonicalGuid } = body;
-
-  if (server !== "plex" && server !== "jellyfin") {
-    return NextResponse.json({ error: "server must be 'plex' or 'jellyfin'" }, { status: 400 });
-  }
-  if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: "mediaType must be 'MOVIE' or 'TV'" }, { status: 400 });
-  }
-  if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
-    return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
-  }
-  if (!Number.isInteger(correctTmdbId) || correctTmdbId <= 0) {
-    return NextResponse.json({ error: "correctTmdbId must be a positive integer" }, { status: 400 });
-  }
-  if (tmdbId === correctTmdbId) {
-    return NextResponse.json({ error: "TMDB IDs are already the same" }, { status: 400 });
-  }
-  if (body.serverInstance !== undefined && !isValidMediaInstanceSlug(body.serverInstance)) {
-    return NextResponse.json({ error: `invalid serverInstance: ${body.serverInstance}` }, { status: 400 });
-  }
-  const serverInstance = body.serverInstance ?? DEFAULT_MEDIA_INSTANCE;
+// The whole remap — remote rewrite, cache-row transaction, audit, episode
+// re-cache — as one unit that resolves to the client-facing result or throws a
+// FixMatchError carrying the client-safe message + HTTP status. The POST
+// handler either awaits it inline (the synchronous contract) or hands it to the
+// job registry (guardrail 37a); both paths see exactly the same outcomes.
+async function runFixMatch(input: FixMatchInput, actor: FixMatchActor): Promise<FixMatchJobResult> {
+  const { server, tmdbId, mediaType, correctTmdbId, canonicalGuid, serverInstance } = input;
 
   // The remap is inherently two-phase: the remote library server must be
   // rewritten first (to learn the new item id), then the local cache row is
@@ -675,7 +660,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
         select: { plexRatingKey: true, filePath: true },
       });
       if (!item?.plexRatingKey) {
-        return NextResponse.json({ error: "Plex rating key not found — re-sync first" }, { status: 404 });
+        throw new FixMatchError("Plex rating key not found — re-sync first", 404);
       }
       const plexResult = await fixPlexMatch(item.plexRatingKey, correctTmdbId, mediaType, serverInstance, canonicalGuid);
       remoteRemapped = true;
@@ -695,7 +680,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
         // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID
         await tx.tVEpisodeCache.deleteMany({ where: { source: "plex", tmdbId } });
       }, { timeout: BATCH_TX_TIMEOUT });
-      void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "plex", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType, serverInstance } });
+      void logAudit({ userId: actor.userId, userName: actor.userName, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "plex", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType, serverInstance } });
 
       if (mediaType === "TV") {
         getPlexEpisodesForShow(plexResult.serverUrl, plexResult.token, item.plexRatingKey, correctTmdbId)
@@ -718,10 +703,10 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
       }
 
       if (plexResult.conflated) {
-        return NextResponse.json({
+        return {
           ok: true,
           warning: `DB updated to TMDB #${correctTmdbId}. However, Plex's metadata database has permanently merged both TMDB IDs into one entry — Plex will continue to display the old metadata. To fix the Plex display, delete the conflicting metadata bundles from the Plex server's Metadata/Movies directory and run a full Plex scan.`,
-        });
+        };
       }
 
     } else {
@@ -740,7 +725,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
         ...(item?.jellyfinItemIds ?? []),
       ]));
       if (targetItemIds.length === 0) {
-        return NextResponse.json({ error: "Jellyfin item ID not found — re-sync first" }, { status: 404 });
+        throw new FixMatchError("Jellyfin item ID not found — re-sync first", 404);
       }
       // Serial, not concurrent: each call drives a FullRefresh on the server and
       // then polls for confirmation, and hammering a Jellyfin box with parallel
@@ -788,7 +773,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
         // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID
         await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId } });
       }, { timeout: BATCH_TX_TIMEOUT });
-      void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "jellyfin", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType, serverInstance } });
+      void logAudit({ userId: actor.userId, userName: actor.userName, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "jellyfin", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType, serverInstance } });
 
       if (mediaType === "TV") {
         getJellyfinEpisodesForShow(jellyfinResult.baseUrl, jellyfinResult.apiKey, resolvedItemId, correctTmdbId)
@@ -811,8 +796,9 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
       }
     }
 
-    return NextResponse.json(partialWarning ? { ok: true, warning: partialWarning } : { ok: true });
+    return partialWarning ? { ok: true, warning: partialWarning } : { ok: true };
   } catch (err) {
+    if (err instanceof FixMatchError) throw err;
     // Log the real detail server-side only — the message can carry the
     // configured Plex/Jellyfin server URL, internal paths, or upstream
     // response bodies. Return a generic error to the client.
@@ -829,13 +815,69 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
       const base = server === "plex" ? "Plex" : "Jellyfin";
       const serverName = serverInstance === DEFAULT_MEDIA_INSTANCE ? base : `${base} (${serverInstance})`;
       console.warn("[fix-match]", `${serverLabel} remapped remotely but the DB update failed for tmdb:${tmdbId} → ${correctTmdbId}; cache is out of sync until a re-sync runs`);
-      return NextResponse.json(
-        {
-          error: `${serverName} was re-matched to TMDB #${correctTmdbId}, but updating the local library cache failed. Run a library re-sync to reconcile the cache with ${serverName}.`,
-        },
-        { status: 502 },
-      );
+      throw new FixMatchError(`${serverName} was re-matched to TMDB #${correctTmdbId}, but updating the local library cache failed. Run a library re-sync to reconcile the cache with ${serverName}.`, 502);
     }
+    throw new FixMatchError("Fix-match operation failed", 502);
+  }
+}
+
+export const POST = withIssueAdmin(async (request, _ctx, session) => {
+  // fix-match runs ~60s of Plex/Jellyfin remap calls plus DB writes — without
+  // a rate limit, an admin loop (intentional or scripted) can saturate the
+  // upstream servers and pile up partial two-phase commits (remote rewrite
+  // succeeds, DB tx fails). 10/min/admin matches the broader admin-write cap.
+  if (!checkRateLimit(`fix-match:${session.user.id}`, 10, 60_000)) {
+    return NextResponse.json(
+      { error: "Too many fix-match operations — try again in a minute." },
+      { status: 429 },
+    );
+  }
+
+  const parsed = await readJsonCapped<FixMatchBody>(request, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
+
+  const { server, tmdbId, mediaType, correctTmdbId, canonicalGuid } = body;
+
+  if (server !== "plex" && server !== "jellyfin") {
+    return NextResponse.json({ error: "server must be 'plex' or 'jellyfin'" }, { status: 400 });
+  }
+  if (mediaType !== "MOVIE" && mediaType !== "TV") {
+    return NextResponse.json({ error: "mediaType must be 'MOVIE' or 'TV'" }, { status: 400 });
+  }
+  if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
+    return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
+  }
+  if (!Number.isInteger(correctTmdbId) || correctTmdbId <= 0) {
+    return NextResponse.json({ error: "correctTmdbId must be a positive integer" }, { status: 400 });
+  }
+  if (tmdbId === correctTmdbId) {
+    return NextResponse.json({ error: "TMDB IDs are already the same" }, { status: 400 });
+  }
+  if (body.serverInstance !== undefined && !isValidMediaInstanceSlug(body.serverInstance)) {
+    return NextResponse.json({ error: `invalid serverInstance: ${body.serverInstance}` }, { status: 400 });
+  }
+  const serverInstance = body.serverInstance ?? DEFAULT_MEDIA_INSTANCE;
+  const input: FixMatchInput = { server, tmdbId, mediaType, correctTmdbId, canonicalGuid, serverInstance };
+  const actor: FixMatchActor = { userId: session.user.id, userName: session.user.name ?? session.user.email };
+
+  // Background mode (guardrail 37a): a series remap waits on the media server
+  // for minutes — longer than a reverse proxy keeps one request open — so the
+  // browser polls instead of holding the request. An identical job already
+  // running is returned as-is, never started twice.
+  if (body.async === true) {
+    const job = startFixMatchJob(fixMatchJobKey(input), () => runFixMatch(input, actor));
+    return NextResponse.json({ ok: true, jobId: job.id, status: job.status }, { status: 202 });
+  }
+
+  try {
+    return NextResponse.json(await runFixMatch(input, actor));
+  } catch (err) {
+    if (err instanceof FixMatchError) {
+      return NextResponse.json({ error: err.message }, { status: err.status });
+    }
+    // runFixMatch maps every failure to a FixMatchError; this is defensive.
+    console.error("[fix-match] unexpected error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Fix-match operation failed" }, { status: 502 });
   }
 });

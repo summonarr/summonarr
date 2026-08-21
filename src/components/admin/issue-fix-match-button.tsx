@@ -9,6 +9,7 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 import type { PlexCandidate, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";
 import type { FileInfoInstance, FileInfoResponse } from "@/app/api/admin/fix-match/file-info/route";
 import { withBasePath } from "@/lib/base-path";
+import { runFixMatch } from "@/lib/client/fix-match";
 import { DEFAULT_MEDIA_INSTANCE, mediaInstanceLabel } from "@/lib/media-instances";
 
 type ServerStatus = "idle" | "fetching" | "selecting" | "applying" | "done" | "error";
@@ -313,16 +314,11 @@ export function IssueFixMatchButton({
     setPlexState({ status: "applying" });
     setPhase("confirm");
     try {
-      const res  = await fetch(withBasePath("/api/admin/fix-match"), {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({
-          server: "plex", tmdbId, mediaType, correctTmdbId: selected.id, canonicalGuid,
-          ...(plexInstance ? { serverInstance: plexInstance } : {}),
-        }),
+      // Background job + status poll (guardrail 37a).
+      await runFixMatch({
+        server: "plex", tmdbId, mediaType, correctTmdbId: selected.id, canonicalGuid,
+        ...(plexInstance ? { serverInstance: plexInstance } : {}),
       });
-      const json = await res.json() as { ok?: boolean; error?: string };
-      if (!res.ok || !json.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
       setPlexState({ status: "done" });
       await resolveIssue(selected.title);
       router.refresh();
@@ -335,16 +331,11 @@ export function IssueFixMatchButton({
     if (!selected) return;
     setJellyfinState({ status: "applying" });
     try {
-      const res  = await fetch(withBasePath("/api/admin/fix-match"), {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({
-          server: "jellyfin", tmdbId, mediaType, correctTmdbId: selected.id,
-          ...(jellyfinInstance ? { serverInstance: jellyfinInstance } : {}),
-        }),
+      // Background job + status poll (guardrail 37a).
+      await runFixMatch({
+        server: "jellyfin", tmdbId, mediaType, correctTmdbId: selected.id,
+        ...(jellyfinInstance ? { serverInstance: jellyfinInstance } : {}),
       });
-      const json = await res.json() as { ok?: boolean; error?: string };
-      if (!res.ok || !json.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
       setJellyfinState({ status: "done" });
       await resolveIssue(selected.title);
       router.refresh();

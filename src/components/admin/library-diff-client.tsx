@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { FixMatchButton } from "@/components/admin/fix-match-button";
 import { posterUrl } from "@/lib/tmdb-types";
-import { withBasePath } from "@/lib/base-path";
+import { runFixMatch } from "@/lib/client/fix-match";
 import { mediaInstanceLabel } from "@/lib/media-instances";
 
 interface RequestSummary {
@@ -548,24 +548,21 @@ function FixAllArrButton({ matches }: { matches: ClientBadMatch[] }) {
 
       const wrongItem = arrVerdict === "plex" ? match.plex : match.jellyfin;
       try {
-        const res = await fetch(withBasePath("/api/admin/fix-match"), {
-          method:  "POST",
-          headers: { "Content-Type": "application/json" },
-          body:    JSON.stringify({
-            server:        arrVerdict,
-            tmdbId:        wrongItem.tmdbId,
-            mediaType:     wrongItem.mediaType,
-            correctTmdbId: arrTmdbId,
-            // Same instance pinning the per-row FixMatchButton does. Omitted
-            // when empty so a default-instance body stays byte-identical.
-            // Without it the route falls back to the default server and
-            // rewrites ITS library using a ratingKey that belongs to the
-            // named one — the wrong-server remap this phase fixed.
-            ...(wrongItem.serverInstance ? { serverInstance: wrongItem.serverInstance } : {}),
-          }),
+        // Background job + status poll (guardrail 37a) — each title settles
+        // server-side before the next starts, same serial order as before.
+        await runFixMatch({
+          server:        arrVerdict,
+          tmdbId:        wrongItem.tmdbId,
+          mediaType:     wrongItem.mediaType,
+          correctTmdbId: arrTmdbId,
+          // Same instance pinning the per-row FixMatchButton does. Omitted
+          // when empty so a default-instance body stays byte-identical.
+          // Without it the route falls back to the default server and
+          // rewrites ITS library using a ratingKey that belongs to the
+          // named one — the wrong-server remap this phase fixed.
+          ...(wrongItem.serverInstance ? { serverInstance: wrongItem.serverInstance } : {}),
         });
-        const json = await res.json() as { ok?: boolean };
-        if (res.ok && json.ok) { done++; } else { failed++; }
+        done++;
       } catch {
         failed++;
       }

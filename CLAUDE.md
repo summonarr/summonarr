@@ -568,6 +568,17 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - **Which copy becomes the stored row is `prefersCandidate` — newest `addedAt`, item-id tiebreak — NOT arrival order.** The library-scoped walk fetches folders concurrently, so plain last-write-wins let the winner (and with it the row's `itemId`, `filePath`, `addedAt` and ratings) flip between syncs. Order-independence is the whole point; don't "simplify" it back to a bare `items.set()`. The rule is also what the unscoped single-query path already did by construction (`SortBy=DateCreated` ascending + last write), so single-library servers see no change.
     - **fix-match remaps EVERY copy, serially.** All copies of a title are mismatched on the server, so remapping one left the others reporting the old tmdbId and the next library sync could elect an unfixed copy — the admin's correction silently reverted. Only a total failure aborts; a partial one still records the copies that moved and returns a `warning` naming the shortfall. Keep it serial — parallel `FullRefresh` calls are how these start timing out.
 
+37a. **A fix-match runs as a BACKGROUND JOB with a polled status — never as a request the browser waits on.** `POST /api/admin/fix-match` with `async: true` answers 202 + `jobId` at once and the client polls `GET /api/admin/fix-match/status?id=`; the registry is [fix-match-jobs.ts](src/lib/fix-match-jobs.ts), the client half is [client/fix-match.ts](src/lib/client/fix-match.ts).
+
+    Why:
+    - A Jellyfin series identify keeps refreshing every season and episode for minutes after `RemoteSearch/Apply` returns, and the route (rightly) waits to confirm. A reverse proxy keeps one request open for ~60s (nginx, NPM) to 100s (Cloudflare), so the browser got a **502 while the remap succeeded** — the operator saw "failed", retried, and queued yet another full refresh on an already-busy server.
+    - The in-process job outlives the request the same way guardrail 17's backfill does (single long-lived Node server). The status route 404s after a restart and the client tells the operator to re-sync instead of retrying.
+
+    Rules:
+    - The synchronous default (no `async`) is a **wire contract the iOS app pins** — keep it byte-identical; gate a native switch on the reported `apiVersion` (guardrail 25), never by changing the default.
+    - The same key (server + instance + mediaType + from→to) already running ⇒ the same job is returned, never a second remap of one title.
+    - A job's `error` is the client-safe message only — the route still logs the real detail before throwing `FixMatchError`.
+
 38. **`'unsafe-eval'` in the CSP is gated on `NODE_ENV === "development"` and NEVER widens. Don't delete the branch either.**
 
     Why:
