@@ -445,6 +445,8 @@ async function describeUnconfirmedJellyfinMatch(opts: {
 //
 // `previousTmdbId` is the row's current (wrong) id — only used to diagnose an
 // unconfirmed apply (did the server revert to it?), never sent to Jellyfin.
+// `background` = running as a job (guardrail 37a): nothing waits on an HTTP
+// request, so the confirmation window can be as long as the cascade needs.
 async function fixJellyfinMatch(
   itemId: string,
   correctTmdbId: number,
@@ -452,6 +454,7 @@ async function fixJellyfinMatch(
   instance: MediaInstanceKey,
   filePath: string | null,
   previousTmdbId: number,
+  background: boolean,
 ): Promise<{ newItemId: string; baseUrl: string; apiKey: string }> {
   // Strip itemId to UUID-safe chars to break taint from a DB-read string before
   // it's interpolated into any admin-token URL below.
@@ -548,7 +551,12 @@ async function fixJellyfinMatch(
   // old 20s window had ALL landed correctly when inspected later. Success still
   // breaks out of the loop on the first confirming poll, so a fast confirm pays
   // nothing for the longer window.
-  const confirmAttempts = applyTimedOut || mediaType === "TV" ? 24 : 4;
+  // In background-job mode nothing is waiting on an HTTP request, so the only
+  // cost of waiting longer is a slower "done" — while giving up early turns a
+  // remap that LANDED into a "failed" report (seen live on a 300-episode show).
+  // 120 × 5s ≈ 10 minutes. The synchronous contract keeps the shorter windows:
+  // a reverse proxy cuts that request off long before ten minutes anyway.
+  const confirmAttempts = background ? 120 : (applyTimedOut || mediaType === "TV" ? 24 : 4);
   for (let attempt = 0; attempt < confirmAttempts; attempt++) {
     await new Promise((r) => setTimeout(r, 5_000));
 
@@ -639,7 +647,7 @@ type FixMatchActor = { userId: string; userName: string | null | undefined };
 // FixMatchError carrying the client-safe message + HTTP status. The POST
 // handler either awaits it inline (the synchronous contract) or hands it to the
 // job registry (guardrail 37a); both paths see exactly the same outcomes.
-async function runFixMatch(input: FixMatchInput, actor: FixMatchActor): Promise<FixMatchJobResult> {
+async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { background: boolean }): Promise<FixMatchJobResult> {
   const { server, tmdbId, mediaType, correctTmdbId, canonicalGuid, serverInstance } = input;
 
   // The remap is inherently two-phase: the remote library server must be
@@ -734,7 +742,7 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor): Promise<
       const failedCopies: string[] = [];
       for (const targetId of targetItemIds) {
         try {
-          applied.push(await fixJellyfinMatch(targetId, correctTmdbId, mediaType, serverInstance, item?.filePath ?? null, tmdbId));
+          applied.push(await fixJellyfinMatch(targetId, correctTmdbId, mediaType, serverInstance, item?.filePath ?? null, tmdbId, opts.background));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           console.error("[fix-match]", `jellyfin copy ${targetId} failed:`, msg);
@@ -866,12 +874,12 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
   // browser polls instead of holding the request. An identical job already
   // running is returned as-is, never started twice.
   if (body.async === true) {
-    const job = startFixMatchJob(fixMatchJobKey(input), () => runFixMatch(input, actor));
+    const job = startFixMatchJob(fixMatchJobKey(input), () => runFixMatch(input, actor, { background: true }));
     return NextResponse.json({ ok: true, jobId: job.id, status: job.status }, { status: 202 });
   }
 
   try {
-    return NextResponse.json(await runFixMatch(input, actor));
+    return NextResponse.json(await runFixMatch(input, actor, { background: false }));
   } catch (err) {
     if (err instanceof FixMatchError) {
       return NextResponse.json({ error: err.message }, { status: err.status });

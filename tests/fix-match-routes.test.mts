@@ -758,6 +758,45 @@ test("POST async:true failure → status failed with the client-safe error + err
   assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 0);
 });
 
+test("background mode waits out a long series cascade: a TV item confirming only on the 40th poll succeeds as a job, while the synchronous window gives up at 24", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "TV", serverInstance: "", filePath: "/media/shows/Long Show", jellyfinItemId: "aaaaaaaa" });
+  let checks = 0;
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) return new Response("", { status: 200 });
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Long Show" }]);
+    if (p === "/Items/aaaaaaaa/Refresh") return new Response("", { status: 200 });
+    // The cascade "settles" only on the 40th confirmation read — past the
+    // synchronous 24-poll window, inside the background one.
+    if (p === "/Items/aaaaaaaa") { checks++; return okJson({ ProviderIds: { Tmdb: checks >= 40 ? "222" : "111" } }); }
+    if (p === "/Library/VirtualFolders") return okJson([]);
+    return okJson({ Items: [] }); // the post-success episode re-cache fetch
+  };
+
+  const res = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "TV", correctTmdbId: 222, async: true }, a.header), undefined);
+  assert.equal(res.status, 202);
+  const { jobId } = await res.json() as { jobId: string };
+  let final: { status: string; error?: string } = { status: "running" };
+  for (let i = 0; i < 600 && final.status === "running"; i++) {
+    await flush();
+    final = await (await fixMatchStatus(req(statusUrl(jobId), { headers: a.header }), undefined)).json() as typeof final;
+  }
+  assert.equal(final.status, "done", `the job must keep polling past the synchronous window; got ${JSON.stringify(final)}`);
+  assert.ok(checks >= 40, `expected at least 40 confirmation polls, got ${checks}`);
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 1, "the landed remap is recorded");
+
+  // Same server behaviour under the synchronous contract: it stops at its window.
+  checks = 0;
+  ops = [];
+  const sync = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "TV", correctTmdbId: 222 }, a.header), undefined);
+  assert.equal(sync.status, 502);
+  assert.equal(checks, 24, "the synchronous TV window is still 24 polls");
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 0);
+  assert.ok(errors.some((e) => e.includes("still reported the previous match")), "and it says the cascade may still be settling");
+});
+
 test("status: 400 on a malformed id, 404 on an unknown job, 401 with no session", async () => {
   const a = await admin();
   const unknown = "00000000-0000-4000-8000-000000000000";
