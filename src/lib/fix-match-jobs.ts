@@ -13,6 +13,22 @@ import { randomUUID } from "node:crypto";
 export type FixMatchJobStatus = "running" | "done" | "failed";
 export type FixMatchJobResult = { ok: true; warning?: string };
 
+// Live progress a runner reports while it works, so the UI can tell "waiting
+// on the media server's refresh" apart from "stuck". `remoteApplied` flips the
+// moment the media server accepted the new match — from then on the remap is
+// Jellyfin's/Plex's to finish and Summonarr is only waiting to record it.
+export type FixMatchProgress = {
+  phase: "searching" | "applying" | "confirming";
+  remoteApplied: boolean;
+  attempt: number;
+  attempts: number;
+  // Confirmation reads that errored or timed out — the media server answers
+  // slowly (or not at all) while it is busy refreshing.
+  readFailures: number;
+  updatedAt: number;
+};
+export type FixMatchReport = (progress: Omit<FixMatchProgress, "updatedAt">) => void;
+
 export type FixMatchJob = {
   id: string;
   key: string;
@@ -24,6 +40,7 @@ export type FixMatchJob = {
   error: string | null;
   // The HTTP status the synchronous path would have answered with (404/502).
   errorStatus: number | null;
+  progress: FixMatchProgress | null;
 };
 
 // A failure the client may see verbatim. Anything else that escapes a runner
@@ -73,7 +90,7 @@ function prune(now: number): void {
 // one title.
 export function startFixMatchJob(
   key: string,
-  run: () => Promise<FixMatchJobResult>,
+  run: (report: FixMatchReport) => Promise<FixMatchJobResult>,
   now: number = Date.now(),
 ): FixMatchJob {
   prune(now);
@@ -82,10 +99,11 @@ export function startFixMatchJob(
   }
   const job: FixMatchJob = {
     id: randomUUID(), key, status: "running", startedAt: now,
-    finishedAt: null, result: null, error: null, errorStatus: null,
+    finishedAt: null, result: null, error: null, errorStatus: null, progress: null,
   };
   jobs.set(job.id, job);
-  void Promise.resolve().then(run).then(
+  const report: FixMatchReport = (progress) => { job.progress = { ...progress, updatedAt: Date.now() }; };
+  void Promise.resolve().then(() => run(report)).then(
     (result) => {
       job.status = "done";
       job.result = result;

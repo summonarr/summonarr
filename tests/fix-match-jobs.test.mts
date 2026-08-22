@@ -69,6 +69,28 @@ test("finished jobs expire after the TTL; running jobs never do", async () => {
   assert.equal(getFixMatchJob(running.id, later)?.status, "running", "a running job is never evicted");
 });
 
+test("a runner's report() lands on job.progress with an updatedAt stamp, readable while running", async () => {
+  // Holder object rather than a bare `let`: TS narrows a closure-assigned
+  // variable to `never` at the later call site.
+  const gate: { release?: () => void } = {};
+  const job = startFixMatchJob("progress", async (report) => {
+    report({ phase: "confirming", remoteApplied: true, attempt: 3, attempts: 120, readFailures: 1 });
+    await new Promise<void>((r) => { gate.release = r; });
+    return { ok: true };
+  });
+  await settle();
+  const mid = getFixMatchJob(job.id);
+  assert.equal(mid?.status, "running");
+  assert.equal(mid?.progress?.phase, "confirming");
+  assert.equal(mid?.progress?.remoteApplied, true);
+  assert.equal(mid?.progress?.attempt, 3);
+  assert.equal(mid?.progress?.readFailures, 1);
+  assert.ok((mid?.progress?.updatedAt ?? 0) > 0, "the registry stamps when the report arrived");
+  gate.release?.();
+  await settle();
+  assert.equal(getFixMatchJob(job.id)?.status, "done");
+});
+
 test("fixMatchJobKey identifies the remap by server, instance, type and the from→to pair", () => {
   assert.equal(fixMatchJobKey({ server: "jellyfin", serverInstance: "", mediaType: "TV", tmdbId: 1, correctTmdbId: 2 }), "jellyfin::TV:1->2");
   assert.notEqual(

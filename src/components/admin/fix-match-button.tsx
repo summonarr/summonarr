@@ -6,7 +6,7 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import type { PlexCandidate, CandidateMatch, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";
 import { withBasePath } from "@/lib/base-path";
-import { runFixMatch } from "@/lib/client/fix-match";
+import { runFixMatch, type FixMatchProgressView } from "@/lib/client/fix-match";
 import { DEFAULT_MEDIA_INSTANCE, mediaInstanceLabel } from "@/lib/media-instances";
 
 type Phase = "idle" | "fetching" | "selecting" | "applying" | "success" | "conflated" | "error";
@@ -36,6 +36,13 @@ const LEVEL_STYLES: Record<CandidateMatch, { border: string; bg: string; badge: 
   unknown: { border: "border-l-2 border-transparent",     bg: "hover:bg-zinc-800",                       badge: "bg-zinc-800 text-zinc-500 border-zinc-700",              label: "Unknown" },
 };
 
+// m:ss from a duration the poll already measured — no clock read in render
+// (guardrail 16).
+function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
 interface ModalProps {
   server:        "plex" | "jellyfin";
   data:          CandidatesResponse;
@@ -51,10 +58,13 @@ interface ModalProps {
   // Jellyfin mode only: fires the single-target apply from the confirm footer.
   onConfirm:     () => void;
   onCancel:      () => void;
+  // Closes the modal while the apply keeps running — the row keeps tracking it.
+  onHide:        () => void;
   applying:      boolean;
+  progress:      FixMatchProgressView | null;
 }
 
-function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, instanceLabel, onSelect, onConfirm, onCancel, applying }: ModalProps) {
+function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, instanceLabel, onSelect, onConfirm, onCancel, onHide, applying, progress }: ModalProps) {
   const {
     candidates, targetTitle, targetYear, targetImdbId, targetPosterPath,
     targetOverview, targetReleaseDate, targetVoteAverage, targetRuntime, targetGenres,
@@ -68,7 +78,7 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
   const jellyfinFileName = jellyfinFilePath ? jellyfinFilePath.replace(/\\/g, "/").split("/").pop() ?? jellyfinFilePath : null;
 
   return (
-    <Dialog open onOpenChange={(open) => { if (!open && !applying) onCancel(); }}>
+    <Dialog open onOpenChange={(open) => { if (!open) (applying ? onHide : onCancel)(); }}>
       <DialogPortal>
         <DialogBackdrop />
         <DialogPopup className="max-w-3xl">
@@ -201,13 +211,30 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
         </div>
         </>)}
 
+        {applying && (
+          <div className="mx-6 mb-3 flex-shrink-0 px-4 py-3 rounded border bg-zinc-800/60 border-zinc-700 text-xs text-zinc-300 space-y-1">
+            <p>
+              {progress?.remoteApplied
+                ? `✓ ${server === "jellyfin" ? "Jellyfin" : "Plex"} accepted the new match — waiting for its library refresh to finish`
+                : `Applying the match on ${server === "jellyfin" ? "Jellyfin" : "Plex"}…`}
+              <span className="ml-2 font-mono text-zinc-500">{formatElapsed(progress?.elapsedMs ?? 0)}</span>
+            </p>
+            <p className="text-zinc-500">
+              Large shows can take several minutes — the server answers slowly while it refreshes. You can hide this;
+              Summonarr keeps tracking it and records the match the moment the server confirms it.
+            </p>
+            {(progress?.readFailures ?? 0) > 0 && (
+              <p className="text-yellow-400/80">The server isn&apos;t answering status reads right now (busy refreshing) — still waiting.</p>
+            )}
+          </div>
+        )}
+
         <div className="px-6 py-4 border-t border-zinc-700 flex justify-end gap-2 flex-shrink-0">
           <DialogClose
-            disabled={applying}
             className="text-sm px-4 py-2 rounded border border-zinc-600 text-zinc-400
-              hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50 transition-colors"
+              hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
           >
-            Cancel
+            {applying ? "Hide" : "Cancel"}
           </DialogClose>
           {server === "jellyfin" && (
             <button
@@ -361,6 +388,8 @@ export function FixMatchButton({
   const [phase, setPhase]       = useState<Phase>("idle");
   const [errorMsg, setErrorMsg] = useState("");
   const [candidates, setCandidates] = useState<CandidatesResponse | null>(null);
+  const [progress, setProgress] = useState<FixMatchProgressView | null>(null);
+  const [modalHidden, setModalHidden] = useState(false);
 
   // Two library rows can share a tmdbId once a second server is configured, so a
   // bare "Fix match" is ambiguous — name the server on both the button and the
@@ -373,6 +402,8 @@ export function FixMatchButton({
     setPhase("idle");
     setErrorMsg("");
     setCandidates(null);
+    setProgress(null);
+    setModalHidden(false);
   }, []);
 
   async function handleClick() {
@@ -402,6 +433,8 @@ export function FixMatchButton({
   async function applyFix(canonicalGuid: string | undefined) {
     setPhase("applying");
     setErrorMsg("");
+    setProgress(null);
+    setModalHidden(false);
     try {
       // Background job + status poll (guardrail 37a): a series remap can take
       // minutes on the media server — longer than a reverse proxy keeps one
@@ -411,7 +444,7 @@ export function FixMatchButton({
       const json = await runFixMatch({
         server, tmdbId, mediaType, correctTmdbId, canonicalGuid,
         ...(serverInstance ? { serverInstance } : {}),
-      });
+      }, { onProgress: setProgress });
       setCandidates(null);
       if (json.warning) {
         setErrorMsg(json.warning);
@@ -441,7 +474,7 @@ export function FixMatchButton({
 
   return (
     <>
-      {(phase === "selecting" || phase === "applying") && candidates && (
+      {(phase === "selecting" || (phase === "applying" && !modalHidden)) && candidates && (
         <FixMatchModal
           server={server}
           data={candidates}
@@ -452,7 +485,9 @@ export function FixMatchButton({
           onSelect={(guid) => applyFix(guid)}
           onConfirm={() => applyFix(undefined)}
           onCancel={reset}
+          onHide={() => setModalHidden(true)}
           applying={phase === "applying"}
+          progress={progress}
         />
       )}
 
@@ -468,7 +503,7 @@ export function FixMatchButton({
           {phase === "fetching"
             ? "Loading…"
             : phase === "applying"
-              ? "Applying…"
+              ? (progress?.remoteApplied ? `Confirming… ${formatElapsed(progress.elapsedMs)}` : "Applying…")
               : instanceLabel ? `${label} · ${instanceLabel}` : label}
         </button>
         {phase === "error" && (

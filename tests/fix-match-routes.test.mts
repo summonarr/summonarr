@@ -715,6 +715,18 @@ test("POST async:true → 202 + jobId BEFORE the remap finishes; same key dedupe
   assert.equal(st.status, 200);
   assert.equal((await st.json() as { status: string }).status, "running");
 
+  // While gated, the job has already passed Apply: the status must say the
+  // media server accepted the match and Summonarr is merely confirming — the
+  // signal the UI turns into "Jellyfin accepted — waiting for its refresh".
+  let progress: { phase?: string; remoteApplied?: boolean } | undefined;
+  for (let i = 0; i < 400 && !progress?.remoteApplied; i++) {
+    await flush();
+    st = await fixMatchStatus(req(statusUrl(started.jobId), { headers: a.header }), undefined);
+    progress = (await st.json() as { progress?: typeof progress }).progress;
+  }
+  assert.equal(progress?.remoteApplied, true, "the job reports the server accepted the match before confirmation lands");
+  assert.equal(progress?.phase, "confirming");
+
   release();
   await until(() => opsOf("jellyfinLibraryItem.upsert").length === 1, "the background remap's DB write");
   let final: { status: string; result?: unknown; error?: string } = { status: "running" };
@@ -795,6 +807,37 @@ test("background mode waits out a long series cascade: a TV item confirming only
   assert.equal(checks, 24, "the synchronous TV window is still 24 polls");
   assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 0);
   assert.ok(errors.some((e) => e.includes("still reported the previous match")), "and it says the cascade may still be settling");
+});
+
+test("confirmation reads that fail are counted on the job's progress and warned once — and the job still confirms afterwards", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: null, jellyfinItemId: "aaaaaaaa" });
+  let reads = 0;
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) return new Response("", { status: 200 });
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Correct Title" }]);
+    if (p === "/Items/aaaaaaaa/Refresh") return new Response("", { status: 200 });
+    if (p === "/Items/aaaaaaaa") {
+      reads++;
+      if (reads <= 3) throw new Error("socket hang up"); // Jellyfin busy: the read errors out
+      return okJson({ ProviderIds: { Tmdb: "222" } });
+    }
+    throw new Error(`unexpected Jellyfin path ${p}`);
+  };
+
+  const res = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, async: true }, a.header), undefined);
+  assert.equal(res.status, 202);
+  const { jobId } = await res.json() as { jobId: string };
+  let final: { status: string; progress?: { readFailures?: number } } = { status: "running" };
+  for (let i = 0; i < 400 && final.status === "running"; i++) {
+    await flush();
+    final = await (await fixMatchStatus(req(statusUrl(jobId), { headers: a.header }), undefined)).json() as typeof final;
+  }
+  assert.equal(final.status, "done", `a few failed reads must not fail the job: ${JSON.stringify(final)}`);
+  assert.equal(final.progress?.readFailures, 3, "every failed confirmation read is counted for the UI");
+  assert.equal(warns.filter((w) => w.includes("confirmation read failed")).length, 1, "warned on the first failure only (then every 10th)");
 });
 
 test("status: 400 on a malformed id, 404 on an unknown job, 401 with no session", async () => {

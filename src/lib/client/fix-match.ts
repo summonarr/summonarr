@@ -19,8 +19,26 @@ export type FixMatchRequest = {
 
 export type FixMatchOutcome = { ok: true; warning?: string };
 
+// What the UI gets on every poll while the job runs: the server's phase plus
+// wall-clock elapsed since the job started, so "Applying…" can become
+// "Jellyfin accepted the match — waiting for its refresh (3:20)".
+export type FixMatchProgressView = {
+  phase: "searching" | "applying" | "confirming";
+  remoteApplied: boolean;
+  attempt: number;
+  attempts: number;
+  readFailures: number;
+  elapsedMs: number;
+};
+
 type StartBody = { ok?: boolean; jobId?: string; warning?: string; error?: string };
-type StatusBody = { status?: "running" | "done" | "failed"; result?: FixMatchOutcome; error?: string };
+type StatusBody = {
+  status?: "running" | "done" | "failed";
+  startedAt?: number;
+  progress?: Omit<FixMatchProgressView, "elapsedMs">;
+  result?: FixMatchOutcome;
+  error?: string;
+};
 
 const POLL_INTERVAL_MS = 3_000;
 const MAX_WAIT_MS = 20 * 60_000;
@@ -28,7 +46,11 @@ const MAX_CONSECUTIVE_POLL_FAILURES = 10;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-export async function runFixMatch(body: FixMatchRequest): Promise<FixMatchOutcome> {
+export async function runFixMatch(
+  body: FixMatchRequest,
+  opts: { onProgress?: (progress: FixMatchProgressView) => void } = {},
+): Promise<FixMatchOutcome> {
+  const startedLocally = Date.now();
   const res = await fetch(withBasePath("/api/admin/fix-match"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -68,6 +90,14 @@ export async function runFixMatch(body: FixMatchRequest): Promise<FixMatchOutcom
     const job = await pollRes.json().catch(() => ({})) as StatusBody;
     if (job.status === "done") return job.result ?? { ok: true };
     if (job.status === "failed") throw new Error(job.error ?? "Fix-match operation failed");
+    opts.onProgress?.({
+      phase: job.progress?.phase ?? "applying",
+      remoteApplied: job.progress?.remoteApplied ?? false,
+      attempt: job.progress?.attempt ?? 0,
+      attempts: job.progress?.attempts ?? 0,
+      readFailures: job.progress?.readFailures ?? 0,
+      elapsedMs: Date.now() - (job.startedAt ?? startedLocally),
+    });
   }
   throw new Error("The fix-match is still running after 20 minutes — check the item on the media server or run a library re-sync.");
 }

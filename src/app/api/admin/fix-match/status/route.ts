@@ -20,6 +20,7 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
     status: job.status,
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
+    ...(job.progress ? { progress: job.progress } : {}),
     ...(job.result ? { result: job.result } : {}),
     ...(job.error ? { error: job.error, errorStatus: job.errorStatus } : {}),
   });

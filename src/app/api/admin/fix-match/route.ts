@@ -13,7 +13,7 @@ import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { FixMatchError, fixMatchJobKey, startFixMatchJob, type FixMatchJobResult } from "@/lib/fix-match-jobs";
+import { FixMatchError, fixMatchJobKey, startFixMatchJob, type FixMatchJobResult, type FixMatchReport } from "@/lib/fix-match-jobs";
 import {
   DEFAULT_MEDIA_INSTANCE,
   isValidMediaInstanceSlug,
@@ -455,11 +455,18 @@ async function fixJellyfinMatch(
   filePath: string | null,
   previousTmdbId: number,
   background: boolean,
+  report?: FixMatchReport,
 ): Promise<{ newItemId: string; baseUrl: string; apiKey: string }> {
   // Strip itemId to UUID-safe chars to break taint from a DB-read string before
   // it's interpolated into any admin-token URL below.
   const safeItemId = itemId.replace(/[^0-9a-f-]/gi, "");
   const tag = `[fix-match/${mediaInstanceLabel("jellyfin", instance)} itemId=${safeItemId} target=tmdb:${correctTmdbId}]`;
+
+  // Progress the job exposes to the UI (no-op on the synchronous path).
+  const progress: Omit<import("@/lib/fix-match-jobs").FixMatchProgress, "updatedAt"> =
+    { phase: "searching", remoteApplied: false, attempt: 0, attempts: 0, readFailures: 0 };
+  const push = () => report?.({ ...progress });
+  push();
 
   const jellyfinConfig = await getJellyfinConfig(instance);
   if (!jellyfinConfig.url || !jellyfinConfig.apiKey) throw new Error("Jellyfin server not configured");
@@ -512,6 +519,8 @@ async function fixJellyfinMatch(
   // failing an operation that is usually still succeeding. Any other apply
   // failure (non-2xx, network, SSRF) still throws as before.
   let applyTimedOut = false;
+  progress.phase = "applying";
+  push();
   try {
     const applyRes = await safeFetchAdminConfigured(`${baseUrl}/Items/RemoteSearch/Apply/${safeItemId}?replaceAllImages=false`, {
       method: "POST",
@@ -525,6 +534,12 @@ async function fixJellyfinMatch(
     applyTimedOut = true;
     console.warn("[fix-match]", tag, "apply timed out client-side; Jellyfin is still refreshing — extending the confirmation poll");
   }
+
+  // Either way the media server now owns the remap: it accepted the new match
+  // (2xx) or is still applying it (timeout) — from here Summonarr only waits.
+  progress.remoteApplied = true;
+  progress.phase = "confirming";
+  push();
 
   const refreshUrl = (id: string) =>
     `${baseUrl}/Items/${id}/Refresh?MetadataRefreshMode=FullRefresh&ReplaceAllMetadata=true&ImageRefreshMode=FullRefresh&ReplaceAllImages=true`;
@@ -557,8 +572,11 @@ async function fixJellyfinMatch(
   // 120 × 5s ≈ 10 minutes. The synchronous contract keeps the shorter windows:
   // a reverse proxy cuts that request off long before ten minutes anyway.
   const confirmAttempts = background ? 120 : (applyTimedOut || mediaType === "TV" ? 24 : 4);
+  progress.attempts = confirmAttempts;
   for (let attempt = 0; attempt < confirmAttempts; attempt++) {
     await new Promise((r) => setTimeout(r, 5_000));
+    progress.attempt = attempt + 1;
+    push();
 
     const checkRes = await safeFetchAdminConfigured(
       `${baseUrl}/Items/${resolvedItemId}?Fields=ProviderIds`,
@@ -566,6 +584,14 @@ async function fixJellyfinMatch(
     ).catch(() => null);
 
     if (!checkRes?.ok) {
+      // A read that errors or times out is the media server being busy with
+      // its own refresh, not a verdict — say so once (and every 10th time) so
+      // a long wait is explained in the log instead of looking stuck.
+      progress.readFailures++;
+      if (progress.readFailures === 1 || progress.readFailures % 10 === 0) {
+        console.warn("[fix-match]", tag, `confirmation read failed (${progress.readFailures} so far) — Jellyfin is usually busy refreshing; still polling`);
+      }
+      push();
       if (filePath) {
         const folderName = filePath.replace(/\\/g, "/").split("/").at(-2) ?? "";
         const searchTerm = folderName.replace(/\s*\(\d{4}\)\s*$/, "").trim();
@@ -647,7 +673,7 @@ type FixMatchActor = { userId: string; userName: string | null | undefined };
 // FixMatchError carrying the client-safe message + HTTP status. The POST
 // handler either awaits it inline (the synchronous contract) or hands it to the
 // job registry (guardrail 37a); both paths see exactly the same outcomes.
-async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { background: boolean }): Promise<FixMatchJobResult> {
+async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { background: boolean; report?: FixMatchReport }): Promise<FixMatchJobResult> {
   const { server, tmdbId, mediaType, correctTmdbId, canonicalGuid, serverInstance } = input;
 
   // The remap is inherently two-phase: the remote library server must be
@@ -670,6 +696,7 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
       if (!item?.plexRatingKey) {
         throw new FixMatchError("Plex rating key not found — re-sync first", 404);
       }
+      opts.report?.({ phase: "applying", remoteApplied: false, attempt: 0, attempts: 0, readFailures: 0 });
       const plexResult = await fixPlexMatch(item.plexRatingKey, correctTmdbId, mediaType, serverInstance, canonicalGuid);
       remoteRemapped = true;
 
@@ -742,7 +769,7 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
       const failedCopies: string[] = [];
       for (const targetId of targetItemIds) {
         try {
-          applied.push(await fixJellyfinMatch(targetId, correctTmdbId, mediaType, serverInstance, item?.filePath ?? null, tmdbId, opts.background));
+          applied.push(await fixJellyfinMatch(targetId, correctTmdbId, mediaType, serverInstance, item?.filePath ?? null, tmdbId, opts.background, opts.report));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           console.error("[fix-match]", `jellyfin copy ${targetId} failed:`, msg);
@@ -874,7 +901,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
   // browser polls instead of holding the request. An identical job already
   // running is returned as-is, never started twice.
   if (body.async === true) {
-    const job = startFixMatchJob(fixMatchJobKey(input), () => runFixMatch(input, actor, { background: true }));
+    const job = startFixMatchJob(fixMatchJobKey(input), (report) => runFixMatch(input, actor, { background: true, report }));
     return NextResponse.json({ ok: true, jobId: job.id, status: job.status }, { status: 202 });
   }
 
