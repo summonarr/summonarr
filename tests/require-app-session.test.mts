@@ -82,9 +82,9 @@ const usersById = new Map<string, DbUser>();
 const sessionRows = new Set<string>();
 
 shadowPrismaModel(prisma, "authSession", {
-  // createdAt must be RECENT: the ADMIN 7-day hard ceiling anchors on this row's
-  // birth rather than the token's iat, so an epoch default silently rejects every
-  // admin session and would read as a source bug.
+  // createdAt is the row's birth; nothing time-based keys off it any more (the
+  // former ADMIN 7-day ceiling did — guardrail 6c removed it), but keep it a
+  // real Date so the row shape stays faithful to production.
   findUnique: async (args: { where: { sessionId: string } }) =>
     sessionRows.has(args.where.sessionId)
       ? { id: `row-${args.where.sessionId}`, sessionId: args.where.sessionId, createdAt: new Date() }

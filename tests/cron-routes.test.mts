@@ -383,6 +383,23 @@ test("purge-auth-sessions: EVERY delete carries a date predicate — none is unb
   }
 });
 
+test("purge-auth-sessions: the AuthSession sweep is `expiresAt < now`, so a native session's never-expires sentinel is never swept", async () => {
+  // A native (iOS) session's AuthSession.expiresAt is the far-future sentinel
+  // from session-lifetime.ts (guardrail 6c) — the row is the session's only
+  // revocation anchor, and the only housekeeping that may delete it is this
+  // expiry sweep. Pin the predicate's SHAPE: a bound on expiresAt, strictly
+  // below the sentinel. A "sessions older than N days" sweep on createdAt /
+  // lastSeenAt would sign every iOS user out on the first nightly run.
+  const { NEVER_EXPIRES_AT_MS } = await import("../src/lib/session-lifetime.ts");
+  await purge.POST(authed(purge));
+  const [sweep] = opsOf("authSession.deleteMany");
+  const where = sweep.args as { expiresAt?: { lt?: Date }; createdAt?: unknown; lastSeenAt?: unknown };
+  assert.ok(where.expiresAt?.lt instanceof Date, `the AuthSession sweep must bound expiresAt with lt: ${JSON.stringify(where)}`);
+  assert.ok(where.expiresAt.lt.getTime() < NEVER_EXPIRES_AT_MS, "the cutoff must sit below the never-expires sentinel");
+  assert.equal(where.createdAt, undefined, "no age-based sweep on createdAt");
+  assert.equal(where.lastSeenAt, undefined, "no idle-based sweep on lastSeenAt");
+});
+
 test("purge-auth-sessions: sweeps every table the job claims to, and only those", async () => {
   await purge.POST(authed(purge));
   const swept = ops.filter((o) => o.op.endsWith(".deleteMany")).map((o) => o.op.replace(".deleteMany", "")).sort();

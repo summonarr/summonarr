@@ -83,7 +83,7 @@ export function SessionForm({ initialDefaultDuration, initialMobileDuration, ini
         </div>
       </div>
       <p className="text-xs text-zinc-500">
-        Desktop default: 3600 (1 h). Mobile default: 604800 (7 days). Remember me: 2592000 (30 days). Changes apply to new logins only.
+        Desktop default: 3600 (1 h). Mobile default: 604800 (7 days). Remember me: 2592000 (30 days). A session lasts its full configured duration — there is no inactivity timeout — and the iOS app stays signed in until the session is revoked. Changes apply to new logins only.
       </p>
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">

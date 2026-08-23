@@ -68,7 +68,7 @@ A misconfigured deployment fails closed at startup, not silently at runtime.
 
 **Backup encryption:** AES-256-GCM with PBKDF2-SHA256 / 600,000 iterations (NIST SP 800-132 recommends ≥210k). The password lives in the operator's environment, not the database — a compromised admin account can trigger a backup but cannot decrypt one.
 
-**Per-device sessions:** Each session is tracked in `AuthSession` with a UA fingerprint and per-device revocation. Role demotions propagate within 10 seconds for `ADMIN`/`ISSUE_ADMIN`. Admin sessions cap at 7 days (the general session ceiling is 90 days).
+**Per-device sessions:** Each session is tracked in `AuthSession` with a UA fingerprint and per-device revocation. Role demotions propagate within 10 seconds for `ADMIN`/`ISSUE_ADMIN`. A browser session lasts exactly its admin-configured duration (desktop / mobile / remember-me; each capped at 90 days) with no inactivity timeout; a native-app (iOS) bearer session has no time-based expiry and ends only when revoked — per-device or everywhere from the Sessions page, or by a password change / account deactivation.
 
 **Audit log:** Sensitive `Setting` keys (Radarr/Sonarr/Plex/Jellyfin/Discord tokens, SMTP password) are redacted to `[redacted]` before being written to the audit log.
 

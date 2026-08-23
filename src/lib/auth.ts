@@ -16,6 +16,7 @@ import { readSummonarrSession, readActiveSummonarrSession } from "@/lib/session-
 import { defaultPermissionsForRole, effectivePermissions, parsePermissions, serializePermissions } from "@/lib/permissions";
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
+import { NEVER_EXPIRES_AT_SEC } from "@/lib/session-lifetime";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey, plexSettingKey, mediaInstanceLabel } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { getPlexConfig } from "@/lib/plex-config";
@@ -323,17 +324,20 @@ const DEFAULT_SESSION_SECONDS        = 3_600;
 const DEFAULT_MOBILE_SESSION_SECONDS = 604_800;
 const DEFAULT_MAX_SESSION_SECONDS    = 2_592_000;
 
-// Native-app (bearer) sessions get a long FIXED lifetime so the iOS app stays signed
-// in by default. The token lives in the iOS Keychain (hardware-backed, not an ambient
-// cookie) and bearer clients have no sliding refresh (guardrail 6b), so a long fixed
-// TTL is the mechanism. NOT a security hole: DB revocation — sign-out-everywhere, a
-// password change, the sessionsRevokedAt/passwordChangedAt cutoffs — still invalidates
-// it instantly on the next request, independent of this lifetime. Granted ONLY to
-// rememberMe + a mobile device class (so web "remember me" is unaffected).
-const NATIVE_APP_SESSION_SECONDS = 365 * 24 * 60 * 60; // 1 year
+// Native-app (bearer) sessions never expire by time — the deadline is the
+// never-reached NEVER_EXPIRES_AT_SEC sentinel (see session-lifetime.ts for why a
+// sentinel and not an absent claim). The token lives in the iOS Keychain
+// (hardware-backed, not an ambient cookie) and bearer clients have no refresh
+// channel (guardrail 6b), so "never expires" is the mechanism that keeps the app
+// signed in. NOT a security hole: DB revocation — sign-out, a per-device revoke,
+// sign-out-everywhere, a password change, the sessionsRevokedAt/passwordChangedAt
+// cutoffs, account deactivation — still invalidates it on the next request,
+// independent of the deadline. Granted ONLY to a caller presenting the
+// X-Summonarr-Client header (a custom header a cross-origin page cannot attach to
+// a credentialed request), so web "remember me" is unaffected.
 
 // Hard ceiling for ADMIN-CONFIGURABLE durations (the sessionDefault/Mobile/Max settings)
-// — prevents an admin from configuring an unbounded JWT lifetime. NATIVE_APP_SESSION_SECONDS
+// — prevents an admin from configuring an unbounded JWT lifetime. The native sentinel
 // above is a deliberate code-level constant and is intentionally not bound by this.
 const MAX_ALLOWED_SESSION_SECONDS = 90 * 24 * 60 * 60;
 
@@ -451,7 +455,7 @@ export async function revokeSessionById(sessionId: string): Promise<void> {
   // per-USER, so anchoring it to one session's createdAt also kills every session
   // minted earlier. Cookie sessions hide this — they are re-signed constantly, so
   // their iat is always newer — but a bearer/native token keeps its sign-in iat for
-  // its whole ~1-year life. Revoking a laptop therefore signed out every iOS device
+  // its whole (now indefinite) life. Revoking a laptop therefore signed out every iOS device
   // that had been signed in longer. Revoke-all still stamps a cutoff ("now"), which
   // is correct for its everywhere semantics.
   await prisma.$transaction(async (tx) => {
@@ -544,11 +548,11 @@ export async function initializeTokenOnSignIn(token: JwtToken, user: Record<stri
   const isMobile   = token.isMobile as boolean | undefined;
   const { desktopDuration, mobileDuration, maxDuration } = await getSessionDurations();
 
-  // The 1-year native-app TTL is reserved for a real native client, identified by
-  // the X-Summonarr-Client header it presents (a custom header a cross-origin web
-  // page cannot forge on a credentialed request — guardrail 6b). A spoofed mobile
-  // User-Agent alone (isMobile is UA-derived) must NOT grant it, or any browser
-  // could mint a 1-year remember-me ceiling by lying about its UA.
+  // The never-expiring native-app session is reserved for a real native client,
+  // identified by the X-Summonarr-Client header it presents (a custom header a
+  // cross-origin web page cannot forge on a credentialed request — guardrail 6b).
+  // A spoofed mobile User-Agent alone (isMobile is UA-derived) must NOT grant it,
+  // or any browser could mint a never-expiring cookie by lying about its UA.
   let isNativeClient = false;
   try {
     const { headers: getHeaders } = await import("next/headers");
@@ -558,23 +562,30 @@ export async function initializeTokenOnSignIn(token: JwtToken, user: Record<stri
     // Invoked outside a request context — treat as non-native.
   }
 
-  let ttl: number;
-  if (rememberMe && isMobile && isNativeClient) {
-    // Native app (iOS Keychain bearer) — long-lived by default. See NATIVE_APP_SESSION_SECONDS.
-    ttl = NATIVE_APP_SESSION_SECONDS;
-  } else if (rememberMe) {
-    // Web "remember me" — admin-configurable maxDuration (30d default, capped at 90d).
-    ttl = maxDuration;
-  } else if (isMobile) {
-    ttl = mobileDuration;
+  let expiresAt: number;
+  if (isNativeClient) {
+    // Native app (iOS Keychain bearer) — no time-based expiry. Every native
+    // sign-in qualifies regardless of rememberMe / device class: the header is
+    // the signal, the UA only feeds the device label. See session-lifetime.ts.
+    expiresAt = NEVER_EXPIRES_AT_SEC;
   } else {
-    ttl = desktopDuration;
+    let ttl: number;
+    if (rememberMe) {
+      // Web "remember me" — admin-configurable maxDuration (30d default, capped at 90d).
+      ttl = maxDuration;
+    } else if (isMobile) {
+      ttl = mobileDuration;
+    } else {
+      ttl = desktopDuration;
+    }
+    // The session deadline, captured once at sign-in. verifyAndRefreshSession
+    // enforces it on every DB-checked verify and re-signs the JWT / cookie out to
+    // exactly this instant — there is no inactivity window on top of it (guardrail
+    // 6c), and it can never move, so a session can't outlive the configured
+    // duration (itself capped at MAX_ALLOWED_SESSION_SECONDS in getSessionDurations()).
+    expiresAt = Math.floor(Date.now() / 1000) + ttl;
   }
-  // Hard ceiling captured once at sign-in. verifyAndRefreshSession bounds the
-  // sliding expiry against the `expiresAt` claim so non-admins can't be silently
-  // extended past the original session TTL (which is itself capped at
-  // MAX_ALLOWED_SESSION_SECONDS in getSessionDurations()).
-  token.expiresAt = Math.floor(Date.now() / 1000) + ttl;
+  token.expiresAt = expiresAt;
 
   const userId = user.id as string | undefined;
   if (!token.mediaServer && userId) {

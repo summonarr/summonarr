@@ -18,12 +18,14 @@ import { serializePermissions } from "@/lib/permissions";
 //      cannot be replayed after a privilege change.
 //   5. Refresh mediaServer for credentials/oidc tokens (plex/jellyfin/jellyfin-qc
 //      sessions have their mediaServer pinned at sign-in).
-//   6. Sliding window for non-ADMIN: move the JWT exp to now+3600, capped at
-//      the original session deadline (`expiresAt` claim). It slides BOTH ways —
-//      down for a fresh long-TTL token, back up on every later DB check. This
-//      keeps active mobile/rememberMe sessions alive while enforcing a 1-hour
-//      inactivity timeout.
-//   7. Hard ceiling for ADMIN: reject after iat + 7d regardless of exp.
+//   6. Enforce the session deadline (`expiresAt` claim, captured at sign-in and
+//      mirrored into AuthSession.expiresAt): reject a token past it, otherwise
+//      re-sign with exp = the deadline, so the cookie's Max-Age / the JWT's exp
+//      always cover the session's full remaining life. There is NO inactivity
+//      window and NO role-based ceiling on top of the deadline (guardrail 6c):
+//      "remember me" lasts the configured sessionMaxDuration, and a native
+//      session (deadline = the never-reached sentinel, see session-lifetime.ts)
+//      lives until it is revoked.
 //
 // dbCheckedAt skip optimization keeps the hot path off the DB: if the token was
 // validated against the DB within the last 60s (10s for ADMIN/ISSUE_ADMIN, so
@@ -39,8 +41,6 @@ export interface VerifyAndRefreshResult {
   refreshed?: RefreshedToken;
 }
 
-const ADMIN_MAX_LIFETIME_SECONDS = 7 * 24 * 60 * 60;
-const NON_ADMIN_SLIDE_WINDOW_SECONDS = 3600;
 const FAST_CHECK_INTERVAL_SECONDS = 10;
 const SLOW_CHECK_INTERVAL_SECONDS = 60;
 
@@ -79,13 +79,9 @@ export async function verifyAndRefreshSession(
     !shouldForceDbCheck(claims.id, claims.sessionId);
 
   if (skipDbCheck) {
-    // Still enforce the ADMIN 7d ceiling without hitting the DB.
-    if (claims.role === "ADMIN") {
-      const iat = claims.iat;
-      if (typeof iat === "number" && now >= iat + ADMIN_MAX_LIFETIME_SECONDS) {
-        return null;
-      }
-    }
+    // The JWT's own exp (= the session deadline, re-signed that way on every
+    // slow-path check) is all the time-based enforcement the fast path needs —
+    // jose already rejected an expired token above.
     return { claims };
   }
 
@@ -171,24 +167,6 @@ export async function verifyAndRefreshSession(
   void prisma.authSession
     .update({ where: { sessionId: claims.sessionId }, data: { lastSeenAt: new Date() } })
     .catch(() => {});
-
-  // ADMIN 7d hard ceiling — anchored to the AuthSession row's createdAt (the stable
-  // session birth), NOT claims.iat. The re-sign below resets iat to `now` on every
-  // DB check (signSessionJwt couples exp to iat, so iat cannot simply be preserved),
-  // so an iat-based ceiling never fires for an actively-used admin token — it would
-  // ride the full rememberMe deadline (maxDuration: 30d default, up to 90d) instead
-  // of being capped at 7 days. createdAt is set once at sign-in and never updated, so
-  // it enforces the true 7d cap. The fast path above stays iat-based but is bounded by
-  // the 10s admin dbCheckedAt window, so this DB check fires within 10s of the 7d mark.
-  if (dbUser.role === "ADMIN") {
-    // createdAt is a non-nullable @default(now()) column, so it's always a Date in
-    // production; the instanceof guard just avoids crashing auth on an unexpected row
-    // shape (fails open on the ceiling only — the session is still DB-checked/revocable).
-    const born = authSessionRow.createdAt;
-    if (born instanceof Date && now >= Math.floor(born.getTime() / 1000) + ADMIN_MAX_LIFETIME_SECONDS) {
-      return null;
-    }
-  }
 
   const dbPermsStr = serializePermissions(dbUser.permissions ?? 0n);
   const claimPermsStr =
@@ -279,32 +257,29 @@ export async function verifyAndRefreshSession(
     }
   }
 
-  // Sliding window for non-ADMIN: move exp to now+3600, capped at the original
-  // session deadline. The cap (`expiresAt` claim) is the value set at sign-in by
-  // initializeTokenOnSignIn — it never moves, so the session can never outlive
-  // its original TTL. (The sole exception is the same-second privilege-change
-  // rotation below, where signedIat = cutoff+1 makes exp land ≤2s past the
-  // deadline once; the DB AuthSession row / sessionsRevokedAt remain the real
-  // boundary, so this is immaterial.)
-  //
-  // The slide is UNCONDITIONAL — it clamps a fresh long-TTL token down to the
-  // 1-hour window AND re-extends it on every later DB-checked request. A
-  // shorten-only slide pinned exp at the first slow-path check, so every
-  // non-ADMIN cookie session died ~1h after sign-in no matter how active the
-  // user was, making sessionMaxDuration/sessionMobileDuration unreachable. The
-  // inactivity timeout is unaffected: a gap longer than the window still arrives
-  // on an already-expired JWT, which verifySessionJwt rejects above.
-  let resignExpiresIn: number | null = null;
-  if (workingClaims.role !== "ADMIN") {
-    const sessionDeadline = workingClaims.expiresAt;
-    if (typeof sessionDeadline === "number") {
-      if (now >= sessionDeadline) return null;
-      const newExp = Math.min(now + NON_ADMIN_SLIDE_WINDOW_SECONDS, sessionDeadline);
-      resignExpiresIn = newExp - now;
-    }
-  }
-
-  if (resignExpiresIn === null) {
+  // Session deadline (`expiresAt` claim) — the value set at sign-in by
+  // initializeTokenOnSignIn, mirrored into AuthSession.expiresAt. It never
+  // moves, so a session can never outlive its configured duration; and nothing
+  // shortens it either: the re-sign below puts exp (and so the cookie's
+  // Max-Age) at EXACTLY the deadline for every role. Guardrail 6c — there is
+  // deliberately no inactivity window and no role-based ceiling here. Both
+  // used to exist: a 1-hour non-admin slide meant "remember me" ended after
+  // any hour-long gap no matter what sessionMaxDuration promised, and a 7-day
+  // ADMIN ceiling ended every admin session weekly. A native session's deadline
+  // is the never-reached sentinel (session-lifetime.ts), so it passes here
+  // forever and ends only through the revocation checks above. (The sole
+  // exception to "exactly the deadline" is the same-second privilege-change
+  // rotation below, where signedIat = cutoff+1 makes exp land ≤2s past it once;
+  // the DB AuthSession row / sessionsRevokedAt remain the real boundary, so
+  // this is immaterial.)
+  let resignExpiresIn: number;
+  const sessionDeadline = workingClaims.expiresAt;
+  if (typeof sessionDeadline === "number") {
+    if (now >= sessionDeadline) return null;
+    resignExpiresIn = sessionDeadline - now;
+  } else {
+    // A token without a deadline claim (pre-claim legacy mints only — every
+    // current mint path sets it) keeps its own remaining exp.
     const currentExp = workingClaims.exp;
     resignExpiresIn =
       typeof currentExp === "number" ? Math.max(60, currentExp - now) : 3600;
