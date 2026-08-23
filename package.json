@@ -32,7 +32,7 @@
     "jose": "^6.2.8",
     "next": "16.3.0",
     "openid-client": "^6.8.5",
-    "pg": "^8.22.0",
+    "pg": "^8.23.0",
     "prisma": "^7.9.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
@@ -57,7 +57,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^26.2.0",
-    "@types/pg": "^8.20.4",
+    "@types/pg": "^8.21.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^10.8.1",
