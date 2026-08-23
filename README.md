@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.23.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.23.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,29 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.23.1
+
+**Added**
+
+- "For You" picks now explain themselves ("Because you watched / requested …"), the strongest picks carry a **Top match** / **Strong match** badge that survives any sort or filter, and the shelf widens from 100 to 200 titles.
+- "For You" seeds from your requests as well as your watch history and watchlist, so accounts without a linked media-server identity get a real shelf; users with little history get an honest starter shelf instead of filler.
+- Fix-match runs as a background job the page polls — with live progress (phase, elapsed time, confirmation polls) — so a long series remap behind a reverse proxy no longer comes back as a false "failed". Jellyfin gets a confirmation card before the apply, like the Plex picker.
+- Native clients: `GET /api/play-history/mine/wrapped`, `GET /api/requests/instances`, and a native OIDC sign-in path. The API contract version is now 3 (additive; older clients keep working).
+
+**Changed**
+
+- "For You" ranking is rebuilt: seeds are the last 100 titles played (titles, not episode rows), weighted by recency, play count and where each pick ranked; agreement between seeds is capped at 4× so franchise look-alikes stop owning the first page; abandoned titles are dampened; the quality prior weighs each rating source by its evidence, anchored on IMDb; the shelf stays consistent with the languages you actually watch.
+- A Plex library scan no longer launches full syncs back to back: the scan-triggered sync now waits out a 2-minute window and observes a 10-minute cooldown.
+- Series fix-match confirmations wait for Jellyfin's season/episode cascade (up to 10 minutes in the background, ~2 minutes for the synchronous path) instead of giving up at 20 seconds.
+
+**Fixed**
+
+- The activity Bandwidth panel: heavy Plex UHD sessions were erased and sub-1-Mbps Jellyfin streams were inflated 1000× (a two-hour phone stream reported 648 GB). Bitrates are now read in each server's own units, and Plex transcodes measure delivered bytes.
+- Series fix-matches that had succeeded were reported as "did not confirm"; an apply that times out client-side is now treated as still applying, and a genuinely unconfirmed apply gets a diagnosed error (metadata lock, slow refresh) instead of advice pointing at the metadata provider.
+- "For You" excluded titles properly: items marked "Not interested" were still consuming slots, one of the TMDB ranking terms had been dead, and seeds could be counted twice.
+- "Request on <instance>" was offered to native clients for instances that were registered but not configured, which the request could only reject.
+- Patched a high-severity advisory in a Prisma CLI dependency that ships in the image (`deepmerge-ts`, GHSA-ggr8-5vv4-36mx).
 
 ### v0.23.0
 
@@ -518,7 +541,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.23.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.23.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
