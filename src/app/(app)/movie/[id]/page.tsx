@@ -26,9 +26,8 @@ import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
-import { canRequest, canRequestInstance, hasPermission, parseInstanceGrants, Permission } from "@/lib/permissions";
-import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
-import { FOURK_ARR_INSTANCE } from "@/lib/arr-instances";
+import { canRequest, hasPermission, Permission } from "@/lib/permissions";
+import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
 import { isBlacklisted } from "@/lib/blacklist";
 
 export default async function MovieDetailPage({
@@ -72,7 +71,6 @@ export default async function MovieDetailPage({
     request4kAllRow,
     radarr4kAvailable,
     radarr4kWanted,
-    radarrInstances,
     votesEnabled,
     issuesEnabled,
     plexEnabled,
@@ -114,7 +112,6 @@ export default async function MovieDetailPage({
     prisma.setting.findUnique({ where: { key: "request4kAll" } }),
     prisma.radarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
     prisma.radarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
-    getSyncableArrInstances("radarr"),
     // The TV detail page has gated on these four since it was written; this
     // page never did. Without the page flags the Report-issue and Vote-to-
     // delete buttons render even when the feature is off, and only fail on
@@ -154,40 +151,21 @@ export default async function MovieDetailPage({
   const arr4kPending = show4k && !!radarr4kWanted;
 
   // Named instances (non-default, non-4K): render an explicit "Request on X"
-  // button for each configured one the viewer may target. Grants require a DB
-  // read (they're not in the session JWT), so only pay it when one exists.
-  const namedDefs = radarrInstances.filter(
-    (i) => i.slug !== "" && i.slug !== FOURK_ARR_INSTANCE,
-  );
-
+  // button for each configured one the viewer may target. Shared with the TV
+  // page and GET /api/requests/instances so the three can't drift — see
+  // resolveNamedInstanceTargets.
   const [suggestions, collectionItems, namedTargets] = await Promise.all([
     attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true }),
     attachAllAvailability(rawCollection, session?.user.id, { skipRatings: true }),
-    (async (): Promise<{ slug: string; name: string; requested: boolean; available: boolean }[]> => {
-      if (!session || namedDefs.length === 0 || blacklisted) return [];
-      const viewer = await prisma.user.findUnique({
-        where: { id: session.user.id },
-        select: { instanceGrants: true },
-      });
-      const grants = parseInstanceGrants(viewer?.instanceGrants);
-      const eligible = namedDefs.filter((inst) =>
-        canRequestInstance(session.user.permissions, inst, grants, "MOVIE"),
-      );
-      return Promise.all(
-        eligible.map(async (inst) => {
-          const [namedRequest, namedAvailable] = await Promise.all([
-            prisma.mediaRequest.findFirst({
-              where: { tmdbId: media.id, mediaType: "MOVIE", requestedBy: session.user.id, arrInstance: inst.slug, status: { not: "DECLINED" } },
-              select: { id: true },
-            }),
-            prisma.radarrAvailableItem.findUnique({
-              where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: inst.slug } },
-            }),
-          ]);
-          return { slug: inst.slug, name: inst.name, requested: !!namedRequest, available: !!namedAvailable };
-        }),
-      );
-    })(),
+    session
+      ? resolveNamedInstanceTargets({
+          tmdbId: media.id,
+          mediaType: "MOVIE",
+          userId: session.user.id,
+          permissions: session.user.permissions,
+          blacklisted,
+        })
+      : Promise.resolve([]),
   ]);
 
   const backdrop = backdropUrl(media.backdropPath, "original");

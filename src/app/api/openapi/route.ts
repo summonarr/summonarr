@@ -217,9 +217,11 @@ const spec = {
         summary: "Full personalized For You set with availability enrichment",
         parameters: [
           { name: "filter", in: "query", schema: { type: "string", enum: ["available", "missing"] }, description: "Restrict to titles on (or not on) the user's media servers" },
+          { name: "type", in: "query", schema: { type: "string", enum: ["movie", "tv"] }, description: "Restrict to one media type" },
+          { name: "sort", in: "query", schema: { type: "string", enum: ["match", "newest", "rating"], default: "match" }, description: "Ordering; \"match\" keeps the engine's own ranking" },
         ],
         responses: {
-          "200": { description: "Ranked recommendation items ({ items, total })" },
+          "200": { description: "Ranked recommendation items ({ items, total, available }); each item carries recommendedBecause naming the strongest seed" },
           "404": { description: "feature.page.forYou is disabled" },
         },
       },
@@ -833,6 +835,28 @@ const spec = {
           "200": {
             description:
               "{ linked, stats }. stats carries totals (plays, watch hours, avg session), lastActiveIso, the 365-day activityCalendar, playsByDay, the day×hour userHeatmap, platform/device breakdowns, and topMedia. linked=false when the account has no linked media-server user yet",
+          },
+        },
+      },
+    },
+    "/play-history/mine/wrapped": {
+      get: {
+        tags: ["Play History"],
+        summary:
+          "The caller's OWN \"Wrapped\" year-in-review — the REST mirror of the /my-stats/wrapped page, projected for native clients. Scoped server-side to the media-server users linked to the session account; no parameter can select another user.",
+        parameters: [
+          {
+            name: "year",
+            in: "query",
+            schema: { type: "integer" },
+            description:
+              "Calendar year (UTC). Honored only if it appears in the returned years list; anything else falls back to the most recent year on record",
+          },
+        ],
+        responses: {
+          "200": {
+            description:
+              "{ linked, years, year, data }. data carries totals, movie/TV splits, topTitles, biggestDay, busiestMonth, primeDow/primeHour, longestSitting, completion and top platform/device; posters ship as raw TMDB posterPath. linked=false when the account has no linked media-server user yet; year/data are null when it has no watched plays in any year",
           },
         },
       },
@@ -1858,6 +1882,12 @@ const spec = {
                   mediaType: { $ref: "#/components/schemas/MediaType" },
                   correctTmdbId: { type: "integer" },
                   canonicalGuid: { type: "string", description: "Plex only — a candidate GUID preselected from /admin/fix-match/candidates" },
+                  async: {
+                    type: "boolean",
+                    default: false,
+                    description:
+                      "Run the remap as a background job: answers 202 with a `jobId` immediately; poll /admin/fix-match/status. Use this from browsers — a series remap can outlive a reverse proxy's request timeout. Absent/false keeps the synchronous response.",
+                  },
                   serverInstance: {
                     type: "string",
                     default: "",
@@ -1871,10 +1901,23 @@ const spec = {
         },
         responses: {
           "200": { description: "Match updated (may carry a `warning` when Plex conflated both TMDB IDs)" },
+          "202": { description: "`async: true` — the job was started (or an identical one was already running); body carries `jobId`" },
           "400": { description: "Bad body, or an invalid serverInstance slug" },
           "404": { description: "No library row for that tmdbId on that instance — re-sync first" },
           "429": { description: "Rate limited (10/min/admin)" },
           "502": { description: "Remote remap or the follow-up cache write failed" },
+        },
+      },
+    },
+    "/admin/fix-match/status": {
+      get: {
+        tags: ["Admin – Fix Match"],
+        summary: "Status of a background fix-match job started with `async: true` (ADMIN / ISSUE_ADMIN)",
+        parameters: [{ name: "id", in: "query", required: true, schema: { type: "string", format: "uuid" } }],
+        responses: {
+          "200": { description: "`status` is running | done | failed; `result` when done (same shape as the synchronous POST), `error` + `errorStatus` when failed" },
+          "400": { description: "Missing or malformed id" },
+          "404": { description: "Unknown or expired job — jobs are in-process and do not survive a restart; re-sync to see whether the remap landed" },
         },
       },
     },
@@ -2368,6 +2411,23 @@ const spec = {
           { name: "is4k", in: "query", schema: { type: "boolean" }, description: "Legacy shorthand for instance=4k" },
         ],
         responses: { "200": { description: "{ qualityProfiles: [...] }" } },
+      },
+    },
+    "/requests/instances": {
+      get: {
+        tags: ["Requests"],
+        summary:
+          "NAMED Radarr/Sonarr instances the caller may request this title on, with its per-instance request/availability state — the data behind the detail page's \"Request on <instance>\" actions. Excludes the default ('') and '4k' instances, which are the plain and 4K request actions.",
+        parameters: [
+          { name: "tmdbId", in: "query", required: true, schema: { type: "integer" } },
+          { name: "mediaType", in: "query", required: true, schema: { $ref: "#/components/schemas/MediaType" } },
+        ],
+        responses: {
+          "200": {
+            description:
+              "{ instances: [{ slug, name, requested, available }] }. Filtered to instances this caller may target, so an ungranted or unknown slug is simply absent; empty when none are configured, none are grantable, or the title is blacklisted",
+          },
+        },
       },
     },
     "/requests/users": {

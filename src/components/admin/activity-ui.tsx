@@ -18,6 +18,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import Image from "next/image";
+import { bitrateToKbps } from "@/lib/bitrate";
 import {
   HeatmapCellPopover,
   type HeatmapCellAnchor,
@@ -1103,10 +1104,13 @@ export function fmtDuration(seconds: number): string {
   return `${Math.round(seconds)}s`;
 }
 
-export function fmtBitrate(raw: number | null): string {
-  if (!raw || raw <= 0) return "—";
-  // Plex reports kbps; Jellyfin bps — normalize to kbps.
-  const kbps = raw > 100000 ? raw / 1000 : raw;
+// `source` is required, not optional: Plex reports kbps and Jellyfin bps, and
+// the row is the only thing that can tell them apart (see lib/bitrate.ts). An
+// optional param would silently default Jellyfin rows to the Plex reading and
+// render them 1000x too high.
+export function fmtBitrate(raw: number | null, source: string | null): string {
+  const kbps = bitrateToKbps(raw, source);
+  if (kbps <= 0) return "—";
   if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mbps`;
   return `${Math.round(kbps)} kbps`;
 }

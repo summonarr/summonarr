@@ -6,6 +6,7 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import type { PlexCandidate, CandidateMatch, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";
 import { withBasePath } from "@/lib/base-path";
+import { runFixMatch, type FixMatchProgressView } from "@/lib/client/fix-match";
 import { DEFAULT_MEDIA_INSTANCE, mediaInstanceLabel } from "@/lib/media-instances";
 
 type Phase = "idle" | "fetching" | "selecting" | "applying" | "success" | "conflated" | "error";
@@ -35,19 +36,35 @@ const LEVEL_STYLES: Record<CandidateMatch, { border: string; bg: string; badge: 
   unknown: { border: "border-l-2 border-transparent",     bg: "hover:bg-zinc-800",                       badge: "bg-zinc-800 text-zinc-500 border-zinc-700",              label: "Unknown" },
 };
 
-interface ModalProps {
-  data:          CandidatesResponse;
-  correctTmdbId: number;
-  arrTmdbId:     number | null;
-  // "plex:<slug>" for a named server, empty for the default one — surfaced so the
-  // admin can see WHICH server this picker is about to rewrite.
-  instanceLabel: string;
-  onSelect:      (guid: string) => void;
-  onCancel:      () => void;
-  applying:      boolean;
+// m:ss from a duration the poll already measured — no clock read in render
+// (guardrail 16).
+function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
-function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, instanceLabel, onSelect, onCancel, applying }: ModalProps) {
+interface ModalProps {
+  server:        "plex" | "jellyfin";
+  data:          CandidatesResponse;
+  // The library row's current (wrong) id — shown in the Jellyfin confirmation
+  // card so the admin sees the direction of the remap, not just the destination.
+  currentTmdbId: number;
+  correctTmdbId: number;
+  arrTmdbId:     number | null;
+  // "plex:<slug>"/"jellyfin:<slug>" for a named server, empty for the default one
+  // — surfaced so the admin can see WHICH server this modal is about to rewrite.
+  instanceLabel: string;
+  onSelect:      (guid: string) => void;
+  // Jellyfin mode only: fires the single-target apply from the confirm footer.
+  onConfirm:     () => void;
+  onCancel:      () => void;
+  // Closes the modal while the apply keeps running — the row keeps tracking it.
+  onHide:        () => void;
+  applying:      boolean;
+  progress:      FixMatchProgressView | null;
+}
+
+function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, instanceLabel, onSelect, onConfirm, onCancel, onHide, applying, progress }: ModalProps) {
   const {
     candidates, targetTitle, targetYear, targetImdbId, targetPosterPath,
     targetOverview, targetReleaseDate, targetVoteAverage, targetRuntime, targetGenres,
@@ -61,12 +78,12 @@ function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, instanceLabel, on
   const jellyfinFileName = jellyfinFilePath ? jellyfinFilePath.replace(/\\/g, "/").split("/").pop() ?? jellyfinFilePath : null;
 
   return (
-    <Dialog open onOpenChange={(open) => { if (!open && !applying) onCancel(); }}>
+    <Dialog open onOpenChange={(open) => { if (!open) (applying ? onHide : onCancel)(); }}>
       <DialogPortal>
         <DialogBackdrop />
         <DialogPopup className="max-w-3xl">
           <DialogTitle className="sr-only">
-            Select the correct match for {targetTitle || `TMDB #${correctTmdbId}`}
+            {server === "jellyfin" ? "Confirm the new match for" : "Select the correct match for"} {targetTitle || `TMDB #${correctTmdbId}`}
           </DialogTitle>
 
         <div className="px-6 pt-5 pb-4 border-b border-zinc-700 flex-shrink-0 flex gap-4 items-start">
@@ -157,6 +174,20 @@ function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, instanceLabel, on
           </div>
         )}
 
+        {server === "jellyfin" ? (
+          <div className="px-6 py-4 flex-1 overflow-y-auto">
+            <p className="text-sm text-zinc-300 leading-snug">
+              Re-identify this Jellyfin item from{" "}
+              <span className="font-mono text-zinc-500">TMDB #{currentTmdbId}</span> to{" "}
+              <span className="font-mono text-zinc-100">TMDB #{correctTmdbId}</span>
+              {instanceLabel && <span className="text-orange-400"> on {instanceLabel}</span>}.
+            </p>
+            <p className="text-xs text-zinc-500 mt-2 leading-snug">
+              Jellyfin applies this exact TMDB id and runs a full metadata refresh — there are no
+              alternative candidates to choose from. Large items can take a few minutes to confirm.
+            </p>
+          </div>
+        ) : (<>
         <div className="px-6 py-3 flex-shrink-0 flex items-center justify-between">
           <p className="text-xs font-medium text-zinc-500 uppercase tracking-wide">
             Plex candidates — select the correct match
@@ -178,15 +209,45 @@ function PlexCandidatesModal({ data, correctTmdbId, arrTmdbId, instanceLabel, on
             ))
           )}
         </div>
+        </>)}
 
-        <div className="px-6 py-4 border-t border-zinc-700 flex justify-end flex-shrink-0">
+        {applying && (
+          <div className="mx-6 mb-3 flex-shrink-0 px-4 py-3 rounded border bg-zinc-800/60 border-zinc-700 text-xs text-zinc-300 space-y-1">
+            <p>
+              {progress?.remoteApplied
+                ? `✓ ${server === "jellyfin" ? "Jellyfin" : "Plex"} accepted the new match — waiting for its library refresh to finish`
+                : `Applying the match on ${server === "jellyfin" ? "Jellyfin" : "Plex"}…`}
+              <span className="ml-2 font-mono text-zinc-500">{formatElapsed(progress?.elapsedMs ?? 0)}</span>
+            </p>
+            <p className="text-zinc-500">
+              Large shows can take several minutes — the server answers slowly while it refreshes. You can hide this;
+              Summonarr keeps tracking it and records the match the moment the server confirms it.
+            </p>
+            {(progress?.readFailures ?? 0) > 0 && (
+              <p className="text-yellow-400/80">The server isn&apos;t answering status reads right now (busy refreshing) — still waiting.</p>
+            )}
+          </div>
+        )}
+
+        <div className="px-6 py-4 border-t border-zinc-700 flex justify-end gap-2 flex-shrink-0">
           <DialogClose
-            disabled={applying}
             className="text-sm px-4 py-2 rounded border border-zinc-600 text-zinc-400
-              hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50 transition-colors"
+              hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
           >
-            Cancel
+            {applying ? "Hide" : "Cancel"}
           </DialogClose>
+          {server === "jellyfin" && (
+            <button
+              onClick={onConfirm}
+              disabled={applying}
+              className="text-sm px-4 py-2 rounded border font-medium transition-colors
+                bg-orange-500/10 border-orange-600/30 text-orange-400
+                hover:bg-orange-500/20 hover:border-orange-500/50
+                disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {applying ? "Applying…" : "Apply match"}
+            </button>
+          )}
         </div>
         </DialogPopup>
       </DialogPortal>
@@ -316,7 +377,9 @@ function CandidateRow({
 }
 
 // Admin control to correct a wrong library→TMDB match. Plex opens a candidate
-// picker (fetch → select → apply); Jellyfin applies directly with no picker.
+// picker (fetch → select → apply); Jellyfin opens a confirmation card for the
+// exact target (fetch → confirm → apply) — there are no candidates to choose
+// from because the apply is deterministic by TMDB id.
 export function FixMatchButton({
   server, tmdbId, mediaType, correctTmdbId, label, arrTmdbId = null,
   serverInstance = DEFAULT_MEDIA_INSTANCE,
@@ -325,6 +388,8 @@ export function FixMatchButton({
   const [phase, setPhase]       = useState<Phase>("idle");
   const [errorMsg, setErrorMsg] = useState("");
   const [candidates, setCandidates] = useState<CandidatesResponse | null>(null);
+  const [progress, setProgress] = useState<FixMatchProgressView | null>(null);
+  const [modalHidden, setModalHidden] = useState(false);
 
   // Two library rows can share a tmdbId once a second server is configured, so a
   // bare "Fix match" is ambiguous — name the server on both the button and the
@@ -337,11 +402,15 @@ export function FixMatchButton({
     setPhase("idle");
     setErrorMsg("");
     setCandidates(null);
+    setProgress(null);
+    setModalHidden(false);
   }, []);
 
   async function handleClick() {
-    // Jellyfin has no candidate-picker UI; apply the fix directly with the correct TMDB ID
-    if (server === "jellyfin") { await applyFix(undefined); return; }
+    // Both servers fetch first and open the modal: Plex gets the candidate
+    // picker, Jellyfin gets a confirmation card (its target is already exact, so
+    // there is nothing to pick — but the admin sees WHAT will be applied before
+    // a heavyweight full refresh fires).
     setPhase("fetching");
     setErrorMsg("");
     try {
@@ -364,20 +433,18 @@ export function FixMatchButton({
   async function applyFix(canonicalGuid: string | undefined) {
     setPhase("applying");
     setErrorMsg("");
+    setProgress(null);
+    setModalHidden(false);
     try {
-      const res = await fetch(withBasePath("/api/admin/fix-match"), {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        // serverInstance omitted when default — same byte-identical rationale as
-        // the candidates query above.
-        body:    JSON.stringify({
-          server, tmdbId, mediaType, correctTmdbId, canonicalGuid,
-          ...(serverInstance ? { serverInstance } : {}),
-        }),
-      });
-      let json: { ok?: boolean; error?: string; warning?: string } = {};
-      try { json = await res.json() as { ok?: boolean; error?: string; warning?: string }; } catch { }
-      if (!res.ok || !json.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+      // Background job + status poll (guardrail 37a): a series remap can take
+      // minutes on the media server — longer than a reverse proxy keeps one
+      // request open — so the old single POST came back as a 502 while the
+      // remap quietly succeeded. serverInstance omitted when default — same
+      // byte-identical rationale as the candidates query above.
+      const json = await runFixMatch({
+        server, tmdbId, mediaType, correctTmdbId, canonicalGuid,
+        ...(serverInstance ? { serverInstance } : {}),
+      }, { onProgress: setProgress });
       setCandidates(null);
       if (json.warning) {
         setErrorMsg(json.warning);
@@ -407,15 +474,20 @@ export function FixMatchButton({
 
   return (
     <>
-      {(phase === "selecting" || phase === "applying") && candidates && (
-        <PlexCandidatesModal
+      {(phase === "selecting" || (phase === "applying" && !modalHidden)) && candidates && (
+        <FixMatchModal
+          server={server}
           data={candidates}
+          currentTmdbId={tmdbId}
           correctTmdbId={correctTmdbId}
           arrTmdbId={arrTmdbId}
           instanceLabel={instanceLabel}
           onSelect={(guid) => applyFix(guid)}
+          onConfirm={() => applyFix(undefined)}
           onCancel={reset}
+          onHide={() => setModalHidden(true)}
           applying={phase === "applying"}
+          progress={progress}
         />
       )}
 
@@ -431,7 +503,7 @@ export function FixMatchButton({
           {phase === "fetching"
             ? "Loading…"
             : phase === "applying"
-              ? "Applying…"
+              ? (progress?.remoteApplied ? `Confirming… ${formatElapsed(progress.elapsedMs)}` : "Applying…")
               : instanceLabel ? `${label} · ${instanceLabel}` : label}
         </button>
         {phase === "error" && (

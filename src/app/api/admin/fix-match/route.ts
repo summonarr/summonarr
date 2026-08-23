@@ -3,7 +3,7 @@ import { getMediaInstances } from "@/lib/media-instance-registry";
 import { readJsonCapped } from "@/lib/body-size";
 import { withIssueAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
+import { safeFetchAdminConfigured, safeFetchTrusted, SafeFetchError } from "@/lib/safe-fetch";
 
 import { tmdbAuth } from "@/lib/tmdb-auth";
 import { getPlexEpisodesForShow } from "@/lib/plex";
@@ -13,6 +13,7 @@ import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { FixMatchError, fixMatchJobKey, startFixMatchJob, type FixMatchJobResult, type FixMatchReport } from "@/lib/fix-match-jobs";
 import {
   DEFAULT_MEDIA_INSTANCE,
   isValidMediaInstanceSlug,
@@ -29,6 +30,10 @@ type FixMatchBody = {
   correctTmdbId:  number;
 
   canonicalGuid?: string;
+  // Run the remap as a background job and answer 202 + jobId at once (guardrail
+  // 37a); the caller polls /api/admin/fix-match/status. Absent/false keeps the
+  // synchronous contract the iOS client pins.
+  async?: boolean;
   // Multi-server support: which configured server's library row to remap.
   // Optional + defaults to the default server ("") so an existing caller that
   // doesn't send it yet keeps targeting the only server that existed before
@@ -360,6 +365,76 @@ async function fixPlexMatch(
   );
 }
 
+type JellyfinVirtualFolder = {
+  Name?: string;
+  Locations?: string[];
+  LibraryOptions?: {
+    SaveLocalMetadata?: boolean;
+    MetadataSavers?: string[] | null;
+    DisabledLocalMetadataReaders?: string[] | null;
+  };
+};
+
+// Post-mortem for a fix-match apply that Jellyfin did not confirm in the poll
+// window. Field data (2026-08, 13 series across three days) says an item still
+// reporting the OLD id at this point is USUALLY a slow series refresh settling
+// after our window — every sampled "failure" had actually landed when inspected
+// later — so the message leads with "re-sync and check before retrying". A
+// REPEATED landing back on the old id is the genuine-revert signature (a stale
+// .nfo re-imported by the Nfo reader, or a locked item), so the probe still
+// names those as the repeat-offender explanation. Field semantics verified
+// against the Jellyfin 10.11 LibraryOptions model: local metadata READERS are
+// on by default and DisabledLocalMetadataReaders lists the ones turned off; the
+// SAVER is MetadataSavers / SaveLocalMetadata. Every probe failure degrades
+// back to the generic message — diagnosis must never mask the original failure.
+async function describeUnconfirmedJellyfinMatch(opts: {
+  baseUrl: string;
+  headers: Record<string, string>;
+  previousTmdbId: number;
+  correctTmdbId: number;
+  lastSeenTmdbId: string | null;
+  itemLocked: boolean;
+  filePath: string | null;
+}): Promise<string> {
+  const { baseUrl, headers, previousTmdbId, correctTmdbId, lastSeenTmdbId, itemLocked, filePath } = opts;
+
+  if (itemLocked) {
+    return `Jellyfin did not keep TMDB #${correctTmdbId} — the item is locked in Jellyfin ("Lock this item" in Edit metadata), so refreshes preserve its old data. Unlock it and retry.`;
+  }
+
+  if (lastSeenTmdbId === String(previousTmdbId)) {
+    // Still the old id — most likely still settling (see the header comment).
+    // Probe the owning library's config so the repeat-offender hint is specific.
+    const folders = await safeFetchAdminConfigured(`${baseUrl}/Library/VirtualFolders`, { headers, timeoutMs: 10_000 })
+      .then((r) => (r.ok ? (r.json() as Promise<JellyfinVirtualFolder[]>) : null))
+      .catch(() => null);
+    if (Array.isArray(folders)) {
+      const normalizedPath = filePath ? filePath.replace(/\\/g, "/") : null;
+      const owns = (f: JellyfinVirtualFolder) =>
+        !!normalizedPath && (f.Locations ?? []).some((loc) => {
+          const l = loc.replace(/\\/g, "/").replace(/\/$/, "");
+          return !!l && (normalizedPath === l || normalizedPath.startsWith(l + "/"));
+        });
+      const nfoReaderOn = (f: JellyfinVirtualFolder) =>
+        !(f.LibraryOptions?.DisabledLocalMetadataReaders ?? []).some((r) => r.toLowerCase() === "nfo");
+      const nfoSaverOn = (f: JellyfinVirtualFolder) =>
+        f.LibraryOptions?.SaveLocalMetadata === true ||
+        (f.LibraryOptions?.MetadataSavers ?? []).some((s) => s.toLowerCase() === "nfo");
+
+      const lib = folders.find(owns) ?? null;
+      if (lib && nfoReaderOn(lib)) {
+        const saverNote = nfoSaverOn(lib)
+          ? " That library also has the Nfo metadata SAVER enabled, which keeps rewriting those files."
+          : "";
+        return `Jellyfin still reported the previous match (TMDB #${previousTmdbId}) after the confirmation window. Slow refreshes settle late — run a library re-sync in a few minutes and check whether the new match landed before retrying. If it keeps ending up at TMDB #${previousTmdbId}, a stale .nfo is the likely cause: the "${lib.Name ?? "matching"}" library has the Nfo metadata reader enabled, and such a file re-asserts the old id on every refresh.${saverNote}`;
+      }
+    }
+    return `Jellyfin still reported the previous match (TMDB #${previousTmdbId}) after the confirmation window. Slow refreshes settle late — run a library re-sync in a few minutes and check whether the new match landed before retrying. If it keeps ending up at TMDB #${previousTmdbId}, something local is re-asserting it (a stale .nfo file, another metadata provider, or a plugin) — check the Jellyfin server log for this item.`;
+  }
+
+  return `Jellyfin did not confirm TMDB #${correctTmdbId} after applying the match — library mapping not updated. Retry, or check that Jellyfin can reach its metadata provider.`;
+}
+
 // Remaps a Jellyfin library item to the correct TMDB id: remote-search for a
 // candidate carrying correctTmdbId, apply it, refresh, then poll until Jellyfin
 // confirms — throws if it never confirms. Returns the (possibly new) item id.
@@ -367,17 +442,31 @@ async function fixPlexMatch(
 // `instance` selects WHICH configured Jellyfin server gets rewritten — same rule
 // as the Plex path: the item id came from one server's library row and is only
 // meaningful against that server.
+//
+// `previousTmdbId` is the row's current (wrong) id — only used to diagnose an
+// unconfirmed apply (did the server revert to it?), never sent to Jellyfin.
+// `background` = running as a job (guardrail 37a): nothing waits on an HTTP
+// request, so the confirmation window can be as long as the cascade needs.
 async function fixJellyfinMatch(
   itemId: string,
   correctTmdbId: number,
   mediaType: "MOVIE" | "TV",
   instance: MediaInstanceKey,
   filePath: string | null,
+  previousTmdbId: number,
+  background: boolean,
+  report?: FixMatchReport,
 ): Promise<{ newItemId: string; baseUrl: string; apiKey: string }> {
   // Strip itemId to UUID-safe chars to break taint from a DB-read string before
   // it's interpolated into any admin-token URL below.
   const safeItemId = itemId.replace(/[^0-9a-f-]/gi, "");
   const tag = `[fix-match/${mediaInstanceLabel("jellyfin", instance)} itemId=${safeItemId} target=tmdb:${correctTmdbId}]`;
+
+  // Progress the job exposes to the UI (no-op on the synchronous path).
+  const progress: Omit<import("@/lib/fix-match-jobs").FixMatchProgress, "updatedAt"> =
+    { phase: "searching", remoteApplied: false, attempt: 0, attempts: 0, readFailures: 0 };
+  const push = () => report?.({ ...progress });
+  push();
 
   const jellyfinConfig = await getJellyfinConfig(instance);
   if (!jellyfinConfig.url || !jellyfinConfig.apiKey) throw new Error("Jellyfin server not configured");
@@ -421,23 +510,73 @@ async function fixJellyfinMatch(
     throw new Error(`Jellyfin remote search returned no candidate matching TMDB #${correctTmdbId} — refusing to apply a different match`);
   }
 
-  const applyRes = await safeFetchAdminConfigured(`${baseUrl}/Items/RemoteSearch/Apply/${safeItemId}?replaceAllImages=false`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(target),
-    timeoutMs: 90_000,
-  });
-  if (!applyRes.ok) throw new Error(`Jellyfin apply match failed: ${applyRes.status}`);
+  // Jellyfin runs the identify's FullRefresh SYNCHRONOUSLY inside the Apply
+  // request, with CancellationToken.None (ItemLookupController.ApplySearchCriteria,
+  // verified against the 10.11.x source) — so a client-side timeout does NOT
+  // cancel the server-side work, and the match routinely lands moments after we
+  // hang up (large series, busy box, slow metadata provider). Treat a timeout as
+  // "still applying" and fall through to a LONGER confirmation poll instead of
+  // failing an operation that is usually still succeeding. Any other apply
+  // failure (non-2xx, network, SSRF) still throws as before.
+  let applyTimedOut = false;
+  progress.phase = "applying";
+  push();
+  try {
+    const applyRes = await safeFetchAdminConfigured(`${baseUrl}/Items/RemoteSearch/Apply/${safeItemId}?replaceAllImages=false`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(target),
+      timeoutMs: 90_000,
+    });
+    if (!applyRes.ok) throw new Error(`Jellyfin apply match failed: ${applyRes.status}`);
+  } catch (err) {
+    if (!(err instanceof SafeFetchError) || err.reason !== "timeout") throw err;
+    applyTimedOut = true;
+    console.warn("[fix-match]", tag, "apply timed out client-side; Jellyfin is still refreshing — extending the confirmation poll");
+  }
 
-  await safeFetchAdminConfigured(
-    `${baseUrl}/Items/${safeItemId}/Refresh?MetadataRefreshMode=FullRefresh&ReplaceAllMetadata=true&ImageRefreshMode=FullRefresh&ReplaceAllImages=true`,
-    { method: "POST", headers, timeoutMs: 30_000 },
-  ).catch((e: unknown) => { console.warn("[fix-match]", tag, "Refresh call failed (non-fatal):", e); return null; });
+  // Either way the media server now owns the remap: it accepted the new match
+  // (2xx) or is still applying it (timeout) — from here Summonarr only waits.
+  progress.remoteApplied = true;
+  progress.phase = "confirming";
+  push();
+
+  const refreshUrl = (id: string) =>
+    `${baseUrl}/Items/${id}/Refresh?MetadataRefreshMode=FullRefresh&ReplaceAllMetadata=true&ImageRefreshMode=FullRefresh&ReplaceAllImages=true`;
+  // When the apply timed out, the server is already >90s deep in that apply's own
+  // refresh — queueing a second one now only grows the backlog. Defer it to after
+  // confirmation (below) so the image-replacement pass still happens on success.
+  if (!applyTimedOut) {
+    await safeFetchAdminConfigured(
+      refreshUrl(safeItemId),
+      { method: "POST", headers, timeoutMs: 30_000 },
+    ).catch((e: unknown) => { console.warn("[fix-match]", tag, "Refresh call failed (non-fatal):", e); return null; });
+  }
 
   let resolvedItemId = safeItemId;
   let confirmed = false;
-  for (let attempt = 0; attempt < 4; attempt++) {
+  // Post-mortem inputs: the last TMDB id the item reported, and whether it is
+  // metadata-locked — both read off the confirmation polls we already make.
+  let lastSeenTmdbId: string | null = null;
+  let itemLocked = false;
+  // ~2 extra minutes of polling when the refresh outlived the apply window, and
+  // for EVERY series: a Series identify cascades across seasons/episodes, so its
+  // new provider ids can become readable minutes after the Apply call returns.
+  // Field-verified (2026-08): 13 series applies that "failed to confirm" in the
+  // old 20s window had ALL landed correctly when inspected later. Success still
+  // breaks out of the loop on the first confirming poll, so a fast confirm pays
+  // nothing for the longer window.
+  // In background-job mode nothing is waiting on an HTTP request, so the only
+  // cost of waiting longer is a slower "done" — while giving up early turns a
+  // remap that LANDED into a "failed" report (seen live on a 300-episode show).
+  // 120 × 5s ≈ 10 minutes. The synchronous contract keeps the shorter windows:
+  // a reverse proxy cuts that request off long before ten minutes anyway.
+  const confirmAttempts = background ? 120 : (applyTimedOut || mediaType === "TV" ? 24 : 4);
+  progress.attempts = confirmAttempts;
+  for (let attempt = 0; attempt < confirmAttempts; attempt++) {
     await new Promise((r) => setTimeout(r, 5_000));
+    progress.attempt = attempt + 1;
+    push();
 
     const checkRes = await safeFetchAdminConfigured(
       `${baseUrl}/Items/${resolvedItemId}?Fields=ProviderIds`,
@@ -445,6 +584,14 @@ async function fixJellyfinMatch(
     ).catch(() => null);
 
     if (!checkRes?.ok) {
+      // A read that errors or times out is the media server being busy with
+      // its own refresh, not a verdict — say so once (and every 10th time) so
+      // a long wait is explained in the log instead of looking stuck.
+      progress.readFailures++;
+      if (progress.readFailures === 1 || progress.readFailures % 10 === 0) {
+        console.warn("[fix-match]", tag, `confirmation read failed (${progress.readFailures} so far) — Jellyfin is usually busy refreshing; still polling`);
+      }
+      push();
       if (filePath) {
         const folderName = filePath.replace(/\\/g, "/").split("/").at(-2) ?? "";
         const searchTerm = folderName.replace(/\s*\(\d{4}\)\s*$/, "").trim();
@@ -480,58 +627,54 @@ async function fixJellyfinMatch(
       continue;
     }
 
-    const checkJson = await checkRes.json() as { ProviderIds?: Record<string, string> };
+    const checkJson = await checkRes.json() as { ProviderIds?: Record<string, string>; LockData?: boolean };
     const providerIds = checkJson?.ProviderIds;
-    confirmed = (providerIds?.Tmdb ?? providerIds?.tmdb) === String(correctTmdbId);
+    const seenTmdb = providerIds?.Tmdb ?? providerIds?.tmdb ?? null;
+    if (seenTmdb !== null) lastSeenTmdbId = seenTmdb;
+    if (checkJson?.LockData === true) itemLocked = true;
+    confirmed = seenTmdb === String(correctTmdbId);
     if (confirmed) break;
   }
 
   if (!confirmed) {
     // Throw when unconfirmed so the caller's DB write aborts — otherwise we'd persist
     // a tmdbId Jellyfin never confirmed. Matches the Plex path.
-    throw new Error(`Jellyfin did not confirm TMDB #${correctTmdbId} after applying the match — library mapping not updated. Retry, or check that Jellyfin can reach its metadata provider.`);
+    if (applyTimedOut) {
+      throw new Error(`Jellyfin was still processing the match for TMDB #${correctTmdbId} when we stopped waiting — the refresh continues server-side and may finish on its own. Check the item in Jellyfin or run a library re-sync before retrying; an immediate retry only queues another full refresh.`);
+    }
+    throw new Error(await describeUnconfirmedJellyfinMatch({
+      baseUrl, headers, previousTmdbId, correctTmdbId, lastSeenTmdbId, itemLocked, filePath,
+    }));
+  }
+  if (applyTimedOut) {
+    // The image-replacement refresh deferred above, now that the server has
+    // confirmed the match and is no longer busy with the apply's own refresh.
+    await safeFetchAdminConfigured(
+      refreshUrl(resolvedItemId),
+      { method: "POST", headers, timeoutMs: 30_000 },
+    ).catch((e: unknown) => { console.warn("[fix-match]", tag, "Refresh call failed (non-fatal):", e); return null; });
   }
   return { newItemId: resolvedItemId, baseUrl, apiKey };
 }
 
 // ISSUE_ADMIN intentionally has fix-match access to resolve wrong-match issues without full admin privileges
-export const POST = withIssueAdmin(async (request, _ctx, session) => {
-  // fix-match runs ~60s of Plex/Jellyfin remap calls plus DB writes — without
-  // a rate limit, an admin loop (intentional or scripted) can saturate the
-  // upstream servers and pile up partial two-phase commits (remote rewrite
-  // succeeds, DB tx fails). 10/min/admin matches the broader admin-write cap.
-  if (!checkRateLimit(`fix-match:${session.user.id}`, 10, 60_000)) {
-    return NextResponse.json(
-      { error: "Too many fix-match operations — try again in a minute." },
-      { status: 429 },
-    );
-  }
+type FixMatchInput = {
+  server: "plex" | "jellyfin";
+  tmdbId: number;
+  mediaType: "MOVIE" | "TV";
+  correctTmdbId: number;
+  canonicalGuid?: string;
+  serverInstance: string;
+};
+type FixMatchActor = { userId: string; userName: string | null | undefined };
 
-  const parsed = await readJsonCapped<FixMatchBody>(request, 16384);
-  if (parsed instanceof NextResponse) return parsed;
-  const body = parsed;
-
-  const { server, tmdbId, mediaType, correctTmdbId, canonicalGuid } = body;
-
-  if (server !== "plex" && server !== "jellyfin") {
-    return NextResponse.json({ error: "server must be 'plex' or 'jellyfin'" }, { status: 400 });
-  }
-  if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: "mediaType must be 'MOVIE' or 'TV'" }, { status: 400 });
-  }
-  if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
-    return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
-  }
-  if (!Number.isInteger(correctTmdbId) || correctTmdbId <= 0) {
-    return NextResponse.json({ error: "correctTmdbId must be a positive integer" }, { status: 400 });
-  }
-  if (tmdbId === correctTmdbId) {
-    return NextResponse.json({ error: "TMDB IDs are already the same" }, { status: 400 });
-  }
-  if (body.serverInstance !== undefined && !isValidMediaInstanceSlug(body.serverInstance)) {
-    return NextResponse.json({ error: `invalid serverInstance: ${body.serverInstance}` }, { status: 400 });
-  }
-  const serverInstance = body.serverInstance ?? DEFAULT_MEDIA_INSTANCE;
+// The whole remap — remote rewrite, cache-row transaction, audit, episode
+// re-cache — as one unit that resolves to the client-facing result or throws a
+// FixMatchError carrying the client-safe message + HTTP status. The POST
+// handler either awaits it inline (the synchronous contract) or hands it to the
+// job registry (guardrail 37a); both paths see exactly the same outcomes.
+async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { background: boolean; report?: FixMatchReport }): Promise<FixMatchJobResult> {
+  const { server, tmdbId, mediaType, correctTmdbId, canonicalGuid, serverInstance } = input;
 
   // The remap is inherently two-phase: the remote library server must be
   // rewritten first (to learn the new item id), then the local cache row is
@@ -551,8 +694,9 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
         select: { plexRatingKey: true, filePath: true },
       });
       if (!item?.plexRatingKey) {
-        return NextResponse.json({ error: "Plex rating key not found — re-sync first" }, { status: 404 });
+        throw new FixMatchError("Plex rating key not found — re-sync first", 404);
       }
+      opts.report?.({ phase: "applying", remoteApplied: false, attempt: 0, attempts: 0, readFailures: 0 });
       const plexResult = await fixPlexMatch(item.plexRatingKey, correctTmdbId, mediaType, serverInstance, canonicalGuid);
       remoteRemapped = true;
 
@@ -571,7 +715,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
         // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID
         await tx.tVEpisodeCache.deleteMany({ where: { source: "plex", tmdbId } });
       }, { timeout: BATCH_TX_TIMEOUT });
-      void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "plex", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType, serverInstance } });
+      void logAudit({ userId: actor.userId, userName: actor.userName, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "plex", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType, serverInstance } });
 
       if (mediaType === "TV") {
         getPlexEpisodesForShow(plexResult.serverUrl, plexResult.token, item.plexRatingKey, correctTmdbId)
@@ -594,10 +738,10 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
       }
 
       if (plexResult.conflated) {
-        return NextResponse.json({
+        return {
           ok: true,
           warning: `DB updated to TMDB #${correctTmdbId}. However, Plex's metadata database has permanently merged both TMDB IDs into one entry — Plex will continue to display the old metadata. To fix the Plex display, delete the conflicting metadata bundles from the Plex server's Metadata/Movies directory and run a full Plex scan.`,
-        });
+        };
       }
 
     } else {
@@ -616,7 +760,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
         ...(item?.jellyfinItemIds ?? []),
       ]));
       if (targetItemIds.length === 0) {
-        return NextResponse.json({ error: "Jellyfin item ID not found — re-sync first" }, { status: 404 });
+        throw new FixMatchError("Jellyfin item ID not found — re-sync first", 404);
       }
       // Serial, not concurrent: each call drives a FullRefresh on the server and
       // then polls for confirmation, and hammering a Jellyfin box with parallel
@@ -625,7 +769,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
       const failedCopies: string[] = [];
       for (const targetId of targetItemIds) {
         try {
-          applied.push(await fixJellyfinMatch(targetId, correctTmdbId, mediaType, serverInstance, item?.filePath ?? null));
+          applied.push(await fixJellyfinMatch(targetId, correctTmdbId, mediaType, serverInstance, item?.filePath ?? null, tmdbId, opts.background, opts.report));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           console.error("[fix-match]", `jellyfin copy ${targetId} failed:`, msg);
@@ -664,7 +808,7 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
         // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID
         await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId } });
       }, { timeout: BATCH_TX_TIMEOUT });
-      void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "jellyfin", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType, serverInstance } });
+      void logAudit({ userId: actor.userId, userName: actor.userName, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "jellyfin", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType, serverInstance } });
 
       if (mediaType === "TV") {
         getJellyfinEpisodesForShow(jellyfinResult.baseUrl, jellyfinResult.apiKey, resolvedItemId, correctTmdbId)
@@ -687,8 +831,9 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
       }
     }
 
-    return NextResponse.json(partialWarning ? { ok: true, warning: partialWarning } : { ok: true });
+    return partialWarning ? { ok: true, warning: partialWarning } : { ok: true };
   } catch (err) {
+    if (err instanceof FixMatchError) throw err;
     // Log the real detail server-side only — the message can carry the
     // configured Plex/Jellyfin server URL, internal paths, or upstream
     // response bodies. Return a generic error to the client.
@@ -705,13 +850,69 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
       const base = server === "plex" ? "Plex" : "Jellyfin";
       const serverName = serverInstance === DEFAULT_MEDIA_INSTANCE ? base : `${base} (${serverInstance})`;
       console.warn("[fix-match]", `${serverLabel} remapped remotely but the DB update failed for tmdb:${tmdbId} → ${correctTmdbId}; cache is out of sync until a re-sync runs`);
-      return NextResponse.json(
-        {
-          error: `${serverName} was re-matched to TMDB #${correctTmdbId}, but updating the local library cache failed. Run a library re-sync to reconcile the cache with ${serverName}.`,
-        },
-        { status: 502 },
-      );
+      throw new FixMatchError(`${serverName} was re-matched to TMDB #${correctTmdbId}, but updating the local library cache failed. Run a library re-sync to reconcile the cache with ${serverName}.`, 502);
     }
+    throw new FixMatchError("Fix-match operation failed", 502);
+  }
+}
+
+export const POST = withIssueAdmin(async (request, _ctx, session) => {
+  // fix-match runs ~60s of Plex/Jellyfin remap calls plus DB writes — without
+  // a rate limit, an admin loop (intentional or scripted) can saturate the
+  // upstream servers and pile up partial two-phase commits (remote rewrite
+  // succeeds, DB tx fails). 10/min/admin matches the broader admin-write cap.
+  if (!checkRateLimit(`fix-match:${session.user.id}`, 10, 60_000)) {
+    return NextResponse.json(
+      { error: "Too many fix-match operations — try again in a minute." },
+      { status: 429 },
+    );
+  }
+
+  const parsed = await readJsonCapped<FixMatchBody>(request, 16384);
+  if (parsed instanceof NextResponse) return parsed;
+  const body = parsed;
+
+  const { server, tmdbId, mediaType, correctTmdbId, canonicalGuid } = body;
+
+  if (server !== "plex" && server !== "jellyfin") {
+    return NextResponse.json({ error: "server must be 'plex' or 'jellyfin'" }, { status: 400 });
+  }
+  if (mediaType !== "MOVIE" && mediaType !== "TV") {
+    return NextResponse.json({ error: "mediaType must be 'MOVIE' or 'TV'" }, { status: 400 });
+  }
+  if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
+    return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
+  }
+  if (!Number.isInteger(correctTmdbId) || correctTmdbId <= 0) {
+    return NextResponse.json({ error: "correctTmdbId must be a positive integer" }, { status: 400 });
+  }
+  if (tmdbId === correctTmdbId) {
+    return NextResponse.json({ error: "TMDB IDs are already the same" }, { status: 400 });
+  }
+  if (body.serverInstance !== undefined && !isValidMediaInstanceSlug(body.serverInstance)) {
+    return NextResponse.json({ error: `invalid serverInstance: ${body.serverInstance}` }, { status: 400 });
+  }
+  const serverInstance = body.serverInstance ?? DEFAULT_MEDIA_INSTANCE;
+  const input: FixMatchInput = { server, tmdbId, mediaType, correctTmdbId, canonicalGuid, serverInstance };
+  const actor: FixMatchActor = { userId: session.user.id, userName: session.user.name ?? session.user.email };
+
+  // Background mode (guardrail 37a): a series remap waits on the media server
+  // for minutes — longer than a reverse proxy keeps one request open — so the
+  // browser polls instead of holding the request. An identical job already
+  // running is returned as-is, never started twice.
+  if (body.async === true) {
+    const job = startFixMatchJob(fixMatchJobKey(input), (report) => runFixMatch(input, actor, { background: true, report }));
+    return NextResponse.json({ ok: true, jobId: job.id, status: job.status }, { status: 202 });
+  }
+
+  try {
+    return NextResponse.json(await runFixMatch(input, actor, { background: false }));
+  } catch (err) {
+    if (err instanceof FixMatchError) {
+      return NextResponse.json({ error: err.message }, { status: err.status });
+    }
+    // runFixMatch maps every failure to a FixMatchError; this is defensive.
+    console.error("[fix-match] unexpected error:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Fix-match operation failed" }, { status: 502 });
   }
 });

@@ -822,7 +822,13 @@ model PlayHistory {
   videoCodec    String?    @db.VarChar(64)
   audioCodec    String?    @db.VarChar(64)
   resolution    String?    @db.VarChar(32)
-  bitrate       Int? // kbps
+  // WHATEVER THE UPSTREAM REPORTED, VERBATIM — the unit is a property of
+  // `source`, NOT of this column: plex is kbps, jellyfin is bps. There is no
+  // write-time normalization. Read it through lib/bitrate.ts
+  // (BITRATE_KBPS_SQL / bitrateToKbps), never by magnitude — the two ranges
+  // overlap, and this comment previously read a flat "kbps", which is the
+  // premise both shipped reconciliation bugs were built on. See guardrail 19a.
+  bitrate       Int?
   videoDecision String?    @db.VarChar(32)
   audioDecision String?    @db.VarChar(32)
   container     String?    @db.VarChar(32)
@@ -939,6 +945,8 @@ model ActiveSession {
   videoCodec    String?  @db.VarChar(64)
   audioCodec    String?  @db.VarChar(64)
   resolution    String?  @db.VarChar(32)
+  // Source-dependent unit, exactly like PlayHistory.bitrate — see the comment
+  // there and lib/bitrate.ts. plex = kbps, jellyfin = bps.
   bitrate       Int?
   videoDecision String?  @db.VarChar(32)
   audioDecision String?  @db.VarChar(32)
@@ -1132,11 +1140,43 @@ model UserRecommendation {
   score Float
   rank  Int
 
+  // WHY this title was picked — the single highest-weighted seed (a title the
+  // user watched or watchlisted) that surfaced it, plus how many seeds
+  // corroborated it in total. The compute has always known this at the moment
+  // it does `score += seed.weight`; only the summed number used to survive, so
+  // the page could rank picks but never explain one.
+  //
+  // Denormalized (title alongside id, like the row's own title/posterPath)
+  // because the seed may be a title the user watched years ago that has no
+  // TmdbCache row left to join against. Nullable for rows written before this
+  // existed — the whole table is rebuilt every cron cycle, so they heal within
+  // one run, but the read path must tolerate a null until then.
+  reasonTmdbId    Int?
+  reasonTitle     String?    @db.VarChar(500)
+  reasonMediaType MediaType?
+  reasonSource    RecommendationSeed?
+  seedCount       Int        @default(1)
+
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, tmdbId, mediaType])
   @@index([userId, rank])
+}
+
+// Which pool a recommendation's reason came from. Drives the wording only
+// ("Because you watched X" / "On your watchlist: X" / "Because you requested
+// X") — the weighting differences between pools live in recommendations.ts.
+// TRENDING is the odd one out: it marks a COLD-START FALLBACK row (a shelf
+// filled from the prewarmed trending/popular caches when a user has no seeds),
+// which carries NO reason title — its reasonTmdbId/reasonTitle/reasonMediaType
+// stay NULL so the read path's all-four-non-null gate never fabricates a
+// "Because you watched…" line for it, and match-tier chips skip it entirely.
+enum RecommendationSeed {
+  WATCH_HISTORY
+  WATCHLIST
+  REQUEST
+  TRENDING
 }
 
 // In-app notification inbox (the header bell). One row per user-facing event

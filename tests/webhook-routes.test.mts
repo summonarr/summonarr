@@ -47,9 +47,15 @@
 //
 // Harness notes: Next's after() throws outside a request scope, so every POST
 // runs inside workAsyncStorage.run() with a minimal store whose afterContext
-// captures the scheduled tasks (globalThis.AsyncLocalStorage must be installed
-// BEFORE next/server loads — createAsyncLocalStorage falls back to a throwing
-// fake otherwise). No DB or network: the prisma model delegates are shadowed
+// captures the scheduled tasks, nested in workUnitAsyncStorage.run() with a
+// type:"request"/phase:"render" store — since Next 16.3 after() requires BOTH
+// stores and hands the work-unit store to afterContext.after() so the real
+// AfterContext can flip its phase to "after" when the tasks run (the recording
+// stub here ignores it). No headers()/cookies() are sealed in: the webhook
+// handlers read everything off the NextRequest they are passed and never call
+// those (globalThis.AsyncLocalStorage must be installed BEFORE next/server
+// loads — createAsyncLocalStorage falls back to a throwing fake otherwise).
+// No DB or network: the prisma model delegates are shadowed
 // in-memory (tests/_helpers.mts), fetch is scripted (default: refuse), and the
 // configured arr URLs use loopback IP literals so safeFetchAdminConfigured
 // (allowPrivate=true) never performs a DNS lookup. Math.random is pinned so the
@@ -95,6 +101,9 @@ Math.random = () => 0.5;
 const { NextRequest } = await import("next/server");
 const { workAsyncStorage } = await import(
   "../node_modules/next/dist/server/app-render/work-async-storage.external.js"
+);
+const { workUnitAsyncStorage } = await import(
+  "../node_modules/next/dist/server/app-render/work-unit-async-storage.external.js"
 );
 const { Prisma } = await import("@/generated/prisma");
 const { prisma } = await import("../src/lib/prisma.ts");
@@ -454,14 +463,18 @@ function webhookReq(
 type AfterTask = (() => unknown) | Promise<unknown>;
 
 // Run a route POST inside a work store whose afterContext captures (does not
-// execute) the after() tasks. after() outside this scope throws in Next 16.
+// execute) the after() tasks, nested in a request-typed work-unit store.
+// after() outside BOTH scopes throws in Next 16 (the work-unit half since 16.3).
 async function post(
   handler: (req: Req) => Promise<Response>,
   req: Req,
 ): Promise<{ res: Response; body: Record<string, unknown>; tasks: AfterTask[] }> {
   const tasks: AfterTask[] = [];
-  const store = { afterContext: { after: (t: AfterTask) => { tasks.push(t); } } };
-  const res = await workAsyncStorage.run(store as never, () => handler(req));
+  const workStore = { afterContext: { after: (t: AfterTask) => { tasks.push(t); } } };
+  const requestStore = { type: "request", phase: "render", usedDynamic: false };
+  const res = await workAsyncStorage.run(workStore as never, () =>
+    workUnitAsyncStorage.run(requestStore as never, () => handler(req)),
+  );
   return { res, body: (await res.json()) as Record<string, unknown>, tasks };
 }
 

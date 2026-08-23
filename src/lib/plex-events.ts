@@ -130,6 +130,18 @@ type TimelineEventData = {
 // /api/sync call rather than N. 30 s is long enough to absorb a normal
 // re-scan while still being responsive to one-off edits.
 const TIMELINE_RESYNC_DEBOUNCE_MS = 30_000;
+// Floor between two SSE-triggered full syncs, and the latest a burst may defer
+// its first one. Plex streams an `updated` TimelineEntry per item for the WHOLE
+// of a library scan or "refresh all metadata" pass — hours, on a big library —
+// and the debounce alone turned every 30-second lull into another complete
+// orchestrator run (Plex + Jellyfin + arr + episode cache), back to back, for
+// as long as Plex stayed busy. Observed live (2026-08): the same run's notices
+// repeating every ~minute for an afternoon. The hourly cron is the backstop, so
+// a burst now coalesces into at most one run per cooldown, while MAX_WAIT keeps
+// a continuous stream from resetting the debounce forever and starving the
+// resync entirely. Exported for the test pins.
+export const TIMELINE_RESYNC_COOLDOWN_MS = 10 * 60_000;
+export const TIMELINE_RESYNC_MAX_WAIT_MS = 2 * 60_000;
 // Max cadence for broadcasting the full active-sessions snapshot to admin SSE clients.
 // Bounds scrub-driven fan-out without noticeably delaying the visible "now playing" UI.
 const SNAPSHOT_THROTTLE_MS = 2_000;
@@ -636,20 +648,47 @@ class PlexEventStreamManager {
   // full re-scan from N+1ing /api/sync. The trigger fires HTTP to the local
   // sync route with the cron bearer token — exactly the same path the
   // external cron uses, so observability + auth stay consistent.
+  //
+  // Three clocks bound the dispatch (see the constants for the why):
+  //   debounce — fire TIMELINE_RESYNC_DEBOUNCE_MS after the LAST event;
+  //   max wait — but no later than TIMELINE_RESYNC_MAX_WAIT_MS after the FIRST
+  //              event of the burst, so a continuous stream cannot starve it;
+  //   cooldown — and no sooner than TIMELINE_RESYNC_COOLDOWN_MS after the
+  //              previous run this manager dispatched, so a long scan yields
+  //              one trailing run per cooldown instead of one per lull.
   private resyncTimer: ReturnType<typeof setTimeout> | null = null;
+  // Absolute latest fire time for the burst currently being coalesced.
+  private resyncDeadline = 0;
+  // When this manager last dispatched a trigger that actually RAN (0 = never).
+  private lastResyncFiredAt = 0;
   private requestLibraryResync(): void {
-    if (this.resyncTimer) clearTimeout(this.resyncTimer);
+    const now = Date.now();
+    const notBefore = this.lastResyncFiredAt + TIMELINE_RESYNC_COOLDOWN_MS;
+    if (this.resyncTimer) {
+      clearTimeout(this.resyncTimer);
+    } else {
+      this.resyncDeadline = Math.max(now + TIMELINE_RESYNC_MAX_WAIT_MS, notBefore);
+    }
+    const fireAt = Math.min(Math.max(now + TIMELINE_RESYNC_DEBOUNCE_MS, notBefore), this.resyncDeadline);
     this.resyncTimer = setTimeout(() => {
       this.resyncTimer = null;
-      void this.triggerLibrarySync();
-    }, TIMELINE_RESYNC_DEBOUNCE_MS);
+      const previousFiredAt = this.lastResyncFiredAt;
+      this.lastResyncFiredAt = Date.now();
+      void this.triggerLibrarySync(previousFiredAt);
+    }, Math.max(0, fireAt - now));
   }
 
-  private async triggerLibrarySync(): Promise<void> {
+  private async triggerLibrarySync(previousFiredAt: number): Promise<void> {
     // Uses the single allowed internal loopback trigger (see src/lib/internal-trigger.ts
     // and Claude.md guardrail 5a). This ensures the full public /api/sync path
     // (auth, advisory lock, orchestrator, audit recording) is exercised.
     try {
+      const result = await triggerFullSync();
+      // Only a trigger that RAN starts a cooldown. A "skipped" (advisory lock
+      // held by a cron/admin/previous run) or "failed" trigger did no work, so
+      // the stamp rolls back — otherwise a lock race would silently push the
+      // next change out by a whole cooldown.
+      if (result !== "ran") this.lastResyncFiredAt = previousFiredAt;
       // "skipped" = the orchestrator's advisory lock was held (an in-flight
       // cron/admin/previous-SSE run). Dropping the trigger there made the
       // library change wait up to SYNC_INTERVAL (1h) — re-arm the debounce so
@@ -657,7 +696,7 @@ class PlexEventStreamManager {
       // retry is one cheap loopback probe per debounce window, and stop()
       // tears the timer down. "failed" is NOT re-armed (triggerFullSync
       // already warned; a broken loopback would retry forever).
-      if (await triggerFullSync() === "skipped") {
+      if (result === "skipped") {
         this.requestLibraryResync();
       }
     } catch (err) {

@@ -36,6 +36,16 @@ interface MediaCardProps {
   priority?: boolean;
 
   requestToken?: string;
+
+  /** Small explanatory line under the title — /for-you uses it for "Because you
+      watched X". Purely presentational; omitted everywhere else, which is how a
+      shared card stays identical on every other grid. */
+  caption?: React.ReactNode;
+  /** Node pinned to the poster's top-left, revealed on hover/focus like the
+      request overlay. /for-you passes its "not interested" control here. Kept as
+      a node rather than a boolean flag so this component never learns about the
+      hidden-items API. */
+  overlayAction?: React.ReactNode;
 }
 
 type RequestState = "idle" | "confirm" | "loading" | "requested" | "available" | "error";
@@ -49,6 +59,8 @@ function MediaCardImpl({
   showJellyfin = true,
   priority = false,
   requestToken,
+  caption,
+  overlayAction,
 }: MediaCardProps) {
   const router = useRouter();
   const poster = posterUrl(media.posterPath, "w342");
@@ -391,6 +403,16 @@ function MediaCardImpl({
           </span>
         )}
 
+        {/* Top-left: caller-supplied action (e.g. /for-you's "not interested").
+            Fades in with hover like the request overlay, but stays visible while
+            focused so it is reachable by keyboard and always present on touch,
+            where there is no hover state to reveal it. */}
+        {overlayAction && (
+          <div className="absolute top-1.5 left-1.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-[1024px]:opacity-100">
+            {overlayAction}
+          </div>
+        )}
+
         {/* Top-right: TMDB community score (at-a-glance). Detailed ratings live in the RatingsBar below. */}
         {media.voteAverage > 0 && (
           <div
@@ -452,6 +474,7 @@ function MediaCardImpl({
             </>
           )}
         </div>
+        {caption}
         <div
           className={size === "md" ? "flex flex-col gap-1 mt-0.5" : "min-h-[34px] flex items-start"}
         >

@@ -240,6 +240,7 @@ const { POST: fixMatch } = await import("../src/app/api/admin/fix-match/route.ts
 const { GET: candidates } = await import("../src/app/api/admin/fix-match/candidates/route.ts");
 const { GET: fileInfo } = await import("../src/app/api/admin/fix-match/file-info/route.ts");
 const { GET: thumb } = await import("../src/app/api/admin/fix-match/thumb/route.ts");
+const { GET: fixMatchStatus } = await import("../src/app/api/admin/fix-match/status/route.ts");
 
 type Req = InstanceType<typeof NextRequest>;
 
@@ -515,6 +516,339 @@ test("POST with NO serverInstance targets the default server (jellyfin)", async 
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+// Apply-timeout tolerance (jellyfin) — Jellyfin runs the identify's FullRefresh
+// synchronously INSIDE the Apply request with CancellationToken.None, so a
+// client-side timeout means "still working", not "failed". The route must keep
+// polling on that signal, defer the extra image refresh until confirmation, and
+// when even the extended window expires, say "still processing" rather than
+// implying a revert.
+// ════════════════════════════════════════════════════════════════════════════
+
+// The same TimeoutError shape undici's AbortSignal.timeout produces, which
+// safe-fetch maps to SafeFetchError("timeout").
+const timeoutError = () => Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+
+test("POST (jellyfin): apply timeout → extended poll confirms → 200, DB written, image refresh deferred until after confirmation", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", jellyfinItemId: "aaaaaaaa" });
+
+  let checks = 0;
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) throw timeoutError();
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Correct Title" }]);
+    if (p === "/Items/aaaaaaaa/Refresh") return new Response("", { status: 200 });
+    if (p === "/Items/aaaaaaaa") {
+      checks++;
+      // Old id for the first five polls — past the NORMAL path's 4-attempt
+      // window, so a pass here proves the extended window did the confirming.
+      return okJson({ ProviderIds: { Tmdb: checks <= 5 ? "111" : "222" } });
+    }
+    throw new Error(`unexpected Jellyfin path ${p}`);
+  };
+
+  const res = await fixMatch(postBody(
+    { server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222 },
+    a.header,
+  ), undefined);
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+  assert.ok(checks >= 6, `the poll must continue past the normal 4-attempt window (got ${checks} checks)`);
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 1, "the DB rewrite must land once confirmed");
+  assert.ok(warns.some((w) => w.includes("apply timed out client-side")), "the timeout must be surfaced as a warn, not swallowed silently");
+  // The image refresh is deferred: exactly one, and only AFTER a confirming read.
+  const calls = fetchCalls.map((c) => c.url.pathname);
+  const refreshCalls = calls.filter((p) => p === "/Items/aaaaaaaa/Refresh");
+  assert.equal(refreshCalls.length, 1, "exactly one deferred image refresh");
+  assert.ok(
+    calls.indexOf("/Items/aaaaaaaa/Refresh") > calls.indexOf("/Items/aaaaaaaa"),
+    "the image refresh must fire only after confirmation, never while the server is mid-apply",
+  );
+});
+
+test("POST (jellyfin): apply timeout that never confirms → 502, NO DB write, NO extra refresh, still-processing error", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", jellyfinItemId: "aaaaaaaa" });
+
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) throw timeoutError();
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Correct Title" }]);
+    if (p === "/Items/aaaaaaaa") return okJson({ ProviderIds: { Tmdb: "111" } }); // never flips
+    throw new Error(`unexpected Jellyfin path ${p}`);
+  };
+
+  const res = await fixMatch(postBody(
+    { server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222 },
+    a.header,
+  ), undefined);
+
+  assert.equal(res.status, 502);
+  assert.equal(opsOf("jellyfinLibraryItem.delete").length, 0, "an unconfirmed match must not touch the DB");
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 0);
+  assert.ok(fetchCalls.every((c) => !c.url.pathname.endsWith("/Refresh")), "no refresh may be queued on a box that is already mid-apply");
+  assert.ok(errors.some((e) => e.includes("still processing the match")), "the failure must say the server is still working, not imply a revert");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Unconfirmed-apply diagnosis (jellyfin) — an item still reporting the OLD id
+// when the window expires is USUALLY a slow series refresh settling late (field
+// data: every sampled "failure" had actually landed when inspected afterwards),
+// so the error must lead with re-sync-and-check guidance — and only name the
+// repeat-offender explanations (an enabled Nfo reader re-importing a stale
+// .nfo, or a metadata-locked item) as what to look at if it KEEPS happening.
+// ════════════════════════════════════════════════════════════════════════════
+
+test("POST (jellyfin): old-id-after-window failure says re-sync-first and names the library's enabled Nfo reader (and saver)", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/media/movies/Wrong (1999)/wrong.mkv", jellyfinItemId: "aaaaaaaa" });
+
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) return new Response("", { status: 200 });
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Correct Title" }]);
+    if (p === "/Items/aaaaaaaa/Refresh") return new Response("", { status: 200 });
+    if (p === "/Items/aaaaaaaa") return okJson({ ProviderIds: { Tmdb: "111" } }); // the server reverted
+    if (p === "/Library/VirtualFolders") return okJson([
+      { Name: "Shows", Locations: ["/media/shows"], LibraryOptions: { DisabledLocalMetadataReaders: [] } },
+      // Owning library: Nfo reader ON (not in the disabled list) + Nfo saver ON.
+      { Name: "Movies", Locations: ["/media/movies"], LibraryOptions: { DisabledLocalMetadataReaders: ["Collections"], MetadataSavers: ["Nfo"] } },
+    ]);
+    throw new Error(`unexpected Jellyfin path ${p}`);
+  };
+
+  const res = await fixMatch(postBody(
+    { server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222 },
+    a.header,
+  ), undefined);
+
+  assert.equal(res.status, 502);
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 0, "an unconfirmed match must not touch the DB");
+  const msg = errors.find((e) => e.includes("still reported the previous match"));
+  assert.ok(msg, `the error must say the old id was still reported, got: ${errors.join(" | ")}`);
+  assert.ok(msg.includes("re-sync"), "slow-settle is the common case — re-sync-and-check guidance must lead");
+  assert.ok(msg.includes('"Movies"'), "the OWNING library must be named, not the first one in the list");
+  assert.ok(msg.includes("Nfo metadata reader"), "the reader must be called out as the cause");
+  assert.ok(msg.includes("SAVER"), "an enabled Nfo saver must be flagged too — it keeps rewriting the stale files");
+  assert.ok(msg.includes("TMDB #111"), "the id the server restored must be shown");
+});
+
+test("POST (jellyfin): a metadata-locked item is diagnosed as locked, without probing library config", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/media/movies/Wrong (1999)/wrong.mkv", jellyfinItemId: "aaaaaaaa" });
+
+  let virtualFoldersCalls = 0;
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) return new Response("", { status: 200 });
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Correct Title" }]);
+    if (p === "/Items/aaaaaaaa/Refresh") return new Response("", { status: 200 });
+    if (p === "/Items/aaaaaaaa") return okJson({ ProviderIds: { Tmdb: "111" }, LockData: true });
+    if (p === "/Library/VirtualFolders") { virtualFoldersCalls++; return okJson([]); }
+    throw new Error(`unexpected Jellyfin path ${p}`);
+  };
+
+  const res = await fixMatch(postBody(
+    { server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222 },
+    a.header,
+  ), undefined);
+
+  assert.equal(res.status, 502);
+  assert.ok(errors.some((e) => e.includes("locked in Jellyfin")), "a lock explains everything — say so");
+  assert.equal(virtualFoldersCalls, 0, "the lock short-circuits the library-config probe");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Background mode (guardrail 37a) — `async: true` answers 202 + jobId before
+// the remap finishes, an identical in-flight remap is deduped, and the status
+// route reports running → done/failed with the same outcomes the synchronous
+// path produces. The synchronous default is untouched (every test above).
+// ════════════════════════════════════════════════════════════════════════════
+
+async function until(cond: () => boolean, what: string): Promise<void> {
+  for (let i = 0; i < 400; i++) {
+    if (cond()) return;
+    await flush();
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+const statusUrl = (id: string) => `http://localhost:3000/api/admin/fix-match/status?id=${id}`;
+
+test("POST async:true → 202 + jobId BEFORE the remap finishes; same key dedupes; status polls running → done; DB written once", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", jellyfinItemId: "aaaaaaaa" });
+
+  let release: () => void = () => {};
+  const gate = new Promise<void>((r) => { release = r; });
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) return new Response("", { status: 200 });
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Correct Title" }]);
+    if (p === "/Items/aaaaaaaa/Refresh") return new Response("", { status: 200 });
+    // The confirming read is held until the test releases it — this is the
+    // "media server still busy" window the 202 must not wait for.
+    if (p === "/Items/aaaaaaaa") return gate.then(() => okJson({ ProviderIds: { Tmdb: "222" } }));
+    throw new Error(`unexpected Jellyfin path ${p}`);
+  };
+
+  const body = { server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, async: true };
+  const res = await fixMatch(postBody(body, a.header), undefined);
+  assert.equal(res.status, 202);
+  const started = await res.json() as { ok: boolean; jobId: string; status: string };
+  assert.equal(started.ok, true);
+  assert.equal(started.status, "running");
+  assert.match(started.jobId, /^[0-9a-f-]{36}$/);
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 0, "the 202 must come back before the remap has finished");
+
+  const again = await fixMatch(postBody(body, a.header), undefined);
+  assert.equal(again.status, 202);
+  assert.equal((await again.json() as { jobId: string }).jobId, started.jobId, "an identical remap already running is returned, never started twice");
+
+  let st = await fixMatchStatus(req(statusUrl(started.jobId), { headers: a.header }), undefined);
+  assert.equal(st.status, 200);
+  assert.equal((await st.json() as { status: string }).status, "running");
+
+  // While gated, the job has already passed Apply: the status must say the
+  // media server accepted the match and Summonarr is merely confirming — the
+  // signal the UI turns into "Jellyfin accepted — waiting for its refresh".
+  let progress: { phase?: string; remoteApplied?: boolean } | undefined;
+  for (let i = 0; i < 400 && !progress?.remoteApplied; i++) {
+    await flush();
+    st = await fixMatchStatus(req(statusUrl(started.jobId), { headers: a.header }), undefined);
+    progress = (await st.json() as { progress?: typeof progress }).progress;
+  }
+  assert.equal(progress?.remoteApplied, true, "the job reports the server accepted the match before confirmation lands");
+  assert.equal(progress?.phase, "confirming");
+
+  release();
+  await until(() => opsOf("jellyfinLibraryItem.upsert").length === 1, "the background remap's DB write");
+  let final: { status: string; result?: unknown; error?: string } = { status: "running" };
+  for (let i = 0; i < 400 && final.status === "running"; i++) {
+    await flush();
+    st = await fixMatchStatus(req(statusUrl(started.jobId), { headers: a.header }), undefined);
+    final = await st.json() as typeof final;
+  }
+  assert.equal(final.status, "done", `job should settle as done, got ${JSON.stringify(final)}`);
+  assert.deepEqual(final.result, { ok: true });
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 1, "exactly one DB write for the deduped pair of POSTs");
+});
+
+test("POST async:true failure → status failed with the client-safe error + errorStatus, and no DB write", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", jellyfinItemId: "aaaaaaaa" });
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) return new Response("", { status: 200 });
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Correct Title" }]);
+    if (p === "/Items/aaaaaaaa/Refresh") return new Response("", { status: 200 });
+    if (p === "/Items/aaaaaaaa") return okJson({ ProviderIds: { Tmdb: "111" } }); // never confirms
+    if (p === "/Library/VirtualFolders") return okJson([]);
+    throw new Error(`unexpected Jellyfin path ${p}`);
+  };
+
+  const res = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, async: true }, a.header), undefined);
+  assert.equal(res.status, 202);
+  const { jobId } = await res.json() as { jobId: string };
+
+  let final: { status: string; error?: string; errorStatus?: number } = { status: "running" };
+  for (let i = 0; i < 400 && final.status === "running"; i++) {
+    await flush();
+    const st = await fixMatchStatus(req(statusUrl(jobId), { headers: a.header }), undefined);
+    final = await st.json() as typeof final;
+  }
+  assert.equal(final.status, "failed");
+  assert.equal(final.error, "Fix-match operation failed", "the job carries the same client-safe message the synchronous 502 would");
+  assert.equal(final.errorStatus, 502);
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 0);
+});
+
+test("background mode waits out a long series cascade: a TV item confirming only on the 40th poll succeeds as a job, while the synchronous window gives up at 24", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "TV", serverInstance: "", filePath: "/media/shows/Long Show", jellyfinItemId: "aaaaaaaa" });
+  let checks = 0;
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) return new Response("", { status: 200 });
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Long Show" }]);
+    if (p === "/Items/aaaaaaaa/Refresh") return new Response("", { status: 200 });
+    // The cascade "settles" only on the 40th confirmation read — past the
+    // synchronous 24-poll window, inside the background one.
+    if (p === "/Items/aaaaaaaa") { checks++; return okJson({ ProviderIds: { Tmdb: checks >= 40 ? "222" : "111" } }); }
+    if (p === "/Library/VirtualFolders") return okJson([]);
+    return okJson({ Items: [] }); // the post-success episode re-cache fetch
+  };
+
+  const res = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "TV", correctTmdbId: 222, async: true }, a.header), undefined);
+  assert.equal(res.status, 202);
+  const { jobId } = await res.json() as { jobId: string };
+  let final: { status: string; error?: string } = { status: "running" };
+  for (let i = 0; i < 600 && final.status === "running"; i++) {
+    await flush();
+    final = await (await fixMatchStatus(req(statusUrl(jobId), { headers: a.header }), undefined)).json() as typeof final;
+  }
+  assert.equal(final.status, "done", `the job must keep polling past the synchronous window; got ${JSON.stringify(final)}`);
+  assert.ok(checks >= 40, `expected at least 40 confirmation polls, got ${checks}`);
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 1, "the landed remap is recorded");
+
+  // Same server behaviour under the synchronous contract: it stops at its window.
+  checks = 0;
+  ops = [];
+  const sync = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "TV", correctTmdbId: 222 }, a.header), undefined);
+  assert.equal(sync.status, 502);
+  assert.equal(checks, 24, "the synchronous TV window is still 24 polls");
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 0);
+  assert.ok(errors.some((e) => e.includes("still reported the previous match")), "and it says the cascade may still be settling");
+});
+
+test("confirmation reads that fail are counted on the job's progress and warned once — and the job still confirms afterwards", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: null, jellyfinItemId: "aaaaaaaa" });
+  let reads = 0;
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) return new Response("", { status: 200 });
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Correct Title" }]);
+    if (p === "/Items/aaaaaaaa/Refresh") return new Response("", { status: 200 });
+    if (p === "/Items/aaaaaaaa") {
+      reads++;
+      if (reads <= 3) throw new Error("socket hang up"); // Jellyfin busy: the read errors out
+      return okJson({ ProviderIds: { Tmdb: "222" } });
+    }
+    throw new Error(`unexpected Jellyfin path ${p}`);
+  };
+
+  const res = await fixMatch(postBody({ server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, async: true }, a.header), undefined);
+  assert.equal(res.status, 202);
+  const { jobId } = await res.json() as { jobId: string };
+  let final: { status: string; progress?: { readFailures?: number } } = { status: "running" };
+  for (let i = 0; i < 400 && final.status === "running"; i++) {
+    await flush();
+    final = await (await fixMatchStatus(req(statusUrl(jobId), { headers: a.header }), undefined)).json() as typeof final;
+  }
+  assert.equal(final.status, "done", `a few failed reads must not fail the job: ${JSON.stringify(final)}`);
+  assert.equal(final.progress?.readFailures, 3, "every failed confirmation read is counted for the UI");
+  assert.equal(warns.filter((w) => w.includes("confirmation read failed")).length, 1, "warned on the first failure only (then every 10th)");
+});
+
+test("status: 400 on a malformed id, 404 on an unknown job, 401 with no session", async () => {
+  const a = await admin();
+  const unknown = "00000000-0000-4000-8000-000000000000";
+  assert.equal((await fixMatchStatus(req(statusUrl("nope"), { headers: a.header }), undefined)).status, 400);
+  assert.equal((await fixMatchStatus(req(statusUrl(unknown), { headers: a.header }), undefined)).status, 404);
+  assert.equal((await fixMatchStatus(req(statusUrl(unknown)), undefined)).status, 401, "withIssueAdmin fronts the status route (guardrail 6a)");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // candidates
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -637,6 +971,67 @@ test("candidates rejects an invalid serverInstance with 400 and reads no library
   assert.equal(res.status, 400);
   assert.match((await res.json()).error, /invalid serverInstance/);
   assert.equal(opsOf("plexLibraryItem.findFirst").length, 0);
+  assert.equal(fetchCalls.length, 0);
+});
+
+// candidates?server=jellyfin — the confirmation-card payload. Jellyfin has no
+// candidate list (the POST applies the exact TMDB id), so this mode returns the
+// target's details + the file about to be re-identified, from the DB alone: no
+// media-server config read, no upstream call.
+
+test("candidates?server=jellyfin: confirm-card payload from the INSTANCE row — zero network, zero media-server config reads", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/media/def/wrong.mkv", jellyfinItemId: "aaaaaaaa" });
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote", filePath: "/media/rem/wrong.mkv", jellyfinItemId: "bbbbbbbb" });
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/media/plex/wrong.mkv", plexRatingKey: "1001" });
+  tmdbCacheRows.set("movie:222:details", JSON.stringify({
+    title: "Correct Title", releaseYear: "2010", imdbId: "tt0000222",
+    posterPath: "/p222.jpg", overview: "The right film.", releaseDate: "2010-05-01", voteAverage: 7.4,
+  }));
+
+  const res = await candidates(req(candidatesUrl({
+    server: "jellyfin", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: "222", serverInstance: "remote",
+  }), { headers: a.header }), undefined);
+
+  assert.equal(res.status, 200);
+  const body = await res.json() as {
+    candidates: unknown[]; ratingKey: string; serverInstance: string;
+    jellyfinFilePath: string | null; plexFilePath: string | null;
+    targetTitle: string; targetYear: string; targetImdbId: string;
+    targetPosterPath: string | null; targetVoteAverage: number | null;
+  };
+  assert.deepEqual(body.candidates, [], "jellyfin mode has no candidate list");
+  assert.equal(body.ratingKey, "", "the Plex-only field stays neutral");
+  assert.equal(body.serverInstance, "remote");
+  assert.equal(body.jellyfinFilePath, "/media/rem/wrong.mkv", "the file shown must be the REQUESTED instance's copy");
+  assert.equal(body.plexFilePath, "/media/plex/wrong.mkv", "cross-server hint mirrors the Plex mode's Jellyfin hint");
+  assert.equal(body.targetTitle, "Correct Title");
+  assert.equal(body.targetYear, "2010");
+  assert.equal(body.targetImdbId, "tt0000222");
+  assert.equal(body.targetPosterPath, "/p222.jpg");
+  assert.equal(body.targetVoteAverage, 7.4);
+
+  const read = opsOf("jellyfinLibraryItem.findFirst")[0].args as { where: Record<string, unknown> };
+  assert.deepEqual(read.where, { tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote" });
+  assert.equal(fetchCalls.length, 0, "the confirm card is DB-only — no TMDB, no arr, no media server");
+  assert.equal(
+    settingReads.filter((k) => k.startsWith("plex") || k.startsWith("jellyfin")).length, 0,
+    "no media-server config may even be read",
+  );
+});
+
+test("candidates?server=jellyfin 404s when the instance has no row (re-sync first)", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", jellyfinItemId: "aaaaaaaa" });
+
+  const res = await candidates(req(candidatesUrl({
+    server: "jellyfin", tmdbId: "111", mediaType: "MOVIE", correctTmdbId: "222", serverInstance: "remote",
+  }), { headers: a.header }), undefined);
+
+  assert.equal(res.status, 404);
+  assert.match((await res.json()).error, /re-sync/);
   assert.equal(fetchCalls.length, 0);
 });
 

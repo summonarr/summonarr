@@ -40,7 +40,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-@base-ui/react@1.6.0
+@base-ui/react@1.7.0
 License: MIT
 
 MIT License
@@ -67,7 +67,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-@base-ui/utils@0.3.1
+@base-ui/utils@0.3.2
 License: MIT
 
 MIT License
@@ -647,7 +647,7 @@ License: MIT
 
 ------------------------------------------------------------------------------
 
-@floating-ui/core@1.7.5
+@floating-ui/core@1.8.0
 License: MIT
 
 MIT License
@@ -673,7 +673,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-@floating-ui/dom@1.7.6
+@floating-ui/dom@1.8.0
 License: MIT
 
 MIT License
@@ -699,7 +699,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-@floating-ui/react-dom@2.1.8
+@floating-ui/react-dom@2.1.9
 License: MIT
 
 MIT License
@@ -725,7 +725,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-@floating-ui/utils@0.2.11
+@floating-ui/utils@0.2.12
 License: MIT
 
 MIT License
@@ -940,63 +940,63 @@ License: Apache-2.0 AND LGPL-3.0-or-later
 
 ------------------------------------------------------------------------------
 
-@next/env@16.2.12
+@next/env@16.3.0
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-darwin-arm64@16.2.12
+@next/swc-darwin-arm64@16.3.0
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-darwin-x64@16.2.12
+@next/swc-darwin-x64@16.3.0
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-arm64-gnu@16.2.12
+@next/swc-linux-arm64-gnu@16.3.0
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-arm64-musl@16.2.12
+@next/swc-linux-arm64-musl@16.3.0
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-x64-gnu@16.2.12
+@next/swc-linux-x64-gnu@16.3.0
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-x64-musl@16.2.12
+@next/swc-linux-x64-musl@16.3.0
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-win32-arm64-msvc@16.2.12
+@next/swc-win32-arm64-msvc@16.3.0
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-win32-x64-msvc@16.2.12
+@next/swc-win32-x64-msvc@16.3.0
 License: MIT
 
 (No license file shipped in the package.)
@@ -4688,7 +4688,7 @@ MIT License
 
 ------------------------------------------------------------------------------
 
-@types/node@26.1.2
+@types/node@26.2.0
 License: MIT
 
 MIT License
@@ -4715,7 +4715,7 @@ MIT License
 
 ------------------------------------------------------------------------------
 
-@types/pg@8.20.4
+@types/pg@8.21.0
 License: MIT
 
 MIT License
@@ -6122,7 +6122,7 @@ THIS SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-deepmerge-ts@7.1.5
+deepmerge-ts@8.0.1
 License: BSD-3-Clause
 
 BSD 3-Clause License
@@ -7968,7 +7968,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-next@16.2.12
+next@16.3.0
 License: MIT
 
 The MIT License (MIT)
@@ -8194,7 +8194,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-pg@8.22.0
+pg@8.23.0
 License: MIT
 
 MIT License
@@ -8301,7 +8301,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-pg-protocol@1.15.0
+pg-protocol@1.16.0
 License: MIT
 
 MIT License

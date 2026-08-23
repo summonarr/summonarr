@@ -66,7 +66,7 @@
 // periodic recycle, the 2s snapshot-throttle trailing edge, and everything
 // recordCompletedSession computes internally beyond what the recorded
 // PlayHistory payload shows.
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import dns from "node:dns/promises";
 
@@ -310,6 +310,8 @@ const syncFetches = () => fetchLog.filter((c) => c.url.includes("/api/sync"));
 // ── dynamic imports (stubs above genuinely precede the module graph) ────────
 const {
   PLEX_STALL_THRESHOLD_MS,
+  TIMELINE_RESYNC_COOLDOWN_MS,
+  TIMELINE_RESYNC_MAX_WAIT_MS,
   markPlexSessionFinalized,
   isPlexSessionRecentlyFinalized,
   pruneRecentlyFinalized,
@@ -880,10 +882,21 @@ test("noise immunity: comments, unknown events, malformed JSON, and missing sess
   assert.ok(!warns.some((w) => w.includes("loop crashed")), "noise never crashes the run loop");
 });
 
+// Phase G mocks Date as well as setTimeout: the resync dispatch is clock-based
+// (debounce + max-wait + cooldown), so ticks have to move the clock too. Each
+// test starts its clock an hour past the previous one — the managers are shared
+// across tests, and a cooldown stamp left by an earlier test's run (at ITS mock
+// time) must never sit in the next test's future.
+let timelineClock = Date.now();
+function enableTimelineClock(t: TestContext): void {
+  timelineClock += 60 * 60_000;
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: timelineClock });
+}
+
 // ═══ Phase G — timeline events → debounced full-sync loopback ═══════════════
 
 test("timeline: terminal states debounce-coalesce into ONE /api/sync loopback 30s after the LAST event; scan-intermediate states never schedule", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  enableTimelineClock(t);
   const syncBefore = syncFetches().length;
 
   // queued/processing are intermediate scanner states — never a resync.
@@ -915,7 +928,7 @@ test("timeline: terminal states debounce-coalesce into ONE /api/sync loopback 30
 });
 
 test("timeline: a non-video (music/photo) typed entry never schedules a sync; a video-typed entry still does", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  enableTimelineClock(t);
   const syncBefore = syncFetches().length;
 
   // track=10 (python-plexapi SEARCHTYPES): a music scan must not pay a full
@@ -935,7 +948,7 @@ test("timeline: a non-video (music/photo) typed entry never schedules a sync; a 
 });
 
 test("timeline: a lock-race 'skipped' response re-arms the debounce instead of dropping the change for SYNC_INTERVAL", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  enableTimelineClock(t);
   const syncBefore = syncFetches().length;
   syncResponseBody = { skipped: true, reason: "sync already running" };
   try {
@@ -958,6 +971,68 @@ test("timeline: a lock-race 'skipped' response re-arms the debounce instead of d
   } finally {
     syncResponseBody = { ok: true };
   }
+});
+
+test("timeline: a long scan coalesces into at most ONE run per TIMELINE_RESYNC_COOLDOWN_MS — a trailing run at expiry, then nothing while quiet", async (t) => {
+  // Policy bounds first: the mechanism pins here and below are parameterized
+  // on the constants, so a value drifting to "never" (or "always") would still
+  // pass them. Responsive enough to matter, sparse enough not to be the bug.
+  assert.ok(TIMELINE_RESYNC_COOLDOWN_MS >= 5 * 60_000 && TIMELINE_RESYNC_COOLDOWN_MS <= 30 * 60_000, "cooldown must stay within 5–30 minutes");
+  assert.ok(TIMELINE_RESYNC_MAX_WAIT_MS >= 60_000 && TIMELINE_RESYNC_MAX_WAIT_MS <= 5 * 60_000, "max-wait must stay within 1–5 minutes");
+  assert.ok(TIMELINE_RESYNC_MAX_WAIT_MS < TIMELINE_RESYNC_COOLDOWN_MS, "max-wait is the burst bound, cooldown the rate bound — order matters");
+  enableTimelineClock(t);
+  const syncBefore = syncFetches().length;
+
+  // Leading run: a burst still fires 30s after its last event.
+  pushFrame(timelineFrame({ itemID: 20, metadataState: "created" }));
+  await drain(20);
+  t.mock.timers.tick(30_000);
+  await waitFor(() => syncFetches().length === syncBefore + 1, "the leading run");
+  await drain(30);
+
+  // Plex keeps scanning: a terminal event every 20s for five minutes. Before
+  // the cooldown every such lull launched another complete orchestrator run.
+  for (let i = 0; i < 15; i++) {
+    pushFrame(timelineFrame({ itemID: 100 + i, metadataState: "updated" }));
+    await drain(20);
+    t.mock.timers.tick(20_000);
+    await drain(10);
+  }
+  assert.equal(syncFetches().length, syncBefore + 1, "no second run may start inside the cooldown, however many lulls the scan has");
+
+  // Cooldown expires → exactly one trailing run carries the scan's final state.
+  t.mock.timers.tick(TIMELINE_RESYNC_COOLDOWN_MS);
+  await waitFor(() => syncFetches().length === syncBefore + 2, "the trailing run at cooldown expiry");
+  await drain(30);
+  assert.equal(syncFetches().length, syncBefore + 2, "the trailing run is ONE run, not a replay per coalesced event");
+
+  // Quiet afterwards → nothing more.
+  t.mock.timers.tick(TIMELINE_RESYNC_COOLDOWN_MS);
+  await drain(30);
+  assert.equal(syncFetches().length, syncBefore + 2, "a cooldown expiring with no pending change runs nothing");
+});
+
+test("timeline: a CONTINUOUS event stream still gets its first run within TIMELINE_RESYNC_MAX_WAIT_MS instead of resetting the debounce forever", async (t) => {
+  enableTimelineClock(t);
+  const syncBefore = syncFetches().length;
+
+  // An event every 10s — never a 30s lull, so the debounce alone would never fire.
+  let elapsed = 0;
+  while (elapsed < TIMELINE_RESYNC_MAX_WAIT_MS - 10_000) {
+    pushFrame(timelineFrame({ itemID: 300 + elapsed / 10_000, metadataState: "updated" }));
+    await drain(20);
+    t.mock.timers.tick(10_000);
+    await drain(10);
+    elapsed += 10_000;
+  }
+  assert.equal(syncFetches().length, syncBefore, "inside the max-wait window the stream is still coalescing");
+
+  pushFrame(timelineFrame({ itemID: 399, metadataState: "updated" }));
+  await drain(20);
+  t.mock.timers.tick(10_000); // crosses MAX_WAIT measured from the burst's FIRST event
+  await waitFor(() => syncFetches().length === syncBefore + 1, "the max-wait run");
+  await drain(30);
+  assert.equal(syncFetches().length, syncBefore + 1, "exactly one run at the max-wait boundary");
 });
 
 // ═══ Phase H — reachability persistence ═════════════════════════════════════

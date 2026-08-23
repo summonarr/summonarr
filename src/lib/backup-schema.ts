@@ -61,6 +61,7 @@ export const BACKUP_ENUMS = [
   "AuditAction",
   "TrashService",
   "TrashSpecKind",
+  "RecommendationSeed",
 ] as const;
 
 // Stable fingerprint of the live schema, derived from the bytes of

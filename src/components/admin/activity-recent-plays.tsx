@@ -5,6 +5,7 @@ import Link from "next/link";
 import { ChevronDown, ChevronRight, Loader2 } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTime } from "@/lib/relative-time";
+import { bitrateToKbps } from "@/lib/bitrate";
 import {
   ActivityCard,
   Avatar,
@@ -61,9 +62,11 @@ function formatDuration(seconds: number): string {
   return `${m}m`;
 }
 
-function formatBitrate(raw: number | null): string {
-  if (!raw || raw <= 0) return "—";
-  const kbps = raw > 100000 ? raw / 1000 : raw;
+// `source` is required: Plex reports kbps, Jellyfin bps, and the row is the
+// only thing that can tell them apart (lib/bitrate.ts).
+function formatBitrate(raw: number | null, source: string | null): string {
+  const kbps = bitrateToKbps(raw, source);
+  if (kbps <= 0) return "—";
   if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mbps`;
   return `${Math.round(kbps)} kbps`;
 }
@@ -101,7 +104,7 @@ function DetailRow({ play }: { play: RecentPlay }) {
       play.ipAddress ? <IpInfo ip={play.ipAddress} inline /> : "—",
     ],
     ["Container", play.container?.toUpperCase() ?? "—"],
-    ["Bitrate", formatBitrate(play.bitrate)],
+    ["Bitrate", formatBitrate(play.bitrate, play.source)],
     ["Video Decision", play.videoDecision ?? "—"],
     ["Audio Decision", play.audioDecision ?? "—"],
     ["Audio Codec", play.audioCodec?.toUpperCase() ?? "—"],

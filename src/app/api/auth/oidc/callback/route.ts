@@ -3,7 +3,9 @@ import { AccountDeactivatedError, findOrCreateOidcUser, PROVIDER_REBIND_REQUIRED
 import { prisma } from "@/lib/prisma";
 import {
   exchangeOidcCode,
+  isNativeOidcState,
   isOidcConfigured,
+  NATIVE_OIDC_CALLBACK_URL,
   OIDC_STATE_COOKIE,
   OIDC_STATE_COOKIE_PATH,
   verifyOidcStateCookie,
@@ -48,6 +50,20 @@ function loginErrorRedirect(_req: NextRequest, code: string): NextResponse {
   return res;
 }
 
+// Hand a native flow straight back to the app on its custom scheme, carrying
+// whatever the IdP returned. Deliberately does NOT exchange the code or mint a
+// session: the PKCE codeVerifier for a native flow lives only in the signed
+// flowState the app holds, so this server request could not complete the
+// exchange even if it wanted to. The app finishes at /api/auth/sign-in/oidc.
+//
+// Safe to put the code in this URL for the same reason: without the app's
+// flowState it cannot be redeemed. Nothing session-bearing is ever set here.
+function nativeCallbackRedirect(params: Record<string, string>): NextResponse {
+  const url = new URL(NATIVE_OIDC_CALLBACK_URL);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  return NextResponse.redirect(url.toString());
+}
+
 export async function GET(req: NextRequest) {
   const authUrl = process.env.AUTH_URL;
   if (!authUrl) {
@@ -62,6 +78,18 @@ export async function GET(req: NextRequest) {
 
   if (!isOidcConfigured()) {
     return loginErrorRedirect(req, "oidc_not_configured");
+  }
+
+  // Native branch first: this request arrives in the app's web-auth view, which
+  // never carries the flow cookie, so every cookie-based check below would
+  // (correctly) fail. The state marker is the only signal available here.
+  const returnedState = req.nextUrl.searchParams.get("state");
+  if (isNativeOidcState(returnedState)) {
+    const idpError = req.nextUrl.searchParams.get("error");
+    if (idpError) return nativeCallbackRedirect({ error: idpError.slice(0, 64) });
+    const code = req.nextUrl.searchParams.get("code");
+    if (!code) return nativeCallbackRedirect({ error: "oidc_no_code" });
+    return nativeCallbackRedirect({ code, state: returnedState });
   }
 
   const stateCookie = readStateCookie(req);

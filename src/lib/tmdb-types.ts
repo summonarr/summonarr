@@ -85,6 +85,35 @@ export interface TmdbMedia {
   inProduction?: boolean | null;
   tvType?: string | null;
   nextEpisodeAirDate?: string | null;
+
+  // Why the For You engine picked this title: the strongest seed (something the
+  // viewer watched or watchlisted) that surfaced it, and how many seeds agreed.
+  // Set ONLY on the recommendation read path (getUserRecommendations); every
+  // other discovery surface leaves it undefined, which is how the UI knows not
+  // to render a "Because you watched…" line outside /for-you.
+  recommendedBecause?: {
+    tmdbId: number;
+    title: string;
+    mediaType: MediaType;
+    // TRENDING never appears here: fallback rows carry no reason title, so the
+    // read path's all-four-non-null gate keeps this object absent for them —
+    // they surface through fromTrendingFallback below instead.
+    source: "WATCH_HISTORY" | "WATCHLIST" | "REQUEST" | "TRENDING";
+    seedCount: number;
+  };
+
+  // Set on cold-start fallback rows only (reasonSource TRENDING): the title is
+  // here because it is popular right now, not because the engine matched it to
+  // the viewer's taste. The UI labels it honestly and withholds match chips.
+  fromTrendingFallback?: boolean;
+
+  // How strongly the For You engine rates this pick, as a band rather than a
+  // raw score — the score is a sum of seed weights whose magnitude depends on
+  // how much history a viewer has, so it is meaningless to show and impossible
+  // to compare between people. Set alongside recommendedBecause on the
+  // recommendation read path only; absent means "not in a labelled band", which
+  // is the majority of a 200-title shelf and renders no chip.
+  matchTier?: "top" | "strong";
 }
 
 export interface TmdbSeason {

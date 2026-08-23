@@ -12,7 +12,16 @@
 // Current contract version the server speaks. Advertised via X-Summonarr-Api
 // and GET /api/config/compat. Bump on a breaking contract change.
 // v2: APNs push registration (POST/DELETE /api/push/apns) + iOS relay push.
-export const API_VERSION = 2;
+// v3: native-client surfaces — GET /api/play-history/mine/wrapped,
+//     GET /api/requests/instances, and the native OIDC handshake
+//     (JSON /api/auth/oidc/start + POST /api/auth/sign-in/oidc).
+//
+// v3 is ADDITIVE: MIN_API_VERSION stays 1, so nothing is dropped and no client
+// is locked out. It exists so a native client can ASK whether these routes are
+// here before offering them, instead of advertising a screen that 404s. That is
+// the guardrail-24 posture — feature-gate on the reported version, don't raise
+// the floor.
+export const API_VERSION = 3;
 
 // Oldest contract version the server still answers. Bump only when you drop
 // backward-compatible support for an old client contract.

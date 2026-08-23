@@ -59,6 +59,7 @@ const EXCEPTIONS: Array<{ route: string; reason: string }> = [
   { route: "/auth/sign-in/jellyfin", reason: "Jellyfin sign-in handshake" },
   { route: "/auth/sign-in/jellyfin-quickconnect", reason: "Jellyfin QuickConnect redemption" },
   { route: "/auth/sign-in/plex", reason: "Plex sign-in handshake" },
+  { route: "/auth/sign-in/oidc", reason: "native OIDC code exchange handshake" },
   { route: "/auth/plex/pin", reason: "Plex OAuth PIN poll" },
   { route: "/auth/plex/start", reason: "Plex OAuth start" },
   { route: "/auth/oidc/start", reason: "OIDC redirect start" },

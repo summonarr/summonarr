@@ -1011,6 +1011,130 @@ test("sessions fallbacks: movie title, playSessionId←Id, stream-derived codecs
   await assert.rejects(() => getJellyfinSessions(B, "k"), /Jellyfin sessions: 500/);
 });
 
+// DirectPlay bitrate is the SOURCE TOTAL, not the video track alone. It feeds the
+// activity Bandwidth stat, and for direct play the source total IS what leaves
+// the server — so dropping the audio track undercounted every direct-played
+// Jellyfin session, by 128 kbps for stereo AAC and up to ~4.5 Mbps for
+// TrueHD/DTS-HD MA (larger than many entire streams).
+test("sessions bitrate: DirectPlay prefers the MediaSources container total over the video track", async () => {
+  const B = nextBase();
+  respond = () => okJson([
+    {
+      Id: "d-1", UserId: "u", UserName: "u",
+      NowPlayingItem: {
+        Id: "mv-1", Name: "Dune", Type: "Movie",
+        MediaStreams: [
+          { Type: "Video", Codec: "hevc", BitRate: 20_000_000, Height: 2160 },
+          { Type: "Audio", Codec: "truehd", BitRate: 4_500_000 },
+        ],
+        MediaSources: [{ Id: "src-a", Bitrate: 24_800_000 }],
+      },
+      PlayState: { PositionTicks: 1, IsPaused: false, MediaSourceId: "src-a" },
+    },
+  ]);
+
+  const [s] = await getJellyfinSessions(B, "k");
+  assert.equal(
+    s.bitrate,
+    24_800_000,
+    "the container total (all tracks + overhead) is what direct play transfers",
+  );
+});
+
+test("sessions bitrate: MediaSourceId selects the playing version, not merely the first", async () => {
+  const B = nextBase();
+  respond = () => okJson([
+    {
+      Id: "d-2", UserId: "u", UserName: "u",
+      NowPlayingItem: {
+        Id: "mv-2", Name: "Heat", Type: "Movie",
+        MediaStreams: [{ Type: "Video", Codec: "h264", BitRate: 3_000_000, Height: 1080 }],
+        // A 1080p and a 4K version of one title; the client is on the 4K one.
+        MediaSources: [
+          { Id: "src-1080", Bitrate: 8_000_000 },
+          { Id: "src-4k", Bitrate: 60_000_000 },
+        ],
+      },
+      PlayState: { PositionTicks: 1, IsPaused: false, MediaSourceId: "src-4k" },
+    },
+  ]);
+
+  const [s] = await getJellyfinSessions(B, "k");
+  assert.equal(s.bitrate, 60_000_000, "picking MediaSources[0] would report the wrong version");
+});
+
+test("sessions bitrate: no MediaSources ⇒ video + audio streams, never video alone", async () => {
+  const B = nextBase();
+  respond = () => okJson([
+    {
+      Id: "d-3", UserId: "u", UserName: "u",
+      NowPlayingItem: {
+        Id: "mv-3", Name: "Arrival", Type: "Movie",
+        MediaStreams: [
+          { Type: "Video", Codec: "h264", BitRate: 8_000_000, Height: 1080 },
+          { Type: "Audio", Codec: "dts", BitRate: 1_500_000 },
+          // Subtitles carry no meaningful bitrate and must not perturb the sum.
+          { Type: "Subtitle", Codec: "subrip" },
+        ],
+      },
+      PlayState: { PositionTicks: 1, IsPaused: false },
+    },
+  ]);
+
+  const [s] = await getJellyfinSessions(B, "k");
+  assert.equal(s.bitrate, 9_500_000, "video 8 Mbps + audio 1.5 Mbps — the old code reported 8 Mbps");
+});
+
+test("sessions bitrate: a transcode still reports the OUTPUT bitrate, not the source total", async () => {
+  const B = nextBase();
+  respond = () => okJson([
+    {
+      Id: "t-1", UserId: "u", UserName: "u",
+      NowPlayingItem: {
+        Id: "mv-4", Name: "Sicario", Type: "Movie",
+        MediaStreams: [
+          { Type: "Video", Codec: "hevc", BitRate: 40_000_000, Height: 2160 },
+          { Type: "Audio", Codec: "truehd", BitRate: 4_000_000 },
+        ],
+        MediaSources: [{ Id: "src-a", Bitrate: 44_000_000 }],
+      },
+      PlayState: { PositionTicks: 1, IsPaused: false },
+      TranscodingInfo: {
+        VideoCodec: "h264", AudioCodec: "aac", Bitrate: 3_000_000,
+        IsVideoDirect: false, IsAudioDirect: false, TranscodeReasons: ["VideoCodecNotSupported"],
+      },
+    },
+  ]);
+
+  const [s] = await getJellyfinSessions(B, "k");
+  assert.equal(
+    s.bitrate,
+    3_000_000,
+    "a 4K source transcoded down pushes the transcode output, not the 44 Mbps source",
+  );
+});
+
+test("sessions bitrate: absent everywhere stays undefined rather than collapsing to 0", async () => {
+  const B = nextBase();
+  respond = () => okJson([
+    { Id: "z-1", UserId: "u", UserName: "u", NowPlayingItem: { Id: "mv-5", Name: "X", Type: "Movie" } },
+    {
+      Id: "z-2", UserId: "u", UserName: "u",
+      NowPlayingItem: {
+        Id: "mv-6", Name: "Y", Type: "Movie",
+        MediaStreams: [{ Type: "Video", Codec: "h264", Height: 1080 }],
+        MediaSources: [{ Id: "s", Bitrate: 0 }],
+      },
+    },
+  ]);
+
+  const [a, b] = await getJellyfinSessions(B, "k");
+  // The stats layer filters on `bitrate > 0`; a 0 would still be excluded, but
+  // undefined keeps "unknown" distinct from "genuinely zero" on the row itself.
+  assert.equal(a.bitrate, undefined, "no MediaStreams and no MediaSources ⇒ unknown");
+  assert.equal(b.bitrate, undefined, "a 0 container total is not a usable reading");
+});
+
 // ── terminateJellyfinSession ────────────────────────────────────────────────
 
 test("terminate without a reason issues exactly one elevated POST to /Sessions/{id}/Playing/Stop and returns {ok, status}", async () => {

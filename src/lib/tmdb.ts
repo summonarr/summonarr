@@ -654,6 +654,21 @@ function migrateKeywordShape(m: TmdbMedia): boolean {
   return true;
 }
 
+// Suggestion lists feed two consumers with very different appetites, so the
+// cache stores the WIDE list and each caller slices to what it needs.
+//   - detail-page "More like this" rails take SUGGESTIONS_RAIL_LIMIT (18) — the
+//     historical size, so those pages are byte-identical to before;
+//   - the For You engine takes the whole list, because each seed's tail is what
+//     lets a ranked set reach MAX_STORED_RECOMMENDATIONS_PER_USER (200).
+// Widening costs ZERO extra requests: /similar and /recommendations each return
+// 20 items and both are already fetched, so the surplus was simply discarded.
+//
+// Declared HERE rather than beside getMovieSuggestions because getMovieDetails/
+// getTVDetails are the OTHER writers of the same cache rows and sit above it —
+// the two writers must agree on both the key and the stored size.
+export const SUGGESTIONS_CACHE_MAX = 40;
+const SUGGESTIONS_RAIL_LIMIT = 18;
+
 export async function getMovieDetails(id: number): Promise<TmdbMedia> {
   const key = `movie:${id}:details`;
   return coalesce(key, async () => {
@@ -732,7 +747,7 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
         suggestions.push(normalizeMovie(item));
       }
     }
-    setCache(`movie:${id}:suggestions:v2`, suggestions.slice(0, 18), TTL.DETAILS).catch(() => {});
+    setCache(`movie:${id}:suggestions:v3`, suggestions.slice(0, SUGGESTIONS_CACHE_MAX), TTL.DETAILS).catch(() => {});
   }
 
   await setCache(key, media, TTL.DETAILS);
@@ -827,7 +842,7 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
         suggestions.push(normalizeTV(item));
       }
     }
-    setCache(`tv:${id}:suggestions:v2`, suggestions.slice(0, 18), TTL.DETAILS).catch(() => {});
+    setCache(`tv:${id}:suggestions:v3`, suggestions.slice(0, SUGGESTIONS_CACHE_MAX), TTL.DETAILS).catch(() => {});
   }
 
   await setCache(key, media, TTL.DETAILS);
@@ -1046,12 +1061,17 @@ export async function getTopRatedTV(): Promise<TmdbMedia[]> {
   });
 }
 
-export async function getMovieSuggestions(id: number): Promise<TmdbMedia[]> {
-  // ":v2" retires the pre-reorder cached rows in place — the old similar-first
-  // lists would otherwise keep serving for up to TTL.DETAILS after a deploy.
-  // Orphaned v1 rows age out through the expired-TmdbCache purge.
-  const key = `movie:${id}:suggestions:v2`;
-  return coalesce(key, async () => {
+export async function getMovieSuggestions(
+  id: number,
+  limit: number = SUGGESTIONS_RAIL_LIMIT,
+): Promise<TmdbMedia[]> {
+  // ":v3" retires the 18-item v2 rows in place — a wide caller would otherwise
+  // keep receiving 18 items for the rest of the 7-day DETAILS TTL, silently
+  // capping the recommendation pool at the old size after a deploy. (":v2" did
+  // the same for the pre-reorder similar-first lists.) Orphaned older rows age
+  // out through the expired-TmdbCache purge.
+  const key = `movie:${id}:suggestions:v3`;
+  const all = await coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached) return cached;
 
@@ -1074,19 +1094,26 @@ export async function getMovieSuggestions(id: number): Promise<TmdbMedia[]> {
       result.push(normalizeMovie(item));
     }
   }
-  const trimmed = result.slice(0, 18);
+  const trimmed = result.slice(0, SUGGESTIONS_CACHE_MAX);
   // Don't cache an empty result — if both /similar and /recommendations
   // rejected (a transient double-failure), caching [] would suppress real
   // suggestions for the full 7-day DETAILS TTL (mirrors searchMulti's guard).
   if (trimmed.length > 0) await setCache(key, trimmed, TTL.DETAILS);
   return trimmed;
   });
+  // Slice AFTER coalesce so every caller shares one fetch and one cache row
+  // regardless of the limit it asked for. slice() copies, so a narrow caller
+  // can never truncate the array a wide one is holding.
+  return all.slice(0, limit);
 }
 
-export async function getTVSuggestions(id: number): Promise<TmdbMedia[]> {
-  // Recommendations-first + ":v2" key — see getMovieSuggestions.
-  const key = `tv:${id}:suggestions:v2`;
-  return coalesce(key, async () => {
+export async function getTVSuggestions(
+  id: number,
+  limit: number = SUGGESTIONS_RAIL_LIMIT,
+): Promise<TmdbMedia[]> {
+  // Recommendations-first + ":v3" key + wide cache — see getMovieSuggestions.
+  const key = `tv:${id}:suggestions:v3`;
+  const all = await coalesce(key, async () => {
   const cached = await getCache<TmdbMedia[]>(key);
   if (cached) return cached;
 
@@ -1104,11 +1131,12 @@ export async function getTVSuggestions(id: number): Promise<TmdbMedia[]> {
       result.push(normalizeTV(item));
     }
   }
-  const trimmed = result.slice(0, 18);
+  const trimmed = result.slice(0, SUGGESTIONS_CACHE_MAX);
   // Don't cache an empty result — see getMovieSuggestions.
   if (trimmed.length > 0) await setCache(key, trimmed, TTL.DETAILS);
   return trimmed;
   });
+  return all.slice(0, limit);
 }
 
 export async function getMovieCollection(collectionId: number): Promise<TmdbMedia[]> {
