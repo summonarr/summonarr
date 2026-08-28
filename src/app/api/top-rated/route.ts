@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { parsePageParam } from "@/lib/pagination";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getTopRatedMovies, getTopRatedTV, type TmdbMedia } from "@/lib/tmdb";
 import { getTraktPopularMovies, getTraktPopularTV } from "@/lib/trakt";
@@ -161,7 +162,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const validSorts = new Set<SortBy>(["imdb", "letterboxd", "rt", "trakt", "mdblist"]);
   const sortParam = sp.get("sortBy");
   const sortBy: SortBy = validSorts.has(sortParam as SortBy) ? (sortParam as SortBy) : "imdb";
-  const page = Math.min(Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1), 10_000);
+  const page = parsePageParam(sp);
   const show4k = await getShow4kVisibility(session);
 
   const { showPlex, showJellyfin } = getBadgeVisibility(session);

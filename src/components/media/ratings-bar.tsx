@@ -136,7 +136,7 @@ export function RatingsBar({
           title="IMDb rating"
         >
           <span className={`font-bold text-[#F5C518] ${textSm}`}>IMDb</span>
-          <span className={`font-semibold text-white ${textSm}`}>{imdbRating}</span>
+          <span className={`font-semibold text-zinc-100 ${textSm}`}>{imdbRating}</span>
           {!compact && <span className={`text-zinc-500 ${textXs}`}>/10</span>}
           {!compact && imdbVotes && (
             <span className={`text-zinc-500 ${textXs}`}>({formatVotes(imdbVotes)})</span>
@@ -145,7 +145,7 @@ export function RatingsBar({
       ) : showImdb ? (
         <div className="flex items-center gap-0.5" title="IMDb rating">
           <span className={`font-bold text-[#F5C518] ${textSm}`}>IMDb</span>
-          <span className={`font-semibold text-white ${textSm}`}>{imdbRating}</span>
+          <span className={`font-semibold text-zinc-100 ${textSm}`}>{imdbRating}</span>
           {!compact && <span className={`text-zinc-500 ${textXs}`}>/10</span>}
           {!compact && imdbVotes && (
             <span className={`text-zinc-500 ${textXs}`}>({formatVotes(imdbVotes)})</span>
@@ -202,14 +202,14 @@ export function RatingsBar({
       {showMal && malRating && (
         <div className="flex items-center gap-0.5" title="MyAnimeList">
           <span className={`font-semibold text-blue-400 ${textXs}`}>MAL</span>
-          <span className={`font-semibold text-white ${textSm}`}>{malRating}</span>
+          <span className={`font-semibold text-zinc-100 ${textSm}`}>{malRating}</span>
         </div>
       )}
 
       {showRogerEbert && rogerEbertRating && (
         <div className="flex items-center gap-0.5" title="Roger Ebert">
           <span className={`font-semibold text-zinc-400 ${textXs}`}>RE</span>
-          <span className={`font-semibold text-white ${textSm}`}>{rogerEbertRating}</span>
+          <span className={`font-semibold text-zinc-100 ${textSm}`}>{rogerEbertRating}</span>
           {!compact && <span className={`text-zinc-500 ${textXs}`}>/4</span>}
         </div>
       )}
@@ -217,7 +217,7 @@ export function RatingsBar({
       {showJellyfin && jellyfinRating && (
         <div className="flex items-center gap-0.5" title="Jellyfin community rating">
           <span className={`font-semibold text-purple-400 ${textXs}`}>JF</span>
-          <span className={`font-semibold text-white ${textSm}`}>{jellyfinRating}</span>
+          <span className={`font-semibold text-zinc-100 ${textSm}`}>{jellyfinRating}</span>
           {!compact && <span className={`text-zinc-500 ${textXs}`}>/10</span>}
         </div>
       )}

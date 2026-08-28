@@ -99,7 +99,7 @@ async function getApiKey(opts: { fresh?: boolean } = {}): Promise<string | null>
   if (!opts.fresh && apiKeyInflight) return apiKeyInflight;
   const p = (async () => {
     const row = await prisma.setting.findUnique({ where: { key: "omdbApiKey" } });
-    const value = row?.value || null;
+    const value = row?.value.trim() || null;
     apiKeyCache = { value, at: Date.now() };
     return value;
   })();

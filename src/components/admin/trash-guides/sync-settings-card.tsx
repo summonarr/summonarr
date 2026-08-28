@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { CheckCircle, Loader2, Play, RefreshCw, XCircle } from "@/components/icons";
+import { CheckCircle, Clock, Loader2, Play, RefreshCw, XCircle } from "@/components/icons";
 import type { ActionState, ApplyResult, TrashSettings } from "./types";
 import { withBasePath } from "@/lib/base-path";
 
@@ -18,6 +18,7 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
   const [saveState, setSaveState] = useState<ActionState>("idle");
   const [refreshState, setRefreshState] = useState<ActionState>("idle");
   const [syncState, setSyncState] = useState<ActionState>("idle");
+  const [syncSkipped, setSyncSkipped] = useState(false);
 
   async function patchSettings(partial: Partial<TrashSettings>) {
     setSaveState("running");
@@ -69,9 +70,18 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
 
   async function handleSyncNow() {
     setSyncState("running");
+    setSyncSkipped(false);
     try {
       const res = await fetch(withBasePath(`/api/cron/trash-sync`), { method: "POST" });
-      const data = (await res.json()) as { applied?: ApplyResult[] };
+      const data = (await res.json()) as { applied?: ApplyResult[]; skipped?: boolean };
+      // The advisory lock reports contention as a 200 { skipped: true } — nothing
+      // ran, so it is neither a success nor a failure and there is no result set.
+      if (res.ok && data.skipped) {
+        setSyncSkipped(true);
+        setSyncState("idle");
+        setTimeout(() => setSyncSkipped(false), 3000);
+        return;
+      }
       setSyncState(res.ok ? "ok" : "error");
       onAfterAction?.(data.applied ?? []);
     } catch {
@@ -166,6 +176,7 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
         {refreshState === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />Refresh failed</span>}
         {syncState === "ok"    && <span className="text-xs text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />Sync complete</span>}
         {syncState === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />Sync failed</span>}
+        {syncSkipped && <span className="text-xs text-amber-400 flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" />Already running — try again shortly</span>}
       </div>
     </Card>
   );

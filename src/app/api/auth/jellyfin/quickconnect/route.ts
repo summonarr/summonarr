@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { initiateJellyfinQuickConnect, pollJellyfinQuickConnect } from "@/lib/jellyfin";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 import {
   buildQcFlowSetCookie,
@@ -78,7 +78,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Jellyfin not configured" }, { status: 503 });
   }
 
-  if (!checkRateLimit(`qc-initiate:${getClientIp(req.headers)}`, 10, 60_000)) {
+  if (!checkRateLimit(`qc-initiate:${getClientIpKey(req.headers)}`, 10, 60_000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
   try {
@@ -128,7 +128,7 @@ export async function GET(req: NextRequest) {
   }
   const wait = searchParams.get("wait") === "1";
 
-  if (!checkRateLimit(`qc-poll:${getClientIp(req.headers)}`, 60, 60_000)) {
+  if (!checkRateLimit(`qc-poll:${getClientIpKey(req.headers)}`, 60, 60_000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
 
@@ -146,7 +146,11 @@ export async function GET(req: NextRequest) {
   if (existingRaw && !existing) pollCounts.delete(countKey);
   const attempts = (existing ? existing.count : 0) + 1;
   if (attempts > MAX_POLLS) {
-    pollCounts.delete(countKey);
+    // Keep the entry rather than dropping it: deleting the counter here let the
+    // very next poll for the same secret start a fresh 60-attempt window, so the
+    // per-session ceiling was never enforced against a persistent caller. The
+    // 60s sweep above reclaims the key once its TTL passes.
+    pollCounts.set(countKey, { count: attempts, expiresAt: existing?.expiresAt ?? now + QC_TTL });
     return NextResponse.json({ error: "QuickConnect session expired" }, { status: 410 });
   }
   if (!existing && pollCounts.size >= MAX_POLL_KEYS) {
@@ -168,7 +172,7 @@ export async function GET(req: NextRequest) {
 
     // Concurrent-long-poll cap (per-IP + global). Reject 503 if exceeded so the
     // client can fall back to short-polling instead of stalling.
-    const ipKey = getClientIp(req.headers);
+    const ipKey = getClientIpKey(req.headers);
     if (globalInflight >= LONG_POLL_GLOBAL_CAP) {
       return NextResponse.json({ error: "Server busy — retry shortly" }, { status: 503 });
     }

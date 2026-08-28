@@ -183,6 +183,18 @@ export function IssueFixMatchButton({
 
   const inputRef = useRef<HTMLInputElement>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Aborts the runFixMatch poll loop on unmount (the server-side job keeps
+  // running by design). One controller PER SIDE: neither apply button is gated on
+  // the other being in flight, so a single shared ref would be overwritten by the
+  // second apply and leave the first polling every 3s for its full 20-minute
+  // deadline after unmount — then resolve the issue and refresh a page that has
+  // moved on.
+  const plexAbort = useRef<AbortController | null>(null);
+  const jellyfinAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => {
+    plexAbort.current?.abort();
+    jellyfinAbort.current?.abort();
+  }, []);
 
   const reset = useCallback(() => {
     setPhase("search");
@@ -313,16 +325,19 @@ export function IssueFixMatchButton({
     if (!selected) return;
     setPlexState({ status: "applying" });
     setPhase("confirm");
+    const ac = new AbortController();
+    plexAbort.current = ac;
     try {
       // Background job + status poll (guardrail 37a).
       await runFixMatch({
         server: "plex", tmdbId, mediaType, correctTmdbId: selected.id, canonicalGuid,
         ...(plexInstance ? { serverInstance: plexInstance } : {}),
-      });
+      }, { signal: ac.signal });
       setPlexState({ status: "done" });
       await resolveIssue(selected.title);
       router.refresh();
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return; // unmounted; job runs on
       setPlexState({ status: "error", error: err instanceof Error ? err.message : "Failed" });
     }
   }
@@ -330,16 +345,19 @@ export function IssueFixMatchButton({
   async function applyJellyfin() {
     if (!selected) return;
     setJellyfinState({ status: "applying" });
+    const ac = new AbortController();
+    jellyfinAbort.current = ac;
     try {
       // Background job + status poll (guardrail 37a).
       await runFixMatch({
         server: "jellyfin", tmdbId, mediaType, correctTmdbId: selected.id,
         ...(jellyfinInstance ? { serverInstance: jellyfinInstance } : {}),
-      });
+      }, { signal: ac.signal });
       setJellyfinState({ status: "done" });
       await resolveIssue(selected.title);
       router.refresh();
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return; // unmounted; job runs on
       setJellyfinState({ status: "error", error: err instanceof Error ? err.message : "Failed" });
     }
   }
@@ -399,7 +417,11 @@ export function IssueFixMatchButton({
         Fix Match
       </button>
 
-      <Dialog open={open} onOpenChange={(o) => { if (!o && !busy) close(); }}>
+      {/* While an apply is in flight the dialog HIDES rather than resetting
+          (matches the sibling FixMatchModal's onHide): the component stays
+          mounted so runFixMatch's poll still resolves the issue and refreshes,
+          and reopening shows the settled state. Only a not-busy close resets. */}
+      <Dialog open={open} onOpenChange={(o) => { if (!o) { if (busy) setOpen(false); else close(); } }}>
         <DialogPortal>
           <DialogBackdrop />
           <DialogPopup className="max-w-3xl" initialFocus={inputRef}>
@@ -426,7 +448,10 @@ export function IssueFixMatchButton({
                   {phase === "plex-candidates" && "Select Plex item"}
                 </DialogTitle>
               </div>
-              <DialogClose disabled={busy} aria-label="Close" title="Close" className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors">
+              {/* Not disabled while busy: closing during an apply HIDES the
+                  dialog (see onOpenChange) so the admin isn't trapped for the
+                  minutes a real remap takes; the background job runs on. */}
+              <DialogClose aria-label={busy ? "Hide" : "Close"} title={busy ? "Hide — the fix keeps running" : "Close"} className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors">
                 <X className="w-5 h-5" />
               </DialogClose>
             </div>

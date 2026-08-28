@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { posterUrl } from "@/lib/tmdb-types";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
@@ -390,6 +390,9 @@ export function FixMatchButton({
   const [candidates, setCandidates] = useState<CandidatesResponse | null>(null);
   const [progress, setProgress] = useState<FixMatchProgressView | null>(null);
   const [modalHidden, setModalHidden] = useState(false);
+  // Aborts the runFixMatch poll loop on unmount; the server-side job runs on.
+  const applyAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => applyAbort.current?.abort(), []);
 
   // Two library rows can share a tmdbId once a second server is configured, so a
   // bare "Fix match" is ambiguous — name the server on both the button and the
@@ -435,6 +438,8 @@ export function FixMatchButton({
     setErrorMsg("");
     setProgress(null);
     setModalHidden(false);
+    const ac = new AbortController();
+    applyAbort.current = ac;
     try {
       // Background job + status poll (guardrail 37a): a series remap can take
       // minutes on the media server — longer than a reverse proxy keeps one
@@ -444,7 +449,7 @@ export function FixMatchButton({
       const json = await runFixMatch({
         server, tmdbId, mediaType, correctTmdbId, canonicalGuid,
         ...(serverInstance ? { serverInstance } : {}),
-      }, { onProgress: setProgress });
+      }, { onProgress: setProgress, signal: ac.signal });
       setCandidates(null);
       if (json.warning) {
         setErrorMsg(json.warning);
@@ -454,6 +459,7 @@ export function FixMatchButton({
       }
       router.refresh();
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return; // unmounted; job runs on
       setErrorMsg(err instanceof Error ? err.message : "Unknown error");
       setPhase("error");
     }

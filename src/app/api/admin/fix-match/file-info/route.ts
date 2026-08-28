@@ -36,7 +36,12 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
   const { searchParams } = new URL(request.url);
   const tmdbIdParam = searchParams.get("tmdbId");
   const tmdbId      = parseInt(tmdbIdParam ?? "", 10);
-  const mediaType   = searchParams.get("mediaType") as "MOVIE" | "TV" | null;
+  const mediaTypeRaw = searchParams.get("mediaType");
+  // Validated, not just cast: an arbitrary value reaching the Prisma enum
+  // filters below throws PrismaClientValidationError → an unhandled 500 where
+  // the sibling candidates route answers 400.
+  const mediaType: "MOVIE" | "TV" | null =
+    mediaTypeRaw === "MOVIE" || mediaTypeRaw === "TV" ? mediaTypeRaw : null;
 
   if (!Number.isInteger(tmdbId) || tmdbId <= 0 || !mediaType) {
     return NextResponse.json({ error: "Missing params" }, { status: 400 });

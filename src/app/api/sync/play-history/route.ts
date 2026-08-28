@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 import {
   isPlayHistoryEnabled,
   isSourceEnabled,
@@ -363,10 +363,14 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
               // the sessionKey for an hour with no history row — let the next poll
               // re-observe the stall and retry the finalize.
               markPlexSessionFinalized(sessionId, nowMs);
+              return "ended";
             } catch (err) {
               console.warn(`[play-history] stall-finalize failed for ${sessionId}:`, err);
+              // Not "ended": no history row was written, so the tick must not
+              // count it into stallEnded / fire activity:history-updated for a
+              // row that isn't there (mirrors the absence sweep's .catch(false)).
+              return "skipped";
             }
-            return "ended";
           }
 
           const increment = computePlaytimeIncrement(existing, now);
@@ -912,7 +916,7 @@ export async function POST(request: NextRequest) {
 }
 
 async function syncPlayHistory(request: NextRequest) {
-  if (!checkRateLimit(`sync-ph:${getClientIp(request.headers)}`, 30, 60_000)) {
+  if (!checkRateLimit(`sync-ph:${getClientIpKey(request.headers)}`, 30, 60_000)) {
     return NextResponse.json({ error: "Too many requests" }, { status: 429 });
   }
 
@@ -1054,7 +1058,11 @@ async function syncPlayHistory(request: NextRequest) {
 
     await emitActiveSessionsSnapshot();
 
-    await cleanupStaleSessions(30);
+    // Guardrail 21: cleanupStaleSessions measures off lastSeenAt exactly like
+    // the two per-source absence sweeps, which skip when the boot re-anchor
+    // failed — hold this third finalize path to the same gate, or a failed
+    // re-anchor after a >30min outage finalizes still-playing sessions.
+    if (reanchored) await cleanupStaleSessions(30);
 
     const now = Date.now();
 

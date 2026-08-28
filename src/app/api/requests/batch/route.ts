@@ -87,8 +87,22 @@ async function writeBatchInboxRows(
       : `Your ${label} request was declined.`;
   };
   try {
+    // Guardrail 33: account removal disables rather than scrubs — mirror the
+    // deactivatedAt gate the email/Discord/push fan-outs already apply, or a
+    // later re-enabled account signs in to a bell full of stale batch rows for
+    // requests it never saw actioned.
+    const activeIds = new Set(
+      (
+        await prisma.user.findMany({
+          where: { id: { in: [...new Set(targets.map((t) => t.requestedBy))] }, deactivatedAt: null },
+          select: { id: true },
+        })
+      ).map((u) => u.id),
+    );
+    const liveTargets = targets.filter((t) => activeIds.has(t.requestedBy));
+    if (liveTargets.length === 0) return;
     await prisma.notification.createMany({
-      data: targets.map((t) =>
+      data: liveTargets.map((t) =>
         buildNotificationData(t.requestedBy, {
           type,
           title: t.title,

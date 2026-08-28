@@ -103,7 +103,13 @@ export async function runDownloadCheck(target: DownloadCheckTarget): Promise<voi
   // Clearing pendingNotifyAt is what stops the orchestrator backstop firing a
   // SECOND, duplicate "download pending" DM on the next sync tick for a request
   // this job already notified about.
-  await prisma.mediaRequest.update({ where: { id: requestId }, data: { pendingNotifyAt: null } });
+  // updateMany, not update: an admin can delete the request during the awaited
+  // Radarr/Sonarr queue polls above, and a bare update would throw P2025 on a
+  // normal race (same convention as this module's callers). count === 0 means
+  // the row is gone — abort so we don't DM the requester about a download that
+  // no longer exists (the bare update's P2025 throw used to abort here for free).
+  const cleared = await prisma.mediaRequest.updateMany({ where: { id: requestId }, data: { pendingNotifyAt: null } });
+  if (cleared.count === 0) return;
   // Guardrail 33: a disabled account keeps a live Discord link. CONSUME the backstop
   // rather than defer it (pendingNotifyAt cleared above, DM dropped) so re-enabling
   // an account doesn't replay a stale "download pending" backlog — same reasoning as

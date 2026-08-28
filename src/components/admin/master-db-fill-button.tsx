@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Database, Loader2, AlertTriangle } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
@@ -16,8 +16,19 @@ export function MasterDbFillButton({
 }) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [summary, setSummary] = useState<string | null>(null);
+  // The end-of-run reset has to be cancellable: a rerun started inside the 15-20s
+  // window would otherwise be flipped to "idle" mid-flight — spinner and summary
+  // gone, button live again — inviting a second concurrent full fill.
+  const resetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(resetTimer.current), []);
+
+  function scheduleReset(ms: number) {
+    clearTimeout(resetTimer.current);
+    resetTimer.current = setTimeout(() => { setPhase("idle"); setSummary(null); }, ms);
+  }
 
   async function handleFill() {
+    clearTimeout(resetTimer.current);
     setPhase("phase1");
     setSummary(null);
 
@@ -43,7 +54,7 @@ export function MasterDbFillButton({
       if (targets.length === 0) {
         setPhase("error");
         setSummary("No media servers configured — set up Plex or Jellyfin first");
-        setTimeout(() => { setPhase("idle"); setSummary(null); }, 15_000);
+        scheduleReset(15_000);
         return;
       }
 
@@ -77,7 +88,7 @@ export function MasterDbFillButton({
       if (!outcomes.some((o) => o.ok)) {
         setPhase("error");
         setSummary(`Library sync failed — ${outcomes.map((o) => o.text).join(" · ")}`);
-        setTimeout(() => { setPhase("idle"); setSummary(null); }, 15_000);
+        scheduleReset(15_000);
         return;
       }
       // A partial failure carries on to the TMDB warm — the server that did
@@ -88,7 +99,7 @@ export function MasterDbFillButton({
     } catch {
       setPhase("error");
       setSummary("Library sync failed — check server logs");
-      setTimeout(() => { setPhase("idle"); setSummary(null); }, 15_000);
+      scheduleReset(15_000);
       return;
     }
 
@@ -99,7 +110,7 @@ export function MasterDbFillButton({
       if (warmData.error) {
         setPhase("error");
         setSummary(warmData.error);
-        setTimeout(() => { setPhase("idle"); setSummary(null); }, 15_000);
+        scheduleReset(15_000);
         return;
       }
       // Every configured server is named, including one that scanned 0 items —
@@ -122,7 +133,7 @@ export function MasterDbFillButton({
       setPhase("error");
       setSummary("TMDB warm failed — check server logs");
     }
-    setTimeout(() => { setPhase("idle"); setSummary(null); }, 20_000);
+    scheduleReset(20_000);
   }
 
   if (phase === "confirm") {
@@ -176,7 +187,7 @@ export function MasterDbFillButton({
         <Button
           variant="outline"
           size="sm"
-          onClick={() => setPhase("confirm")}
+          onClick={() => { clearTimeout(resetTimer.current); setPhase("confirm"); }}
           disabled={loading}
           className="border-zinc-700 text-zinc-300 hover:text-white gap-2"
         >

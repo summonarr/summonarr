@@ -135,6 +135,10 @@ function AuditLogFilters({
   const [targetInput, setTargetInput] = useState(currentTarget);
   const userTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const targetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // The search value the URL is expected to hold because of us — see the sync
+  // effect below.
+  const userUrlRef = useRef(currentUser);
+  const targetUrlRef = useRef(currentTarget);
 
   const hasFilters = currentAction || currentGroup || currentDateFrom || currentDateTo || currentUser || currentTarget || currentHideCron;
 
@@ -149,13 +153,29 @@ function AuditLogFilters({
   // the debounce effect below saw them differ, and 500 ms later it router.push'ed
   // the stale filter as a NEW history entry. Back was effectively dead on this
   // page: the list flashed unfiltered and snapped straight back.
-  useEffect(() => { setUserInput(currentUser); }, [currentUser]);
-  useEffect(() => { setTargetInput(currentTarget); }, [currentTarget]);
+  //
+  // Skip the prop change our OWN debounce caused, though: the RSC round-trip
+  // lands well after the 500 ms debounce, so overwriting then erases whatever
+  // was typed while it was in flight (and the re-run debounce, now seeing
+  // input === prop, drops the fuller term instead of searching it).
+  useEffect(() => {
+    if (currentUser === userUrlRef.current) return;
+    userUrlRef.current = currentUser;
+    setUserInput(currentUser);
+  }, [currentUser]);
+  useEffect(() => {
+    if (currentTarget === targetUrlRef.current) return;
+    targetUrlRef.current = currentTarget;
+    setTargetInput(currentTarget);
+  }, [currentTarget]);
 
   useEffect(() => {
     clearTimeout(userTimer.current);
     userTimer.current = setTimeout(() => {
-      if (userInput !== currentUser) navigate({ user: userInput });
+      if (userInput !== currentUser) {
+        userUrlRef.current = userInput;
+        navigate({ user: userInput });
+      }
     }, 500);
     return () => clearTimeout(userTimer.current);
   }, [userInput, currentUser, navigate]);
@@ -163,7 +183,10 @@ function AuditLogFilters({
   useEffect(() => {
     clearTimeout(targetTimer.current);
     targetTimer.current = setTimeout(() => {
-      if (targetInput !== currentTarget) navigate({ target: targetInput });
+      if (targetInput !== currentTarget) {
+        targetUrlRef.current = targetInput;
+        navigate({ target: targetInput });
+      }
     }, 500);
     return () => clearTimeout(targetTimer.current);
   }, [targetInput, currentTarget, navigate]);

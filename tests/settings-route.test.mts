@@ -538,6 +538,30 @@ test("PATCH: an empty webhook secret is WRITTEN, not skipped — the admin form'
   assert.equal(write.create.value, "", "it must be stored empty, not left at the previous secret");
 });
 
+test("PATCH: an emptied library selection is WRITTEN for BOTH media servers", async () => {
+  // Unticking every box posts "" (join over an empty set), and both pickers
+  // render that state as "No libraries selected — all libraries will be synced".
+  // Every consumer already agrees: sync/route.ts and the two per-source routes
+  // read an empty value as undefined = sync all. Skipping the write left the OLD
+  // restriction active behind a "Saved", so a newly added library never synced.
+  // Both keys are asserted together because they are one bug: jellyfinLibraries
+  // was made clearable while plexLibraries was left behind, so the Jellyfin
+  // picker worked and the Plex one silently kept lying.
+  const admin = await mintSession("ADMIN");
+  settings.set("plexLibraries", "1,2");
+  settings.set("jellyfinLibraries", "lib-a");
+  const res = await PATCH(
+    patchReq(JSON.stringify({ plexLibraries: "", jellyfinLibraries: "" }), admin.header),
+    undefined,
+  );
+  assert.equal(res.status, 200);
+  for (const key of ["plexLibraries", "jellyfinLibraries"]) {
+    const write = upsertFor(key)[0];
+    assert.ok(write, `clearing ${key} must reach the database`);
+    assert.equal(write.create.value, "", `${key} must be stored empty, not left at the previous selection`);
+  }
+});
+
 
 // ---------------------------------------------------------------------------
 // The machine-session guard. POST /api/auth/machine-session mints a fully

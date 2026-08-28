@@ -113,6 +113,7 @@ const opsOf = (name: string) => ops.filter((o) => o.op === name);
 type AppUser = Record<string, unknown> & { id: string; email: string; discordId: string | null; role: string };
 let appUsers: AppUser[] = [];
 const sessionRows = new Set<string>();
+let userUpdateThrows = false;
 
 shadowPrismaModel(prisma, "authSession", {
   findUnique: async (args: { where: { sessionId: string } }) =>
@@ -159,6 +160,7 @@ shadowPrismaModel(prisma, "user", {
   },
   update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
     rec("user.update", args);
+    if (userUpdateThrows) throw new Error("simulated write failure");
     const u = appUsers.find((x) => x.id === args.where.id);
     if (u) Object.assign(u, args.data);
     return u ?? {};
@@ -368,6 +370,7 @@ beforeEach(async () => {
   registerOk = true;
   roleCallsOk = true;
   mergeThrows = false;
+  userUpdateThrows = false;
 });
 
 // ── gating ───────────────────────────────────────────────────────────────────
@@ -762,10 +765,16 @@ test("confirm-merge is rate-limited, and hitting the limit WIPES the pending cod
 });
 
 test("confirm-merge caps its body (guardrail 30)", async () => {
-  const { token } = await mintSession();
+  // Seed a live code first, and demand exactly 413. Without a seeded code an
+  // UNCAPPED route parses the 32 KB body and answers 400 "request a code", so
+  // `400 || 413` passed whether or not the cap existed; 413 is the only status
+  // the cap itself can produce, from either the Content-Length or the post-read
+  // byte check.
+  const { token, userId } = await mintSession();
+  seedCode(userId);
   const huge = JSON.stringify({ code: "z".repeat(32 * 1024) });
   const res = await doConfirm(token, undefined, huge);
-  assert.ok(res.status === 400 || res.status === 413);
+  assert.equal(res.status, 413);
 });
 
 // ── 4: unlink reads before clearing, revokes after committing ────────────────
@@ -802,6 +811,26 @@ test("unlink revokes roles only AFTER the clearing write commits (guardrail 27)"
   assert.equal(appUsers.find((u) => u.id === userId)?.discordId, null);
   await waitForDiscordCall();
   assert.ok(fetchCalls.some((c) => c.url.hostname === "discord.com"));
+});
+
+test("a THROWING clearing write revokes NOTHING — the guardrail-27 ordering pin", async () => {
+  // The ordering is only observable through the FAILURE path. On the happy path
+  // the update is awaited before the response either way, and the revoke's own
+  // feature-flag + Setting reads put its fetch several turns later — so hoisting
+  // the revoke above the write still leaves discordId null at assert time and
+  // still logs user.update first. Every op-order or eventual-arrival assertion
+  // therefore passes on the reordered route. Make the write fail and the two
+  // orders diverge for real: revoke-first has already told Discord to strip the
+  // member's roles for an unlink that never committed.
+  const { token } = await mintSession({ discordId: VALID_SNOWFLAKE });
+  userUpdateThrows = true;
+  await assert.rejects(doUnlink(token), /simulated write failure/);
+  await waitForDiscordCall();
+  assert.deepEqual(
+    fetchCalls.filter((c) => c.url.hostname === "discord.com").map((c) => c.url.pathname),
+    [],
+    "no role may be revoked when the clearing write never committed",
+  );
 });
 
 test("unlinking an account with NO discord link is a harmless no-op", async () => {

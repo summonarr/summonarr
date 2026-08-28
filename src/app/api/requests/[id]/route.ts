@@ -63,7 +63,12 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     }
 
     if (adminNote !== undefined) {
-      await prisma.mediaRequest.update({ where: { id }, data: { adminNote: sanitizedAdminNote } });
+      // updateMany, like every other write in this handler: a bare update throws
+      // P2025 when the row is deleted between the read above and this write, and
+      // nothing catches it — a concurrent delete answered 500 where the sibling
+      // note-only path and DELETE both answer 404.
+      const noteWrite = await prisma.mediaRequest.updateMany({ where: { id }, data: { adminNote: sanitizedAdminNote } });
+      if (noteWrite.count === 0) return NextResponse.json({ error: "Not found" }, { status: 404 });
       // Audit the note change so silent edits via search/retry leave a trail.
       // The status-transition branches already audit via logAudit.
       if ((existing.adminNote ?? null) !== (sanitizedAdminNote ?? null)) {
@@ -102,7 +107,8 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     }
 
     if (adminNote !== undefined) {
-      await prisma.mediaRequest.update({ where: { id }, data: { adminNote: sanitizedAdminNote } });
+      const noteWrite = await prisma.mediaRequest.updateMany({ where: { id }, data: { adminNote: sanitizedAdminNote } });
+      if (noteWrite.count === 0) return NextResponse.json({ error: "Not found" }, { status: 404 });
       if ((existing.adminNote ?? null) !== (sanitizedAdminNote ?? null)) {
         void logAudit({
           userId: session.user.id,
@@ -119,16 +125,24 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     // path's effectiveProfileId — a bare re-push previously dropped it to default.
     const retryProfileId = existing.qualityProfileId ?? undefined;
     let arrError: string | null = null;
+    let pushedTvdbId: number | null = null;
     try {
       if (existing.mediaType === "MOVIE") {
         await addMovieToRadarr(existing.tmdbId, variant, retryProfileId, existing.requestedBy);
       } else {
-        const tvdbId = await addSeriesToSonarr(existing.tmdbId, variant, retryProfileId, existing.requestedBy);
-        await prisma.mediaRequest.update({ where: { id }, data: { tvdbId } });
+        pushedTvdbId = await addSeriesToSonarr(existing.tmdbId, variant, retryProfileId, existing.requestedBy);
       }
     } catch (err) {
       console.error("[arr] Retry push failed:", err);
       arrError = arrErrorMessage(err);
+    }
+    // Bookkeeping write kept OUT of the try above (mirrors the approve branch
+    // below and requests/route.ts): Sonarr has already accepted the series by
+    // this point, so a DB hiccup here must not be reported as an ARR push
+    // failure — and updateMany no-ops on a concurrently deleted row instead of
+    // throwing P2025.
+    if (pushedTvdbId !== null) {
+      await prisma.mediaRequest.updateMany({ where: { id }, data: { tvdbId: pushedTvdbId } });
     }
     return NextResponse.json({ ...existing, adminNote: adminNote !== undefined ? sanitizedAdminNote : existing.adminNote, arrError });
   }

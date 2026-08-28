@@ -64,7 +64,17 @@ export function IssueActions({
   const [panel, setPanel] = useState<"resolve" | "delete" | "replace" | null>(null);
   const [resolution, setResolution] = useState("");
 
-  const [instance, setInstance] = useState("");
+  // `instances` is the CONFIGURED set (getSyncableArrInstances), default first — so
+  // on an install whose default *arr is unconfigured the "" slug is absent entirely
+  // and every refetch/replace/grab aimed at it hits a server that does not exist.
+  // Derived rather than seeded because the same component instance is reused when
+  // the selected issue switches between MOVIE (radarr) and TV (sonarr).
+  const instanceOptions = instances ?? [];
+  const [pickedInstance, setPickedInstance] = useState<string | null>(null);
+  const instance =
+    pickedInstance !== null && instanceOptions.some((i) => i.slug === pickedInstance)
+      ? pickedInstance
+      : instanceOptions[0]?.slug ?? "";
   const [releases, setReleases] = useState<ArrRelease[]>([]);
   const [selectedGuid, setSelectedGuid] = useState<string | null>(null);
   const [grabOk, setGrabOk] = useState(false);
@@ -207,7 +217,7 @@ export function IssueActions({
   }
 
   async function switchInstance(next: string) {
-    setInstance(next);
+    setPickedInstance(next);
     await loadReleases(next);
   }
 

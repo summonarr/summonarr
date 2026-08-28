@@ -10,7 +10,7 @@ const errors: string[] = [];
 console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
 
 const {
-  startFixMatchJob, getFixMatchJob, fixMatchJobKey, FixMatchError, _resetFixMatchJobsForTests,
+  startFixMatchJob, getFixMatchJob, findRunningFixMatchJob, fixMatchJobKey, FixMatchError, _resetFixMatchJobsForTests,
 } = await import("../src/lib/fix-match-jobs.ts");
 
 const settle = () => new Promise((r) => setTimeout(r, 5));
@@ -98,4 +98,30 @@ test("fixMatchJobKey identifies the remap by server, instance, type and the from
     fixMatchJobKey({ server: "jellyfin", serverInstance: "", mediaType: "TV", tmdbId: 1, correctTmdbId: 2 }),
     "two servers holding the same title are two different remaps",
   );
+});
+
+test("the concurrent-running cap refuses admission beyond MAX_RUNNING_JOBS with a 429", async () => {
+  const never = () => new Promise<never>(() => {});
+  // Four distinct keys start and stay running.
+  for (let i = 0; i < 4; i++) startFixMatchJob(`run-${i}`, never);
+  // The fifth distinct key is refused — parallel metadata refreshes are how
+  // these calls start timing out (guardrail 37).
+  let thrown: unknown = null;
+  try { startFixMatchJob("run-5", never); } catch (e) { thrown = e; }
+  assert.ok(thrown instanceof FixMatchError, "the cap throws a FixMatchError");
+  assert.equal((thrown as InstanceType<typeof FixMatchError>).status, 429);
+  // An already-running key is still JOINED, not counted as a new admission.
+  const joined = startFixMatchJob("run-0", never);
+  assert.equal(joined.status, "running");
+});
+
+test("findRunningFixMatchJob returns the running job for a key, null otherwise", async () => {
+  assert.equal(findRunningFixMatchJob("k"), null);
+  const job = startFixMatchJob("k", () => new Promise<never>(() => {}));
+  assert.equal(findRunningFixMatchJob("k")?.id, job.id);
+  // A finished key no longer counts as running.
+  const done = startFixMatchJob("kd", async () => ({ ok: true }));
+  await settle();
+  assert.equal(findRunningFixMatchJob("kd"), null, "a settled job is not 'running'");
+  void done;
 });

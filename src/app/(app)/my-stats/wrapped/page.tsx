@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { requireAppSession } from "@/lib/require-app-session";
 import { getMyWrapped } from "@/lib/my-watch-history";
-import { resolvePosterMap } from "@/lib/poster-cache";
+import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
 import { posterUrl } from "@/lib/tmdb-types";
 import { PageHeader } from "@/components/ui/design";
 import { WrappedView, type WrappedData } from "@/components/watch-history/wrapped-view";
@@ -34,8 +34,9 @@ export default async function WrappedPage({
     // snapshot for titles no longer cached (same as the dashboard).
     const posterItems = [...data.topTitles, ...(data.longestSitting ? [data.longestSitting] : [])];
     const posters = await resolvePosterMap(posterItems);
-    const src = (tmdbId: number | null, posterPath: string | null) =>
-      (tmdbId != null ? posters[tmdbId] : undefined) ?? (posterPath ? posterUrl(posterPath, "w342") : null);
+    const src = (tmdbId: number | null, mediaType: string | null, posterPath: string | null) =>
+      (tmdbId != null ? posters[posterPathKey(tmdbId, mediaType)] : undefined) ??
+      (posterPath ? posterUrl(posterPath, "w342") : null);
     view = {
       year,
       isCurrentYear: year === new Date().getUTCFullYear(),
@@ -48,7 +49,7 @@ export default async function WrappedPage({
         mediaType: t.mediaType,
         count: t.count,
         hours: t.hours,
-        posterSrc: src(t.tmdbId, t.posterPath),
+        posterSrc: src(t.tmdbId, t.mediaType, t.posterPath),
       })),
       biggestDay: data.biggestDay,
       busiestMonth: data.busiestMonth,
@@ -61,7 +62,11 @@ export default async function WrappedPage({
             mediaType: data.longestSitting.mediaType,
             seconds: data.longestSitting.seconds,
             startedAt: data.longestSitting.startedAt,
-            posterSrc: src(data.longestSitting.tmdbId, data.longestSitting.posterPath),
+            posterSrc: src(
+              data.longestSitting.tmdbId,
+              data.longestSitting.mediaType,
+              data.longestSitting.posterPath,
+            ),
           }
         : null,
       completion: data.completion,

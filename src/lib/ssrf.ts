@@ -175,6 +175,12 @@ export function isSafeAddrForAdmin(addr: string): boolean {
   if (/^fe[c-f][0-9a-f]:/i.test(addr)) return false;
   if (/^0\./.test(addr)) return false;
   if (isUnspecifiedV6(addr)) return false;
+  // Multicast and reserved/broadcast: no admin-configured server legitimately
+  // lives there, and a typo'd 239.x/255.255.255.255 URL would otherwise emit
+  // an HTTP request that reaches every device on the LAN segment.
+  if (/^(22[4-9]|23[0-9])\./.test(addr)) return false;
+  if (/^ff/i.test(addr)) return false;
+  if (/^(24[0-9]|25[0-5])\./.test(addr)) return false;
   return true;
 }
 
@@ -208,7 +214,11 @@ async function lookupHostCached(host: string, bypassCache = false): Promise<stri
   // which is what an uncached host already pays, and the OS resolver caches
   // NXDOMAIN itself so a genuinely-dead host is still cheap.
   if (addrs.length === 0) return addrs;
-  // Evict by insertion order (Map iteration is ordered) when the cache is full
+  // Evict by insertion order (Map iteration is ordered) when the cache is full.
+  // Map.set on an EXISTING key keeps its original position, so a refresh must
+  // delete-then-set or the hottest, constantly-refreshed host sits at the head
+  // and is the first evicted while one-shot hosts are retained.
+  dnsCache.delete(host);
   if (dnsCache.size >= DNS_CACHE_MAX) {
     const oldestKey = dnsCache.keys().next().value;
     if (oldestKey) dnsCache.delete(oldestKey);

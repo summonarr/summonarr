@@ -151,7 +151,9 @@ shadowPrismaClientMethod(prisma, "$executeRaw", async (strings: TemplateStringsA
   return casClaims;
 });
 shadowPrismaClientMethod(prisma, "$executeRawUnsafe", async (sql: string) => {
-  rec("$executeRawUnsafe", sql.replace(/\s+/g, " ").trim().slice(0, 60));
+  // Whole statement, not a prefix — the pins below read the UPDATE's WHERE
+  // clause and check for a DELETE anywhere in it.
+  rec("$executeRawUnsafe", sql.replace(/\s+/g, " ").trim());
   return backfillUpdatedRows;
 });
 
@@ -582,6 +584,12 @@ test("the backfill UPDATE stays bounded to the rows that actually need clamping"
   await callBackfill(t, "?execute=true", JSON.stringify({ confirmAffectedRows: 7 }));
   const sql = opsOf("$executeRawUnsafe")[0].args as string;
   assert.match(sql, /UPDATE "PlayHistory" SET/);
+  assert.match(
+    sql,
+    /WHERE "playDuration" > EXTRACT\(EPOCH FROM \("stoppedAt" - "startedAt"\)\)::int/,
+    "the UPDATE must skip rows whose playDuration is already within wall-clock",
+  );
+  assert.match(sql, /AND "stoppedAt" > "startedAt"/, "the UPDATE must skip rows with no positive wall-clock span");
 });
 
 test("a successful backfill is audited and never 500s on a failing audit write (guardrail 26)", async () => {

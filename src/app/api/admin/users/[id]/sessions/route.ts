@@ -4,6 +4,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { revokeSessionById, revokeAllUserSessions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
+import { isIndefiniteDeadline } from "@/lib/session-lifetime";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
@@ -32,7 +33,12 @@ export const GET = withAdmin(async (
     },
   });
 
-  return NextResponse.json(sessions);
+  // `indefinite` is ADDITIVE (safe for the pinned iOS decoders — guardrail 6c):
+  // it lets clients label a never-expiring native session without hardcoding
+  // the sentinel date the raw expiresAt serializes to.
+  return NextResponse.json(
+    sessions.map((s) => ({ ...s, indefinite: isIndefiniteDeadline(s.expiresAt) }))
+  );
 });
 
 export const DELETE = withAdmin(async (

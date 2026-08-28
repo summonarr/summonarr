@@ -24,7 +24,9 @@ echo "Deduplicating PlayHistory before schema sync..."
 node --input-type=module <<'DEDUP_EOF'
 const { DATABASE_URL } = process.env;
 // Remove duplicate PlayHistory rows with the same (source, sourceSessionId),
-// keeping the highest id (latest write). Idempotent — safe to run every start.
+// keeping the most recently written one. Ordered by createdAt: `id` is a cuid2
+// (random letter + hash), so it is NOT time-sortable and only breaks ties
+// deterministically. Idempotent — safe to run every start.
 // Skips cleanly on a fresh DB where the table hasn't been created yet.
 //
 // Best-effort by design: this runs BEFORE `prisma db push`, so a schema change
@@ -65,7 +67,7 @@ try {
           SELECT id,
                  ROW_NUMBER() OVER (
                    PARTITION BY ${partition}
-                   ORDER BY id DESC
+                   ORDER BY "createdAt" DESC, id DESC
                  ) AS rn
           FROM "PlayHistory"
           WHERE "sourceSessionId" IS NOT NULL
@@ -402,8 +404,14 @@ _cron_int() {
 # Compute the next-run timestamp for a job: full interval on success, a short
 # retry window on failure so a transient outage doesn't skip the job for an
 # entire (possibly 24h) interval.
+#
+# $4 is the JOB'S OWN default and every caller must pass it (mirroring
+# _play_history_loop's `_cron_int "${PLAY_HISTORY_SYNC_INTERVAL:-5}" 5`). A
+# single hardcoded fallback here would substitute an hour for a set-but-invalid
+# value ("86400s", "1d", "086400"), so a daily job would silently reschedule
+# itself 24x/day while the "Cron started" banner still echoed the raw value.
 _cron_next() {
-  _exit="$1"; _now="$2"; _interval=$(_cron_int "$3" 3600)
+  _exit="$1"; _now="$2"; _interval=$(_cron_int "$3" "${4:-3600}")
   if [ "$_exit" -eq 0 ]; then
     echo $((_now + _interval))
   else
@@ -437,51 +445,51 @@ _cron_loop() {
     NOW=$(date +%s)
     if [ "$NOW" -ge "$SYNC_NEXT" ]; then
       _cron_sync "${SYNC_URL:-${CRON_BASE}/api/sync}" "sync" && rc=0 || rc=$?
-      SYNC_NEXT=$(_cron_next "$rc" "$NOW" "${SYNC_INTERVAL:-3600}")
+      SYNC_NEXT=$(_cron_next "$rc" "$NOW" "${SYNC_INTERVAL:-3600}" 3600)
     fi
     if [ "$NOW" -ge "$UPCOMING_NEXT" ]; then
       _cron_sync "${UPCOMING_SYNC_URL:-${CRON_BASE}/api/sync/upcoming}" "upcoming" && rc=0 || rc=$?
-      UPCOMING_NEXT=$(_cron_next "$rc" "$NOW" "${UPCOMING_SYNC_INTERVAL:-86400}")
+      UPCOMING_NEXT=$(_cron_next "$rc" "$NOW" "${UPCOMING_SYNC_INTERVAL:-86400}" 86400)
     fi
     if [ "$NOW" -ge "$RATINGS_NEXT" ]; then
       _cron_sync "${RATINGS_SYNC_URL:-${CRON_BASE}/api/sync/ratings}" "ratings" && rc=0 || rc=$?
-      RATINGS_NEXT=$(_cron_next "$rc" "$NOW" "${RATINGS_SYNC_INTERVAL:-86400}")
+      RATINGS_NEXT=$(_cron_next "$rc" "$NOW" "${RATINGS_SYNC_INTERVAL:-86400}" 86400)
     fi
     if [ "$NOW" -ge "$PURGE_SESSIONS_NEXT" ]; then
       _cron_sync "${PURGE_SESSIONS_URL:-${CRON_BASE}/api/cron/purge-auth-sessions}" "purge-sessions" && rc=0 || rc=$?
-      PURGE_SESSIONS_NEXT=$(_cron_next "$rc" "$NOW" "${PURGE_SESSIONS_INTERVAL:-86400}")
+      PURGE_SESSIONS_NEXT=$(_cron_next "$rc" "$NOW" "${PURGE_SESSIONS_INTERVAL:-86400}" 86400)
     fi
     if [ "$NOW" -ge "$LIST_CACHE_NEXT" ]; then
       _cron_sync "${LIST_CACHE_SYNC_URL:-${CRON_BASE}/api/cron/warm-list-cache}" "warm-list-cache" && rc=0 || rc=$?
-      LIST_CACHE_NEXT=$(_cron_next "$rc" "$NOW" "${LIST_CACHE_SYNC_INTERVAL:-21600}")
+      LIST_CACHE_NEXT=$(_cron_next "$rc" "$NOW" "${LIST_CACHE_SYNC_INTERVAL:-21600}" 21600)
     fi
     if [ "$NOW" -ge "$WARM_ACTIVITY_NEXT" ]; then
       _cron_sync "${WARM_ACTIVITY_URL:-${CRON_BASE}/api/cron/warm-activity}" "warm-activity" quiet && rc=0 || rc=$?
-      WARM_ACTIVITY_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_ACTIVITY_INTERVAL:-1800}")
+      WARM_ACTIVITY_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_ACTIVITY_INTERVAL:-1800}" 1800)
     fi
     if [ "$NOW" -ge "$WARM_MDBLIST_NEXT" ]; then
       _cron_sync "${WARM_MDBLIST_URL:-${CRON_BASE}/api/cron/warm-mdblist}" "warm-mdblist" && rc=0 || rc=$?
-      WARM_MDBLIST_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_MDBLIST_INTERVAL:-86400}")
+      WARM_MDBLIST_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_MDBLIST_INTERVAL:-86400}" 86400)
     fi
     if [ "$NOW" -ge "$WARM_OMDB_NEXT" ]; then
       _cron_sync "${WARM_OMDB_URL:-${CRON_BASE}/api/cron/warm-omdb}" "warm-omdb" && rc=0 || rc=$?
-      WARM_OMDB_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_OMDB_INTERVAL:-86400}")
+      WARM_OMDB_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_OMDB_INTERVAL:-86400}" 86400)
     fi
     if [ "$NOW" -ge "$WARM_RECOMMENDATIONS_NEXT" ]; then
       _cron_sync "${WARM_RECOMMENDATIONS_URL:-${CRON_BASE}/api/cron/warm-recommendations}" "warm-recommendations" && rc=0 || rc=$?
-      WARM_RECOMMENDATIONS_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_RECOMMENDATIONS_INTERVAL:-43200}")
+      WARM_RECOMMENDATIONS_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_RECOMMENDATIONS_INTERVAL:-43200}" 43200)
     fi
     if [ "$NOW" -ge "$WARM_LIBRARY_NEXT" ]; then
       _cron_sync "${WARM_LIBRARY_URL:-${CRON_BASE}/api/cron/warm-library}" "warm-library" && rc=0 || rc=$?
-      WARM_LIBRARY_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_LIBRARY_INTERVAL:-86400}")
+      WARM_LIBRARY_NEXT=$(_cron_next "$rc" "$NOW" "${WARM_LIBRARY_INTERVAL:-86400}" 86400)
     fi
     if [ "$NOW" -ge "$SCRUB_AUDIT_PII_NEXT" ]; then
       _cron_sync "${SCRUB_AUDIT_PII_URL:-${CRON_BASE}/api/cron/scrub-audit-pii}" "scrub-audit-pii" quiet && rc=0 || rc=$?
-      SCRUB_AUDIT_PII_NEXT=$(_cron_next "$rc" "$NOW" "${SCRUB_AUDIT_PII_INTERVAL:-86400}")
+      SCRUB_AUDIT_PII_NEXT=$(_cron_next "$rc" "$NOW" "${SCRUB_AUDIT_PII_INTERVAL:-86400}" 86400)
     fi
     if [ "$NOW" -ge "$TRASH_SYNC_NEXT" ]; then
       _cron_sync "${TRASH_SYNC_URL:-${CRON_BASE}/api/cron/trash-sync}" "trash-sync" && rc=0 || rc=$?
-      TRASH_SYNC_NEXT=$(_cron_next "$rc" "$NOW" "${TRASH_SYNC_INTERVAL:-86400}")
+      TRASH_SYNC_NEXT=$(_cron_next "$rc" "$NOW" "${TRASH_SYNC_INTERVAL:-86400}" 86400)
     fi
   done
 }

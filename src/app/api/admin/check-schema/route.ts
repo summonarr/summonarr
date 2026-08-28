@@ -3,16 +3,24 @@ import { withAdmin } from "@/lib/api-auth";
 import { isCronAuthorized } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
 
+// Tracks the columns whose ABSENCE means a `db push` was skipped or refused —
+// in particular the multi-instance identity columns (guardrails 32/35), which
+// sit inside @@id/@@unique keys, so every scoped write fails at runtime when
+// they are missing while a pre-instance column list would still report allOk.
 const EXPECTED: Record<string, string[]> = {
-  User:                ["id","name","email","passwordHash","role","permissions","mediaServer","discordId","autoApprove","quotaExempt"],
-  PlexLibraryItem:     ["tmdbId","mediaType","filePath","plexRatingKey","title","year","overview"],
-  JellyfinLibraryItem: ["tmdbId","mediaType","filePath","jellyfinItemId","jellyfinItemIds","title","year","overview"],
+  User:                ["id","name","email","passwordHash","role","permissions","mediaServer","discordId","autoApprove","quotaExempt","deactivatedAt","purgedAt"],
+  PlexLibraryItem:     ["tmdbId","mediaType","serverInstance","filePath","plexRatingKey","title","year","overview"],
+  JellyfinLibraryItem: ["tmdbId","mediaType","serverInstance","filePath","jellyfinItemId","jellyfinItemIds","title","year","overview"],
   TVEpisodeCache:      ["source","tmdbId","seasonNumber","episodeNumber"],
-  PlayHistory:         ["id","source","tmdbId","mediaType","title","year","posterPath","startedAt","watched"],
-  MediaRequest:        ["id","tmdbId","mediaType","title","posterPath","status","requestedBy"],
+  PlayHistory:         ["id","source","serverInstance","tmdbId","mediaType","title","year","posterPath","startedAt","watched"],
+  MediaRequest:        ["id","tmdbId","mediaType","arrInstance","title","posterPath","status","requestedBy"],
   TmdbCache:           ["key","data","expiresAt"],
-  ActiveSession:       ["id","source","tmdbId","title"],
-  MediaServerUser:     ["id","source","sourceUserId","username"],
+  ActiveSession:       ["id","source","serverInstance","tmdbId","title"],
+  MediaServerUser:     ["id","source","serverInstance","sourceUserId","username"],
+  RadarrWantedItem:    ["tmdbId","arrInstance"],
+  SonarrWantedItem:    ["tmdbId","arrInstance"],
+  RadarrAvailableItem: ["tmdbId","arrInstance"],
+  SonarrAvailableItem: ["tmdbId","arrInstance"],
 };
 
 // Requires both an admin session (withAdmin) AND a cron bearer token to

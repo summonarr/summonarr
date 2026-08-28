@@ -17,7 +17,7 @@ import { getPlexConfig } from "@/lib/plex-config";
 import { buildSeriesItemIdIndex, libraryItemIds, getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { getMediaInstances, getSyncableMediaInstances } from "@/lib/media-instance-registry";
-import { type MediaInstanceKey, plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
+import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
 import { syncDownloadPolicies } from "@/lib/download-policy";
 import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDownloadPending } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
@@ -25,7 +25,7 @@ import { logAudit } from "@/lib/audit";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 import { isFeatureEnabled } from "@/lib/features";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
-import { claimAvailableNotificationWinners, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
+import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
 import { getArrInstances, getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
@@ -97,6 +97,33 @@ const addPresence = (m: Map<number, Set<string>>, tmdbId: number, slug: string):
   const existing = m.get(tmdbId);
   if (existing) existing.add(slug);
   else m.set(tmdbId, new Set([slug]));
+};
+
+// Inverse of addPresence, for ids the ratingKey dedupe dropped from an
+// instance's written rows: remove that instance's contribution and, when no
+// other instance still holds the id, the union entry itself. Without this the
+// marking pass reads ids the written rows don't contain — flipping requests
+// AVAILABLE (and notifying) for titles every badge reader calls missing, and
+// permanently so, since conflations are stable properties of the library.
+const removePresence = <V>(
+  slugs: Map<number, Set<string>>,
+  ids: Map<number, V>,
+  tmdbId: number,
+  slug: string,
+): void => {
+  const holders = slugs.get(tmdbId);
+  holders?.delete(slug);
+  if (!holders || holders.size === 0) {
+    slugs.delete(tmdbId);
+    ids.delete(tmdbId);
+  }
+};
+
+// tmdbIds present in `input` but absent from `kept` (both carry one row per tmdbId).
+const droppedTmdbIds = <T extends { tmdbId: number }>(input: T[], kept: T[]): number[] => {
+  if (kept.length === input.length) return [];
+  const keptSet = new Set(kept.map((r) => r.tmdbId));
+  return input.filter((r) => !keptSet.has(r.tmdbId)).map((r) => r.tmdbId);
 };
 
 export async function POST(request: NextRequest) {
@@ -245,22 +272,26 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     // rows this statement actually flipped (notifiedAvailable false→true) come
     // back, so a row a concurrent sync/webhook claimed between a read and the
     // update is never double-notified. Mirrors the per-source plex/jellyfin paths.
-    const winners = arrUnpinned.length > 0
-      ? await claimAvailableNotificationWinners(arrUnpinned, { markAvailable: true })
-      : [];
-    const winnerIds = new Set(winners.map((w) => w.id));
-    for (const req of winners) {
+    // `claimed` is every row the CAS flipped; `deliverable` drops the ones whose
+    // requester is disabled. Only the notification payload keys off the latter —
+    // every consequence of the TRANSITION keys off `claimed`, because a disabled
+    // requester's row still went AVAILABLE and its claim is already burned.
+    const { claimed, deliverable } = arrUnpinned.length > 0
+      ? await claimAvailableNotifications(arrUnpinned, { markAvailable: true })
+      : { claimed: [], deliverable: [] };
+    const claimedIds = new Set(claimed.map((w) => w.id));
+    for (const req of deliverable) {
       arrNotify.push({ id: req.id, requestedBy: req.requestedBy, title: req.title, mediaType: req.mediaType, tmdbId: req.tmdbId, posterPath: req.posterPath });
     }
     // An ARR-driven re-add is an AVAILABLE transition: wipe stale deletion votes and the
     // per-item notify gate so a fresh round can re-arm (mirrors the library-marking path).
-    if (winners.length > 0) {
-      void clearDeletionVotesForTmdbs(winners.map((w) => ({ tmdbId: w.tmdbId, mediaType: w.mediaType as "MOVIE" | "TV" })));
+    if (claimed.length > 0) {
+      void clearDeletionVotesForTmdbs(claimed.map((w) => ({ tmdbId: w.tmdbId, mediaType: w.mediaType as "MOVIE" | "TV" })));
     }
-    if (winnerIds.size > 0) {
+    if (claimedIds.size > 0) {
       // The helper sets status/availableAt/notifiedAvailable but not pendingNotifyAt.
       await prisma.mediaRequest.updateMany({
-        where: { id: { in: [...winnerIds] } },
+        where: { id: { in: [...claimedIds] } },
         data: { pendingNotifyAt: null },
       });
     }
@@ -269,7 +300,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
     // stable row's availableAt isn't rewritten on every tick.
     // Keep the whole rows, not just ids: an AVAILABLE transition must also wipe
     // stale deletion votes, and that needs tmdbId/mediaType.
-    const catchupRows = arrUnpinned.filter((r) => !winnerIds.has(r.id));
+    const catchupRows = arrUnpinned.filter((r) => !claimedIds.has(r.id));
     const catchupIds = catchupRows.map((r) => r.id);
     if (catchupIds.length > 0) {
       const flipped = await prisma.mediaRequest.updateMany({
@@ -511,21 +542,23 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       const secondMediaServer = new Map(secondUserRows.map((u) => [u.id, u.mediaServer]));
       const secondUnpinned = nowAvailableSecond.filter((r) => !(secondMediaServer.get(r.requestedBy) ?? null));
 
-      const winners = secondUnpinned.length > 0
-        ? await claimAvailableNotificationWinners(secondUnpinned, { markAvailable: true })
-        : [];
-      if (winners.length > 0) {
+      const { claimed, deliverable } = secondUnpinned.length > 0
+        ? await claimAvailableNotifications(secondUnpinned, { markAvailable: true })
+        : { claimed: [], deliverable: [] };
+      if (claimed.length > 0) {
         await prisma.mediaRequest.updateMany({
-          where: { id: { in: winners.map((w) => w.id) } },
+          where: { id: { in: claimed.map((w) => w.id) } },
           data: { pendingNotifyAt: null },
         });
-        void clearDeletionVotesForTmdbs(winners.map((w) => ({ tmdbId: w.tmdbId, mediaType: w.mediaType as "MOVIE" | "TV" })));
-        const secondNotify = winners.map((w) => ({ id: w.id, requestedBy: w.requestedBy, title: w.title, mediaType: w.mediaType, tmdbId: w.tmdbId, posterPath: w.posterPath }));
+        void clearDeletionVotesForTmdbs(claimed.map((w) => ({ tmdbId: w.tmdbId, mediaType: w.mediaType as "MOVIE" | "TV" })));
+        marked += claimed.length;
+      }
+      if (deliverable.length > 0) {
+        const secondNotify = deliverable.map((w) => ({ id: w.id, requestedBy: w.requestedBy, title: w.title, mediaType: w.mediaType, tmdbId: w.tmdbId, posterPath: w.posterPath }));
         notifyUsersRequestsAvailable(secondNotify).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
         notifyUsersRequestsAvailablePush(secondNotify).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
         void notifyUsersRequestsAvailableEmail(secondNotify, "sync");
         void writeAvailableInAppNotifications(secondNotify, "sync");
-        marked += winners.length;
       }
     }
   }
@@ -820,13 +853,24 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
             writable.map(async ({ slug, movieIds, tvIds }) => {
               const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, serverInstance: slug, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
               const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, serverInstance: slug, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
+              const finalMovieRows = await deduplicatePlexRowsByRatingKey(movieRows, "MOVIE", slug);
+              const finalTvRows    = await deduplicatePlexRowsByRatingKey(tvRows, "TV", slug);
               return {
                 slug,
-                finalMovieRows: await deduplicatePlexRowsByRatingKey(movieRows, "MOVIE", slug),
-                finalTvRows:    await deduplicatePlexRowsByRatingKey(tvRows, "TV", slug),
+                finalMovieRows,
+                finalTvRows,
+                droppedMovieIds: droppedTmdbIds(movieRows, finalMovieRows),
+                droppedTvIds:    droppedTmdbIds(tvRows, finalTvRows),
               };
             }),
           );
+          // The union above was filled from the RAW fetch maps; reconcile it with
+          // what dedupe actually kept, so the marking pass can never announce an
+          // id that has no library row.
+          for (const { slug, droppedMovieIds, droppedTvIds } of rowsByInstance) {
+            for (const tmdbId of droppedMovieIds) removePresence(plexMovieSlugs, plexMovieIds, tmdbId, slug);
+            for (const tmdbId of droppedTvIds)    removePresence(plexTvSlugs,    plexTvIds,    tmdbId, slug);
+          }
           // Advisory lock 2001,1 — matches /api/sync/plex so the two callers can't race the
           // same write. Per-instance scoped delete (mirrors the Jellyfin arm below) so one
           // instance's rewrite never touches another's rows; only instances whose fetch
@@ -1181,10 +1225,19 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   // configured: it holds no rows, so absence IS provable. Veto only on a missing slug
   // that ACTUALLY still holds rows. The existence probe is gated behind both cheap
   // terms, so the common single-server path issues no extra query.
+  // The synthesized default ("") is EXCLUDED from the missing set. It can never
+  // be de-registered (guardrail 35), so the only way it is registered-but-not-
+  // syncable is that its connection was blanked — after which its surviving
+  // library rows are stale ORPHANS, not the deliberately-preserved data of a
+  // de-registered NAMED instance. Left in, a deployment that moved entirely to a
+  // named server and cleared the default would keep matching its old default
+  // rows here and veto EVERY demote forever, with no admin action able to clear
+  // the state (nothing re-syncs the blanked default). Absence from a blanked
+  // default is provable; only a missing NAMED slug that still holds rows vetoes.
   const syncablePlexSlugs = new Set(plexInstances.map((i) => i.slug));
-  const missingPlex = registeredPlex.filter((i) => !syncablePlexSlugs.has(i.slug)).map((i) => i.slug);
+  const missingPlex = registeredPlex.filter((i) => i.slug !== DEFAULT_MEDIA_INSTANCE && !syncablePlexSlugs.has(i.slug)).map((i) => i.slug);
   const syncableJellyfinSlugs = new Set(jellyfinInstances.map((i) => i.slug));
-  const missingJellyfin = registeredJellyfin.filter((i) => !syncableJellyfinSlugs.has(i.slug)).map((i) => i.slug);
+  const missingJellyfin = registeredJellyfin.filter((i) => i.slug !== DEFAULT_MEDIA_INSTANCE && !syncableJellyfinSlugs.has(i.slug)).map((i) => i.slug);
   const plexUnionIncomplete =
     plexInstances.length > 0 && missingPlex.length > 0 &&
     !!(await prisma.plexLibraryItem.findFirst({ where: { serverInstance: { in: missingPlex } }, select: { tmdbId: true } }));
@@ -1457,13 +1510,22 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       });
 
       if (toNotify.length > 0) {
-        const winners = await claimAvailableNotificationWinners(toNotify, { markAvailable: true });
-        if (winners.length > 0) {
-          void clearDeletionVotesForTmdbs(winners);
-          notifyUsersRequestsAvailable(winners).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
-          notifyUsersRequestsAvailablePush(winners).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
-          void notifyUsersRequestsAvailableEmail(winners, "sync");
-          void writeAvailableInAppNotifications(winners, "sync");
+        const { claimed, deliverable } = await claimAvailableNotifications(toNotify, { markAvailable: true });
+        if (claimed.length > 0) {
+          // The claim helper sets status/availableAt/notifiedAvailable but not
+          // pendingNotifyAt — disarm the 90s "still pending" backstop on the
+          // same transition (mirrors the ARR pass's post-claim clear).
+          await prisma.mediaRequest.updateMany({
+            where: { id: { in: claimed.map((w) => w.id) } },
+            data: { pendingNotifyAt: null },
+          });
+          void clearDeletionVotesForTmdbs(claimed);
+        }
+        if (deliverable.length > 0) {
+          notifyUsersRequestsAvailable(deliverable).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
+          notifyUsersRequestsAvailablePush(deliverable).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
+          void notifyUsersRequestsAvailableEmail(deliverable, "sync");
+          void writeAvailableInAppNotifications(deliverable, "sync");
         }
       }
       if (toMarkOnly.length > 0) {
@@ -1472,7 +1534,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
         // DECLINED after this run's snapshot (AVAILABLE is terminal — unfixable).
         const flipped = await prisma.mediaRequest.updateMany({
           where: { id: { in: toMarkOnly.map((r) => r.id) }, status: { in: ["PENDING", "APPROVED"] } },
-          data: { status: "AVAILABLE", availableAt: new Date() },
+          data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
         });
         if (flipped.count > 0) void clearDeletionVotesForTmdbs(toMarkOnly);
       }
@@ -1484,7 +1546,7 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       // DECLINED after this run's snapshot (AVAILABLE is terminal — unfixable).
       const flipped = await prisma.mediaRequest.updateMany({
         where: { id: { in: alreadyNotified.map((r) => r.id) }, status: { in: ["PENDING", "APPROVED"] } },
-        data: { status: "AVAILABLE", availableAt: new Date() },
+        data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
       });
       if (flipped.count > 0) void clearDeletionVotesForTmdbs(alreadyNotified);
     }
@@ -1611,16 +1673,18 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
       // false→true) come back, so a row a concurrent path claimed between a read
       // and the update is never re-notified. requireStatusAvailable preserves the
       // original "only notify rows already marked AVAILABLE" guard.
-      const winners = await claimAvailableNotificationWinners(toNotify, { requireStatusAvailable: true });
-      if (winners.length > 0) {
+      const { claimed, deliverable } = await claimAvailableNotifications(toNotify, { requireStatusAvailable: true });
+      if (claimed.length > 0) {
         // Backstop wipe: the original AVAILABLE transition (per-source mark pass,
         // webhooks) should have wiped already, but a regression there is silent
         // until threshold notifications fire on stale votes — wipe again here.
-        void clearDeletionVotesForTmdbs(winners);
-        notifyUsersRequestsAvailable(winners).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
-        notifyUsersRequestsAvailablePush(winners).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
-        void notifyUsersRequestsAvailableEmail(winners, "sync");
-        void writeAvailableInAppNotifications(winners, "sync");
+        void clearDeletionVotesForTmdbs(claimed);
+      }
+      if (deliverable.length > 0) {
+        notifyUsersRequestsAvailable(deliverable).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
+        notifyUsersRequestsAvailablePush(deliverable).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
+        void notifyUsersRequestsAvailableEmail(deliverable, "sync");
+        void writeAvailableInAppNotifications(deliverable, "sync");
       }
     }
   }

@@ -10,6 +10,8 @@ import {
   recordFailure,
   refundHit,
   getClientIp,
+  getClientIpKey,
+  ipBucketKey,
 } from "../src/lib/rate-limit.ts";
 
 // Run `fn` with the given env vars set (undefined = deleted), restoring the
@@ -301,4 +303,48 @@ test("refundHit on an unknown or empty key is a no-op, never a negative count", 
   refundHit(key); // extra refund must not create headroom beyond a fresh bucket
   assert.ok(checkRateLimit(key, 1, 60_000));
   assert.equal(checkRateLimit(key, 1, 60_000), false);
+});
+
+// ── IPv6 /64 bucketing (getClientIpKey / ipBucketKey) ────────────────────────
+// An IPv6 delegation is typically a /64 — 2^64 addresses one holder may freely
+// choose. Keying limiter buckets on the full address let that holder mint a
+// fresh empty bucket per request and rotate past every IP-keyed limit, so the
+// bucket key collapses to the /64 prefix while IPv4 keeps its full address.
+
+test("ipBucketKey collapses a full IPv6 /64 to one prefixed bucket", () => {
+  const a = ipBucketKey("2001:db8:abcd:1234::1");
+  const b = ipBucketKey("2001:db8:abcd:1234:ffff:ffff:ffff:fffe");
+  assert.equal(a, b, "two hosts in the same /64 share a bucket");
+  assert.equal(a, "v6:2001:0db8:abcd:1234", "keyed on the canonical /64 prefix");
+});
+
+test("ipBucketKey separates different IPv6 /64s", () => {
+  assert.notEqual(
+    ipBucketKey("2001:db8:abcd:1234::1"),
+    ipBucketKey("2001:db8:abcd:5678::1"),
+    "a different /64 is a different bucket",
+  );
+});
+
+test("ipBucketKey keeps IPv4 and the unknown UA bucket keyed in full", () => {
+  assert.equal(ipBucketKey("203.0.113.7"), "203.0.113.7");
+  assert.equal(ipBucketKey("unknown:deadbeefcafe"), "unknown:deadbeefcafe");
+});
+
+test("ipBucketKey keys a v4-mapped IPv6 literal on the embedded IPv4", () => {
+  // ::ffff:203.0.113.7 is really an IPv4 client — collapsing it to an all-zero
+  // /64 would make every mapped-v4 client share one bucket.
+  assert.equal(ipBucketKey("::ffff:203.0.113.7"), "203.0.113.7");
+});
+
+test("ipBucketKey strips an IPv6 zone index before prefixing", () => {
+  assert.equal(ipBucketKey("fe80::1%eth0"), ipBucketKey("fe80::2%eth0"));
+});
+
+test("getClientIpKey buckets the trusted forwarded IPv6 by /64", () => {
+  withEnv({ TRUST_PROXY: "true", TRUSTED_PROXY_HOPS: "1" }, () => {
+    const k1 = getClientIpKey(new Headers({ "x-forwarded-for": "2001:db8:abcd:1234::1" }));
+    const k2 = getClientIpKey(new Headers({ "x-forwarded-for": "2001:db8:abcd:1234::99" }));
+    assert.equal(k1, k2, "rotating the low 64 bits cannot mint a fresh limiter bucket");
+  });
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Tv2 } from "@/components/icons";
@@ -18,8 +18,14 @@ export function SyncTVEpisodesButton() {
   const searchParams = useSearchParams();
   const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [result, setResult] = useState<string | null>(null);
+  // The end-of-run reset has to be cancellable: a prior run's timer landing mid-run
+  // clears "Syncing Episodes…" and re-enables the button while the walk across
+  // every server is still going, inviting a second whole-table rebuild.
+  const resetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(resetTimer.current), []);
 
   async function handleSync() {
+    clearTimeout(resetTimer.current);
     setStatus("loading");
     setResult(null);
     try {
@@ -49,7 +55,8 @@ export function SyncTVEpisodesButton() {
       setStatus("error");
       setResult("Sync failed");
     }
-    setTimeout(() => { setStatus("idle"); setResult(null); }, 10_000);
+    clearTimeout(resetTimer.current);
+    resetTimer.current = setTimeout(() => { setStatus("idle"); setResult(null); }, 10_000);
   }
 
   return (

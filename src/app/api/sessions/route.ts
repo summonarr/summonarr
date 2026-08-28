@@ -6,6 +6,7 @@ import { revokeSessionById } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { isIndefiniteDeadline } from "@/lib/session-lifetime";
 
 export const GET = withAuth(async (_req, _ctx, session) => {
   const sessions = await prisma.authSession.findMany({
@@ -25,10 +26,14 @@ export const GET = withAuth(async (_req, _ctx, session) => {
 
   const currentSessionId = session.sessionId;
 
+  // `indefinite` is ADDITIVE (safe for the pinned iOS decoders — guardrail 6c):
+  // it lets clients label a never-expiring native session without hardcoding
+  // the sentinel date the raw expiresAt serializes to.
   return NextResponse.json(
     sessions.map((s) => ({
       ...s,
       isCurrent: s.sessionId === currentSessionId,
+      indefinite: isIndefiniteDeadline(s.expiresAt),
     }))
   );
 });

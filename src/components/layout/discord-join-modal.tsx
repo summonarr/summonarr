@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { X, ExternalLink } from "@/components/icons";
+import { safeExternalHref } from "@/lib/safe-url";
 
 interface DiscordJoinModalProps {
   inviteUrl: string;
@@ -11,7 +12,8 @@ interface DiscordJoinModalProps {
 export function DiscordJoinModal({ inviteUrl }: DiscordJoinModalProps) {
   const [dismissed, setDismissed] = useState(false);
 
-  if (dismissed) return null;
+  const href = safeExternalHref(inviteUrl);
+  if (dismissed || !href) return null;
 
   return (
     <div className="flex items-center gap-3 bg-indigo-600 px-4 py-2.5 text-sm text-white">
@@ -23,7 +25,7 @@ export function DiscordJoinModal({ inviteUrl }: DiscordJoinModalProps) {
         .
       </span>
       <a
-        href={inviteUrl}
+        href={href}
         target="_blank"
         rel="noopener noreferrer"
         className="shrink-0 inline-flex items-center gap-1 font-medium underline underline-offset-2 hover:text-indigo-200 whitespace-nowrap"

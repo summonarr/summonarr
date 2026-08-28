@@ -15,8 +15,18 @@ export function NavigationProgress() {
   const [width, setWidth] = useState(0);
   const [visible, setVisible] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Holds the complete/hide timeouts scheduled by the URL-change effect so a
+  // NEW pushState can cancel them. They used to be effect-local consts the
+  // pushState patch could never reach, so a stale hide-timeout from the
+  // previous navigation would fire mid-way through the next one and blank the
+  // bar until yet another navigation.
+  const completionTimeouts = useRef<ReturnType<typeof setTimeout>[]>([]);
   const prevPathname = useRef(pathname);
+
+  const clearCompletionTimeouts = () => {
+    for (const id of completionTimeouts.current) clearTimeout(id);
+    completionTimeouts.current = [];
+  };
 
   useEffect(() => {
     // Monkey-patch history.pushState because Next.js App Router doesn't expose navigation start events
@@ -24,7 +34,7 @@ export function NavigationProgress() {
 
     window.history.pushState = function (...args: Parameters<typeof window.history.pushState>) {
       if (intervalRef.current) clearInterval(intervalRef.current);
-      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      clearCompletionTimeouts();
 
       setVisible(true);
       setWidth(0);
@@ -61,6 +71,7 @@ export function NavigationProgress() {
       setVisible(false);
       setWidth(0);
     }, 300);
+    completionTimeouts.current = [completeId, hideId];
 
     return () => {
       clearTimeout(completeId);

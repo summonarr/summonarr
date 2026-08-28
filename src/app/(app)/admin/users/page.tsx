@@ -19,7 +19,7 @@ export default async function UsersPage() {
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_USERS)) redirect("/");
 
-  const [users, localAuthRows, serverUsers, autoDisableRow, radarr4kConfigured, sonarr4kConfigured] = await Promise.all([
+  const [users, localAuthRows, oidcAccountRows, serverUsers, autoDisableRow, radarr4kConfigured, sonarr4kConfigured] = await Promise.all([
     prisma.user.findMany({
       select: {
         id: true,
@@ -58,6 +58,14 @@ export default async function UsersPage() {
       where: { passwordHash: { not: null } },
       select: { id: true },
     }),
+    // The only Account rows this app writes are the OIDC bindings (auth.ts) —
+    // Plex/Jellyfin pin their subject on the User row instead. Without this the
+    // ternary below reads every OIDC account (no passwordHash, IdP email) as
+    // "plex" and hides the server-access controls it actually needs.
+    prisma.account.findMany({
+      where: { provider: "oidc" },
+      select: { userId: true },
+    }),
     prisma.mediaServerUser.findMany({
       // Active users, PLUS departed (soft-deleted) ones that still hold play
       // history. A departed row's history outlives their removal from the server
@@ -89,6 +97,7 @@ export default async function UsersPage() {
     isArrConfigured("sonarr", "4k"),
   ]);
   const localAuthIds = new Set(localAuthRows.map((r) => r.id));
+  const oidcAuthIds = new Set(oidcAccountRows.map((r) => r.userId));
 
   const hasPlex = serverUsers.some((u) => u.source === "plex");
   const hasJellyfin = serverUsers.some((u) => u.source === "jellyfin");
@@ -175,6 +184,8 @@ export default async function UsersPage() {
             maxContentRating: u.maxContentRating,
             source: localAuthIds.has(u.id)
               ? "local"
+              : oidcAuthIds.has(u.id)
+              ? "oidc"
               : u.email.endsWith("@jellyfin.local")
               ? "jellyfin"
               : "plex",

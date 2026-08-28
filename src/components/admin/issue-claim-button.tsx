@@ -27,12 +27,22 @@ export function IssueClaimButton({ issueId, claimedBy, claimerName, currentUserI
     setError(null);
     setConfirmingTakeover(false);
     try {
-      const res = await fetch(withBasePath(`/api/issues/${issueId}/claim`), { method: "POST" });
+      // The claim state these props were rendered from. The server refuses the
+      // toggle when the row has moved on, so a Claim clicked on stale props can
+      // no longer take another admin's claim over without the confirmation.
+      const res = await fetch(withBasePath(`/api/issues/${issueId}/claim`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ expectedClaimedBy: claimedBy }),
+      });
       if (!res.ok) {
         // `message` first — a claim CAS miss answers { error: "claim-conflict",
         // message: "<who claimed it>" }, and showing the slug hid the useful half.
         const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
         setError(data.message ?? data.error ?? "Failed");
+        // 409 means these props are stale: pull the real state so the button
+        // re-renders as "Take over from <name>" instead of "Claim".
+        if (res.status === 409) router.refresh();
         return;
       }
       router.refresh();

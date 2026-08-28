@@ -169,15 +169,17 @@ export function ActivityStatsRedesign({
     (s, r) => s + r.count,
     0,
   );
+  // transcodeRatio spans every session; stats.totalPlays counts watched rows
+  // only (play-history.ts's `wwhere` split), so the two are different
+  // populations and the stream-method shares divide by the session total.
+  const sessionTotal = stats.transcodeRatio.reduce((s, r) => s + r.count, 0);
   const transcodePct =
-    stats.totalPlays > 0
-      ? Math.round(
-          ((streamTypes[2]?.count ?? 0) / stats.totalPlays) * 100,
-        )
+    sessionTotal > 0
+      ? Math.round(((streamTypes[2]?.count ?? 0) / sessionTotal) * 100)
       : 0;
   const directPct =
-    stats.totalPlays > 0
-      ? Math.round(((streamTypes[0]?.count ?? 0) / stats.totalPlays) * 100)
+    sessionTotal > 0
+      ? Math.round(((streamTypes[0]?.count ?? 0) / sessionTotal) * 100)
       : 0;
   const topReason = [...stats.transcodeReasons].sort(
     (a, b) => b.count - a.count,
@@ -210,10 +212,10 @@ export function ActivityStatsRedesign({
         <div className="resp-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           {trends.map((t) => {
             const peak = Math.max(...t.data, 0);
+            // GROUP BY day omits zero-activity days, so t.data.length counts
+            // ACTIVE days, not the window the header labels.
             const avg =
-              t.data.length > 0
-                ? t.data.reduce((s, v) => s + v, 0) / t.data.length
-                : 0;
+              days > 0 ? t.data.reduce((s, v) => s + v, 0) / days : 0;
             return (
               <ActivityCard key={t.label}>
                 <SectionHeader
@@ -432,7 +434,7 @@ export function ActivityStatsRedesign({
           <ActivityCard>
             <SectionHeader
               label="Why we're transcoding"
-              sub={`${transcodeTotal.toLocaleString("en-US")} transcoded sessions · ${transcodePct}% of plays`}
+              sub={`${transcodeTotal.toLocaleString("en-US")} transcoded sessions · ${transcodePct}% of sessions`}
             />
             <HorizontalBars
               items={stats.transcodeReasons.map((r) => ({

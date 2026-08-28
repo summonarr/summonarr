@@ -11,7 +11,7 @@ import {
   verifyOidcStateCookie,
 } from "@/lib/oidc";
 import { serializeSessionCookie } from "@/lib/session-cookie";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 import { safeInternalPath } from "@/lib/safe-url";
 
 function readStateCookie(req: NextRequest): string | null {
@@ -70,21 +70,31 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Server misconfigured: AUTH_URL is not set" }, { status: 500 });
   }
 
+  // Detected before the refusals below: a native flow's browser sheet cannot
+  // render the web login page usefully — an error must bounce to the app's
+  // custom scheme (nativeCallbackRedirect) or the sheet strands with nothing
+  // for the app to surface.
+  const returnedState = req.nextUrl.searchParams.get("state");
+  const isNativeFlow = isNativeOidcState(returnedState);
+
   // Throttle the callback like /start — each hit triggers an outbound IdP token
   // exchange and a DB user lookup/create even before the state cookie is checked.
-  if (!checkRateLimit(`oidc-callback:${getClientIp(req.headers)}`, 20, 5 * 60 * 1000)) {
-    return loginErrorRedirect(req, "rate_limited");
+  if (!checkRateLimit(`oidc-callback:${getClientIpKey(req.headers)}`, 20, 5 * 60 * 1000)) {
+    return isNativeFlow
+      ? nativeCallbackRedirect({ error: "rate_limited" })
+      : loginErrorRedirect(req, "rate_limited");
   }
 
   if (!isOidcConfigured()) {
-    return loginErrorRedirect(req, "oidc_not_configured");
+    return isNativeFlow
+      ? nativeCallbackRedirect({ error: "oidc_not_configured" })
+      : loginErrorRedirect(req, "oidc_not_configured");
   }
 
   // Native branch first: this request arrives in the app's web-auth view, which
   // never carries the flow cookie, so every cookie-based check below would
   // (correctly) fail. The state marker is the only signal available here.
-  const returnedState = req.nextUrl.searchParams.get("state");
-  if (isNativeOidcState(returnedState)) {
+  if (isNativeFlow) {
     const idpError = req.nextUrl.searchParams.get("error");
     if (idpError) return nativeCallbackRedirect({ error: idpError.slice(0, 64) });
     const code = req.nextUrl.searchParams.get("code");

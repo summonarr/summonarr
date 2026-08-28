@@ -1264,21 +1264,26 @@ test("download policy is read-modify-write: GET /Users/{id}, then POST the FULL 
   );
 });
 
-test("download policy failure contracts: a failed user read throws before any POST; a failed policy POST throws; a missing Policy still writes the flag", async () => {
+test("download policy failure contracts: a failed user read throws before any POST; a missing/empty Policy throws WITHOUT a destructive one-field POST", async () => {
   const B = nextBase();
   respond = () => okJson({}, 404);
   await assert.rejects(() => setJellyfinDownloadPolicy(B, "k", "ghost", true), /Jellyfin fetch user ghost: 404/);
   assert.equal(sent.length, 1, "a failed read must never be followed by a blind policy write");
 
+  // A real Jellyfin user ALWAYS has a Policy; an absent/empty one means the read
+  // was degraded (de-elevated key, truncating proxy). POST /Users/{id}/Policy
+  // replaces the WHOLE policy, so writing just { EnableContentDownloading }
+  // would reset IsAdministrator/EnabledFolders/every other bit to its C#
+  // default. The sibling test above pins exactly that danger — so an empty
+  // Policy must ABORT, never degrade to a one-field write.
   sent.length = 0;
   respond = (url) => {
     if (url.endsWith("/Policy")) return okJson({}, 400);
     return okJson({ Id: "u1" }); // user exists but exposes no Policy object
   };
-  await assert.rejects(() => setJellyfinDownloadPolicy(B, "k", "u1", true), /Jellyfin set policy u1: 400/);
-  assert.deepEqual(
-    JSON.parse(sent[1].body!),
-    { EnableContentDownloading: true },
-    "an absent Policy degrades to writing just the download flag",
+  await assert.rejects(
+    () => setJellyfinDownloadPolicy(B, "k", "u1", true),
+    /returned no Policy — refusing to overwrite/,
   );
+  assert.equal(sent.length, 1, "no Policy POST is attempted when the read exposed no policy");
 });

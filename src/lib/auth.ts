@@ -5,7 +5,7 @@ import { createHash, createHmac } from "crypto";
 import { getPlexUser, getPlexFriendEmails, pingPlexToken, type PlexServerMembers } from "@/lib/plex";
 import { authenticateWithJellyfin, authenticateWithJellyfinQuickConnect } from "@/lib/jellyfin";
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
-import { checkRateLimit, refundHit, getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit, refundHit, getClientIp, ipBucketKey } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { extractUaFingerprint, serializeFingerprint, fingerprintToLabel, matchesStoredFingerprint } from "@/lib/ua-fingerprint";
 import { signSessionJwt, type SessionClaims } from "@/lib/session-jwt";
@@ -361,7 +361,11 @@ export async function getSessionDurations(): Promise<SessionDurations> {
     where: { key: { in: ["sessionDefaultDuration", "sessionMobileDuration", "sessionMaxDuration"] } },
   });
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-  const cap = (n: number) => Math.min(n, MAX_ALLOWED_SESSION_SECONDS);
+  // Symmetric clamp: the settings route enforces [60, MAX] at write time, but a
+  // hand-edited row or a restored pre-clamp backup can carry 0/negative — which
+  // would mint a session already past its deadline and present as an
+  // instant-logout loop on every sign-in. Clamp reads the same way as writes.
+  const cap = (n: number) => Math.min(Math.max(n, 60), MAX_ALLOWED_SESSION_SECONDS);
   const value: SessionDurations = {
     desktopDuration: cap(parseInt(map.sessionDefaultDuration ?? "") || DEFAULT_SESSION_SECONDS),
     mobileDuration:  cap(parseInt(map.sessionMobileDuration  ?? "") || DEFAULT_MOBILE_SESSION_SECONDS),
@@ -661,7 +665,7 @@ export async function authorizeWithCredentials(
   // bucket is already per-UA, so the standard limit applies per bucket and no group
   // of users shares one counter. Don't reintroduce a widened limit here — that would
   // loosen the throttle without the shared-bucket problem it was written for.
-  const ipKey = `login-ip:${ip}`;
+  const ipKey = `login-ip:${ipBucketKey(ip)}`;
   const ipLimit = 20;
   const ipAllowed = checkRateLimit(ipKey, ipLimit, 5 * 60 * 1000);
   // RESERVE atomically rather than peek. peekRateLimit is synchronous but the verify
@@ -710,7 +714,7 @@ export async function authorizeWithPlex(
   const ip = getClientIp(headers);
   const ua = headers.get("user-agent")?.slice(0, 512) ?? null;
 
-  if (!checkRateLimit(`plex-ip:${ip}`, 20, 5 * 60 * 1000)) {
+  if (!checkRateLimit(`plex-ip:${ipBucketKey(ip)}`, 20, 5 * 60 * 1000)) {
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "rate_limited" } });
     return null;
   }
@@ -951,7 +955,7 @@ export async function authorizeWithJellyfin(
 
   // Deliberately NOT scoped by instance — an attacker's per-IP attempt budget
   // must not multiply with the number of configured Jellyfin servers.
-  if (!checkRateLimit(`jellyfin-ip:${ip}`, 10, 5 * 60 * 1000)) {
+  if (!checkRateLimit(`jellyfin-ip:${ipBucketKey(ip)}`, 10, 5 * 60 * 1000)) {
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin", details: { reason: "rate_limited" } });
     return null;
   }
@@ -1030,7 +1034,7 @@ export async function authorizeWithJellyfinQuickConnect(
   const ip = getClientIp(headers);
   const ua = headers.get("user-agent")?.slice(0, 512) ?? null;
   // Deliberately NOT scoped by instance — see authorizeWithJellyfin.
-  if (!checkRateLimit(`jellyfin-qc-ip:${ip}`, 10, 5 * 60 * 1000)) {
+  if (!checkRateLimit(`jellyfin-qc-ip:${ipBucketKey(ip)}`, 10, 5 * 60 * 1000)) {
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "jellyfin-quickconnect", details: { reason: "rate_limited" } });
     return null;
   }

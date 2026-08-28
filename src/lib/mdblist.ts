@@ -56,7 +56,7 @@ async function getApiKey(opts: { fresh?: boolean } = {}): Promise<string | null>
   if (!opts.fresh && apiKeyInflight) return apiKeyInflight;
   const p = (async () => {
     const row = await prisma.setting.findUnique({ where: { key: "mdblistApiKey" } });
-    const value = row?.value || null;
+    const value = row?.value.trim() || null;
     apiKeyCache = { value, at: Date.now() };
     return value;
   })();
@@ -553,10 +553,14 @@ export async function getMdblistTopLists(limit = 10): Promise<MdblistListMeta[]>
   });
 }
 
-export async function getMdblistListItems(
+// Fetches one list, distinguishing a genuine empty list (ok:true, items:[]) from
+// a FAILED fetch (ok:false). The aggregate below needs that split so it never
+// caches a partial union for 12h — the exact failure mode trakt.ts's `complete`
+// flag exists to prevent. The per-list cache row is still only written on
+// success, so a failure never poisons this list's own cache either.
+async function fetchMdblistListItemsWithStatus(
   listId: number,
-  mediaType?: "movie" | "tv",
-): Promise<TmdbMedia[]> {
+): Promise<{ items: TmdbMedia[]; ok: boolean }> {
   // ONE cache row per list, holding the unfiltered projection. The old
   // type-suffixed keys (`:movie`/`:tv`/`:all`) cached disjoint post-filter
   // copies, so the same upstream list was fetched once per requested type;
@@ -564,24 +568,24 @@ export async function getMdblistListItems(
   // dedups the concurrent movie+tv cold fan-out the /top page fires. Old
   // type-suffixed rows simply expire out.
   const key = `mdblist:list:${listId}`;
-  const all = await coalesce(key, async (): Promise<TmdbMedia[]> => {
+  return coalesce(key, async (): Promise<{ items: TmdbMedia[]; ok: boolean }> => {
   const cached = await getCache<TmdbMedia[]>(key);
-  if (cached?.length) return cached;
+  if (cached?.length) return { items: cached, ok: true };
 
   const apiKey = await getApiKey();
-  if (!apiKey) return [];
-  if (isMdblistQuotaLocked()) return [];
+  if (!apiKey) return { items: [], ok: false };
+  if (isMdblistQuotaLocked()) return { items: [], ok: false };
 
   try {
     const url = new URL(`${MDBLIST_REST_BASE}lists/${listId}/items`);
     url.searchParams.set("apikey", apiKey);
 
     const res = await safeFetchTrusted(url.toString(), { allowedHosts: MDBLIST_HOSTS, timeoutMs: MDBLIST_FETCH_TIMEOUT_MS });
-    if (res.status === 429) { tripQuotaLockout("HTTP 429 on list items"); return []; }
-    if (!res.ok) return [];
+    if (res.status === 429) { tripQuotaLockout("HTTP 429 on list items"); return { items: [], ok: false }; }
+    if (!res.ok) return { items: [], ok: false };
 
     const data = await res.json() as MdblistListItem[];
-    if (!Array.isArray(data)) return [];
+    if (!Array.isArray(data)) return { items: [], ok: false };
 
     // Dedup on type+id: movie and TV ids are independent TMDB namespaces, and
     // this projection is unfiltered, so a bare-id set would drop a legitimate
@@ -608,14 +612,22 @@ export async function getMdblistListItems(
       });
     }
 
+    // A genuinely-empty list is a SUCCESS (ok:true) — just nothing to cache.
     if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
-    return result;
+    return { items: result, ok: true };
   } catch (err) {
     console.error("[mdblist] Failed to fetch list items:", err);
-    return [];
+    return { items: [], ok: false };
   }
   });
-  return mediaType ? all.filter((m) => m.mediaType === mediaType) : all;
+}
+
+export async function getMdblistListItems(
+  listId: number,
+  mediaType?: "movie" | "tv",
+): Promise<TmdbMedia[]> {
+  const { items } = await fetchMdblistListItemsWithStatus(listId);
+  return mediaType ? items.filter((m) => m.mediaType === mediaType) : items;
 }
 
 export async function getMdblistTopRated(
@@ -633,14 +645,22 @@ export async function getMdblistTopRated(
   const lists = await getMdblistTopLists(maxLists);
   if (lists.length === 0) return [];
 
-  const allItems = await Promise.all(
-    lists.map((l) => getMdblistListItems(l.id, mediaType)),
+  const settled = await Promise.all(
+    lists.map((l) => fetchMdblistListItemsWithStatus(l.id)),
   );
+  // If ANY list failed (quota lockout, 429, transient error), the union is a
+  // partial picture — cache it and the 12h hard TTL would pin the truncated
+  // list, and the cache-first read (including the warm cron's own next run)
+  // could never repair it until it expired. Serve the partial this once, but
+  // don't cache it; the next call retries the failed lists. (trakt.ts's
+  // `complete` gate, applied to this fan-out.)
+  const allOk = settled.every((s) => s.ok);
 
   const seen = new Set<number>();
   const result: TmdbMedia[] = [];
-  for (const items of allItems) {
+  for (const { items } of settled) {
     for (const item of items) {
+      if (item.mediaType !== mediaType) continue;
       if (!seen.has(item.id)) {
         seen.add(item.id);
         result.push(item);
@@ -648,7 +668,7 @@ export async function getMdblistTopRated(
     }
   }
 
-  if (result.length > 0) await setCache(key, result, TTL.DISCOVER);
+  if (result.length > 0 && allOk) await setCache(key, result, TTL.DISCOVER);
   return result;
   });
 }

@@ -13,7 +13,7 @@ import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { batchCreateMany, BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { FixMatchError, fixMatchJobKey, startFixMatchJob, type FixMatchJobResult, type FixMatchReport } from "@/lib/fix-match-jobs";
+import { FixMatchError, findRunningFixMatchJob, fixMatchJobKey, startFixMatchJob, type FixMatchJobResult, type FixMatchReport } from "@/lib/fix-match-jobs";
 import {
   DEFAULT_MEDIA_INSTANCE,
   isValidMediaInstanceSlug,
@@ -901,8 +901,24 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
   // browser polls instead of holding the request. An identical job already
   // running is returned as-is, never started twice.
   if (body.async === true) {
-    const job = startFixMatchJob(fixMatchJobKey(input), (report) => runFixMatch(input, actor, { background: true, report }));
-    return NextResponse.json({ ok: true, jobId: job.id, status: job.status }, { status: 202 });
+    // Join detection before start (both synchronous, so atomic per request):
+    // `joined: true` tells the client its submission attached to an
+    // already-running identical remap — whose candidate selection may differ.
+    const key = fixMatchJobKey(input);
+    const existing = findRunningFixMatchJob(key);
+    if (existing) {
+      return NextResponse.json({ ok: true, jobId: existing.id, status: existing.status, joined: true }, { status: 202 });
+    }
+    try {
+      const job = startFixMatchJob(key, (report) => runFixMatch(input, actor, { background: true, report }));
+      return NextResponse.json({ ok: true, jobId: job.id, status: job.status }, { status: 202 });
+    } catch (err) {
+      // The registry's concurrent-running cap (429) — map like the sync branch.
+      if (err instanceof FixMatchError) {
+        return NextResponse.json({ error: err.message }, { status: err.status });
+      }
+      throw err;
+    }
   }
 
   try {

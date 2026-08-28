@@ -6,6 +6,7 @@ import { ChevronDown, ChevronRight, Loader2 } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { bitrateToKbps } from "@/lib/bitrate";
+import { formatDurationSeconds } from "@/lib/format-duration";
 import {
   ActivityCard,
   Avatar,
@@ -52,14 +53,6 @@ export interface RecentPlay {
   username: string;
   userSource: string;
   userThumb: string | null;
-}
-
-function formatDuration(seconds: number): string {
-  if (seconds <= 0) return "—";
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
 }
 
 // `source` is required: Plex reports kbps, Jellyfin bps, and the row is the
@@ -110,12 +103,12 @@ function DetailRow({ play }: { play: RecentPlay }) {
     ["Audio Codec", play.audioCodec?.toUpperCase() ?? "—"],
     [
       "Paused",
-      play.pausedDuration ? formatDuration(play.pausedDuration) : "—",
+      play.pausedDuration ? formatDurationSeconds(play.pausedDuration) : "—",
     ],
     ["Started", formatTimestamp(play.startedAt)],
     ["Stopped", formatTimestamp(play.stoppedAt)],
-    ["Total Duration", formatDuration(play.duration)],
-    ["Actual Watch Time", formatDuration(play.playDuration)],
+    ["Total Duration", formatDurationSeconds(play.duration)],
+    ["Actual Watch Time", formatDurationSeconds(play.playDuration)],
   ];
   return (
     <tr style={{ background: "var(--ds-bg-1)" }}>
@@ -204,6 +197,11 @@ export function ActivityRecentPlays({
       const filterParams = new URLSearchParams();
       filterParams.set("page", String(nextPage));
       filterParams.set("limit", "20");
+      // Page 1 is server-seeded from raw PlayHistory rows (admin/activity/page.tsx
+      // findMany, take 20), but /api/play-history defaults to collapsing
+      // referenceId chains — so paging without this offsets 20 into chain space
+      // and skips every chain ranked past the raw row count.
+      filterParams.set("ungrouped", "true");
       if (source) filterParams.set("source", source);
       if (mediaType) filterParams.set("mediaType", mediaType);
       if (startDateIso) filterParams.set("startDate", startDateIso);
@@ -538,7 +536,7 @@ export function ActivityRecentPlays({
                             fontVariantNumeric: "tabular-nums",
                           }}
                         >
-                          {formatDuration(p.playDuration)}
+                          {formatDurationSeconds(p.playDuration)}
                         </td>
                         <td style={TD}>
                           <MethodPill method={m.label} methodClass={m.cls} />

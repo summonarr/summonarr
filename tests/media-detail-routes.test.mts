@@ -235,7 +235,9 @@ shadowPrismaModel(prisma, "tVEpisodeCache", {
 
 type ReqRow = { tmdbId: number; mediaType: string; requestedBy: string; status: string };
 let requestRows: ReqRow[] = [];
-shadowPrismaModel(prisma, "mediaRequest", {
+// Named so the one test that swaps in a throwing stub can put THIS back in a
+// finally, rather than re-declaring a second copy that can drift.
+const mediaRequestModel = {
   findMany: async (args: { where: { OR?: Array<{ tmdbId: number; mediaType: string }>; requestedBy?: string; status?: unknown } }) => {
     rec("mediaRequest.findMany", args.where);
     return requestRows.filter((r) => {
@@ -245,7 +247,8 @@ shadowPrismaModel(prisma, "mediaRequest", {
       return true;
     });
   },
-});
+};
+shadowPrismaModel(prisma, "mediaRequest", mediaRequestModel);
 
 for (const m of ["radarrWantedItem", "sonarrWantedItem"]) {
   shadowPrismaModel(prisma, m, {
@@ -376,20 +379,16 @@ test("person: a DB failure during enrichment maps to 502, not 404", async () => 
   shadowPrismaModel(prisma, "mediaRequest", {
     findMany: async () => { throw new Error("prisma exploded"); },
   });
-  const res = await getPerson(me.token, "6384");
-  assert.equal(res.status, 502);
-  assert.ok(!(await res.text()).includes("prisma exploded"), "the raw DB error must stay server-side");
-  shadowPrismaModel(prisma, "mediaRequest", {
-    findMany: async (args: { where: { OR?: Array<{ tmdbId: number; mediaType: string }>; requestedBy?: string }}) => {
-      rec("mediaRequest.findMany", args.where);
-      return requestRows.filter((r) => {
-        if (r.status === "DECLINED") return false;
-        if (args.where.requestedBy !== undefined && r.requestedBy !== args.where.requestedBy) return false;
-        if (args.where.OR) return args.where.OR.some((c) => c.tmdbId === r.tmdbId && c.mediaType === r.mediaType);
-        return true;
-      });
-    },
-  });
+  // finally, not a trailing statement: shadowPrismaModel is a plain assignment
+  // and beforeEach reinstalls no stubs, so a throw above would leave the
+  // throwing findMany installed and cascade 502s through every later test.
+  try {
+    const res = await getPerson(me.token, "6384");
+    assert.equal(res.status, 502);
+    assert.ok(!(await res.text()).includes("prisma exploded"), "the raw DB error must stay server-side");
+  } finally {
+    shadowPrismaModel(prisma, "mediaRequest", mediaRequestModel);
+  }
 });
 
 test("person: the failure is logged with a scoped prefix and the raw error stays server-side", async () => {

@@ -12,7 +12,7 @@ import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } from "@/lib/permissions";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
-import { claimAvailableNotificationWinners, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
+import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
 
 // 2 hours — intentionally wider than the 1-hour sync interval so one missed run is survivable
@@ -77,6 +77,16 @@ async function syncJellyfin(request: NextRequest) {
 
   if (!jellyfinConfig.url || !jellyfinConfig.apiKey) {
     return NextResponse.json({ error: "Jellyfin server not configured" }, { status: 400 });
+  }
+
+  // The slug must be REGISTERED, not merely shape-valid: leftover Setting rows
+  // from a pre-cleanup de-registration can still satisfy the config check, and
+  // an unregistered slug would skip the restricted-visibility gate (the registry
+  // entry carries `restricted`) and — on a deployment whose registry holds only
+  // the default — take the episode-cache-owner branch and wipe the shared
+  // TVEpisodeCache's jellyfin rows in favour of a ghost server's holdings.
+  if (instance !== DEFAULT_MEDIA_INSTANCE && !jellyfinInstances.some((i) => i.slug === instance)) {
+    return NextResponse.json({ error: "Unknown Jellyfin instance" }, { status: 400 });
   }
 
   const baseUrl = jellyfinConfig.url.replace(/\/$/, "");
@@ -293,13 +303,26 @@ async function syncJellyfin(request: NextRequest) {
       if (toNotify.length > 0) {
         // CAS on notifiedAvailable so concurrent sync paths don't double-fire notifications;
         // winner filter ensures we only notify on rows we actually flipped.
-        const winners = await claimAvailableNotificationWinners(toNotify, { markAvailable: true });
-        if (winners.length > 0) {
-          void clearDeletionVotesForTmdbs(winners);
-          notifyUsersRequestsAvailable(winners).catch(() => {});
-          notifyUsersRequestsAvailablePush(winners).catch(() => {});
-          void notifyUsersRequestsAvailableEmail(winners, "sync/jellyfin");
-          void writeAvailableInAppNotifications(winners, "sync/jellyfin");
+        // `claimed` is every row the CAS flipped; `deliverable` drops the ones whose
+        // requester is disabled. Consequences of the TRANSITION key off `claimed` —
+        // that row went AVAILABLE too, and its claim is already burned, so nothing
+        // later would wipe its stale deletion votes. Only delivery keys off the split.
+        const { claimed, deliverable } = await claimAvailableNotifications(toNotify, { markAvailable: true });
+        if (claimed.length > 0) {
+          // The claim helper sets status/availableAt/notifiedAvailable but not
+          // pendingNotifyAt — disarm the 90s "still pending" backstop on the
+          // same transition (mirrors the orchestrator's post-claim clear).
+          await prisma.mediaRequest.updateMany({
+            where: { id: { in: claimed.map((w) => w.id) } },
+            data: { pendingNotifyAt: null },
+          });
+          void clearDeletionVotesForTmdbs(claimed);
+        }
+        if (deliverable.length > 0) {
+          notifyUsersRequestsAvailable(deliverable).catch(() => {});
+          notifyUsersRequestsAvailablePush(deliverable).catch(() => {});
+          void notifyUsersRequestsAvailableEmail(deliverable, "sync/jellyfin");
+          void writeAvailableInAppNotifications(deliverable, "sync/jellyfin");
         }
       }
       if (toMarkOnly.length > 0) {
@@ -307,7 +330,7 @@ async function syncJellyfin(request: NextRequest) {
         // a row an admin DECLINED after this run's snapshot (AVAILABLE is terminal).
         const flipped = await prisma.mediaRequest.updateMany({
           where: { id: { in: toMarkOnly.map((r) => r.id) }, status: { in: ["PENDING", "APPROVED"] } },
-          data: { status: "AVAILABLE", availableAt: new Date() },
+          data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
         });
         if (flipped.count > 0) void clearDeletionVotesForTmdbs(toMarkOnly);
       }
@@ -320,7 +343,7 @@ async function syncJellyfin(request: NextRequest) {
       // AND refuses to resurrect a concurrently-DECLINED row (AVAILABLE is terminal).
       const flipped = await prisma.mediaRequest.updateMany({
         where: { id: { in: alreadyNotified.map((r) => r.id) }, status: { in: ["PENDING", "APPROVED"] } },
-        data: { status: "AVAILABLE", availableAt: new Date() },
+        data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
       });
       if (flipped.count > 0) void clearDeletionVotesForTmdbs(alreadyNotified);
     }

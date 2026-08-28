@@ -141,6 +141,7 @@ export function OpenApiViewer() {
   const [filter, setFilter] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [revealed, setRevealed] = useState<{ key: string; command: string } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -207,7 +208,7 @@ export function OpenApiViewer() {
     return schemes.map((s) => SECURITY_LABEL[s] ?? s).join(" or ");
   };
 
-  const copyCurl = (method: string, path: string, op: Operation) => {
+  const copyCurl = async (method: string, path: string, op: Operation) => {
     const origin = typeof window !== "undefined" ? window.location.origin : "";
     // Substitute {id}-style path params with an uppercase placeholder the user
     // replaces, rather than leaving the literal brace syntax in the URL.
@@ -216,7 +217,10 @@ export function OpenApiViewer() {
       .filter((p) => p.in === "query")
       .map((p) => `${p.name}=`)
       .join("&");
-    const url = `${origin}${serverUrl}${resolvedPath}${query ? `?${query}` : ""}`;
+    // The spec's server url is the bare "/api" — Next serves the routes only under
+    // BASE_PATH, so the prefix has to be applied here or every copied command 404s
+    // on a subpath deployment.
+    const url = `${origin}${withBasePath(serverUrl)}${resolvedPath}${query ? `?${query}` : ""}`;
     const lines = [`curl -X ${method.toUpperCase()} '${url}'`];
     const sec = op.security ?? globalSecurity;
     if (sec.length > 0) {
@@ -235,10 +239,20 @@ export function OpenApiViewer() {
       lines.push(`  -d '${JSON.stringify(example)}'`);
     }
     const command = lines.join(" \\\n");
-    void navigator.clipboard.writeText(command).then(() => {
-      setCopiedKey(`${method} ${path}`);
+    const key = `${method} ${path}`;
+    // navigator.clipboard exists only in a secure context, so it is absent on the
+    // supported http:// LAN deployment the cookie-name branch above anticipates —
+    // an unguarded write throws a TypeError straight out of the click handler.
+    try {
+      if (!navigator.clipboard) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(command);
+      setRevealed(null);
+      setCopiedKey(key);
       window.setTimeout(() => setCopiedKey(null), 2000);
-    });
+    } catch {
+      setCopiedKey(null);
+      setRevealed({ key, command });
+    }
   };
 
   const toggle = (key: string) => {
@@ -495,7 +509,7 @@ export function OpenApiViewer() {
 
                         <button
                           type="button"
-                          onClick={() => copyCurl(method, path, op)}
+                          onClick={() => void copyCurl(method, path, op)}
                           style={{
                             fontSize: 12,
                             padding: "0.3rem 0.7rem",
@@ -508,6 +522,29 @@ export function OpenApiViewer() {
                         >
                           {copiedKey === key ? "Copied!" : "Copy as curl"}
                         </button>
+
+                        {revealed?.key === key && (
+                          <div style={{ marginTop: "0.5rem" }}>
+                            <p style={{ color: "var(--ds-warning)", fontSize: 12, margin: "0 0 0.3rem" }}>
+                              Clipboard unavailable — select the command below and copy it manually.
+                            </p>
+                            <pre
+                              style={{
+                                margin: 0,
+                                padding: "0.5rem 0.6rem",
+                                background: "var(--ds-bg)",
+                                border: "1px solid var(--ds-border)",
+                                borderRadius: "var(--ds-r-sm)",
+                                color: "var(--ds-fg-muted)",
+                                fontSize: 12,
+                                overflowX: "auto",
+                                userSelect: "text",
+                              }}
+                            >
+                              {revealed.command}
+                            </pre>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

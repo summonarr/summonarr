@@ -289,7 +289,7 @@ const ROUTES: DiscoveryRoute[] = [
   { name: "search", path: "/api/search", defaultQuery: "?q=matrix",
     call: (t, q = "?q=matrix") => inScope(() => search.GET(mk("/api/search", t, q), undefined)) },
   { name: "media", path: "/api/media/movie/603", defaultQuery: "",
-    call: (t) => inScope(() => media.GET(mk("/api/media/movie/603", t), { params: Promise.resolve({ type: "movie", tmdbId: "603" }) })) },
+    call: (t, q = "") => inScope(() => media.GET(mk("/api/media/movie/603", t, q), { params: Promise.resolve({ type: "movie", tmdbId: "603" }) })) },
 ];
 
 const FLAGGED = ROUTES.filter((r) => r.flag);
@@ -534,11 +534,19 @@ test("search whitelists the type filter", async () => {
 
 test("search is maintenance-gated", async () => {
   // The only discovery route behind the maintenance guard — it is the one an
-  // operator most wants quiet during a migration.
+  // operator most wants quiet during a migration. The key is `maintenanceEnabled`
+  // (src/lib/maintenance.ts); seeding any other name leaves the guard inert and
+  // the route answers 200, which is indistinguishable from the guard being gone.
   const { token } = await mintSession();
-  settings.set("maintenanceMode", "true");
+  settings.set("maintenanceEnabled", "true");
   const res = await searchRoute.call(token, "?q=matrix");
-  assert.ok(res.status === 200 || res.status === 503, `unexpected ${res.status}`);
+  assert.equal(res.status, 503);
+  assert.deepEqual(fetchCalls, [], "the gate must run before TMDB");
+});
+
+test("search serves normally when maintenance is off", async () => {
+  const { token } = await mintSession();
+  assert.equal((await searchRoute.call(token, "?q=matrix")).status, 200);
 });
 
 // ── media/[type]/[tmdbId]-specific ───────────────────────────────────────────

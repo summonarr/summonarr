@@ -123,7 +123,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
   // Full webhook URL the admin pastes into Radarr/Sonarr. Only rendered inside a
   // card (loaded state = client-only), so window is always defined here.
   const webhookUrl = (secret: string) =>
-    `${typeof window !== "undefined" ? window.location.origin : ""}${withBasePath(`/api/webhooks/${service}`)}?token=${secret}`;
+    `${typeof window !== "undefined" ? window.location.origin : ""}${withBasePath(`/api/webhooks/${service}`)}?token=${encodeURIComponent(secret)}`;
 
   async function copyHook(idx: number, secret: string) {
     try {
@@ -372,6 +372,13 @@ function ServiceInstances({ service }: { service: ArrService }) {
                     className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">— {label}&apos;s default —</option>
+                    {/* A saved folder the server no longer lists would otherwise
+                        make this controlled select silently display the first
+                        option ("default") while the stale value stays in state —
+                        so surface it explicitly instead of hiding it. */}
+                    {d.rootFolder && !(opts as ArrOptions).rootFolders.some((f) => f.path === d.rootFolder) && (
+                      <option value={d.rootFolder}>{d.rootFolder} (not found on server)</option>
+                    )}
                     {(opts as ArrOptions).rootFolders.map((f) => (
                       <option key={f.path} value={f.path}>{f.path}</option>
                     ))}
@@ -390,6 +397,9 @@ function ServiceInstances({ service }: { service: ArrService }) {
                     className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">— {label}&apos;s default —</option>
+                    {d.qualityProfileId && !(opts as ArrOptions).qualityProfiles.some((p) => String(p.id) === d.qualityProfileId) && (
+                      <option value={d.qualityProfileId}>Profile #{d.qualityProfileId} (not found on server)</option>
+                    )}
                     {(opts as ArrOptions).qualityProfiles.map((p) => (
                       <option key={p.id} value={String(p.id)}>{p.name}</option>
                     ))}
@@ -434,6 +444,9 @@ function ServiceInstances({ service }: { service: ArrService }) {
                     className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">— {label}&apos;s default —</option>
+                    {d.languageProfileId && !(opts as ArrOptions).languageProfiles!.some((p) => String(p.id) === d.languageProfileId) && (
+                      <option value={d.languageProfileId}>Profile #{d.languageProfileId} (not found on server)</option>
+                    )}
                     {(opts as ArrOptions).languageProfiles!.map((p) => (
                       <option key={p.id} value={String(p.id)}>{p.name}</option>
                     ))}

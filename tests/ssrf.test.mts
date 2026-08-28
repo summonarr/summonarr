@@ -89,6 +89,13 @@ test("isSafeAddrForAdmin: raw-address admin policy incl. embedded-IPv4 unwrap", 
   assert.equal(isSafeAddrForAdmin("fe80::1"), false);
   assert.equal(isSafeAddrForAdmin("fec0::1"), false); // deprecated site-local stays blocked
   assert.equal(isSafeAddrForAdmin("::ffff:169.254.1.1"), false); // unwrap → link-local
+  // Multicast / reserved / broadcast: no admin-configured server lives there,
+  // and a typo'd 239.x/255.255.255.255 would emit a segment-wide HTTP request.
+  assert.equal(isSafeAddrForAdmin("239.255.255.250"), false); // SSDP multicast
+  assert.equal(isSafeAddrForAdmin("224.0.0.1"), false);
+  assert.equal(isSafeAddrForAdmin("255.255.255.255"), false); // broadcast
+  assert.equal(isSafeAddrForAdmin("240.0.0.1"), false); // reserved 240/4
+  assert.equal(isSafeAddrForAdmin("ff02::1"), false); // IPv6 multicast
 });
 
 test("verifyResolvedHost re-checks a literal host under the chosen policy", async () => {

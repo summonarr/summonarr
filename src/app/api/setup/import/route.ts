@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { checkBodySize } from "@/lib/body-size";
 import { sanitizeText } from "@/lib/sanitize";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIp, getClientIpKey } from "@/lib/rate-limit";
 import {
   processBackupImport,
   MAX_CIPHERTEXT_BYTES,
@@ -16,7 +16,7 @@ const MIN_BACKUP_PASSWORD_LEN = 12;
 // can't post a crafted dump to a live server. The admin route at
 // /api/admin/backup/db-import handles every other case.
 export async function POST(req: NextRequest) {
-  if (!checkRateLimit(`setup-import:${getClientIp(req.headers)}`, 5, 5 * 60 * 1000)) {
+  if (!checkRateLimit(`setup-import:${getClientIpKey(req.headers)}`, 5, 5 * 60 * 1000)) {
     return NextResponse.json({ error: "Too many setup-import attempts. Try again later." }, { status: 429 });
   }
 

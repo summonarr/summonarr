@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback } from "react";
 import { Copy, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 
@@ -99,18 +99,16 @@ export function WebhookUrls({
   const radarrBase = `${baseUrl}/api/webhooks/radarr`;
   const sonarrBase = `${baseUrl}/api/webhooks/sonarr`;
 
-  // Fetch the actual tokens only on the first copy click, then cache them in a
-  // ref for the rest of the session. Admin-only endpoint; responses are
-  // `private, no-store`. Returns { radarr, sonarr, radarr4k, sonarr4k } where
-  // radarr/sonarr already fold in the legacy shared secret server-side.
-  const tokensRef = useRef<Record<string, string | null> | null>(null);
+  // Fetch the actual tokens on every copy click. Admin-only endpoint; responses
+  // are `private, no-store`. Returns { radarr, sonarr, radarr4k, sonarr4k }
+  // where radarr/sonarr already fold in the legacy shared secret server-side.
+  // Do NOT cache these across clicks: the secret form above saves without
+  // re-rendering this component, so a cached token survives a rotation and the
+  // copied URL carries a value the webhook handler now rejects.
   const loadTokens = useCallback(async (): Promise<Record<string, string | null>> => {
-    if (tokensRef.current) return tokensRef.current;
     const res = await fetch(withBasePath("/api/settings/webhook-urls"));
     if (!res.ok) throw new Error("failed to load webhook tokens");
-    const data = (await res.json()) as Record<string, string | null>;
-    tokensRef.current = data;
-    return data;
+    return (await res.json()) as Record<string, string | null>;
   }, []);
   const resolver = useCallback(
     (key: string, base: string) => async (): Promise<string | null> => {

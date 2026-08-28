@@ -44,6 +44,7 @@ interface UserTableProps {
 const sourceStyles: Record<User["source"], string> = {
   plex:     "border-yellow-600/30 bg-yellow-500/10 text-yellow-400",
   jellyfin: "border-purple-600/30 bg-purple-500/10 text-purple-400",
+  oidc:     "border-sky-600/30 bg-sky-500/10 text-sky-400",
   local:    "border-zinc-700 bg-zinc-800 text-zinc-400",
 };
 
@@ -56,8 +57,14 @@ const roleStyles: Record<User["role"], string> = {
 const avatarColors: Record<User["source"], string> = {
   plex:     "bg-yellow-600",
   jellyfin: "bg-purple-700",
+  oidc:     "bg-sky-700",
   local:    "bg-indigo-700",
 };
+
+// A Plex/Jellyfin sign-in pins User.mediaServer to the provider it came from;
+// a local or OIDC account has no such binding, so an admin assigns the server by
+// hand. Both of those sources therefore get the Server access controls.
+const adminAssignsServer = (source: User["source"]) => source === "local" || source === "oidc";
 
 interface ActionsMenuProps {
   u: User;
@@ -171,7 +178,7 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, name
             "Permissions & Quota",
           )}
 
-          {u.source === "local" && (
+          {adminAssignsServer(u.source) && (
             <>
               <div className="my-1 border-t border-zinc-800" />
 
@@ -401,13 +408,13 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                     <span style={{ color: "var(--ds-info)" }}>No quota</span>
                   </>
                 )}
-                {u.mediaServer === "plex" && u.source === "local" && (
+                {u.mediaServer === "plex" && adminAssignsServer(u.source) && (
                   <>
                     <span>·</span>
                     <span style={{ color: "var(--ds-plex)" }}>Plex access</span>
                   </>
                 )}
-                {u.mediaServer === "jellyfin" && u.source === "local" && (
+                {u.mediaServer === "jellyfin" && adminAssignsServer(u.source) && (
                   <>
                     <span>·</span>
                     <span style={{ color: "var(--ds-jellyfin)" }}>

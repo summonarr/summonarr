@@ -2,9 +2,9 @@ import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb-types";
 
 // Resolve TMDB posters for activity views — `resolvePosterMap` returns a
-// tmdbId→url map, `resolvePosterPathMap` the same lookup as raw TMDB paths.
-// An id is absent when the title is uncached/unmapped so callers fall back to
-// the letter placeholder.
+// `posterPathKey`→url map, `resolvePosterPathMap` the same lookup as raw TMDB
+// paths. A key is absent when the title is uncached/unmapped so callers fall
+// back to the letter placeholder.
 //
 // Both are live lookups on purpose: the `PlayHistory.posterPath` snapshot taken
 // at finalize time is null for every row whose `:details` cache row didn't
@@ -41,17 +41,22 @@ function namespacesFor(mediaType?: string | null): ("movie" | "tv")[] {
   return ["movie", "tv"]; // unknown/unmapped — consult both, first hit wins
 }
 
+// Keyed by `posterPathKey`, like `resolvePosterPathMap` — a bare numeric key
+// cannot hold a movie and a TV title sharing one TMDB number, and 5 of the 7
+// call sites pass mixed movie+TV lists.
 export async function resolvePosterMap(
   items: PosterLookupItem[],
-): Promise<Record<number, string>> {
+): Promise<Record<string, string>> {
   const paths = await resolvePosterPathMap(items);
-  const map: Record<number, string> = {};
+  const map: Record<string, string> = {};
   for (const item of items) {
-    if (item.tmdbId == null || map[item.tmdbId]) continue;
-    const path = paths[posterPathKey(item.tmdbId, item.mediaType)];
+    if (item.tmdbId == null) continue;
+    const key = posterPathKey(item.tmdbId, item.mediaType);
+    if (map[key]) continue;
+    const path = paths[key];
     if (!path) continue;
     const url = posterUrl(path, "w342");
-    if (url) map[item.tmdbId] = url;
+    if (url) map[key] = url;
   }
   return map;
 }

@@ -16,7 +16,10 @@ const SOURCE_PREFIXES: Record<string, string[]> = {
 type Source = keyof typeof SOURCE_PREFIXES | "all";
 
 function isSource(v: string): v is Source {
-  return v === "all" || v in SOURCE_PREFIXES;
+  // Own-property check, never `in`: `in` walks the prototype chain, so
+  // ?source=toString / constructor / valueOf passed the guard and then blew up
+  // on `prefixes.map` — a 500 where the 400 below is the intended answer.
+  return v === "all" || Object.hasOwn(SOURCE_PREFIXES, v);
 }
 
 export const DELETE = withAdmin(async (req, _ctx, session) => {

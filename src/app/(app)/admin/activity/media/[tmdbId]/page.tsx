@@ -2,7 +2,7 @@ import { authActive } from "@/lib/auth";
 import { redirect, notFound } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getMediaPlayStats } from "@/lib/play-history";
-import { resolvePosterMap } from "@/lib/poster-cache";
+import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
 import {
   TitleDetailView,
   type TitleDetailData,
@@ -40,7 +40,7 @@ export default async function MediaActivityPage({
   const stats = await getMediaPlayStats(tmdbId, mediaType);
 
   // Real TMDB poster art from the cache (same source the overview uses).
-  const posterSrc = (await resolvePosterMap([{ tmdbId }]))[tmdbId] ?? null;
+  const posterSrc = (await resolvePosterMap([{ tmdbId }]))[posterPathKey(tmdbId)] ?? null;
 
   // Per-play distributions getMediaPlayStats doesn't aggregate — derived from
   // the recent-plays sample (≤50 rows), labelled "recent sample" in the UI.

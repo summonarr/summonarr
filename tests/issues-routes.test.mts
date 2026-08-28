@@ -32,6 +32,9 @@
 //   - the "notify the other party" inbox write: an admin reply / a resolve
 //     writes an in-app Notification row for the reporter, and a self-action
 //     (issue-admin acting on their OWN reported issue) suppresses it.
+//   - POST /api/issues/[id]/claim's OPTIONAL `expectedClaimedBy` precondition:
+//     a stale expectation is refused 409 before any write, a matching one still
+//     toggles, and an ABSENT key keeps the original body-less contract intact.
 //
 // Harness mirrors tests/requests-route.test.mts: withAuth/withIssueAdmin handlers
 // invoked as real route functions over in-memory prisma stubs + a REAL signed
@@ -329,6 +332,7 @@ const { GET: getIssues, POST: postIssues } = await import("../src/app/api/issues
 const { PATCH: patchIssueRoute } = await import("../src/app/api/issues/[id]/route.ts");
 const { POST: postMessageRoute } = await import("../src/app/api/issues/[id]/messages/route.ts");
 const { POST: postReleaseRoute } = await import("../src/app/api/issues/[id]/releases/route.ts");
+const { POST: postClaimRoute } = await import("../src/app/api/issues/[id]/claim/route.ts");
 
 // ── synthetic request scope with a recording afterContext ────────────────────
 const afterTasks: Array<() => Promise<unknown>> = [];
@@ -391,6 +395,15 @@ async function postMessage(token: string | null, id: string, body: unknown, rawB
 async function postRelease(token: string | null, id: string, body: unknown): Promise<Response> {
   const req = issuesReq(token, { method: "POST", body: JSON.stringify(body), path: `/${id}/releases` });
   return inScope(() => postReleaseRoute(req, idCtx(id)));
+}
+// `body` omitted ⇒ a genuinely BODY-LESS POST (the legacy caller shape), not `{}`.
+async function postClaim(token: string | null, id: string, body?: unknown): Promise<Response> {
+  const req = issuesReq(token, {
+    method: "POST",
+    path: `/${id}/claim`,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  return inScope(() => postClaimRoute(req, idCtx(id)));
 }
 
 // A minimal valid create body. tvdbId is deliberately NOT included — the route
@@ -962,4 +975,137 @@ test("admin replying in their OWN reported thread reads no reporter row and noti
     otherLookups.length, 1,
     "and reads it exactly once — the deactivatedAt chokepoint and the email prefs share one query",
   );
+});
+
+// ══════════════════ POST /api/issues/[id]/claim (take-over race) ═════════════
+//
+// The handler's own CAS (`updateMany where claimedBy = <what I just read>`) only
+// guards ITS read→write window — microseconds. The race that actually bites is
+// wider: two admins have the issue list open, admin B claims, and admin A's page
+// has not received the issue:updated refresh yet. A's button still reads "Claim",
+// so A clicks it expecting to take an UNCLAIMED issue and silently takes B's
+// claim over, never seeing the take-over confirmation the UI shows when it knows
+// the issue is claimed. The route now accepts the claim state the caller was
+// rendering and refuses when the row has moved on.
+//
+// Three properties are pinned below, and they pull in opposite directions on
+// purpose — a mutation that satisfies one breaks another:
+//   (a) a STALE expectation ⇒ 409 and NO write. Both stale directions are
+//       covered, and the unclaimed-expectation case is deliberately expressed as
+//       `expectedClaimedBy: null`: `null` is a MEANINGFUL expectation ("I saw
+//       this unclaimed"), so presence must be tested with `in`, never
+//       truthiness. A truthiness check passes every other test in this section.
+//   (b) a MATCHING expectation ⇒ the claim/release toggle still happens.
+//   (c) an ABSENT key (a body-less legacy caller — the shipped iOS build and any
+//       older web bundle send no body at all) ⇒ the ORIGINAL contract, silent
+//       take-over included. Backward compatibility is the reason the field is
+//       optional rather than required.
+
+test("claim: a STALE expectation is refused 409 in BOTH directions, with no write, no SSE and no audit", async () => {
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+
+  // Direction 1 — the caller rendered "unclaimed"; another admin got there first.
+  // `null` must be honoured as an expectation: under a truthiness test it would
+  // read as "no expectation" and this take-over would go through silently.
+  issueRow = {
+    id: "issue-claim-1", status: "OPEN", reportedBy: "reporter-c1", title: "Heat",
+    claimedBy: "admin-other", claimedUser: { name: "Ada", email: "ada@example.com" },
+  };
+  const stale = await postClaim(admin.token, "issue-claim-1", { expectedClaimedBy: null });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(await stale.json(), {
+    error: "claim-conflict",
+    message: "Ada claimed this issue first.",
+  });
+
+  // Direction 2 — the caller rendered "claimed by X"; X released it meanwhile.
+  issueRow = {
+    id: "issue-claim-2", status: "OPEN", reportedBy: "reporter-c2", title: "Heat",
+    claimedBy: null, claimedUser: null,
+  };
+  const released = await postClaim(admin.token, "issue-claim-2", { expectedClaimedBy: "admin-other" });
+  assert.equal(released.status, 409);
+  assert.deepEqual(await released.json(), {
+    error: "claim-conflict",
+    message: "This issue is no longer claimed.",
+  });
+
+  // The precondition is checked BEFORE the mutation, so a refusal leaves the row
+  // — and everything downstream of it — completely untouched.
+  assert.equal(opsOf("issue.updateMany").length, 0, "a refused take-over must not touch the row");
+  assert.deepEqual(sseEvents, [], "no issue:updated may be broadcast for a refused take-over");
+  assert.equal(opsOf("auditLog.create").length, 0, "nothing happened, so nothing is audited");
+  assert.equal(issueRow.claimedBy, null, "the row still holds the value the CAS read");
+});
+
+test("claim: a MATCHING expectation still claims, and still releases — the toggle is unchanged", async () => {
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+
+  // Unclaimed row + "I saw it unclaimed" ⇒ claim for me.
+  issueRow = {
+    id: "issue-claim-3", status: "OPEN", reportedBy: "reporter-c3", title: "Sicario",
+    claimedBy: null, claimedUser: null,
+  };
+  const claimed = await postClaim(admin.token, "issue-claim-3", { expectedClaimedBy: null });
+  assert.equal(claimed.status, 200);
+  assert.equal((await claimed.json() as { claimedBy: string }).claimedBy, admin.userId);
+  const claimCas = opsOf("issue.updateMany")[0].args as { where: Record<string, unknown>; data: Record<string, unknown> };
+  assert.equal(claimCas.where.claimedBy, null, "the handler's own CAS still guards the value it read");
+  assert.equal(claimCas.data.claimedBy, admin.userId);
+  assert.equal(opsOf("auditLog.create").length, 1);
+  assert.equal((opsOf("auditLog.create")[0].args as { data: Record<string, unknown> }).data.action, "ISSUE_CLAIM");
+
+  // Self-claimed row + "I saw it claimed by me" ⇒ release.
+  ops.length = 0;
+  issueRow = {
+    id: "issue-claim-4", status: "OPEN", reportedBy: "reporter-c4", title: "Sicario",
+    claimedBy: admin.userId, claimedUser: { name: "Me", email: "me@example.com" },
+  };
+  const releasedRes = await postClaim(admin.token, "issue-claim-4", { expectedClaimedBy: admin.userId });
+  assert.equal(releasedRes.status, 200);
+  assert.equal((await releasedRes.json() as { claimedBy: string | null }).claimedBy, null);
+  const releaseCas = opsOf("issue.updateMany")[0].args as { data: Record<string, unknown> };
+  assert.deepEqual(releaseCas.data, { claimedBy: null, claimedAt: null });
+  assert.equal((opsOf("auditLog.create")[0].args as { data: Record<string, unknown> }).data.action, "ISSUE_UNCLAIM");
+});
+
+test("claim: an ABSENT expectedClaimedBy keeps the ORIGINAL contract — a body-less caller still takes a claim over", async () => {
+  // Backward compatibility, not an oversight: the shipped iOS build and any web
+  // bundle older than this change POST with no body at all. Making the field
+  // required (or defaulting a missing key to `null`) would 409 every one of them
+  // on any claimed issue — a take-over they are entitled to perform.
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+
+  issueRow = {
+    id: "issue-claim-5", status: "OPEN", reportedBy: "reporter-c5", title: "Tenet",
+    claimedBy: "admin-other", claimedUser: { name: "Ada", email: "ada@example.com" },
+  };
+  const bodyless = await postClaim(admin.token, "issue-claim-5"); // no body whatsoever
+  assert.equal(bodyless.status, 200, "a legacy body-less caller must keep working");
+  assert.equal((await bodyless.json() as { claimedBy: string }).claimedBy, admin.userId);
+  assert.equal(opsOf("issue.updateMany").length, 1, "the take-over really happened");
+  assert.deepEqual(sseEvents.map((e) => e.type), ["issue:updated"]);
+
+  // `{}` is the same thing over the wire — an object with no such key.
+  ops.length = 0;
+  issueRow = {
+    id: "issue-claim-6", status: "OPEN", reportedBy: "reporter-c6", title: "Tenet",
+    claimedBy: "admin-other", claimedUser: { name: "Ada", email: "ada@example.com" },
+  };
+  const emptyBody = await postClaim(admin.token, "issue-claim-6", {});
+  assert.equal(emptyBody.status, 200);
+  assert.equal((await emptyBody.json() as { claimedBy: string }).claimedBy, admin.userId);
+});
+
+test("claim: a present-but-non-string, non-null expectedClaimedBy → 400 before any read or write", async () => {
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  issueRow = {
+    id: "issue-claim-7", status: "OPEN", reportedBy: "reporter-c7", title: "Dune",
+    claimedBy: null, claimedUser: null,
+  };
+  const res = await postClaim(admin.token, "issue-claim-7", { expectedClaimedBy: 42 });
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "Invalid expectedClaimedBy" });
+  assert.equal(opsOf("issue.findUnique").length, 0, "the shape check precedes the row read");
+  assert.equal(opsOf("issue.updateMany").length, 0);
 });

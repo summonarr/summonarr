@@ -7,7 +7,7 @@ import {
   OIDC_STATE_COOKIE_PATH,
   signOidcStateCookie,
 } from "@/lib/oidc";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 import { safeInternalPath } from "@/lib/safe-url";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 
@@ -30,7 +30,7 @@ function isSecureCookieContext(): boolean {
 // input — the callback then falls back to "/".
 
 export async function GET(req: NextRequest) {
-  if (!checkRateLimit(`oidc-start:${getClientIp(req.headers)}`, 20, 5 * 60 * 1000)) {
+  if (!checkRateLimit(`oidc-start:${getClientIpKey(req.headers)}`, 20, 5 * 60 * 1000)) {
     return NextResponse.json({ error: "Too many requests — try again later." }, { status: 429 });
   }
 

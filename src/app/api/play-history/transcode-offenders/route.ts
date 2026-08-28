@@ -14,8 +14,15 @@ export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, _sessi
   // Clamp identically to /api/play-history/stats so an unbounded/negative
   // window can't scan or invert the whole table.
   const days = Math.min(Math.max(parseInt(params.get("days") ?? "30", 10) || 30, 1), 3650);
-  const source = params.get("source") ?? undefined;
-  const mediaType = params.get("mediaType") ?? undefined;
+  // Whitelist BEFORE these reach getTranscodeOffenders: the cache key is built
+  // from the raw strings while the SQL filter honours only these values, so an
+  // unrecognised one ran both uncached aggregate scans under a key nothing would
+  // ever reuse — and evicted real entries from the shared 500-key activity cache
+  // on its way out. Same two-branch check as /api/play-history/stats.
+  const rawSource = params.get("source");
+  const source = rawSource === "plex" || rawSource === "jellyfin" ? rawSource : undefined;
+  const rawMediaType = params.get("mediaType");
+  const mediaType = rawMediaType === "MOVIE" || rawMediaType === "TV" ? rawMediaType : undefined;
 
   const offenders = await getTranscodeOffenders({ days, source, mediaType });
   return NextResponse.json(offenders);

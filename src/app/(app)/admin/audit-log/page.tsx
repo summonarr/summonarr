@@ -52,11 +52,18 @@ export default async function AuditLogPage({
   else if (group) where.action = { in: GROUP_ACTIONS[group] };
   if (dateFrom || dateTo) {
     where.createdAt = {};
-    if (dateFrom) where.createdAt.gte = new Date(dateFrom);
+    // An Invalid Date reaches Prisma's DateTime filter and throws, taking the
+    // whole page render down — mirrors the isNaN guard in /api/admin/audit-log.
+    if (dateFrom) {
+      const start = new Date(dateFrom);
+      if (!isNaN(start.getTime())) where.createdAt.gte = start;
+    }
     if (dateTo) {
       const end = new Date(dateTo);
-      end.setDate(end.getDate() + 1);
-      where.createdAt.lt = end;
+      if (!isNaN(end.getTime())) {
+        end.setDate(end.getDate() + 1);
+        where.createdAt.lt = end;
+      }
     }
   }
   // Prisma `contains` → ILIKE with no ESCAPE clause; strip wildcard

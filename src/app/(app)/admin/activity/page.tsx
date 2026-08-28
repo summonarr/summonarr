@@ -22,7 +22,7 @@ import { TranscodePressure } from "@/components/admin/transcode-pressure";
 import { ActivityWarmButton } from "@/components/admin/activity-warm-button";
 import { ActivityLiveRefresher } from "@/components/admin/activity-live-refresher";
 import { posterUrl } from "@/lib/tmdb-types";
-import { resolvePosterMap } from "@/lib/poster-cache";
+import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
 import { requireFeature, getFeatureFlags } from "@/lib/features";
 
 export const dynamic = "force-dynamic";
@@ -375,7 +375,10 @@ export default async function ActivityPage({
     ).catch(() => {});
   }
 
-  const posterMap: Record<number, string | null> = {};
+  // Keyed by the FULL cache key, not the bare tmdbId: a movie and a series can
+  // share a TMDB id, so a bare-id map with a first-row-wins guard rendered
+  // whichever of the two the unordered findMany happened to return first.
+  const posterMap: Record<string, string | null> = {};
   const sessionTmdbIds = [...new Set(effectiveSessions.map((s: typeof effectiveSessions[0]) => s.effectiveTmdbId).filter((id): id is number => id != null))];
   if (sessionTmdbIds.length > 0) {
     const cacheKeys = sessionTmdbIds.flatMap((id) => [`movie:${id}:details`, `tv:${id}:details`]);
@@ -386,16 +389,20 @@ export default async function ActivityPage({
     for (const row of cacheRows) {
       try {
         const parsed = JSON.parse(row.data) as { posterPath?: string | null };
-        if (parsed.posterPath) {
-          const idStr = row.key.split(":")[1];
-          const id = parseInt(idStr, 10);
-          if (id && !posterMap[id]) {
-            posterMap[id] = posterUrl(parsed.posterPath, "w342");
-          }
+        if (parsed.posterPath && !posterMap[row.key]) {
+          posterMap[row.key] = posterUrl(parsed.posterPath, "w342");
         }
       } catch { }
     }
   }
+  // Prefer the session's own media type; fall back to the other so a session
+  // whose type has no cached details still gets the poster it used to get.
+  const posterFor = (tmdbId: number | null, mediaType: string | null): string | null => {
+    if (tmdbId == null) return null;
+    const own = mediaType === "TV" ? "tv" : "movie";
+    const other = own === "tv" ? "movie" : "tv";
+    return posterMap[`${own}:${tmdbId}:details`] ?? posterMap[`${other}:${tmdbId}:details`] ?? null;
+  };
 
   const serializedSessions = effectiveSessions.map((s: typeof effectiveSessions[0]) => ({
     id: s.id,
@@ -434,7 +441,7 @@ export default async function ActivityPage({
     introEndMs: s.introEndMs,
     creditsStartMs: s.creditsStartMs,
     creditsEndMs: s.creditsEndMs,
-    posterUrl: s.effectiveTmdbId ? posterMap[s.effectiveTmdbId] ?? null : null,
+    posterUrl: posterFor(s.effectiveTmdbId, s.effectiveMediaType),
   }));
 
   const serializedRecentPlays = recentPlays.map((p: typeof recentPlays[0]) => ({
@@ -624,7 +631,7 @@ export default async function ActivityPage({
     plays: m.plays,
     viewers: m.viewers,
     rank: i + 1,
-    posterSrc: rewatchedPosters[m.tmdbId] ?? null,
+    posterSrc: rewatchedPosters[posterPathKey(m.tmdbId, m.mediaType)] ?? null,
   }));
 
   return (

@@ -151,12 +151,22 @@ export const PATCH = withAdmin(async (
     data: { downloadsEnabled: body.downloadsEnabled },
   });
 
-  // Push the change to the media server immediately; log but don't fail the response
+  // Push the change to the media server immediately; log but don't fail the
+  // response. The push OUTCOME is surfaced to the client: the hourly reconcile
+  // only re-pushes drift in the DISABLE direction, so a failed enable-push
+  // never self-heals — the UI must be able to tell the admin the server wasn't
+  // actually updated rather than showing a bare success.
+  let pushed = true;
   try {
     await enforceUserDownloadPolicy(id);
   } catch (err) {
+    pushed = false;
     console.warn(`[server-users] Failed to push policy for ${id}:`, err instanceof Error ? err.message : String(err));
   }
 
-  return NextResponse.json({ ok: true });
+  return NextResponse.json(
+    pushed
+      ? { ok: true, pushed: true }
+      : { ok: true, pushed: false, warning: "Saved, but the media server could not be reached to apply the change — it will retry on the next hourly sync only if you disabled downloads." },
+  );
 });

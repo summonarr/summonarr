@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { escapeIlike, SEARCH_TERM_MAX_LEN } from "@/lib/sanitize";
-import { resolvePosterMap } from "@/lib/poster-cache";
+import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
 import {
   getPlayStatsForServerUsers,
   getPlayYearsForServerUsers,
@@ -303,7 +303,7 @@ export async function getMyWatchHistory(
     player: r.player,
     device: r.device,
     playMethod: r.playMethod,
-    posterUrl: r.tmdbId != null ? posters[r.tmdbId] ?? null : null,
+    posterUrl: r.tmdbId != null ? posters[posterPathKey(r.tmdbId, r.mediaType)] ?? null : null,
     playCount: r.play_count,
     totalPlaySeconds: r.total_play_duration,
   }));
@@ -476,7 +476,8 @@ export async function getMyWatchHistoryEntry(
   const newest = playRows[0];
   if (!newest) return null;
 
-  const posters = anchor.tmdbId != null ? await resolvePosterMap([anchor]) : {};
+  const posters: Record<string, string> =
+    anchor.tmdbId != null ? await resolvePosterMap([anchor]) : {};
   const item: MyWatchHistoryItem = {
     id: newest.id,
     source: newest.source,
@@ -498,7 +499,8 @@ export async function getMyWatchHistoryEntry(
     player: newest.player,
     device: newest.device,
     playMethod: newest.playMethod,
-    posterUrl: anchor.tmdbId != null ? posters[anchor.tmdbId] ?? null : null,
+    posterUrl:
+      anchor.tmdbId != null ? posters[posterPathKey(anchor.tmdbId, anchor.mediaType)] ?? null : null,
     playCount: agg._count._all,
     totalPlaySeconds: agg._sum.playDuration ?? 0,
   };

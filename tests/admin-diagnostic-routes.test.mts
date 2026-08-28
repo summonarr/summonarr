@@ -165,7 +165,7 @@ let jellyfinItems: LibItem[] = [];
 function libStub(name: string, rows: () => LibItem[]) {
   return {
     findMany: async (args: { where: { serverInstance: string; mediaType: string; filePath?: unknown }; take?: number }) => {
-      rec(`${name}.findMany`, args.where);
+      rec(`${name}.findMany`, { where: args.where, take: args.take });
       const out = rows().filter(
         (r) => r.serverInstance === args.where.serverInstance && r.mediaType === args.where.mediaType && r.filePath != null,
       );
@@ -501,7 +501,7 @@ test("sample-paths scopes every query to the DEFAULT server instance (guardrail 
   const queries = [...opsOf("plexLibraryItem.findMany"), ...opsOf("jellyfinLibraryItem.findMany")];
   assert.equal(queries.length, 4);
   for (const q of queries) {
-    assert.equal((q.args as { serverInstance: string }).serverInstance, "", "query not scoped to the default instance");
+    assert.equal((q.args as { where: { serverInstance: string } }).where.serverInstance, "", "query not scoped to the default instance");
   }
 });
 
@@ -603,8 +603,10 @@ test("plex and jellyfin previews are computed independently", async () => {
 test("each library query is bounded", async () => {
   const t = await mintSession();
   await paths(t);
-  for (const q of [...opsOf("plexLibraryItem.findMany"), ...opsOf("jellyfinLibraryItem.findMany")]) {
-    assert.equal((q.args as { take?: number }).take ?? 500, 500);
+  const queries = [...opsOf("plexLibraryItem.findMany"), ...opsOf("jellyfinLibraryItem.findMany")];
+  assert.equal(queries.length, 4);
+  for (const q of queries) {
+    assert.equal((q.args as { take?: number }).take, 500, "an unbounded library fetch");
   }
 });
 
@@ -616,7 +618,7 @@ test("rows with a null filePath are excluded by the query, not crashed on", asyn
   ];
   const body = await (await paths(t)).json();
   assert.equal(body.plex.movie.mountPoint, "/data/movies/");
-  const where = opsOf("plexLibraryItem.findMany")[0].args as { filePath?: unknown };
+  const { where } = opsOf("plexLibraryItem.findMany")[0].args as { where: { filePath?: unknown } };
   assert.ok(where.filePath, "the query should filter nulls server-side");
 });
 

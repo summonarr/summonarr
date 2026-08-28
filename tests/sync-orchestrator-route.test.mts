@@ -213,6 +213,12 @@ function preservedRowHit(model: "plexLibraryItem" | "jellyfinLibraryItem", slugs
 // prisma), so its deletes land here rather than in the TxRecord journal.
 const orphanSweepDeletes: Array<{ model: string; where: Record<string, unknown> | undefined }> = [];
 const mediaRequestUpdateManyCalls: Array<{ where?: ReqWhere; data: Record<string, unknown> }> = [];
+// clearDeletionVotesForTmdbs' two writes (one deletionVote.deleteMany per
+// mediaType + one setting.deleteMany for the `deletionVoteNotified:` keys). Both
+// delegates already existed as silent no-ops; recording them is what makes the
+// AVAILABLE transition's vote wipe observable.
+const deletionVoteDeleteWheres: Array<Record<string, unknown> | undefined> = [];
+const settingDeleteManyWheres: Array<Record<string, unknown> | undefined> = [];
 // Every user.findMany, with its select — the grants gate must ride the requester
 // query the marking/notify passes ALREADY issue (extra columns, not an extra
 // round-trip), so the count of requester-shaped reads is itself a pin.
@@ -336,7 +342,10 @@ const fakePrisma = {
       }
       return { count };
     },
-    deleteMany: async () => ({ count: 0 }),
+    deleteMany: async (args?: { where?: Record<string, unknown> }) => {
+      settingDeleteManyWheres.push(args?.where);
+      return { count: 0 };
+    },
   },
   user: {
     findUnique: async (args: { where: { id: string } }) => {
@@ -416,7 +425,12 @@ const fakePrisma = {
   tmdbCache: {
     deleteMany: async (args: unknown) => { tmdbCacheDeleteManyCalls.push(args); return { count: 0 }; },
   },
-  deletionVote: { deleteMany: async () => ({ count: 0 }) },
+  deletionVote: {
+    deleteMany: async (args?: { where?: Record<string, unknown> }) => {
+      deletionVoteDeleteWheres.push(args?.where);
+      return { count: 0 };
+    },
+  },
   mediaServerUser: { findMany: async () => [], upsert: async () => ({}), updateMany: async () => ({ count: 0 }) },
   $transaction: async (arg: unknown, opts?: { timeout?: number }) => {
     if (typeof arg === "function") {
@@ -597,6 +611,8 @@ beforeEach(() => {
   tmdbCacheDeleteManyCalls.length = 0;
   mediaRequestFindManyWheres.length = 0;
   mediaRequestUpdateManyCalls.length = 0;
+  deletionVoteDeleteWheres.length = 0;
+  settingDeleteManyWheres.length = 0;
   userFindManyCalls.length = 0;
   plexLibraryItemFindManyWheres.length = 0;
   orphanSweepDeletes.length = 0;
@@ -827,6 +843,94 @@ test("guardrail 14: notifiedAvailable is flipped ONLY by the claim CAS (UPDATE �
     [],
     "guardrail 14: notifiedAvailable must never be written by a plain mediaRequest.updateMany — only the CAS may flip it",
   );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A DEACTIVATED requester — the TRANSITION's consequences still run; only the
+// DELIVERY is withheld (guardrail 33 on top of guardrail 14)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// claimAvailableNotifications returns TWO sets and the split is the whole point:
+//   • `claimed`     — every row the CAS actually flipped to AVAILABLE.
+//   • `deliverable` — `claimed` minus the rows whose requester's account is
+//                     DISABLED. Account removal disables rather than scrubs, so a
+//                     removed user keeps a live email address, a Discord link and
+//                     push subscriptions; this is the single chokepoint that
+//                     suppresses all four channels at once.
+//
+// Only the four DELIVERY channels may key off `deliverable`. Everything else is a
+// consequence of the TRANSITION and must key off `claimed`, because the claim is
+// BURNED on the way past — notifiedAvailable is now true and the row is AVAILABLE,
+// which is terminal — so no later run will ever revisit it. Keying a transition
+// consequence off `deliverable` therefore does not defer it, it drops it forever:
+// the requester's stale "delete this" votes survive against a title that is
+// available again (and the `deletionVoteNotified:` key stays set, blocking the
+// next legitimate threshold notification), and the 90s pendingNotifyAt backstop
+// stays armed on a row that has already gone AVAILABLE.
+//
+// Both requesters below ride the SAME run, the SAME marking pass and the SAME CAS
+// call; the only difference between them is `deactivatedAt`. That makes the
+// control inline — "nobody was notified" cannot pass vacuously here, because the
+// active requester's notification has to appear in the very same array.
+
+test("a DEACTIVATED requester's AVAILABLE transition still wipes stale deletion votes and disarms pendingNotifyAt — only the notification is withheld", async () => {
+  configureBothServers();
+  respond = bothServersRespond([550, 551], []); // both titles land in Plex
+  usersById.set("u-disabled", { ...defaultUser("u-disabled"), deactivatedAt: new Date("2026-02-01T00:00:00.000Z") });
+  usersById.set("u-active", defaultUser("u-active"));
+  seedRequest({ id: "req-disabled", tmdbId: 550, mediaType: "MOVIE", requestedBy: "u-disabled", status: "PENDING" });
+  seedRequest({ id: "req-active", tmdbId: 551, mediaType: "MOVIE", requestedBy: "u-active", status: "PENDING" });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  // Precondition: BOTH rows genuinely transitioned in one markAvailable claim, so
+  // both once-only claims are now burned.
+  const claim = casCalls.find((c) => c.mode === "markAvailable");
+  assert.ok(claim, "the library marking pass must have run its markAvailable claim");
+  assert.deepEqual([...claim.winners].sort(), ["req-active", "req-disabled"]);
+  for (const id of ["req-disabled", "req-active"]) {
+    assert.equal(requests.get(id)?.status, "AVAILABLE", `${id} must have flipped to AVAILABLE`);
+    assert.equal(requests.get(id)?.notifiedAvailable, true, `${id}'s once-only claim must be burned`);
+  }
+
+  // THE DEFECT THIS PINS. The vote wipe follows the CAS winners, so it covers the
+  // disabled requester's tmdbId too. Keyed off `deliverable` it would carry 551
+  // alone and 550's stale votes would outlive the re-add permanently.
+  assert.deepEqual(
+    deletionVoteDeleteWheres,
+    [{ tmdbId: { in: [550, 551] }, mediaType: "MOVIE" }],
+    "the deletion-vote wipe must follow `claimed`: a disabled requester's row went AVAILABLE too, " +
+      "and its claim is already burned, so nothing later would ever clear its stale votes",
+  );
+  assert.deepEqual(
+    settingDeleteManyWheres,
+    [{ key: { in: ["deletionVoteNotified:550:MOVIE", "deletionVoteNotified:551:MOVIE"] } }],
+    "and so must the per-item deletionVoteNotified: re-arm key, for the same reason",
+  );
+
+  // Same rule for the pendingNotifyAt disarm: ONE updateMany naming BOTH winners.
+  const disarms = mediaRequestUpdateManyCalls.filter(
+    (c) => Object.keys(c.data ?? {}).length === 1 && c.data.pendingNotifyAt === null,
+  );
+  assert.equal(disarms.length, 1, "exactly one post-claim pendingNotifyAt disarm for this pass");
+  assert.deepEqual(
+    [...(disarms[0].where?.id?.in ?? [])].sort(),
+    ["req-active", "req-disabled"],
+    "the 90s still-pending backstop must be disarmed on every row that went AVAILABLE — leaving it " +
+      "armed on an AVAILABLE row is exactly what keying this off `deliverable` does",
+  );
+
+  // …and the half that must NOT happen. The active requester in the same run is
+  // the control: without them this assertion would also pass on a run that
+  // notified nobody at all.
+  assert.deepEqual(
+    notifiedUserIds(),
+    ["u-active"],
+    "guardrail 33: a disabled account keeps a live email address and push subscriptions, so the " +
+      "delivery is suppressed even though the claim was burned",
+  );
+  assert.deepEqual(notifiedTmdbIds(), [551]);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1909,13 +2013,13 @@ test("demote: a NAMED-only Plex deployment still demotes — the synthesized def
 
   assert.deepEqual(
     preservedRowFindFirsts.filter((p) => p.model === "plexLibraryItem").map((p) => p.slugs),
-    [[""]],
-    "the veto probes exactly the registered-but-unsyncable slugs — here the never-configured default",
+    [],
+    "the synthesized default is EXCLUDED from the missing set, so no veto probe is issued for it — its rows (if any survive a blanked connection) are stale orphans, not deliberately-preserved data",
   );
   assert.equal(
     requests.get("req-named-only")?.status,
     "APPROVED",
-    "a never-configured default instance holds no preserved rows and must not disable demotes",
+    "a never-configured (or blanked) default instance must not disable demotes",
   );
 });
 

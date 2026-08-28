@@ -158,6 +158,54 @@ export function getClientIp(headers: Headers): string {
   return untrustedBucket(headers);
 }
 
+// Rate-limit BUCKET key for the client address. IPv4 keys on the full address;
+// IPv6 keys on the /64 prefix — the standard residential/VPS delegation hands
+// one holder 2^64 addresses, so a full-address key lets that holder mint a
+// fresh, empty bucket per request and rotate straight past every IP-keyed
+// limiter (register, oidc-start, quickconnect, …). Audit rows, device tracking
+// and the machine-session IP allowlist keep the exact address via getClientIp;
+// ONLY limiter keys collapse to the prefix.
+export function getClientIpKey(headers: Headers): string {
+  return ipBucketKey(getClientIp(headers));
+}
+
+export function ipBucketKey(ip: string): string {
+  if (isIP(ip) !== 6) return ip; // IPv4 and the "unknown:" UA bucket pass through
+  // A v4-mapped literal is really an IPv4 client — key on the embedded
+  // address, or every mapped-v4 client would share one all-zero /64 bucket.
+  const mapped = ip.toLowerCase().match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (mapped) return mapped[1];
+  const prefix = ipv6Prefix64(ip);
+  return prefix ? `v6:${prefix}` : ip;
+}
+
+// Canonical /64 prefix ("xxxx:xxxx:xxxx:xxxx") of a syntactically valid IPv6
+// address; null when the shape defeats expansion (callers then fall back to the
+// full address, which only ever under-shares a bucket, never over-shares one).
+function ipv6Prefix64(ip: string): string | null {
+  const pct = ip.indexOf("%"); // zone index (fe80::1%eth0)
+  let s = (pct === -1 ? ip : ip.slice(0, pct)).toLowerCase();
+  // Embedded dotted-quad tail (64:ff9b::1.2.3.4) → two hextets
+  const v4 = s.match(/(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (v4) {
+    const oct = v4[1].split(".").map(Number);
+    if (oct.some((o) => o > 255)) return null;
+    s =
+      s.slice(0, s.length - v4[1].length) +
+      ((oct[0] << 8) | oct[1]).toString(16) + ":" + ((oct[2] << 8) | oct[3]).toString(16);
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const groups =
+    halves.length === 2
+      ? [...head, ...Array(Math.max(0, 8 - head.length - tail.length)).fill("0"), ...tail]
+      : head;
+  if (groups.length !== 8 || groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
+  return groups.slice(0, 4).map((g) => g.padStart(4, "0")).join(":");
+}
+
 export function parseRateLimit(value: string | null | undefined, defaultLimit: number): number {
   if (value === undefined || value === null || value.trim() === "") return defaultLimit;
   const n = parseInt(value, 10);

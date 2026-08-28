@@ -287,9 +287,16 @@ export async function GET(request: NextRequest) {
         }
 
         if (emitted >= MAX_EXPORT_ROWS) {
+          // CSV has no comment syntax, so this trailing notice IS a data record to
+          // every parser — escapeCSV keeps it a single well-formed field instead of
+          // a raw fragment that splits the row. The remedy has to be the date
+          // filters: this route reads no `cursor` param, so the notice previously
+          // pointed at a knob that does not exist.
           controller.enqueue(
             encoder.encode(
-              `# Export truncated at ${MAX_EXPORT_ROWS} rows — use ?cursor= to paginate\n`
+              escapeCSV(
+                `Export truncated at ${MAX_EXPORT_ROWS} rows — narrow startDate/endDate and export again`,
+              ) + "\n",
             )
           );
         }

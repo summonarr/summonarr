@@ -1,5 +1,6 @@
 import { NextResponse, after } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { parsePageParam } from "@/lib/pagination";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, addSeriesToSonarr, listQualityProfiles } from "@/lib/arr";
@@ -32,7 +33,7 @@ const VALID_SORTS = ["newest", "oldest"] as const;
 
 export const GET = withAuth(async (req, _ctx, session) => {
   const sp = req.nextUrl.searchParams;
-  const page = Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1);
+  const page = parsePageParam(sp);
   const skip = (page - 1) * PAGE_SIZE;
 
   const statusParam = sp.get("status");

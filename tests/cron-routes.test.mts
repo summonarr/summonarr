@@ -113,8 +113,13 @@ function isBookkeeping(o: Op): boolean {
   const key = (o.args as { where?: { key?: string } } | undefined)?.where?.key ?? "";
   return CRON_BOOKKEEPING.test(key);
 }
+// Unanchored ON PURPOSE: an end-anchored pattern misses `<model>.createMany`,
+// which is the bulk-insert shape guardrail 4 mandates (batchCreateMany) and the
+// one warm-recommendations actually issues — so the "did no work" assertions
+// below would have been blind to exactly the write they most need to see. Raw
+// writes count too.
 const writeOps = () =>
-  ops.filter((o) => /(deleteMany|updateMany|create|upsert|update)$/.test(o.op) && !isBookkeeping(o));
+  ops.filter((o) => /(create|update|upsert|delete|\$executeRaw)/i.test(o.op) && !isBookkeeping(o));
 
 // ── prisma stubs ─────────────────────────────────────────────────────────────
 // A deleteMany/updateMany stub that records its `where` so the cutoff-bounded
@@ -244,6 +249,27 @@ beforeEach(() => {
 test("all eleven cron routes loaded and expose a POST handler", () => {
   assert.equal(ROUTES.length, 11);
   for (const r of ROUTES) assert.equal(typeof r.POST, "function", `${r.name} has no POST`);
+});
+
+test("writeOps() counts bulk inserts and raw writes — the 'did no work' assertions must not be blind to them", () => {
+  // The whole matrix's "zero writes before auth / while the lock is busy"
+  // assertions are only as good as this classifier. An end-anchored pattern
+  // silently excluded `<model>.createMany` — the shape batchCreateMany issues
+  // (guardrail 4) and the one warm-recommendations reaches through
+  // warmRecommendationsCache — so those assertions passed vacuously.
+  ops = [
+    { op: "userRecommendation.createMany" },
+    { op: "$executeRawUnsafe" },
+    { op: "auditLog.deleteMany" },
+    { op: "setting.upsert", args: { where: { key: "cron:lastRun:warm-omdb" } } },
+    { op: "tmdbCache.findMany" },
+    { op: "$queryRawUnsafe" },
+  ];
+  assert.deepEqual(writeOps().map((o) => o.op), [
+    "userRecommendation.createMany",
+    "$executeRawUnsafe",
+    "auditLog.deleteMany",
+  ]);
 });
 
 test("the matrix covers every cron route on disk — a new one must be added here", async () => {
@@ -534,7 +560,10 @@ for (const [name, key, reason] of [
     assert.ok(pgLockCalls.some((c) => c.op === "try"), `${name} must take its lock when configured`);
   });
 
-  test(`${name} treats a whitespace-only ${key} as unconfigured`, async () => {
+  test(`${name} treats an EMPTY ${key} as unconfigured`, async () => {
+    // An empty value only, not a whitespace-only one: neither the route
+    // (`!apiKey?.value`) nor getApiKey in omdb.ts/mdblist.ts trims, so "   "
+    // counts as configured today and this test must not claim otherwise.
     settings.set(key, "");
     const route = ROUTES.find((r) => r.name === name)!;
     assert.equal((await route.POST(authed(route))).status, 200);

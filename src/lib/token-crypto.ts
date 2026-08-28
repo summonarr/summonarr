@@ -92,16 +92,18 @@ export function decryptToken(value: string, label: string = "unknown row"): stri
   if (parts.length !== 3) {
     throw new Error("[token-crypto] Decrypt failed: malformed ciphertext (expected 3 colon-separated parts)");
   }
-  let iv: Buffer;
-  let tag: Buffer;
-  let ct: Buffer;
-  try {
-    iv  = Buffer.from(parts[0], "hex");
-    tag = Buffer.from(parts[1], "hex");
-    ct  = Buffer.from(parts[2], "hex");
-  } catch {
+  // Buffer.from(s, "hex") never throws — it silently stops at the first
+  // non-hex character / odd trailing nibble — so the shape must be validated
+  // explicitly or a truncated row reports "wrong key" instead of "malformed".
+  // The ciphertext part may be empty (an encrypted empty string), so it gets
+  // the star quantifier; the IV/tag length check below catches empties there.
+  const HEX_PAIRS = /^(?:[0-9a-f]{2})*$/i;
+  if (!HEX_PAIRS.test(parts[0]) || !HEX_PAIRS.test(parts[1]) || !HEX_PAIRS.test(parts[2])) {
     throw new Error("[token-crypto] Decrypt failed: malformed ciphertext (hex decode failed)");
   }
+  const iv  = Buffer.from(parts[0], "hex");
+  const tag = Buffer.from(parts[1], "hex");
+  const ct  = Buffer.from(parts[2], "hex");
   if (iv.length !== 16 || tag.length !== 16) {
     throw new Error("[token-crypto] Decrypt failed: malformed ciphertext (IV or auth tag has wrong length)");
   }

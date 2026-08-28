@@ -740,16 +740,18 @@ test("bad-matches maps an internal failure to a 500 without leaking the error", 
     findFirst: async () => null, findUnique: async () => null, count: async () => 0,
   });
   const res = await doBadMatches(t);
-  if (res.status === 500) {
+  try {
+    assert.equal(res.status, 500, "an internal failure must map to a 500");
     const text = await res.text();
     assert.ok(!text.includes("SECRET INTERNAL DETAIL"), "the internal error leaked to the client");
     assert.ok(errors.some((e) => e.includes("[library/bad-matches]")), "no scoped error log");
+  } finally {
+    shadowPrismaModel(prisma, "plexLibraryItem", {
+      findMany: async () => { rec("plexLibraryItem.findMany"); return []; },
+      findFirst: async () => null, findUnique: async () => null, count: async () => 0,
+      aggregate: async () => ({ _count: { _all: 0 }, _sum: {}, _min: {}, _max: {} }), groupBy: async () => [],
+    });
   }
-  shadowPrismaModel(prisma, "plexLibraryItem", {
-    findMany: async () => { rec("plexLibraryItem.findMany"); return []; },
-    findFirst: async () => null, findUnique: async () => null, count: async () => 0,
-    aggregate: async () => ({ _count: { _all: 0 }, _sum: {}, _min: {}, _max: {} }), groupBy: async () => [],
-  });
 });
 
 // ── /api/admin/play-history/heatmap-cell ─────────────────────────────────────

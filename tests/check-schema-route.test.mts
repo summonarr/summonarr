@@ -111,15 +111,19 @@ const TRUSTED_ORIGIN = "http://localhost:3000";
 // ── the columns the route asserts (mirror of the route's EXPECTED) ───────────
 // Kept as a local fixture so a schema-contract change breaks these tests loudly.
 const EXPECTED: Record<string, string[]> = {
-  User: ["id", "name", "email", "passwordHash", "role", "permissions", "mediaServer", "discordId", "autoApprove", "quotaExempt"],
-  PlexLibraryItem: ["tmdbId", "mediaType", "filePath", "plexRatingKey", "title", "year", "overview"],
-  JellyfinLibraryItem: ["tmdbId", "mediaType", "filePath", "jellyfinItemId", "jellyfinItemIds", "title", "year", "overview"],
+  User: ["id", "name", "email", "passwordHash", "role", "permissions", "mediaServer", "discordId", "autoApprove", "quotaExempt", "deactivatedAt", "purgedAt"],
+  PlexLibraryItem: ["tmdbId", "mediaType", "serverInstance", "filePath", "plexRatingKey", "title", "year", "overview"],
+  JellyfinLibraryItem: ["tmdbId", "mediaType", "serverInstance", "filePath", "jellyfinItemId", "jellyfinItemIds", "title", "year", "overview"],
   TVEpisodeCache: ["source", "tmdbId", "seasonNumber", "episodeNumber"],
-  PlayHistory: ["id", "source", "tmdbId", "mediaType", "title", "year", "posterPath", "startedAt", "watched"],
-  MediaRequest: ["id", "tmdbId", "mediaType", "title", "posterPath", "status", "requestedBy"],
+  PlayHistory: ["id", "source", "serverInstance", "tmdbId", "mediaType", "title", "year", "posterPath", "startedAt", "watched"],
+  MediaRequest: ["id", "tmdbId", "mediaType", "arrInstance", "title", "posterPath", "status", "requestedBy"],
   TmdbCache: ["key", "data", "expiresAt"],
-  ActiveSession: ["id", "source", "tmdbId", "title"],
-  MediaServerUser: ["id", "source", "sourceUserId", "username"],
+  ActiveSession: ["id", "source", "serverInstance", "tmdbId", "title"],
+  MediaServerUser: ["id", "source", "serverInstance", "sourceUserId", "username"],
+  RadarrWantedItem: ["tmdbId", "arrInstance"],
+  SonarrWantedItem: ["tmdbId", "arrInstance"],
+  RadarrAvailableItem: ["tmdbId", "arrInstance"],
+  SonarrAvailableItem: ["tmdbId", "arrInstance"],
 };
 
 function rowsFor(tables: Record<string, string[]>): SchemaRow[] {

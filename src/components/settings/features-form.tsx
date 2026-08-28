@@ -55,6 +55,11 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
   const savedState = useRef<FeatureFlags>({ ...initialFlags });
   const pendingTarget = useRef<Map<string, boolean>>(new Map());
   const inFlight = useRef(false);
+  // Keys whose PATCH is currently on the wire. A key stays in pendingTarget
+  // until its response settles (so a mid-flight re-flip is re-sent), which means
+  // the unmount cleanup would otherwise re-PATCH a value already in flight —
+  // racing the two writes for the same key. Cleanup skips anything listed here.
+  const inFlightKeys = useRef<Set<string>>(new Set());
   const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const statusTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
@@ -116,6 +121,7 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
 
         let success = false;
         let message = "";
+        for (const [key] of batch) inFlightKeys.current.add(key);
         try {
           const res = await fetch(withBasePath("/api/settings"), {
             method: "PATCH",
@@ -128,6 +134,8 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
         } catch {
           success = false;
           message = "Network error — the change was not saved";
+        } finally {
+          for (const [key] of batch) inFlightKeys.current.delete(key);
         }
 
         for (const [key, target] of batch) {
@@ -171,10 +179,14 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
     // exhaustive-deps rule actually asks for here.
     const timers = statusTimers;
     const pendingRef = pendingTarget;
+    const inFlightRef = inFlightKeys;
     return () => {
       if (flushTimer.current) clearTimeout(flushTimer.current);
       for (const timer of timers.current.values()) clearTimeout(timer);
-      const pending = [...pendingRef.current];
+      // Exclude keys whose PATCH is already on the wire — re-sending them would
+      // race a duplicate write for the same key (and the in-flight request will
+      // reach the server regardless of unmount).
+      const pending = [...pendingRef.current].filter(([key]) => !inFlightRef.current.has(key));
       if (pending.length === 0) return;
       // Each toggle used to PATCH immediately, so navigating away right after a
       // click still saved it. The debounce would drop that; `keepalive` lets the

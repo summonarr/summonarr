@@ -17,7 +17,7 @@ import {
   isOidcConfigured,
   verifyOidcStateCookie,
 } from "@/lib/oidc";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 
 // Native completion of the OIDC flow — the counterpart to the JSON branch of
 // /api/auth/oidc/start. The browser flow never reaches here: it finishes inside
@@ -40,7 +40,7 @@ const MAX_SIGNIN_BODY_BYTES = 16 * 1024;
 export async function POST(req: NextRequest) {
   // Each hit triggers an outbound IdP token exchange plus a DB user
   // lookup/create, so throttle on the same budget as /start and /callback.
-  if (!checkRateLimit(`oidc-signin:${getClientIp(req.headers)}`, 20, 5 * 60 * 1000)) {
+  if (!checkRateLimit(`oidc-signin:${getClientIpKey(req.headers)}`, 20, 5 * 60 * 1000)) {
     return NextResponse.json({ error: "Too many requests — try again later." }, { status: 429 });
   }
 
