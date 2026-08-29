@@ -271,12 +271,26 @@ export async function getMyWatchHistory(
     WHERE ${filterSql}
   `;
 
-  const [rows, totalRows, agg] = await Promise.all([
+  // Two aggregates, two deliberately different populations — do NOT collapse
+  // them into one `aggregate()` call.
+  //
+  // `plays` counts WATCHED sessions only, matching getPlayStatsForServerUsers
+  // ("plays" surfaces filter watched=true; raw counts are reserved for
+  // technical/resource analytics). Without that filter this page reported 818
+  // where My Stats reported 525 for the same account — the same headline word
+  // measuring two different things on two pages.
+  //
+  // `playSeconds` stays UNFILTERED, which is why the two pages already agreed
+  // on watch time. A session that stopped below the watched threshold is still
+  // time the person spent watching; excluding it would under-report the hours.
+  const [rows, totalRows, playAgg, timeAgg] = await Promise.all([
     prisma.$queryRawUnsafe<RawGroupedRow[]>(pageSql, ...binds),
     prisma.$queryRawUnsafe<{ total: number }[]>(countSql, ...filterBinds),
+    prisma.playHistory.count({
+      where: { mediaServerUserId: { in: ids }, watched: true },
+    }),
     prisma.playHistory.aggregate({
       where: { mediaServerUserId: { in: ids } },
-      _count: { _all: true },
       _sum: { playDuration: true },
     }),
   ]);
@@ -315,7 +329,7 @@ export async function getMyWatchHistory(
     total: totalRows[0]?.total ?? 0,
     nextCursor: last ? `${last.startedAt.toISOString()}|${last.id}` : null,
     pageSize: MY_HISTORY_PAGE_SIZE,
-    stats: { plays: agg._count._all, playSeconds: agg._sum.playDuration ?? 0 },
+    stats: { plays: playAgg, playSeconds: timeAgg._sum.playDuration ?? 0 },
   };
 }
 

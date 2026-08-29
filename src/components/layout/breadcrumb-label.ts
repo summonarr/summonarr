@@ -7,13 +7,20 @@ export type Crumb = { label: string; href?: string };
  *
  * Matches against the flat nav list first; detail routes (/movie/[id],
  * /tv/[id]) get a two-segment crumb so users see where they are.
+ *
+ * `detailTitle` is the title of the thing being viewed, supplied by the detail
+ * page through DetailTitleProvider. Without it the last crumb read the literal
+ * "Detail" — accurate but useless, with the actual title sitting right below it
+ * in the hero. It stays the fallback for the first render (the context starts
+ * null on both server and client, so hydration matches) and for any detail
+ * route that doesn't publish one.
  */
-export function breadcrumbFor(pathname: string): Crumb[] {
+export function breadcrumbFor(pathname: string, detailTitle?: string | null): Crumb[] {
   if (pathname.startsWith("/movie/")) {
-    return [{ label: "Movies", href: "/movies" }, { label: "Detail" }];
+    return [{ label: "Movies", href: "/movies" }, { label: detailTitle || "Detail" }];
   }
   if (pathname.startsWith("/tv/")) {
-    return [{ label: "TV Shows", href: "/tv" }, { label: "Detail" }];
+    return [{ label: "TV Shows", href: "/tv" }, { label: detailTitle || "Detail" }];
   }
 
   const all: readonly NavItem[] = [...userNavItems, ...adminNavItems];

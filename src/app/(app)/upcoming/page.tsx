@@ -12,7 +12,12 @@ import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { requireFeature } from "@/lib/features";
 import { LiveRefresh } from "@/components/live-refresh";
 import { PageHeader, EmptyState } from "@/components/ui/design";
+import { PaginationBar } from "@/components/media/pagination-bar";
 import { AlertTriangle, Calendar } from "@/components/icons";
+
+// One screenful, matching POPULAR_PER_PAGE. See the note at the slice below for
+// why this page needed bounding at all.
+const UPCOMING_PER_PAGE = 40;
 
 // Reads still-fresh (within 49h) not-yet-released titles from the UpcomingCacheItem table.
 async function getUpcomingFromCache(): Promise<TmdbMedia[]> {
@@ -92,12 +97,35 @@ export default async function UpcomingPage({
     items = items.filter((m) => !((showPlex && m.plexAvailable) || (showJellyfin && m.jellyfinAvailable)));
   }
 
+  // PAGINATE. The cache query takes up to 500 rows and this page used to render
+  // every one — 447 cards on a live instance, against ~20-40 on Discover or
+  // Movies. Posters are lazy (next/image defaults to loading="lazy"), so the
+  // cost was not the images: it was the DOM, and the ratings batcher, which
+  // every MediaCard calls on MOUNT rather than on visibility. At 447 cards that
+  // is three chained POSTs to /api/ratings/batch (MAX_BATCH is 200), each
+  // resolving MDBList/OMDB server-side, before the grid finishes filling in.
+  // One page is one batch.
+  //
+  // The slice happens AFTER enrichment on purpose: hideAvailable filters on
+  // availability, so paginating first would give uneven pages. attachAll is a
+  // fixed handful of bulk queries regardless of list length, so enriching the
+  // full list costs about the same as enriching one page of it.
+  const totalPages = Math.max(1, Math.ceil(items.length / UPCOMING_PER_PAGE));
+  // Clamped, not trusted: ?page=99 (or a page that shrank when the user turned
+  // on Hide Available) lands on the last real page instead of an empty grid.
+  const page = Math.min(totalPages, Math.max(1, parseInt(sp.page ?? "1", 10) || 1));
+  const pageItems = items.slice((page - 1) * UPCOMING_PER_PAGE, page * UPCOMING_PER_PAGE);
+
   return (
     <div className="ds-page-enter">
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
       <PageHeader
         title="Upcoming"
-        subtitle="Movies and TV shows premiering soon"
+        subtitle={
+          items.length > 0
+            ? `${(page - 1) * UPCOMING_PER_PAGE + 1}–${(page - 1) * UPCOMING_PER_PAGE + pageItems.length} of ${items.length} premiering soon`
+            : "Movies and TV shows premiering soon"
+        }
         right={
           <Suspense>
             <HideAvailableToggle active={hideAvailable} />
@@ -128,17 +156,22 @@ export default async function UpcomingPage({
           />
         )
       ) : (
-        <div className="ds-media-grid">
-          {items.map((media) => (
-            <MediaCard
-              key={`${media.mediaType}-${media.id}`}
-              media={media}
-              showPlex={showPlex}
-              showJellyfin={showJellyfin}
-              size="md"
-            />
-          ))}
-        </div>
+        <>
+          <div className="ds-media-grid">
+            {pageItems.map((media) => (
+              <MediaCard
+                key={`${media.mediaType}-${media.id}`}
+                media={media}
+                showPlex={showPlex}
+                showJellyfin={showJellyfin}
+                size="md"
+              />
+            ))}
+          </div>
+          <Suspense>
+            <PaginationBar currentPage={page} totalPages={totalPages} />
+          </Suspense>
+        </>
       )}
     </div>
   );

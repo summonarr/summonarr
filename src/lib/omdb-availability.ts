@@ -423,10 +423,18 @@ async function readCachedRatings(items: TmdbMedia[]): Promise<WarmCache> {
 // An MDBList batch row is cached as a real value even when every ratings field is
 // null (the item is in MDBList's index but carries no scores). Such a row must not
 // shadow a populated OMDB row, so treat it as "no data" when deciding which source wins.
+//
+// mdblistScore gets a NUMERIC test rather than a truthiness one: MDBList's
+// no-score sentinel is -1 (see aggregateScore in mdblist.ts), and rows cached
+// before that guard existed still carry it. As a truthy string it made a
+// scoreless row read as populated here — defeating the exact shadowing this
+// function exists to prevent.
 export function hasAnyMdblistRating(d: MdblistRatings): boolean {
+  const score = d.mdblistScore != null ? Number(d.mdblistScore) : NaN;
   return Boolean(
     d.imdbRating || d.rottenTomatoes || d.rtAudienceScore || d.metacritic ||
-    d.traktRating || d.letterboxdRating || d.mdblistScore || d.malRating || d.rogerEbertRating,
+    d.traktRating || d.letterboxdRating || (Number.isFinite(score) && score > 0) ||
+    d.malRating || d.rogerEbertRating,
   );
 }
 

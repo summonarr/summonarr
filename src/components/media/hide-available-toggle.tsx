@@ -18,6 +18,10 @@ export function HideAvailableToggle({ active }: HideAvailableToggleProps) {
     } else {
       params.set("hideAvailable", "1");
     }
+    // Toggling changes the result set, so the page number it indexed into is
+    // meaningless — same reasoning as the filter bars. /upcoming clamps an
+    // out-of-range page anyway, but landing on page 1 is what the user means.
+    params.delete("page");
     const qs = params.toString();
     router.push(qs ? `${pathname}?${qs}` : pathname);
   }

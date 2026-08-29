@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { X } from "@/components/icons";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { FilterBar as Segments } from "@/components/ui/design";
@@ -77,9 +77,32 @@ export function TopFilterBar({
   const searchParams = useSearchParams();
   const years = useMemo(() => buildYears(maxYear), [maxYear]);
 
+  // Not-yet-committed filter changes. `searchParams` reflects the COMMITTED
+  // url and router.push is async, so two changes in quick succession rebuilt
+  // the second query string from a snapshot still holding the first filter's
+  // old value and silently reverted it. Same delta reconciliation as
+  // filter-bar.tsx — see the longer note there.
+  const pendingRef = useRef<Record<string, string | undefined>>({});
+  const committed = searchParams.toString();
+
+  useEffect(() => {
+    const current = new URLSearchParams(committed);
+    for (const [k, v] of Object.entries(pendingRef.current)) {
+      const landed = v === undefined || v === "" ? current.get(k) === null : current.get(k) === v;
+      if (landed) delete pendingRef.current[k];
+    }
+  }, [committed]);
+
+  useEffect(() => {
+    const onPop = () => { pendingRef.current = {}; };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
   const push = useCallback((updates: Record<string, string | undefined>) => {
+    Object.assign(pendingRef.current, updates);
     const params = new URLSearchParams(searchParams.toString());
-    for (const [k, v] of Object.entries(updates)) {
+    for (const [k, v] of Object.entries(pendingRef.current)) {
       if (v === undefined || v === "") params.delete(k);
       else params.set(k, v);
     }
@@ -90,6 +113,11 @@ export function TopFilterBar({
     params.delete("page");
     router.push(`${pathname}?${params.toString()}`);
   }, [router, pathname, searchParams]);
+
+  const clearAll = useCallback(() => {
+    pendingRef.current = {};
+    router.push(pathname);
+  }, [router, pathname]);
 
   const hasFilters = !!(activeMediaType || activeSortBy || activeMinImdb || activeMinVotes || activeFromYear || activeToYear || activeHideAvailable);
 
@@ -181,7 +209,7 @@ export function TopFilterBar({
         {hasFilters && (
           <button
             type="button"
-            onClick={() => router.push(pathname)}
+            onClick={clearAll}
             className="ds-tap inline-flex items-center gap-1 transition-colors"
             style={{
               padding: "5px 10px",

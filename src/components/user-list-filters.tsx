@@ -39,9 +39,18 @@ export function FilterPills({
   // narrow viewports instead of being clipped off-screen with no visual cue.
   // Wider viewports where the row fits are unaffected — wrap only kicks in when
   // content exceeds the container width.
+  //
+  // `w-fit` keeps the box tight to its pills instead of stretching. It pairs
+  // with the SearchBox change below: every caller sits this next to a
+  // <SearchBox> inside a `flex items-center gap-3`, and that box used to be
+  // `w-full` even in the row layout. A wrapping flex container's min-content
+  // width is ONE PILL, so the w-full sibling could crush this to a single-pill
+  // column — Newest/Oldest stacked vertically at 1372px, and the 6-pill type
+  // filter on /issues wrapped 4-then-2. Deliberately NOT `shrink-0`: the wrap
+  // still has to work when the row genuinely doesn't fit.
   return (
     <div
-      className="flex flex-wrap gap-1 max-w-full"
+      className="flex flex-wrap gap-1 max-w-full w-fit"
       style={{
         padding: 2,
         background: "var(--ds-bg-1)",
@@ -154,8 +163,13 @@ export function SearchBox({
     push("");
   }
 
+  // Full width only when the parent row has collapsed to a column (below `sm`).
+  // In the row layout `w-full` made this demand 100% of the line, which is what
+  // squeezed the sibling FilterPills into a vertical stack — see the note on
+  // that component. `sm:w-auto` lets the row size to its content instead, with
+  // a floor so the input stays usable and a cap so it can't sprawl.
   return (
-    <div className="relative w-full sm:max-w-xs">
+    <div className="relative w-full sm:w-auto sm:min-w-[12rem] sm:max-w-xs">
       <div
         className="flex items-center focus-within:ring-2 focus-within:ring-ring"
         style={{

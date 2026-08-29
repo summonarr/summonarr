@@ -1,88 +1,25 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { Bell, Film, Tv2 } from "@/components/icons";
 import { posterUrl } from "@/lib/tmdb-types";
-import { withBasePath } from "@/lib/base-path";
 import { useHasMounted } from "@/hooks/use-has-mounted";
-import { useLiveEvents } from "@/hooks/use-live-events";
+import { useNotifications } from "@/components/notifications/notification-store";
 import { notificationHref, timeAgo } from "@/lib/notification-links";
 
-interface NotificationItem {
-  id: string;
-  type: string;
-  title: string;
-  body: string;
-  tmdbId: number | null;
-  mediaType: "MOVIE" | "TV" | null;
-  posterPath: string | null;
-  readAt: string | null;
-  createdAt: string;
-}
-
-const POLL_MS = 60_000;
-
 export function NotificationBell() {
-  const [items, setItems] = useState<NotificationItem[]>([]);
-  const [unread, setUnread] = useState(0);
+  // Fetching, polling and the SSE reload all live in NotificationStoreProvider
+  // ((app)/layout.tsx). This component used to own them, and so did the mobile
+  // nav's badge — both are mounted at every viewport (the breakpoints are CSS,
+  // not React), so every page load issued two identical GET /api/notifications.
+  // See the note on the store.
+  const { items, unread, markAllRead } = useNotifications();
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
-  const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mounted = useHasMounted();
-
-  const load = useCallback(async () => {
-    try {
-      const res = await fetch(withBasePath("/api/notifications"), { credentials: "include" });
-      if (!res.ok) return;
-      const data = (await res.json()) as { items: NotificationItem[]; unreadCount: number };
-      setItems(data.items ?? []);
-      setUnread(data.unreadCount ?? 0);
-    } catch {
-      // best-effort — a transient failure just leaves the last-known state
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-    // The interval keeps ticking in hidden tabs (simplest correct shape), but
-    // the fetch is skipped there — a background tab doesn't need a fresh badge.
-    const t = setInterval(() => {
-      if (document.visibilityState === "hidden") return;
-      void load();
-    }, POLL_MS);
-    // Refresh immediately when the tab becomes visible again so a returning
-    // user isn't up to POLL_MS stale.
-    function onVisibility() {
-      if (document.visibilityState === "visible") void load();
-    }
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      clearInterval(t);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
-  }, [load]);
-
-  // Real-time: the server writes an in-app notification alongside these SSE events
-  // (scoped to this user server-side), so re-fetch on them for a near-instant badge
-  // instead of waiting up to POLL_MS. The 60s poll above stays as the missed-event
-  // safety net. Bursts (a sync flipping several requests at once) coalesce into one refetch.
-  useLiveEvents((event) => {
-    if (
-      event.type === "request:updated" ||
-      event.type === "issue:updated" ||
-      event.type === "issuemessage:created"
-    ) {
-      if (reloadTimer.current) clearTimeout(reloadTimer.current);
-      reloadTimer.current = setTimeout(() => void load(), 400);
-    }
-  });
-
-  useEffect(() => () => {
-    if (reloadTimer.current) clearTimeout(reloadTimer.current);
-  }, []);
 
   // Close on outside click / Escape.
   useEffect(() => {
@@ -112,19 +49,8 @@ export function NotificationBell() {
   async function toggle() {
     const next = !open;
     setOpen(next);
-    // Opening marks everything read: optimistic clear, then persist.
-    if (next && unread > 0) {
-      setUnread(0);
-      try {
-        await fetch(withBasePath("/api/notifications"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: "{}",
-        });
-      } catch {
-        // ignore — the badge re-appears on the next poll if the write failed
-      }
-    }
+    // Opening marks everything read.
+    if (next && unread > 0) await markAllRead();
   }
 
   return (

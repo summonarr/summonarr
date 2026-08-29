@@ -556,6 +556,24 @@ function formatSummary(action: string, d: Record<string, unknown>): string | nul
         return `${d.service}: ${(d.instances as unknown[]).length} instance(s)${removed}`;
       }
       if (d.scrubbed != null) return `Scrubbed PII from ${d.scrubbed} row(s)`;
+      // TRaSH sync logs under SETTINGS_CHANGE with a shape of its own
+      // ({refreshed[], applied{count,failures}, errors[], durationMs}). With no
+      // case here it fell to the raw-payload path and spilled the whole
+      // `refreshed` array — several wrapped lines of JSON per row, pushing real
+      // entries off screen.
+      if (Array.isArray(d.refreshed) || d.applied != null) {
+        const applied = d.applied as { count?: number; failures?: number; recreated?: number } | undefined;
+        const failures = applied?.failures ?? 0;
+        const recreated = applied?.recreated ?? 0;
+        const errors = Array.isArray(d.errors) ? d.errors.length : 0;
+        return [
+          Array.isArray(d.refreshed) && `Refreshed ${d.refreshed.length} service(s)`,
+          applied?.count != null && `applied ${applied.count} spec(s)`,
+          recreated > 0 && `${recreated} recreated`,
+          failures > 0 && `${failures} failed`,
+          errors > 0 && `${errors} error(s)`,
+        ].filter(Boolean).join(" · ") || null;
+      }
       return null;
     }
     case "ISSUE_STATUS_CHANGE":
@@ -700,18 +718,38 @@ function DetailSection({ details, action, expanded }: { details: string | null; 
 
   const summary = formatSummary(action, parsed);
 
+  // Actions with no summary case (cron shapes, anything added later) used to
+  // dump their whole payload inline — `refreshed:[{"service":"RADARR",…` across
+  // several wrapped lines, pushing real entries off screen. Put it behind the
+  // same toggle the diff rows already use, and show a field-name preview
+  // collapsed so the row still says what it is.
+  const rawEntries = !summary && !hasDiff ? Object.entries(parsed) : [];
+  const hasRaw = rawEntries.length > 0;
+
   return (
     <div className="text-xs">
-      {hasDiff ? (
+      {hasDiff || hasRaw ? (
         <button
           onClick={() => setIsExpanded(!isExpanded)}
+          aria-expanded={isExpanded}
           className="flex items-center gap-1 text-zinc-300 hover:text-zinc-100 transition-colors text-left"
         >
           {isExpanded ? <ChevronDown size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
-          <span>{summary || "View changes"}</span>
+          <span>
+            {summary ||
+              (hasDiff
+                ? "View changes"
+                : `${rawEntries.length} field${rawEntries.length === 1 ? "" : "s"}: ${rawEntries.map(([k]) => k).join(", ")}`)}
+          </span>
         </button>
       ) : (
-        <span className="text-zinc-400">{summary || Object.entries(parsed).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join(", ")}</span>
+        <span className="text-zinc-400">{summary}</span>
+      )}
+
+      {isExpanded && hasRaw && (
+        <pre className="mt-2 pl-4 border-l-2 border-zinc-700/60 text-zinc-400 whitespace-pre-wrap break-words overflow-x-auto">
+          {JSON.stringify(parsed, null, 2)}
+        </pre>
       )}
 
       {isExpanded && hasDiff && (

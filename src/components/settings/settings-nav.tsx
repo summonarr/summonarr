@@ -8,8 +8,19 @@ export interface NavItem {
   group: string;
 }
 
-// Scroll-spy sidebar nav: highlights the section nearest the top of <main>
-// and smooth-scrolls to a section on click.
+// Scroll-spy sidebar nav: highlights the section nearest the top of <main>.
+//
+// The entries are plain `#id` anchors, NOT buttons that measure and scroll in
+// JS. The previous implementation read getBoundingClientRect() on both the
+// section and <main>, then called main.scrollTo() with a hand-computed offset —
+// which reportedly moved the page a few dozen pixels and stopped. Handing the
+// scroll back to the browser removes the measurement entirely; the offset that
+// JS was applying is now `scroll-margin-top` on `.settings-sections > [id]` in
+// globals.css. It also means these sections have real deep links, survive JS
+// failing to load, and work from the keyboard.
+//
+// The spy stays: it listens on <main>'s scroll (the (app) layout makes <main>
+// the scroll container) purely to move the active pill.
 export function SettingsNav({ items }: { items: NavItem[] }) {
   const [activeId, setActiveId] = useState<string>(items[0]?.id ?? "");
 
@@ -35,15 +46,6 @@ export function SettingsNav({ items }: { items: NavItem[] }) {
     return () => main.removeEventListener("scroll", onScroll);
   }, [items]);
 
-  function scrollTo(id: string) {
-    const el = document.getElementById(id);
-    const main = document.querySelector("main");
-    if (!el || !main) return;
-    const mainRect = main.getBoundingClientRect();
-    const elRect = el.getBoundingClientRect();
-    main.scrollTo({ top: main.scrollTop + elRect.top - mainRect.top - 24, behavior: "smooth" });
-  }
-
   const groups = items.reduce<Record<string, NavItem[]>>((acc, item) => {
     (acc[item.group] ??= []).push(item);
     return acc;
@@ -58,17 +60,22 @@ export function SettingsNav({ items }: { items: NavItem[] }) {
           </p>
           <div className="space-y-0.5">
             {groupItems.map(({ id, label }) => (
-              <button
+              <a
                 key={id}
-                onClick={() => scrollTo(id)}
-                className={`w-full text-left text-sm px-3 py-1.5 rounded-md transition-colors ${
+                href={`#${id}`}
+                // The spy would set this on the next scroll event anyway, but
+                // doing it on click makes the pill move with the page rather
+                // than a frame behind it.
+                onClick={() => setActiveId(id)}
+                aria-current={activeId === id ? "true" : undefined}
+                className={`block w-full text-left text-sm px-3 py-1.5 rounded-md transition-colors ${
                   activeId === id
                     ? "bg-zinc-800 text-white font-medium"
                     : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
                 }`}
               >
                 {label}
-              </button>
+              </a>
             ))}
           </div>
         </div>

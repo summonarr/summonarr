@@ -187,11 +187,20 @@ function pickSelect(row: HistoryRow, select: Record<string, true>): Record<strin
   return out;
 }
 
-// The list path's grouped page/count ride $queryRawUnsafe (mirrored below);
-// these delegate methods serve the stats aggregate + the entry-detail queries.
-// count is deliberately NOT stubbed — a regression to Prisma count throws
-// loudly instead of hanging on a real DB.
+// The list path's grouped ENTRY count rides $queryRawUnsafe (mirrored below);
+// these delegate methods serve the stats aggregates + the entry-detail queries.
+//
+// `count` serves exactly one caller: the `stats.plays` headline, which counts
+// WATCHED rows to match getPlayStatsForServerUsers ("plays" surfaces filter
+// watched=true). It is recorded so the assertions below can pin that filter —
+// without it this page reported every row and disagreed with My Stats by 56%
+// on a live instance. The grouped entry total must still come from the raw SQL
+// mirror, never from here; `total` is asserted separately in every list test.
 shadowPrismaModel(prisma, "playHistory", {
+  count: async (args: { where: PWhere }) => {
+    rec("playHistory.count", args);
+    return historyRows.filter((r) => rowMatches(r, args.where)).length;
+  },
   findFirst: async (args: { where: PWhere; select: Record<string, true> }) => {
     rec("playHistory.findFirst", args);
     const row = historyRows.find((r) => rowMatches(r, args.where));
@@ -642,8 +651,25 @@ test("repeat plays of the same episode/movie consolidate into one entry with agg
   const single = body.items.find((i) => i.id === otherEp.id)!;
   assert.equal(single.playCount, 1);
 
-  // Consolidation never inflates the all-time totals: stats stay RAW plays.
-  assert.equal(body.stats.plays, 6);
+  // Consolidation never changes the all-time totals — `stats.plays` counts
+  // individual plays, not the 3 consolidated entries. It counts the WATCHED
+  // ones (4 of these 6 rows), matching getPlayStatsForServerUsers; without that
+  // filter this page said 818 where My Stats said 525 for the same account.
+  assert.equal(body.stats.plays, 4);
+  assert.equal(
+    (opsOf("playHistory.count")[0]?.args as { where: { watched?: boolean } }).where.watched,
+    true,
+    "the plays headline must filter watched=true, or it disagrees with My Stats",
+  );
+  // Watch time is deliberately NOT filtered — a session that stopped below the
+  // watched threshold is still time spent watching, and this is why the two
+  // pages already agreed on hours while disagreeing on plays.
+  assert.equal(body.stats.playSeconds, 1000 + 2000 + 500 + 3000 + 4000 + 4500);
+  assert.equal(
+    (opsOf("playHistory.aggregate")[0]?.args as { where: { watched?: boolean } }).where.watched,
+    undefined,
+    "watch time must span every play, watched or not",
+  );
 });
 
 test("unmatched rows consolidate by library item, and distinct unmatched titles never merge", async () => {

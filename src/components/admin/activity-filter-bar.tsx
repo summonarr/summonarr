@@ -46,6 +46,7 @@ export function ActivityFilterBar() {
 
   const [showCustom, setShowCustom] = useState(!isPreset && currentDays !== "30");
   const [customValue, setCustomValue] = useState(!isPreset ? currentDays : "");
+  const [customError, setCustomError] = useState<string | null>(null);
 
   function isSubPageActive(page: typeof SUB_PAGES[0]): boolean {
     if (page.href === "/admin/activity" && page.exact) {
@@ -72,11 +73,28 @@ export function ActivityFilterBar() {
     [router, pathname, searchParams],
   );
 
+  // Rejecting an out-of-range value is right; doing it in silence was not.
+  // Previously this was the `if` alone with no `else`, so "-5" or "99999" left
+  // the page on its previous range with no message and the field unchanged —
+  // there was nothing to tell the user their input had been thrown away, so
+  // the natural response was to press Go again.
   const applyCustomDays = () => {
-    const num = parseInt(customValue, 10);
-    if (num > 0 && num <= 3650) {
-      setParam("days", String(num));
+    const trimmed = customValue.trim();
+    if (trimmed === "") {
+      setCustomError("Enter a number of days.");
+      return;
     }
+    const num = Number(trimmed);
+    if (!Number.isInteger(num)) {
+      setCustomError("Whole days only.");
+      return;
+    }
+    if (num < 1 || num > 3650) {
+      setCustomError("Pick between 1 and 3650 days.");
+      return;
+    }
+    setCustomError(null);
+    setParam("days", String(num));
   };
 
   const showFilters = pathname === "/admin/activity" || pathname === "/admin/activity/stats";
@@ -179,10 +197,21 @@ export function ActivityFilterBar() {
                   min={1}
                   max={3650}
                   value={customValue}
-                  onChange={(e) => setCustomValue(e.target.value)}
+                  onChange={(e) => {
+                    setCustomValue(e.target.value);
+                    // Clear the complaint as soon as they start correcting it.
+                    if (customError) setCustomError(null);
+                  }}
                   onKeyDown={(e) => e.key === "Enter" && applyCustomDays()}
                   placeholder="days"
-                  className="w-16 px-2 py-1 text-xs bg-zinc-800 border border-zinc-700 rounded-lg text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-500 tabular-nums"
+                  aria-label="Custom range in days"
+                  aria-invalid={customError ? true : undefined}
+                  aria-describedby={customError ? "activity-custom-days-error" : undefined}
+                  className={`w-16 px-2 py-1 text-xs bg-zinc-800 border rounded-lg text-white placeholder:text-zinc-500 focus:outline-none tabular-nums ${
+                    customError
+                      ? "border-red-500 focus:border-red-400"
+                      : "border-zinc-700 focus:border-indigo-500"
+                  }`}
                 />
                 <button
                   onClick={applyCustomDays}
@@ -190,6 +219,15 @@ export function ActivityFilterBar() {
                 >
                   Go
                 </button>
+                {customError && (
+                  <span
+                    id="activity-custom-days-error"
+                    role="alert"
+                    className="text-xs text-red-400 whitespace-nowrap"
+                  >
+                    {customError}
+                  </span>
+                )}
               </div>
             )}
           </div>

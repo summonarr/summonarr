@@ -28,6 +28,7 @@ import { Chip } from "@/components/ui/design";
 import { canRequest, hasPermission, Permission } from "@/lib/permissions";
 import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
 import { isBlacklisted } from "@/lib/blacklist";
+import { DetailTitle } from "@/components/layout/detail-title";
 import { isFeatureEnabled } from "@/lib/features";
 
 export default async function TVDetailPage({
@@ -200,6 +201,9 @@ export default async function TVDetailPage({
 
   return (
     <div className="ds-page-enter ds-detail-bleed">
+      {/* Renders nothing — publishes the title so the header breadcrumb
+          reads "Movies › <title>" instead of "Movies › Detail". */}
+      <DetailTitle title={media.title} />
       <div
         className="relative w-full overflow-hidden aspect-video max-h-[500px] xl:max-h-[640px] 2xl:max-h-[760px]"
         style={{ background: "var(--ds-bg-inset)" }}
