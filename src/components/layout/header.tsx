@@ -26,6 +26,7 @@ async function signOutAndRedirect(callbackUrl: string) {
   window.location.href = withBasePath(callbackUrl);
 }
 import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
+import { useDetailTitle } from "@/components/layout/detail-title";
 import { AppearanceMenu } from "@/components/theme/appearance-menu";
 import Image from "next/image";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
@@ -431,7 +432,8 @@ export function Header() {
     .join("")
     .toUpperCase();
 
-  const crumbs = breadcrumbFor(pathname);
+  const detailTitle = useDetailTitle();
+  const crumbs = breadcrumbFor(pathname, detailTitle);
 
   return (
     <header

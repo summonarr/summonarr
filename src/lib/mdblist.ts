@@ -205,6 +205,24 @@ export function batchRowTmdbId(raw: MdblistBatchRaw): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
+// MDBList signals "no score" with a SENTINEL, not null: the aggregate `score`
+// comes back as -1 (and sometimes 0) for a title it holds but has not scored.
+// `!= null` alone lets those through, and every downstream consumer treats the
+// resulting string as a real rating — the badge prints "MDB -1", and
+// hasAnyMdblistRating (omdb-availability.ts) reads the row as populated, which
+// is exactly the shadowing its own comment says must not happen. A genuine
+// aggregate of 0 would mean every constituent source scored it zero, which is
+// not a reachable state, so non-positive is treated as absent.
+function aggregateScore(score: number | null | undefined): string | null {
+  return score != null && score > 0 ? String(Math.round(score)) : null;
+}
+
+// Per-source values keep legitimate zeros (Rotten Tomatoes 0% and Metacritic 0
+// are real scores) and only reject negatives, which no scale here can produce.
+function sourceValue(value: number | null | undefined): number | null {
+  return value != null && value >= 0 ? value : null;
+}
+
 // Exported for direct unit coverage (tests/mdblist-parse.test.mts) — pure parser, no I/O.
 export function parseBatchItem(raw: MdblistBatchRaw): MdblistRatings {
 
@@ -226,18 +244,27 @@ export function parseBatchItem(raw: MdblistBatchRaw): MdblistRatings {
   const mal              = findSrc("mal", "myanimelist");
   const ebert            = findSrc("rogerebert");
 
+  const imdbValue       = sourceValue(imdb?.value);
+  const tomatoesValue   = sourceValue(tomatoes?.value);
+  const audienceValue   = sourceValue(tomatoesAudience?.value);
+  const mcValue         = sourceValue(mc?.value);
+  const traktValue      = sourceValue(trakt?.value);
+  const letterboxdValue = sourceValue(letterboxd?.value);
+  const malValue        = sourceValue(mal?.value);
+  const ebertValue      = sourceValue(ebert?.value);
+
   return {
     imdbId:           raw.imdb_id || null,
-    imdbRating:       imdb?.value != null             ? String(imdb.value)                          : null,
-    imdbVotes:        imdb?.votes                     ? String(imdb.votes)                          : null,
-    rottenTomatoes:   tomatoes?.value != null         ? `${Math.round(tomatoes.value)}%`            : null,
-    rtAudienceScore:  tomatoesAudience?.value != null ? `${Math.round(tomatoesAudience.value)}%`   : null,
-    metacritic:       mc?.value != null               ? `${Math.round(mc.value)}/100`               : null,
-    traktRating:      trakt?.value != null            ? String(Math.round(trakt.value))             : null,
-    letterboxdRating: letterboxd?.value != null       ? String(letterboxd.value)                    : null,
-    mdblistScore:     raw.score != null               ? String(Math.round(raw.score))               : null,
-    malRating:        mal?.value != null              ? String(mal.value)                           : null,
-    rogerEbertRating: ebert?.value != null            ? String(ebert.value)                         : null,
+    imdbRating:       imdbValue != null       ? String(imdbValue)                     : null,
+    imdbVotes:        imdb?.votes             ? String(imdb.votes)                    : null,
+    rottenTomatoes:   tomatoesValue != null   ? `${Math.round(tomatoesValue)}%`       : null,
+    rtAudienceScore:  audienceValue != null   ? `${Math.round(audienceValue)}%`       : null,
+    metacritic:       mcValue != null         ? `${Math.round(mcValue)}/100`          : null,
+    traktRating:      traktValue != null      ? String(Math.round(traktValue))        : null,
+    letterboxdRating: letterboxdValue != null ? String(letterboxdValue)               : null,
+    mdblistScore:     aggregateScore(raw.score),
+    malRating:        malValue != null        ? String(malValue)                      : null,
+    rogerEbertRating: ebertValue != null      ? String(ebertValue)                    : null,
     releasedDigital:  raw.released_digital || null,
     trailerUrl:       raw.trailer || null,
   };

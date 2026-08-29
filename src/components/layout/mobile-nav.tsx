@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
@@ -17,15 +17,15 @@ import {
   X,
   type IconComponent,
 } from "@/components/icons";
-import { useLiveEvents } from "@/hooks/use-live-events";
 import { getClientBadgeVisibility } from "@/lib/badge-visibility";
 import { cn } from "@/lib/utils";
-import { withBasePath } from "@/lib/base-path";
 import { filterNavByFeatures, getVisibleAdminItems, userNavItems } from "@/lib/nav-items";
 import type { FeatureFlags } from "@/lib/features";
 import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
+import { useDetailTitle } from "@/components/layout/detail-title";
+import { useNotifications } from "@/components/notifications/notification-store";
 import { SearchBar } from "@/components/layout/header";
 
 type Tab = {
@@ -61,7 +61,8 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
   );
   const someTabActive = tabs.some((t) => t.match(pathname));
 
-  const crumbs = breadcrumbFor(pathname);
+  const detailTitle = useDetailTitle();
+  const crumbs = breadcrumbFor(pathname, detailTitle);
   const breadcrumbLabel = crumbs.map((c) => c.label).join(" · ");
 
   return (
@@ -271,60 +272,16 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
 }
 
 // The in-app notification inbox is only reachable via the desktop header bell
-// (hidden below lg), so mobile/tablet gets a top-bar link here. Fetches its own
-// unread count once on mount (the /notifications page owns the full list + read
-// state); the badge stays hidden until the count lands, so SSR and first client
-// render agree — no Date.now()/new Date() at render (guardrail 16).
+// (hidden below lg), so mobile/tablet gets a top-bar link here. The count comes
+// from the shared NotificationStoreProvider rather than a fetch of its own:
+// this component and the desktop bell are BOTH mounted at every viewport (one
+// is hidden with CSS, not gated in React), so owning a fetch here meant every
+// page load issued two identical GET /api/notifications — and at desktop widths
+// one of them was for a badge nobody could see. The badge stays hidden until
+// the count lands, so SSR and first client render agree — no Date.now()/new
+// Date() at render (guardrail 16).
 function NotificationsLink() {
-  const [unread, setUnread] = useState(0);
-  const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Re-read on the same signals the desktop bell uses. Fetching once on mount
-  // left the badge frozen for the whole SPA session: this component and the
-  // desktop bell are BOTH mounted at every viewport (one is hidden with CSS,
-  // not gated in React), and neither remounts on navigation — App Router
-  // layouts persist, and router.refresh() re-renders server components without
-  // re-running client effects. So reading your notifications and navigating
-  // back left the count exactly as it was at first paint, and a new
-  // notification never appeared at all until a full reload.
-  const load = useCallback(async () => {
-    try {
-      const res = await fetch(withBasePath("/api/notifications"), {
-        credentials: "include",
-      });
-      if (!res.ok) return;
-      const data = (await res.json()) as { unreadCount?: number };
-      setUnread(data.unreadCount ?? 0);
-    } catch {
-      // best-effort — a transient failure just leaves the last-known count
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-    // Refresh when the tab comes back to the foreground. No poll here: the
-    // desktop bell already polls every 60s and is mounted alongside this, so a
-    // second interval would just double the request rate for one visible badge.
-    function onVisibility() {
-      if (document.visibilityState === "visible") void load();
-    }
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisibility);
-      if (reloadTimer.current) clearTimeout(reloadTimer.current);
-    };
-  }, [load]);
-
-  useLiveEvents((event) => {
-    if (
-      event.type === "request:updated" ||
-      event.type === "issue:updated" ||
-      event.type === "issuemessage:created"
-    ) {
-      if (reloadTimer.current) clearTimeout(reloadTimer.current);
-      reloadTimer.current = setTimeout(() => void load(), 400);
-    }
-  });
+  const { unread } = useNotifications();
 
   return (
     <Link

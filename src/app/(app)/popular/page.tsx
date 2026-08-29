@@ -370,7 +370,7 @@ function MediaGrid({
   return (
     <div className="ds-media-grid">
       {items.map((media, i) => (
-        <div key={`${media.mediaType}-${media.id}`} className="relative">
+        <div key={`${media.mediaType}-${media.id}`} className="ds-ranked-card relative">
           <div
             className="ds-mono absolute z-10 flex items-center justify-center font-bold"
             style={{

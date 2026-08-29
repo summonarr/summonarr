@@ -110,6 +110,30 @@ test("mdblistScore comes from raw.score, rounded to an integer string", () => {
   assert.equal(parse({ score: 68 }).mdblistScore, "68");
 });
 
+test("mdblistScore treats MDBList's no-score sentinel as absent, not as a rating", () => {
+  // MDBList returns -1 (and sometimes 0) for a title it holds but has not
+  // scored. A `!= null` gate let those through as the strings "-1"/"0", which
+  // rendered as real scores beside genuine IMDb/TMDB numbers — the /upcoming
+  // grid was a wall of "MDB -1". A genuine aggregate of 0 would require every
+  // constituent source to have scored it zero, which is not reachable, so
+  // non-positive is absence here. Contrast imdbRating 0 below, which IS data.
+  assert.equal(parse({ score: -1 }).mdblistScore, null);
+  assert.equal(parse({ score: 0 }).mdblistScore, null);
+  assert.equal(parse({ score: null }).mdblistScore, null);
+  // The boundary stays inclusive on the low end of real scores.
+  assert.equal(parse({ score: 1 }).mdblistScore, "1");
+});
+
+test("per-source values reject negative sentinels but keep legitimate zeros", () => {
+  // No scale here can produce a negative, so a negative is always a sentinel.
+  assert.equal(parse({ ratings: [src("tomatoes", -1)] }).rottenTomatoes, null);
+  assert.equal(parse({ ratings: [src("metacritic", -1)] }).metacritic, null);
+  assert.equal(parse({ ratings: [src("trakt", -1)] }).traktRating, null);
+  // 0% on Rotten Tomatoes and 0 on Metacritic are real, published scores.
+  assert.equal(parse({ ratings: [src("tomatoes", 0)] }).rottenTomatoes, "0%");
+  assert.equal(parse({ ratings: [src("metacritic", 0)] }).metacritic, "0/100");
+});
+
 test("letterboxd, MAL, and Ebert pass through unrounded via String()", () => {
   const out = parse({ ratings: [src("letterboxd", 4.25), src("mal", 8.61), src("rogerebert", 3.5)] });
   assert.equal(out.letterboxdRating, "4.25");

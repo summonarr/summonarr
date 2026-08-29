@@ -48,13 +48,23 @@ export function ActivityWarmButton() {
 
   return (
     <div className="flex items-center gap-2">
+      {/* This control POSTs on first click — it runs a cache warm immediately,
+          with no confirm step. An unlabelled icon is the wrong affordance for
+          that, so the button now says what it does. The `title` was already
+          here but a native tooltip is a hover-only, screen-reader-last-resort
+          hint; `aria-label` gives it a real accessible name, and the visible
+          text means nobody has to click to find out. */}
       <button
         onClick={handleWarm}
         disabled={loading || cooldown > 0}
-        title={cooldown > 0 ? `Wait ${cooldown}s` : "Warm activity cache"}
-        className="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 disabled:bg-zinc-800 disabled:opacity-50 transition-colors"
+        aria-label={cooldown > 0 ? `Warm activity cache — wait ${cooldown}s` : "Warm activity cache"}
+        title={cooldown > 0 ? `Wait ${cooldown}s` : "Rebuild the cached play-history stats behind this dashboard"}
+        className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 disabled:bg-zinc-800 disabled:opacity-50 transition-colors"
       >
-        <Zap className="w-4 h-4 text-amber-500" />
+        <Zap className="w-4 h-4 text-amber-500 shrink-0" aria-hidden="true" />
+        <span className="text-xs font-medium text-zinc-200">
+          {loading ? "Warming…" : "Warm cache"}
+        </span>
       </button>
       {message && (
         <span className={`text-xs ${message.type === "success" ? "text-green-400" : "text-red-400"}`}>

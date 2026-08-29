@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import type { Genre, WatchProvider } from "@/lib/tmdb-types";
 import { X } from "@/components/icons";
 import { StyledSelect } from "@/components/ui/styled-select";
@@ -128,9 +128,44 @@ export function FilterBar({
   const searchParams = useSearchParams();
   const years = useMemo(() => buildYears(maxYear), [maxYear]);
 
+  // Filter changes we have pushed but that the URL has not caught up with yet.
+  //
+  // `searchParams` reflects the COMMITTED url, and router.push is async — so
+  // changing two filters in quick succession used to rebuild the second query
+  // string from a snapshot that still held the first filter's OLD value, wiping
+  // the change the user had just made. It presented as a dropdown reverting to
+  // a year nobody picked, with the chip agreeing, so nothing on screen showed
+  // that a change had been dropped. Waiting ~2s between changes worked because
+  // the first navigation had committed by then.
+  //
+  // Keeping a DELTA rather than a full snapshot is what makes this correct for
+  // a third change too: every not-yet-committed change is reapplied on top of
+  // whatever `searchParams` currently says.
+  const pendingRef = useRef<Record<string, string | undefined>>({});
+  const committed = searchParams.toString();
+
+  // Drop deltas the URL has caught up with; anything still in flight stays.
+  useEffect(() => {
+    const current = new URLSearchParams(committed);
+    for (const [k, v] of Object.entries(pendingRef.current)) {
+      const landed = v === undefined || v === "" ? current.get(k) === null : current.get(k) === v;
+      if (landed) delete pendingRef.current[k];
+    }
+  }, [committed]);
+
+  // Back/forward replaces the query string wholesale, so any optimistic delta
+  // is void — without this it would be reapplied on the next filter change and
+  // silently undo the user's Back.
+  useEffect(() => {
+    const onPop = () => { pendingRef.current = {}; };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
   const push = useCallback((updates: Record<string, string | undefined>) => {
+    Object.assign(pendingRef.current, updates);
     const params = new URLSearchParams(searchParams.toString());
-    for (const [k, v] of Object.entries(updates)) {
+    for (const [k, v] of Object.entries(pendingRef.current)) {
       if (v === undefined || v === "") params.delete(k);
       else params.set(k, v);
     }
@@ -139,6 +174,14 @@ export function FilterBar({
     // overlay for the whole navigation, not just its tail.
     navigate(() => router.push(`${pathname}?${params.toString()}`));
   }, [router, pathname, searchParams, navigate]);
+
+  // Clearing bypasses `push` (it drops every param rather than editing some),
+  // so it has to drop the delta too or the next change resurrects the filters
+  // that were just cleared.
+  const clearAll = useCallback(() => {
+    pendingRef.current = {};
+    navigate(() => router.push(pathname));
+  }, [router, pathname, navigate]);
 
   const activeRatingValue = activeRatingFilter
     ? activeRatingFilter
@@ -276,7 +319,7 @@ export function FilterBar({
         {hasFilters && (
           <button
             type="button"
-            onClick={() => navigate(() => router.push(pathname))}
+            onClick={clearAll}
             className="ds-tap inline-flex items-center gap-1 transition-colors"
             style={{
               padding: "5px 10px",

@@ -380,6 +380,22 @@ a:focus-visible > .ds-chip-link { color: var(--ds-fg); border-color: var(--ds-ac
 }
 .ds-page-enter { animation: ds-page-in 260ms var(--ds-ease); }
 
+/* ───── Ranked media cards (/popular) ─────
+   The rank circle overlays the poster's top-left corner, which is where
+   MediaCard already puts its Plex/Jellyfin availability chips — identical
+   coordinates, and the rank badge wins on z-index, so it clipped the label on
+   every card in the grid. Push the chips clear of the badge instead of moving
+   the rank somewhere less legible. */
+.ds-ranked-card [data-media-chips] { left: 2rem; }
+
+/* ───── Settings section anchors ─────
+   The settings side-nav is a list of plain #hash anchors, so the browser does
+   the scrolling and it keeps working with JS off, from a pasted deep link, and
+   from the keyboard. scroll-margin-top is what stops each section landing flush
+   against the top edge of the <main> scroll container — it replaces the manual
+   `- 24` offset the old JS measurement applied. */
+.settings-sections > [id] { scroll-margin-top: 24px; }
+
 /* ───── Responsive grids (media-queried for simplicity) ───── */
 
 .ds-media-grid {

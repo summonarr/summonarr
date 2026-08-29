@@ -2132,14 +2132,33 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     prisma.$queryRawUnsafe<{ reason: string; count: bigint }[]>(
       // Group by the captured transcodeReason (Plex-derived / Jellyfin
       // TranscodeReasons). Multi-reason sessions keep their comma-joined
-      // label as one bucket so counts still sum to exactly the transcode
-      // session total — the % math in the UI stays correct. Pre-capture
-      // rows have a null reason and fall into 'Unknown'.
-      `SELECT COALESCE(NULLIF("transcodeReason", ''), 'Unknown') AS reason,
-              COUNT(*)::bigint AS count
-       FROM "PlayHistory"
-       WHERE ${where} AND "playMethod" = 'Transcode'
-       GROUP BY reason ORDER BY count DESC LIMIT 8`,
+      // label as one bucket, and pre-capture rows have a null reason and fall
+      // into 'Unknown'.
+      //
+      // The tail is ROLLED UP, not dropped. A plain `LIMIT 8` here returned the
+      // top eight buckets while the comment above it claimed the counts "sum to
+      // exactly the transcode session total" — they didn't, and the UI prints
+      // that sum as "N transcoded sessions" beside a percentage derived from
+      // the real total (2,035 vs 2,206 on a live instance, a 171-session gap).
+      // Everything past the eighth bucket now lands in one 'Other reasons' row,
+      // so the buckets sum to exactly the transcode total again and the claim
+      // holds. The row is omitted entirely when there is no tail.
+      `WITH reasons AS (
+         SELECT COALESCE(NULLIF("transcodeReason", ''), 'Unknown') AS reason,
+                COUNT(*)::bigint AS count
+         FROM "PlayHistory"
+         WHERE ${where} AND "playMethod" = 'Transcode'
+         GROUP BY 1
+       ), ranked AS (
+         SELECT reason, count, ROW_NUMBER() OVER (ORDER BY count DESC, reason) AS rn
+         FROM reasons
+       ), rolled AS (
+         SELECT reason, count, rn FROM ranked WHERE rn <= 8
+         UNION ALL
+         SELECT 'Other reasons', SUM(count)::bigint, 9 FROM ranked WHERE rn > 8
+         HAVING SUM(count) > 0
+       )
+       SELECT reason, count FROM rolled ORDER BY rn`,
       ...params,
     ),
     prisma.$queryRawUnsafe<{ device: string; count: bigint }[]>(

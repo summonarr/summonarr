@@ -63,6 +63,24 @@ const TAB_SECTIONS: Record<TabId, SettingsNavItem[]> = {
 
 export const dynamic = "force-dynamic";
 
+// Scheduled-job intervals arrive from env as a raw second count. Every other
+// column in that table is already humanised ("21m ago", "170.7s"), so a bare
+// "86400s" was the one value nobody could read at a glance. Unparseable or
+// non-positive values are shown verbatim rather than silently normalised — an
+// operator who typo'd the env var needs to see what they actually set.
+function formatInterval(seconds: string | undefined, fallback: string): string {
+  const raw = seconds ?? fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return raw;
+  if (n === 3_600) return "hourly";
+  if (n === 86_400) return "daily";
+  if (n === 604_800) return "weekly";
+  if (n % 86_400 === 0) return `${n / 86_400}d`;
+  if (n % 3_600 === 0) return `${n / 3_600}h`;
+  if (n % 60 === 0) return `${n / 60}m`;
+  return `${n}s`;
+}
+
 function StatusBadge({ connected, label = "Connected" }: { connected: boolean; label?: string }) {
   if (connected) {
     return (
@@ -199,11 +217,35 @@ export default async function SettingsPage({
       prisma.issue.count({ where: { status: "RESOLVED" } }),
       prisma.plexLibraryItem.count(),
       prisma.jellyfinLibraryItem.count(),
-      prisma.plexLibraryItem.count({ where: { mediaType: "TV" } }),
-      prisma.jellyfinLibraryItem.count({ where: { mediaType: "TV" } }),
 
-      prisma.$queryRaw<[{ count: bigint }]>(Prisma.sql`SELECT COUNT(DISTINCT "tmdbId")::bigint AS count FROM "TVEpisodeCache" WHERE source = 'plex'`).then((r) => Number(r[0].count)),
-      prisma.$queryRaw<[{ count: bigint }]>(Prisma.sql`SELECT COUNT(DISTINCT "tmdbId")::bigint AS count FROM "TVEpisodeCache" WHERE source = 'jellyfin'`).then((r) => Number(r[0].count)),
+      // TV COVERAGE: both halves must come from the SAME population or the
+      // ratio is meaningless — this pair used to read 1,798 / 1,796 because the
+      // numerator counted DISTINCT tmdbId in TVEpisodeCache while the
+      // denominator was a raw row count on the library table. Two ways they
+      // drifted: the library tables are keyed [tmdbId, mediaType,
+      // serverInstance] so a title on two servers counted twice, and
+      // TVEpisodeCache has no serverInstance column and is only rewritten when
+      // every configured instance's fetch succeeds (guardrail 35), so it lags
+      // and retains rows for titles the library no longer holds.
+      //
+      // Denominator: DISTINCT shows in the library. Numerator: those of them
+      // that actually have episode rows. The EXISTS makes covered ≤ total by
+      // construction, so a stale episode-cache row can never push it over 100%.
+      prisma.$queryRaw<[{ count: bigint }]>(Prisma.sql`SELECT COUNT(DISTINCT "tmdbId")::bigint AS count FROM "PlexLibraryItem" WHERE "mediaType" = 'TV'`).then((r) => Number(r[0].count)),
+      prisma.$queryRaw<[{ count: bigint }]>(Prisma.sql`SELECT COUNT(DISTINCT "tmdbId")::bigint AS count FROM "JellyfinLibraryItem" WHERE "mediaType" = 'TV'`).then((r) => Number(r[0].count)),
+
+      prisma.$queryRaw<[{ count: bigint }]>(Prisma.sql`
+        SELECT COUNT(DISTINCT p."tmdbId")::bigint AS count
+        FROM "PlexLibraryItem" p
+        WHERE p."mediaType" = 'TV'
+          AND EXISTS (SELECT 1 FROM "TVEpisodeCache" e WHERE e."tmdbId" = p."tmdbId" AND e.source = 'plex')
+      `).then((r) => Number(r[0].count)),
+      prisma.$queryRaw<[{ count: bigint }]>(Prisma.sql`
+        SELECT COUNT(DISTINCT j."tmdbId")::bigint AS count
+        FROM "JellyfinLibraryItem" j
+        WHERE j."mediaType" = 'TV'
+          AND EXISTS (SELECT 1 FROM "TVEpisodeCache" e WHERE e."tmdbId" = j."tmdbId" AND e.source = 'jellyfin')
+      `).then((r) => Number(r[0].count)),
       prisma.tmdbCache.count({ where: { key: { not: { startsWith: "omdb:" } } } }),
       prisma.tmdbCache.count({ where: { key: { startsWith: "omdb:" } } }),
       prisma.upcomingCacheItem.count(),
@@ -317,17 +359,17 @@ export default async function SettingsPage({
     }
 
     return [
-      { name: "Library Sync", description: "Plex + Jellyfin library, Radarr/Sonarr state", endpoint: "/api/sync", interval: `${process.env.SYNC_INTERVAL ?? "3600"}s`, ...lastRunInfo("sync:full") },
-      { name: "Upcoming Sync", description: "Upcoming movies and TV from TMDB", endpoint: "/api/sync/upcoming", interval: `${process.env.UPCOMING_SYNC_INTERVAL ?? "86400"}s`, ...lastRunInfo("upcoming-cache") },
-      { name: "Ratings Sync", description: "Pre-warm MDBList/OMDB ratings for trending/popular", endpoint: "/api/sync/ratings", interval: `${process.env.RATINGS_SYNC_INTERVAL ?? "86400"}s`, ...lastRunInfo("ratings-sync") },
-      { name: "Warm List Cache", description: "TMDB, Trakt, MDBList lists + genres + providers", endpoint: "/api/cron/warm-list-cache", interval: `${process.env.LIST_CACHE_SYNC_INTERVAL ?? "21600"}s`, ...lastRunInfo("list-cache") },
-      { name: "Warm Activity", description: "Play history stats for admin dashboard", endpoint: "/api/cron/warm-activity", interval: `${process.env.WARM_ACTIVITY_INTERVAL ?? "1800"}s`, ...lastRunInfo("activity") },
-      { name: "Warm MDBList", description: "MDBList ratings for entire library", endpoint: "/api/cron/warm-mdblist", interval: `${process.env.WARM_MDBLIST_INTERVAL ?? "86400"}s`, ...lastRunInfo("mdblist") },
-      { name: "Warm OMDB", description: "OMDB ratings fallback for entire library", endpoint: "/api/cron/warm-omdb", interval: `${process.env.WARM_OMDB_INTERVAL ?? "86400"}s`, ...lastRunInfo("omdb") },
-      { name: "Purge Sessions", description: "Delete expired auth sessions", endpoint: "/api/cron/purge-auth-sessions", interval: `${process.env.PURGE_SESSIONS_INTERVAL ?? "86400"}s`, ...lastRunInfo("auth-sessions:purge-expired") },
-      { name: "Scrub Audit PII", description: "Remove IP/UA from audit entries older than 90 days", endpoint: "/api/cron/scrub-audit-pii", interval: `${process.env.SCRUB_AUDIT_PII_INTERVAL ?? "86400"}s`, ...lastRunInfo("audit-log:pii-scrub") },
-      { name: "TRaSH Sync", description: "Refresh TRaSH-Guides catalog (capped at hourly) and re-apply managed specs each tick", endpoint: "/api/cron/trash-sync", interval: `${process.env.TRASH_SYNC_INTERVAL ?? "86400"}s`, ...lastRunInfo("trash-sync") },
-      { name: "Download Policy Sync", description: "Sync Plex & Jellyfin user download permissions, enforce any restrictions set in Summonarr", endpoint: "/api/cron/sync-download-policies", interval: `${process.env.SYNC_INTERVAL ?? "3600"}s`, ...lastRunInfo("download-policies") },
+      { name: "Library Sync", description: "Plex + Jellyfin library, Radarr/Sonarr state", endpoint: "/api/sync", interval: formatInterval(process.env.SYNC_INTERVAL, "3600"), ...lastRunInfo("sync:full") },
+      { name: "Upcoming Sync", description: "Upcoming movies and TV from TMDB", endpoint: "/api/sync/upcoming", interval: formatInterval(process.env.UPCOMING_SYNC_INTERVAL, "86400"), ...lastRunInfo("upcoming-cache") },
+      { name: "Ratings Sync", description: "Pre-warm MDBList/OMDB ratings for trending/popular", endpoint: "/api/sync/ratings", interval: formatInterval(process.env.RATINGS_SYNC_INTERVAL, "86400"), ...lastRunInfo("ratings-sync") },
+      { name: "Warm List Cache", description: "TMDB, Trakt, MDBList lists + genres + providers", endpoint: "/api/cron/warm-list-cache", interval: formatInterval(process.env.LIST_CACHE_SYNC_INTERVAL, "21600"), ...lastRunInfo("list-cache") },
+      { name: "Warm Activity", description: "Play history stats for admin dashboard", endpoint: "/api/cron/warm-activity", interval: formatInterval(process.env.WARM_ACTIVITY_INTERVAL, "1800"), ...lastRunInfo("activity") },
+      { name: "Warm MDBList", description: "MDBList ratings for entire library", endpoint: "/api/cron/warm-mdblist", interval: formatInterval(process.env.WARM_MDBLIST_INTERVAL, "86400"), ...lastRunInfo("mdblist") },
+      { name: "Warm OMDB", description: "OMDB ratings fallback for entire library", endpoint: "/api/cron/warm-omdb", interval: formatInterval(process.env.WARM_OMDB_INTERVAL, "86400"), ...lastRunInfo("omdb") },
+      { name: "Purge Sessions", description: "Delete expired auth sessions", endpoint: "/api/cron/purge-auth-sessions", interval: formatInterval(process.env.PURGE_SESSIONS_INTERVAL, "86400"), ...lastRunInfo("auth-sessions:purge-expired") },
+      { name: "Scrub Audit PII", description: "Remove IP/UA from audit entries older than 90 days", endpoint: "/api/cron/scrub-audit-pii", interval: formatInterval(process.env.SCRUB_AUDIT_PII_INTERVAL, "86400"), ...lastRunInfo("audit-log:pii-scrub") },
+      { name: "TRaSH Sync", description: "Refresh TRaSH-Guides catalog (capped at hourly) and re-apply managed specs each tick", endpoint: "/api/cron/trash-sync", interval: formatInterval(process.env.TRASH_SYNC_INTERVAL, "86400"), ...lastRunInfo("trash-sync") },
+      { name: "Download Policy Sync", description: "Sync Plex & Jellyfin user download permissions, enforce any restrictions set in Summonarr", endpoint: "/api/cron/sync-download-policies", interval: formatInterval(process.env.SYNC_INTERVAL, "3600"), ...lastRunInfo("download-policies") },
     ];
   }
 
@@ -403,7 +445,10 @@ export default async function SettingsPage({
             </div>
           </aside>
         )}
-        <div className="max-w-3xl flex-1 flex flex-col" style={{ gap: 16 }}>
+        {/* `settings-sections` gives every direct child with an id a
+            scroll-margin-top (globals.css) so the side-nav's plain #hash
+            anchors land below the sticky chrome instead of flush against it. */}
+        <div className="settings-sections max-w-3xl flex-1 flex flex-col" style={{ gap: 16 }}>
 
         {tab === "site" && (
           <>
@@ -422,7 +467,7 @@ export default async function SettingsPage({
               <div className="mb-5">
                 <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Rate Limiting</h2>
                 <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  Maximum actions allowed per user within the time window. Set to 0 to disable.
+                  Maximum actions allowed per user within the time window.
                 </p>
               </div>
               <RateLimitForm

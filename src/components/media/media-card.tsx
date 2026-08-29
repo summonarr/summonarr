@@ -319,8 +319,12 @@ function MediaCardImpl({
           )}
         </div>
 
-        {/* Top-left: availability chips */}
-        <div className="absolute top-1.5 left-1.5 flex flex-col gap-1">
+        {/* Top-left: availability chips. `data-media-chips` lets a caller that
+            puts its own overlay in this corner shift them clear — /popular's
+            rank badge sits at exactly these coordinates (top-1.5/left-1.5 is
+            6px, the same inset it uses) and, being z-10, covered the Plex
+            glyph on every ranked card. See .ds-ranked-card in globals.css. */}
+        <div data-media-chips className="absolute top-1.5 left-1.5 flex flex-col gap-1">
           {showPlex && media.plexAvailable && (
             <span
               className="ds-chip ds-chip-plex"

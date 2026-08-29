@@ -109,7 +109,13 @@ export function RatingsBar({
   const showMetacritic = !!metacritic && !hidden.includes("metacritic");
   const showTrakt = !!traktRating && !hidden.includes("trakt");
   const showLetterboxd = !!letterboxdRating && !hidden.includes("letterboxd");
-  const showMdblist = !!mdblistScore && !hidden.includes("mdblist");
+  // Numeric guard, not just truthiness: MDBList's "no score" sentinel reaches
+  // rows cached before the parser started rejecting it (mdblist.ts
+  // aggregateScore), and "-1"/"0" are truthy strings that would print as real
+  // scores. Same shape as the showTmdb guard below.
+  const mdblistValue = mdblistScore != null ? Number(mdblistScore) : NaN;
+  const showMdblist =
+    Number.isFinite(mdblistValue) && mdblistValue > 0 && !hidden.includes("mdblist");
   const showMal = !!malRating && !hidden.includes("mal");
   const showRogerEbert = !!rogerEbertRating && !hidden.includes("rogerEbert");
   const showJellyfin = !!jellyfinRating && !hidden.includes("jellyfin");

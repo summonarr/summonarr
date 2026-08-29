@@ -32,10 +32,18 @@ function shortDay(day: string): string {
   });
 }
 
+// Up to five evenly spaced x-axis ticks, but never more ticks than there are
+// buckets. The fixed [0, .25, .5, .75, 1] this replaced always emitted five, so
+// a short custom range printed a date twice — a 3-day range (4 buckets) rounded
+// to indices 0, 1, 2, 2, 3 and rendered "Aug 26 · 27 · 28 · 28 · 29".
+//
+// With `ticks <= days.length` the spacing between consecutive indices is at
+// least 1 before rounding, so the indices are always distinct.
 function axisLabels(days: string[]): string[] {
   if (days.length < 2) return days.map(shortDay);
-  return [0, 0.25, 0.5, 0.75, 1].map((p) =>
-    shortDay(days[Math.round(p * (days.length - 1))]),
+  const ticks = Math.min(5, days.length);
+  return Array.from({ length: ticks }, (_, i) =>
+    shortDay(days[Math.round((i / (ticks - 1)) * (days.length - 1))]),
   );
 }
 
@@ -165,6 +173,12 @@ export function ActivityStatsRedesign({
     count: r.count,
     color: r.source === "plex" ? "var(--ds-plex)" : "var(--ds-jellyfin)",
   }));
+  // Both halves of the "N transcoded sessions · P% of sessions" line come from
+  // this one number. It used to print the reason-bucket sum as N beside a P
+  // derived from transcodeRatio's Transcode count — two sources in one
+  // sentence, reading "2,035 transcoded sessions · 42% of sessions" where the
+  // 42% described 2,206. The buckets now roll their tail into "Other reasons"
+  // (play-history.ts) so this sum is the true transcode total.
   const transcodeTotal = stats.transcodeReasons.reduce(
     (s, r) => s + r.count,
     0,
@@ -174,9 +188,7 @@ export function ActivityStatsRedesign({
   // populations and the stream-method shares divide by the session total.
   const sessionTotal = stats.transcodeRatio.reduce((s, r) => s + r.count, 0);
   const transcodePct =
-    sessionTotal > 0
-      ? Math.round(((streamTypes[2]?.count ?? 0) / sessionTotal) * 100)
-      : 0;
+    sessionTotal > 0 ? Math.round((transcodeTotal / sessionTotal) * 100) : 0;
   const directPct =
     sessionTotal > 0
       ? Math.round(((streamTypes[0]?.count ?? 0) / sessionTotal) * 100)

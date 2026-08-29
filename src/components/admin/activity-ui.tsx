@@ -1002,6 +1002,11 @@ export function SectionHeader({
   right?: ReactNode;
 }) {
   return (
+    // `flexWrap` on the row plus `flexShrink: 0` on the right slot is what
+    // stops the heading and the right-hand element overlapping. The left group
+    // carries `minWidth: 0` so it can shrink, but its <h2> is `nowrap` — so
+    // without a floor on the right slot the heading simply overflowed under it
+    // and "Now playing" + the Live dot rendered as "Now playingive".
     <div
       style={{
         display: "flex",
@@ -1009,6 +1014,7 @@ export function SectionHeader({
         justifyContent: "space-between",
         marginBottom: 12,
         gap: 10,
+        flexWrap: "wrap",
       }}
     >
       <div
@@ -1046,7 +1052,7 @@ export function SectionHeader({
           </span>
         )}
       </div>
-      {right}
+      {right && <div style={{ flexShrink: 0 }}>{right}</div>}
     </div>
   );
 }

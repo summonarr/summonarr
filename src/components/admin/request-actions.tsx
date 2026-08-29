@@ -399,7 +399,15 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
   if (status === "AVAILABLE") {
     return (
       <div className="flex flex-col items-end gap-1">
-        <span className="text-xs text-indigo-400 font-medium">Available</span>
+        {/* Mirrors the row's status Chip breakpoint (`hidden sm:inline-flex`)
+            so exactly one "Available" shows at any width. Both were rendering
+            at >=sm — the green Chip immediately to the left plus this one — so
+            the same word appeared twice in two different colours and read as
+            the request status colliding with the library status (which is in
+            fact a separate chip row, "On Plex" / "On Jellyfin"). This branch
+            exists because there is no action to offer once a request is
+            available. */}
+        <span className="sm:hidden text-xs text-indigo-400 font-medium">Available</span>
         {replyBlock}
         {/* saveReply is reachable from this branch too, so it needs somewhere to
             report a failure — otherwise a reply on an available title silently

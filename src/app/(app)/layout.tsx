@@ -15,6 +15,8 @@ import { getFeatureFlags, type FeatureFlags } from "@/lib/features";
 import { DONATION_SETTING_KEYS, hasDonationLinks } from "@/lib/donations";
 import { parseHiddenRatingSources } from "@/lib/ratings-visibility";
 import { RatingsVisibilityProvider } from "@/components/media/ratings-visibility";
+import { DetailTitleProvider } from "@/components/layout/detail-title";
+import { NotificationStoreProvider } from "@/components/notifications/notification-store";
 
 export async function generateMetadata(): Promise<Metadata> {
   try {
@@ -75,6 +77,13 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   return (
     <RatingsVisibilityProvider hidden={hiddenRatingSources}>
+    {/* Wraps Header/MobileNav as well as {children}: the detail pages
+        publish their title here and the breadcrumb in that chrome reads it. */}
+    <DetailTitleProvider>
+    {/* One notifications poll for the whole app — the desktop bell and the
+        mobile badge are both mounted at every viewport and used to fetch
+        independently. Must wrap Header and MobileNav, not just {children}. */}
+    <NotificationStoreProvider>
     <div
       className="flex h-screen overflow-hidden"
       style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}
@@ -104,6 +113,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       </div>
       {motdBody && <MotdModal title={motdTitle} body={motdBody} />}
     </div>
+    </NotificationStoreProvider>
+    </DetailTitleProvider>
     </RatingsVisibilityProvider>
   );
 }
