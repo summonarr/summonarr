@@ -54,6 +54,10 @@ async function main() {
   await expect("blocks 192.168.1.1 (RFC1918 /16)", async () => (await resolveToSafeUrl("http://192.168.1.1/")) === null);
   await expect("rejects file:// scheme",           async () => (await resolveToSafeUrl("file:///etc/passwd")) === null);
   await expect("allows public IP literal",         async () => (await resolveToSafeUrl("http://1.1.1.1/")) !== null);
+  await expect("admin policy blocks 6to4 of IMDS", async () => (await resolveToSafeUrl("http://[2002:a9fe:a9fe::]/", { allowPrivate: true })) === null);
+  await expect("admin policy blocks Teredo",       async () => (await resolveToSafeUrl("http://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/", { allowPrivate: true })) === null);
+  await expect("admin policy blocks AWS IPv6 IMDS", async () => (await resolveToSafeUrl("http://[fd00:ec2::254]/", { allowPrivate: true })) === null);
+  await expect("admin policy still allows other ULA", async () => (await resolveToSafeUrl("http://[fd00::1]/", { allowPrivate: true })) !== null);
 
   console.log("\n[smoke] safeFetchTrusted error reasons");
 
