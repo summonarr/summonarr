@@ -940,63 +940,63 @@ License: Apache-2.0 AND LGPL-3.0-or-later
 
 ------------------------------------------------------------------------------
 
-@next/env@16.3.0
+@next/env@16.3.2
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-darwin-arm64@16.3.0
+@next/swc-darwin-arm64@16.3.2
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-darwin-x64@16.3.0
+@next/swc-darwin-x64@16.3.2
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-arm64-gnu@16.3.0
+@next/swc-linux-arm64-gnu@16.3.2
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-arm64-musl@16.3.0
+@next/swc-linux-arm64-musl@16.3.2
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-x64-gnu@16.3.0
+@next/swc-linux-x64-gnu@16.3.2
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-x64-musl@16.3.0
+@next/swc-linux-x64-musl@16.3.2
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-win32-arm64-msvc@16.3.0
+@next/swc-win32-arm64-msvc@16.3.2
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-win32-x64-msvc@16.3.0
+@next/swc-win32-x64-msvc@16.3.2
 License: MIT
 
 (No license file shipped in the package.)
@@ -4130,7 +4130,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-@swc/helpers@0.5.15
+@swc/helpers@0.5.23
 License: Apache-2.0
 
 Apache License
@@ -7549,7 +7549,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-jose@6.2.8
+jose@6.2.10
 License: MIT
 
 The MIT License (MIT)
@@ -7968,7 +7968,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-next@16.3.0
+next@16.3.2
 License: MIT
 
 The MIT License (MIT)
@@ -8049,7 +8049,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-openid-client@6.8.5
+openid-client@6.8.7
 License: MIT
 
 The MIT License (MIT)
