@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { withBasePath } from "@/lib/base-path";
 import { formatRelativeTime } from "@/lib/relative-time";
+import { isIndefiniteDeadline } from "@/lib/session-lifetime";
 
 interface AuthSessionRow {
   id: string;
@@ -128,7 +129,11 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                 </span>
               </div>
               <p className="text-xs text-zinc-500">
-                Expires {mounted ? new Date(s.expiresAt).toLocaleDateString() : ""}
+                {/* A native-app (iOS) session carries the never-reached sentinel
+                    deadline (session-lifetime.ts) — it ends only when revoked. */}
+                {isIndefiniteDeadline(s.expiresAt)
+                  ? "Never expires — until revoked"
+                  : <>Expires {mounted ? new Date(s.expiresAt).toLocaleDateString() : ""}</>}
               </p>
             </div>
           </div>

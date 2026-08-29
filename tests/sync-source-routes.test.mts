@@ -415,11 +415,17 @@ for (const a of ARR) {
 
   test(`${a.name}: the transaction takes its advisory lock ${a.lockKey}`, async () => {
     // Coordinates with the webhook handler and the sync orchestrator; without it
-    // two runs interleave delete/insert phases and leave the cache empty.
+    // two runs interleave delete/insert phases and leave the cache empty. The id
+    // is asserted, not just the call: both routes use a non-interpolated
+    // template, so the recorded SQL carries the literal key and a regression to
+    // a SHARED id (which would serialize the two syncs) fails here.
     configureArr(a.service);
     await call(a.route);
     const locks = opsOf("$executeRaw").map((o) => o.args as string);
-    assert.ok(locks.some((s) => s.includes("pg_advisory_xact_lock")), `no advisory lock: ${locks.join(" | ")}`);
+    assert.ok(
+      locks.some((s) => s.includes(`pg_advisory_xact_lock${a.lockKey}`)),
+      `no pg_advisory_xact_lock${a.lockKey}: ${locks.join(" | ")}`,
+    );
   });
 
   test(`${a.name}: an empty result set clears but issues no createMany`, async () => {
@@ -444,9 +450,20 @@ for (const a of ARR) {
   });
 }
 
-test("radarr and sonarr use DISTINCT advisory locks", () => {
-  // Sharing one would serialize two independent syncs against each other.
-  assert.notEqual(ARR[0].lockKey, ARR[1].lockKey);
+test("radarr and sonarr use DISTINCT advisory locks", async () => {
+  // Sharing one would serialize two independent syncs against each other. The
+  // ids come out of each route's own recorded SQL, so comparing the fixtures
+  // here — which can never disagree with themselves — would prove nothing.
+  const taken: string[] = [];
+  for (const a of ARR) {
+    ops = [];
+    configureArr(a.service);
+    await call(a.route);
+    const lock = opsOf("$executeRaw").map((o) => String(o.args)).find((s) => s.includes("pg_advisory_xact_lock"));
+    assert.ok(lock, `${a.name} took no advisory lock`);
+    taken.push(lock);
+  }
+  assert.notEqual(taken[0], taken[1]);
 });
 
 test("a radarr sync never touches sonarr's tables, and vice versa", async () => {
@@ -789,7 +806,12 @@ test("no sync route source contains a console.log call (guardrail 7)", async () 
   const { readFileSync } = await import("node:fs");
   for (const route of ROUTES) {
     const src = readFileSync(`src/app/api/sync/${route.name}/route.ts`, "utf-8");
-    const code = src.split("\n").map((l) => { const i = l.indexOf("//"); return i === -1 ? l : l.slice(0, i); });
+    // The `//` in a URL scheme is not a comment: cutting the line at "https:"
+    // would exempt everything after it, including a console.log.
+    const code = src.split("\n").map((l) => {
+      const m = /(^|[^:])\/\//.exec(l);
+      return m === null ? l : l.slice(0, m.index + m[1].length);
+    });
     assert.ok(!code.some((l) => /console\.log\s*\(/.test(l)), `${route.name} has a console.log`);
   }
 });

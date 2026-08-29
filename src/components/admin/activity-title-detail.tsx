@@ -462,7 +462,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
                 className="ds-mono"
                 style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
               >
-                {s.recentPlays.length} of {s.totalPlays}
+                latest {s.recentPlays.length} sessions
               </span>
             </div>
           </div>

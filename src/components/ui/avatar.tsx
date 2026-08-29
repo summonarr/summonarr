@@ -8,7 +8,7 @@ type ImageStatus = "idle" | "loaded" | "error"
 
 const AvatarContext = React.createContext<{
   status: ImageStatus
-  setStatus: (s: ImageStatus) => void
+  setStatus: React.Dispatch<React.SetStateAction<ImageStatus>>
 } | null>(null)
 
 function useAvatarContext(component: string) {
@@ -49,6 +49,15 @@ function AvatarImage({
 }: React.ComponentProps<"img">) {
   const { status, setStatus } = useAvatarContext("AvatarImage")
   const ref = React.useRef<HTMLImageElement>(null)
+
+  // "error" is otherwise terminal: the <img> below unmounts, so no later load
+  // event can ever fire and a subsequently supplied valid src (a refreshed
+  // session thumb, a re-fetched Plex token) can never recover — the initials
+  // stay until the whole Avatar remounts. Only the error state resets; doing it
+  // for "loaded" too would flash the fallback over the old image on every swap.
+  React.useEffect(() => {
+    setStatus((prev) => (prev === "error" ? "idle" : prev))
+  }, [props.src, setStatus])
 
   // React attaches the load listener during hydration and does NOT replay an
   // event that already fired. For an <img> present in the SSR HTML whose bytes

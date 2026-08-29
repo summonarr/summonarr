@@ -473,6 +473,16 @@ async function handleCommand(interaction: any): Promise<void> {
         await editOriginal(appId, token, { content: "Could not link account: This token was generated for a different Discord account." });
         return;
       }
+      // Deactivation gate, same reasoning as the /request branch below: deactivation
+      // writes only deactivatedAt (guardrail 33), so a banned account keeps its role,
+      // permissions AND any pending link token. Redeeming one here would bind the
+      // Discord id and hand back the Summonarr-managed guild roles the admin
+      // sync-roles route exists to strip — and Discord is not session-backed, so
+      // nothing upstream of this refuses it.
+      if (row.user.deactivatedAt) {
+        await editOriginal(appId, token, { content: "Could not link account: This account has been deactivated." });
+        return;
+      }
       const existing = await prisma.user.findUnique({ where: { discordId: discordUserId } });
       if (existing && existing.id !== row.userId && !existing.email.endsWith("@discord.local")) {
         await editOriginal(appId, token, { content: "Could not link account: This Discord account is already linked to another user." });

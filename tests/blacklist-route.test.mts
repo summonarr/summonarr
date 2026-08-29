@@ -369,9 +369,13 @@ test("POST with a malformed JSON body is a 400, not a 500", async () => {
 });
 
 test("POST with an oversized body is rejected by the guardrail-30 cap", async () => {
-  const huge = JSON.stringify({ tmdbId: 603, mediaType: "MOVIE", reason: "z".repeat(20_000) });
+  // The padding sits in a key the route never validates, and every other field
+  // is a valid create — so readJsonCapped is the ONLY thing that can reject
+  // this. Padding `reason` instead would be caught by its own length rule, and
+  // the pin would then survive the cap being raised or dropped.
+  const huge = JSON.stringify({ tmdbId: 603, mediaType: "MOVIE", note: "z".repeat(20_000) });
   const res = await add(await mintSession(), undefined, huge);
-  assert.ok(res.status === 400 || res.status === 413, `expected a cap rejection, got ${res.status}`);
+  assert.equal(res.status, 413, `expected a cap rejection, got ${res.status}`);
   assert.equal(opsOf("blacklistItem.upsert").length, 0);
 });
 

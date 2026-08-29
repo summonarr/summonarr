@@ -12,7 +12,7 @@ import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } from "@/lib/permissions";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
-import { claimAvailableNotificationWinners, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
+import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
 
 export async function POST(request: NextRequest) {
@@ -66,6 +66,16 @@ async function syncPlex(request: NextRequest) {
 
   if (!plexConfig.url || !plexConfig.token) {
     return NextResponse.json({ error: "Plex server not configured" }, { status: 400 });
+  }
+
+  // The slug must be REGISTERED, not merely shape-valid: leftover Setting rows
+  // from a pre-cleanup de-registration can still satisfy the config check, and
+  // an unregistered slug would skip the restricted-visibility gate (the registry
+  // entry carries `restricted`) and — on a deployment whose registry holds only
+  // the default — take the episode-cache-owner branch and rewrite the shared
+  // TVEpisodeCache from a ghost server.
+  if (instance !== DEFAULT_MEDIA_INSTANCE && !plexInstances.some((i) => i.slug === instance)) {
+    return NextResponse.json({ error: "Unknown Plex instance" }, { status: 400 });
   }
 
   const serverUrl = plexConfig.url.replace(/\/$/, "");
@@ -228,6 +238,16 @@ async function syncPlex(request: NextRequest) {
   let finalMovieRows = await deduplicateByRatingKey(movieRows, "MOVIE", instance);
   let finalTvRows    = await deduplicateByRatingKey(tvRows,    "TV",    instance);
 
+  // Ids the dedupe dropped never get a library row, so they must not reach the
+  // marking pass below — it would flip requests AVAILABLE (and notify) for
+  // titles every badge reader calls missing (mirrors the orchestrator's
+  // removePresence reconciliation). Computed HERE, before the recentOnly
+  // already-present filter narrows finalRows for a different reason.
+  const keptMovieIds = new Set(finalMovieRows.map((r) => r.tmdbId));
+  const keptTvIds    = new Set(finalTvRows.map((r) => r.tmdbId));
+  const droppedMovieIds = new Set(movieRows.filter((r) => !keptMovieIds.has(r.tmdbId)).map((r) => r.tmdbId));
+  const droppedTvIds    = new Set(tvRows.filter((r) => !keptTvIds.has(r.tmdbId)).map((r) => r.tmdbId));
+
   if (recentOnly) {
     // Insert-only: never delete rows on this path — an empty window would nuke the whole library.
     // The already-present check is scoped to the instance being written: another server's
@@ -317,7 +337,9 @@ async function syncPlex(request: NextRequest) {
   });
 
   let toMark = requests.filter((req) =>
-    req.mediaType === "MOVIE" ? movieIds.has(req.tmdbId) : tvIds.has(req.tmdbId)
+    req.mediaType === "MOVIE"
+      ? movieIds.has(req.tmdbId) && !droppedMovieIds.has(req.tmdbId)
+      : tvIds.has(req.tmdbId) && !droppedTvIds.has(req.tmdbId)
   );
 
   // Per-user visibility gate for a RESTRICTED named server (guardrail 35). This run
@@ -383,13 +405,26 @@ async function syncPlex(request: NextRequest) {
       if (toNotify.length > 0) {
         // CAS on notifiedAvailable so concurrent sync paths don't double-fire notifications;
         // winner filter ensures we only notify on rows we actually flipped.
-        const winners = await claimAvailableNotificationWinners(toNotify, { markAvailable: true });
-        if (winners.length > 0) {
-          void clearDeletionVotesForTmdbs(winners);
-          notifyUsersRequestsAvailable(winners).catch(() => {});
-          notifyUsersRequestsAvailablePush(winners).catch(() => {});
-          void notifyUsersRequestsAvailableEmail(winners, "sync/plex");
-          void writeAvailableInAppNotifications(winners, "sync/plex");
+        // `claimed` is every row the CAS flipped; `deliverable` drops the ones whose
+        // requester is disabled. Consequences of the TRANSITION key off `claimed` —
+        // that row went AVAILABLE too, and its claim is already burned, so nothing
+        // later would wipe its stale deletion votes. Only delivery keys off the split.
+        const { claimed, deliverable } = await claimAvailableNotifications(toNotify, { markAvailable: true });
+        if (claimed.length > 0) {
+          // The claim helper sets status/availableAt/notifiedAvailable but not
+          // pendingNotifyAt — disarm the 90s "still pending" backstop on the
+          // same transition (mirrors the orchestrator's post-claim clear).
+          await prisma.mediaRequest.updateMany({
+            where: { id: { in: claimed.map((w) => w.id) } },
+            data: { pendingNotifyAt: null },
+          });
+          void clearDeletionVotesForTmdbs(claimed);
+        }
+        if (deliverable.length > 0) {
+          notifyUsersRequestsAvailable(deliverable).catch(() => {});
+          notifyUsersRequestsAvailablePush(deliverable).catch(() => {});
+          void notifyUsersRequestsAvailableEmail(deliverable, "sync/plex");
+          void writeAvailableInAppNotifications(deliverable, "sync/plex");
         }
       }
       if (toMarkOnly.length > 0) {
@@ -397,7 +432,7 @@ async function syncPlex(request: NextRequest) {
         // a row an admin DECLINED after this run's snapshot (AVAILABLE is terminal).
         const flipped = await prisma.mediaRequest.updateMany({
           where: { id: { in: toMarkOnly.map((r) => r.id) }, status: { in: ["PENDING", "APPROVED"] } },
-          data: { status: "AVAILABLE", availableAt: new Date() },
+          data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
         });
         if (flipped.count > 0) void clearDeletionVotesForTmdbs(toMarkOnly);
       }
@@ -410,7 +445,7 @@ async function syncPlex(request: NextRequest) {
       // AND refuses to resurrect a concurrently-DECLINED row (AVAILABLE is terminal).
       const flipped = await prisma.mediaRequest.updateMany({
         where: { id: { in: alreadyNotified.map((r) => r.id) }, status: { in: ["PENDING", "APPROVED"] } },
-        data: { status: "AVAILABLE", availableAt: new Date() },
+        data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
       });
       if (flipped.count > 0) void clearDeletionVotesForTmdbs(alreadyNotified);
     }

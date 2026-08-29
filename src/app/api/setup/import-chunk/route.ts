@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { sanitizeText } from "@/lib/sanitize";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIp, getClientIpKey } from "@/lib/rate-limit";
 import { checkBodySize } from "@/lib/body-size";
 import {
   processBackupImport,
@@ -92,7 +92,7 @@ export async function POST(req: NextRequest) {
   // Rate-limit the upload *attempt*, not each chunk: consume one slot when the client
   // opens the session (chunk 0). A real backup is split into many 16 MiB chunks, so a
   // per-chunk limiter would burn the whole bucket and 429 the restore partway through.
-  if (chunkIndex === 0 && !checkRateLimit(`setup-import:${getClientIp(req.headers)}`, 5, 5 * 60 * 1000)) {
+  if (chunkIndex === 0 && !checkRateLimit(`setup-import:${getClientIpKey(req.headers)}`, 5, 5 * 60 * 1000)) {
     return NextResponse.json({ error: "Too many setup-import attempts. Try again later." }, { status: 429 });
   }
 

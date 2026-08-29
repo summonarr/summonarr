@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { parsePageParam } from "@/lib/pagination";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
@@ -17,7 +18,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
   }
 
   const sp = req.nextUrl.searchParams;
-  const page = Math.min(Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1), 10_000);
+  const page = parsePageParam(sp);
   const typeParam = sp.get("type");
   const mediaType = typeParam === "MOVIE" || typeParam === "TV" ? typeParam : undefined;
   const q = sanitizeContainsSearch((sp.get("q") ?? "").trim());

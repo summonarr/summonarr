@@ -882,18 +882,33 @@ test("GET scopes ?mine=1 to the caller, filters ?q= by title, and falls back to 
   };
   assert.equal(paged.where.userId, userId, "mine=1 must scope the group query to the caller");
   assert.deepEqual(paged.where.title, { contains: "matrix", mode: "insensitive" });
-  // `tmdbId` is a deliberate secondary sort, not incidental: groups tied on _count
-  // (most titles sit at 1-2 votes) otherwise have no total order, so page=1 and
-  // page=2 can return them in different sequences and OFFSET paging duplicates one
+  // The whole group key is a deliberate secondary sort, not incidental: groups tied
+  // on _count (most titles sit at 1-2 votes) otherwise have no total order, so page=1
+  // and page=2 can return them in different sequences and OFFSET paging duplicates one
   // row while skipping another. Same tiebreaker discipline as the play-history
-  // list query. The FIRST element is what pins the "unknown sort falls back to
-  // votes" behaviour this test is actually about.
+  // list query. `mediaType` is required alongside `tmdbId` because groupBy keys on
+  // both, and a MOVIE and a TV group can share one TMDB id. The FIRST element is what
+  // pins the "unknown sort falls back to votes" behaviour this test is actually about.
   assert.deepEqual(
     paged.orderBy,
-    [{ _count: { id: "desc" } }, { tmdbId: "asc" }],
-    "an unknown sort falls back to 'votes', with tmdbId as the paging tiebreaker",
+    [{ _count: { id: "desc" } }, { tmdbId: "asc" }, { mediaType: "asc" }],
+    "an unknown sort falls back to 'votes', with the full group key as the paging tiebreaker",
   );
   const body = (await res.json()) as { items: unknown[]; total: number };
   assert.deepEqual(body.items, []);
   assert.equal(body.total, 0);
+});
+
+test("GET ?sort=recent orders by newest vote and carries the same full-group-key tiebreaker", async () => {
+  const { token } = await mintSession();
+  const res = await inScope(() =>
+    listVotes(votesReq(token, { method: "GET", query: "?sort=recent" }), undefined),
+  );
+  assert.equal(res.status, 200);
+  const paged = opsOf("deletionVote.groupBy")[0].args as { orderBy: unknown };
+  assert.deepEqual(
+    paged.orderBy,
+    [{ _max: { createdAt: "desc" } }, { tmdbId: "asc" }, { mediaType: "asc" }],
+    "the recent sort needs the same total order as the votes sort or OFFSET paging skips rows",
+  );
 });

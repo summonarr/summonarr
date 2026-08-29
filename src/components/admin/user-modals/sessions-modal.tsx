@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTime } from "@/lib/relative-time";
+import { isIndefiniteDeadline } from "@/lib/session-lifetime";
 import {
   Trash2,
   Loader2,
@@ -188,7 +189,11 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                     </span>
                   </div>
                   <p className="text-[10px] text-zinc-500">
-                    Expires {mounted ? new Date(s.expiresAt).toLocaleDateString() : ""}
+                    {/* A native-app (iOS) session carries the never-reached sentinel
+                        deadline (session-lifetime.ts) — it ends only when revoked. */}
+                    {isIndefiniteDeadline(s.expiresAt)
+                      ? "Never expires — until revoked"
+                      : <>Expires {mounted ? new Date(s.expiresAt).toLocaleDateString() : ""}</>}
                   </p>
                 </div>
               </div>

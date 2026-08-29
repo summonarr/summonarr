@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle, Loader2, ExternalLink, Copy, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { safeExternalHref } from "@/lib/safe-url";
 
 function TokenLinkFlow() {
   const [token, setToken] = useState<string | null>(null);
@@ -12,11 +13,16 @@ function TokenLinkFlow() {
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  function copyToken() {
+  async function copyToken() {
     if (!token) return;
-    navigator.clipboard.writeText(token);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(token);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard unavailable (insecure context) or blocked — the token is
+         rendered beside this button for manual selection */
+    }
   }
 
   async function generateToken() {
@@ -62,7 +68,7 @@ function TokenLinkFlow() {
         <div className="rounded-md bg-zinc-800 border border-zinc-700 p-4 space-y-3">
           <p className="text-xs text-zinc-500 uppercase tracking-wide font-semibold">Your link token</p>
           <div className="flex items-center gap-2">
-            <p className="font-mono text-sm font-bold text-white break-all flex-1">{token}</p>
+            <p className="font-mono text-sm font-bold text-zinc-100 break-all flex-1">{token}</p>
             <button
               onClick={copyToken}
               className="shrink-0 p-1.5 rounded text-zinc-400 hover:text-white hover:bg-zinc-700 transition-colors"
@@ -231,16 +237,18 @@ export function DiscordLinkSection({ linkedDiscordId, discordInviteUrl }: { link
     );
   }
 
+  const inviteHref = safeExternalHref(discordInviteUrl);
+
   return (
     <div className="space-y-6">
-      {discordInviteUrl && (
+      {inviteHref && (
         <div className="rounded-md bg-indigo-950 border border-indigo-800 px-4 py-3 space-y-2">
           <p className="text-sm font-medium text-indigo-200">Join our Discord server</p>
           <p className="text-sm text-indigo-300">
             Join the Discord server and link your account to request media directly from Discord.
           </p>
           <a
-            href={discordInviteUrl}
+            href={inviteHref}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 text-sm font-medium text-indigo-400 hover:text-indigo-300 transition-colors"
@@ -249,7 +257,7 @@ export function DiscordLinkSection({ linkedDiscordId, discordInviteUrl }: { link
           </a>
         </div>
       )}
-      {!discordInviteUrl && <p className="text-sm text-zinc-400">No Discord account linked yet.</p>}
+      {!inviteHref && <p className="text-sm text-zinc-400">No Discord account linked yet.</p>}
       <TokenLinkFlow />
       <div className="border-t border-zinc-800 pt-4">
         <WebMergeFlow />

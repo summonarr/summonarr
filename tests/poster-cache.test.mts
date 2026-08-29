@@ -2,9 +2,11 @@
 // resolvePosterMap backs the posters on admin activity surfaces: it must (a)
 // prefer the cheap TmdbMediaCore posterPath column, (b) fall back to the
 // `movie:/tv:<id>:details` TmdbCache blobs only for ids core couldn't resolve,
-// and (c) OMIT unresolvable ids from the returned map — callers key their
+// (c) OMIT unresolvable ids from the returned map — callers key their
 // letter-placeholder fallback off absence, so a null/empty entry would break
-// the UI contract. There is no local DB in this harness: src/lib/prisma.ts
+// the UI contract — and (d) key on `posterPathKey`, never the bare number, so a
+// mixed movie+TV list can't collapse two titles onto one poster.
+// There is no local DB in this harness: src/lib/prisma.ts
 // caches its client on globalThis (`globalForPrisma.prisma ?? create...`), so
 // we pre-seed that slot with an in-memory fake BEFORE the module graph loads —
 // no query ever leaves the process.
@@ -69,8 +71,8 @@ test("core rows resolve to exact w342 URLs and skip the cache query entirely", a
   });
   const map = await resolvePosterMap([{ tmdbId: 550 }, { tmdbId: 1399 }]);
   assert.deepEqual(map, {
-    550: `${W342}/fight-club.jpg`,
-    1399: `${W342}/thrones.jpg`,
+    "movie:550": `${W342}/fight-club.jpg`,
+    "movie:1399": `${W342}/thrones.jpg`,
   });
   assert.equal(coreCalls.length, 1);
   assert.equal(cacheCalls.length, 0); // all ids resolved — no fallback round-trip
@@ -100,8 +102,8 @@ test("ids the core misses fall back to exactly the movie:/tv: :details keys", as
     ["movie:2:details", "tv:2:details", "movie:3:details", "tv:3:details"],
   ]);
   assert.deepEqual(map, {
-    1: `${W342}/one.jpg`,
-    2: `${W342}/two.jpg`,
+    "movie:1": `${W342}/one.jpg`,
+    "movie:2": `${W342}/two.jpg`,
     // 3 is absent — caller falls back to the letter placeholder
   });
 });
@@ -124,8 +126,8 @@ test("core rows with null or non-slash posterPath fall through to the cache", as
     ["movie:10:details", "tv:10:details", "movie:11:details", "tv:11:details"],
   ]);
   assert.deepEqual(map, {
-    10: `${W342}/ten.jpg`,
-    11: `${W342}/eleven.jpg`,
+    "movie:10": `${W342}/ten.jpg`,
+    "movie:11": `${W342}/eleven.jpg`,
   });
 });
 
@@ -139,17 +141,17 @@ test("an UNKNOWN mediaType resolves deterministically (movie namespace), not by 
     { key: "movie:5:details", data: JSON.stringify({ posterPath: "/movie-poster.jpg" }) },
   ];
   reset({ cache: both });
-  assert.deepEqual(await resolvePosterMap([{ tmdbId: 5 }]), { 5: `${W342}/movie-poster.jpg` });
+  assert.deepEqual(await resolvePosterMap([{ tmdbId: 5 }]), { "movie:5": `${W342}/movie-poster.jpg` });
 
   // Same answer with the rows returned the other way round.
   reset({ cache: [...both].reverse() });
-  assert.deepEqual(await resolvePosterMap([{ tmdbId: 5 }]), { 5: `${W342}/movie-poster.jpg` });
+  assert.deepEqual(await resolvePosterMap([{ tmdbId: 5 }]), { "movie:5": `${W342}/movie-poster.jpg` });
 
   // And when the caller DOES know the type, it gets that type's art.
   reset({ cache: both });
   assert.deepEqual(
     await resolvePosterMap([{ tmdbId: 5, mediaType: "TV" }]),
-    { 5: `${W342}/tv-poster.jpg` },
+    { "tv:5": `${W342}/tv-poster.jpg` },
   );
 });
 
@@ -162,7 +164,7 @@ test("unparseable JSON and malformed cache keys are skipped, never thrown", asyn
     ],
   });
   const map = await resolvePosterMap([{ tmdbId: 8 }, { tmdbId: 9 }]);
-  assert.deepEqual(map, { 9: `${W342}/nine.jpg` }); // 8 dropped silently, 9 unaffected
+  assert.deepEqual(map, { "movie:9": `${W342}/nine.jpg` }); // 8 dropped silently, 9 unaffected
 });
 
 test("cache blobs without a usable posterPath leave the id out of the map", async () => {
@@ -193,8 +195,8 @@ test("core poster shadows a conflicting cache blob for the same id", async () =>
   const map = await resolvePosterMap([{ tmdbId: 30 }, { tmdbId: 31 }]);
   assert.deepEqual(cacheCalls, [["movie:31:details", "tv:31:details"]]); // 30 not re-queried
   assert.deepEqual(map, {
-    30: `${W342}/core.jpg`,
-    31: `${W342}/cache-31.jpg`,
+    "movie:30": `${W342}/core.jpg`,
+    "movie:31": `${W342}/cache-31.jpg`,
   });
 });
 
@@ -206,7 +208,7 @@ test("duplicate core rows: first row wins for the same tmdbId", async () => {
     ],
   });
   const map = await resolvePosterMap([{ tmdbId: 40 }]);
-  assert.deepEqual(map, { 40: `${W342}/first.jpg` });
+  assert.deepEqual(map, { "movie:40": `${W342}/first.jpg` });
 });
 
 // ── resolvePosterPathMap ─────────────────────────────────────────────────────
@@ -252,7 +254,29 @@ test("a movie and a TV title sharing one tmdbId keep their OWN posters", async (
 
   // ...and the URL variant keeps them apart per item too.
   const urls = await resolvePosterMap([{ tmdbId: 1399, mediaType: "TV" }]);
-  assert.equal(urls[1399], `${W342}/show.jpg`);
+  assert.equal(urls[posterPathKey(1399, "TV")], `${W342}/show.jpg`);
+});
+
+test("the URL variant survives a MIXED movie+TV list sharing one tmdbId", async () => {
+  // The collapse this pins: resolvePosterMap did the namespace-correct per-item
+  // lookup and then wrote it under the bare number, so the first item's art was
+  // returned for both media. 5 of its 7 call sites pass mixed lists (a watch
+  // history page, the wrapped top titles, the two topMedia dashboards, the
+  // rewatched leaderboard), so both media routinely arrive in one call.
+  reset({
+    core: [
+      { tmdbId: 1399, mediaType: "MOVIE", posterPath: "/film.jpg" },
+      { tmdbId: 1399, mediaType: "TV", posterPath: "/show.jpg" },
+    ],
+  });
+  const urls = await resolvePosterMap([
+    { tmdbId: 1399, mediaType: "MOVIE" },
+    { tmdbId: 1399, mediaType: "TV" },
+  ]);
+  assert.deepEqual(urls, {
+    "movie:1399": `${W342}/film.jpg`,
+    "tv:1399": `${W342}/show.jpg`,
+  });
 });
 
 test("a NAMED namespace is resolved on its own even when its twin already hit", async () => {

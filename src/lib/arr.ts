@@ -1004,6 +1004,11 @@ export async function isSeriesDownloadingInSonarr(tmdbId: number, variant: ArrVa
     const series = await lookupSeriesByTmdbId<{ tmdbId?: number; tvdbId: number }>(cfg, tmdbId);
     if (!series) return false;
     const { tvdbId } = series;
+    // Hold the never-schema-checked lookup value to the same positive-integer
+    // contract as isSeriesWantedInSonarr/isSeriesDownloadedInSonarr: a
+    // malformed tvdbId would make queueSet.has() a confident false ("not in
+    // queue") where the contract reserves null for "couldn't determine".
+    if (!Number.isInteger(tvdbId) || tvdbId <= 0) return null;
     const queueSet = await getSonarrQueueSet(cfg);
     if (queueSet === null) return null;
     return queueSet.has(tvdbId);

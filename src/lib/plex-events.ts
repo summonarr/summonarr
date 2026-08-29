@@ -662,6 +662,13 @@ class PlexEventStreamManager {
   // When this manager last dispatched a trigger that actually RAN (0 = never).
   private lastResyncFiredAt = 0;
   private requestLibraryResync(): void {
+    // A trigger that resolved "skipped" re-arms this AFTER an await, by which
+    // point stop() may have run (play-history disabled, instance de-registered
+    // or re-pointed) — stop() clears the timer, but it cannot reach a re-arm
+    // that happens later. Without this guard the re-arm resurrects a timer on a
+    // manager no longer in the map and fires an uncancellable full sync nobody
+    // requested; if the lock is still held it re-arms again, forever.
+    if (!this.running) return;
     const now = Date.now();
     const notBefore = this.lastResyncFiredAt + TIMELINE_RESYNC_COOLDOWN_MS;
     if (this.resyncTimer) {
@@ -672,6 +679,10 @@ class PlexEventStreamManager {
     const fireAt = Math.min(Math.max(now + TIMELINE_RESYNC_DEBOUNCE_MS, notBefore), this.resyncDeadline);
     this.resyncTimer = setTimeout(() => {
       this.resyncTimer = null;
+      // Re-check liveness at fire time too: a stop() between arming and firing
+      // clears resyncTimer, but a timer armed and fired within one tick could
+      // still slip through — never dispatch a sync for a stopped manager.
+      if (!this.running) return;
       const previousFiredAt = this.lastResyncFiredAt;
       this.lastResyncFiredAt = Date.now();
       void this.triggerLibrarySync(previousFiredAt);

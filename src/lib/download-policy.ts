@@ -220,7 +220,9 @@ async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string,
         `[download-policy] Jellyfin user shrink for instance "${instance}" confirmed across ${runs} runs (fetched ${users.length}, ${priorActiveCount} active) — accepting it as the server's real state and reconciling`,
       );
       safeToReconcile = true;
-      refusedReconciles.delete(instance);
+      // The counter is cleared AFTER the updateMany below succeeds (guardrail
+      // 27: ledger after the write it stands for) — clearing here would re-arm
+      // the full 3-run countdown whenever the write itself throws.
     } else {
       refusedReconciles.set(instance, { signature, runs });
       console.warn(
@@ -238,6 +240,11 @@ async function syncJellyfinPolicies(instance: MediaInstanceKey, baseUrl: string,
       where: { source: "jellyfin", serverInstance: instance, sourceUserId: { notIn: currentIds }, active: true },
       data: { active: false },
     });
+    // Only now is the confirmed-shrink observation consumed: a failed write
+    // above keeps the counter, so the next hourly run reconciles immediately
+    // instead of restarting the 3-run countdown behind a log line that already
+    // claimed "reconciling".
+    refusedReconciles.delete(instance);
   }
 
   return result;

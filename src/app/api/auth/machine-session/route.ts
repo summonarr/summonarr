@@ -3,7 +3,7 @@ import { readJsonCappedOr } from "@/lib/body-size";
 import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIp, ipBucketKey } from "@/lib/rate-limit";
 import { parseIpAllowlist, isIpAllowed } from "@/lib/ip-allowlist";
 import { signSessionJwt } from "@/lib/session-jwt";
 import { serializeSessionCookie } from "@/lib/session-cookie";
@@ -27,7 +27,9 @@ export async function POST(req: NextRequest) {
   // Throttle per IP as defense-in-depth against CRON_SECRET brute-force (on top
   // of the timing-safe compare below). Legitimate machine sessions are minted
   // infrequently, so a tight limit costs real callers nothing.
-  if (!checkRateLimit(`machine-session:${callerIp}`, 10, 60_000)) {
+  // ipBucketKey for the THROTTLE (an IPv6 /64 holder must not rotate past it);
+  // the exact callerIp is kept for the isIpAllowed check + audit rows below.
+  if (!checkRateLimit(`machine-session:${ipBucketKey(callerIp)}`, 10, 60_000)) {
     return NextResponse.json({ error: "Too many requests" }, { status: 429 });
   }
 

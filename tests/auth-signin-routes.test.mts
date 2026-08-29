@@ -478,16 +478,30 @@ test("plex sign-in caps its body (guardrail 30)", async () => {
 
 // ── /api/auth/plex/start ─────────────────────────────────────────────────────
 
+// /api/auth/plex/start is IP rate-limited (20 per 5 min) against rate-limit.ts's
+// module-global window map, and nothing in this file — or in src/lib — can reset
+// it. A request with no x-forwarded-for falls back to the UA bucket, so every
+// such case in this file would share ONE bucket and the file would start 429ing
+// an unrelated later test as cases are added. Give each call its own address.
+let plexStartCall = 0;
+function startPost(body: string | undefined, headers: Record<string, string> = {}) {
+  plexStartCall++;
+  return post("/api/auth/plex/start", body, {
+    "x-forwarded-for": `198.51.100.${(plexStartCall % 254) + 1}`,
+    ...headers,
+  });
+}
+
 test("plex start requires a well-formed clientId", async () => {
   for (const clientId of [undefined, "", "short", "not a uuid!", "../etc/passwd", "x".repeat(80)]) {
-    const res = await inScope(() => plexStart.POST(post("/api/auth/plex/start", JSON.stringify({ clientId }))));
+    const res = await inScope(() => plexStart.POST(startPost(JSON.stringify({ clientId }))));
     assert.equal(res.status, 400, `clientId ${JSON.stringify(clientId)} should be rejected`);
   }
   assert.deepEqual(fetchCalls, [], "a bad clientId must not reach plex.tv");
 });
 
 test("plex start mints a flow cookie binding the pin to this browser", async () => {
-  const res = await inScope(() => plexStart.POST(post("/api/auth/plex/start", JSON.stringify({ clientId: VALID_CLIENT_ID }))));
+  const res = await inScope(() => plexStart.POST(startPost(JSON.stringify({ clientId: VALID_CLIENT_ID }))));
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.pinId, 4242);
@@ -501,32 +515,32 @@ test("plex start mints a flow cookie binding the pin to this browser", async () 
 test("plex start does NOT hand the flow state to a web caller's body", async () => {
   // Only the HttpOnly cookie for a browser; putting it in the body would make it
   // readable by page JS and defeat the binding.
-  const res = await inScope(() => plexStart.POST(post("/api/auth/plex/start", JSON.stringify({ clientId: VALID_CLIENT_ID }))));
+  const res = await inScope(() => plexStart.POST(startPost(JSON.stringify({ clientId: VALID_CLIENT_ID }))));
   assert.ok(!("flowState" in (await res.json())));
 });
 
 test("plex start DOES hand the flow state to a native caller's body", async () => {
   const res = await inScope(() =>
-    plexStart.POST(post("/api/auth/plex/start", JSON.stringify({ clientId: VALID_CLIENT_ID }), { [NATIVE_CLIENT_HEADER]: "ios; build=42" })),
+    plexStart.POST(startPost(JSON.stringify({ clientId: VALID_CLIENT_ID }), { [NATIVE_CLIENT_HEADER]: "ios; build=42" })),
   );
   const body = await res.json();
   assert.equal(typeof body.flowState, "string");
 });
 
 test("plex start only ever talks to plex.tv", async () => {
-  await inScope(() => plexStart.POST(post("/api/auth/plex/start", JSON.stringify({ clientId: VALID_CLIENT_ID }))));
+  await inScope(() => plexStart.POST(startPost(JSON.stringify({ clientId: VALID_CLIENT_ID }))));
   assert.ok(fetchCalls.length > 0);
   for (const c of fetchCalls) assert.equal(c.url.hostname, "plex.tv");
 });
 
 test("plex start forwards the caller's clientId to plex.tv", async () => {
-  await inScope(() => plexStart.POST(post("/api/auth/plex/start", JSON.stringify({ clientId: VALID_CLIENT_ID }))));
+  await inScope(() => plexStart.POST(startPost(JSON.stringify({ clientId: VALID_CLIENT_ID }))));
   assert.equal(fetchCalls[0].headers.get("X-Plex-Client-Identifier"), VALID_CLIENT_ID);
 });
 
 test("plex start bounds the caller-supplied device strings", async () => {
   await inScope(() =>
-    plexStart.POST(post("/api/auth/plex/start", JSON.stringify({
+    plexStart.POST(startPost(JSON.stringify({
       clientId: VALID_CLIENT_ID, platform: "p".repeat(200), device: "d".repeat(200), model: "m".repeat(200),
     }))),
   );
@@ -537,14 +551,14 @@ test("plex start bounds the caller-supplied device strings", async () => {
 
 test("plex start maps an upstream failure to 502 and sets no cookie", async () => {
   plexPinStatus = 500;
-  const res = await inScope(() => plexStart.POST(post("/api/auth/plex/start", JSON.stringify({ clientId: VALID_CLIENT_ID }))));
+  const res = await inScope(() => plexStart.POST(startPost(JSON.stringify({ clientId: VALID_CLIENT_ID }))));
   assert.equal(res.status, 502);
   assert.ok(!setCookies(res).some((c) => c.startsWith(`${PLEX_FLOW_COOKIE}=`)));
 });
 
 test("plex start maps a malformed upstream response to 502", async () => {
   plexPinCreate = { id: undefined, code: "ABCD" };
-  const res = await inScope(() => plexStart.POST(post("/api/auth/plex/start", JSON.stringify({ clientId: VALID_CLIENT_ID }))));
+  const res = await inScope(() => plexStart.POST(startPost(JSON.stringify({ clientId: VALID_CLIENT_ID }))));
   assert.equal(res.status, 502);
 });
 
@@ -564,14 +578,14 @@ test("plex start is IP rate-limited", async () => {
 
 test("plex start rejects an oversized body before reaching plex.tv", async () => {
   const res = await inScope(() =>
-    plexStart.POST(post("/api/auth/plex/start", JSON.stringify({ clientId: VALID_CLIENT_ID, pad: "z".repeat(8 * 1024) }))),
+    plexStart.POST(startPost(JSON.stringify({ clientId: VALID_CLIENT_ID, pad: "z".repeat(8 * 1024) }))),
   );
   assert.ok(res.status === 400 || res.status === 413);
   assert.deepEqual(fetchCalls, []);
 });
 
 test("plex start rejects malformed JSON", async () => {
-  const res = await inScope(() => plexStart.POST(post("/api/auth/plex/start", "{nope")));
+  const res = await inScope(() => plexStart.POST(startPost("{nope")));
   assert.equal(res.status, 400);
 });
 

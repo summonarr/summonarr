@@ -26,7 +26,7 @@ export async function POST(request: NextRequest) {
   }
 
   const apiKey = await prisma.setting.findUnique({ where: { key: "mdblistApiKey" } });
-  if (!apiKey?.value) {
+  if (!apiKey?.value.trim()) {
     return NextResponse.json({ skipped: true, reason: "no MDBList API key configured" });
   }
 

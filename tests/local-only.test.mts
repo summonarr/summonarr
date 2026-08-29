@@ -14,6 +14,7 @@ import {
   isLocalHost,
   isPublicAuthHost,
   evaluateLocalOnlyStartup,
+  type LocalOnlyStartupInput,
 } from "../src/lib/local-only.ts";
 
 test("localhost and loopback are local (with or without a port)", () => {
@@ -254,10 +255,16 @@ test("the boot decision does not consult any request Host — no header value ca
   // The policy input carries AUTH_URL's host (operator config) and nothing a
   // client can send. This is the structural half of "Host is not an access
   // control": there is no request-shaped field to spoof at boot.
-  const inputKeys = Object.keys({
+  //
+  // `Required<LocalOnlyStartupInput>` is what makes that structural: the literal
+  // is checked against the function's OWN parameter type, so adding a field —
+  // an optional request-Host one in particular — fails to compile here instead
+  // of slipping past an assertion over an object the test wrote for itself.
+  const input: Required<LocalOnlyStartupInput> = {
     nodeEnv: PROD, trustProxy: "", allowLocalOnly: undefined, authHost: LAN_AUTH_HOST,
-  }).sort();
-  assert.deepEqual(inputKeys, ["allowLocalOnly", "authHost", "nodeEnv", "trustProxy"]);
+  };
+  assert.deepEqual(Object.keys(input).sort(), ["allowLocalOnly", "authHost", "nodeEnv", "trustProxy"]);
+  assert.equal(evaluateLocalOnlyStartup(input).reason, "missing-opt-in");
 
   // And the values a client WOULD send as Host — including the loopback and
   // RFC1918 spellings that satisfy the runtime gate — cannot make an

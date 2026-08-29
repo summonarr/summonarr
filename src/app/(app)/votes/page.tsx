@@ -19,23 +19,29 @@ import { sanitizeContainsSearch } from "@/lib/sanitize";
 const PAGE_SIZE = 40;
 const VALID_SORTS = ["votes", "recent"] as const;
 
+// A repeated query key (?q=a&q=b) is delivered as an array, so every read takes
+// the first value — `.trim()` on the array throws and 500s the whole page.
+const first = (v: string | string[] | undefined): string | undefined =>
+  Array.isArray(v) ? v[0] : v;
+
 export default async function VotesPage({
   searchParams,
 }: {
-  searchParams: Promise<Record<string, string>>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   await requireFeature("feature.page.votes");
   const [sp, session] = await Promise.all([searchParams, requireAppSession()]);
-  const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
+  const page = Math.max(1, parseInt(first(sp.page) ?? "1", 10) || 1);
 
-  const mine = sp.mine === "1";
-  const sort = VALID_SORTS.includes(sp.sort as typeof VALID_SORTS[number])
-    ? (sp.sort as typeof VALID_SORTS[number])
+  const mine = first(sp.mine) === "1";
+  const sortParam = first(sp.sort);
+  const sort = VALID_SORTS.includes(sortParam as typeof VALID_SORTS[number])
+    ? (sortParam as typeof VALID_SORTS[number])
     : "votes";
   // Feeds both the Prisma `contains` below (ILIKE, no ESCAPE clause) and the raw
   // ILIKE further down — strip wildcard metacharacters and bound the length for
   // both at once (search-box DoS, matches /api/votes).
-  const q = sanitizeContainsSearch((sp.q ?? "").trim());
+  const q = sanitizeContainsSearch((first(sp.q) ?? "").trim());
 
   const where: Prisma.DeletionVoteWhereInput = {
     ...(mine && session ? { userId: session.user.id } : {}),

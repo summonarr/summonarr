@@ -10,6 +10,11 @@ export function RatingsVisibilityForm({ initialHidden }: { initialHidden: string
   const [hidden, setHidden] = useState<string[]>(initialHidden);
   const [status, setStatus] = useState<SaveStatus>("idle");
 
+  // One write at a time. All 11 checkboxes write the same ratingsHiddenSources
+  // key, which is exempt from the settings route's per-key cooldown (so a
+  // second tick within 10s isn't 429'd and rolled back) — without the boxes
+  // locking while a save is on the wire, two overlapping PATCHes each carrying
+  // a full snapshot could commit out of order and persist the older set.
   async function toggleSource(key: string) {
     const prev = hidden;
     const next = prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key];
@@ -54,6 +59,7 @@ export function RatingsVisibilityForm({ initialHidden }: { initialHidden: string
               type="checkbox"
               checked={!hidden.includes(s.key)}
               onChange={() => toggleSource(s.key)}
+              disabled={status === "saving"}
               className="w-3.5 h-3.5 accent-indigo-600"
             />
             {s.label}

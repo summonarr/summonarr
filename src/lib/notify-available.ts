@@ -4,6 +4,13 @@ import { prisma } from "./prisma";
 
 type MediaType = "MOVIE" | "TV";
 
+export type AvailableNotificationClaim<T> = {
+  /** Every row the CAS actually flipped — i.e. every row whose state transition really happened. */
+  claimed: T[];
+  /** `claimed` minus the rows whose requester's account is DISABLED. */
+  deliverable: T[];
+};
+
 /**
  * Atomically flips `notifiedAvailable: true` on the candidate set (WHERE
  * notifiedAvailable=false) and returns the subset whose row was actually
@@ -22,7 +29,7 @@ type MediaType = "MOVIE" | "TV";
  * `availableAt=NOW()`. Without it, only `notifiedAvailable` flips (used by
  * the webhook path where status was already set upstream).
  *
- * Requesters whose account is DISABLED are dropped from the returned set. This
+ * Requesters whose account is DISABLED are dropped from `deliverable`. This
  * is the single chokepoint for the batch "now available" fan-out — every sync
  * route and the webhook poller derive their Discord/push/email/in-app payloads
  * from these winners — so filtering here suppresses all four channels at once
@@ -33,12 +40,19 @@ type MediaType = "MOVIE" | "TV";
  * still flips to AVAILABLE and still burns `notifiedAvailable` — only the
  * delivery is skipped, so re-enabling the account later does not replay a
  * backlog of stale notifications.
+ *
+ * That burn is exactly why `claimed` is returned alongside it. The row moved to
+ * AVAILABLE, so every consequence of the TRANSITION — the deletion-vote wipe
+ * below, the `pendingNotifyAt` disarm — must key off `claimed`; only the four
+ * DELIVERY channels key off `deliverable`. Keying a transition consequence off
+ * `deliverable` silently skips it for a disabled requester's row, and since the
+ * claim is burned no later run can make it up.
  */
-export async function claimAvailableNotificationWinners<T extends { id: string; requestedBy: string }>(
+export async function claimAvailableNotifications<T extends { id: string; requestedBy: string }>(
   candidates: readonly T[],
   opts: { markAvailable?: boolean; requireStatusAvailable?: boolean } = {},
-): Promise<T[]> {
-  if (candidates.length === 0) return [];
+): Promise<AvailableNotificationClaim<T>> {
+  if (candidates.length === 0) return { claimed: [], deliverable: [] };
   const ids = candidates.map((r) => r.id);
   // Non-markAvailable callers (the notify-fallback path) only flip notifiedAvailable
   // for rows ALREADY AVAILABLE — they don't set status themselves — so they pass
@@ -72,19 +86,30 @@ export async function claimAvailableNotificationWinners<T extends { id: string; 
           ${statusGuard}
         RETURNING id
       `);
-  if (updated.length === 0) return [];
+  if (updated.length === 0) return { claimed: [], deliverable: [] };
   const winnerIds = new Set(updated.map((r) => r.id));
-  const winners = candidates.filter((r) => winnerIds.has(r.id));
+  const claimed = candidates.filter((r) => winnerIds.has(r.id));
 
   // Only runs when there is actually something to deliver, so the steady-state
   // sync (zero winners) pays nothing for it.
   const disabled = await prisma.user.findMany({
-    where: { id: { in: [...new Set(winners.map((r) => r.requestedBy))] }, deactivatedAt: { not: null } },
+    where: { id: { in: [...new Set(claimed.map((r) => r.requestedBy))] }, deactivatedAt: { not: null } },
     select: { id: true },
   });
-  if (disabled.length === 0) return winners;
+  if (disabled.length === 0) return { claimed, deliverable: claimed };
   const disabledIds = new Set(disabled.map((u) => u.id));
-  return winners.filter((r) => !disabledIds.has(r.requestedBy));
+  return { claimed, deliverable: claimed.filter((r) => !disabledIds.has(r.requestedBy)) };
+}
+
+/**
+ * `claimAvailableNotifications(...).deliverable` — for callers that only fan out
+ * notifications and draw no other consequence from the transition.
+ */
+export async function claimAvailableNotificationWinners<T extends { id: string; requestedBy: string }>(
+  candidates: readonly T[],
+  opts: { markAvailable?: boolean; requireStatusAvailable?: boolean } = {},
+): Promise<T[]> {
+  return (await claimAvailableNotifications(candidates, opts)).deliverable;
 }
 
 /**

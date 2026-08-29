@@ -1,6 +1,6 @@
 import { prisma } from "./prisma";
 import { getClientIp } from "./rate-limit";
-import { sanitizeText } from "./sanitize";
+import { sanitizeForLog, sanitizeText } from "./sanitize";
 import type { AuditAction } from "@/generated/prisma";
 
 export type AuditParams = {
@@ -17,22 +17,29 @@ export type AuditParams = {
   sessionId?: string | null;
 };
 
+// One builder for both writers so the sanitization set cannot drift between
+// them. userAgent is a raw attacker-controlled request header rendered into the
+// admin audit table (tooltip title attribute), so it gets the full
+// sanitizeForLog strip (controls + bidi overrides); ipAddress is normally a
+// validated getClientIp value but is sanitized the same way as belt-and-braces.
+function auditRowData(params: AuditParams) {
+  return {
+    userId: params.userId,
+    userName: sanitizeText(params.userName ?? "unknown"),
+    action: params.action,
+    target: sanitizeText(params.target),
+    details: params.details ? JSON.stringify(params.details) : null,
+    ipAddress: params.ipAddress ? sanitizeForLog(params.ipAddress) : null,
+    userAgent: params.userAgent ? sanitizeForLog(params.userAgent) : null,
+    provider: params.provider ?? null,
+    sessionId: params.sessionId ?? null,
+  };
+}
+
 // logAudit swallows errors by design — a failed audit write must never break the triggering request
 export async function logAudit(params: AuditParams): Promise<void> {
   try {
-    await prisma.auditLog.create({
-      data: {
-        userId: params.userId,
-        userName: sanitizeText(params.userName ?? "unknown"),
-        action: params.action,
-        target: sanitizeText(params.target),
-        details: params.details ? JSON.stringify(params.details) : null,
-        ipAddress: params.ipAddress ?? null,
-        userAgent: params.userAgent ?? null,
-        provider: params.provider ?? null,
-        sessionId: params.sessionId ?? null,
-      },
-    });
+    await prisma.auditLog.create({ data: auditRowData(params) });
   } catch (err) {
     console.error("[audit] Failed to write audit log:", err);
   }
@@ -40,19 +47,7 @@ export async function logAudit(params: AuditParams): Promise<void> {
 
 // logAuditOrFail is for writes that must succeed (e.g. inside a transaction where failure should roll back)
 export async function logAuditOrFail(params: AuditParams): Promise<void> {
-  await prisma.auditLog.create({
-    data: {
-      userId: params.userId,
-      userName: sanitizeText(params.userName ?? "unknown"),
-      action: params.action,
-      target: sanitizeText(params.target),
-      details: params.details ? JSON.stringify(params.details) : null,
-      ipAddress: params.ipAddress ?? null,
-      userAgent: params.userAgent ?? null,
-      provider: params.provider ?? null,
-      sessionId: params.sessionId ?? null,
-    },
-  });
+  await prisma.auditLog.create({ data: auditRowData(params) });
 }
 
 // PII retention window for audit rows, in days. Both scrub paths (the

@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { emitSSE } from "@/lib/sse-emitter";
 import { logAudit, auditContext } from "@/lib/audit";
 import { maintenanceGuard } from "@/lib/maintenance";
+import { readJsonCappedOr } from "@/lib/body-size";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -18,13 +19,52 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
   if (maint) return maint;
 
   const { id } = await params;
+
+  // `expectedClaimedBy` is the claim state the CALLER was rendering. Optional:
+  // an absent key (a body-less or `{}` request) keeps the original contract.
+  // `null` is a meaningful expectation — "I saw this unclaimed" — so presence is
+  // tested with `in`, never truthiness.
+  const body = await readJsonCappedOr<{ expectedClaimedBy?: unknown }>(req, 8192, {});
+  if (body instanceof NextResponse) return body;
+  const hasExpectation = "expectedClaimedBy" in body;
+  const expectedClaimedBy = body.expectedClaimedBy;
+  if (hasExpectation && expectedClaimedBy !== null && typeof expectedClaimedBy !== "string") {
+    return NextResponse.json({ error: "Invalid expectedClaimedBy" }, { status: 400 });
+  }
+
   const issue = await prisma.issue.findUnique({
     where: { id },
-    select: { id: true, title: true, claimedBy: true, reportedBy: true, status: true },
+    select: {
+      id: true,
+      title: true,
+      claimedBy: true,
+      reportedBy: true,
+      status: true,
+      claimedUser: { select: { name: true, email: true } },
+    },
   });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   const existingClaimedBy = issue.claimedBy;
+
+  // The CAS below only guards this handler's own read→write window. A caller
+  // acting on stale props — another admin claimed it moments ago, before the
+  // issue:updated refresh landed — would otherwise silently take the claim over,
+  // skipping the take-over confirmation it never knew to show. Refuse when the
+  // caller's view of the claim no longer matches the row.
+  if (hasExpectation && expectedClaimedBy !== existingClaimedBy) {
+    const holder = issue.claimedUser?.name ?? issue.claimedUser?.email ?? "Another admin";
+    return NextResponse.json(
+      {
+        error: "claim-conflict",
+        message: existingClaimedBy
+          ? `${holder} claimed this issue first.`
+          : "This issue is no longer claimed.",
+      },
+      { status: 409 }
+    );
+  }
+
   const isSelfClaim = existingClaimedBy === session.user.id;
   const action = isSelfClaim ? "release" : "claim";
 

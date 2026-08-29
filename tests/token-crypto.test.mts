@@ -4,6 +4,7 @@
 // they are pinned here alongside the basic roundtrip/tamper contract.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createCipheriv, randomBytes } from "node:crypto";
 import {
   encryptToken,
   decryptToken,
@@ -127,4 +128,43 @@ test("plaintext warn dedupe is per-label, not global: a second label still warns
   assert.equal(decryptToken("plain-legacy-token-b", "Setting.testKeyB"), "plain-legacy-token-b");
   const forB = warn.mock.calls.filter((c) => String(c.arguments[0]).includes("Setting.testKeyB"));
   assert.equal(forB.length, 1); // warned despite testKeyA's earlier warn, and deduped on repeat
+});
+
+test("decryptToken rejects malformed ciphertext with a precise error, not 'wrong key'", () => {
+  // Buffer.from(s,"hex") silently stops at the first non-hex char rather than
+  // throwing, so a bad shape must be caught by explicit validation — otherwise a
+  // truncated/garbled row reports "auth-tag mismatch — wrong key" and sends an
+  // operator hunting the wrong problem.
+  const goodIv = "a".repeat(32);
+  const goodTag = "b".repeat(32);
+  // Non-hex chars in a part → the explicit hex-shape check fires.
+  assert.throws(
+    () => decryptToken(`enc:v1:${goodIv}:${goodTag}:zzzz`),
+    /malformed ciphertext \(hex decode failed\)/,
+  );
+  // Odd-length hex is also malformed (not a whole byte).
+  assert.throws(
+    () => decryptToken(`enc:v1:${goodIv}:${goodTag}:abc`),
+    /malformed ciphertext \(hex decode failed\)/,
+  );
+  // Wrong IV length still reports the IV/tag-length error, not the hex one.
+  assert.throws(
+    () => decryptToken(`enc:v1:${"a".repeat(30)}:${goodTag}:dead`),
+    /IV or auth tag has wrong length/,
+  );
+});
+
+test("the hex guard accepts an envelope whose CIPHERTEXT PART is empty", () => {
+  // encryptToken("") short-circuits to the empty-string passthrough, so it can
+  // never produce this shape — a round-trip through it therefore exercises the
+  // legacy-plaintext branch and nothing else. The envelope has to be built by
+  // hand, and it is what the `*` (not `+`) quantifier in HEX_PAIRS is for: a
+  // well-formed row carrying an empty ciphertext must decrypt to "", not be
+  // rejected as "malformed ciphertext (hex decode failed)".
+  const iv = randomBytes(16);
+  const cipher = createCipheriv("aes-256-gcm", Buffer.from(TEST_KEY, "hex"), iv);
+  const ct = Buffer.concat([cipher.update("", "utf8"), cipher.final()]);
+  assert.equal(ct.length, 0, "an empty plaintext must yield an empty ciphertext part");
+  const envelope = `enc:v1:${iv.toString("hex")}:${cipher.getAuthTag().toString("hex")}:`;
+  assert.equal(decryptToken(envelope, "empty ciphertext"), "");
 });

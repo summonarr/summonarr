@@ -9,7 +9,20 @@ interface MotdModalProps {
   body: string;
 }
 
-const SESSION_KEY = "motd_dismissed";
+// The dismissal flag is keyed on the announcement's CONTENT, not a fixed
+// literal: a flat key suppresses a newly published or edited MOTD for the rest
+// of the tab session (sessionStorage survives reloads), so the next urgent
+// announcement is never seen by anyone who dismissed the previous one.
+// FNV-1a — a short stable digest, not a security hash.
+function contentKey(title: string, body: string): string {
+  const raw = `${title}\n${body}`;
+  let h = 0x811c9dc5;
+  for (let i = 0; i < raw.length; i++) {
+    h ^= raw.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return `motd_dismissed:${(h >>> 0).toString(36)}`;
+}
 
 export function MotdModal({ title, body }: MotdModalProps) {
   // Effect flips visibility after hydration; initial render matches SSR (null) to avoid hydration mismatch
@@ -17,17 +30,18 @@ export function MotdModal({ title, body }: MotdModalProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
   const titleId = "motd-modal-title";
+  const sessionKey = contentKey(title, body);
 
   useEffect(() => {
     if (!body) return;
-    if (sessionStorage.getItem(SESSION_KEY)) return;
+    if (sessionStorage.getItem(sessionKey)) return;
     setVisible(true);
-  }, [body]);
+  }, [body, sessionKey]);
 
   const dismiss = useCallback(() => {
-    sessionStorage.setItem(SESSION_KEY, "1");
+    sessionStorage.setItem(sessionKey, "1");
     setVisible(false);
-  }, []);
+  }, [sessionKey]);
 
   // Focus a sensible element on open, return focus to the opener on close, ESC closes.
   useEffect(() => {

@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { redirect, notFound } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getUserPlayStats } from "@/lib/play-history";
-import { resolvePosterMap } from "@/lib/poster-cache";
+import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
 import { posterUrl } from "@/lib/tmdb-types";
 import {
   UserDetailView,
@@ -150,7 +150,7 @@ export default async function UserActivityPage({
       // for titles no longer cached. (f1d609a preferred the snapshot, which
       // regressed cover art here.)
       posterSrc:
-        (m.tmdbId != null ? topMediaPosters[m.tmdbId] : undefined) ??
+        (m.tmdbId != null ? topMediaPosters[posterPathKey(m.tmdbId, m.mediaType)] : undefined) ??
         (m.posterPath ? posterUrl(m.posterPath, "w342") : null),
     })),
     knownIps,

@@ -9,6 +9,7 @@ import { type MediaServerService, type PlexSettingField, type JellyfinSettingFie
 import { settleLimit } from "@/lib/concurrency";
 import { getMediaInstances, buildMediaInstanceRegistryWrite } from "@/lib/media-instance-registry";
 import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
+import { validateServerUrl, stripUrlUserinfo } from "@/lib/server-url";
 
 // Admin management surface for the full Plex/Jellyfin instance list (multi-
 // server support): the registry metadata (slug/name — deliberately thin, see
@@ -144,7 +145,9 @@ async function readInstanceView(service: MediaServerService, slug: string, name:
       slug,
       name,
       restricted,
-      serverUrl: map[plexSettingKey(slug, "ServerUrl")] ?? "",
+      // Redacted like the /api/settings GET: never echo an embedded credential
+      // (older rows may predate the write-time rejection above).
+      serverUrl: stripUrlUserinfo(map[plexSettingKey(slug, "ServerUrl")] ?? ""),
       adminEmail: map[plexSettingKey(slug, "AdminEmail")] ?? "",
       hasAdminToken: !!map[plexSettingKey(slug, "AdminToken")],
       libraries: map[plexSettingKey(slug, "Libraries")] ?? "",
@@ -168,7 +171,7 @@ async function readInstanceView(service: MediaServerService, slug: string, name:
     slug,
     name,
     restricted,
-    url: map[jellyfinSettingKey(slug, "Url")] ?? "",
+    url: stripUrlUserinfo(map[jellyfinSettingKey(slug, "Url")] ?? ""),
     hasApiKey: !!map[jellyfinSettingKey(slug, "ApiKey")],
     restrictSignIn: readRestrictSignIn(map[jellyfinSettingKey(slug, "RestrictSignIn")]),
     libraries: map[jellyfinSettingKey(slug, "Libraries")] ?? "",
@@ -210,6 +213,14 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   for (const inst of instances) {
     if (typeof inst?.slug !== "string" || !isValidMediaInstanceSlug(inst.slug)) {
       return NextResponse.json({ error: `invalid instance slug: ${inst?.slug}` }, { status: 400 });
+    }
+    // Same URL rules as the /api/settings sibling: the value ships out on every
+    // safeFetchAdminConfigured call, so reject a bad scheme or an embedded
+    // credential here rather than storing it verbatim and echoing it back.
+    const rawUrl = service === "plex" ? inst.serverUrl : inst.url;
+    if (typeof rawUrl === "string" && rawUrl.trim().length > 0) {
+      const err = validateServerUrl(rawUrl.trim());
+      if (err) return NextResponse.json({ error: `Server URL for "${inst.slug}" ${err}` }, { status: 400 });
     }
   }
 

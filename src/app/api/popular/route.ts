@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { parsePageParam } from "@/lib/pagination";
 import { getMostPopularOnServer, POPULAR_PER_PAGE, type PopularSort } from "@/lib/play-history";
 import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import type { TmdbMedia } from "@/lib/tmdb-types";
@@ -40,7 +41,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const sort: PopularSort = validSorts.has(sortParam as PopularSort)
     ? (sortParam as PopularSort)
     : "trending";
-  const page = Math.min(Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1), 10_000);
+  const page = parsePageParam(sp);
   const show4k = await getShow4kVisibility(session);
 
   try {

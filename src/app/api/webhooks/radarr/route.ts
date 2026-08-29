@@ -11,7 +11,7 @@ import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { pollAndNotifyAvailable } from "@/lib/request-notifications";
 import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { checkBodySize } from "@/lib/body-size";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIp, ipBucketKey } from "@/lib/rate-limit";
 import { isMovieDownloadedInRadarr } from "@/lib/arr";
 import { getArrInstances } from "@/lib/arr-instance-registry";
 import { arrSettingKey, DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
@@ -43,7 +43,7 @@ export async function POST(req: NextRequest) {
   // 600/min (~10/s): a legitimate season-pack import fires one Download event
   // per episode, and 120/min rejected the tail of a large burst. Still bounds
   // the pre-auth cost (two Setting reads + a hash compare) per IP.
-  if (!checkRateLimit(`webhook:radarr:${clientIp}`, 600, 60_000)) {
+  if (!checkRateLimit(`webhook:radarr:${ipBucketKey(clientIp)}`, 600, 60_000)) {
     return NextResponse.json({ error: "Too Many Requests" }, { status: 429 });
   }
 

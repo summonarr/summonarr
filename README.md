@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.23.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.24.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,39 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.24.0
+
+The audit release: a full-codebase every-line scan of all 914 source files closed 91 verified defects, alongside a session-lifetime rework.
+
+**Added**
+
+- Sign-ins from the iOS app no longer expire on a timer — the session ends only when you revoke it. Both device lists label these "Never expires — until revoked".
+
+**Changed**
+
+- "Remember me" now genuinely lasts the configured session duration. A hidden 1-hour inactivity timeout was cutting sessions short after any idle gap, and a 7-day ceiling was signing admins out weekly; both are gone, and a session now runs to the deadline it was issued with. Revoking a device (or changing your password) still ends it immediately.
+- IPv6 rate-limit buckets key on the /64 prefix rather than the full address, so one holder of a standard delegation can no longer rotate addresses past the sign-up, OIDC and QuickConnect limiters.
+- A partially-failed MDBList fan-out is served once but no longer cached for 12 hours, so a quota lockout or transient error can't pin a truncated list until it expires.
+
+**Fixed**
+
+- **Settings could never clear an optional value.** Blanking a Discord channel or role, a donation handle, the SMTP sender, a library selection, a path prefix, the MOTD or the maintenance message reported "Saved" and silently changed nothing. 27 more fields are now clearable — including both library pickers, which each promise "all libraries will be synced" when emptied. Masked secrets (SMTP password, Resend API key) deliberately remain non-clearable, so an echoed mask can never wipe one.
+- Two admin activity charts could crash the dashboard when the pointer rested over a series that then shrank.
+- A title becoming available left stale deletion votes behind when the requester's account had been deactivated.
+- Watch leaderboards, the poster map and Wrapped merged a movie and a TV show sharing a TMDB id, so one could show the other's poster and play counts.
+- OIDC accounts were classified as Plex accounts and could not be assigned a media server from the admin UI.
+- The Votes page returned a server error when a query parameter appeared twice in the URL.
+- A newly published or edited announcement stayed hidden from anyone who had dismissed the previous one; dismissal is now per-announcement.
+- The navigation progress bar could blank mid-navigation when the previous navigation's hide timer fired late.
+- An avatar that failed to load stayed on initials even after a valid image became available.
+- Copy buttons threw instead of degrading gracefully where the clipboard API is unavailable (an `http://` LAN deployment). The API-docs viewer now shows the curl command for manual selection, and it applies `BASE_PATH` so copied commands work on a subpath deployment.
+- "Claim" on an issue could take another admin's claim without the confirmation step when the button had been rendered from stale state.
+- The "Fill master DB" button could reset itself mid-run, inviting a second concurrent fill.
+- A `?page=` far beyond the last page drove the database offset into the trillions on two paginated endpoints.
+- Admin-configured server URLs (Radarr/Sonarr/Jellyfin/Plex) rejected two cloud-metadata bypasses that the user-facing policy already blocked: 6to4/Teredo encodings of `169.254.169.254`, and AWS's IPv6 metadata address.
+- A Discord DM could still be sent about a download whose request had just been deleted, and push notifications could still reach a deactivated admin's devices.
+- A failed library scan silently skipped the work queued behind it.
 
 ### v0.23.1
 
@@ -541,7 +574,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.23.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.24.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

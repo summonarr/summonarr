@@ -43,6 +43,13 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
     try {
       const res = await fetch(withBasePath(`/api/search?q=${encodeURIComponent(query.trim())}`));
       const data: unknown = await res.json();
+      // /api/search answers `{ error }` on 429 (rate limit), 400 and 500. Without
+      // this the error body falls through Array.isArray to setResults([]) and the
+      // empty list reads as "TMDB has no such title".
+      if (!res.ok) {
+        setError((data as { error?: string } | null)?.error ?? "Search failed — try again");
+        return;
+      }
       if (Array.isArray(data)) {
         setResults(
           data

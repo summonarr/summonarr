@@ -858,7 +858,12 @@ export async function getPlayStatsForServerUsers(ids: string[]) {
   const oneYearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
   // Bind every id as its own $N placeholder; the optional date filter takes the
   // slot right after the id list — same IN-list discipline as my-watch-history.
-  const idIn = ids.map((_, i) => `$${i + 1}`).join(", ");
+  // An empty id list would render "IN ()", a Postgres syntax error; "IN (NULL)"
+  // matches no row and keeps the later binds' offsets consistent (they all
+  // derive from ids.length). Callers today short-circuit on empty, so this is
+  // a landmine guard, not a live path (getPlayYearsForServerUsers early-returns
+  // for the same reason).
+  const idIn = ids.length > 0 ? ids.map((_, i) => `$${i + 1}`).join(", ") : "NULL";
   const dateBind = `$${ids.length + 1}`;
 
   const [
@@ -892,9 +897,9 @@ export async function getPlayStatsForServerUsers(ids: string[]) {
     // notes: previously the GROUP BY also keyed on title, so the same show
     // appeared twice when one source resolved tmdbId and the other didn't.
     prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; posterPath: string | null; count: bigint }[]>(
-      `SELECT MAX("title") AS title, "tmdbId", MAX("mediaType"::text) AS "mediaType", MAX("posterPath") AS "posterPath", COUNT(*)::bigint AS count
+      `SELECT MAX("title") AS title, "tmdbId", "mediaType"::text AS "mediaType", MAX("posterPath") AS "posterPath", COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE "mediaServerUserId" IN (${idIn}) AND "watched" = true
-       GROUP BY "tmdbId", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
+       GROUP BY "tmdbId", "mediaType", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
        ORDER BY count DESC LIMIT 10`,
       ...ids,
     ),
@@ -1036,7 +1041,9 @@ export async function getPlayYearsForServerUsers(ids: string[]): Promise<number[
 export async function getWrappedForServerUsers(ids: string[], year: number): Promise<WrappedBundle> {
   const yearStart = new Date(Date.UTC(year, 0, 1));
   const yearEnd = new Date(Date.UTC(year + 1, 0, 1));
-  const idIn = ids.map((_, i) => `$${i + 1}`).join(", ");
+  // "IN (NULL)" on an empty list: matches nothing instead of the "IN ()" syntax
+  // error, and keeps $y1/$y2 offsets consistent (see getPlayStatsForServerUsers).
+  const idIn = ids.length > 0 ? ids.map((_, i) => `$${i + 1}`).join(", ") : "NULL";
   const y1 = `$${ids.length + 1}`;
   const y2 = `$${ids.length + 2}`;
   const scope = `"mediaServerUserId" IN (${idIn}) AND "startedAt" >= ${y1} AND "startedAt" < ${y2}`;
@@ -1046,24 +1053,24 @@ export async function getWrappedForServerUsers(ids: string[], year: number): Pro
     prisma.$queryRawUnsafe<{ plays: number; hours: number; titles: number }[]>(
       `SELECT COUNT(*) FILTER (WHERE watched)::int AS plays,
               (COALESCE(SUM("playDuration") FILTER (WHERE watched), 0) / 3600.0)::float8 AS hours,
-              COUNT(DISTINCT COALESCE("tmdbId"::text, lower("title"))) FILTER (WHERE watched)::int AS titles
+              COUNT(DISTINCT COALESCE("tmdbId"::text || ':' || COALESCE("mediaType"::text, ''), lower("title"))) FILTER (WHERE watched)::int AS titles
        FROM "PlayHistory" WHERE ${scope}`,
       ...binds,
     ),
     prisma.$queryRawUnsafe<{ movie_titles: number; movie_hours: number; shows: number; episodes: number; tv_hours: number }[]>(
-      `SELECT COUNT(DISTINCT "tmdbId") FILTER (WHERE "mediaType" = 'MOVIE' AND watched)::int AS movie_titles,
+      `SELECT COUNT(DISTINCT COALESCE("tmdbId"::text, lower("title"))) FILTER (WHERE "mediaType" = 'MOVIE' AND watched)::int AS movie_titles,
               (COALESCE(SUM("playDuration") FILTER (WHERE "mediaType" = 'MOVIE' AND watched), 0) / 3600.0)::float8 AS movie_hours,
-              COUNT(DISTINCT "tmdbId") FILTER (WHERE "mediaType" = 'TV' AND watched)::int AS shows,
+              COUNT(DISTINCT COALESCE("tmdbId"::text, lower("title"))) FILTER (WHERE "mediaType" = 'TV' AND watched)::int AS shows,
               COUNT(*) FILTER (WHERE "mediaType" = 'TV' AND watched)::int AS episodes,
               (COALESCE(SUM("playDuration") FILTER (WHERE "mediaType" = 'TV' AND watched), 0) / 3600.0)::float8 AS tv_hours
        FROM "PlayHistory" WHERE ${scope}`,
       ...binds,
     ),
     prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; posterPath: string | null; cnt: number; hours: number }[]>(
-      `SELECT MAX("title") AS title, "tmdbId", MAX("mediaType"::text) AS "mediaType", MAX("posterPath") AS "posterPath",
+      `SELECT MAX("title") AS title, "tmdbId", "mediaType"::text AS "mediaType", MAX("posterPath") AS "posterPath",
               COUNT(*)::int AS cnt, (COALESCE(SUM("playDuration"), 0) / 3600.0)::float8 AS hours
        FROM "PlayHistory" WHERE ${scope} AND watched
-       GROUP BY "tmdbId", CASE WHEN "tmdbId" IS NULL THEN lower("title") ELSE NULL END
+       GROUP BY "tmdbId", "mediaType", CASE WHEN "tmdbId" IS NULL THEN lower("title") ELSE NULL END
        ORDER BY cnt DESC, hours DESC LIMIT 5`,
       ...binds,
     ),
@@ -1952,9 +1959,9 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
     ),
     // See per-user equivalent earlier in this file — same dedupe strategy.
     prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; count: bigint }[]>(
-      `SELECT MAX("title") AS title, "tmdbId", MAX("mediaType"::text) AS "mediaType", COUNT(*)::bigint AS count
+      `SELECT MAX("title") AS title, "tmdbId", "mediaType"::text AS "mediaType", COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${wwhere}
-       GROUP BY "tmdbId", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
+       GROUP BY "tmdbId", "mediaType", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
        ORDER BY count DESC LIMIT 10`,
       ...params,
     ),
@@ -2219,30 +2226,51 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
   const peakConcurrent = Number(peakConcurrentRaw[0]?.peak ?? 0);
   const prev = prevPeriodStats[0];
 
+  // The cutoff is a rolling `now - days*24h`, so the window spans days+1 UTC
+  // calendar days (both edges partial). Padding to `days` would drop the oldest
+  // edge's rows from the series while totalPlays above still counts them.
+  const seriesDays = days + 1;
+
   return {
     totalPlays: Number(totalPlays[0]?.count ?? 0),
     totalWatchTimeHours: Math.round(Number(totalWatchTime[0]?.hours ?? 0) * 10) / 10,
-    playsByDay: playsByDay.map((r) => ({ day: r.day, count: Number(r.count) })),
+    playsByDay: padDailySeries(
+      playsByDay.map((r) => ({ day: r.day, count: Number(r.count) })),
+      seriesDays,
+      (day) => ({ day, count: 0 }),
+    ),
     topUsers: topUsers.map((r) => ({ id: r.id, username: r.username, source: r.source, count: Number(r.count) })),
     topMedia: topMedia.map((r) => ({ title: r.title, tmdbId: r.tmdbId, mediaType: r.mediaType, count: Number(r.count) })),
     transcodeRatio: transcodeRatio.map((r) => ({ method: r.method ?? "Unknown", count: Number(r.count) })),
     playsByPlatform: playsByPlatform.map((r) => ({ platform: r.platform ?? "Unknown", count: Number(r.count) })),
     playsByHour: playsByHour.map((r) => ({ hour: r.hour, count: Number(r.count) })),
     mediaTypeBreakdown: mediaTypeBreakdown.map((r) => ({ type: r.type, count: Number(r.count) })),
-    watchTimeByDay: watchTimeByDay.map((r) => ({ day: r.day, hours: Math.round(r.hours * 100) / 100 })),
+    watchTimeByDay: padDailySeries(
+      watchTimeByDay.map((r) => ({ day: r.day, hours: Math.round(r.hours * 100) / 100 })),
+      seriesDays,
+      (day) => ({ day, hours: 0 }),
+    ),
     heatmap: heatmap.map((r) => ({ dow: r.dow, hour: r.hour, count: Number(r.count) })),
     completionRate: totalCount > 0 ? Math.round((watchedCount / totalCount) * 100) : 0,
     completionBuckets: completionBuckets.map((r) => ({ bucket: r.bucket, count: Number(r.count) })),
     avgBitrateMbps: Math.round(Number(bitrateStats[0]?.avg_mbps ?? 0) * 10) / 10,
     totalBandwidthGB: Math.round(Number(bitrateStats[0]?.total_gb ?? 0) * 10) / 10,
-    bandwidthByDay: bandwidthByDayRaw.map((r) => ({ day: r.day, gb: Math.round(r.gb * 100) / 100 })),
+    bandwidthByDay: padDailySeries(
+      bandwidthByDayRaw.map((r) => ({ day: r.day, gb: Math.round(r.gb * 100) / 100 })),
+      seriesDays,
+      (day) => ({ day, gb: 0 }),
+    ),
     uniqueViewers: Number(extras?.unique_viewers ?? 0),
     uniqueTitles: Number(extras?.unique_titles ?? 0),
     avgSessionMinutes,
     longestSessionMinutes,
     pauseRatio,
     peakConcurrent,
-    uniqueViewersByDay: uniqueViewersByDay.map((r) => ({ day: r.day, count: Number(r.count) })),
+    uniqueViewersByDay: padDailySeries(
+      uniqueViewersByDay.map((r) => ({ day: r.day, count: Number(r.count) })),
+      seriesDays,
+      (day) => ({ day, count: 0 }),
+    ),
     playsByDow: playsByDow.map((r) => ({ dow: r.dow, count: Number(r.count) })),
     resolutionBreakdown: resolutionBreakdown.map((r) => ({ bucket: r.bucket, count: Number(r.count) })),
     videoCodecBreakdown: videoCodecBreakdown.map((r) => ({ codec: r.codec, count: Number(r.count) })),
@@ -2467,7 +2495,7 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
     prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; count: bigint }[]>(
       `SELECT MAX("title") AS title, "tmdbId", COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where} AND "title" IS NOT NULL AND "title" <> ''
-       GROUP BY "tmdbId", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
+       GROUP BY "tmdbId", "mediaType", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
        ORDER BY count DESC LIMIT 4`,
       ...params,
     ),
@@ -2571,9 +2599,9 @@ export async function getTranscodeOffenders(
       limit,
     ),
     prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; count: bigint }[]>(
-      `SELECT MAX("title") AS title, "tmdbId", MAX("mediaType"::text) AS "mediaType", COUNT(*)::bigint AS count
+      `SELECT MAX("title") AS title, "tmdbId", "mediaType"::text AS "mediaType", COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${twhere} AND "title" IS NOT NULL AND "title" <> ''
-       GROUP BY "tmdbId", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
+       GROUP BY "tmdbId", "mediaType", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
        ORDER BY count DESC LIMIT $${limitIdx}`,
       ...params,
       limit,

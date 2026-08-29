@@ -6,8 +6,11 @@ import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 //
 // `expiresAt` is the per-device session deadline tracked alongside the
 // AuthSession DB row — distinct from the JWT `exp` claim, which jose enforces
-// on every verify. The two are intentionally separate so a sliding refresh
-// can update `exp` without losing the original device-bound deadline.
+// on every verify. The two are intentionally separate so a re-sign (every
+// DB-checked verify mints a fresh token carrying dbCheckedAt) can set `exp`
+// without losing the original device-bound deadline; since guardrail 6c the
+// re-sign puts `exp` AT the deadline, and a native session's deadline is the
+// never-reached sentinel from session-lifetime.ts.
 export interface SessionClaims extends JWTPayload {
   id: string;
   role: string;

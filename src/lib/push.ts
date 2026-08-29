@@ -182,7 +182,15 @@ let apnsRelayInflight: Promise<{ url: string; key: string }> | null = null;
  * test would run against a config up to 30s stale, which is precisely the
  * interaction an operator uses to check the change landed.
  */
+// Bumped by every invalidation; an in-flight read only populates the cache if
+// no invalidation landed while it was running. Nulling the two variables alone
+// cannot stop a promise that is already reading — its .then would re-cache the
+// PRE-invalidation value with a fresh 30s TTL, which is exactly the window the
+// admin's "save relay key → send test notification" flow hits.
+let apnsRelayEpoch = 0;
+
 export function invalidateApnsRelayCache(): void {
+  apnsRelayEpoch += 1;
   apnsRelayCache = null;
   apnsRelayInflight = null;
 }
@@ -191,9 +199,10 @@ async function getApnsRelayConfig(): Promise<{ url: string; key: string }> {
   const now = Date.now();
   if (apnsRelayCache && now - apnsRelayCache.at < APNS_RELAY_TTL_MS) return apnsRelayCache.value;
   if (apnsRelayInflight) return apnsRelayInflight;
+  const epochAtStart = apnsRelayEpoch;
   apnsRelayInflight = readApnsRelayConfig()
     .then((value) => {
-      apnsRelayCache = { value, at: Date.now() };
+      if (apnsRelayEpoch === epochAtStart) apnsRelayCache = { value, at: Date.now() };
       return value;
     })
     .finally(() => {
@@ -613,7 +622,13 @@ export async function notifyAdminGrabCompletedPush(data: {
     const ctx = await pushContext();
     if (!ctx) return "skipped-no-keys";
 
-    const subs = await prisma.pushSubscription.findMany({ where: { userId: data.userId } });
+    // deactivatedAt gate like getAdminSubscriptions/getIssueAdminSubscriptions
+    // (guardrail 33): the triggering issue-admin may have been removed between
+    // pressing Replace and the arr Download webhook firing — a disabled
+    // account's surviving subscriptions must not be pinged.
+    const subs = await prisma.pushSubscription.findMany({
+      where: { userId: data.userId, user: { deactivatedAt: null } },
+    });
     if (!subs.length) return "skipped-no-subs";
 
     let scopeLabel = "";

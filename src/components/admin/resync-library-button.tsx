@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { RefreshCw, XCircle } from "@/components/icons";
@@ -18,8 +18,19 @@ export function ResyncLibraryButton({
   const searchParams = useSearchParams();
   const [status, setStatus] = useState<"idle" | "confirm" | "loading" | "done" | "error">("idle");
   const [result, setResult] = useState<string | null>(null);
+  // The end-of-run reset has to be cancellable: a prior run's timer landing mid-run
+  // flips "loading" back to "idle", so the spinner and counts vanish and the button
+  // re-enables while the full delete-and-replace is still POSTing.
+  const resetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(resetTimer.current), []);
+
+  function scheduleReset() {
+    clearTimeout(resetTimer.current);
+    resetTimer.current = setTimeout(() => { setStatus("idle"); setResult(null); }, 10_000);
+  }
 
   async function handleResync() {
+    clearTimeout(resetTimer.current);
     setStatus("loading");
     setResult(null);
     try {
@@ -45,7 +56,7 @@ export function ResyncLibraryButton({
         // re-scan. Neutral styling says that; red would not.
         setStatus("done");
         setResult("No media servers configured");
-        setTimeout(() => { setStatus("idle"); setResult(null); }, 10_000);
+        scheduleReset();
         return;
       }
 
@@ -86,7 +97,7 @@ export function ResyncLibraryButton({
       setStatus("error");
       setResult("Sync failed");
     }
-    setTimeout(() => { setStatus("idle"); setResult(null); }, 10_000);
+    scheduleReset();
   }
 
   if (status === "confirm") {
@@ -118,7 +129,7 @@ export function ResyncLibraryButton({
       <Button
         variant="outline"
         size="sm"
-        onClick={() => setStatus("confirm")}
+        onClick={() => { clearTimeout(resetTimer.current); setStatus("confirm"); }}
         disabled={status === "loading"}
         className="border-zinc-700 text-zinc-300 hover:text-white gap-2"
       >

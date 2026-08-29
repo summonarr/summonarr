@@ -16,11 +16,16 @@ services:
       - SETGID
       - DAC_OVERRIDE
       - FOWNER
+    # Deliberately NOT `env_file: .env` — Postgres needs POSTGRES_PASSWORD and
+    # nothing else, and loading the shared file would put TOKEN_ENCRYPTION_KEY,
+    # NEXTAUTH_SECRET and CRON_SECRET into this container's env (and its
+    # `docker inspect`), i.e. the at-rest key sitting beside the ciphertext it
+    # protects. Compose interpolates ./.env here exactly as it does for
+    # ${SUMMONARR_VERSION} and the *_INTERVAL knobs below.
     environment:
       POSTGRES_DB: summonarr
       POSTGRES_USER: summonarr
-    env_file:
-      - .env
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:

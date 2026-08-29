@@ -51,12 +51,17 @@ const envOrigins: ReadonlySet<string> = (() => {
 })();
 
 const trustedOriginsCache = new Map<string, ReadonlySet<string>>();
+// The key is derived from the Host header — client-controlled — so an
+// unbounded map is a slow OOM under a rotating-Host loop. The entries are
+// trivially recomputable, so wholesale clearing loses nothing.
+const TRUSTED_ORIGINS_CACHE_MAX = 512;
 
 function buildTrustedOrigins(selfOrigin: string): ReadonlySet<string> {
   if (envOrigins.size > 0) return envOrigins;
   const cached = trustedOriginsCache.get(selfOrigin);
   if (cached) return cached;
   const fallback = new Set<string>([selfOrigin]);
+  if (trustedOriginsCache.size >= TRUSTED_ORIGINS_CACHE_MAX) trustedOriginsCache.clear();
   trustedOriginsCache.set(selfOrigin, fallback);
   return fallback;
 }
@@ -70,7 +75,6 @@ function isPublicPath(pathname: string): boolean {
     pathname.startsWith("/api/auth/") ||
     pathname.startsWith("/api/setup/") ||
     pathname.startsWith("/api/webhooks/") ||
-    pathname.startsWith("/api/discord/") ||
     pathname === "/api/sync" ||
     pathname.startsWith("/api/sync/") ||
     pathname.startsWith("/api/cron/") ||
@@ -241,6 +245,17 @@ export async function proxy(request: NextRequest) {
         extractUaFingerprint(request.headers.get("user-agent") ?? ""),
       );
       if (currentFp !== storedFp) {
+        // Same fork as the !isLoggedIn branch above: through fetch() a 302
+        // resolves as 200-with-HTML (and a followed POST is downgraded to GET,
+        // silently dropping the write), so API callers need a machine-readable
+        // 401. Both arms clear the session cookies.
+        if (pathname.startsWith("/api/")) {
+          const res = NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+          for (const cookie of serializeClearedSessionCookies()) {
+            res.headers.append("Set-Cookie", cookie);
+          }
+          return res;
+        }
         return clearedCookieResponse(buildLoginRedirect(request));
       }
     }

@@ -19,6 +19,9 @@ function safeCompareStrings(a: string, b: string): boolean {
 // same-origin check, otherwise a malicious site can drive a logged-in admin's
 // browser to POST /api/sync via cookie auth.
 const sessionOriginCache = new Map<string, ReadonlySet<string>>();
+// Keyed on the Host-derived origin — client-controlled — so cap it like the
+// proxy's trustedOriginsCache; entries are trivially recomputable.
+const SESSION_ORIGIN_CACHE_MAX = 512;
 
 function buildSessionTrustedOrigins(selfOrigin: string): ReadonlySet<string> {
   const cached = sessionOriginCache.get(selfOrigin);
@@ -34,6 +37,7 @@ function buildSessionTrustedOrigins(selfOrigin: string): ReadonlySet<string> {
   }
   if (trusted.size === 0) trusted.add(selfOrigin);
   const frozen: ReadonlySet<string> = trusted;
+  if (sessionOriginCache.size >= SESSION_ORIGIN_CACHE_MAX) sessionOriginCache.clear();
   sessionOriginCache.set(selfOrigin, frozen);
   return frozen;
 }

@@ -44,7 +44,11 @@ export interface User {
   // (guardrail 16), and only the on/off state drives the UI.
   disabled: boolean;
   purged: boolean;
-  source: "local" | "plex" | "jellyfin";
+  // How the account authenticates, derived by the page: "local" = passwordHash,
+  // "oidc" = an oidc Account row, "jellyfin"/"plex" = the provider-pinned rest.
+  // Only the first two have no provider-pinned media server, so only those two
+  // get the Server access controls in user-table.tsx.
+  source: "local" | "oidc" | "plex" | "jellyfin";
   discordId: string | null;
   permissions: string;
   instanceGrants: InstanceGrantMap;

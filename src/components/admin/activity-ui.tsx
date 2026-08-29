@@ -455,6 +455,7 @@ export function Sparkline({
         )}
       </svg>
       {hover &&
+        hover.i < data.length &&
         typeof document !== "undefined" &&
         createPortal(
         <div
@@ -670,6 +671,7 @@ export function AreaChart({
         )}
       </svg>
       {hover &&
+        hover.i < data.length &&
         typeof document !== "undefined" &&
         createPortal(
         <div

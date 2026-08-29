@@ -293,13 +293,16 @@ async function resolveArrConfirmation(
       // ArrResponseError handling instead of a bare safeFetchAdminConfigured
       // (which defaulted to an 8s timeout + 10 MB cap and raw Response handling).
       const arrCfg = { url: arrUrlRow.value.replace(/\/$/, ""), apiKey: arrKeyRow.value };
-      const folderPath = nodePath.posix.normalize(filePath.replace(/\/[^/]+$/, ""));
+      // Fold Windows separators first (as file-info does): without it the
+      // dirname regex strips nothing off a backslash path, so the filename
+      // stays on folderPath and every pathMatches() below reads false.
+      const folderPath = nodePath.posix.normalize(filePath.replace(/\\/g, "/").replace(/\/[^/]+$/, ""));
       const endpoint   = mediaType === "MOVIE" ? "movie" : "series";
 
       type ArrMovie = { tmdbId?: number; path?: string; hasFile?: boolean; statistics?: { episodeFileCount?: number } };
 
       const pathMatches = (arrPathRaw: string | undefined): boolean => {
-        const arrPath = nodePath.posix.normalize(arrPathRaw ?? "");
+        const arrPath = nodePath.posix.normalize((arrPathRaw ?? "").replace(/\\/g, "/"));
         return !!arrPath && !!folderPath && (arrPath === folderPath || folderPath.startsWith(arrPath + "/"));
       };
 
@@ -378,7 +381,12 @@ async function resolveArrConfirmation(
 export const GET = withIssueAdmin(async (request, _ctx, _session) => {
   const { searchParams } = new URL(request.url);
   const server             = searchParams.get("server");
-  const mediaType          = searchParams.get("mediaType") as "MOVIE" | "TV" | null;
+  const mediaTypeRaw       = searchParams.get("mediaType");
+  // Validated, not just cast: an arbitrary value reaching the Prisma enum
+  // filter below throws PrismaClientValidationError → an unhandled 500 where
+  // the sibling POST answers 400.
+  const mediaType: "MOVIE" | "TV" | null =
+    mediaTypeRaw === "MOVIE" || mediaTypeRaw === "TV" ? mediaTypeRaw : null;
   const tmdbIdRaw          = parseInt(searchParams.get("tmdbId") ?? "", 10);
   const correctTmdbIdRaw   = parseInt(searchParams.get("correctTmdbId") ?? "", 10);
   const arrTmdbIdParam     = searchParams.get("arrTmdbId");

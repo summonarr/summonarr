@@ -3,6 +3,7 @@ import { withPermission } from "@/lib/api-auth";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
@@ -83,7 +84,18 @@ export const DELETE = withPermission(Permission.ADMIN)(async (
     ? await prisma.playHistory.deleteMany({
         where: { OR: [{ id: chainId }, { referenceId: chainId }] },
       })
-    : await prisma.playHistory.delete({ where: { id } }).then(() => ({ count: 1 }));
+    // The findUnique above is a TOCTOU: a concurrent (or double-submitted) delete
+    // removes the row first and Prisma answers this one with P2025, which nothing
+    // here catches — so a removal that SUCCEEDED was reported as a 500, while the
+    // chain branch's deleteMany no-ops and 204s in the identical race. Swallow
+    // only P2025; the 404 pre-check still covers an id that never existed.
+    : await prisma.playHistory
+        .delete({ where: { id } })
+        .then(() => ({ count: 1 }))
+        .catch((err: unknown) => {
+          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") return { count: 0 };
+          throw err;
+        });
 
   // Rows already deleted; a failed audit write must not 500 a successful delete.
   void logAudit({

@@ -147,6 +147,15 @@ export async function GET() {
 
       heartbeatTimer = setInterval(() => {
         try {
+          // enqueue on an unread stream does not throw — it drives desiredSize
+          // negative — so a silently-dead client (lid closed, network dropped
+          // before TCP notices) would hold a capped connection slot until the
+          // 1h max-duration timer. Mirror the event listener's backpressure
+          // check and reclaim the slot instead.
+          if (controller.desiredSize !== null && controller.desiredSize <= 0) {
+            cleanup(controller);
+            return;
+          }
           controller.enqueue(encoder.encode(": heartbeat\n\n"));
         } catch {
           cleanup(controller);

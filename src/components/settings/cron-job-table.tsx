@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Loader2, Play, CheckCircle, XCircle, Clock } from "@/components/icons";
 import { Button } from "@/components/ui/button";
+import { formatDurationMs } from "@/lib/format-duration";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { withBasePath } from "@/lib/base-path";
@@ -15,11 +16,6 @@ export interface CronJobInfo {
   lastRun: string | null;
   lastDuration: number | null;
   lastStatus: "ok" | "error" | null;
-}
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 // Admin table of internal cron jobs with last-run/status and a per-job manual Run trigger.
@@ -109,7 +105,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                   )}
                 </td>
                 <td className="hidden sm:table-cell py-3 pr-4 text-zinc-400 text-xs tabular-nums whitespace-nowrap">
-                  {job.lastDuration != null ? formatDuration(job.lastDuration) : "—"}
+                  {job.lastDuration != null ? formatDurationMs(job.lastDuration) : "—"}
                 </td>
                 <td className="py-3 pr-4">
                   {job.lastStatus === "ok" && (

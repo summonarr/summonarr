@@ -586,13 +586,23 @@ export default async function LibraryDiffPage({
     if (name && !tvArrByName.has(name)) tvArrByName.set(name, id);
   }
 
+  // Movies need the same basename index: the map key is Radarr's absolute path
+  // while the lookup key is the media server's, and the two bind-mount roots
+  // (/data vs /plexmedia) differ on any normal Docker deployment, so a full-path
+  // get() never matched. Basenames ("Movie (2020)") line up across mounts.
+  const movieArrByName = new Map<string, number>();
+  for (const [path, id] of movieArrMap) {
+    const name = path.split("/").pop();
+    if (name && !movieArrByName.has(name)) movieArrByName.set(name, id);
+  }
+
   const badMatches: BadMatch[] = filteredRawBadMatches.map((m, i) => {
     // toMatchKey already reduced a TV relativePath to the show folder; movies
     // keep their full relative file path, so they look the file's parent
-    // directory up against the full-path radarr map.
+    // directory's basename up against the radarr basename index.
     const arrTmdbId = m.plexItem.mediaType === "TV"
       ? (tvArrByName.get(m.relativePath) ?? null)
-      : (movieArrMap.get(folderOf(m.plexItem.filePath) || folderOf(m.jellyfinItem.filePath)) ?? null);
+      : (movieArrByName.get((folderOf(m.plexItem.filePath) || folderOf(m.jellyfinItem.filePath)).split("/").pop() ?? "") ?? null);
 
     let arrVerdict: ArrVerdict = null;
     if (arrTmdbId !== null) {
@@ -639,11 +649,13 @@ export default async function LibraryDiffPage({
   ): DiffItem[] =>
     items.map((item) => {
       const mediaRelPath = stripMountPoint(item.filePath, mountPoints.get(mountKey(item)) ?? "");
-      // TV resolves against the series-folder basename index (see tvArrByName);
-      // movies keep the full-path radarr lookup off the file's parent dir.
+      // Both sides resolve against a folder-BASENAME index (see tvArrByName /
+      // movieArrByName): TV off the series folder, movies off the file's parent
+      // dir. The arr paths are absolute under a different bind-mount root, so a
+      // full-path lookup never matches.
       const arrTmdbId = item.mediaType === "TV"
         ? (mediaRelPath ? (tvArrByName.get(mediaRelPath.split("/")[0]) ?? null) : null)
-        : (item.filePath ? (arrMap(item).get(folderOf(item.filePath)) ?? null) : null);
+        : (item.filePath ? (arrMap(item).get(folderOf(item.filePath).split("/").pop() ?? "") ?? null) : null);
       const inArr     = arrTmdbSet(item).has(item.tmdbId);
 
       const arrFallbackPath = (!mediaRelPath && item.mediaType === "TV")
@@ -668,8 +680,8 @@ export default async function LibraryDiffPage({
       };
     });
 
-  const clientOnlyPlex     = toClientItem(onlyPlex,     plexMountPoints,     (i) => i.mediaType === "MOVIE" ? movieArrMap : tvArrMap, (i) => i.mediaType === "MOVIE" ? movieArrTmdbIds : tvArrTmdbIds);
-  const clientOnlyJellyfin = toClientItem(onlyJellyfin, jellyfinMountPoints, (i) => i.mediaType === "MOVIE" ? movieArrMap : tvArrMap, (i) => i.mediaType === "MOVIE" ? movieArrTmdbIds : tvArrTmdbIds);
+  const clientOnlyPlex     = toClientItem(onlyPlex,     plexMountPoints,     (i) => i.mediaType === "MOVIE" ? movieArrByName : tvArrByName, (i) => i.mediaType === "MOVIE" ? movieArrTmdbIds : tvArrTmdbIds);
+  const clientOnlyJellyfin = toClientItem(onlyJellyfin, jellyfinMountPoints, (i) => i.mediaType === "MOVIE" ? movieArrByName : tvArrByName, (i) => i.mediaType === "MOVIE" ? movieArrTmdbIds : tvArrTmdbIds);
 
   const clientBadMatches: ClientBadMatch[] = badMatches.map((m) => ({
     relativePath:   m.relativePath,

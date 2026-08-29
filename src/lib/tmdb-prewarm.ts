@@ -95,7 +95,7 @@ interface RawItem {
   next_episode_to_air?: { air_date?: string | null } | null;
   keywords?: { keywords?: { id: number; name: string }[]; results?: { id: number; name: string }[] };
   "watch/providers"?: { results?: Record<string, { flatrate?: RawProvider[]; rent?: RawProvider[]; buy?: RawProvider[] }> };
-  external_ids?: { tvdb_id?: number | null };
+  external_ids?: { imdb_id?: string | null; tvdb_id?: number | null };
   release_dates?: { results?: { iso_3166_1: string; release_dates: { certification?: string }[] }[] };
   content_ratings?: { results?: { iso_3166_1: string; rating?: string }[] };
 }
@@ -234,6 +234,15 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
   const countries = raw.production_countries?.length
     ? raw.production_countries.map((c) => c.name || pwRegion(c.iso_3166_1))
     : (raw.origin_country?.map(pwRegion) ?? []);
+  // ISO codes beside the display names: the anime auto-route matches "JP"
+  // against these, and the normalize writers (tmdb.ts) store them under this
+  // same :details key — TV prefers origin_country (already ISO codes), movies
+  // take production_countries.
+  const countryCodes = mediaType === "TV" && raw.origin_country?.length
+    ? raw.origin_country
+    : (raw.production_countries?.length
+        ? raw.production_countries.map((c) => c.iso_3166_1)
+        : (raw.origin_country ?? []));
   // Match the normalize shape (src/lib/tmdb.ts): `genres`/`keywords` = names (back-compat),
   // `genreList`/`keywordList` = id+name. Both writers persist the same `:details` cache key.
   const genreObjs = raw.genres?.map((g) => ({ id: g.id, name: g.name })) ?? [];
@@ -285,7 +294,10 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     studios:         studios.map((c) => c.name),
     tagline:         raw.tagline ?? null,
     status:          raw.status ?? null,
-    imdbId:          raw.imdb_id ?? null,
+    // /tv carries no top-level imdb_id — it lives in the appended external_ids,
+    // so reading only raw.imdb_id nulled the id on every TV rewrite. `prior` is
+    // the last fallback because a ratings hit can supply one TMDB never had.
+    imdbId:          raw.external_ids?.imdb_id ?? raw.imdb_id ?? prior?.imdbId ?? null,
     runtime:         raw.runtime ?? (raw.episode_run_time?.[0] ?? null),
     numberOfSeasons: raw.number_of_seasons ?? null,
     numberOfEpisodes: raw.number_of_episodes ?? null,
@@ -294,6 +306,7 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     originalLanguage:    raw.original_language ?? null,
     spokenLanguages:     raw.spoken_languages?.map((l) => l.english_name || l.name || pwLanguage(l.iso_639_1)) ?? [],
     productionCountries: countries,
+    originCountryCodes:  countryCodes,
     homepage:            raw.homepage || null,
     budget:              raw.budget || null,
     revenue:             raw.revenue || null,

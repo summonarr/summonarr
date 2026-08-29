@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { parsePageParam } from "@/lib/pagination";
 import { type DiscoverFilters } from "@/lib/tmdb";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { runBrowseQuery } from "@/lib/browse-query";
@@ -11,7 +12,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
 
   const sp = request.nextUrl.searchParams;
   const mediaType     = sp.get("mediaType") === "tv" ? "tv" : "movie";
-  const page          = Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1);
+  const page          = parsePageParam(sp);
   const genreId       = sp.get("genreId") || undefined;
   const keywordId     = sp.get("keywordId") || undefined;
   const minRating     = sp.get("minRating") || undefined;

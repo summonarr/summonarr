@@ -119,12 +119,43 @@ function hasChainedCatch(node: ts.CallExpression): boolean {
 // lexically encloses its definition has exited.
 const RESULT_COLLECTING_CALLEES = new Set(["map", "flatMap"]);
 
+/**
+ * Does the VALUE of `expr` reach somewhere a rejection can still be observed —
+ * awaited, returned, assigned, or handed to a combinator/callee that owns it?
+ * The map callback is only a non-barrier when the array of promises it builds
+ * is actually collected. A bare `ids.map((id) => fetch(id));` statement and a
+ * `void Promise.all(ids.map(...))` both float: nothing downstream ever sees
+ * those rejections, so the try that lexically encloses them cannot catch them.
+ */
+function resultIsCollected(expr: ts.Node): boolean {
+  let cur: ts.Node = expr;
+  while (cur.parent) {
+    const p = cur.parent;
+    if (ts.isAwaitExpression(p) || ts.isReturnStatement(p) || ts.isYieldExpression(p)) return true;
+    if (ts.isVariableDeclaration(p) && p.initializer === cur) return true;
+    if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.EqualsToken && p.right === cur) return true;
+    if (
+      ts.isParenthesizedExpression(p) ||
+      ts.isAsExpression(p) ||
+      ts.isNonNullExpression(p) ||
+      ts.isArrayLiteralExpression(p) ||
+      ts.isSpreadElement(p) ||
+      // `.then`/`.catch` continuations, and Promise.all/allSettled/race, all
+      // forward the rejection — keep walking out to see whether THEY are collected.
+      (ts.isPropertyAccessExpression(p) && p.expression === cur) ||
+      (ts.isCallExpression(p) && (p.expression === cur || p.arguments.includes(cur as ts.Expression)))
+    ) { cur = p; continue; }
+    return false;
+  }
+  return false;
+}
+
 function isBarrierFunction(fn: ts.Node): boolean {
   const parent = fn.parent;
   if (parent && ts.isCallExpression(parent) && parent.arguments.includes(fn as ts.Expression)) {
     const ex = parent.expression;
     const name = ts.isIdentifier(ex) ? ex.text : ts.isPropertyAccessExpression(ex) ? ex.name.text : "";
-    if (RESULT_COLLECTING_CALLEES.has(name)) return false;
+    if (RESULT_COLLECTING_CALLEES.has(name) && resultIsCollected(parent)) return false;
   }
   return true;
 }
@@ -232,20 +263,26 @@ test("the analyzer catches every unhandled shape and excuses every handled one",
         setTimeout(async () => { await fetch("/c"); }, 0);   // 11 — VIOLATION
       } catch { }
     }
+    function floatingMap(ids) {
+      try { ids.map((id) => fetch(id)); } catch { report(); }                    // 15 — VIOLATION
+    }
+    function floatingVoidAll(ids) {
+      try { void Promise.all(ids.map((id) => fetch(id))); } catch { report(); }  // 18 — VIOLATION
+    }
     async function okTryCatch() {
-      try { await fetch("/d"); } catch { report(); }         // 15 — excused
+      try { await fetch("/d"); } catch { report(); }         // 21 — excused
     }
     function okChained() {
-      fetch("/e").then((r) => r.json()).catch(() => null);   // 18 — excused
+      fetch("/e").then((r) => r.json()).catch(() => null);   // 24 — excused
     }
     async function okThrows() {
-      const r = await fetch("/f");                           // 21 — excused
+      const r = await fetch("/f");                           // 27 — excused
       if (!r.ok) throw new Error("nope");
       return r;
     }
     async function okAwaitedMap(ids) {
       try {
-        await Promise.all(ids.map((id) => fetch(id)));       // 27 — excused
+        await Promise.all(ids.map((id) => fetch(id)));       // 33 — excused
       } catch { report(); }
     }
   `;
@@ -253,9 +290,12 @@ test("the analyzer catches every unhandled shape and excuses every handled one",
   const violations = hits.filter((h) => h.excuse === null).map((h) => h.line);
   const excused = hits.filter((h) => h.excuse !== null).map((h) => h.line);
 
-  assert.equal(hits.length, 7, `expected 7 fetch calls, found ${hits.length}`);
-  assert.deepEqual(violations, [3, 6, 11], `wrong violations: ${JSON.stringify(hits)}`);
-  assert.deepEqual(excused, [15, 18, 21, 27], `wrong excuses: ${JSON.stringify(hits)}`);
+  assert.equal(hits.length, 9, `expected 9 fetch calls, found ${hits.length}`);
+  // 15 and 18 are the map callbacks whose promise array nobody collects: the
+  // enclosing catch can never observe those rejections, so it must not excuse
+  // them. 33 is the same callback shape with the result actually awaited.
+  assert.deepEqual(violations, [3, 6, 11, 15, 18], `wrong violations: ${JSON.stringify(hits)}`);
+  assert.deepEqual(excused, [21, 24, 27, 33], `wrong excuses: ${JSON.stringify(hits)}`);
 });
 
 // A try whose ONLY clause is `finally` is the antipattern this whole file

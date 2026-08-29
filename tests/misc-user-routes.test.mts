@@ -114,6 +114,16 @@ const issueAdmin = () => mintSession({ permissions: Permission.MANAGE_ISSUES, ro
 shadowPrismaModel(prisma, "user", {
   findUnique: async (args: { where: { id: string } }) => usersById.get(args.where.id) ?? null,
   findMany: async () => [], update: async () => ({}), count: async () => usersById.size,
+  // The email-confirm bind. Recorded so "this path must not bind an address" is
+  // an assertion about a write that could have happened, not about a stub that
+  // never existed.
+  updateMany: async (args: { where: { id?: string }; data: Record<string, unknown> }) => {
+    rec("user.updateMany", args.where);
+    const u = args.where.id ? usersById.get(args.where.id) : undefined;
+    if (!u) return { count: 0 };
+    Object.assign(u, args.data);
+    return { count: 1 };
+  },
 });
 
 // ── stores ───────────────────────────────────────────────────────────────────
@@ -259,7 +269,7 @@ const notifications = await import("../src/app/api/notifications/route.ts");
 const report = await import("../src/app/api/report/route.ts");
 const claim = await import("../src/app/api/issues/[id]/claim/route.ts");
 const confirm = await import("../src/app/api/profile/notification-email/confirm/route.ts");
-const { hashVerifyToken } = await import("../src/lib/notification-email-verify.ts");
+const { hashVerifyToken, buildVerifyIdentifier } = await import("../src/lib/notification-email-verify.ts");
 
 // ── scope ────────────────────────────────────────────────────────────────────
 const afterTasks: Array<() => Promise<unknown>> = [];
@@ -703,7 +713,7 @@ test("the confirm token is stored HASHED — the raw link value is never the sto
   // The token in the URL IS the credential on an unauthenticated route, so a
   // stolen DB dump must not yield working confirmation links.
   const raw = "abcdef0123456789";
-  verifyTokens = [{ token: hashVerifyToken(raw), identifier: "u1:new@example.com", expires: new Date(Date.now() + 60_000) }];
+  verifyTokens = [{ token: hashVerifyToken(raw), identifier: buildVerifyIdentifier("u1", "new@example.com"), expires: new Date(Date.now() + 60_000) }];
   await confirmGet(`?token=${raw}`);
   const looked = opsOf("verificationToken.findUnique").map((o) => o.args as string);
   assert.ok(looked.length > 0);
@@ -720,15 +730,17 @@ test("a missing token renders an error page rather than throwing", async () => {
 
 test("an unknown token is refused on both verbs", async () => {
   for (const res of [await confirmGet("?token=nope"), await confirmPost("?token=nope")]) {
-    assert.ok(res.status < 500);
+    assert.equal(res.status, 400);
+    assert.match(await res.text(), /expired or already used/i);
   }
+  assert.equal(opsOf("user.updateMany").length, 0, "an unrecognized token must never bind an address");
 });
 
 test("GET does NOT consume the token — only POST binds", async () => {
   // An email scanner or link preview following the URL must not silently
   // confirm the address; GET only renders the confirm form.
   const raw = "abcdef0123456789";
-  verifyTokens = [{ token: hashVerifyToken(raw), identifier: "u1:new@example.com", expires: new Date(Date.now() + 60_000) }];
+  verifyTokens = [{ token: hashVerifyToken(raw), identifier: buildVerifyIdentifier("u1", "new@example.com"), expires: new Date(Date.now() + 60_000) }];
   await confirmGet(`?token=${raw}`);
   assert.equal(opsOf("verificationToken.delete").length, 0, "GET must not consume the token");
   assert.equal(verifyTokens.length, 1);
@@ -736,11 +748,13 @@ test("GET does NOT consume the token — only POST binds", async () => {
 
 test("POST consumes the token FIRST so a double-submit can't re-trigger the bind", async () => {
   const raw = "abcdef0123456789";
-  verifyTokens = [{ token: hashVerifyToken(raw), identifier: "u1:new@example.com", expires: new Date(Date.now() + 60_000) }];
-  await confirmPost(`?token=${raw}`);
+  verifyTokens = [{ token: hashVerifyToken(raw), identifier: buildVerifyIdentifier("u1", "new@example.com"), expires: new Date(Date.now() + 60_000) }];
+  assert.equal((await confirmPost(`?token=${raw}`)).status, 200);
   assert.ok(opsOf("verificationToken.delete").length > 0, "the token must be single-use");
   const second = await confirmPost(`?token=${raw}`);
-  assert.ok(second.status < 500, "a replay is refused cleanly");
+  assert.equal(second.status, 400, "a replay is refused cleanly");
+  assert.match(await second.text(), /expired or already used/i);
+  assert.equal(opsOf("user.updateMany").length, 1, "the replay must not re-run the bind");
 });
 
 test("the confirm pages are HTML, not JSON", async () => {
@@ -750,7 +764,7 @@ test("the confirm pages are HTML, not JSON", async () => {
 
 test("the token is escaped into the form action rather than interpolated raw", async () => {
   const raw = "abc<script>alert(1)</script>";
-  verifyTokens = [{ token: hashVerifyToken(raw), identifier: "u1:new@example.com", expires: new Date(Date.now() + 60_000) }];
+  verifyTokens = [{ token: hashVerifyToken(raw), identifier: buildVerifyIdentifier("u1", "new@example.com"), expires: new Date(Date.now() + 60_000) }];
   const html = await (await confirmGet(`?token=${encodeURIComponent(raw)}`)).text();
   assert.ok(!html.includes("<script>alert(1)</script>"), "the token must not land unescaped in the page");
 });

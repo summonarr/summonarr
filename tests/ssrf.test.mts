@@ -78,6 +78,9 @@ test("admin policy (allowPrivate): LAN + loopback OK, link-local + unspecified s
   assert.equal(await resolveToSafeUrl("http://169.254.169.254/", admin), null);
   assert.equal(await resolveToSafeUrl("http://0.0.0.0:3000/", admin), null);
   assert.equal(await resolveToSafeUrl("http://[fe80::1]/", admin), null);
+  // AWS IPv6 IMDS is ULA, so the admin ULA carve-out would otherwise allow it.
+  assert.equal(await resolveToSafeUrl("http://[fd00:ec2::254]/", admin), null);
+  assert.equal(await resolveToSafeUrl("http://[fd00:ec2:0:0:0:0:0:254]/", admin), null);
 });
 
 test("isSafeAddrForAdmin: raw-address admin policy incl. embedded-IPv4 unwrap", () => {
@@ -89,6 +92,21 @@ test("isSafeAddrForAdmin: raw-address admin policy incl. embedded-IPv4 unwrap", 
   assert.equal(isSafeAddrForAdmin("fe80::1"), false);
   assert.equal(isSafeAddrForAdmin("fec0::1"), false); // deprecated site-local stays blocked
   assert.equal(isSafeAddrForAdmin("::ffff:169.254.1.1"), false); // unwrap → link-local
+  // Multicast / reserved / broadcast: no admin-configured server lives there,
+  // and a typo'd 239.x/255.255.255.255 would emit a segment-wide HTTP request.
+  assert.equal(isSafeAddrForAdmin("239.255.255.250"), false); // SSDP multicast
+  assert.equal(isSafeAddrForAdmin("224.0.0.1"), false);
+  assert.equal(isSafeAddrForAdmin("255.255.255.255"), false); // broadcast
+  assert.equal(isSafeAddrForAdmin("240.0.0.1"), false); // reserved 240/4
+  assert.equal(isSafeAddrForAdmin("ff02::1"), false); // IPv6 multicast
+  // AWS IMDSv2 IPv6 (fd00:ec2::254) is ULA, but it is metadata, not a LAN server.
+  assert.equal(isSafeAddrForAdmin("fd00:ec2::254"), false);
+  assert.equal(isSafeAddrForAdmin("fd00:ec2:0:0:0:0:0:254"), false);
+  assert.equal(isSafeAddrForAdmin("FD00:EC2::254"), false);
+  // Neighbouring ULA still passes — the carve-out is the one metadata address.
+  assert.equal(isSafeAddrForAdmin("fd00::1"), true);
+  assert.equal(isSafeAddrForAdmin("fd00:ec2::1"), true);
+  assert.equal(isSafeAddrForAdmin("fd00:ec2::253"), true);
 });
 
 test("verifyResolvedHost re-checks a literal host under the chosen policy", async () => {
@@ -135,6 +153,34 @@ test("SIIT ::ffff:0:0:0/96 form unwraps and is blocked", async () => {
   assert.equal(await verifyResolvedHost("::ffff:0:7f00:1"), false);
   // SIIT-embedded link-local stays blocked under the admin policy too
   assert.equal(isSafeAddrForAdmin("::ffff:0:a9fe:a9fe"), false);
+});
+
+test("admin policy blocks 6to4/Teredo — unwrapEmbeddedV4 misses these prefixes", async () => {
+  // 6to4 embeds IPv4 in bits 16–47, which unwrapEmbeddedV4 (prefix96 of the last
+  // 32 bits) does not look at. 2002:a9fe:a9fe:: is 6to4 of 169.254.169.254 —
+  // the same cloud-metadata address the NAT64/SIIT admin pins already cover.
+  // Bit-prefix check (not the textual /^2002:/ regex) so zero-padded/expanded
+  // spellings cannot slip through.
+  assert.equal(isSafeAddrForAdmin("2002:a9fe:a9fe::"), false);
+  assert.equal(isSafeAddrForAdmin("2002:a9fe:a9fe:0:0:0:0:0"), false);
+  assert.equal(isSafeAddrForAdmin("2002:A9FE:A9FE::"), false);
+  // Teredo 2001:0::/32 — same hole: not an embedded-v4 prefix96 form.
+  assert.equal(isSafeAddrForAdmin("2001:0:4136:e378:8000:63bf:3fff:fdd2"), false);
+  assert.equal(isSafeAddrForAdmin("2001::4136:e378:8000:63bf:3fff:fdd2"), false);
+  assert.equal(isSafeAddrForAdmin("2001:0000:4136:e378:8000:63bf:3fff:fdd2"), false);
+  // Wholesale prefix reject, matching the user policy: 6to4 of RFC1918 / public
+  // IPv4 is still a tunnel, and an admin server is never a 6to4 literal.
+  assert.equal(isSafeAddrForAdmin("2002:c0a8:1::"), false); // 192.168.0.1 via 6to4
+  assert.equal(isSafeAddrForAdmin("2002:808:808::1"), false); // 8.8.8.8 via 6to4
+  // Ordinary 2001::/16 global unicast must still pass (Google Public DNS).
+  assert.equal(isSafeAddrForAdmin("2001:4860:4860::8888"), true);
+
+  const admin = { allowPrivate: true };
+  assert.equal(await resolveToSafeUrl("http://[2002:a9fe:a9fe::]/", admin), null);
+  assert.equal(await resolveToSafeUrl("http://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/", admin), null);
+  assert.equal(await verifyResolvedHost("2002:a9fe:a9fe::", admin), false);
+  assert.equal(await verifyResolvedHost("2001:0:4136:e378:8000:63bf:3fff:fdd2", admin), false);
+  assert.notEqual(await resolveToSafeUrl("http://[2001:4860:4860::8888]/", admin), null);
 });
 
 test("default (user) policy blocks IPv6-native private/tunnel/multicast ranges", async () => {

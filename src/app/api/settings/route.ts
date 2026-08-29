@@ -15,6 +15,7 @@ import { FEATURE_KEYS, invalidateFeatureFlagCache } from "@/lib/features";
 import { invalidateApnsRelayCache } from "@/lib/push";
 import { SETTINGS_SENSITIVE_KEYS_SET } from "@/lib/settings-sensitive-keys";
 import { parseIpAllowlist, isValidIpOrCidr } from "@/lib/ip-allowlist";
+import { stripUrlUserinfo, validateServerUrl } from "@/lib/server-url";
 
 const SETTINGS_SCHEMA = [
   ["siteTitle",                     false],
@@ -221,19 +222,8 @@ const HTTPS_ONLY_URL_KEYS = new Set<string>([
   "apnsRelayUrl",
 ]);
 
-function stripUrlUserinfo(value: string): string {
-  try {
-    const u = new URL(value);
-    if (u.username || u.password) {
-      u.username = "";
-      u.password = "";
-      return u.toString();
-    }
-  } catch {
-    // Not a parseable URL — let it through unchanged.
-  }
-  return value;
-}
+// stripUrlUserinfo now lives in @/lib/server-url (shared with the per-instance
+// media-instances route so both redact GET responses the same way).
 
 // Per-key write cooldown prevents rapid settings toggling (e.g. maintenanceEnabled spam)
 const KEY_COOLDOWN_MS = 10_000;
@@ -244,7 +234,15 @@ const lastKeyWriteAt = new Map<string, number>();
 // the optimistic flip). Spam protection for this tab is handled client-side
 // via trailing-edge coalescing in features-form.tsx plus the general
 // admin-settings rate limit (10 PATCHes / minute).
-const COOLDOWN_EXEMPT = new Set<string>(FEATURE_KEYS);
+// The two standalone toggles below share that shape: each click PATCHes the same
+// key and the control rolls back on a non-ok response, so a 429 inside the
+// cooldown snaps it to the state the admin just tried to leave. The ratings grid
+// is worse — 11 checkboxes all write ratingsHiddenSources.
+const COOLDOWN_EXEMPT = new Set<string>([
+  ...FEATURE_KEYS,
+  "ratingsHiddenSources",
+  "request4kAll",
+]);
 setInterval(() => {
   const cutoff = Date.now() - KEY_COOLDOWN_MS;
   for (const [key, ts] of lastKeyWriteAt) {
@@ -360,36 +358,12 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     if (value === MASKED_VALUE || value.length === 0) continue;
 
     if (URL_KEYS.has(key)) {
-      try {
-        const parsed = new URL(value);
-        if (HTTPS_ONLY_URL_KEYS.has(key)) {
-          if (parsed.protocol !== "https:") {
-            return NextResponse.json(
-              { error: `Setting "${key}" must be an https:// URL` },
-              { status: 400 },
-            );
-          }
-        } else if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-          return NextResponse.json(
-            { error: `Setting "${key}" must be an http(s) URL` },
-            { status: 400 },
-          );
-        }
-        // Reject embedded credentials (user:pass@host) — the URL parser accepts
-        // them silently and the credential ships out as part of every safeFetch
-        // call (Plex/Jellyfin/Radarr/Sonarr server URLs). Operators should set
-        // credentials via the dedicated apiKey field instead.
-        if (parsed.username || parsed.password) {
-          return NextResponse.json(
-            { error: `Setting "${key}" must not contain embedded credentials` },
-            { status: 400 },
-          );
-        }
-      } catch {
-        return NextResponse.json(
-          { error: `Setting "${key}" must be a valid URL` },
-          { status: 400 },
-        );
+      // Shared with /api/admin/media-instances so the default-instance keys and
+      // the per-instance keys reject the exact same shapes (scheme, embedded
+      // credentials). Length is already enforced by the per-key check above.
+      const urlErr = validateServerUrl(value, { httpsOnly: HTTPS_ONLY_URL_KEYS.has(key) });
+      if (urlErr) {
+        return NextResponse.json({ error: `Setting "${key}" ${urlErr}` }, { status: 400 });
       }
     }
 
@@ -633,6 +607,48 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     // Blank = fall back to the 90-day default in getAuditPiiRetentionDays,
     // exactly what the form's helper text promises.
     "auditPiiRetentionDays",
+    // Optional Discord routing. Blanking the notify channel is the documented
+    // way back to DMs ("Leave blank to send DMs"), and a role/invite id can
+    // otherwise only be replaced, never removed.
+    "discordAdminRequestChannelId",
+    "discordWelcomeChannelId",
+    "discordNotifyChannelId",
+    "discordInviteUrl",
+    "discordLinkedRoleId",
+    "discordPlexRoleId",
+    "discordJellyfinRoleId",
+    "discordAdminRoleId",
+    "discordIssueAdminRoleId",
+    "discordAutoApproveRoles",
+    // /api/config publishes these to every visitor, so removing a payment
+    // handle (a Zelle phone/email is personal data) has to actually remove it.
+    "donationPaypal",
+    "donationVenmo",
+    "donationZelle",
+    "donationAmazon",
+    "donationPatreon",
+    "donationBuyMeACoffee",
+    // "Leave blank to use the username as the sender" (email.ts: smtpFrom ||
+    // smtpUser), and a stale smtpUser forces AUTH on a relay that wants none.
+    // smtpPassword is deliberately NOT here: it is masked on GET, so a blank
+    // submit is indistinguishable from an echo and must never wipe the secret.
+    "smtpFrom",
+    "smtpUser",
+    // Empty = "sync every library", which is what each picker promises when no
+    // box is ticked; every sync consumer already reads an empty value that way.
+    "jellyfinLibraries",
+    "plexLibraries",
+    // bad-matches.ts treats an empty prefix as "no prefix", so writing empty is
+    // the correct end state for removing a wrong one.
+    "plexMoviePathStripPrefix",
+    "plexTvPathStripPrefix",
+    "jellyfinMoviePathStripPrefix",
+    "jellyfinTvPathStripPrefix",
+    // Optional user-facing copy: blank restores the built-in maintenance text
+    // and drops the MOTD title/body.
+    "maintenanceMessage",
+    "motdTitle",
+    "motdBody",
   ]);
 
   const entries = Object.entries(body)
@@ -809,9 +825,27 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   // that existed before, delete keys we created.
   if (testFailed) {
     const preWriteByKey = new Map(oldRows.map((r) => [r.key, r.value]));
+    // Restore only the keys still holding the value THIS request wrote. The
+    // tests above run for up to ~30s (arrFetch's timeout, longer for SMTP) while
+    // the per-key cooldown is 10s, so a second PATCH can commit and answer 200
+    // inside that window — restoring the pre-write snapshot unconditionally
+    // would silently revert a durable write its caller was told had succeeded.
+    const currentByKey = new Map(
+      (await prisma.setting.findMany({ where: { key: { in: changedKeys } } })).map((r) => [r.key, r.value]),
+    );
+    const restorable: string[] = [];
+    const superseded: string[] = [];
+    for (const [key, value] of entries) {
+      (currentByKey.get(key) === value ? restorable : superseded).push(key);
+    }
+    if (superseded.length > 0) {
+      console.warn(
+        `[settings] rollback skipped — modified by a concurrent write: ${superseded.join(", ")}`,
+      );
+    }
     try {
       await prisma.$transaction(async (tx) => {
-        for (const [key] of entries) {
+        for (const key of restorable) {
           const prior = preWriteByKey.get(key);
           if (prior === undefined) {
             await tx.setting.deleteMany({ where: { key } });
@@ -848,8 +882,9 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     // Release the cooldown these keys armed before the test ran. Their values
     // were just rolled back, so nothing durable changed — but the stamp survived
     // and 429'd the admin's corrected re-save for the next 10s, which is exactly
-    // when they are most likely to retry.
-    for (const [key] of entries) lastKeyWriteAt.delete(key);
+    // when they are most likely to retry. A superseded key's stamp belongs to
+    // the write that overtook this one, so it stays.
+    for (const key of restorable) lastKeyWriteAt.delete(key);
     // The rollback rewrote Setting rows — drop the flag memo again.
     invalidateFeatureFlagCache();
     invalidateApnsRelayCache();

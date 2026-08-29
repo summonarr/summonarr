@@ -35,10 +35,16 @@ const rel = (f: string) => relative(process.cwd(), f).split("\\").join("/");
 // Strip `//` line comments before matching. Every prose mention of `fetch()` /
 // `encryptToken(...)` in this tree lives in a line comment, so this is what
 // keeps the scanners from flagging documentation as a call site.
+//
+// The `//` inside a scheme ("https://") is NOT a comment. Cutting the line there
+// hid every call to the RIGHT of a URL literal from all three scans below —
+// `url.startsWith("https://") ? await fetch(url) : null` would have read as a
+// comment-only line and sailed through the guardrail-5a pin.
+const LINE_COMMENT = /(^|[^:])\/\//;
 function codeLines(src: string): string[] {
   return src.split("\n").map((line) => {
-    const i = line.indexOf("//");
-    return i === -1 ? line : line.slice(0, i);
+    const m = LINE_COMMENT.exec(line);
+    return m === null ? line : line.slice(0, m.index + m[1].length);
   });
 }
 
@@ -54,6 +60,19 @@ const allTs = walkTs(SRC);
 
 test("the source walk found a realistic file set — a broken walk must not pass vacuously", () => {
   assert.ok(allTs.length > 400, `expected 400+ source files under src/, got ${allTs.length}`);
+});
+
+test("the comment stripper keeps code that follows a URL literal on the same line", () => {
+  // Every scan below is only as good as this: a stripper that cuts at "https:"
+  // exempts the rest of the line, so the offending call is never even matched.
+  assert.match(
+    codeLines('const r = url.startsWith("https://") ? await fetch(url) : null;')[0],
+    /fetch\(url\)/,
+  );
+  // …while genuine comments — trailing and whole-line — must still be removed,
+  // or every prose mention of fetch()/encryptToken() reads as a call site.
+  assert.doesNotMatch(codeLines('const u = "https://x"; // never bare fetch(')[0], /fetch\(/);
+  assert.equal(codeLines("// see https://x — never bare fetch(")[0], "");
 });
 
 // ── Guardrail 5a/5b: every outbound HTTP call goes through a safe-fetch helper ──

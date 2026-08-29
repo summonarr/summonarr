@@ -22,10 +22,12 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
   const [issues, setIssues] = useState(initialIssues);
   const [maxPushSubscriptions, setMaxPushSubscriptions] = useState(initialMaxPushSubscriptions);
   const [status, setStatus] = useState<SaveStatus>("idle");
+  const [message, setMessage] = useState("");
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setStatus("saving");
+    setMessage("");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
         method: "PATCH",
@@ -37,8 +39,13 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
           maxPushSubscriptions,
         }),
       });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
-      setStatus(res.ok && data.ok !== false ? "ok" : "error");
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (res.ok && data.ok !== false) {
+        setStatus("ok");
+      } else {
+        setMessage(data.error ?? "Failed to save");
+        setStatus("error");
+      }
     } catch {
       setStatus("error");
     }
@@ -53,7 +60,7 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
           <Input
             id="rl-register"
             type="number"
-            min="0"
+            min="1"
             value={register}
             onChange={(e) => { setRegister(e.target.value); setStatus("idle"); }}
             placeholder="5"
@@ -65,7 +72,7 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
           <Input
             id="rl-requests"
             type="number"
-            min="0"
+            min="1"
             value={requests}
             onChange={(e) => { setRequests(e.target.value); setStatus("idle"); }}
             placeholder="20"
@@ -77,7 +84,7 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
           <Input
             id="rl-issues"
             type="number"
-            min="0"
+            min="1"
             value={issues}
             onChange={(e) => { setIssues(e.target.value); setStatus("idle"); }}
             placeholder="10"
@@ -85,7 +92,7 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
           />
         </div>
       </div>
-      <p className="text-xs text-zinc-500">Set to 0 to disable rate limiting for that endpoint.</p>
+      <p className="text-xs text-zinc-500">Each limit must be between 1 and 10000 — these limiters cannot be turned off.</p>
       <div className="border-t border-zinc-800 pt-4">
         <div className="space-y-1.5 max-w-[180px]">
           <Label htmlFor="rl-push-subs">Push devices <span className="text-zinc-500 font-normal">max per user</span></Label>
@@ -105,7 +112,7 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
           {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
         </Button>
-        <SaveStatusMessage status={status} />
+        <SaveStatusMessage status={status} errorLabel={message || "Failed to save"} />
       </div>
     </form>
   );

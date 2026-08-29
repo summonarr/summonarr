@@ -2,16 +2,13 @@ import "server-only";
 import { isIP } from "node:net";
 import { prisma } from "./prisma";
 import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
+import { sanitizeForLog } from "./sanitize";
 
 const IPINFO_BASE = "https://ipinfo.io";
 const IPINFO_TIMEOUT_MS = 8_000;
 
 const FOUND_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const NOT_FOUND_TTL_MS = 24 * 60 * 60 * 1000;
-
-function sanitizeForLog(value: string): string {
-  return value.replace(/[\r\n\x00-\x1F\x7F]/g, "");
-}
 
 export interface IpLookup {
   ip: string;

@@ -19,19 +19,22 @@
 //     the 60s USER vs 10s ADMIN/ISSUE_ADMIN window differential (admin
 //     revocations propagate faster); the window's deliberate blindness to a
 //     revocation — and markSessionForceRevoked overriding it on the issuing
-//     replica; the ADMIN 7d ceiling enforced even on the fast path;
-//   - the SLIDING-WINDOW decision: a slow-path verify ALWAYS re-signs (the
-//     refreshed token carries dbCheckedAt and rides the fast path next time);
-//     a long-TTL (rememberMe/mobile) non-admin token slides down to exactly
-//     3600s; a token inside its final hour IS slid back up (the slide moves
-//     BOTH ways, so an active rememberMe session lives to its sign-in
-//     deadline instead of dying ~1h after the first DB check) — pinned both
-//     as a single re-sign and as a compound walk across the 3600s mark under
-//     a faked Date CLASS (jose reads `new Date()`, not just Date.now); the
-//     slide is capped at the sign-in `expiresAt` deadline; a non-admin past
-//     that deadline is rejected outright; ADMIN skips the slide entirely (and —
-//     pinned as CURRENT behavior — ignores `expiresAt`, being governed by the
-//     7d iat ceiling instead, enforced here on the slow path too);
+//     replica; an 8-day-old ADMIN session passing the fast path untouched (the
+//     former 7d ceiling is gone);
+//   - the SESSION-DEADLINE decision (guardrail 6c): a slow-path verify ALWAYS
+//     re-signs (the refreshed token carries dbCheckedAt and rides the fast path
+//     next time) with exp put EXACTLY at the sign-in `expiresAt` deadline — a
+//     long-TTL (rememberMe/mobile) token is never clamped down to an
+//     inactivity window, and a token whose JWT exp had drifted below the
+//     deadline is re-extended back out to it; the re-sign never reaches past
+//     the deadline; a token past the deadline is rejected outright for EVERY
+//     role (ADMIN included — no role-specific lifetime rules: no slide skip,
+//     no `expiresAt` exemption, no 7d ceiling on either path, pinned with a
+//     session born 8 days ago); an idle rememberMe session survives a multi-day
+//     gap and dies only at its deadline, walked under a faked Date CLASS (jose
+//     reads `new Date()`, not just Date.now); and a NATIVE session — deadline =
+//     the never-reached sentinel from session-lifetime.ts — re-signs to the
+//     sentinel forever and ends only through revocation (row deleted);
 //   - the passwordChangedAt cutoff (before/same-second/after boundaries) and
 //     cutoff = max(sessionsRevokedAt, passwordChangedAt);
 //   - PERMISSIONS-only privilege change (same role) rotating the sessionId,
@@ -90,6 +93,7 @@ const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { verifyAndRefreshSession } = await import("../src/lib/session-refresh.ts");
 const { markSessionForceRevoked } = await import("../src/lib/session-revocation.ts");
+const { NEVER_EXPIRES_AT_SEC } = await import("../src/lib/session-lifetime.ts");
 
 const DAY = 86_400;
 const SEVEN_DAYS = 7 * DAY;
@@ -108,8 +112,9 @@ type DbUser = {
 
 const usersById = new Map<string, DbUser>();
 const sessionRows = new Set<string>();
-// Backing AuthSession.createdAt per sessionId — the ADMIN 7d ceiling anchors on it
-// (session birth), not the re-signed iat. Defaults to the token's iat in mint().
+// Backing AuthSession.createdAt per sessionId (session birth; defaults to the
+// token's iat in mint()). The former ADMIN 7d ceiling anchored on it — the
+// no-ceiling pin below mints a session born 8 days ago to prove it's gone.
 const sessionCreatedAt = new Map<string, Date>();
 let dbReads = 0;
 let settingReads = 0;
@@ -242,8 +247,8 @@ async function mint(opts: MintOpts = {}): Promise<{
   });
   sessionRows.add(sessionId);
   const iat = opts.iat ?? Math.floor(Date.now() / 1000);
-  // AuthSession.createdAt defaults to the token's iat — the ADMIN 7d ceiling reads
-  // this stable birth timestamp, so a token minted with an old iat models an old session.
+  // AuthSession.createdAt defaults to the token's iat, so a token minted with an
+  // old iat models an old session (the no-ceiling pin overrides it explicitly).
   sessionCreatedAt.set(sessionId, opts.createdAt ?? new Date(iat * 1000));
   const expiresAt = opts.expiresAt ?? iat + DAY;
   const token = await signSessionJwt(
@@ -367,22 +372,33 @@ test("the cache window is deliberately blind to a revocation — and markSession
   assert.ok(dbReads > 0, "the mark must force the DB read despite the fresh dbCheckedAt");
 });
 
-test("the ADMIN 7d hard ceiling is enforced even on the fast path, with zero DB reads", async () => {
+test("an 8-day-old ADMIN session with a live exp passes the fast path untouched — there is no 7d ceiling", async () => {
+  // The ceiling used to fire here off `iat`, with zero DB reads. Guardrail 6c
+  // removed it: an admin's session lives to its configured deadline like
+  // everyone else's. Mutation-proof both ways — an iat-based re-add rejects
+  // this token; a DB-based re-add trips the throwing stubs.
   const now0 = nowSec();
-  const { token } = await mint({
+  const { userId, token } = await mint({
     role: "ADMIN",
-    iat: now0 - (SEVEN_DAYS + 120),
-    expiresInSeconds: 8 * DAY, // exp still ~a day in the future — JWT verifies
+    iat: now0 - (SEVEN_DAYS + DAY),
+    expiresInSeconds: 9 * DAY, // exp still ~a day in the future — JWT verifies
+    expiresAt: now0 + DAY,
     dbCheckedAt: now0 - 5, // inside the admin fast window
   });
-  throwOnDb = true; // the ceiling must not need the DB
-  assert.equal(await verifyAndRefreshSession(token), null);
+  throwOnDb = true;
+  const result = await verifyAndRefreshSession(token);
+  assert.ok(result, "an old-but-unexpired ADMIN token must still ride the fast path");
+  assert.equal(result.claims.id, userId);
   assert.equal(dbReads, 0);
 });
 
-// ── the sliding window (slow path) ──────────────────────────────────────────
+// ── the session deadline (slow path) — guardrail 6c ─────────────────────────
 
-test("a long-TTL (rememberMe/mobile) non-admin token slides down to exactly the 3600s inactivity window", async () => {
+test("a long-TTL (rememberMe/mobile) token is re-signed out to EXACTLY its sign-in deadline — never clamped to an inactivity window", async () => {
+  // This is what makes "remember me" actually last sessionMaxDuration. The
+  // re-sign used to clamp exp to min(now + 3600, deadline), so the cookie's
+  // Max-Age was ≤1h and any hour-long gap ended the session regardless of the
+  // 30-day deadline the settings form promised.
   const now0 = nowSec();
   const { token } = await mint({
     expiresInSeconds: 30 * DAY,
@@ -390,62 +406,69 @@ test("a long-TTL (rememberMe/mobile) non-admin token slides down to exactly the 
   });
   const result = await verifyAndRefreshSession(token);
   assert.ok(result?.refreshed);
-  // newExp = min(now + 3600, deadline) with the deadline far out ⇒ exactly
-  // 3600 regardless of sub-second drift (both terms share the function's now).
-  assert.equal(result.refreshed.expiresInSeconds, 3600);
+  assert.ok(
+    Math.abs(result.refreshed.expiresInSeconds - 30 * DAY) <= 2,
+    `the re-sign must cover the whole remaining deadline (~${30 * DAY}s), got ${result.refreshed.expiresInSeconds}`,
+  );
+  const payload = decodePayload(result.refreshed.token);
+  assert.ok(
+    Math.abs((payload.exp as number) - (now0 + 30 * DAY)) <= 2,
+    "the JWT exp must sit at the deadline, not an hour out",
+  );
+  assert.equal(payload.expiresAt, now0 + 30 * DAY, "the deadline claim itself never moves");
 });
 
-test("a non-admin token inside its final hour IS slid back up to the full 3600s window", async () => {
-  // The slide is symmetric: it clamps a long-TTL token DOWN on the first DB
-  // check and re-extends it on every later one. A shorten-only slide preserved
-  // the token's ABSOLUTE exp forever, so every non-admin cookie session died
-  // ~1h after sign-in no matter how active the user was (the compound walk
-  // below pins the end-to-end consequence).
+test("a token whose JWT exp drifted below its deadline is re-extended back out to the deadline", async () => {
+  // A cookie minted by the pre-6c code carries exp ≤ 1h out. Its first
+  // DB-checked verify after the upgrade must hand back a token good for the
+  // full remaining session, not preserve the short exp.
   const now0 = nowSec();
   const { token } = await mint({
-    expiresInSeconds: 1800, // already below the 3600s window
-    expiresAt: now0 + DAY, // deadline is not the limiting factor
+    expiresInSeconds: 1800, // the old inactivity-window exp
+    expiresAt: now0 + DAY, // the deadline is a day out
   });
   const result = await verifyAndRefreshSession(token);
   assert.ok(result?.refreshed);
-  assert.equal(
-    result.refreshed.expiresInSeconds,
-    3600,
-    "an active session's remaining life must be pushed back out to the inactivity window",
+  assert.ok(
+    Math.abs(result.refreshed.expiresInSeconds - DAY) <= 2,
+    `the remaining life must be pushed back out to the deadline (~${DAY}s), got ${result.refreshed.expiresInSeconds}`,
   );
 });
 
-test("the slide never extends past the sign-in session deadline (expiresAt cap)", async () => {
+test("the re-sign never reaches past the sign-in session deadline (expiresAt cap)", async () => {
   const now0 = nowSec();
   const { token } = await mint({
-    expiresInSeconds: DAY, // exp alone would allow a full 3600s slide
+    expiresInSeconds: DAY, // exp alone would allow a day
     expiresAt: now0 + 600, // …but the device session deadline is 10 min away
   });
   const result = await verifyAndRefreshSession(token);
   assert.ok(result?.refreshed);
   assert.ok(
     result.refreshed.expiresInSeconds <= 600 && result.refreshed.expiresInSeconds >= 500,
-    `the slide must cap at the ~600s deadline, got ${result.refreshed.expiresInSeconds}`,
+    `the re-sign must cap at the ~600s deadline, got ${result.refreshed.expiresInSeconds}`,
   );
 });
 
-test("a non-admin session past its expiresAt deadline is rejected even though the JWT exp is still valid", async () => {
+test("a session past its expiresAt deadline is rejected for EVERY role, even though the JWT exp is still valid", async () => {
   const now0 = nowSec();
-  const { token } = await mint({
-    expiresInSeconds: 7_200, // exp two hours out — signature/exp verify fine
-    expiresAt: now0 - 10, // …but the sign-in deadline already passed
-  });
-  assert.equal(await verifyAndRefreshSession(token), null);
+  for (const role of ["USER", "ISSUE_ADMIN", "ADMIN"]) {
+    const { token } = await mint({
+      role,
+      expiresInSeconds: 7_200, // exp two hours out — signature/exp verify fine
+      expiresAt: now0 - 10, // …but the sign-in deadline already passed
+    });
+    assert.equal(await verifyAndRefreshSession(token), null, `${role} must honour the deadline`);
+  }
 });
 
-test("an ACTIVE non-admin rememberMe session survives past the 3600s window — and a >1h gap still logs it out", async () => {
-  // The compound outcome the single-step pins above cannot see: a shorten-only
-  // slide left the token's ABSOLUTE exp at the first slow-path check, so an
-  // actively-browsing user was bounced to /login ~1h after sign-in and the
-  // admin-configurable sessionMaxDuration/sessionMobileDuration were dead.
+test("an IDLE rememberMe session survives a multi-day gap and dies only at its deadline — no inactivity timeout", async () => {
+  // The compound outcome the single-step pins above cannot see: a 30-day
+  // remember-me session is left alone for days at a time and must still be
+  // there, with each DB-checked verify handing back a token good for the
+  // whole remaining deadline; one second past the deadline it is gone.
   //
   // jose reads the clock via `new Date()`, not Date.now, so walking a token
-  // across its own exp needs the whole Date CLASS faked.
+  // across days needs the whole Date CLASS faked.
   const RealDate = Date;
   let fakeNowMs = RealDate.now();
   class FakeDate extends RealDate {
@@ -460,101 +483,97 @@ test("an ACTIVE non-admin rememberMe session survives past the 3600s window — 
   globalThis.Date = FakeDate as unknown as DateConstructor;
   try {
     const start = Math.floor(fakeNowMs / 1000);
+    const deadline = start + 30 * DAY;
     const { token } = await mint({
       iat: start,
       expiresInSeconds: 30 * DAY, // the rememberMe TTL as minted at sign-in
-      expiresAt: start + 30 * DAY,
+      expiresAt: deadline,
     });
 
-    // Browse every 5 minutes for two hours, riding each refreshed token forward.
+    // Visit at t+2h, t+3d, t+12d, t+29d — gaps far beyond the former 1h window.
     let current = token;
-    for (let elapsed = 300; elapsed <= 7_200; elapsed += 300) {
+    for (const elapsed of [2 * 3600, 3 * DAY, 12 * DAY, 29 * DAY]) {
       fakeNowMs = (start + elapsed) * 1000;
       const step = await verifyAndRefreshSession(current);
-      assert.ok(step?.refreshed, `an active session must still verify at t+${elapsed}s`);
-      assert.equal(
-        step.refreshed.expiresInSeconds,
-        3600,
-        `each DB check must re-extend to the full window, at t+${elapsed}s`,
+      assert.ok(step?.refreshed, `an idle remember-me session must still verify at t+${elapsed}s`);
+      assert.ok(
+        Math.abs(step.refreshed.expiresInSeconds - (deadline - (start + elapsed))) <= 2,
+        `each DB check must re-sign out to the deadline, at t+${elapsed}s (got ${step.refreshed.expiresInSeconds})`,
       );
       current = step.refreshed.token;
     }
 
-    // …and the inactivity timeout keeps its teeth: a gap longer than the window
-    // arrives on an already-expired JWT, which verifySessionJwt rejects.
-    fakeNowMs = (start + 7_200 + 3_601) * 1000;
+    // …and the deadline keeps its teeth: one second past it the JWT exp (which
+    // the re-sign pinned to the deadline) has lapsed, and verifySessionJwt
+    // rejects the token outright.
+    fakeNowMs = (deadline + 1) * 1000;
     assert.equal(
       await verifyAndRefreshSession(current),
       null,
-      "a >1h idle gap must still end the session",
+      "past the sign-in deadline the session must end",
     );
   } finally {
     globalThis.Date = RealDate;
   }
 });
 
-test("ADMIN skips the inactivity slide and — pinned CURRENT behavior — ignores the expiresAt deadline", async () => {
-  // Admin lifetime is governed by the 7d iat ceiling, not the sliding window:
-  // the deadline/slide block is inside the `role !== "ADMIN"` branch. An
-  // admin token with a lapsed expiresAt therefore still verifies, and its
-  // re-sign keeps the full remaining exp instead of shrinking to 3600.
+test("ADMIN follows the same deadline rule as every other role: re-signed out to the deadline, no exemption, no 7d ceiling", async () => {
+  // Admin lifetime used to be governed by a 7d ceiling anchored on the
+  // AuthSession row's createdAt (with an iat-based twin on the fast path), and
+  // the deadline/slide block was skipped for ADMIN entirely. Guardrail 6c:
+  // one rule for everyone. This session was born 8 days ago AND its token's
+  // iat is 8 days old, so re-adding either ceiling variant rejects it.
   const now0 = nowSec();
   const { token } = await mint({
     role: "ADMIN",
-    expiresInSeconds: 7_200,
-    expiresAt: now0 - 100,
+    iat: now0 - (SEVEN_DAYS + DAY),
+    createdAt: new Date((now0 - (SEVEN_DAYS + DAY)) * 1000),
+    expiresInSeconds: 9 * DAY,
+    expiresAt: now0 + 20 * DAY,
   });
   const result = await verifyAndRefreshSession(token);
-  assert.ok(result, "an ADMIN token is not subject to the expiresAt deadline");
+  assert.ok(result, "an 8-day-old ADMIN session with a live deadline must survive the slow path");
+  assert.ok(dbReads >= 2, "…after the full DB reconciliation");
   assert.ok(result.refreshed);
   assert.ok(
-    result.refreshed.expiresInSeconds > 3600,
-    `ADMIN must keep ~7200s, not slide to 3600 — got ${result.refreshed.expiresInSeconds}`,
+    Math.abs(result.refreshed.expiresInSeconds - 20 * DAY) <= 2,
+    `ADMIN must be re-signed out to its deadline (~${20 * DAY}s), got ${result.refreshed.expiresInSeconds}`,
   );
 });
 
-test("the ADMIN 7d hard ceiling rejects on the slow path even with a future exp and live session row", async () => {
+test("a NATIVE session (deadline = the never-expires sentinel) re-signs to the sentinel and ends only through revocation", async () => {
+  // initializeTokenOnSignIn mints a native (X-Summonarr-Client) session with
+  // expiresAt = NEVER_EXPIRES_AT_SEC and exp at the same instant. Nothing
+  // time-based may end it: the deadline check passes, the re-sign keeps exp at
+  // the sentinel, and a bearer client — which is handed no refreshed token —
+  // keeps presenting the original forever. Deleting the AuthSession row (a
+  // per-device revoke) is what ends it.
   const now0 = nowSec();
-  const { token } = await mint({
-    role: "ADMIN",
-    iat: now0 - (SEVEN_DAYS + 120),
-    expiresInSeconds: 8 * DAY,
-    expiresAt: now0 + DAY,
+  const { sessionId, token } = await mint({
+    expiresInSeconds: NEVER_EXPIRES_AT_SEC - now0,
+    expiresAt: NEVER_EXPIRES_AT_SEC,
   });
-  assert.equal(await verifyAndRefreshSession(token), null);
-  assert.ok(dbReads >= 2, "the slow-path ceiling fires after the DB reconciliation");
-});
-
-test("the ADMIN 7d ceiling anchors on session birth (createdAt), not the re-signed iat", async () => {
-  // The re-sign resets iat to now on every DB check, so a recent-iat token whose
-  // SESSION was born >7d ago must still be rejected — otherwise an actively-used
-  // admin token rides its full rememberMe deadline instead of the 7d cap.
-  const now0 = nowSec();
-  const { token } = await mint({
-    role: "ADMIN",
-    iat: now0 - 30, // freshly re-signed moments ago
-    createdAt: new Date((now0 - (SEVEN_DAYS + 120)) * 1000), // but the session is 7d+ old
-    expiresInSeconds: 8 * DAY,
-    expiresAt: now0 + 30 * DAY,
-  });
-  assert.equal(
-    await verifyAndRefreshSession(token),
-    null,
-    "a >7d-old admin session must be rejected regardless of a fresh iat",
-  );
-
-  // Control: same fresh iat, but the session was genuinely born recently → survives.
-  const fresh = await mint({
-    role: "ADMIN",
-    iat: now0 - 30,
-    createdAt: new Date((now0 - 60) * 1000),
-    expiresInSeconds: 8 * DAY,
-    expiresAt: now0 + 30 * DAY,
-  });
+  const result = await verifyAndRefreshSession(token);
+  assert.ok(result?.refreshed, "a native session must verify on the slow path");
   assert.ok(
-    await verifyAndRefreshSession(fresh.token),
-    "a recently-born admin session must survive the ceiling",
+    Math.abs(result.refreshed.expiresInSeconds - (NEVER_EXPIRES_AT_SEC - now0)) <= 2,
+    "the re-sign must cover the whole (indefinite) remaining life",
   );
+  const payload = decodePayload(result.refreshed.token);
+  assert.equal(payload.expiresAt, NEVER_EXPIRES_AT_SEC, "the sentinel deadline is carried forward unchanged");
+  assert.ok(
+    Math.abs((payload.exp as number) - NEVER_EXPIRES_AT_SEC) <= 2,
+    "the re-signed JWT exp sits at the sentinel",
+  );
+
+  // The ORIGINAL token (what a bearer client keeps presenting) still verifies
+  // on a later slow-path check…
+  const again = await verifyAndRefreshSession(token);
+  assert.ok(again, "the original never-expiring token must keep verifying");
+
+  // …until the device is revoked.
+  sessionRows.delete(sessionId);
+  assert.equal(await verifyAndRefreshSession(token), null, "revocation is the only end of a native session");
 });
 
 // ── sessionsRevokedAt / passwordChangedAt cutoffs ───────────────────────────

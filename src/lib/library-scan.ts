@@ -165,9 +165,20 @@ async function runScan(mediaType: ScanMediaType): Promise<void> {
 
   // Hold the pending entry until the scan finishes so a concurrent schedule sees inFlight and awaits;
   // delete pending only after we've registered the in-flight promise.
-  const scanPromise = triggerLibraryScan(mediaType).finally(() => {
-    inFlight.delete(mediaType);
-  });
+  // Same "a throw escapes runScan" class as the queue check above, one step
+  // later: a rejection here is discarded by the setTimeout that called us
+  // (unhandled) AND is handed to every caller coalescing on inFlight, whose
+  // `await scheduleLibraryScan(...)` then skips the work that follows it.
+  const scanPromise = triggerLibraryScan(mediaType)
+    .catch((err) =>
+      console.error(
+        `[library-scan] ${sanitizeForLog(mediaType)} scan failed:`,
+        err instanceof Error ? err.message : String(err),
+      ),
+    )
+    .finally(() => {
+      inFlight.delete(mediaType);
+    });
   inFlight.set(mediaType, scanPromise);
   pending.delete(mediaType);
   try {

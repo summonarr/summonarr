@@ -947,7 +947,16 @@ export async function setJellyfinDownloadPolicy(
   if (!userRes.ok) throw new Error(`Jellyfin fetch user ${userId}: ${userRes.status}`);
 
   const userData = (await userRes.json()) as { Policy?: Record<string, unknown> };
-  const policy = { ...(userData.Policy ?? {}), EnableContentDownloading: enabled };
+  // POST /Users/{id}/Policy replaces the WHOLE UserPolicy — Jellyfin
+  // deserializes the body into a fresh object, so any field absent from the
+  // JSON lands on its C# default (false/empty). A missing/empty Policy read
+  // (de-elevated key, truncating proxy) must therefore be a hard failure: a
+  // one-key body would strip IsAdministrator/EnabledFolders/every other
+  // permission from the account.
+  if (!userData.Policy || Object.keys(userData.Policy).length === 0) {
+    throw new Error(`Jellyfin user ${userId} returned no Policy — refusing to overwrite the full policy with one field`);
+  }
+  const policy = { ...userData.Policy, EnableContentDownloading: enabled };
 
   const patchRes = await safeFetchAdminConfigured(`${base}/Users/${encodeURIComponent(userId)}/Policy`, {
     method: "POST",

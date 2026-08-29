@@ -79,11 +79,22 @@ interface PendingRequest {
 }
 interface RequesterRow {
   id: string; role: string; permissions: bigint; mediaServerGrants: unknown; mediaServer: string | null;
+  // Optional so the existing visibility fixtures stay untouched: absent ⇒ active.
+  deactivatedAt?: Date | null;
 }
 let pendingRequests: PendingRequest[] = [];
 let requesterRows: RequesterRow[] = [];
 let casCalls = 0;
+// Ids the notifiedAvailable CAS should report as winners. Default [] — every
+// existing test keeps the "nothing was claimed, so the notify path stops here"
+// behaviour it was written against.
+let casWinnerIds: string[] = [];
 const requestUpdateManys: unknown[] = [];
+// clearDeletionVotesForTmdbs' two writes + the in-app inbox fan-out. All three
+// are only reachable once the CAS actually returns a winner.
+const deletionVoteDeleteWheres: Array<Record<string, unknown> | undefined> = [];
+const settingDeleteManyWheres: Array<Record<string, unknown> | undefined> = [];
+const notificationCreateManyData: Array<Record<string, unknown>> = [];
 
 const settingUpserts: Array<{ key: string; value: string }> = [];
 const auditRows: Array<Record<string, unknown>> = [];
@@ -133,7 +144,32 @@ const fakePrisma = {
       settings.set(args.where.key, args.create.value);
       return args.create;
     },
+    // Reached only once a claim produces deliverable winners: the Discord and
+    // push channels batch-read their config through it, and both short-circuit
+    // on the empty result an unconfigured harness gives them.
+    findMany: async (args: { where: { key: { in: string[] } } }) =>
+      args.where.key.in.filter((k) => settings.has(k)).map((k) => ({ key: k, value: settings.get(k) as string })),
+    deleteMany: async (args?: { where?: Record<string, unknown> }) => {
+      settingDeleteManyWheres.push(args?.where);
+      return { count: 0 };
+    },
   },
+  deletionVote: {
+    deleteMany: async (args?: { where?: Record<string, unknown> }) => {
+      deletionVoteDeleteWheres.push(args?.where);
+      return { count: 0 };
+    },
+  },
+  notification: {
+    createMany: async (args: { data: Record<string, unknown>[] }) => {
+      notificationCreateManyData.push(...args.data);
+      return { count: args.data.length };
+    },
+  },
+  // Never reached with push unconfigured (pushContext() returns null first), but
+  // stubbed so a regression surfaces as an assertion rather than a TypeError
+  // swallowed by the channel's own try/catch.
+  pushSubscription: { findMany: async () => [] },
   plexLibraryItem: {
     findMany: async (args: FindManyByTmdbArgs) => {
       plexFindManyWheres.push(args.where as Record<string, unknown>);
@@ -155,10 +191,17 @@ const fakePrisma = {
       const u = usersById.get(args.where.id);
       return u ? { ...u } : null;
     },
-    findMany: async (args: { where?: { id?: { in?: string[] } } }) => {
+    findMany: async (args: { where?: { id?: { in?: string[] }; deactivatedAt?: unknown } }) => {
       const want = args?.where?.id?.in;
       if (!want) return [];
-      return requesterRows.filter((u) => want.includes(u.id)).map((u) => ({ ...u }));
+      const rows = requesterRows.filter((u) => want.includes(u.id));
+      // claimAvailableNotifications asks for the DISABLED subset so it can drop
+      // those recipients. Honour the predicate — answering with every id would
+      // read as "everyone is disabled" and silently suppress every notification.
+      if (args?.where?.deactivatedAt !== undefined) {
+        return rows.filter((u) => u.deactivatedAt != null).map((u) => ({ id: u.id }));
+      }
+      return rows.map((u) => ({ ...u }));
     },
     update: async () => ({}),
   },
@@ -185,7 +228,7 @@ const fakePrisma = {
       throw new Error("unexpected prisma.$queryRaw — the notify path must not run in these tests");
     }
     casCalls++;
-    return [];
+    return casWinnerIds.map((id) => ({ id }));
   },
   $transaction: async (arg: unknown, opts?: { timeout?: number }) => {
     if (typeof arg === "function") {
@@ -426,6 +469,10 @@ beforeEach(() => {
   requesterRows = [];
   requestUpdateManys.length = 0;
   casCalls = 0;
+  casWinnerIds = [];
+  deletionVoteDeleteWheres.length = 0;
+  settingDeleteManyWheres.length = 0;
+  notificationCreateManyData.length = 0;
   respond = (url) => {
     throw new Error(`unexpected fetch ${url} — script a responder for this test`);
   };
@@ -1087,4 +1134,75 @@ test("an UNRESTRICTED named server notifies everyone — the gate costs nothing 
   assert.equal((await resyncRemote()).status, 200);
 
   assert.equal(casCalls, 1, "an unrestricted server is visible to everyone");
+});
+
+// ── a DEACTIVATED requester (guardrail 33 on top of guardrail 14) ───────────
+//
+// The sibling of the orchestrator pin in tests/sync-orchestrator-route.test.mts.
+// claimAvailableNotifications returns `claimed` (every row the CAS really
+// flipped) and `deliverable` (`claimed` minus DISABLED requesters — account
+// removal disables rather than scrubs, so a removed user keeps a live email
+// address and push subscriptions). Only the four DELIVERY channels may key off
+// `deliverable`; the deletion-vote wipe and the pendingNotifyAt disarm are
+// consequences of the TRANSITION and must key off `claimed`, because the claim is
+// BURNED on the way past — AVAILABLE is terminal — so a consequence skipped here
+// is skipped forever, not deferred.
+//
+// Both requesters ride the same run and the same CAS call; the only difference is
+// `deactivatedAt`. That keeps the "no notification" assertion honest — the active
+// requester's notification has to land in the very same array.
+
+test("a DEACTIVATED requester's winner still wipes stale deletion votes and disarms pendingNotifyAt — only the notification is withheld", async () => {
+  configurePlex();
+  respond = plexMovieResponder([
+    { ratingKey: "rk700", type: "movie", title: "Seven Hundred", Guid: [{ id: "tmdb://700" }] },
+    { ratingKey: "rk701", type: "movie", title: "Seven Oh One", Guid: [{ id: "tmdb://701" }] },
+  ]);
+  pendingRequests = [
+    { id: "req-disabled", tmdbId: 700, mediaType: "MOVIE", requestedBy: "u-disabled", title: "Seven Hundred", posterPath: null, notifiedAvailable: false },
+    { id: "req-active", tmdbId: 701, mediaType: "MOVIE", requestedBy: "u-active", title: "Seven Oh One", posterPath: null, notifiedAvailable: false },
+  ];
+  requesterRows = [
+    { id: "u-disabled", role: "USER", permissions: 0n, mediaServerGrants: {}, mediaServer: null, deactivatedAt: new Date("2026-02-01T00:00:00.000Z") },
+    { id: "u-active", role: "USER", permissions: 0n, mediaServerGrants: {}, mediaServer: null },
+  ];
+  casWinnerIds = ["req-disabled", "req-active"]; // the CAS flipped BOTH rows
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+
+  assert.equal(casCalls, 1, "one markAvailable claim covering both requests");
+
+  // THE DEFECT THIS PINS: the wipe follows the CAS winners, so it carries the
+  // disabled requester's tmdbId too. Keyed off `deliverable` it would carry 701
+  // alone, and 700's stale "delete this" votes would outlive the re-add forever.
+  assert.deepEqual(
+    deletionVoteDeleteWheres,
+    [{ tmdbId: { in: [700, 701] }, mediaType: "MOVIE" }],
+    "the deletion-vote wipe must follow `claimed` — the disabled requester's row went AVAILABLE too " +
+      "and its claim is already burned, so no later run would ever clear its votes",
+  );
+  assert.deepEqual(
+    settingDeleteManyWheres,
+    [{ key: { in: ["deletionVoteNotified:700:MOVIE", "deletionVoteNotified:701:MOVIE"] } }],
+    "and so must the per-item deletionVoteNotified: re-arm key",
+  );
+
+  // One post-claim disarm naming BOTH winners.
+  assert.deepEqual(
+    requestUpdateManys,
+    [{ where: { id: { in: ["req-disabled", "req-active"] } }, data: { pendingNotifyAt: null } }],
+    "the 90s still-pending backstop must be disarmed on every row that went AVAILABLE",
+  );
+
+  // …and the half that must NOT happen. The active requester is the inline
+  // control: without them this would also pass on a run that notified nobody.
+  assert.deepEqual(
+    notificationCreateManyData.map((d) => d.userId),
+    ["u-active"],
+    "guardrail 33: a disabled account keeps a live email address and push subscriptions — the claim " +
+      "is burned but the delivery is suppressed",
+  );
+  assert.deepEqual(errors, [], "no channel blew up on the way through");
 });

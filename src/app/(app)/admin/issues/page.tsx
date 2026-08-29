@@ -130,11 +130,17 @@ export default async function AdminIssuesPage({
   // library" — directly under the movie's own Plex/Jellyfin file path, which the
   // same dialog fetches separately and displays. Every movie WRONG_MATCH issue
   // was unfixable from this page, and the obvious reading is that library sync
-  // is broken. Sourcing from `groups` had the same effect for a selected issue
-  // outside the current filter. /admin/page.tsx builds the equivalent sets with
-  // no mediaType filter.
+  // is broken. /admin/page.tsx builds the equivalent sets with no mediaType
+  // filter.
+  //
+  // selectedIssue is unioned in because allIssues is status-filtered in SQL: a
+  // deep link (the issue-reply email/push carries ?selected=<id> with no filter)
+  // resolves through the findUnique fallback above and is absent from the list,
+  // so its pair would never be queried and the side panel would report the same
+  // "not in any synced library".
   const allLibraryPairs = [...new Map(
-    allIssues.map((i) => [`${i.tmdbId}:${i.mediaType}`, { tmdbId: i.tmdbId, mediaType: i.mediaType }])
+    [...allIssues, ...(selectedIssue ? [selectedIssue] : [])]
+      .map((i) => [`${i.tmdbId}:${i.mediaType}`, { tmdbId: i.tmdbId, mediaType: i.mediaType }])
   ).values()];
   const [plexItems, jellyfinItems] = allLibraryPairs.length > 0
     ? await Promise.all([

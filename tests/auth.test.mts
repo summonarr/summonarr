@@ -57,10 +57,12 @@
 //   AuthSession row upsert (deviceType/label/ip), the AUTH_LOGIN audit row
 //   carrying an emailHash and never the raw email, mediaServer provider-pinned
 //   for plex vs DB-resolved for credentials, the TTL decision table
-//   (desktop/mobile/rememberMe/native) where the 1-year native TTL requires
-//   the X-Summonarr-Client header — a spoofed mobile UA + rememberMe alone
-//   stays at maxDuration (guardrail 6b) — and first-admin promotion firing for
-//   credentials only (OIDC pre-setup stays USER; the env flag opts in).
+//   (desktop/mobile/rememberMe/native) where a native (X-Summonarr-Client)
+//   sign-in gets the never-expiring sentinel deadline on the header ALONE —
+//   rememberMe/device class don't matter (guardrail 6c) — while a spoofed
+//   mobile UA + rememberMe without the header stays at maxDuration (guardrail
+//   6b) — and first-admin promotion firing for credentials only (OIDC
+//   pre-setup stays USER; the env flag opts in).
 //
 //   revokeSessionById / revokeAllUserSessions — DB write FIRST, in-memory mark
 //   AFTER commit (guardrail 27: a failed transaction propagates and leaves NO
@@ -542,6 +544,7 @@ const {
   normalizeEmail,
 } = await import("../src/lib/auth.ts");
 const { signSessionJwt, verifySessionJwt } = await import("../src/lib/session-jwt.ts");
+const { NEVER_EXPIRES_AT_SEC, isIndefiniteDeadline } = await import("../src/lib/session-lifetime.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
 const { checkRateLimit, peekRateLimit, recordFailure } = await import("../src/lib/rate-limit.ts");
@@ -1737,7 +1740,7 @@ test("mint REFUSES a disabled account — no JWT, no AuthSession row, no AUTH_LO
   assert.equal(ok.user.id, "u-off");
 });
 
-test("mint TTL table: desktop/mobile/rememberMe pick their configured windows; the 1-year native TTL requires the X-Summonarr-Client header", async () => {
+test("mint TTL table: desktop/mobile/rememberMe pick their configured windows; a native sign-in never expires, on the X-Summonarr-Client header alone", async () => {
   seedUser({ id: "u-ttl", email: "ttl@example.com", name: "T" });
 
   // Outside any request scope headers() throws inside the native check and the
@@ -1760,8 +1763,10 @@ test("mint TTL table: desktop/mobile/rememberMe pick their configured windows; t
   });
   assertApprox(remembered.expiresInSeconds, 2_592_000, "web rememberMe → maxDuration");
 
-  // Native app: rememberMe + mobile device + the X-Summonarr-Client header —
-  // a custom header a cross-origin page cannot attach (guardrail 6b).
+  // Native app: the X-Summonarr-Client header — a custom header a cross-origin
+  // page cannot attach (guardrail 6b) — mints the never-expiring sentinel
+  // deadline (guardrail 6c). The JWT exp, the claim and the AuthSession row all
+  // carry it, so nothing time-based can end the session; only revocation can.
   const native = await withRequestContext(
     { headers: { "x-summonarr-client": "ios; build=42", "user-agent": iphoneUa("ttl-d") } },
     () =>
@@ -1770,10 +1775,29 @@ test("mint TTL table: desktop/mobile/rememberMe pick their configured windows; t
         providerId: "credentials",
       }),
   );
-  assertApprox(native.expiresInSeconds, 365 * 24 * 60 * 60, "native client → 1-year fixed TTL");
+  const nowSec = Math.floor(Date.now() / 1000);
+  assertApprox(native.expiresInSeconds, NEVER_EXPIRES_AT_SEC - nowSec, "native client → never expires");
+  const nativeClaims = await verifySessionJwt(native.token);
+  assert.equal(nativeClaims?.expiresAt, NEVER_EXPIRES_AT_SEC, "the deadline claim is the sentinel itself");
+  assert.equal(nativeClaims?.exp, NEVER_EXPIRES_AT_SEC, "the JWT exp sits AT the sentinel, not a year out");
+  const nativeRow = authSessions.get(native.sessionId);
+  assert.ok(nativeRow && isIndefiniteDeadline(nativeRow.expiresAt), "the AuthSession row mirrors the sentinel (the purge cron's `< now` never matches it)");
+
+  // "All iOS logons": the header ALONE decides. No rememberMe and a desktop UA
+  // (an iPad in desktop-class mode, a Mac Catalyst build) still never expire —
+  // the UA only feeds the device label.
+  const nativeBare = await withRequestContext(
+    { headers: { "x-summonarr-client": "ios; build=42", "user-agent": chromeUa("ttl-d2") } },
+    () =>
+      signInAndMintSession({
+        user: mintableUser("u-ttl", { ua: chromeUa("ttl-d2") }),
+        providerId: "credentials",
+      }),
+  );
+  assertApprox(nativeBare.expiresInSeconds, NEVER_EXPIRES_AT_SEC - nowSec, "native client without rememberMe/mobile UA → still never expires");
 
   // The spoof pin: a mobile UA + rememberMe WITHOUT the native header must NOT
-  // mint the 1-year ceiling — any browser can lie about its UA.
+  // mint a never-expiring session — any browser can lie about its UA.
   const spoofed = await withRequestContext(
     { headers: { "user-agent": iphoneUa("ttl-e") } },
     () =>

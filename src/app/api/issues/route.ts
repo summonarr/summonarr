@@ -17,6 +17,10 @@ import { getVisibleServerInstances } from "@/lib/media-visibility";
 
 const VALID_ISSUE_TYPES = ["BAD_VIDEO", "WRONG_AUDIO", "MISSING_SUBTITLES", "WRONG_MATCH", "OTHER"] as const;
 const VALID_SCOPES = ["FULL", "SEASON", "EPISODE"] as const;
+// Issue.seasonNumber/episodeNumber are INT4. Without a ceiling an out-of-range
+// value clears Number.isInteger and then throws out of prisma.issue.create —
+// there is no try/catch on this route, so malformed input answered 500.
+const MAX_SEASON_EPISODE = 10_000;
 
 export const GET = withAuth(async (req, _ctx, session) => {
   // Issue visibility is bitmask-authoritative: a demoted ISSUE_ADMIN (role kept but
@@ -108,11 +112,17 @@ export const POST = withAuth(async (req, _ctx, session) => {
     if (!Number.isInteger(seasonNumber) || (seasonNumber as number) < 1) {
       return NextResponse.json({ error: "seasonNumber is required for SEASON or EPISODE scope" }, { status: 400 });
     }
+    if ((seasonNumber as number) > MAX_SEASON_EPISODE) {
+      return NextResponse.json({ error: `seasonNumber must be ${MAX_SEASON_EPISODE} or less` }, { status: 400 });
+    }
   }
 
   if (resolvedScope === "EPISODE") {
     if (!Number.isInteger(episodeNumber) || (episodeNumber as number) < 1) {
       return NextResponse.json({ error: "episodeNumber is required for EPISODE scope" }, { status: 400 });
+    }
+    if ((episodeNumber as number) > MAX_SEASON_EPISODE) {
+      return NextResponse.json({ error: `episodeNumber must be ${MAX_SEASON_EPISODE} or less` }, { status: 400 });
     }
   }
 

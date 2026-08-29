@@ -34,6 +34,35 @@ export interface HistoryFilterInput {
   grouped: boolean;
 }
 
+// A YYYY-MM-DD day filter is a UTC calendar day. `PlayHistory.startedAt` is a
+// tz-naive UTC column and every day-bucketed aggregate over it groups by its UTC
+// date — including the activity heatmap, whose cells deep-link here as
+// ?from=&to= — so a local-midnight window would sit offset by the admin's UTC
+// offset from the day the cell counted. Returns null for a malformed or
+// impossible date (2026-13-01, or 2026-02-30, which Date silently rolls forward
+// to Mar 2) so the caller drops the filter instead of handing an Invalid Date to
+// toISOString(), which throws.
+function utcDayBounds(day: string): { start: string; end: string } | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const date = Number(m[3]);
+  const start = new Date(Date.UTC(year, month - 1, date));
+  if (
+    Number.isNaN(start.getTime()) ||
+    start.getUTCFullYear() !== year ||
+    start.getUTCMonth() !== month - 1 ||
+    start.getUTCDate() !== date
+  ) {
+    return null;
+  }
+  return {
+    start: start.toISOString(),
+    end: new Date(start.getTime() + 86_400_000 - 1).toISOString(),
+  };
+}
+
 export function buildHistoryFilterParams({
   globalSource,
   globalMediaType,
@@ -52,13 +81,14 @@ export function buildHistoryFilterParams({
   const params = new URLSearchParams();
   if (globalSource) params.set("source", globalSource);
   if (globalMediaType) params.set("mediaType", globalMediaType);
-  if (fromDate) {
-    params.set("startDate", new Date(`${fromDate}T00:00:00`).toISOString());
+  const from = fromDate ? utcDayBounds(fromDate) : null;
+  const to = toDate ? utcDayBounds(toDate) : null;
+  if (from) {
+    params.set("startDate", from.start);
   } else if (startDateIso) {
     params.set("startDate", startDateIso);
   }
-  if (toDate)
-    params.set("endDate", new Date(`${toDate}T23:59:59`).toISOString());
+  if (to) params.set("endDate", to.end);
   if (debouncedSearch) params.set("search", debouncedSearch);
   if (watched) params.set("watched", watched);
   if (method) params.set("playMethod", method);

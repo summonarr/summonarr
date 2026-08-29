@@ -46,6 +46,18 @@ export default async function RecentlyAddedPage() {
   const merged = new Map<string, RecentItem>();
   for (const item of plexItems) {
     const key = `${item.mediaType}:${item.tmdbId}`;
+    const existing = merged.get(key);
+    if (existing) {
+      // A title held by two Plex servers is two rows (PlexLibraryItem is keyed
+      // by serverInstance too), and they arrive addedAt desc — so keep the
+      // newest rather than letting the older row overwrite it.
+      if (item.addedAt!.getTime() > existing.addedAt.getTime()) {
+        existing.addedAt = item.addedAt!;
+        existing.title = item.title ?? existing.title;
+        existing.year = item.year ?? existing.year;
+      }
+      continue;
+    }
     merged.set(key, {
       tmdbId: item.tmdbId,
       title: item.title ?? "Unknown",

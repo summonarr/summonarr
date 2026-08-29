@@ -741,8 +741,13 @@ export async function getPlexSessions(serverUrl: string, token: string): Promise
       index: s.index,
       type: s.type ?? "movie",
       year: s.year != null ? String(s.year) : undefined,
-      duration: s.duration ?? 0,
-      viewOffset: s.viewOffset ?? 0,
+      // Coerced to safe non-negative integers at the source: BigInt() throws a
+      // RangeError on a fractional value, and the poller converts both fields
+      // inside a per-instance Promise.all — one malformed session would reject
+      // the whole batch and starve that instance's absence sweep every tick.
+      // (The SSE writer floors the same fields in applyLiveStateUpdate.)
+      duration: Number.isFinite(s.duration) && (s.duration as number) > 0 ? Math.floor(s.duration as number) : 0,
+      viewOffset: Number.isFinite(s.viewOffset) && (s.viewOffset as number) > 0 ? Math.floor(s.viewOffset as number) : 0,
       Guid: s.Guid,
       platform: s.Player?.platform,
       player: s.Player?.title,

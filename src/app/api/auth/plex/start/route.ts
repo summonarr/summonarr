@@ -5,7 +5,7 @@ import {
   signPlexFlowCookie,
 } from "@/lib/plex-flow-state";
 import { assertBodyBytesUnderCap, checkBodySize } from "@/lib/body-size";
-import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 
 // Server-side PIN creation for the Plex sign-in flow. Returns the PIN id +
@@ -26,8 +26,8 @@ function isSecureCookieContext(): boolean {
 }
 
 export async function POST(req: NextRequest) {
-  const ip = getClientIp(req.headers);
-  if (!checkRateLimit(`plex-start:${ip}`, 20, 5 * 60 * 1000)) {
+  const ipKey = getClientIpKey(req.headers);
+  if (!checkRateLimit(`plex-start:${ipKey}`, 20, 5 * 60 * 1000)) {
     return NextResponse.json({ error: "Too many requests" }, { status: 429 });
   }
 

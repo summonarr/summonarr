@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { requireAppSession } from "@/lib/require-app-session";
 import { getMyPlayStats } from "@/lib/my-watch-history";
-import { resolvePosterMap } from "@/lib/poster-cache";
+import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
 import { posterUrl } from "@/lib/tmdb-types";
 import { PageHeader } from "@/components/ui/design";
 import { MyStatsView, type MyStatsData } from "@/components/watch-history/my-stats-view";
@@ -52,7 +52,7 @@ export default async function MyStatsPage() {
         mediaType: m.mediaType,
         count: m.count,
         posterSrc:
-          (m.tmdbId != null ? posters[m.tmdbId] : undefined) ??
+          (m.tmdbId != null ? posters[posterPathKey(m.tmdbId, m.mediaType)] : undefined) ??
           (m.posterPath ? posterUrl(m.posterPath, "w342") : null),
       })),
     };

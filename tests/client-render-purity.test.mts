@@ -131,17 +131,44 @@ function subtreeReferencesMounted(node: ts.Node): boolean {
   return found;
 }
 
+/**
+ * Which branch of a `mounted`-style condition is the post-hydration one: true
+ * for the truthy branch, false when a negation flips that, null when the
+ * condition says nothing about mounting. The polarity is load-bearing —
+ * `!mounted ? Date.now() : cached` reads the clock in the branch SSR renders,
+ * which is exactly the #418 shape, while `!mounted ? "" : Date.now()` is the
+ * documented fix spelled inside-out.
+ */
+function mountedBranchPolarity(cond: ts.Expression): boolean | null {
+  let cur: ts.Expression = cond;
+  let negated = false;
+  for (;;) {
+    if (ts.isParenthesizedExpression(cur)) { cur = cur.expression; continue; }
+    if (ts.isPrefixUnaryExpression(cur) && cur.operator === ts.SyntaxKind.ExclamationToken) {
+      negated = !negated;
+      cur = cur.operand;
+      continue;
+    }
+    break;
+  }
+  if (!subtreeReferencesMounted(cur)) return null;
+  return !negated;
+}
+
 /** Is `node` in the post-hydration branch of a `mounted ? … : …` / `mounted && …`? */
 function isMountedGated(node: ts.Node): boolean {
   let cur: ts.Node = node;
   while (cur.parent) {
     const p = cur.parent;
-    if (ts.isConditionalExpression(p) && p.whenTrue === cur && subtreeReferencesMounted(p.condition)) return true;
+    if (ts.isConditionalExpression(p) && (p.whenTrue === cur || p.whenFalse === cur)) {
+      const polarity = mountedBranchPolarity(p.condition);
+      if (polarity !== null && polarity === (p.whenTrue === cur)) return true;
+    }
     if (
       ts.isBinaryExpression(p) &&
       p.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken &&
       p.right === cur &&
-      subtreeReferencesMounted(p.left)
+      mountedBranchPolarity(p.left) === true
     ) return true;
     cur = p;
   }
@@ -298,15 +325,16 @@ test("the analyzer catches every violation shape it claims to (synthetic self-te
     function relativeLabel(iso: string) {
       return String(Date.now() - new Date(iso).getTime()); // 3: helper, ungated callsite
     }
-    export function Row({ iso }: { iso: string }) {
+    export function Row({ iso, mounted }: { iso: string; mounted: boolean }) {
       const rendered = new Date();                         // 4: component body
-      return <span title={String(rendered)}>{relativeLabel(iso)}{Date.now()}</span>; // 5: inline JSX
+      const ssr = !mounted ? String(Date.now()) : "";      // 5: the SSR branch of an INVERTED gate
+      return <span title={String(rendered) + ssr}>{relativeLabel(iso)}{Date.now()}</span>; // 6: inline JSX
     }
   `;
   const violations = analyze("synthetic.tsx", bad).filter((h) => h.excuse === null);
   assert.ok(
-    violations.length >= 5,
-    `the analyzer caught only ${violations.length}/5 planted violations:\n${violations.map((v) => `  ${v.line}: ${v.what}`).join("\n")}`,
+    violations.length >= 6,
+    `the analyzer caught only ${violations.length}/6 planted violations:\n${violations.map((v) => `  ${v.line}: ${v.what}`).join("\n")}`,
   );
   assert.ok(
     violations.some((v) => v.what.includes("UNGATED")),
@@ -324,6 +352,7 @@ test("the analyzer catches every violation shape it claims to (synthetic self-te
       useEffect(() => { const t = new Date(); void t; }, []);
       return <button onClick={() => void new Date()} onFocus={onPick} data-y={maxYear}>
         {mounted ? relativeLabel(iso) : ""}
+        {!mounted ? "" : String(Date.now())}
       </button>;
     }
   `;

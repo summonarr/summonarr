@@ -65,6 +65,13 @@ export function fixMatchJobKey(input: {
 // a script hammers the route under the rate limit.
 const FINISHED_JOB_TTL_MS = 60 * 60_000;
 const MAX_JOBS = 500;
+// Concurrent RUNNING jobs, across all admins. Each Jellyfin job drives a
+// FullRefresh then reads /Items every 5s for up to 10 minutes, and parallel
+// metadata refreshes are exactly how those calls start timing out (guardrail
+// 37's keep-it-serial rationale). The per-admin route rate limit multiplies
+// with admin count, so the registry itself must bound admission; the Fix-all
+// loop is sequential and never approaches this.
+const MAX_RUNNING_JOBS = 4;
 
 const jobs = new Map<string, FixMatchJob>();
 
@@ -88,14 +95,34 @@ function prune(now: number): void {
 // same key that is still running is returned instead of started twice — a
 // double-click or the Fix-all loop must never drive two concurrent remaps of
 // one title.
+// A running job for `key`, or null. Lets the route answer a duplicate submit
+// with `joined: true` so the second admin learns their (possibly different)
+// candidate selection attached to an already-running remap instead of being
+// applied. Synchronous — a caller doing find-then-start with no await between
+// cannot race another request on the single-threaded event loop.
+export function findRunningFixMatchJob(key: string): FixMatchJob | null {
+  for (const job of jobs.values()) {
+    if (job.key === key && job.status === "running") return job;
+  }
+  return null;
+}
+
 export function startFixMatchJob(
   key: string,
   run: (report: FixMatchReport) => Promise<FixMatchJobResult>,
   now: number = Date.now(),
 ): FixMatchJob {
   prune(now);
+  let running = 0;
   for (const job of jobs.values()) {
     if (job.key === key && job.status === "running") return job;
+    if (job.status === "running") running += 1;
+  }
+  if (running >= MAX_RUNNING_JOBS) {
+    throw new FixMatchError(
+      "Too many fix-match operations are already running — wait for one to finish and try again.",
+      429,
+    );
   }
   const job: FixMatchJob = {
     id: randomUUID(), key, status: "running", startedAt: now,

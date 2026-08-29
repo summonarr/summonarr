@@ -112,6 +112,33 @@ async function doFetch(
   // an SSRF escalation; the per-address safety re-check is what stops rebind-to-
   // internal. (See verifyResolvedHost in ssrf.ts.)
 
+  // Created BEFORE any DNS work so resolution counts against the caller's
+  // declared budget. dns.lookup (getaddrinfo) itself accepts no timeout and
+  // cannot be cancelled — when the OS resolver is unreachable it blocks for the
+  // resolver deadline (~5s × attempts × nameservers, up to ~40s) — so the race
+  // below bounds the caller's WALL TIME to timeoutMs while the orphaned lookup
+  // drains in the threadpool. Without this, the 5s poller and SSE reconnect
+  // overran their per-tick budgets by an order of magnitude during DNS outages.
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = opts.signal
+    ? AbortSignal.any([opts.signal, timeoutSignal])
+    : timeoutSignal;
+  const withDnsDeadline = async <T>(work: Promise<T>): Promise<T> => {
+    if (signal.aborted) {
+      throw new SafeFetchError("timeout", rawUrl, `Request to ${rawUrl} timed out after ${timeoutMs}ms (before DNS resolution)`);
+    }
+    return await new Promise<T>((resolve, reject) => {
+      const onAbort = () =>
+        reject(new SafeFetchError("timeout", rawUrl, `DNS resolution for ${rawUrl} exceeded the ${timeoutMs}ms budget`));
+      signal.addEventListener("abort", onAbort, { once: true });
+      work.then(
+        (v) => { signal.removeEventListener("abort", onAbort); resolve(v); },
+        (e) => { signal.removeEventListener("abort", onAbort); reject(e); },
+      );
+    });
+  };
+
   const allowPrivate = mode === "admin";
   let targetUrl: string;
 
@@ -121,7 +148,7 @@ async function doFetch(
     // (fcm.googleapis.com, *.push.apple.com, updates.push.services.mozilla.com,
     // *.notify.windows.com, …). allowPrivate=false blocks RFC1918/loopback/
     // link-local/CGNAT/multicast — push services must be public.
-    const safe = await resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: false });
+    const safe = await withDnsDeadline(resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: false }));
     if (!safe) {
       throw new SafeFetchError(
         "ssrf-blocked",
@@ -148,7 +175,7 @@ async function doFetch(
     }
     // Hardcoded hosts (TMDB, plex.tv, …) must resolve to public addresses.
     // allowPrivate=false here blocks DNS-rebind to RFC1918/loopback.
-    const safe = await resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: false });
+    const safe = await withDnsDeadline(resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: false }));
     if (!safe) {
       throw new SafeFetchError(
         "ssrf-blocked",
@@ -167,7 +194,7 @@ async function doFetch(
     targetUrl = parsedUrl.toString();
   } else {
     // mode === "admin"
-    const safe = await resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: true });
+    const safe = await withDnsDeadline(resolveToSafeUrlWithAddrs(rawUrl, { allowPrivate: true }));
     if (!safe) {
       throw new SafeFetchError(
         "ssrf-blocked",
@@ -178,13 +205,7 @@ async function doFetch(
     targetUrl = safe.url;
   }
 
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxResponseBytes = opts.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
-
-  const timeoutSignal = AbortSignal.timeout(timeoutMs);
-  const signal = opts.signal
-    ? AbortSignal.any([opts.signal, timeoutSignal])
-    : timeoutSignal;
 
   const headers = new Headers(opts.headers);
   if (!headers.has("user-agent")) headers.set("user-agent", USER_AGENT);
@@ -204,9 +225,9 @@ async function doFetch(
   // the rebind window from "however long until connect" to "the time between this
   // call and undici's own getaddrinfo" — typically <1ms. (We don't require the
   // set to be unchanged — see the doFetch header comment for why.)
-  const verified = await verifyResolvedHost(parsedUrl.hostname, {
-    allowPrivate,
-  });
+  const verified = await withDnsDeadline(
+    verifyResolvedHost(parsedUrl.hostname, { allowPrivate }),
+  );
   if (!verified) {
     throw new SafeFetchError(
       "ssrf-blocked",
@@ -318,7 +339,19 @@ function limitResponseBody(
           controller.enqueue(value);
         }
       } catch (err) {
-        controller.error(err);
+        // A failure that lands MID-BODY (the timeout firing while streaming, a
+        // torn-down connection) must keep the SafeFetchError contract callers
+        // branch on — undici's raw "TimeoutError"/"terminated" would otherwise
+        // escape it via res.json()/text() and defeat `err.reason` checks like
+        // arrFetch's tolerant timeout branch.
+        if (err instanceof SafeFetchError) {
+          controller.error(err);
+        } else if (err instanceof Error && (err.name === "TimeoutError" || (err as { cause?: { name?: string } }).cause?.name === "TimeoutError")) {
+          controller.error(new SafeFetchError("timeout", url, `Response body read from ${url} timed out mid-stream`));
+        } else {
+          const msg = err instanceof Error ? err.message : String(err);
+          controller.error(new SafeFetchError("network", url, `Response body read failed for ${url}: ${msg}`));
+        }
       }
     },
     cancel(reason) {

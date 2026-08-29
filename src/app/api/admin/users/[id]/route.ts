@@ -341,53 +341,48 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     return NextResponse.json({ error: "Only an admin can grant or modify admin access" }, { status: 403 });
   }
 
-  // Re-resolve the role INSIDE lock 42 rather than routing on `target.role`, an
-  // unlocked read taken several round-trips earlier. The CAS below is race-safe,
-  // but the DECISION to enter it was not: a promotion landing in that window made
-  // a demotion of the now-last admin fall into the bare-update else branch, which
-  // has no lock, no count check and no re-read — dropping the instance to zero
-  // admins. The DELETE handler already re-reads under the same lock for its
-  // analogous window; this mirrors it.
+  // The re-read, the caller-authority gate AND the write all run under ONE hold
+  // of lock 42. Splitting the re-read into its own committed transaction left a
+  // window: a promotion landing between that read and the write made a demotion
+  // of the now-last admin route into the bare-update else branch — no lock, no
+  // count check — dropping the instance to zero admins, and also slipping past
+  // the authority gate. The DELETE handler serializes the same way.
   const demoting = body.role === "USER" || body.role === "ISSUE_ADMIN";
-  const freshRole = demoting
-    ? await prisma.$transaction(async (tx) => {
-        await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
-        const fresh = await tx.user.findUnique({ where: { id }, select: { role: true } });
-        return fresh?.role ?? target.role;
-      })
-    : target.role;
-  // A target that became ADMIN since the first read stays gated on caller
-  // authority — otherwise winning that race would also slip past the check above.
-  if (!callerIsAdmin && freshRole === "ADMIN") {
-    return NextResponse.json({ error: "Only an admin can grant or modify admin access" }, { status: 403 });
-  }
+  const now = new Date().toISOString();
+  const newRole = body.role as "ADMIN" | "ISSUE_ADMIN" | "USER";
+  const outcome = await prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
+    const fresh = await tx.user.findUnique({ where: { id }, select: { role: true } });
+    const freshRole = fresh?.role ?? target.role;
 
-  if (demoting && freshRole === "ADMIN") {
-    // Advisory lock 42 + atomic row count ensures we never demote the last admin, even under concurrent requests
-    const now = new Date().toISOString();
-    const newRole = body.role;
-    const rowsAffected = await prisma.$transaction(async (tx) => {
-      await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
-      return tx.$executeRaw`
+    // A target that is (or became, in the old window) ADMIN stays gated on
+    // caller authority.
+    if (!callerIsAdmin && freshRole === "ADMIN") return { kind: "forbidden" as const };
+
+    if (demoting && freshRole === "ADMIN") {
+      // Atomic row count under the lock: never demote the last active admin.
+      const rowsAffected = await tx.$executeRaw`
         UPDATE "User" SET role = ${newRole}, permissions = ${defaultPermissionsForRole(newRole)}, "updatedAt" = ${now}
         WHERE id = ${id}
         AND role = 'ADMIN'
         AND (SELECT COUNT(*) FROM "User" WHERE role = 'ADMIN' AND "deactivatedAt" IS NULL) > 1
       `;
-    });
-    if (rowsAffected === 0) {
-      return NextResponse.json({ error: "Cannot demote the last admin" }, { status: 400 });
+      return rowsAffected === 0 ? { kind: "last-admin" as const } : { kind: "ok" as const };
     }
-  } else {
+
     // Setting a role re-seeds the permission bitmask from the preset (role is a
     // preset selector); fine-tune afterward via the `permissions` field.
-    await prisma.user.update({
+    await tx.user.update({
       where: { id },
-      data: {
-        role: body.role as "ADMIN" | "ISSUE_ADMIN" | "USER",
-        permissions: defaultPermissionsForRole(body.role),
-      },
+      data: { role: newRole, permissions: defaultPermissionsForRole(newRole) },
     });
+    return { kind: "ok" as const };
+  });
+  if (outcome.kind === "forbidden") {
+    return NextResponse.json({ error: "Only an admin can grant or modify admin access" }, { status: 403 });
+  }
+  if (outcome.kind === "last-admin") {
+    return NextResponse.json({ error: "Cannot demote the last admin" }, { status: 400 });
   }
 
   invalidateUserSession(id);

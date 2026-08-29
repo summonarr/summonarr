@@ -117,6 +117,38 @@ function isUnspecifiedV6(addr: string): boolean {
   return stripped === "" || /^0+$/.test(stripped);
 }
 
+// Deprecated IPv6 transition tunnels whose payload is an IPv4 address.
+// 6to4 (2002::/16) embeds IPv4 in bits 16–47; Teredo (2001:0::/32) uses a
+// more involved encoding. Neither is a prefix96-of-the-last-32-bits form,
+// so unwrapEmbeddedV4 does not catch them. `2002:a9fe:a9fe::` is 6to4 of
+// 169.254.169.254 and would otherwise pass the dotted 169.254 check.
+//
+// Shared by BOTH policies on purpose. The previous split (user blocked,
+// admin allowed) was how cloud metadata stayed reachable via a tunnel on
+// the admin-configured URL path. An admin server is never a 6to4/Teredo
+// literal — keep the two checks as one helper so they cannot drift again.
+function isDeprecatedIpv6Tunnel(addr: string): boolean {
+  const v = ipv6ToBigInt(addr);
+  if (v !== null) {
+    if (v >> 112n === 0x2002n) return true; // 6to4 2002::/16
+    if (v >> 96n === 0x20010000n) return true; // Teredo 2001:0::/32
+    return false;
+  }
+  // Unparseable spelling — fail closed on the textual prefixes.
+  return /^2002:/i.test(addr) || /^2001:0*:/i.test(addr);
+}
+
+// AWS IMDSv2 IPv6 — `fd00:ec2::254`. Admin mode permits ULA (fc00::/7) so
+// LAN Authelia/Jellyfin on unique-local addressing still work, but this one
+// address is the IPv6 twin of 169.254.169.254: AWS documents it as the
+// on-link metadata endpoint on IPv6-only EC2. A typo'd or DNS-rebound
+// admin URL must not reach instance credentials. User policy already
+// blocks all ULA; this exists so the admin carve-out cannot.
+function isAwsIpv6Imds(addr: string): boolean {
+  const v = ipv6ToBigInt(addr);
+  return v === 0xfd000ec2000000000000000000000254n;
+}
+
 function isSafeAddr(addr: string): boolean {
   // Embedded-IPv4 IPv6 — unwrap and recurse so IPv4 rules apply to ::ffff:1.2.3.4,
   // ::ffff:0102:0304, NAT64 (incl. non-compressed), IPv4-compatible, and SIIT forms.
@@ -150,8 +182,7 @@ function isSafeAddr(addr: string): boolean {
   // Reserved / broadcast
   if (/^(24[0-9]|25[0-5])\./.test(addr)) return false;
   // IPv6 tunneling addresses that can reach private space
-  if (/^2002:/i.test(addr)) return false;
-  if (/^2001:0*:/i.test(addr)) return false;
+  if (isDeprecatedIpv6Tunnel(addr)) return false;
   if (/^64:ff9b::/i.test(addr)) return false;
   // ULA (fc00::/7) — private IPv6
   if (/^f[cd][0-9a-f]{2}:/i.test(addr)) return false;
@@ -175,6 +206,14 @@ export function isSafeAddrForAdmin(addr: string): boolean {
   if (/^fe[c-f][0-9a-f]:/i.test(addr)) return false;
   if (/^0\./.test(addr)) return false;
   if (isUnspecifiedV6(addr)) return false;
+  // Multicast and reserved/broadcast: no admin-configured server legitimately
+  // lives there, and a typo'd 239.x/255.255.255.255 URL would otherwise emit
+  // an HTTP request that reaches every device on the LAN segment.
+  if (/^(22[4-9]|23[0-9])\./.test(addr)) return false;
+  if (/^ff/i.test(addr)) return false;
+  if (/^(24[0-9]|25[0-5])\./.test(addr)) return false;
+  if (isDeprecatedIpv6Tunnel(addr)) return false;
+  if (isAwsIpv6Imds(addr)) return false;
   return true;
 }
 
@@ -208,7 +247,11 @@ async function lookupHostCached(host: string, bypassCache = false): Promise<stri
   // which is what an uncached host already pays, and the OS resolver caches
   // NXDOMAIN itself so a genuinely-dead host is still cheap.
   if (addrs.length === 0) return addrs;
-  // Evict by insertion order (Map iteration is ordered) when the cache is full
+  // Evict by insertion order (Map iteration is ordered) when the cache is full.
+  // Map.set on an EXISTING key keeps its original position, so a refresh must
+  // delete-then-set or the hottest, constantly-refreshed host sits at the head
+  // and is the first evicted while one-shot hosts are retained.
+  dnsCache.delete(host);
   if (dnsCache.size >= DNS_CACHE_MAX) {
     const oldestKey = dnsCache.keys().next().value;
     if (oldestKey) dnsCache.delete(oldestKey);

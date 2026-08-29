@@ -56,6 +56,7 @@ export function SpecSection({
   const [details, setDetails] = useState<Map<string, SpecDetail>>(new Map());
   const [applyState, setApplyState] = useState<"idle" | "running" | "ok" | "error">("idle");
   const [applyLog, setApplyLog] = useState<ApplyResult[]>([]);
+  const [applyError, setApplyError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "managed" | "unmanaged" | "errored">("all");
   const [search, setSearch] = useState("");
   const [confirmingForget, setConfirmingForget] = useState<string | null>(null);
@@ -92,6 +93,14 @@ export function SpecSection({
     });
   }, [specsHere, filter, search]);
 
+  // Selections survive a filter/search change but must not be acted on while
+  // hidden — every count, the header checkbox and the apply payload read the
+  // intersection with the visible rows.
+  const visibleSelected = useMemo(
+    () => filtered.filter((s) => selected.has(s.id)),
+    [filtered, selected],
+  );
+
   function toggle(id: string) {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -121,43 +130,65 @@ export function SpecSection({
     nextExpanded.add(spec.id);
     setExpanded(nextExpanded);
     if (!details.has(spec.id)) {
+      setRowError(null);
+      let failure: string | null = null;
       try {
         const res = await fetch(withBasePath(`/api/admin/trash-guides/spec/${spec.id}?variant=${encodeURIComponent(variant)}`));
         if (res.ok) {
           const detail = (await res.json()) as SpecDetail;
           setDetails((prev) => new Map(prev).set(spec.id, detail));
+        } else {
+          failure = `Could not load detail (${res.status})`;
         }
       } catch {
-
+        failure = "Network error — please try again";
+      }
+      if (failure) {
+        setRowError(failure);
+        setExpanded((prev) => {
+          const next = new Set(prev);
+          next.delete(spec.id);
+          return next;
+        });
       }
     }
   }
 
   async function applySelected() {
-    if (selected.size === 0) return;
+    const ids = visibleSelected.map((s) => s.id);
+    if (ids.length === 0) return;
     setApplyState("running");
     setApplyLog([]);
+    setApplyError(null);
     try {
       const res = await fetch(withBasePath(`/api/admin/trash-guides/apply`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ specIds: [...selected], variant }),
+        body: JSON.stringify({ specIds: ids, variant }),
       });
       // A non-OK response (409 lock contention, 429 rate limit, 400 validation,
       // 5xx) returns an { error } body, not the success shape — keep the selection
-      // intact so the user can retry, and don't parse it as a results payload.
+      // intact so the user can retry, and surface that message rather than
+      // reading the body as a results payload.
       if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        setApplyError(body?.error ?? `Apply failed (${res.status})`);
         setApplyState("error");
         setTimeout(() => setApplyState("idle"), 3000);
         return;
       }
       const data = (await res.json()) as { ok: boolean; results: ApplyResult[] };
       setApplyState(data.ok ? "ok" : "error");
-      setSelected(new Set());
+      setSelected((prev) => {
+        const next = new Set(prev);
+        for (const id of ids) next.delete(id);
+        return next;
+      });
       setApplyLog(data.results ?? []);
       await load();
       onChanged?.();
     } catch {
+      setApplyError("Network error — please try again");
       setApplyState("error");
     }
     setTimeout(() => setApplyState("idle"), 3000);
@@ -204,8 +235,8 @@ export function SpecSection({
 
   const managedCount = specsHere.filter((s) => s.application?.enabled).length;
   const erroredCount = specsHere.filter((s) => s.application?.lastError).length;
-  const allSelected = filtered.length > 0 && selected.size === filtered.length;
-  const someSelected = selected.size > 0 && selected.size < filtered.length;
+  const allSelected = filtered.length > 0 && visibleSelected.length === filtered.length;
+  const someSelected = visibleSelected.length > 0 && visibleSelected.length < filtered.length;
 
   return (
     <div className="space-y-4">
@@ -408,15 +439,15 @@ export function SpecSection({
           <Button
             type="button"
             onClick={applySelected}
-            disabled={disabled || selected.size === 0 || applyState === "running"}
+            disabled={disabled || visibleSelected.length === 0 || applyState === "running"}
             className="bg-indigo-600 hover:bg-indigo-500 text-white"
           >
             {applyState === "running"
               ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Applying…</>
-              : <>Apply selected ({selected.size})</>}
+              : <>Apply selected ({visibleSelected.length})</>}
           </Button>
           {applyState === "ok"    && <span className="text-xs text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />Applied</span>}
-          {applyState === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />One or more failed — see log below</span>}
+          {applyState === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />{applyError ?? "One or more failed — see log below"}</span>}
         </div>
       </Card>
 

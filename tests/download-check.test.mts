@@ -109,6 +109,9 @@ shadowPrismaModel(prisma, "setting", {
 });
 
 let requestRow: { status: string } | null = null;
+// Request ids whose pendingNotifyAt-clear updateMany returns count 0 — i.e. the
+// row was deleted mid-check. runDownloadCheck must abort before notifying.
+const deletedRowIds = new Set<string>();
 // Per-id overrides for the multi-target sweep tests; unset ids fall back to requestRow.
 const requestRowById = new Map<string, { status: string } | null>();
 let throwForRequestId: string | null = null;
@@ -126,6 +129,15 @@ shadowPrismaModel(prisma, "mediaRequest", {
     requestUpdates.push(args.data);
     requestUpdateIds.push(args.where.id);
     return { id: args.where.id, ...args.data };
+  },
+  // runDownloadCheck clears pendingNotifyAt via updateMany (not update) so a
+  // request deleted mid-check no-ops instead of throwing P2025. A deleted row
+  // returns count 0 (see deletedRowIds), which must ABORT before the notify.
+  updateMany: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+    order.push("clear");
+    requestUpdates.push(args.data);
+    requestUpdateIds.push(args.where.id);
+    return { count: deletedRowIds.has(args.where.id) ? 0 : 1 };
   },
 });
 
@@ -191,6 +203,7 @@ beforeEach(() => {
   requestUpdates.length = 0;
   requestUpdateIds.length = 0;
   requestRowById.clear();
+  deletedRowIds.clear();
   throwForRequestId = null;
   requestRow = { status: "APPROVED" };
   requesterDeactivatedAt = null;
@@ -270,6 +283,20 @@ test("the pendingNotifyAt clear happens BEFORE the notify, not after", async () 
   // A DM that lands while the row still carries an elapsed pendingNotifyAt is
   // exactly the duplicate the orchestrator sweep would re-send.
   assert.deepEqual(order, ["clear", "notify"]);
+});
+
+test("a request deleted mid-check (clear returns count 0) aborts BEFORE any DM", async () => {
+  // The pendingNotifyAt clear is updateMany, so a row an admin deleted during
+  // the queue polls no-ops (count 0) instead of throwing — but execution must
+  // then abort, or the requester gets a 'download pending' DM for a request
+  // that no longer exists (the regression the bare-update P2025 throw hid).
+  setSettings(DISCORD_CFG);
+  deletedRowIds.add(target().requestId);
+
+  await runDownloadCheck(target());
+
+  assert.deepEqual(requestUpdates, [{ pendingNotifyAt: null }], "the clear was still attempted");
+  assert.equal(discordPosts().length, 0, "a vanished request must not be DMed");
 });
 
 // ── guardrail 33 ────────────────────────────────────────────────────────────

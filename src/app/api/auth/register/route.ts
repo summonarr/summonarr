@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { hashPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
-import { checkRateLimit, getClientIp, parseRateLimit } from "@/lib/rate-limit";
+import { checkRateLimit, getClientIpKey, parseRateLimit } from "@/lib/rate-limit";
 import { getMaintenanceStatus } from "@/lib/maintenance";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { normalizeEmail } from "@/lib/auth";
@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
 
   const rlRow = await prisma.setting.findUnique({ where: { key: "rateLimitRegister" } });
   const limit = parseRateLimit(rlRow?.value, 5);
-  if (!checkRateLimit(`register:${getClientIp(req.headers)}`, limit, 15 * 60 * 1000)) {
+  if (!checkRateLimit(`register:${getClientIpKey(req.headers)}`, limit, 15 * 60 * 1000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
   const parsed = await readJsonCapped<{ name?: string; email?: string; password?: string }>(req, 16384);

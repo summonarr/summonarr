@@ -1,5 +1,6 @@
 import { NextResponse, after } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { parsePageParam } from "@/lib/pagination";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
@@ -18,12 +19,18 @@ const PAGE_SIZE = 40;
 const VALID_VOTE_SORTS = ["votes", "recent"] as const;
 
 export const GET = withAuth(async (req, _ctx, session) => {
+  // Same gate as POST below and /api/votes/[tmdbId]: disabling the feature
+  // must switch off the whole surface — this listing carries other users'
+  // free-text vote reasons, not just the caller's own state.
+  if (!(await isFeatureEnabled("feature.page.votes"))) {
+    return NextResponse.json({ error: "Deletion voting is disabled" }, { status: 403 });
+  }
   if (!checkRateLimit(`votes-list:${session.user.id}`, 30, 60_000)) {
     return tooManyRequests(60);
   }
 
   const sp = req.nextUrl.searchParams;
-  const page = Math.min(Math.max(1, parseInt(sp.get("page") ?? "1", 10) || 1), 10_000);
+  const page = parsePageParam(sp);
   const mine = sp.get("mine") === "1";
   const sortParam = sp.get("sort");
   const sort =
@@ -39,14 +46,17 @@ export const GET = withAuth(async (req, _ctx, session) => {
     ...(q ? { title: { contains: q, mode: "insensitive" } } : {}),
   };
 
-  // `tmdbId` is the tiebreaker on both sorts: without it, groups tied on
-  // _count (very common — most titles sit at 1-2 votes) have no total order, so
-  // Postgres may return them in a different sequence for the page=1 and page=2
-  // queries and a row gets duplicated onto one page while another is skipped.
+  // The WHOLE group key — `tmdbId` AND `mediaType` — is the tiebreaker on both
+  // sorts: without it, groups tied on _count (very common — most titles sit at
+  // 1-2 votes) have no total order, so Postgres may return them in a different
+  // sequence for the page=1 and page=2 queries and a row gets duplicated onto
+  // one page while another is skipped. `tmdbId` alone is not enough: a MOVIE and
+  // a TV group can share one TMDB id, and those two rows would still be
+  // unordered relative to each other.
   const orderBy: Prisma.DeletionVoteOrderByWithAggregationInput[] =
     sort === "recent"
-      ? [{ _max: { createdAt: "desc" } }, { tmdbId: "asc" }]
-      : [{ _count: { id: "desc" } }, { tmdbId: "asc" }];
+      ? [{ _max: { createdAt: "desc" } }, { tmdbId: "asc" }, { mediaType: "asc" }]
+      : [{ _count: { id: "desc" } }, { tmdbId: "asc" }, { mediaType: "asc" }];
 
   const [grouped, totalItems] = await Promise.all([
     prisma.deletionVote.groupBy({

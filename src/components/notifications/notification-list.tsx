@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { Film, Tv2, Check, X } from "@/components/icons";
@@ -31,29 +31,49 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const mounted = useHasMounted();
+  // Bumped by any list-wiping op (clearAll). An in-flight removeOne records the
+  // generation at start and skips its whole-list rollback if it changed — else a
+  // failed single-delete could restore a stale list a successful clear-all
+  // already wiped server-side. (Pattern mirrors watch-history-list's filterGen.)
+  const listGen = useRef(0);
 
   const anyUnread = items.some((n) => !n.readAt);
 
   async function markAllRead() {
-    setItems((cur) => cur.map((n) => (n.readAt ? n : { ...n, readAt: new Date().toISOString() })));
-    await fetch(withBasePath("/api/notifications"), POST("{}")).catch(() => {});
+    // Track the exact rows this call flips so the rollback can restore their read
+    // state alone: a whole-list snapshot repaints rows a concurrent remove or
+    // clear-all already deleted server-side.
+    const flipped = new Set(items.filter((n) => !n.readAt).map((n) => n.id));
+    setItems((cur) => {
+      const at = new Date().toISOString();
+      return cur.map((n) => (flipped.has(n.id) ? { ...n, readAt: at } : n));
+    });
+    const res = await fetch(withBasePath("/api/notifications"), POST("{}")).catch(() => null);
+    // Roll back on a clean 4xx/5xx too (not just a thrown/network error) so the
+    // list can't show read locally while the server still has them unread.
+    if (!res || !res.ok) setItems((cur) => cur.map((n) => (flipped.has(n.id) ? { ...n, readAt: null } : n)));
   }
   async function markOneRead(id: string) {
-    setItems((cur) => cur.map((n) => (n.id === id && !n.readAt ? { ...n, readAt: new Date().toISOString() } : n)));
-    await fetch(withBasePath("/api/notifications"), POST(JSON.stringify({ ids: [id] }))).catch(() => {});
+    const flipped = items.some((n) => n.id === id && !n.readAt);
+    if (flipped) setItems((cur) => cur.map((n) => (n.id === id ? { ...n, readAt: new Date().toISOString() } : n)));
+    const res = await fetch(withBasePath("/api/notifications"), POST(JSON.stringify({ ids: [id] }))).catch(() => null);
+    if ((!res || !res.ok) && flipped) setItems((cur) => cur.map((n) => (n.id === id ? { ...n, readAt: null } : n)));
   }
   async function removeOne(id: string) {
+    const gen = listGen.current;
     const prev = items;
     setItems((cur) => cur.filter((n) => n.id !== id));
     setTotal((t) => Math.max(0, t - 1));
     // Selection via query param — DELETE bodies are stripped by some proxies.
     const res = await fetch(withBasePath(`/api/notifications?ids=${encodeURIComponent(id)}`), { method: "DELETE" }).catch(() => null);
-    if (!res || !res.ok) {
+    if ((!res || !res.ok) && gen === listGen.current) {
+      // A clear-all landed while this was in flight — don't resurrect the list.
       setItems(prev);
       setTotal((t) => t + 1);
     }
   }
   async function clearAll() {
+    listGen.current += 1;
     const prevItems = items;
     const prevTotal = total;
     setItems([]);
