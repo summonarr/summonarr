@@ -146,7 +146,7 @@ WORKDIR /app
 # Remove npm and npx — the entrypoint uses node directly; no npm needed at runtime.
 # This eliminates the entire class of npm-bundled CVEs (picomatch, brace-expansion, etc).
 RUN apk upgrade --no-cache && \
-    apk add --no-cache 'libssl3>=3.5.7-r0' 'libcrypto3>=3.5.7-r0' && \
+    apk add --no-cache 'libssl3>=3.5.8-r0' 'libcrypto3>=3.5.8-r0' && \
     rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 ENV NODE_ENV=production
