@@ -202,6 +202,7 @@ The audit release: a full-codebase every-line scan of all 914 source files close
 - Admin-configured server URLs (Radarr/Sonarr/Jellyfin/Plex) rejected two cloud-metadata bypasses that the user-facing policy already blocked: 6to4/Teredo encodings of `169.254.169.254`, and AWS's IPv6 metadata address.
 - A Discord DM could still be sent about a download whose request had just been deleted, and push notifications could still reach a deactivated admin's devices.
 - A failed library scan silently skipped the work queued behind it.
+- Patched a high-severity OpenSSL advisory in the shipped image (`CVE-2026-14456`, libssl3/libcrypto3 3.5.7-r0 → 3.5.8-r0).
 
 ### v0.23.1
 
