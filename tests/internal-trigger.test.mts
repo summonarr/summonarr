@@ -258,3 +258,63 @@ test("an EXTERNAL abort (not our deadline) is reported as a failure, not as a sl
   assert.match(warns[0], /full sync trigger failed: This operation was aborted/);
   assert.doesNotMatch(warns[0], /still running/);
 });
+
+// ── dispatch-interval context on the stopped-waiting warning ────────────────
+//
+// "sync still running after 30000ms" is byte-identical whether it is the first
+// trigger in an hour or the fortieth in ten minutes, so on its own it cannot
+// separate a slow sync (fine — the run continues server-side) from a trigger
+// loop (not fine). The caller enforces a 10-minute cooldown floor between
+// dispatches, so an interval far below that is direct evidence the floor is
+// being defeated — and it belongs on the line an operator is already reading,
+// not reconstructed afterwards from the spacing of unrelated log lines.
+
+/**
+ * Drive one trigger to its 30s self-abort and return the warning it emitted.
+ * The caller enables mock timers — MockTimers.enable throws if called twice in
+ * one test context, and one case below needs two dispatches.
+ */
+async function abortedTriggerWarning(t: { mock: { timers: { tick: (ms: number) => void } } }): Promise<string> {
+  warns.length = 0;
+  respond = (_url, init) =>
+    new Promise<Response>((_resolve, reject) => {
+      const signal = init.signal as AbortSignal;
+      signal.addEventListener("abort", () => reject(signal.reason));
+    });
+  const pending = triggerFullSync();
+  t.mock.timers.tick(30_000);
+  await pending;
+  assert.equal(warns.length, 1, "the abort must produce exactly one warning");
+  return warns[0];
+}
+
+test("the stopped-waiting warning reports the interval since the previous dispatch", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const warning = await abortedTriggerWarning(t);
+
+  // Earlier cases in this file have already dispatched, so this process has a
+  // previous trigger and the suffix must be the elapsed form.
+  assert.match(
+    warning,
+    /Previous trigger \d+s ago\.$/,
+    "an operator must be able to see the dispatch interval without leaving the line",
+  );
+  // The pre-existing contract this must not disturb.
+  assert.match(warning, /^\[internal-trigger\] sync still running after 30000ms; stopped waiting/);
+  assert.doesNotMatch(warning, /failed/, "our own deadline is still not a failure");
+});
+
+test("an abandoned wait still counts as a dispatch — the NEXT warning measures from it", async (t) => {
+  // The orchestrator run a timed-out trigger started is real and continues, so
+  // treating it as "no dispatch happened" would report an interval measured
+  // from some older trigger and understate the true rate.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  await abortedTriggerWarning(t);
+  const second = await abortedTriggerWarning(t);
+  const elapsed = Number(/Previous trigger (\d+)s ago\.$/.exec(second)?.[1]);
+  assert.ok(Number.isFinite(elapsed), "the second warning must carry an interval");
+  assert.ok(
+    elapsed < 60,
+    `two back-to-back triggers must report a small interval, got ${elapsed}s`,
+  );
+});

@@ -1,7 +1,7 @@
 import { authActive } from "@/lib/auth";
 import { prisma, getSettingDecryptFailures } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
-import { parseCronLastRun } from "@/lib/cron-auth";
+import { parseCronLastRun, parseCronRunHistory, countCronRunsSince, CRON_RUN_HISTORY_LIMIT } from "@/lib/cron-auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getPlexAccounts } from "@/lib/plex";
@@ -308,6 +308,19 @@ export default async function SettingsPage({
       }),
     ]);
     const lastRunMap = new Map<string, { createdAt: Date; details: string | null }>();
+    // Bounded run history, Setting-rows only — the audit-log fallback below has
+    // no equivalent, so a target that only ever reported there stays null and
+    // the table simply omits a rate for it rather than showing a wrong one.
+    const historyMap = new Map<string, ReturnType<typeof parseCronRunHistory>>();
+    for (const s of lastRunSettings) {
+      historyMap.set(s.key.replace(/^cron:lastRun:/, ""), parseCronRunHistory(s.value));
+    }
+    // Read the clock ONCE, here on the server, and pass the resulting counts to
+    // the client component as plain numbers (guardrail 16) — the cron table is
+    // a "use client" component, so a clock read on its side of the boundary
+    // would be the hydration bug that guardrail exists to prevent.
+    // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
+    const oneHourAgoMs = Date.now() - 60 * 60 * 1000;
     // Audit log is the fallback for jobs that already wrote there before this
     // change shipped (e.g. upcoming-cache, trash-sync) — nothing about that
     // breaks, the Setting row simply takes precedence once it exists.
@@ -338,14 +351,31 @@ export default async function SettingsPage({
       playHistoryEntries, mediaServerUsers, discordCacheEntries,
       uniqueLibraryItems,
       currentShares,
-      cronJobs: buildCronJobs(lastRunMap),
+      cronJobs: buildCronJobs(lastRunMap, historyMap, oneHourAgoMs),
     };
   }
 
-  function buildCronJobs(lastRunMap: Map<string, { createdAt: Date; details: string | null }>): CronJobInfo[] {
-    function lastRunInfo(target: string): { lastRun: string | null; lastDuration: number | null; lastStatus: "ok" | "error" | null } {
+  function buildCronJobs(
+    lastRunMap: Map<string, { createdAt: Date; details: string | null }>,
+    historyMap: Map<string, ReturnType<typeof parseCronRunHistory>>,
+    oneHourAgoMs: number,
+  ): CronJobInfo[] {
+    function lastRunInfo(target: string): {
+      lastRun: string | null;
+      lastDuration: number | null;
+      lastStatus: "ok" | "error" | null;
+      runsLastHour: number | null;
+      runsLastHourCapped: boolean;
+    } {
+      const history = historyMap.get(target);
+      // null (not 0) when there is no ledger history at all: "we do not know
+      // this job's rate" and "this job ran zero times in the last hour" are
+      // different answers, and only the second one is worth rendering.
+      const runsLastHour = history && history.length > 0 ? countCronRunsSince(history, oneHourAgoMs) : null;
+      // The history is bounded, so a saturated count is a floor, not a total.
+      const runsLastHourCapped = runsLastHour != null && runsLastHour >= CRON_RUN_HISTORY_LIMIT;
       const row = lastRunMap.get(target);
-      if (!row) return { lastRun: null, lastDuration: null, lastStatus: null };
+      if (!row) return { lastRun: null, lastDuration: null, lastStatus: null, runsLastHour, runsLastHourCapped };
       let durationMs: number | null = null;
       // ok=false marks the run as failed. Setting-row writes always include `ok`;
       // legacy audit-log fallback rows don't, so default to "ok" when absent.
@@ -355,7 +385,7 @@ export default async function SettingsPage({
         if (d?.durationMs != null) durationMs = d.durationMs;
         if (d?.ok === false) lastStatus = "error";
       } catch { }
-      return { lastRun: row.createdAt.toISOString(), lastDuration: durationMs, lastStatus };
+      return { lastRun: row.createdAt.toISOString(), lastDuration: durationMs, lastStatus, runsLastHour, runsLastHourCapped };
     }
 
     return [

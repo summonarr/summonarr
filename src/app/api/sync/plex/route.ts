@@ -14,6 +14,7 @@ import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } fr
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
+import { warnOnChange } from "@/lib/log-dedup";
 
 export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
@@ -227,7 +228,13 @@ async function syncPlex(request: NextRequest) {
     });
 
     if (dropped.length > 0) {
-      console.warn(
+      // Repeat-suppressed for the same reason as the orchestrator's copy in
+      // /api/sync — see the comment there. Distinct dedup key: this route is
+      // the admin "Resync" button, and its finding should not be swallowed
+      // just because the hourly orchestrator logged the same conflicts.
+      warnOnChange(
+        `sync-plex-conflated:${mediaType}:${serverInstance}`,
+        dropped.join(", "),
         `[sync/plex] ${dropped.length} conflated ratingKey(s) kept their pinned tmdbId ` +
           `(${mediaType}, instance="${serverInstance}"): ${dropped.join(", ")}`,
       );

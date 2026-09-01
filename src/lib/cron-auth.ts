@@ -127,21 +127,72 @@ export async function batchCreateMany<T extends Record<string, unknown>>(
   }
 }
 
-// Records the last time a cron/sync job ran. Stored in the `Setting` table
-// (key: `cron:lastRun:<target>`, value: JSON `{ at, durationMs, ok }`) so that
-// admin observability surfaces (settings page) don't depend on whether the
+/**
+ * How many recent runs the ledger keeps per target.
+ *
+ * 20 is chosen against the FASTEST configured job (warm-activity, 1800s = 2/h):
+ * a healthy ledger therefore spans hours, while a job looping once a minute
+ * fills all 20 slots inside 20 minutes and is unmistakable. Each entry is ~60
+ * bytes, so a full ledger row stays around 1.3 KB.
+ */
+export const CRON_RUN_HISTORY_LIMIT = 20;
+
+/** One recorded run. Same three fields the top-level ledger has always carried. */
+export interface CronRunEntry {
+  at: string;
+  durationMs: number;
+  ok: boolean;
+}
+
+// Records a cron/sync job run. Stored in the `Setting` table (key:
+// `cron:lastRun:<target>`, value: JSON `{ at, durationMs, ok, recent[] }`) so
+// that admin observability surfaces (settings page) don't depend on whether the
 // route also writes a `LIBRARY_SYNC` / `CACHE_WARM` audit row — several warm
 // jobs deliberately skip audit on cron triggers to avoid flooding the table.
 //
-// Single writer per `target`, so no coordination required (per CLAUDE.md
-// guardrail 14 on shared state).
+// The top-level `{ at, durationMs, ok }` fields are UNCHANGED and remain the
+// contract parseCronLastRun reads; `recent` is additive, so an older reader
+// ignores it and a row written before this shipped still parses.
+//
+// Why `recent` exists: the ledger used to keep only the newest run, which made
+// it structurally unable to answer the one question an operator actually has
+// when a job misbehaves — "how OFTEN is this running?". A single timestamp
+// looks identical whether the job ran once or four hundred times, so a runaway
+// trigger was invisible on the very panel the logs point at
+// (`[internal-trigger] … see the sync:full entry under Admin → Settings →
+// System`). `recent` is what makes a cadence anomaly legible without log
+// archaeology.
+//
+// Single writer per `target` in the normal case, so no coordination required
+// (per CLAUDE.md guardrail 14 on shared state). Two genuinely concurrent
+// recorders for one target could interleave the read and lose an entry from the
+// history; that is accepted — this row is observability, and the write below
+// still records the run that just finished either way.
 export async function recordCronRun(
   target: string,
   durationMs: number,
   ok: boolean = true,
 ): Promise<void> {
   const key = `cron:lastRun:${target}`;
-  const value = JSON.stringify({ at: new Date().toISOString(), durationMs, ok });
+  const entry: CronRunEntry = { at: new Date().toISOString(), durationMs, ok };
+
+  // Best-effort history read. Recording THIS run is the job's actual contract;
+  // its predecessors are a nicety. A read that throws — or a caller whose
+  // Prisma surface has no `setting.findUnique` at all — must therefore degrade
+  // to "no history yet" and still write, never propagate.
+  let recent: CronRunEntry[] = [];
+  try {
+    const existing = await prisma.setting.findUnique({
+      where: { key },
+      select: { value: true },
+    });
+    recent = parseCronRunHistory(existing?.value);
+  } catch { /* history unavailable — record the run without it */ }
+
+  const value = JSON.stringify({
+    ...entry,
+    recent: [entry, ...recent].slice(0, CRON_RUN_HISTORY_LIMIT),
+  });
   await prisma.setting.upsert({
     where: { key },
     create: { key, value },
@@ -200,4 +251,67 @@ export function parseCronLastRun(raw: string | null | undefined): CronLastRun | 
   } catch {
     return null;
   }
+}
+
+/**
+ * Read the bounded run history out of a `cron:lastRun:<target>` ledger value,
+ * most-recent-first. Returns `[]` rather than throwing on anything malformed —
+ * a corrupt observability row must never break the page rendering it.
+ *
+ * A row written BEFORE `recent` existed has no array, but its top-level fields
+ * are still a run we know about, so it degrades to a single-entry history
+ * instead of losing the last run on upgrade.
+ */
+export function parseCronRunHistory(raw: string | null | undefined): CronRunEntry[] {
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+
+  const entries = (parsed as { recent?: unknown }).recent;
+  if (!Array.isArray(entries)) {
+    const single = parseCronLastRun(raw);
+    return single ? [single] : [];
+  }
+
+  const out: CronRunEntry[] = [];
+  for (const e of entries) {
+    if (!e || typeof e !== "object" || Array.isArray(e)) continue;
+    const r = e as Partial<CronRunEntry>;
+    // `at` is the only load-bearing field — an entry without a timestamp cannot
+    // contribute to a cadence answer, so drop it rather than invent one.
+    if (typeof r.at !== "string") continue;
+    out.push({
+      at: r.at,
+      durationMs: typeof r.durationMs === "number" ? r.durationMs : 0,
+      // Matches parseCronLastRun: only a literal false reads as a failure, so
+      // pre-`ok` entries read as successful.
+      ok: r.ok !== false,
+    });
+    if (out.length >= CRON_RUN_HISTORY_LIMIT) break;
+  }
+  return out;
+}
+
+/**
+ * How many of `entries` ran at or after `sinceMs` (epoch ms).
+ *
+ * Saturates at CRON_RUN_HISTORY_LIMIT by construction, so callers that report
+ * this to a human should say "N+" once it reaches the cap rather than implying
+ * the count is exact.
+ */
+export function countCronRunsSince(
+  entries: readonly CronRunEntry[],
+  sinceMs: number,
+): number {
+  let n = 0;
+  for (const e of entries) {
+    const t = Date.parse(e.at);
+    if (Number.isFinite(t) && t >= sinceMs) n++;
+  }
+  return n;
 }

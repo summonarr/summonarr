@@ -47,6 +47,10 @@ type SettingUpsertArgs = {
 
 const upsertCalls: SettingUpsertArgs[] = [];
 let failUpserts = false;
+// Backing store for the ledger read recordCronRun now performs. Empty by
+// default, so every pre-existing case still sees "no prior history".
+const settingRows = new Map<string, string>();
+let failFindUnique = false;
 
 // In-memory backing for the admin-session transport tests: session rows by
 // sessionId, users by id. Empty by default so the CRON_SECRET tests never see
@@ -71,7 +75,13 @@ const fakePrisma = {
     upsert: async (args: SettingUpsertArgs): Promise<{ key: string; value: string }> => {
       upsertCalls.push(args);
       if (failUpserts) throw new Error("unit-test DB write failure");
+      settingRows.set(args.where.key, args.create.value);
       return args.create;
+    },
+    findUnique: async (args: { where: { key: string } }): Promise<{ value: string } | null> => {
+      if (failFindUnique) throw new Error("unit-test DB read failure");
+      const value = settingRows.get(args.where.key);
+      return value === undefined ? null : { value };
     },
   },
   authSession: {
@@ -97,6 +107,9 @@ const {
   batchCreateMany,
   isCronAuthorized,
   parseCronLastRun,
+  parseCronRunHistory,
+  countCronRunsSince,
+  CRON_RUN_HISTORY_LIMIT,
   recordCronRun,
   withCronRunRecording,
 } = await import("../src/lib/cron-auth.ts");
@@ -114,6 +127,15 @@ function lastLedgerWrite(): { key: string; parsed: ReturnType<typeof parseCronLa
 function resetLedger(): void {
   upsertCalls.length = 0;
   failUpserts = false;
+  failFindUnique = false;
+  settingRows.clear();
+}
+
+/** The `recent` array actually persisted by the most recent ledger write. */
+function lastLedgerHistory(): ReturnType<typeof parseCronRunHistory> {
+  const call = upsertCalls[upsertCalls.length - 1];
+  assert.ok(call, "expected a setting.upsert ledger write");
+  return parseCronRunHistory(call.create.value);
 }
 
 // ---------------------------------------------------------------------------
@@ -606,4 +628,158 @@ test("withCronRunRecording: records exactly one ledger write per run, keyed by t
     upsertCalls.map((c) => c.where.key),
     ["cron:lastRun:upcoming", "cron:lastRun:ratings"],
   );
+});
+
+// ---------------------------------------------------------------------------
+// parseCronRunHistory / countCronRunsSince / the recordCronRun run history
+//
+// Why this exists at all: the ledger used to keep only the newest run, so it
+// could not distinguish "this job ran once" from "this job ran four hundred
+// times" — which is exactly the question an operator has when a job misbehaves,
+// and exactly what the `[internal-trigger] … see the sync:full entry` warning
+// points them at. These pin the history that makes that answerable.
+// ---------------------------------------------------------------------------
+
+test("parseCronRunHistory: null / empty / malformed / non-object → [] and never throws", () => {
+  assert.deepEqual(parseCronRunHistory(null), []);
+  assert.deepEqual(parseCronRunHistory(undefined), []);
+  assert.deepEqual(parseCronRunHistory(""), []);
+  assert.deepEqual(parseCronRunHistory("{not json"), []);
+  assert.deepEqual(parseCronRunHistory("null"), []);
+  assert.deepEqual(parseCronRunHistory("42"), []);
+  assert.deepEqual(parseCronRunHistory("[]"), []);
+});
+
+test("parseCronRunHistory: a PRE-HISTORY ledger row degrades to its single run, not to nothing", () => {
+  // Rows written before `recent` shipped carry only the three top-level fields.
+  // Reading those as an empty history would silently drop the last known run on
+  // upgrade and make the first post-upgrade rate read as 1 instead of 2.
+  const legacy = JSON.stringify({ at: "2026-09-01T00:00:00.000Z", durationMs: 91, ok: true });
+  assert.deepEqual(parseCronRunHistory(legacy), [
+    { at: "2026-09-01T00:00:00.000Z", durationMs: 91, ok: true },
+  ]);
+});
+
+test("parseCronRunHistory: entries without a string `at` are dropped; defaults match parseCronLastRun", () => {
+  const raw = JSON.stringify({
+    at: "t0", durationMs: 1, ok: true,
+    recent: [
+      { at: "t0", durationMs: 1, ok: true },
+      { at: 42, durationMs: 1 },            // non-string at → dropped
+      { durationMs: 5 },                    // missing at → dropped
+      null,                                 // not an object → dropped
+      ["t1"],                               // array → dropped
+      { at: "t2" },                         // durationMs → 0, ok → true
+      { at: "t3", durationMs: "9", ok: 0 }, // non-number duration → 0; only literal false is a failure
+      { at: "t4", ok: false },
+    ],
+  });
+  assert.deepEqual(parseCronRunHistory(raw), [
+    { at: "t0", durationMs: 1, ok: true },
+    { at: "t2", durationMs: 0, ok: true },
+    { at: "t3", durationMs: 0, ok: true },
+    { at: "t4", durationMs: 0, ok: false },
+  ]);
+});
+
+test("parseCronRunHistory: a row claiming more entries than the cap is truncated on READ too", () => {
+  // The write caps, but a hand-edited or future-written row must not be able to
+  // make a page render an unbounded list.
+  const recent = Array.from({ length: CRON_RUN_HISTORY_LIMIT + 25 }, (_, i) => ({
+    at: `t${i}`, durationMs: 0, ok: true,
+  }));
+  const parsed = parseCronRunHistory(JSON.stringify({ at: "t0", durationMs: 0, ok: true, recent }));
+  assert.equal(parsed.length, CRON_RUN_HISTORY_LIMIT);
+});
+
+test("countCronRunsSince: counts at-or-after the cutoff and ignores unparseable timestamps", () => {
+  const cutoff = Date.parse("2026-09-01T12:00:00.000Z");
+  const entries = [
+    { at: "2026-09-01T12:30:00.000Z", durationMs: 0, ok: true }, // after
+    { at: "2026-09-01T12:00:00.000Z", durationMs: 0, ok: true }, // exactly at → counts
+    { at: "2026-09-01T11:59:59.999Z", durationMs: 0, ok: true }, // before
+    { at: "not-a-date", durationMs: 0, ok: true },               // unparseable → ignored
+  ];
+  assert.equal(countCronRunsSince(entries, cutoff), 2);
+  assert.equal(countCronRunsSince([], cutoff), 0);
+});
+
+test("recordCronRun: the new run is PREPENDED and prior history is preserved", async () => {
+  resetLedger();
+  await recordCronRun("sync:full", 10);
+  await recordCronRun("sync:full", 20);
+  await recordCronRun("sync:full", 30);
+
+  const history = lastLedgerHistory();
+  assert.equal(history.length, 3, "each run must add an entry, not replace the row");
+  assert.deepEqual(history.map((e) => e.durationMs), [30, 20, 10], "most-recent-first");
+  // The top-level fields still describe the newest run — the contract every
+  // pre-existing reader (parseCronLastRun, the settings page) depends on.
+  assert.equal(lastLedgerWrite().parsed?.durationMs, 30);
+});
+
+test("recordCronRun: history is capped at CRON_RUN_HISTORY_LIMIT and drops the OLDEST", async () => {
+  resetLedger();
+  for (let i = 0; i < CRON_RUN_HISTORY_LIMIT + 5; i++) await recordCronRun("sync:full", i);
+
+  // Assert on the RAW persisted array, not the parsed view: parseCronRunHistory
+  // truncates on read too, so reading through it would mask an uncapped WRITE
+  // entirely and this pin would pass against a row growing without bound.
+  const raw = JSON.parse(upsertCalls[upsertCalls.length - 1].create.value) as { recent: unknown[] };
+  assert.equal(raw.recent.length, CRON_RUN_HISTORY_LIMIT, "the stored ledger row must not grow without bound");
+
+  const history = lastLedgerHistory();
+  assert.equal(history.length, CRON_RUN_HISTORY_LIMIT);
+  assert.equal(history[0].durationMs, CRON_RUN_HISTORY_LIMIT + 4, "newest survives");
+  assert.equal(
+    history.at(-1)!.durationMs,
+    5,
+    "the window slides — runs 0-4 are evicted, not the recent ones",
+  );
+});
+
+test("recordCronRun: ok=false runs are recorded in the history like any other", async () => {
+  resetLedger();
+  await recordCronRun("sync:full", 1, true);
+  await recordCronRun("sync:full", 2, false);
+  assert.deepEqual(lastLedgerHistory().map((e) => e.ok), [false, true]);
+});
+
+test("recordCronRun: per-target ledgers are independent", async () => {
+  resetLedger();
+  await recordCronRun("sync:full", 1);
+  await recordCronRun("ratings-sync", 2);
+  await recordCronRun("sync:full", 3);
+
+  assert.deepEqual(parseCronRunHistory(settingRows.get("cron:lastRun:sync:full")).map((e) => e.durationMs), [3, 1]);
+  assert.deepEqual(parseCronRunHistory(settingRows.get("cron:lastRun:ratings-sync")).map((e) => e.durationMs), [2]);
+});
+
+test("recordCronRun: a FAILING history read still records the run — observability degrades, never breaks", async () => {
+  resetLedger();
+  await recordCronRun("sync:full", 10);
+  failFindUnique = true;
+  await recordCronRun("sync:full", 20); // must resolve, not reject
+
+  const history = lastLedgerHistory();
+  assert.equal(history.length, 1, "history is lost for this write, but the run is still recorded");
+  assert.equal(history[0].durationMs, 20);
+  assert.equal(lastLedgerWrite().parsed?.durationMs, 20, "the last-run contract survives a read failure");
+});
+
+test("recordCronRun: a Prisma surface with NO setting.findUnique still records the run", async () => {
+  // Guards the real degradation path — several suites stub `prisma.setting`
+  // with `upsert` alone, and a hard TypeError there would turn an observability
+  // write into a route failure.
+  resetLedger();
+  const settings = (globalThis as unknown as { prisma: { setting: Record<string, unknown> } }).prisma.setting;
+  const saved = settings.findUnique;
+  delete settings.findUnique;
+  try {
+    await recordCronRun("sync:full", 42);
+  } finally {
+    settings.findUnique = saved;
+  }
+  assert.equal(lastLedgerWrite().parsed?.durationMs, 42);
+  assert.deepEqual(lastLedgerHistory().map((e) => e.durationMs), [42]);
 });

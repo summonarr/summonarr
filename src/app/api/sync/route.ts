@@ -32,6 +32,7 @@ import { DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
 import { settleLimit } from "@/lib/concurrency";
 import { effectivePermissions, parseMediaServerGrants } from "@/lib/permissions";
 import { visibleInstancesFor, type VisibleServerInstances } from "@/lib/media-visibility";
+import { warnOnChange } from "@/lib/log-dedup";
 
 // Advisory-lock id 2000 — distinct from 2001-2011 (cron warm/sync routes) and TRASH_SYNC_LOCK_ID (2010).
 // Held for the entire orchestrator run so a second concurrent invocation (admin "Resync" while
@@ -201,7 +202,14 @@ async function deduplicatePlexRowsByRatingKey<T extends PlexDedupeRow>(
   });
 
   if (dropped.length > 0) {
-    console.warn(
+    // Repeat-suppressed: a conflated ratingKey is a standing property of the
+    // Plex library plus its pinned mappings, so this recomputes to the same
+    // string on every orchestrator run. The signature is the dropped list
+    // itself — not just its length — so a different set of conflicts re-logs
+    // even when the count happens to match.
+    warnOnChange(
+      `sync-conflated:${mediaType}:${serverInstance}`,
+      dropped.join(", "),
       `[sync] ${dropped.length} conflated ratingKey(s) kept their pinned tmdbId ` +
         `(${mediaType}, instance="${serverInstance}"): ${dropped.join(", ")}`,
     );
