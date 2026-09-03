@@ -13,12 +13,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { runJson, validateAuditReport, validateOutdatedReport } from "../scripts/audit-deps.mts";
+import {
+  applyAllowlist,
+  exceptionCovers,
+  loadExceptions,
+  normalizeExceptionId,
+  runJson,
+  validateAuditReport,
+  validateOutdatedReport,
+  type AdvisoryFinding,
+  type SecurityException,
+  type VulnReport,
+} from "../scripts/audit-deps.mts";
 
 const CWD = process.cwd();
 const SCRIPT = fileURLToPath(new URL("../scripts/audit-deps.mts", import.meta.url));
@@ -181,4 +192,124 @@ test("the gate still exits 0 on a genuinely clean audit", { skip: process.platfo
   const { status, output } = gateWithStubNpm('{"auditReportVersion":2,"vulnerabilities":{},"metadata":{}}', 0);
   assert.equal(status, 0, output);
   assert.match(output, /No known vulnerabilities/);
+});
+
+// ── Exception matching (guardrail 18a) ─────────────────────────────────────
+// The allowlist drops an advisory ONLY when an exception names both its package
+// and its exact advisory id. The old matcher was a substring test against the
+// advisory URL, and every npm advisory URL is https://github.com/advisories/GHSA-…,
+// so a truncated `"id": "GHSA"` passed `--allowlist-only` and then blanket-
+// accepted every present and future advisory on the package.
+
+function advisory(id: string, overrides: Partial<AdvisoryFinding> = {}): AdvisoryFinding {
+  return {
+    source: 1,
+    name: "some-package",
+    dependency: "some-package",
+    title: `Prototype pollution in some-package (${id})`,
+    url: `https://github.com/advisories/${id}`,
+    severity: "high",
+    range: "<1.0.0",
+    ...overrides,
+  };
+}
+
+function exception(id: string, pkg = "some-package"): SecurityException {
+  return { id, package: pkg, owner: "@gadgetusaf", expires: "2099-01-01", reason: "test" };
+}
+
+const A = "GHSA-7p8r-x3mc-p8w7";
+const B = "GHSA-c2qf-rxjj-qqgw";
+
+function loadExceptionsFrom(entries: unknown[]): ReturnType<typeof loadExceptions> {
+  const dir = mkdtempSync(join(tmpdir(), "summonarr-exceptions-"));
+  try {
+    mkdirSync(join(dir, ".github"));
+    writeFileSync(join(dir, ".github", "security-exceptions.json"), JSON.stringify({ exceptions: entries }));
+    return loadExceptions(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("normalizeExceptionId accepts a bare GHSA id and the github.com/advisories URL form", () => {
+  assert.equal(normalizeExceptionId(A), A.toLowerCase());
+  assert.equal(normalizeExceptionId(` ${A} `), A.toLowerCase());
+  assert.equal(normalizeExceptionId(`https://github.com/advisories/${A}`), A.toLowerCase());
+  assert.equal(normalizeExceptionId(`https://github.com/advisories/${A}/`), A.toLowerCase());
+  assert.equal(normalizeExceptionId(`https://github.com/advisories/${A}?foo=1`), A.toLowerCase());
+});
+
+test("PIN: normalizeExceptionId rejects truncated / partial / non-GHSA ids", () => {
+  for (const bad of ["GHSA", "GHSA-", "GHSA-7p8r", "GHSA-7p8r-x3mc", "github.com", "advisories", "https://github.com/advisories/", "1234", ""]) {
+    assert.equal(normalizeExceptionId(bad), null, `expected ${JSON.stringify(bad)} to be rejected`);
+  }
+});
+
+test("PIN: loadExceptions rejects `id: \"GHSA\"` so --allowlist-only (the blocking PR check) fails on it", () => {
+  const { exceptions, errors } = loadExceptionsFrom([exception("GHSA")]);
+  assert.equal(exceptions.length, 0);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /"id" must be a full GHSA id/);
+});
+
+test("loadExceptions accepts both documented id forms", () => {
+  const { exceptions, errors } = loadExceptionsFrom([
+    exception(A),
+    exception(`https://github.com/advisories/${B}`),
+  ]);
+  assert.deepEqual(errors, []);
+  assert.equal(exceptions.length, 2);
+});
+
+test("exceptionCovers matches exactly one advisory for a bare id and for the URL form", () => {
+  assert.equal(exceptionCovers(exception(A), "some-package", advisory(A)), true);
+  assert.equal(exceptionCovers(exception(`https://github.com/advisories/${A}`), "some-package", advisory(A)), true);
+  assert.equal(exceptionCovers(exception(A), "some-package", advisory(B)), false);
+  assert.equal(exceptionCovers(exception(A), "other-package", advisory(A)), false, "package must match too");
+});
+
+test("PIN: a truncated id covers NOTHING — never every advisory on the package", () => {
+  for (const bad of ["GHSA", "GHSA-", "github.com", "advisories"]) {
+    assert.equal(exceptionCovers(exception(bad), "some-package", advisory(A)), false, bad);
+    assert.equal(exceptionCovers(exception(bad), "some-package", advisory(B)), false, bad);
+  }
+});
+
+test("PIN: the advisory title is not consulted — an id appearing in prose does not match", () => {
+  // Title mentions A, URL is B. The old `title.includes(id)` fallback matched here.
+  const cross = advisory(B, { title: `Follow-up to ${A}` });
+  assert.equal(exceptionCovers(exception(A), "some-package", cross), false);
+});
+
+test("PIN: applyAllowlist suppresses advisory A but still gates advisory B on the same package (18a)", () => {
+  const report: VulnReport = {
+    package: "some-package",
+    severity: "high",
+    isDirect: false,
+    via: [advisory(A), advisory(B)],
+    fixAvailable: false,
+  };
+  const outcome = applyAllowlist([report], [exception(A)], new Date("2026-09-03T00:00:00Z"));
+  assert.equal(outcome.failures.length, 0);
+  assert.equal(outcome.suppressed.length, 1);
+  assert.equal(outcome.remaining.length, 1);
+  assert.deepEqual(
+    outcome.remaining[0].via.map((v) => v.url),
+    [`https://github.com/advisories/${B}`],
+  );
+  assert.deepEqual(outcome.stale, []);
+});
+
+test("applyAllowlist: an exception that matches no live advisory is reported stale, not silently kept", () => {
+  const report: VulnReport = {
+    package: "some-package",
+    severity: "high",
+    isDirect: false,
+    via: [advisory(B)],
+    fixAvailable: false,
+  };
+  const outcome = applyAllowlist([report], [exception(A)], new Date("2026-09-03T00:00:00Z"));
+  assert.equal(outcome.remaining.length, 1);
+  assert.equal(outcome.stale.length, 1);
 });
