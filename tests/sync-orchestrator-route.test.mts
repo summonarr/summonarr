@@ -212,6 +212,11 @@ function preservedRowHit(model: "plexLibraryItem" | "jellyfinLibraryItem", slugs
 // The de-registered-instance sweep runs OUTSIDE any transaction (top-level
 // prisma), so its deletes land here rather than in the TxRecord journal.
 const orphanSweepDeletes: Array<{ model: string; where: Record<string, unknown> | undefined }> = [];
+// Top-level (non-tx) $executeRaw statements — the show file-path patch
+// (patchPlexShowFilePaths) issues ONE VALUES-joined UPDATE per chunk here.
+const rawStatements: Array<{ sql: string; values: unknown[] }> = [];
+// Every Setting key read via findUnique, in order — pins the registry read count.
+const settingFindUniqueKeys: string[] = [];
 const mediaRequestUpdateManyCalls: Array<{ where?: ReqWhere; data: Record<string, unknown> }> = [];
 // clearDeletionVotesForTmdbs' two writes (one deletionVote.deleteMany per
 // mediaType + one setting.deleteMany for the `deletionVoteNotified:` keys). Both
@@ -317,9 +322,14 @@ const fakePrisma = {
     casCalls.push({ mode, ids, winners });
     return winners.map((id) => ({ id }));
   },
-  $executeRaw: async () => 0, // orchestrator never calls this at top level; defensive
+  // patchPlexShowFilePaths' VALUES-joined UPDATE lands here (top-level, no tx).
+  $executeRaw: async (query: { sql: string; values: unknown[] }) => {
+    rawStatements.push({ sql: query.sql, values: query.values ?? [] });
+    return 0;
+  },
   setting: {
     findUnique: async (args: { where: { key: string } }) => {
+      settingFindUniqueKeys.push(args.where.key);
       const v = settings.get(args.where.key);
       return v === undefined ? null : { key: args.where.key, value: v };
     },
@@ -616,6 +626,8 @@ beforeEach(() => {
   userFindManyCalls.length = 0;
   plexLibraryItemFindManyWheres.length = 0;
   orphanSweepDeletes.length = 0;
+  rawStatements.length = 0;
+  settingFindUniqueKeys.length = 0;
   casCalls.length = 0;
   arrAvailableRows.length = 0;
   arrAvailableReadCounts.radarrAvailableItem = 0;
@@ -1694,6 +1706,119 @@ test("multi-server PARTIAL failure: one instance's library fetch failing preserv
     "a partial run must not stamp lastPlexSyncSucceededAt",
   );
   assert.deepEqual(b.failedSources, ["plex"]);
+});
+
+// Plex: one movie section (empty) + one show section. The type=2 walk lists
+// the shows (with tmdb guids); the type=4 walk lists their episodes, each
+// carrying an on-disk file — the data the skipShowFilePaths patch runs on.
+function plexShowResponder(shows: Array<{ ratingKey: string; tmdbId: number; files: string[] }>): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname === "/library/sections") {
+      return okJson({ MediaContainer: { Directory: [
+        { key: "1", title: "Movies", type: "movie" },
+        { key: "2", title: "TV", type: "show" },
+      ] } });
+    }
+    if (url.pathname === "/library/sections/1/all") {
+      return okJson({ MediaContainer: { totalSize: 0, Metadata: [] } });
+    }
+    if (url.pathname === "/library/sections/2/all" && url.searchParams.get("type") === "2") {
+      return okJson({ MediaContainer: {
+        totalSize: shows.length,
+        Metadata: shows.map((s) => ({ ratingKey: s.ratingKey, type: "show", title: `Show ${s.tmdbId}`, Guid: [{ id: `tmdb://${s.tmdbId}` }] })),
+      } });
+    }
+    if (url.pathname === "/library/sections/2/all" && url.searchParams.get("type") === "4") {
+      const eps = shows.flatMap((s) => s.files.map((file, i) => ({
+        grandparentRatingKey: s.ratingKey, parentIndex: 1, index: i + 1, Media: [{ Part: [{ file }] }],
+      })));
+      return okJson({ MediaContainer: { totalSize: eps.length, Metadata: eps } });
+    }
+    throw new Error(`unexpected Plex fetch ${url.pathname}?${url.searchParams}`);
+  };
+}
+
+test("show file-path patch: ONE VALUES-joined UPDATE per instance (never one updateMany per show), serverInstance-scoped and filePath-IS-NULL-guarded", async () => {
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-1");
+  // Two shows, two episodes each: the patch is per SHOW (first episode file
+  // wins), and the statement count must not scale with either.
+  respond = plexShowResponder([
+    { ratingKey: "show-a", tmdbId: 1399, files: ["/tv/a/s01e01.mkv", "/tv/a/s01e02.mkv"] },
+    { ratingKey: "show-b", tmdbId: 1400, files: ["/tv/b/s01e01.mkv", "/tv/b/s01e02.mkv"] },
+  ]);
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  // The library write landed first, with the show rows pathless (skipShowFilePaths).
+  const plexTx = txTouching("plexLibraryItem");
+  assert.equal(plexTx.length, 1);
+  const tvRows = plexTx[0].ops
+    .filter((o) => o.model === "plexLibraryItem" && o.method === "createMany")
+    .flatMap((o) => (o.args as { data: Array<{ mediaType: string; plexRatingKey: string; filePath: string | null }> }).data)
+    .filter((r) => r.mediaType === "TV");
+  assert.deepEqual(tvRows.map((r) => [r.plexRatingKey, r.filePath]).sort(), [["show-a", null], ["show-b", null]]);
+
+  // No per-row updateMany anywhere — that loop was O(shows) serialized
+  // round-trips inside one BATCH_TX_TIMEOUT transaction, every run.
+  const perRowUpdates = transactions.flatMap((t) => t.ops).filter((o) => o.model === "plexLibraryItem" && o.method === "updateMany");
+  assert.deepEqual(perRowUpdates, [], "the file-path patch must never issue one updateMany per show");
+
+  // Exactly one statement for the whole instance.
+  const patches = rawStatements.filter((r) => r.sql.includes('UPDATE "PlexLibraryItem"'));
+  assert.equal(patches.length, 1, "one VALUES-joined UPDATE per instance, not per show");
+  const [patch] = patches;
+  assert.ok(patch.sql.includes('"filePath" IS NULL'), "the concurrent-writer no-op guard must survive");
+  assert.ok(patch.sql.includes('"mediaType" = \'TV\''), "TV rows only");
+  assert.ok(patch.sql.includes('"serverInstance" = '), "must stay instance-scoped — ratingKeys are server-local");
+  assert.ok(patch.values.includes(""), "the default instance's slug is bound as a parameter");
+  // First episode file wins per show; the second episode's path never appears.
+  assert.deepEqual(
+    patch.values.filter((v) => typeof v === "string" && v.startsWith("/tv/")).sort(),
+    ["/tv/a/s01e01.mkv", "/tv/b/s01e01.mkv"],
+  );
+  for (const rk of ["show-a", "show-b"]) assert.ok(patch.values.includes(rk), `ratingKey ${rk} bound`);
+});
+
+test("show file-path patch: a failing patch is best-effort — warned, never failing the run, and the episode rewrite still proceeds", async () => {
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-1");
+  respond = plexShowResponder([{ ratingKey: "show-a", tmdbId: 1399, files: ["/tv/a/s01e01.mkv"] }]);
+  const original = fakePrisma.$executeRaw;
+  fakePrisma.$executeRaw = async () => { throw new Error("patch boom"); };
+  try {
+    const res = await POST(syncReq({ headers: AS_CRON }));
+    assert.equal(res.status, 200);
+    await settle();
+  } finally {
+    fakePrisma.$executeRaw = original;
+  }
+  assert.ok(warns.some((w) => w.includes("show file-path patch failed")), `expected a warn, saw: ${warns.join(" | ")}`);
+  assert.equal(txTouching("tVEpisodeCache").length, 1, "the episode-cache rewrite is independent of the patch");
+});
+
+test("the post-write registry read is issued ONCE per service and shared by the de-registered sweep and the demote guard", async () => {
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-1");
+  respond = plexResponder([300]);
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  // Two reads per service: the arms' pre-walk getSyncableMediaInstances (which
+  // must stay separate — it captures the instance list BEFORE the library walk)
+  // and ONE post-write getMediaInstances shared by the sweep and the demote
+  // guard. The two used to re-issue the post-write pair back-to-back.
+  for (const key of ["plexInstances", "jellyfinInstances"]) {
+    assert.equal(
+      settingFindUniqueKeys.filter((k) => k === key).length,
+      2,
+      `${key}: one pre-walk read + one shared post-write read — saw ${settingFindUniqueKeys.filter((k) => k === key).length}`,
+    );
+  }
 });
 
 test("de-registered instances are swept: the sweep targets exactly the slugs NOT in the registry, scoped per service", async () => {

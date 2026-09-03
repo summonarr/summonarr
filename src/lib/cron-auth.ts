@@ -5,6 +5,7 @@ import { parseBearerToken } from "@/lib/mobile-auth";
 import { matchesStoredFingerprint } from "@/lib/ua-fingerprint";
 import { machineIpAllowed } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@/generated/prisma";
 
 // Hash both sides first so timingSafeEqual compares equal-length buffers regardless of input length
 function safeCompareStrings(a: string, b: string): boolean {
@@ -62,6 +63,36 @@ function isSameOriginRequest(request: NextRequest): boolean {
 // honored immediately), not auth() which would trust a revoked admin's JWT until its exp (up to the 7d
 // admin ceiling). A presented-but-wrong Bearer is throttled per IP to bound CRON_SECRET guessing.
 export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
+  return (await getCronActor(request)) !== null;
+}
+
+/** Who is driving a cron/sync route: an admin (session path) or the scheduler (CRON_SECRET). */
+export interface CronActor {
+  userId: string;
+  userName: string;
+  trigger: "admin" | "cron";
+}
+
+export const CRON_SYSTEM_ACTOR: CronActor = Object.freeze({
+  userId: "system",
+  userName: "cron",
+  trigger: "cron",
+}) as CronActor;
+
+// The authorization decision AND the attribution in ONE session read.
+//
+// Every cron/sync route needs both: isCronAuthorized to gate, then "who was it"
+// for the admin-triggered audit row. Each route used to open-code the second
+// half as a fresh readActiveSummonarrSessionFromRequest after the gate, so an
+// admin "Run now" paid the DB-checked verifyAndRefreshSession twice — and, for a
+// bearer (native) admin with a pending sessionId rotation, the FIRST read
+// rotated the row and the second saw a dead token, mis-attributing the run to
+// "system/cron". Returning the actor from the single read removes both.
+//
+// null ⇒ unauthorized. A non-null actor with trigger "admin" carries the
+// DB-checked claims (revocation/cutoff/role-demotion honored); trigger "cron"
+// means the CRON_SECRET bearer matched and there is no session to attribute.
+export async function getCronActor(request: NextRequest): Promise<CronActor | null> {
   // Request-aware read: resolves a bearer JWT (native admin) FIRST, then the
   // cookie, so a native admin holding only a bearer token can use the session
   // path. readActiveSummonarrSession() read the cookie only.
@@ -77,11 +108,11 @@ export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
     // (no Origin/Referer header) out of every cron/sync route.
     const fromBearer = parseBearerToken(request.headers.get("authorization")) !== null;
     if (!fromBearer) {
-      if (!isSameOriginRequest(request)) return false;
+      if (!isSameOriginRequest(request)) return null;
       // Same UA-fingerprint replay defense the withAuth wrappers enforce: a stolen
       // admin cookie replayed from another device (with a forged trusted Origin) must
       // not drive /api/sync or /api/cron/*. machine:/no-fingerprint claims pass through.
-      if (!matchesStoredFingerprint(claims.uaFingerprint, request.headers.get("user-agent"))) return false;
+      if (!matchesStoredFingerprint(claims.uaFingerprint, request.headers.get("user-agent"))) return null;
     }
     // A machine session carries a mint-time IP allowlist as a claim; the withAuth/
     // requireAuth guards re-check it on /api/* but this cron/sync path is the machine
@@ -91,8 +122,8 @@ export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
     // gates above, the IP allowlist binds the token regardless of how it's presented
     // (parity with api-auth.ts, where the bearer skip covers only the fingerprint).
     // Absent/empty allowlist ⇒ machineIpAllowed returns true (no restriction).
-    if (!machineIpAllowed(claims, request.headers)) return false;
-    return true;
+    if (!machineIpAllowed(claims, request.headers)) return null;
+    return { userId: claims.id, userName: claims.name ?? "admin", trigger: "admin" };
   }
 
   const cronSecret = process.env.CRON_SECRET;
@@ -106,11 +137,11 @@ export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
       // User-Agent bucket: a wrong-secret caller sharing that bucket could then
       // deny the hourly sync and the 5s play-history poller. A valid Bearer must
       // never be deniable by someone else's failures.
-      if (safeCompareStrings(authHeader.slice(7), cronSecret)) return true;
+      if (safeCompareStrings(authHeader.slice(7), cronSecret)) return CRON_SYSTEM_ACTOR;
     }
   }
 
-  return false;
+  return null;
 }
 
 // Always pass BATCH_TX_TIMEOUT to $transaction for library-sized writes to avoid Prisma's default 5s timeout
@@ -124,6 +155,40 @@ export async function batchCreateMany<T extends Record<string, unknown>>(
 ): Promise<void> {
   for (let i = 0; i < rows.length; i += CREATE_MANY_BATCH) {
     await tx.createMany({ data: rows.slice(i, i + CREATE_MANY_BATCH), skipDuplicates: true });
+  }
+}
+
+/**
+ * Patch the show file paths a `skipShowFilePaths` TV walk left null onto the
+ * just-written PlexLibraryItem rows — ONE statement per CREATE_MANY_BATCH chunk,
+ * never one `updateMany` per show.
+ *
+ * The per-key loop this replaces issued N serialized UPDATE round-trips (N = TV
+ * show count) inside one interactive $transaction capped at BATCH_TX_TIMEOUT, on
+ * EVERY orchestrator run (the rows were just rewritten null, so its
+ * `filePath: null` guard never pruned anything). A multi-thousand-show library
+ * burned seconds per run and a large one could hit the timeout, after which
+ * every show's path stayed null until the next run repeated the same failure.
+ *
+ * Kept from the original: the serverInstance scope (ratingKeys are
+ * server-local) and the `"filePath" IS NULL` guard, which makes the patch a
+ * no-op if a concurrent writer replaced the rows. No wrapping transaction —
+ * each chunk is atomic on its own, and a partial patch across chunks is
+ * harmless (idempotent, null-scoped, retried next run).
+ */
+export async function patchPlexShowFilePaths(slug: string, paths: Map<string, string>): Promise<void> {
+  const entries = Array.from(paths.entries());
+  for (let i = 0; i < entries.length; i += CREATE_MANY_BATCH) {
+    const chunk = entries.slice(i, i + CREATE_MANY_BATCH);
+    await prisma.$executeRaw(Prisma.sql`
+      UPDATE "PlexLibraryItem" AS p
+      SET "filePath" = v."file"
+      FROM (VALUES ${Prisma.join(chunk.map(([ratingKey, file]) => Prisma.sql`(${ratingKey}::text, ${file}::text)`))}) AS v("ratingKey", "file")
+      WHERE p."serverInstance" = ${slug}
+        AND p."mediaType" = 'TV'
+        AND p."plexRatingKey" = v."ratingKey"
+        AND p."filePath" IS NULL
+    `);
   }
 }
 

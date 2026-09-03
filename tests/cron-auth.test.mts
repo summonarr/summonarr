@@ -4,6 +4,11 @@
 //   - isCronAuthorized's CRON_SECRET Bearer path: exact "Bearer " scheme, the
 //     hash-first timing-safe compare (differing lengths never throw), and
 //     fail-closed on a wrong/missing/blank secret or an unset env var.
+//   - getCronActor: the SAME single session read answers both "authorized?"
+//     and "who?" — an admin actor carries the DB-checked claims, a CRON_SECRET
+//     caller is the system/cron actor, and isCronAuthorized is exactly
+//     `getCronActor(...) !== null`. Every cron/sync route used to re-run the
+//     DB-checked read a second time just for attribution.
 //   - isCronAuthorized's admin-session path, per transport (guardrail 6b): a
 //     COOKIE admin session must pass BOTH the same-origin check and the
 //     UA-fingerprint check (load-bearing CSRF defenses — cron/sync routes are
@@ -106,6 +111,8 @@ const {
   BATCH_TX_TIMEOUT,
   batchCreateMany,
   isCronAuthorized,
+  getCronActor,
+  CRON_SYSTEM_ACTOR,
   parseCronLastRun,
   parseCronRunHistory,
   countCronRunsSince,
@@ -499,6 +506,82 @@ test("isCronAuthorized: unset or empty CRON_SECRET fails closed", async () => {
     false,
   );
   process.env.CRON_SECRET = CRON_SECRET;
+});
+
+// ---------------------------------------------------------------------------
+// getCronActor — one session read for BOTH the gate and the attribution
+// ---------------------------------------------------------------------------
+
+test("getCronActor: Bearer CRON_SECRET → the system/cron actor (no session to attribute)", async () => {
+  process.env.CRON_SECRET = CRON_SECRET;
+  const actor = await getCronActor(cronRequest({ authorization: `Bearer ${CRON_SECRET}` }));
+  assert.deepEqual(actor, { userId: "system", userName: "cron", trigger: "cron" });
+  assert.equal(actor, CRON_SYSTEM_ACTOR);
+});
+
+test("getCronActor: cookie admin session (same-origin + matching UA) → admin actor carrying the DB-checked claims", async () => {
+  const jwt = await mintSession("actor-cookie-ok", "ADMIN");
+  const actor = await getCronActor(
+    cronRequest({
+      cookie: `summonarr-session=${jwt}`,
+      origin: "http://localhost:3000",
+      "user-agent": ADMIN_UA,
+    }),
+  );
+  // name is null in the minted claims → the "admin" fallback every cron route used.
+  assert.deepEqual(actor, { userId: "user-actor-cookie-ok", userName: "admin", trigger: "admin" });
+});
+
+test("getCronActor: BEARER admin session → admin actor with no Origin and an arbitrary UA (guardrail 6b)", async () => {
+  const jwt = await mintSession("actor-bearer-ok", "ADMIN");
+  const actor = await getCronActor(
+    cronRequest({ authorization: `Bearer ${jwt}`, "user-agent": "Summonarr-iOS/42" }),
+  );
+  assert.deepEqual(actor, { userId: "user-actor-bearer-ok", userName: "admin", trigger: "admin" });
+});
+
+test("getCronActor: the cookie gates still bite — no Origin, or a mismatched UA, → null (never a cron actor)", async () => {
+  process.env.CRON_SECRET = CRON_SECRET;
+  const jwt = await mintSession("actor-cookie-gated", "ADMIN");
+  assert.equal(
+    await getCronActor(cronRequest({ cookie: `summonarr-session=${jwt}`, "user-agent": ADMIN_UA })),
+    null,
+  );
+  assert.equal(
+    await getCronActor(cronRequest({
+      cookie: `summonarr-session=${jwt}`,
+      origin: "http://localhost:3000",
+      "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/604.1",
+    })),
+    null,
+  );
+});
+
+test("getCronActor: a non-admin bearer session and an absent credential → null", async () => {
+  process.env.CRON_SECRET = CRON_SECRET;
+  const jwt = await mintSession("actor-bearer-user", "USER");
+  assert.equal(await getCronActor(cronRequest({ authorization: `Bearer ${jwt}` })), null);
+  assert.equal(await getCronActor(cronRequest()), null);
+  assert.equal(await getCronActor(cronRequest({ authorization: "Bearer nope-0123456789abcdefghijklmnop" })), null);
+});
+
+test("getCronActor and isCronAuthorized agree on every transport — the gate IS the actor read", async () => {
+  process.env.CRON_SECRET = CRON_SECRET;
+  const adminJwt = await mintSession("actor-agree-admin", "ADMIN");
+  const userJwt = await mintSession("actor-agree-user", "USER");
+  const cases: Array<Record<string, string> | undefined> = [
+    { authorization: `Bearer ${CRON_SECRET}` },
+    { authorization: `Bearer ${CRON_SECRET}x` },
+    { authorization: `Bearer ${adminJwt}` },
+    { authorization: `Bearer ${userJwt}` },
+    { cookie: `summonarr-session=${adminJwt}`, origin: "http://localhost:3000", "user-agent": ADMIN_UA },
+    { cookie: `summonarr-session=${adminJwt}`, "user-agent": ADMIN_UA },
+    undefined,
+  ];
+  for (const headers of cases) {
+    const actor = await getCronActor(cronRequest(headers));
+    assert.equal(await isCronAuthorized(cronRequest(headers)), actor !== null, JSON.stringify(headers));
+  }
 });
 
 // ---------------------------------------------------------------------------

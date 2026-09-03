@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
-import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { buildSeriesItemIdIndex, libraryItemIds, getJellyfinTmdbIds, getJellyfinTVEpisodes, getJellyfinEpisodesForShow } from "@/lib/jellyfin";
 import { mapLimit } from "@/lib/concurrency";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
@@ -11,7 +10,7 @@ import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } from "@/lib/permissions";
-import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
+import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
 
@@ -25,11 +24,12 @@ const RECENT_WINDOW_MS = 2 * 60 * 60 * 1000;
 const PER_SERIES_EPISODE_REFRESH_MAX = 50;
 
 export async function POST(request: NextRequest) {
-  if (!(await isCronAuthorized(request))) {
+  const actor = await getCronActor(request);
+  if (!actor) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  return withCronRunRecording("jellyfin-sync", () => syncJellyfin(request));
+  return withCronRunRecording("jellyfin-sync", () => syncJellyfin(request, actor));
 }
 
 // Fetches the Jellyfin library (movies + TV), writes JellyfinLibraryItem rows
@@ -48,7 +48,7 @@ export async function POST(request: NextRequest) {
 // `source: "jellyfin"` unscoped and repopulated from this server alone, and even
 // the recentOnly path's tmdbId-scoped delete removes another server's episodes
 // for a show both of them hold.
-async function syncJellyfin(request: NextRequest) {
+async function syncJellyfin(request: NextRequest, actor: CronActor) {
   const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
   if (rawBody instanceof NextResponse) return rawBody;
   const recentOnly = rawBody.full !== true;
@@ -349,12 +349,13 @@ async function syncJellyfin(request: NextRequest) {
     }
   }
 
-  // Use DB-checked reader (bearer-first) for attribution label, consistent with orchestrator/plex sync.
-  const claims = await readActiveSummonarrSessionFromRequest(request);
-  if (claims) {
+  // Attribution comes from the SAME DB-checked session read that authorized the
+  // request (getCronActor in POST), consistent with the orchestrator/plex sync.
+  // A CRON_SECRET run has no session to attribute.
+  if (actor.trigger === "admin") {
     void logAudit({
-      userId: claims.id,
-      userName: claims.name ?? claims.id,
+      userId: actor.userId,
+      userName: actor.userName,
       action: "LIBRARY_SYNC",
       target: "sync:jellyfin",
       details: { movies: movieIds.size, tv: tvIds.size, marked: toMark.length, full: !recentOnly },

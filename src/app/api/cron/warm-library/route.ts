@@ -2,8 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prewarmLibraryCache } from "@/lib/tmdb-prewarm";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock, WARM_LIBRARY_LOCK_ID } from "@/lib/advisory-lock";
-import { isCronAuthorized, recordCronRun } from "@/lib/cron-auth";
-import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
+import { getCronActor, recordCronRun } from "@/lib/cron-auth";
 import { tmdbAuth } from "@/lib/tmdb-auth";
 
 // Recurring counterpart to the boot-time prewarm (instrumentation.ts) and the
@@ -14,20 +13,8 @@ import { tmdbAuth } from "@/lib/tmdb-auth";
 // prewarmLibraryCache makes this recurring run a cheap incremental top-up
 // (fresh rows skip; only the aging tail re-fetches), not a daily full walk.
 
-async function getAuthContext(request: NextRequest): Promise<{ userId: string; userName: string; trigger: "admin" | "cron" } | null> {
-  if (!(await isCronAuthorized(request))) return null;
-
-  // DB-checked attribution: bearer-first then cookie, with revocation/cutoff/role
-  // honored — so a stale or revoked admin JWT can't mis-attribute the audit row.
-  const claims = await readActiveSummonarrSessionFromRequest(request);
-  if (claims?.role === "ADMIN") {
-    return { userId: claims.id, userName: claims.name ?? "admin", trigger: "admin" };
-  }
-  return { userId: "system", userName: "cron", trigger: "cron" };
-}
-
 export async function POST(request: NextRequest) {
-  const authCtx = await getAuthContext(request);
+  const authCtx = await getCronActor(request);
   if (!authCtx) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -61,7 +48,8 @@ export async function POST(request: NextRequest) {
       // Error, and the container reschedules a failing job every
       // CRON_RETRY_INTERVAL (300s) — so a job broken for a week showed a green
       // tick while being retried 12x an hour.
-      await recordCronRun("library", durationMs, result.failed === 0);
+      const failed = result.failed;
+      await recordCronRun("library", durationMs, failed === 0);
 
       if (authCtx.trigger !== "cron") {
         await logAudit({
@@ -73,11 +61,19 @@ export async function POST(request: NextRequest) {
         });
       }
 
+      // `ok` in the BODY is the same derived verdict the ledger just recorded —
+      // never a literal true. The admin "Run now" badge judges `res.ok && !error`
+      // (cron-job-table.tsx), so a run in which every task failed painted green
+      // until a reload re-read the ledger's ok:false. Status stays 200 on purpose:
+      // the container reschedules any non-2xx every CRON_RETRY_INTERVAL (300s)
+      // instead of the job's own interval. `error` + X-Cron-Degraded are the
+      // documented degraded-but-completed signal (see withCronRunRecording).
       return NextResponse.json({
-        ok: true,
+        ok: failed === 0,
         ...result,
+        ...(failed > 0 ? { error: `${failed} of ${result.total} library items failed to warm` } : {}),
         timestamp: new Date().toISOString(),
-      });
+      }, failed > 0 ? { headers: { "X-Cron-Degraded": String(failed) } } : undefined);
     },
     () => NextResponse.json({ skipped: true, reason: "already running" }),
   );
