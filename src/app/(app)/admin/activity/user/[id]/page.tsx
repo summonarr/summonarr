@@ -6,6 +6,14 @@ import { getUserPlayStats } from "@/lib/play-history";
 import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
 import { posterUrl } from "@/lib/tmdb-types";
 import {
+  addTitleResolutions,
+  collectUnmappedPairs,
+  resolveUnmappedEntry,
+  titleWhereDisjuncts,
+  unresolvedPairs,
+  type TitleResolveMap,
+} from "@/lib/activity-title-resolve";
+import {
   UserDetailView,
   type UserDetailData,
 } from "@/components/admin/activity-user-detail";
@@ -55,55 +63,46 @@ export default async function UserActivityPage({
   // render with no media link (and no cover art). The same title was often
   // resolved on another play — match against those rows so the link target and
   // poster lookup both work.
+  //
+  // The match is scoped on (title, mediaType), never bare title — a same-titled
+  // movie/series pair (Fargo, Westworld, Scream) would otherwise relink a TV
+  // play to the movie and produce `/media/<movieId>?type=TV`. The keying and
+  // the `where` fragments both come from activity-title-resolve.ts so they
+  // cannot drift apart; a play's own non-null mediaType is never overwritten.
   const recentPlaysSlice = stats.recentPlays.slice(0, 12);
-  const unmappedTitles = [
-    ...new Set(
-      [...stats.topMedia, ...recentPlaysSlice]
-        .filter((m) => m.tmdbId == null && m.title)
-        .map((m) => m.title),
-    ),
-  ];
-  const titleResolved: Record<string, { tmdbId: number; mediaType: string | null }> = {};
-  if (unmappedTitles.length > 0) {
+  const unmappedPairs = collectUnmappedPairs([...stats.topMedia, ...recentPlaysSlice]);
+  const titleResolved: TitleResolveMap = {};
+  if (unmappedPairs.length > 0) {
     const matches = await prisma.playHistory.findMany({
-      where: { title: { in: unmappedTitles }, tmdbId: { not: null } },
-      distinct: ["title"],
+      where: {
+        OR: titleWhereDisjuncts(unmappedPairs).map((d) => ({ ...d, tmdbId: { not: null } })),
+      },
+      distinct: ["title", "mediaType"],
       orderBy: { startedAt: "desc" },
       select: { title: true, tmdbId: true, mediaType: true },
     });
-    for (const r of matches) {
-      if (r.tmdbId != null) {
-        titleResolved[r.title] = { tmdbId: r.tmdbId, mediaType: r.mediaType };
-      }
-    }
+    addTitleResolutions(titleResolved, matches);
 
     // A title may be in a library but never resolved on any *play* (so the
     // PlayHistory match above misses it). The library tables are an
     // authoritative title→tmdbId mapping — use them so the title still links.
-    const stillUnmapped = unmappedTitles.filter((t) => !titleResolved[t]);
+    const stillUnmapped = unresolvedPairs(titleResolved, unmappedPairs);
     if (stillUnmapped.length > 0) {
+      const libraryWhere = { OR: titleWhereDisjuncts(stillUnmapped) };
       const [plexLib, jellyfinLib] = await Promise.all([
         prisma.plexLibraryItem.findMany({
-          where: { title: { in: stillUnmapped } },
+          where: libraryWhere,
           select: { title: true, tmdbId: true, mediaType: true },
         }),
         prisma.jellyfinLibraryItem.findMany({
-          where: { title: { in: stillUnmapped } },
+          where: libraryWhere,
           select: { title: true, tmdbId: true, mediaType: true },
         }),
       ]);
-      for (const r of [...plexLib, ...jellyfinLib]) {
-        if (r.title && !titleResolved[r.title]) {
-          titleResolved[r.title] = { tmdbId: r.tmdbId, mediaType: r.mediaType };
-        }
-      }
+      addTitleResolutions(titleResolved, [...plexLib, ...jellyfinLib]);
     }
   }
-  const resolvedTopMedia = stats.topMedia.map((m) => {
-    if (m.tmdbId != null) return m;
-    const r = titleResolved[m.title];
-    return r ? { ...m, tmdbId: r.tmdbId, mediaType: r.mediaType ?? m.mediaType } : m;
-  });
+  const resolvedTopMedia = stats.topMedia.map((m) => resolveUnmappedEntry(m, titleResolved));
 
   const topMediaPosters = await resolvePosterMap(resolvedTopMedia);
 
@@ -155,12 +154,12 @@ export default async function UserActivityPage({
     })),
     knownIps,
     recentPlays: recentPlaysSlice.map((p) => {
-      const r = p.tmdbId == null ? titleResolved[p.title] : undefined;
+      const r = resolveUnmappedEntry(p, titleResolved);
       return {
         id: p.id,
         title: p.title,
-        tmdbId: p.tmdbId ?? r?.tmdbId ?? null,
-        mediaType: p.mediaType ?? r?.mediaType ?? null,
+        tmdbId: r.tmdbId,
+        mediaType: r.mediaType,
         seasonNumber: p.seasonNumber,
         episodeNumber: p.episodeNumber,
         resolution: p.resolution,

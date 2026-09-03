@@ -689,6 +689,36 @@ test("refresh audits even when the upstream pull failed", async () => {
   assert.equal((created[0].args as { data: { target: string } }).data.target, "trash:refresh");
 });
 
+const isTreeFetch = (u: URL) => u.hostname === "api.github.com" && /\/git\/trees\/master/.test(u.pathname);
+
+test("'refresh both' pulls the ~573 KB GitHub tree ONCE and shares it across both services", async () => {
+  // The recursive tree is identical for RADARR and SONARR; the route used to
+  // call refreshCatalog(service) with no prefetched tree, so the UI's default
+  // bodiless POST fetched it back-to-back — 2x transfer and 2x against the
+  // GitHub rate budget for one click. The cron already shared one tree.
+  const t = await mintSession();
+  const res = await postRefresh(t);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(fetchCalls.filter(isTreeFetch).length, 1);
+  // A tree-fetch failure still fails EVERY requested service, one line each,
+  // so the operator sees both services reported rather than a silent skip.
+  assert.deepEqual(
+    body.errors.map((e: string) => e.split(":")[0]),
+    ["RADARR", "SONARR"],
+  );
+  for (const e of body.errors as string[]) assert.match(e, /GitHub tree fetch failed/);
+});
+
+test("an explicit single-service refresh fetches the tree once and reports one error", async () => {
+  const t = await mintSession();
+  const res = await postRefresh(t, JSON.stringify({ service: "radarr" }));
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(fetchCalls.filter(isTreeFetch).length, 1);
+  assert.deepEqual(body.errors.map((e: string) => e.split(":")[0]), ["RADARR"]);
+});
+
 // ── status / spec detail ─────────────────────────────────────────────────────
 
 for (const bad of [undefined, "plex", "RADARR", ""]) {

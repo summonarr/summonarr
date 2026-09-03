@@ -46,6 +46,7 @@ const sourceStyles: Record<User["source"], string> = {
   jellyfin: "border-purple-600/30 bg-purple-500/10 text-purple-400",
   oidc:     "border-sky-600/30 bg-sky-500/10 text-sky-400",
   local:    "border-zinc-700 bg-zinc-800 text-zinc-400",
+  discord:  "border-indigo-600/30 bg-indigo-500/10 text-indigo-400",
 };
 
 const roleStyles: Record<User["role"], string> = {
@@ -59,6 +60,7 @@ const avatarColors: Record<User["source"], string> = {
   jellyfin: "bg-purple-700",
   oidc:     "bg-sky-700",
   local:    "bg-indigo-700",
+  discord:  "bg-indigo-600",
 };
 
 // A Plex/Jellyfin sign-in pins User.mediaServer to the provider it came from;

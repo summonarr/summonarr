@@ -23,7 +23,10 @@ interface BrowseGridProps {
   maxYear: number;
   // True when the server's discover fetch failed. Replaces the client fetch's
   // own error state: without it a TMDB outage renders an empty grid under the
-  // "TMDB token not configured" empty state, which names the wrong cause.
+  // "TMDB token not configured" empty state, which names the wrong cause. The
+  // empty-state branch below is therefore gated on `!failed` — the page maps a
+  // failure to `items: []`, so without that gate both the banner AND the
+  // wrong-cause empty state rendered together.
   failed?: boolean;
 }
 
@@ -134,7 +137,7 @@ export function BrowseGrid({
           }}
         >
           <AlertTriangle style={{ width: 14, height: 14, flexShrink: 0 }} />
-          Couldn&apos;t load results. Showing the previous view — try again.
+          Couldn&apos;t load results from TMDB — try again.
         </div>
       )}
 
@@ -158,7 +161,7 @@ export function BrowseGrid({
             />
           </div>
         )}
-        {items.length === 0 && !isPending ? (
+        {items.length === 0 && !isPending && !failed ? (
           hasFilters ? (
             <EmptyState
               icon={Filter}

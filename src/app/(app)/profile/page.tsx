@@ -1,5 +1,6 @@
 import { authActive } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { parseRateLimit } from "@/lib/rate-limit";
 import { isNotificationEmailEnabled } from "@/lib/email";
 import { resolveUserNotificationEmail } from "@/lib/notification-email";
 import { redirect } from "next/navigation";
@@ -13,6 +14,12 @@ import { User } from "@/components/icons";
 import { PageHeader } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
+
+// Mirrors the default in /api/push/subscribe and /api/push/apns — the routes
+// that actually enforce `maxPushSubscriptions`. Their contract (via
+// `parseRateLimit`) is 0 = unlimited and a negative/junk value = this default,
+// and the label rendered here must agree with it.
+const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 
 export default async function ProfilePage() {
   const session = await authActive();
@@ -54,7 +61,7 @@ export default async function ProfilePage() {
     isNotificationEmailEnabled(),
   ]);
   const discordInviteUrl = discordInviteSetting?.value || null;
-  const pushCap = maxPushSetting?.value ? parseInt(maxPushSetting.value, 10) || 5 : 5;
+  const pushCap = parseRateLimit(maxPushSetting?.value, DEFAULT_MAX_PUSH_SUBSCRIPTIONS);
   const currentSessionId = session.sessionId;
 
   return (

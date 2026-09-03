@@ -53,7 +53,7 @@ export async function GET() {
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
 
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   const userId = session.user.id;

@@ -94,7 +94,13 @@ export const GET = withAuth(async (request, _ctx, session) => {
       getOnTheAirTV(),
       getTopRatedMovies(),
       getTopRatedTV(),
-      getUserRecommendations(session.user.id),
+      // The For You rail is gated at emit time below, so don't pay the
+      // recommendation read (~8 queries) plus the enrichment of its 20 extra
+      // titles for a rail the default (flag-off) configuration then discards.
+      // Keep the array slot so the sourceNames index mapping stays aligned.
+      flags["feature.page.forYou"]
+        ? getUserRecommendations(session.user.id)
+        : Promise.resolve([] as TmdbMedia[]),
     ]);
 
     // A rail whose source rejected degrades to an omitted rail (better than

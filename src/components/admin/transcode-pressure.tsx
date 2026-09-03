@@ -82,7 +82,9 @@ export function TranscodePressure({ data, days }: { data: TranscodeOffenders; da
           {data.topUsers.length > 0 ? (
             <RankList
               rows={data.topUsers.map((u) => ({
-                key: `${u.source}:${u.username}`,
+                // MediaServerUser.id, not username — username is not unique
+                // (same person on two instances, or a departed + re-created row).
+                key: `${u.source}:${u.id}`,
                 label: u.username,
                 source: u.source,
                 count: u.count,
@@ -100,7 +102,15 @@ export function TranscodePressure({ data, days }: { data: TranscodeOffenders; da
           {data.topTitles.length > 0 ? (
             <RankList
               rows={data.topTitles.map((t) => ({
-                key: `${t.tmdbId ?? t.title}`,
+                // Key on the same tuple the SQL groups by — (tmdbId, mediaType),
+                // falling back to the lowercased title when tmdbId is null. TMDB
+                // movie and TV ids are separate namespaces that overlap
+                // numerically, so a movie and a series sharing an integer are two
+                // rows and must not collapse to one React key. The `id:`/`t:`
+                // prefixes keep a numeric-looking title from colliding with an id.
+                key: `${t.mediaType ?? ""}:${
+                  t.tmdbId != null ? `id:${t.tmdbId}` : `t:${t.title.toLowerCase()}`
+                }`,
                 label: t.title,
                 count: t.count,
               }))}

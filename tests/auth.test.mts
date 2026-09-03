@@ -273,7 +273,7 @@ const models = {
         image: (d.image as string | null | undefined) ?? null,
         notificationEmail: (d.notificationEmail as string | null | undefined) ?? null,
         mediaServer: null,
-        plexClientId: null,
+        plexClientId: (d.plexClientId as string | null | undefined) ?? null,
         sessionsRevokedAt: null,
         deactivatedAt: null, // a freshly provisioned account is never disabled
       };
@@ -370,7 +370,9 @@ const models = {
     delete: async (args: { where: { sessionId: string } }) => {
       dbOp("authSession.delete");
       const row = authSessions.get(args.where.sessionId);
-      if (!row) throw new Error("authSession.delete: row not found");
+      // Prisma rejects a delete of a missing row with code P2025 — the shape
+      // revokeSessionById's idempotency check keys on.
+      if (!row) throw Object.assign(new Error("authSession.delete: row not found"), { code: "P2025" });
       authSessions.delete(args.where.sessionId);
       return { ...row };
     },
@@ -953,11 +955,13 @@ test("plex sign-in: unconfigured server fails closed; a friend on THIS server pr
     throw new Error(`unexpected fetch to ${url}`);
   };
 
+  const userUpdatesBefore = dbCalls.filter((c) => c === "user.update").length;
   const friend = await authorizeWithPlex(
-    { plexToken: "plex-tok-friend", rememberMe: "true" },
+    { plexToken: "plex-tok-friend", rememberMe: "true", plexClientId: "abcdef12-3456-7890-abcd-ef1234567890" },
     makeReq(ua),
   );
   assert.ok(friend, "a friend shared on this server must sign in");
+  assert.equal(dbCalls.filter((c) => c === "user.update").length, userUpdatesBefore, "a first sign-in is ONE create — no trailing update on the same row");
   assert.equal(friend.email, "friend@example.com");
   assert.equal(friend.name, "Friend");
   assert.equal(friend.role, "USER");
@@ -967,6 +971,18 @@ test("plex sign-in: unconfigured server fails closed; a friend on THIS server pr
   assert.ok(friendRow, "sign-in must have minted the user row");
   assert.equal(friendRow.plexUserId, "777", "the numeric plex id must be bound as a string sub");
   assert.equal(friendRow.notificationEmail, "friend@example.com");
+  assert.equal(friendRow.plexClientId, "abcdef12-3456-7890-abcd-ef1234567890", "the browser client id is persisted by the create");
+
+  // A RETURNING user costs exactly one UPDATE (email lock-step + client id in
+  // one write), never a second update on the same row.
+  const returningBefore = dbCalls.filter((c) => c === "user.update").length;
+  const again = await authorizeWithPlex(
+    { plexToken: "plex-tok-friend", plexClientId: "fedcba98-7654-3210-dcba-fe0987654321" },
+    makeReq(ua),
+  );
+  assert.ok(again, "the returning friend signs in");
+  assert.equal(dbCalls.filter((c) => c === "user.update").length - returningBefore, 1, "a returning sign-in is exactly ONE user.update");
+  assert.equal(userById(again.id as string).plexClientId, "fedcba98-7654-3210-dcba-fe0987654321", "the newer client id replaces the stored one");
   const cacheRow = [...plexCacheRows.values()][0];
   assert.ok(cacheRow, "the verified token must be cached");
   assert.equal(cacheRow.plexUserId, "777");
@@ -1165,12 +1181,18 @@ test("provider-subject binding: an existing plex sub returns that identity (role
     role: "ISSUE_ADMIN",
     plexUserId: "px-1",
   });
+  const updatesBefore = dbCalls.filter((c) => c === "user.update").length;
   const bySub = asUser(
-    await findOrCreatePlexUser({ plexUserId: "px-1", email: "Rotated@New.email", name: "NewName" }),
+    await findOrCreatePlexUser({ plexUserId: "px-1", email: "Rotated@New.email", name: "NewName", plexClientId: "browser-client-1" }),
   );
   assert.deepEqual(bySub, { id: "u-bound", email: "bound@example.com", name: "NewName", role: "ISSUE_ADMIN" });
   assert.equal(userById("u-bound").notificationEmail, "rotated@new.email", "notification email follows the verified address");
+  assert.equal(userById("u-bound").plexClientId, "browser-client-1", "the browser client id rides the SAME update as the email");
+  assert.equal(dbCalls.filter((c) => c === "user.update").length - updatesBefore, 1, "exactly ONE write for a returning user");
   assert.equal(users.length, 1);
+  // A sign-in without a usable client id must not clear the stored one.
+  await findOrCreatePlexUser({ plexUserId: "px-1", email: "rotated@new.email" });
+  assert.equal(userById("u-bound").plexClientId, "browser-client-1", "an absent client id leaves the stored one alone");
 
   // (b) Email collision with an UNBOUND row (here: an admin) — the
   // account-takeover surface. Must refuse, mutate nothing, and log the rebind.
@@ -1230,9 +1252,11 @@ test("findOrCreatePlexUser create: role USER, USER-preset bitmask, sanitized nam
       email: "  New.User@Example.COM ",
       name: " <Eve> ",
       image: "https://plex.tv/avatar.png",
+      plexClientId: "browser-client-new",
     }),
   );
   const row = userById(created.id);
+  assert.equal(row.plexClientId, "browser-client-new", "the client id lands on the CREATE, not a follow-up update");
   assert.equal(row.email, "new.user@example.com");
   assert.equal(row.notificationEmail, "new.user@example.com");
   assert.equal(row.name, "Eve", "provider display names must be sanitized before storage");
@@ -1708,6 +1732,20 @@ test("mint (credentials): SignInResult + JWT claims, the AuthSession row, an ema
   assert.equal(plexClaims?.mediaServer, "plex");
 });
 
+test("mint (oidc): the UA fingerprint comes from the caller's buildDeviceMeta — there is no headers() fallback to reach for", async () => {
+  // Both OIDC routes spread buildDeviceMeta(req.headers) into the user before
+  // minting, and serializeFingerprint is never empty (an unknown UA still yields
+  // "unknown:unknown:desktop"), so the former `!token.uaFingerprint && provider
+  // === "oidc"` headers() branch was unreachable and was removed. Pin the sole
+  // source: the claim is exactly the DeviceMeta value, for a known AND an
+  // unknown UA. (No request scope exists here — a live headers() read would throw.)
+  seedUser({ id: "u-oidc-fp", email: "oidc-fp@example.com", role: "USER" });
+  const known = await signInAndMintSession({ user: mintableUser("u-oidc-fp", { ua: chromeUa("oidc-fp") }), providerId: "oidc" });
+  assert.equal((await verifySessionJwt(known.token))?.uaFingerprint, "chrome:windows:desktop");
+  const unknown = await signInAndMintSession({ user: mintableUser("u-oidc-fp", { ua: "" }), providerId: "oidc" });
+  assert.equal((await verifySessionJwt(unknown.token))?.uaFingerprint, "unknown:unknown:desktop");
+});
+
 test("mint REFUSES a disabled account — no JWT, no AuthSession row, no AUTH_LOGIN audit", async () => {
   // Account removal disables rather than scrubs (src/lib/account-lifecycle.ts),
   // so the row keeps its email, provider-subject keys and OAuth rows and every
@@ -1889,6 +1927,23 @@ test("revokeSessionById: deletes the row and marks in-memory only AFTER the comm
   failTransactions = false;
   assert.equal(authSessions.has("sess-r3"), true, "the row must survive the failed revoke");
   assert.equal(shouldForceDbCheck("anyone", "sess-r3"), false, "no mark may precede a successful commit");
+
+  // (d) Idempotent under a race: two concurrent revokes of ONE session (a
+  // retried native sign-out, or admin revoke racing the user's own DELETE
+  // /api/sessions) both resolve. The loser's DELETE finds no row (P2025) — the
+  // revocation it asked for is a fact, not a 500 that skips the audit. Any
+  // OTHER failure still propagates (see (c)).
+  seedUser({ id: "u-r4", email: "r4@example.com" });
+  authSessions.set("sess-r4", {
+    sessionId: "sess-r4", userId: "u-r4", deviceType: "desktop", deviceLabel: null,
+    ipAddress: null, expiresAt: new Date(Date.now() + 3_600_000), createdAt: T1, lastSeenAt: T1,
+  });
+  await Promise.all([revokeSessionById("sess-r4"), revokeSessionById("sess-r4")]);
+  assert.equal(authSessions.has("sess-r4"), false);
+  assert.equal(shouldForceDbCheck("anyone", "sess-r4"), true, "both racers leave the session ledger-marked");
+  assert.equal(dbCalls.filter((c) => c === "authSession.findUnique").length, 0, "no find-then-delete: the SELECT took no lock and bought nothing");
+  await revokeSessionById("sess-never-existed");
+  assert.equal(shouldForceDbCheck("anyone", "sess-never-existed"), true, "an already-gone session is still marked — the row is gone either way");
 });
 
 test("revokeAllUserSessions: deletes every row of the user, stamps a fresh cutoff, and marks each session plus the user", async () => {

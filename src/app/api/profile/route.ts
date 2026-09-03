@@ -23,7 +23,7 @@ import { deactivateUserInTx, LastAdminError } from "@/lib/account-lifecycle";
 // an in-app deletion to actually remove the account's data, so a user who wants
 // that must have an admin follow up with a purge — see account-lifecycle.ts.
 export const DELETE = withAuth(async (req, _ctx, session) => {
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
   const id = session.user.id;
 

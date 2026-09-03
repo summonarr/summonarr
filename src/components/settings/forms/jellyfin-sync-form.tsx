@@ -177,10 +177,12 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ jellyfinUrl: url, jellyfinApiKey: apiKey }),
       });
-      const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; jellyfinError?: string };
       saveOk = res.ok && body.ok !== false;
       if (!saveOk) {
-        setSaveErrorMessage(body.error ?? "Failed to save");
+        // 422 + jellyfinError: the route probed the new URL/key, it failed, and the
+        // previous working config was rolled back — nothing durable changed.
+        setSaveErrorMessage(body.jellyfinError ?? body.error ?? "Failed to save");
       }
     } catch {
       setSaveErrorMessage("Failed to save");

@@ -5,13 +5,13 @@ import Link from "next/link";
 import { ChevronDown, ChevronRight, Loader2 } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTime } from "@/lib/relative-time";
-import { bitrateToKbps } from "@/lib/bitrate";
 import { formatDurationSeconds } from "@/lib/format-duration";
 import {
   ActivityCard,
   Avatar,
   MethodPill,
   ProgressTrack,
+  fmtBitrate,
   methodLabel,
   sourceDotColor,
 } from "@/components/admin/activity-ui";
@@ -55,15 +55,6 @@ export interface RecentPlay {
   userThumb: string | null;
 }
 
-// `source` is required: Plex reports kbps, Jellyfin bps, and the row is the
-// only thing that can tell them apart (lib/bitrate.ts).
-function formatBitrate(raw: number | null, source: string | null): string {
-  const kbps = bitrateToKbps(raw, source);
-  if (kbps <= 0) return "—";
-  if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mbps`;
-  return `${Math.round(kbps)} kbps`;
-}
-
 // Unpinned locale/timezone (via "en-US" + no timeZone) is only safe because
 // the sole caller (below, inside DetailRow) never renders during SSR/first
 // paint — DetailRow is gated behind `isExpanded`, false until a post-hydration
@@ -97,7 +88,7 @@ function DetailRow({ play }: { play: RecentPlay }) {
       play.ipAddress ? <IpInfo ip={play.ipAddress} inline /> : "—",
     ],
     ["Container", play.container?.toUpperCase() ?? "—"],
-    ["Bitrate", formatBitrate(play.bitrate, play.source)],
+    ["Bitrate", fmtBitrate(play.bitrate, play.source)],
     ["Video Decision", play.videoDecision ?? "—"],
     ["Audio Decision", play.audioDecision ?? "—"],
     ["Audio Codec", play.audioCodec?.toUpperCase() ?? "—"],

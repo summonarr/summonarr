@@ -249,6 +249,21 @@ test("getHeatmapCellDetail (mode=day): all five queries share one params array a
   assert.equal(shapes.size, 1, "every query binds the IDENTICAL params array — they share one `where`");
 });
 
+// The topTitles statement GROUPs BY ("tmdbId", "mediaType") — TMDB movie and TV
+// ids overlap numerically, so a movie and a series sharing an integer are two
+// rows. The projection MUST carry "mediaType" or the popover cannot key or link
+// them apart (duplicate React keys + a blended stats page). Review 2026-09 f77.
+test("getHeatmapCellDetail: the grouped-by-mediaType topTitles projection SELECTs mediaType", async () => {
+  const queries = await capture(() => getHeatmapCellDetail({ mode: "day", day: "2026-03-15" }));
+  const titles = queries.find((q) => q.sql.includes(`GROUP BY "tmdbId", "mediaType"`));
+  assert.ok(titles, "the topTitles statement groups by (tmdbId, mediaType)");
+  const selectList = titles!.sql.slice(0, titles!.sql.indexOf("FROM"));
+  assert.ok(
+    selectList.includes(`"mediaType"::text AS "mediaType"`),
+    `topTitles must project the mediaType it groups by: ${selectList.trim()}`,
+  );
+});
+
 test("getHeatmapCellDetail (mode=hour): dow/hour/days all bind, and the window is a Date param", async () => {
   const queries = await capture(() =>
     getHeatmapCellDetail({ mode: "hour", dow: 3, hour: 21, days: 90 }),
@@ -372,6 +387,19 @@ test("getTranscodeOffenders: both queries bind the same params — one shared fi
   );
 });
 
+// The users statement groups by "mediaServerUserId" and joins MediaServerUser,
+// whose username is NOT unique (@@unique is [source, serverInstance,
+// sourceUserId]) — the same person on two same-type servers (guardrail 35) or a
+// departed + re-created account (guardrail 28) share (source, username). The
+// row id is the only key the leaderboard can use, so the projection must carry
+// it. Review 2026-09 f79.
+test("getTranscodeOffenders: the users statement projects MediaServerUser.id as the per-row key", async () => {
+  const queries = await capture(() => getTranscodeOffenders({ days: 46, source: "plex" }, 4));
+  const users = queries.find((q) => q.sql.includes(`JOIN "MediaServerUser" m`));
+  assert.ok(users, "the users statement joins MediaServerUser");
+  assert.ok(users!.sql.includes(`m."id" AS id`), `users statement must SELECT m."id" AS id: ${users!.sql}`);
+});
+
 // ── the broad sweep: every remaining aggregate entry point ──────────────────
 
 // getPlayHistoryStats alone fans out to ~40 statements sharing two param arrays
@@ -441,4 +469,39 @@ test("no aggregate inlines a caller-supplied id — server-user and tmdb ids are
 test("the aggregate layer stays silent across every path exercised here (guardrail 7)", () => {
   assert.deepEqual(errors, [], `unexpected console.error: ${errors.join(" | ")}`);
   assert.deepEqual(warns, [], `unexpected console.warn: ${warns.join(" | ")}`);
+});
+
+// The previous-period WHERE used to hand-rebuild the source/mediaType clause
+// that appendPlayHistoryFilter is the documented single owner of. Now it binds
+// its own $1/$2 window and takes the suffix from the helper, so a filtered
+// comparison carries [prevStart, prevEnd, source, mediaType] with $3/$4 — the
+// same shape the current-period statements get from buildStatsFilters.
+test("getPlayHistoryStats: a filtered previous-period comparison binds window THEN filters via the shared helper", async () => {
+  const queries = await capture(() => getPlayHistoryStats({ days: 30, source: "plex", mediaType: "TV" }));
+  const prev = queries.filter((q) => q.sql.includes(`"startedAt" < $2`));
+  assert.equal(prev.length, 1, "exactly one statement is the previous-period comparison");
+  const [q] = prev;
+
+  assert.equal(q!.params.length, 4);
+  assert.ok(q!.params[0] instanceof Date && q!.params[1] instanceof Date, "window bounds are Dates");
+  assert.ok((q!.params[0] as Date).getTime() < (q!.params[1] as Date).getTime(), "prevStart precedes prevEnd");
+  assert.deepEqual(q!.params.slice(2), ["plex", "TV"]);
+  assert.ok(q!.sql.includes(`"source" = $3`), excerpt(q!.sql));
+  assert.ok(q!.sql.includes(`"mediaType"::text = $4`), excerpt(q!.sql));
+  auditAll("getPlayHistoryStats(prev, filtered)", prev);
+});
+
+// getMediaPlayStats' avgCompletion is a mean of per-row playDuration/duration.
+// playDuration is wall-clock playing seconds with no cap at the runtime, so a
+// looped/rewound sitting stores playDuration > duration; each row must be
+// clamped at 100% before it enters the mean or the title reads above 100%.
+test("getMediaPlayStats: the per-row completion is clamped with LEAST before averaging", async () => {
+  const queries = await capture(() => getMediaPlayStats(603, "MOVIE"));
+  const avg = queries.filter((q) => q.sql.includes("avg_pct"));
+  assert.equal(avg.length, 1, "exactly one avgCompletion statement");
+  const sql = avg[0]!.sql.replace(/\s+/g, " ");
+  assert.ok(
+    sql.includes(`LEAST("playDuration"::float / "duration", 1.0) * 100`),
+    `the ratio is clamped at 1.0 before scaling to a percentage: ${excerpt(sql)}`,
+  );
 });

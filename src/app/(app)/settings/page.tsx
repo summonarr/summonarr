@@ -265,18 +265,16 @@ export default async function SettingsPage({
       countUniqueLibraryItems(),
     ]);
 
-    const [plexTokenRow, jellyfinUrlRow, jellyfinKeyRow] = await Promise.all([
-      prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-      prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-      prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
-    ]);
+    // plexAdminToken / jellyfinUrl / jellyfinApiKey are all in ALL_KEYS, so `cfg`
+    // already holds the decrypted values (the prisma extension decrypts findMany
+    // rows exactly as it does findUnique) — no second read needed.
     let currentShares: number | null = null;
     const shareCounts = await Promise.allSettled([
-      cfg.plexServerUrl && plexTokenRow?.value
-        ? getPlexAccounts(cfg.plexServerUrl, plexTokenRow.value).then((a) => a.length)
+      cfg.plexServerUrl && cfg.plexAdminToken
+        ? getPlexAccounts(cfg.plexServerUrl, cfg.plexAdminToken).then((a) => a.length)
         : Promise.resolve(null),
-      jellyfinUrlRow?.value && jellyfinKeyRow?.value
-        ? getJellyfinUserCount(jellyfinUrlRow.value, jellyfinKeyRow.value)
+      cfg.jellyfinUrl && cfg.jellyfinApiKey
+        ? getJellyfinUserCount(cfg.jellyfinUrl, cfg.jellyfinApiKey)
         : Promise.resolve(null),
     ]);
     const plexCount = shareCounts[0].status === "fulfilled" ? shareCounts[0].value : null;
@@ -300,12 +298,20 @@ export default async function SettingsPage({
         where: { key: { in: settingKeys } },
         select: { key: true, value: true },
       }),
-      prisma.auditLog.findMany({
-        where: { target: { in: cronTargets } },
-        orderBy: { createdAt: "desc" },
-        distinct: ["target"],
-        select: { target: true, createdAt: true, details: true },
-      }),
+      // One index-bounded LIMIT-1 read per target (`@@index([target])`), NOT a
+      // single `distinct: ["target"]` query: Prisma's query compiler implements
+      // `distinct` client-side, so that shape transferred EVERY audit row for
+      // these targets (the orchestrator writes one per run, kept for 365 days)
+      // into Node on each System-tab render just to keep one per target.
+      Promise.all(
+        cronTargets.map((target) =>
+          prisma.auditLog.findFirst({
+            where: { target },
+            orderBy: { createdAt: "desc" },
+            select: { target: true, createdAt: true, details: true },
+          }),
+        ),
+      ),
     ]);
     const lastRunMap = new Map<string, { createdAt: Date; details: string | null }>();
     // Bounded run history, Setting-rows only — the audit-log fallback below has
@@ -325,17 +331,23 @@ export default async function SettingsPage({
     // change shipped (e.g. upcoming-cache, trash-sync) — nothing about that
     // breaks, the Setting row simply takes precedence once it exists.
     for (const r of lastRuns) {
+      if (!r) continue;
       lastRunMap.set(r.target, { createdAt: r.createdAt, details: r.details });
     }
     for (const s of lastRunSettings) {
       const target = s.key.replace(/^cron:lastRun:/, "");
       const parsed = parseCronLastRun(s.value);
-      if (parsed) {
-        lastRunMap.set(target, {
-          createdAt: new Date(parsed.at),
-          details: JSON.stringify({ durationMs: parsed.durationMs, ok: parsed.ok }),
-        });
-      }
+      if (!parsed) continue;
+      // parseCronLastRun passes `at` through verbatim (its tests pin that), so a
+      // corrupted / hand-edited row can carry a non-date here. `new Date(garbage)`
+      // is an Invalid Date and `toISOString()` on it throws, taking the whole
+      // System tab down — skip the row and let the audit-log fallback stand.
+      const atMs = Date.parse(parsed.at);
+      if (!Number.isFinite(atMs)) continue;
+      lastRunMap.set(target, {
+        createdAt: new Date(atMs),
+        details: JSON.stringify({ durationMs: parsed.durationMs, ok: parsed.ok }),
+      });
     }
 
     metrics = {

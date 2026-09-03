@@ -121,19 +121,47 @@ export function NotificationStoreProvider({ children }: { children: ReactNode })
   );
 
   const markAllRead = useCallback(async () => {
-    // Optimistic clear, then persist. If the write fails the badge comes back
-    // on the next poll.
+    // Optimistic clear of BOTH the badge and the rows, then persist. The bell
+    // panel paints each row off `readAt`, so zeroing `unread` alone left every
+    // row highlighted as unread for up to POLL_MS after the badge had already
+    // gone (the two disagreed for a minute). Track the exact rows this call
+    // flips so the rollback restores their read state alone — a whole-list
+    // snapshot would repaint rows a concurrent reload already replaced.
+    // (Mirrors notification-list.tsx's markAllRead.) Event handler, not render,
+    // so the timestamp here is fine under guardrail 16.
+    const flipped = new Set(items.filter((n) => !n.readAt).map((n) => n.id));
+    const prevUnread = unread;
     setUnread(0);
-    try {
-      await fetch(withBasePath("/api/notifications"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
+    if (flipped.size > 0) {
+      setItems((cur) => {
+        const at = new Date().toISOString();
+        return cur.map((n) => (flipped.has(n.id) ? { ...n, readAt: at } : n));
       });
-    } catch {
-      // ignore
     }
-  }, []);
+    const res = await fetch(withBasePath("/api/notifications"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    }).catch(() => null);
+    if (!res || !res.ok) {
+      // Roll back on a clean 4xx/5xx too, not just a thrown/network error, so
+      // the panel can't show read locally while the server still has them
+      // unread. The next poll reconciles either way.
+      setUnread(prevUnread);
+      if (flipped.size > 0) {
+        setItems((cur) => cur.map((n) => (flipped.has(n.id) ? { ...n, readAt: null } : n)));
+      }
+      return;
+    }
+    // Reconcile the badge with the server's answer (a notification that landed
+    // between the last poll and this write stays counted).
+    try {
+      const data = (await res.json()) as { unreadCount?: number };
+      if (typeof data.unreadCount === "number") setUnread(data.unreadCount);
+    } catch {
+      // body unreadable — the optimistic 0 stands until the next poll
+    }
+  }, [items, unread]);
 
   const value = useMemo(
     () => ({ items, unread, reload, markAllRead }),

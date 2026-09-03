@@ -220,15 +220,21 @@ const COOKIE = getSessionCookieName();
 
 // ── Setting stub (registry, connections, quota, rate limit, notify config) ──
 const settings = new Map<string, string>();
+// Setting reads, recorded by shape — the instance-resolution query-count pin
+// (review 2026-09 f56) reads these; everything else ignores them.
+const settingReads: Array<{ op: "findUnique"; key: string } | { op: "findMany"; keys: string[] }> = [];
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) => {
+    settingReads.push({ op: "findUnique", key: args.where.key });
     const v = settings.get(args.where.key);
     return v === undefined ? null : { key: args.where.key, value: v };
   },
-  findMany: async (args: { where: { key: { in: string[] } } }) =>
-    args.where.key.in
+  findMany: async (args: { where: { key: { in: string[] } } }) => {
+    settingReads.push({ op: "findMany", keys: [...args.where.key.in] });
+    return args.where.key.in
       .filter((k) => settings.has(k))
-      .map((k) => ({ key: k, value: settings.get(k) })),
+      .map((k) => ({ key: k, value: settings.get(k) }));
+  },
 });
 
 function seedAnimeInstance(opts: { configured?: boolean } = {}): void {
@@ -510,6 +516,7 @@ beforeEach(() => {
   warns.length = 0;
   errors.length = 0;
   settings.clear();
+  settingReads.length = 0;
   createImpls = [];
   requestCounts = [];
   existingRow = null;
@@ -692,6 +699,40 @@ test("auto-routing: an anime-genre TMDB payload (cache-served, zero fetches) rou
   assert.equal(fallback.status, 201, "a server-side routing decision must never block a base requester");
   assert.equal(((await fallback.json()) as Record<string, unknown>).arrInstance, "");
   assert.equal(createdData().arrInstance, "");
+});
+
+test("instance resolution is ONE registry read + ONE batched connection probe per request — auto-routed and explicit alike (no re-read, no per-slug re-probe)", async () => {
+  seedAnimeInstance();
+  seedMovieDetails(603, { genreList: [{ id: 16, name: "Animation" }], originalLanguage: "ja" });
+  const granted = await mintSession({ instanceGrants: { anime: { request: true } } });
+  settingReads.length = 0;
+  const routed = await post(granted.token, requestBody(granted.userId));
+  assert.equal(routed.status, 201);
+  assert.equal(createdData().arrInstance, "anime");
+
+  const registryReads = settingReads.filter((r) => r.op === "findUnique" && r.key === "arrRadarrInstances");
+  assert.equal(registryReads.length, 1, "the registry row is read once per request, not once per helper");
+  const animeProbes = settingReads.filter(
+    (r) => r.op === "findMany" && r.keys.includes("radarrAnimeUrl") && r.keys.includes("radarrAnimeApiKey"),
+  );
+  // One batched probe over every instance's keys (default + 4k + anime); the
+  // auto-routed slug was picked from that configured subset, so the per-slug
+  // isInstanceConfigured re-probe must not run for it.
+  assert.equal(animeProbes.length, 1, `anime connection keys probed ${animeProbes.length}×, expected once`);
+  assert.ok(
+    animeProbes[0].op === "findMany" && animeProbes[0].keys.includes("radarrUrl") && animeProbes[0].keys.includes("radarr4kUrl"),
+    "the one probe is batched over every instance's keys",
+  );
+
+  // The explicit path shares the read: a registered-but-unconfigured slug is still
+  // the "isn't configured" 400 (pinned above) without any per-slug re-probe.
+  settings.clear();
+  seedAnimeInstance({ configured: false });
+  settingReads.length = 0;
+  const explicit = await post(granted.token, requestBody(granted.userId, { arrInstance: "anime" }));
+  assert.equal(explicit.status, 400);
+  assert.equal(settingReads.filter((r) => r.op === "findUnique" && r.key === "arrRadarrInstances").length, 1);
+  assert.equal(settingReads.filter((r) => r.op === "findMany" && r.keys.includes("radarrAnimeUrl")).length, 1);
 });
 
 test("auto-route fallback still enforces the BASE request permission — a request-revoked user can't bypass it by omitting the instance target", async () => {

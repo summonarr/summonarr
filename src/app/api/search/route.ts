@@ -7,7 +7,7 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { checkRateLimit } from "@/lib/rate-limit";
 
 export const GET = withAuth(async (req, _ctx, session) => {
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   if (!checkRateLimit(`search:${session.user.id}`, 30, 60 * 1000)) {

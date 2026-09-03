@@ -16,8 +16,14 @@
 //     rows' age-scaled TTLs) and cross-source dedup of the item list;
 //   - failure isolation: a rejected chain counts failed without aborting the
 //     run — later batches are still issued;
+//   - the transient-vs-notFound split: a fulfilled `{found:false, transient}`
+//     result (bad key 401, OMDB 5xx, TMDB external_ids 5xx — everything
+//     fetchAndCacheOmdbForTmdb CATCHES) counts failed, never notFound, and
+//     writes no sentinel. The cron ledger derives ok from `failed === 0`, so
+//     before this pin a run against a rotated-bad key recorded green;
 //   - the mid-run quota stop: once a batch trips the OMDB lockout, the
-//     post-batch check breaks the loop and later batches are never issued.
+//     post-batch check breaks the loop, later batches are never issued, and
+//     the result carries `quotaExhausted: true` (mirrors mdblist-prewarm).
 //
 // Sibling ownership: tests/omdb.test.mts + tests/omdb-quota.test.mts own the
 // getOmdbRatingsForTmdb chain itself (wire shapes, parsing, sentinel/lockout
@@ -354,6 +360,55 @@ test("a rejected chain counts failed without aborting the run — the next batch
   assert.ok(cacheRows.has("omdb:tmdb:movie:745"));
 });
 
+// ── transient failures are failed, not notFound ─────────────────────────────
+
+test("a rotated-bad OMDB key (401 Invalid API key) counts every item failed — not notFound — writes no sentinel, and does NOT trip the lockout", async () => {
+  tables.plex = Array.from({ length: 4 }, (_, i): Row => ({ tmdbId: 760 + i, mediaType: "MOVIE" }));
+  respond = (url) => {
+    if (url.hostname === "api.themoviedb.org") {
+      const m = url.pathname.match(/^\/3\/movie\/(\d+)\/external_ids$/);
+      if (m) return jsonResponse({ imdb_id: `tt0000${m[1]}` });
+    }
+    if (url.hostname === "www.omdbapi.com") {
+      return jsonResponse({ Response: "False", Error: "Invalid API key!" }, 401);
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  // fetchAndCacheOmdbForTmdb CATCHES the 401 and resolves {found:false,
+  // transient:true}; the prewarm used to count that as notFound with
+  // failed=0, so warm-omdb's `recordCronRun(..., failed === 0)` wrote ok:true
+  // for a run in which not one item was warmed.
+  assert.deepEqual(await prewarmOmdbCache(), { total: 4, fetched: 0, notFound: 0, skipped: 0, failed: 4 });
+  assert.equal(isOmdbQuotaLocked(), false); // invalid-key deliberately never locks (omdb.ts)
+  assert.equal(cacheUpserts.length, 0); // a transient miss is never negative-cached
+  assert.ok(!cacheUpserts.some((r) => r.data.includes("_notFound")));
+  // The per-item cause is omdb.ts's console.error; the prewarm adds no line of its own.
+  assert.ok(errors.some((e) => e.includes("[omdb] fetch failed for tt0000760")));
+});
+
+test("a TMDB external_ids outage (503) is transient too: failed, not notFound, no sentinel — while a genuine null imdb_id in the same run still counts notFound", async () => {
+  tables.plex = [
+    { tmdbId: 770, mediaType: "MOVIE" },
+    { tmdbId: 771, mediaType: "MOVIE" },
+    { tmdbId: 772, mediaType: "MOVIE" },
+  ];
+  respond = (url) => {
+    if (url.pathname === "/3/movie/770/external_ids") return new Response("upstream down", { status: 503 });
+    if (url.pathname === "/3/movie/771/external_ids") return new Response("upstream down", { status: 503 });
+    if (url.pathname === "/3/movie/772/external_ids") return jsonResponse({ imdb_id: null }); // authoritative miss
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  assert.deepEqual(await prewarmOmdbCache(), { total: 3, fetched: 0, notFound: 1, skipped: 0, failed: 2 });
+  assert.equal(isOmdbQuotaLocked(), false);
+  // Only the authoritative miss was negative-cached.
+  assert.deepEqual(cacheUpserts.map((r) => r.key), ["omdb:tmdb:movie:772"]);
+  assert.ok(cacheUpserts[0]!.data.includes("_notFound"));
+  assert.ok(!cacheRows.has("omdb:tmdb:movie:770"));
+  assert.ok(!cacheRows.has("omdb:tmdb:movie:771"));
+});
+
 // ── quota lockout (LAST — module-global state, clock never advances) ────────
 
 test("a quota trip mid-run stops the batch loop: later batches are never issued and unattempted items appear in NO counter", async () => {
@@ -375,11 +430,13 @@ test("a quota trip mid-run stops the batch loop: later batches are never issued 
 
   // Batch 1 (801–805) succeeds; batch 2 (806–810) hits 429s — the first trips
   // the module lockout and every chain in the batch settles found:false
-  // (transient) ⇒ notFound. The post-batch check then breaks the loop, so
-  // batch 3 (811–815) is never even resolved against TMDB. Those five items
-  // land in NO counter — total ≠ fetched+notFound+skipped+failed is the
+  // (transient) ⇒ failed (the run WAS cut short; counting them notFound is
+  // what let the ledger record a quota-truncated run green). The post-batch
+  // check then breaks the loop, so batch 3 (811–815) is never even resolved
+  // against TMDB. Those five items land in NO counter — total ≠
+  // fetched+notFound+skipped+failed plus `quotaExhausted: true` is the
   // documented signature of an early stop.
-  assert.deepEqual(await prewarmOmdbCache(), { total: 15, fetched: 5, notFound: 5, skipped: 0, failed: 0 });
+  assert.deepEqual(await prewarmOmdbCache(), { total: 15, fetched: 5, notFound: 0, skipped: 0, failed: 5, quotaExhausted: true });
   assert.equal(isOmdbQuotaLocked(), true);
   for (let id = 811; id <= 815; id++) {
     assert.ok(
@@ -393,7 +450,7 @@ test("a quota trip mid-run stops the batch loop: later batches are never issued 
 test("already locked at start: aborts before the key read and the library scan (runs LAST — rides the lockout the previous test tripped)", async () => {
   assert.equal(isOmdbQuotaLocked(), true); // the mocked clock never advances past the trip
   tables.plex = [{ tmdbId: 900, mediaType: "MOVIE" }];
-  assert.deepEqual(await prewarmOmdbCache(), ZERO);
+  assert.deepEqual(await prewarmOmdbCache(), { ...ZERO, quotaExhausted: true });
   assert.deepEqual(settingReads, []); // the lockout check precedes the key read
   assert.equal(libCalls.length, 0);
   assert.equal(fetchCalls.length, 0);

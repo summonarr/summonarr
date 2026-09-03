@@ -3,6 +3,7 @@ import { isIP } from "node:net";
 import { prisma } from "./prisma";
 import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
+import { unwrapEmbeddedV4 } from "./ssrf";
 
 const IPINFO_BASE = "https://ipinfo.io";
 const IPINFO_TIMEOUT_MS = 8_000;
@@ -51,6 +52,15 @@ function isPrivateOrReserved(ip: string): boolean {
     const lower = ip.toLowerCase();
     if (lower === "::1" || lower === "::") return true;
     if (lower.startsWith("fe80:") || lower.startsWith("fc") || lower.startsWith("fd")) return true;
+    // An IPv4 address carried inside IPv6 (`::ffff:192.168.1.10`, the hex-pair
+    // `::ffff:c0a8:10a`, NAT64/SIIT/IPv4-compatible) is classified by the IPv4
+    // table on its payload. Jellyfin on a dual-stack host reports RemoteEndPoint
+    // in the mapped form, and without this unwrap every such LAN client fell
+    // through to a billed ipinfo call that answered bogon:true and, on the
+    // 24h notFound TTL, was re-billed daily. The unwrap is ssrf.ts's, not a
+    // local copy, so the two classifiers cannot drift.
+    const embedded = unwrapEmbeddedV4(ip);
+    if (embedded !== null) return isPrivateOrReserved(embedded);
     return false;
   }
   const parts = ip.split(".").map(Number);

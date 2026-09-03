@@ -110,7 +110,10 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
   useLiveEvents((event) => {
     if (event.type === "request:new" || event.type === "request:updated" || event.type === "request:deleted") {
       if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-      refreshTimerRef.current = setTimeout(() => router.refresh(), 500);
+      refreshTimerRef.current = setTimeout(() => {
+        refreshTimerRef.current = null;
+        router.refresh();
+      }, 500);
     }
   });
   useEffect(() => () => {
@@ -197,6 +200,14 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
       setShowBatchNote(null);
       setBatchNote("");
       setConfirmingApprove(false);
+      // The batch route emits request:updated per id BEFORE it responds, so by
+      // the time res.ok resolves the SSE handler above has already armed a 500ms
+      // refresh. Cancel it so the two collapse into this one immediate refresh —
+      // which stays as the fallback for when the SSE singleton is closed.
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
       router.refresh();
     } catch {
       setBatchError("Network error — please try again");

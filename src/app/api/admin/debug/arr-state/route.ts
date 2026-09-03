@@ -34,25 +34,20 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     voteAverage: 0,
   };
 
-  // Fetch both the HD and 4K wanted-cache rows so the diagnostic can explain a
-  // missing badge on either instance. The 4K row is only meaningful when a 4K
-  // instance is configured (checked below), but the cache lookup is harmless.
   const service = type === "movie" ? "radarr" : "sonarr";
-  const [wantedRow, wanted4kRow, has4kInstance] = await Promise.all([
-    type === "movie"
-      ? prisma.radarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: "" } } })
-      : prisma.sonarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: "" } } }),
-    type === "movie"
-      ? prisma.radarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: "4k" } } })
-      : prisma.sonarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: "4k" } } }),
-    isArrConfigured(service, "4k"),
-  ]);
 
   // Generalized per-instance view: iterate every configured instance (default
   // first, plus legacy 4k and any named instances) so the diagnostic can explain
-  // a missing badge on ANY instance, not just HD/4K. Additive — the legacy
-  // top-level `cacheTable` / `fourK` fields above stay populated for the debug UI.
-  const instanceConfigs = await getArrInstances(service);
+  // a missing badge on ANY instance, not just HD/4K. The legacy top-level
+  // `cacheTable` / `fourK` / `liveArrApi` fields are DERIVED from this list below
+  // (getArrInstances always yields the default first and includes "4k" whenever
+  // it is configured) — re-reading the rows / re-running the live checks for
+  // those two slugs doubled the DB reads and the 30s-timeout Arr round-trips on
+  // a route meant to be hit whenever a badge looks wrong.
+  const [instanceConfigs, has4kInstance] = await Promise.all([
+    getArrInstances(service),
+    isArrConfigured(service, "4k"),
+  ]);
   const instances = await mapLimit(instanceConfigs, 4, async (inst) => {
     const cacheRow = type === "movie"
       ? await prisma.radarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: inst.slug } } })
@@ -64,11 +59,25 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
         : await isSeriesWantedInSonarr(tmdbId, inst.slug);
       liveArrApi = { result };
     } catch (err) {
+      // Don't leak raw Arr error detail (may carry the configured server URL /
+      // upstream body) to the client — log it server-side, return a generic flag.
       console.error(`[arr-state] live Arr check failed (instance=${inst.slug}):`, err instanceof Error ? err.message : err);
       liveArrApi = { result: false, error: "live Arr check failed" };
     }
     return { slug: inst.slug, name: inst.name, cacheRow, hasEntry: !!cacheRow, liveArrApi };
   });
+
+  // Legacy HD/4K sections, derived from the per-instance results (additive: the
+  // debug UI still reads them). `has4kInstance` is its own predicate on purpose —
+  // a registry-listed-but-unconfigured "4k" entry still appears in `instances`,
+  // so mere presence there must not report the instance as configured.
+  const defaultInst = instances.find((i) => i.slug === "");
+  const fourKInst = instances.find((i) => i.slug === "4k");
+  const wantedRow = defaultInst?.cacheRow ?? null;
+  const wanted4kRow = fourKInst?.cacheRow ?? null;
+  const liveCheck: { result: boolean; error?: string } = defaultInst?.liveArrApi ?? { result: false };
+  const liveCheck4k: { result: boolean; error?: string } | null =
+    has4kInstance ? (fourKInst?.liveArrApi ?? null) : null;
 
   const mediaRequests = await prisma.mediaRequest.findMany({
     where: { tmdbId, mediaType: dbType },
@@ -79,37 +88,10 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   const enriched = await attachArrPending([stub]);
   const arrPendingResult = enriched[0]?.arrPending ?? false;
 
-  let liveCheck: { result: boolean; error?: string };
-  try {
-    const result = type === "movie"
-      ? await isMovieWantedInRadarr(tmdbId)
-      : await isSeriesWantedInSonarr(tmdbId);
-    liveCheck = { result };
-  } catch (err) {
-    // Don't leak raw Arr error detail (may carry the configured server URL /
-    // upstream body) to the client — log it server-side, return a generic flag.
-    console.error("[arr-state] live Arr check failed:", err instanceof Error ? err.message : err);
-    liveCheck = { result: false, error: "live Arr check failed" };
-  }
-
-  // Same live check against the 4K instance, when one is configured. Lets the
-  // diagnostic explain a missing 4K badge without a second endpoint.
-  let liveCheck4k: { result: boolean; error?: string } | null = null;
-  if (has4kInstance) {
-    try {
-      const result = type === "movie"
-        ? await isMovieWantedInRadarr(tmdbId, "4k")
-        : await isSeriesWantedInSonarr(tmdbId, "4k");
-      liveCheck4k = { result };
-    } catch (err) {
-      console.error("[arr-state] live Arr 4K check failed:", err instanceof Error ? err.message : err);
-      liveCheck4k = { result: false, error: "live Arr 4K check failed" };
-    }
-  }
-
   let tvdbInfo: {
     tvdbId: number | null;
     cachedMapping?: { tmdbId: number | null } | null;
+    error?: string;
   } | null = null;
   if (type === "tv") {
     try {
@@ -133,7 +115,10 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
       // Don't surface raw Arr error detail (configured server URL / upstream
       // body) to the client — log server-side, return a generic flag.
       console.error("[arr-state] sonarr series lookup failed:", err instanceof Error ? err.message : err);
-      tvdbInfo = { tvdbId: null, cachedMapping: { tmdbId: null }, error: "sonarr lookup failed" } as typeof tvdbInfo;
+      // `cachedMapping` must be null here, not `{ tmdbId: null }` — that shape is
+      // exactly what a genuine NEGATIVE tvdb→tmdb cache entry looks like, and
+      // nothing was read (the lookup never produced a tvdbId to key on).
+      tvdbInfo = { tvdbId: null, cachedMapping: null, error: "sonarr lookup failed" };
     }
   }
 

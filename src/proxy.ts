@@ -13,10 +13,7 @@ import {
   hasNativeClientHeader,
   NATIVE_CLIENT_HEADER,
 } from "@/lib/mobile-auth";
-import {
-  extractUaFingerprint,
-  serializeFingerprint,
-} from "@/lib/ua-fingerprint";
+import { matchesStoredFingerprint } from "@/lib/ua-fingerprint";
 import {
   API_VERSION,
   parseNativeClient,
@@ -238,26 +235,28 @@ export async function proxy(request: NextRequest) {
     // for bearer sessions: a native client holds its JWT in app-secure storage
     // and presents it explicitly, so the device-class binding that hardens an
     // ambiently-replayed browser cookie doesn't apply. Browser cookie sessions
-    // get the full check.
-    const storedFp = refreshResult.claims.uaFingerprint;
-    if (!bearerToken && storedFp && !storedFp.startsWith("machine:")) {
-      const currentFp = serializeFingerprint(
-        extractUaFingerprint(request.headers.get("user-agent") ?? ""),
-      );
-      if (currentFp !== storedFp) {
-        // Same fork as the !isLoggedIn branch above: through fetch() a 302
-        // resolves as 200-with-HTML (and a followed POST is downgraded to GET,
-        // silently dropping the write), so API callers need a machine-readable
-        // 401. Both arms clear the session cookies.
-        if (pathname.startsWith("/api/")) {
-          const res = NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-          for (const cookie of serializeClearedSessionCookies()) {
-            res.headers.append("Set-Cookie", cookie);
-          }
-          return res;
+    // get the full check. The machine:/no-fingerprint skips live inside
+    // matchesStoredFingerprint (shared with api-auth/auth/cron-auth) so the
+    // skip rules have exactly one definition; only the bearer skip is local.
+    if (
+      !bearerToken &&
+      !matchesStoredFingerprint(
+        refreshResult.claims.uaFingerprint,
+        request.headers.get("user-agent"),
+      )
+    ) {
+      // Same fork as the !isLoggedIn branch above: through fetch() a 302
+      // resolves as 200-with-HTML (and a followed POST is downgraded to GET,
+      // silently dropping the write), so API callers need a machine-readable
+      // 401. Both arms clear the session cookies.
+      if (pathname.startsWith("/api/")) {
+        const res = NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        for (const cookie of serializeClearedSessionCookies()) {
+          res.headers.append("Set-Cookie", cookie);
         }
-        return clearedCookieResponse(buildLoginRedirect(request));
+        return res;
       }
+      return clearedCookieResponse(buildLoginRedirect(request));
     }
 
     // Defense-in-depth backstop for the admin API surface — fails closed only if a

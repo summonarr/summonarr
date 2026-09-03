@@ -12,9 +12,16 @@
 //   - the admin bypass is an authz decision keyed off the ADMIN permission bit
 //     (hasPermission), not the role string, and it short-circuits BEFORE the
 //     status read; a signed-in non-admin is NOT exempt;
-//   - the bypass rides authActive(), so a garbage cookie, an expired JWT, and
-//     an admin cookie replayed under a different User-Agent (UA-fingerprint
-//     mismatch) all degrade to "anonymous" — blocked, never thrown.
+//   - the PRIMARY path takes the wrapper's already-DB-checked, bearer-first
+//     session as an argument (withAuth/withAdmin/withIssueAdmin/requireAuth),
+//     so a native ADMIN holding ONLY a bearer JWT — no cookie jar, guardrail
+//     6b — keeps the bypass. The no-argument FALLBACK rides authActive(), which
+//     is cookie-only, so on that path a garbage cookie, an expired JWT, and an
+//     admin cookie replayed under a different User-Agent (UA-fingerprint
+//     mismatch) all degrade to "anonymous" — blocked, never thrown. The
+//     bearer test below is the regression pin: before the argument existed,
+//     every route discarded its wrapper session and re-resolved cookie-only,
+//     so a bearer admin got 503 on every mutation while a browser admin passed.
 //
 // Harness notes — maintenanceGuard's session read is the DB-checked
 // authActive(), which reaches cookies()/headers() from next/headers, and those
@@ -277,4 +284,84 @@ test("guard: a Settings read failure fails closed — anonymous requests get 503
   const res = await withRequestContext({}, () => maintenanceGuard());
   assert.equal(res?.status, 503);
   assert.deepEqual(await res!.json(), { error: "Service unavailable", message: "Under maintenance" });
+});
+
+// ── maintenanceGuard(session) — the wrapper-session passthrough ─────────────
+//
+// These run with EMPTY cookies on purpose: the only credential is the session
+// object the route wrapper resolved (from a bearer token, in the native case).
+// If the guard ever went back to re-resolving via cookie-only authActive(),
+// the admin case below would read no cookie → anonymous → 503 and fail.
+
+function adminSession(overrides: Partial<{ role: string; permissions: bigint }> = {}) {
+  return {
+    user: {
+      id: "user-1",
+      role: overrides.role ?? "ADMIN",
+      permissions: overrides.permissions ?? Permission.ADMIN,
+      provider: "credentials",
+    },
+    sessionId: "11111111-1111-4111-8111-111111111111",
+  };
+}
+
+test("guard(session): a bearer-only ADMIN session (no cookie at all) bypasses and skips the status read", async () => {
+  settings.set("maintenanceEnabled", "true");
+  const res = await withRequestContext(
+    { userAgent: "Summonarr-iOS/1.0" }, // no cookies: a native client has no cookie jar
+    () => maintenanceGuard(adminSession()),
+  );
+  assert.equal(res, null, "the wrapper's bearer-resolved ADMIN session must bypass maintenance");
+  assert.equal(findManyCalls.length, 0, "the admin bypass must not read maintenance settings at all");
+});
+
+test("guard(session): the passed session is authoritative — the cookie is NOT consulted", async () => {
+  // A cookie carrying an ADMIN JWT sits on the request, but the wrapper resolved
+  // a USER session (bearer-first, guardrail 6b). The guard must honour the
+  // wrapper's answer, not re-read the cookie and let it ride out maintenance.
+  settings.set("maintenanceEnabled", "true");
+  const adminJwt = await mintSessionJwt({ role: "ADMIN" });
+  const res = await withRequestContext(
+    { cookies: { [COOKIE]: adminJwt }, userAgent: UA_CHROME },
+    () => maintenanceGuard(adminSession({ role: "USER", permissions: 0n })),
+  );
+  assert.equal(res?.status, 503);
+});
+
+test("guard(session): a passed NON-admin session is still blocked; the ADMIN permission bit (not the role) decides", async () => {
+  settings.set("maintenanceEnabled", "true");
+  const user = await withRequestContext({}, () => maintenanceGuard(adminSession({ role: "USER", permissions: 0n })));
+  assert.equal(user?.status, 503);
+  assert.deepEqual(await user!.json(), { error: "Service unavailable", message: "Under maintenance" });
+
+  // Role string "USER" but granted the ADMIN superbit → passes hasPermission.
+  const bitOnly = await withRequestContext({}, () => maintenanceGuard(adminSession({ role: "USER", permissions: Permission.ADMIN })));
+  assert.equal(bitOnly, null);
+
+  // Role string "ADMIN" but WITHOUT the bit → the role string alone is not enough.
+  const roleOnly = await withRequestContext({}, () => maintenanceGuard(adminSession({ role: "ADMIN", permissions: 0n })));
+  assert.equal(roleOnly?.status, 503);
+});
+
+test("guard(session): an explicit null is anonymous — honoured as-is, never re-resolved from the cookie", async () => {
+  settings.set("maintenanceEnabled", "true");
+  const adminJwt = await mintSessionJwt({ role: "ADMIN" });
+  const res = await withRequestContext(
+    { cookies: { [COOKIE]: adminJwt }, userAgent: UA_CHROME },
+    () => maintenanceGuard(null),
+  );
+  assert.equal(res?.status, 503, "null means the caller already decided there is no session");
+  // Maintenance off → null for the anonymous caller, same as the everyday no-op.
+  settings.set("maintenanceEnabled", "false");
+  assert.equal(await withRequestContext({}, () => maintenanceGuard(null)), null);
+});
+
+test("guard(session): a passed session is not affected by the fingerprint check — that already ran in the wrapper", async () => {
+  // The cookie-only fallback drops the bypass under a UA mismatch (pinned
+  // above). A passed session was fingerprint-checked by withAuth/requireAuth
+  // already, and bearer sessions deliberately carry no UA binding (guardrail
+  // 6b), so the guard must not re-run it and must not need a User-Agent.
+  settings.set("maintenanceEnabled", "true");
+  const res = await withRequestContext({}, () => maintenanceGuard(adminSession()));
+  assert.equal(res, null);
 });

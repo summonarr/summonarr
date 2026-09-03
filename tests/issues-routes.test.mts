@@ -813,6 +813,7 @@ test("releases POST is withIssueAdmin-gated and refuses a RESOLVED issue with 40
   assert.equal(resolved.status, 409);
   assert.deepEqual(await resolved.json(), { error: "Issue is resolved — reopen it before grabbing a release" });
   assert.equal(opsOf("issueGrab.create").length, 0);
+  assert.deepEqual(sseEvents, [], "a refused grab announces nothing — the row never changed");
 });
 
 test("releases POST is instance-slug-scoped (guardrail 32): an invalid slug → 400, a valid-but-unconfigured named instance → 422", async () => {
@@ -855,6 +856,47 @@ test("releases POST (happy grab): the resolved instance slug flows into IssueGra
   assert.deepEqual(claim.where.status, { not: "RESOLVED" });
   assert.equal(claim.data.status, "IN_PROGRESS");
   assert.equal(opsOf("auditLog.create").length, 1, "the grab is audited");
+
+  // The OPEN→IN_PROGRESS flip is broadcast like every sibling transition (refetch,
+  // claim, message auto-promote): without it other admins' lists and the reporter's
+  // own /issues page kept showing OPEN until they navigated.
+  assert.deepEqual(sseEvents.map((e) => e.type), ["issue:updated"]);
+  assert.equal((sseEvents[0] as { status: string }).status, "IN_PROGRESS");
+  assert.equal((sseEvents[0] as { userId: string }).userId, "r", "the SSE targets the reporter");
+});
+
+test("releases POST: an already-IN_PROGRESS issue is not re-announced, and a grab that fails AFTER the claim still announces the flip", async () => {
+  settings.set("radarr4kUrl", "http://radarr-4k.example.com:7878");
+  settings.set("radarr4kApiKey", "4k-api-key");
+  fetchImpl = (url: URL) => {
+    if (url.pathname.startsWith("/api/v3/movie")) return jsonResponse([{ id: 42, tmdbId: 603 }]);
+    if (url.pathname === "/api/v3/release") return jsonResponse({ ok: true });
+    throw new Error(`unexpected grab fetch: ${url.href}`);
+  };
+  const admin = await mintSession({ role: "ADMIN" });
+
+  // Unchanged status ⇒ no broadcast (the CAS still runs, but nothing to tell anyone).
+  issueRow = { id: "issue-r4", status: "IN_PROGRESS", reportedBy: "r", title: "The Matrix", mediaType: "MOVIE", tmdbId: 603, tvdbId: null, scope: "FULL", seasonNumber: null, episodeNumber: null };
+  const same = await postRelease(admin.token, "issue-r4", { guid: "release-guid-123", indexerId: 7, instance: "4k" });
+  assert.equal(same.status, 200);
+  assert.equal(opsOf("issue.updateMany").length, 1, "the CAS still runs");
+  assert.equal(sseEvents.length, 0, "an unchanged IN_PROGRESS status is not re-broadcast");
+
+  // A 502 grab failure leaves the row IN_PROGRESS by design (an admin attempted it),
+  // so the SSE must fire BEFORE the grab — the early return cannot swallow it.
+  ops.length = 0;
+  sseEvents.length = 0;
+  fetchImpl = (url: URL) => {
+    if (url.pathname.startsWith("/api/v3/movie")) return jsonResponse([{ id: 42, tmdbId: 603 }]);
+    if (url.pathname === "/api/v3/release") return new Response("boom", { status: 500 });
+    throw new Error(`unexpected grab fetch: ${url.href}`);
+  };
+  issueRow = { id: "issue-r5", status: "OPEN", reportedBy: "r", title: "The Matrix", mediaType: "MOVIE", tmdbId: 603, tvdbId: null, scope: "FULL", seasonNumber: null, episodeNumber: null };
+  const failed = await postRelease(admin.token, "issue-r5", { guid: "release-guid-123", indexerId: 7, instance: "4k" });
+  assert.equal(failed.status, 502);
+  assert.equal(opsOf("issueGrab.create").length, 0, "no grab row for a failed grab");
+  assert.deepEqual(sseEvents.map((e) => e.type), ["issue:updated"], "the flip the row still holds is announced");
+  assert.equal((sseEvents[0] as { status: string }).status, "IN_PROGRESS");
 });
 
 // ── refetch instance routing (guardrail 32) ────────────────────────────────

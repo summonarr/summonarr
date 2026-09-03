@@ -105,10 +105,18 @@ export async function runDownloadCheck(target: DownloadCheckTarget): Promise<voi
   // this job already notified about.
   // updateMany, not update: an admin can delete the request during the awaited
   // Radarr/Sonarr queue polls above, and a bare update would throw P2025 on a
-  // normal race (same convention as this module's callers). count === 0 means
-  // the row is gone — abort so we don't DM the requester about a download that
-  // no longer exists (the bare update's P2025 throw used to abort here for free).
-  const cleared = await prisma.mediaRequest.updateMany({ where: { id: requestId }, data: { pendingNotifyAt: null } });
+  // normal race (same convention as this module's callers).
+  // The `pendingNotifyAt: { not: null }` predicate makes this clear a CONSUME
+  // (compare-and-swap), not a blind write: two jobs can overlap for one row —
+  // an approve whose ARR push failed and rolled back, then a re-approve inside
+  // the 90s window, or a job racing the orchestrator's backstop sweep — and an
+  // id-only predicate let every one of them read count === 1 and DM in turn.
+  // count === 0 therefore means the row is gone OR the backstop was already
+  // consumed by an earlier job / the sweep; either way abort without a DM.
+  const cleared = await prisma.mediaRequest.updateMany({
+    where: { id: requestId, pendingNotifyAt: { not: null } },
+    data: { pendingNotifyAt: null },
+  });
   if (cleared.count === 0) return;
   // Guardrail 33: a disabled account keeps a live Discord link. CONSUME the backstop
   // rather than defer it (pendingNotifyAt cleared above, DM dropped) so re-enabling

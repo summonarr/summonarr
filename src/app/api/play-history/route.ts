@@ -174,6 +174,9 @@ async function ungroupedQuery(
       segmentCount: 1,
       chainId: it.referenceId ?? it.id,
       totalPlayDuration: it.playDuration,
+      totalPausedDuration: it.pausedDuration,
+      firstStartedAt: it.startedAt,
+      lastStoppedAt: it.stoppedAt,
     };
   });
 

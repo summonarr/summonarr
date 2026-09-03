@@ -58,6 +58,12 @@ export function ActivityFilterBar() {
     return pathname === page.href || pathname.startsWith(page.href + "/");
   }
 
+  // The activity and stats pages are `force-dynamic` and read searchParams, and
+  // Next's router-cache `staleTimes.dynamic` defaults to 0, so a `router.push`
+  // to the new URL already fetches a fresh RSC render with the new params. A
+  // trailing refresh here re-rendered the heaviest admin page a second time
+  // per click (and refetched the shared layouts on top) — don't re-add it.
+  // The same holds for the Overview/History tab buttons below.
   const setParam = useCallback(
     (key: string, value: string) => {
       const params = new URLSearchParams(searchParams.toString());
@@ -68,7 +74,6 @@ export function ActivityFilterBar() {
       }
       const url = `${pathname}?${params.toString()}`;
       router.push(url);
-      router.refresh();
     },
     [router, pathname, searchParams],
   );
@@ -109,10 +114,7 @@ export function ActivityFilterBar() {
             return (
               <button
                 key={page.label}
-                onClick={() => {
-                  router.push(`/admin/activity?tab=${page.tab}`);
-                  router.refresh();
-                }}
+                onClick={() => router.push(`/admin/activity?tab=${page.tab}`)}
                 className={`px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors ${
                   active
                     ? "bg-zinc-800 text-white"
@@ -127,10 +129,7 @@ export function ActivityFilterBar() {
             return (
               <button
                 key={page.label}
-                onClick={() => {
-                  router.push("/admin/activity");
-                  router.refresh();
-                }}
+                onClick={() => router.push("/admin/activity")}
                 className={`px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors ${
                   active
                     ? "bg-zinc-800 text-white"

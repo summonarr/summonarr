@@ -879,6 +879,23 @@ test("export: is rate-limited to 3 per hour per admin", async () => {
   assert.equal(opsOf("auditLog.create").length, 3, "a throttled export must not write a paper-trail row");
 });
 
+test("export: a rejected (400) request does NOT consume a rate-limit slot", async () => {
+  // The limiter records a hit on every call under the limit. Checking it before
+  // parameter validation let three malformed-date 400s — which export nothing —
+  // burn the whole 3/hour budget, so the corrected fourth request got 429 and
+  // the admin was locked out of exporting for an hour.
+  const t = await mintSession();
+  for (let i = 0; i < 5; i++) {
+    const r = await exportAudit(t, "?dateTo=nonsense");
+    assert.equal(r.status, 400, `malformed request ${i + 1} should be a 400, not ${r.status}`);
+  }
+  assert.equal(opsOf("auditLog.create").length, 0, "no paper-trail row for a rejected export");
+  const ok = await exportAudit(t);
+  assert.notEqual(ok.status, 429, "invalid requests must not count against the export budget");
+  await readAll(ok);
+  assert.equal(opsOf("auditLog.create").length, 1, "the corrected export should proceed exactly once");
+});
+
 test("export: the filters actually applied are recorded on the audit row", async () => {
   const t = await mintSession();
   const res = await exportAudit(t, "?format=json&action=AUTH_LOGIN&hideCron=1&user=alice");

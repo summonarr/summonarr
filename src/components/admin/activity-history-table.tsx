@@ -42,13 +42,14 @@ import { DeleteConfirm } from "./activity-history/delete-confirm";
 export function ActivityHistoryTable({
   source: globalSource,
   mediaType: globalMediaType,
-  days,
   startDateIso,
   initialFromDate,
   initialToDate,
 }: {
   source?: string;
   mediaType?: string;
+  // Not read here: the parent remounts the table via `key="ht-<days>-…"`
+  // (admin/activity/page.tsx), so a period change starts from fresh state.
   days: number;
   // Period lower bound, computed once on the server so client refetches don't
   // drift off a fresh client clock (guardrail 16).
@@ -106,25 +107,6 @@ export function ActivityHistoryTable({
   }, [search]);
 
   useEffect(() => {
-    setPage(1);
-  }, [
-    debouncedSearch,
-    watched,
-    method,
-    platform,
-    userFilter,
-    fromDate,
-    toDate,
-    sortBy,
-    sortDir,
-    limit,
-    grouped,
-    globalSource,
-    globalMediaType,
-    days,
-  ]);
-
-  useEffect(() => {
     // AbortController guards against unmount during the in-flight fetch + against
     // a backend 4xx returning `{ error: "..." }` which (untyped) would crash the
     // downstream .map/.filter in the dropdown render. Typed parsers narrow the
@@ -180,14 +162,42 @@ export function ActivityHistoryTable({
     ],
   );
 
+  // Identity of the last filter set the fetch effect acted on. A filter change
+  // resets the page to 1 — but that decision is made INSIDE the fetch effect,
+  // not in a separate `useEffect(() => setPage(1), [filters])`. With two
+  // effects, both run in the same commit (declaration order), so the fetch
+  // effect saw the NEW filters with the OLD page and issued
+  // `GET /api/play-history?…&page=<old>`; the re-render then aborted it
+  // client-side and sent page 1. The abort never reaches the server, which
+  // had already started the grouped window-function query over the whole
+  // filtered set — one full history query wasted per filter change from any
+  // page other than 1. Folding the reset into the fetch decision makes it
+  // exactly one request.
+  const lastFilterKeyRef = useRef<string | null>(null);
+
   useEffect(() => {
+    const params = buildFilterParams();
+    // `limit` is part of the key (a page-size change re-pages from 1); `page`
+    // and `reloadToken` deliberately are not — a delete refetches the CURRENT
+    // page.
+    const filterKey = `${params.toString()}|${limit}`;
+    if (
+      lastFilterKeyRef.current !== null &&
+      lastFilterKeyRef.current !== filterKey &&
+      page !== 1
+    ) {
+      lastFilterKeyRef.current = filterKey;
+      setPage(1);
+      return;
+    }
+    lastFilterKeyRef.current = filterKey;
+
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
     setLoading(true);
     setError(null);
-    const params = buildFilterParams();
     params.set("page", String(page));
     params.set("limit", String(limit));
 
