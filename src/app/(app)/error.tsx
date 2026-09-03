@@ -4,10 +4,10 @@ import { useEffect } from "react";
 
 export default function AppError({
   error,
-  unstable_retry,
+  retry,
 }: {
   error: Error & { digest?: string };
-  unstable_retry: () => void;
+  retry: () => void;
 }) {
   useEffect(() => {
     console.error("[app/error]", error);
@@ -20,7 +20,7 @@ export default function AppError({
         An unexpected error occurred. Try refreshing the page.
       </p>
       <button
-        onClick={() => unstable_retry()}
+        onClick={() => retry()}
         className="px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
       >
         Try again
