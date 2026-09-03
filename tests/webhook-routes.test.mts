@@ -21,8 +21,8 @@
 //    manual-interaction one-shot key, IssueGrab claiming, and the Download
 //    verify call all scope to the matched instance (a "4k" webhook never flips
 //    a default-instance request). Equal-secret misconfig resolves to default.
-//  - Event handling: Download flips APPROVED→AVAILABLE (both availableAt
-//    branches, pendingNotifyAt cleared, PENDING/DECLINED untouched) under the
+//  - Event handling: Download flips APPROVED→AVAILABLE (one UPDATE covers both
+//    availableAt branches, pendingNotifyAt cleared, PENDING/DECLINED untouched) under the
 //    per-service advisory lock; the payload's id is verified against the arr's
 //    own API first (tri-state: false → flip refused, true/null → proceed);
 //    Test short-circuits before the replay digest; Grab/unknown events are
@@ -684,7 +684,7 @@ test("radarr: the same body delivered to two instances is NOT a replay — the d
 
 // ── Download event handling ─────────────────────────────────────────────────
 
-test("radarr Download: APPROVED→AVAILABLE on both availableAt branches; PENDING/DECLINED untouched; deferred work scheduled", async () => {
+test("radarr Download: one UPDATE flips APPROVED→AVAILABLE on both availableAt branches; PENDING/DECLINED untouched; deferred work scheduled", async () => {
   const fresh = seedRequest({ tmdbId: 603, mediaType: "MOVIE" }); // availableAt null
   const rePush = seedRequest({ tmdbId: 603, mediaType: "MOVIE", availableAt: new Date(1), pendingNotifyAt: new Date(2) });
   const pending = seedRequest({ tmdbId: 603, mediaType: "MOVIE", status: "PENDING" });
@@ -710,13 +710,14 @@ test("radarr Download: APPROVED→AVAILABLE on both availableAt branches; PENDIN
 
   // Instance-scoped where-shapes, under the Radarr advisory lock (1001, 1).
   assert.ok(executeRawCalls.some((sql) => sql.includes("pg_advisory_xact_lock(1001, 1)")));
+  // One UPDATE flips every APPROVED row regardless of availableAt — the fresh
+  // and re-push rows above both flipping (marked: 2) is the behavioural pin.
   const wheres = requestUpdateManyCalls.map((c) => c.where);
+  assert.equal(wheres.length, 1, "a Download issues exactly one MediaRequest UPDATE");
   assert.deepEqual(wheres[0], {
-    tmdbId: 603, mediaType: "MOVIE", arrInstance: "", status: "APPROVED", availableAt: null,
+    tmdbId: 603, mediaType: "MOVIE", arrInstance: "", status: "APPROVED",
   });
-  assert.deepEqual(wheres[1], {
-    tmdbId: 603, mediaType: "MOVIE", arrInstance: "", status: "APPROVED", availableAt: { not: null },
-  });
+  assert.ok(!("availableAt" in wheres[0]), "one UPDATE covers both availableAt branches");
   assert.deepEqual(radarrWantedDeletes, [{ tmdbId: 603, arrInstance: "" }]);
 
   // notifiedAvailable is never touched here — the orchestrator CAS (guardrail
@@ -1057,7 +1058,7 @@ test("sonarr Download by tvdbId only: the request is matched via tvdbId and the 
   assert.deepEqual(sonarrWantedDeletes, [{ tmdbId: 999, arrInstance: "" }]);
   const tvdbWhere = requestUpdateManyCalls.find((c) => "tvdbId" in c.where)?.where;
   assert.deepEqual(tvdbWhere, {
-    tvdbId: 5555, mediaType: "TV", arrInstance: "", status: "APPROVED", availableAt: null,
+    tvdbId: 5555, mediaType: "TV", arrInstance: "", status: "APPROVED",
   });
 });
 

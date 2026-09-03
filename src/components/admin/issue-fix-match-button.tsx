@@ -54,6 +54,19 @@ function resolveInstance(rows: FileInfoInstance[], hint: string): string | null 
   return rows[0].serverInstance;
 }
 
+// Seeds a side's instance from a (re)fetched file-info response. A pick the
+// admin already made survives as long as some refetched row still holds it;
+// only then does the hint/default resolution run. The file-info effect fires
+// on every open — including the reopen after a busy HIDE (see onOpenChange),
+// which keeps state on purpose — so seeding unconditionally with
+// resolveInstance discarded a named-server choice made in the picker and the
+// next "Fix" ran against the default server. A not-busy close nulls both
+// picks via reset(), so a fresh open still resolves from scratch.
+function seedInstance(cur: string | null, rows: FileInfoInstance[], hint: string): string | null {
+  if (cur !== null && rows.some((r) => r.serverInstance === cur)) return cur;
+  return resolveInstance(rows, hint);
+}
+
 const LEVEL_STYLES: Record<string, { border: string; bg: string; badge: string; label: string }> = {
   exact:    { border: "border-l-2 border-green-500",       bg: "bg-green-500/5 hover:bg-green-500/10",     badge: "bg-green-500/20 text-green-400 border-green-500/40",     label: "Exact"    },
   strong:   { border: "border-l-2 border-emerald-500/70",  bg: "bg-emerald-500/5 hover:bg-emerald-500/10", badge: "bg-emerald-500/20 text-emerald-400 border-emerald-500/40", label: "Strong"   },
@@ -234,8 +247,8 @@ export function IssueFixMatchButton({
       .then((data) => {
         if (data) {
           setFileInfo(data);
-          setPlexInstance(resolveInstance(data.plexInstances, serverInstance));
-          setJellyfinInstance(resolveInstance(data.jellyfinInstances, serverInstance));
+          setPlexInstance((cur) => seedInstance(cur, data.plexInstances, serverInstance));
+          setJellyfinInstance((cur) => seedInstance(cur, data.jellyfinInstances, serverInstance));
         } else setFileInfoError(true);
       })
       .catch((err) => {

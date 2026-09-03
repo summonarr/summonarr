@@ -117,7 +117,7 @@ jobs:
           skip-dirs: 'node_modules,.next,src/generated'
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       # Build the RUNNER image so it can be scanned BEFORE anything is
       # published. The source scan above cannot see this layer: Alpine OS
@@ -211,7 +211,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -264,14 +264,28 @@ jobs:
       # gate` step in security-gate, against a loadable amd64 build), so this
       # is no longer the only image check and no longer merely an after-the-
       # fact alarm. It stays for two things the gate cannot cover:
+      #   - the exact published digest, which is what users actually pull
+      #     (the amd64 scan below);
       #   - the arm64 half of the manifest, which cannot be loaded and so
-      #     cannot be scanned pre-push;
-      #   - the exact published digest, which is what users actually pull.
+      #     cannot be scanned pre-push (the arm64 scan below).
       # Divergence between the two is the interesting signal.
       #
-      # The SARIF upload below is `if: always()`, so findings still reach the
-      # Security tab when this step fails.
-      - name: Scan published image
+      # `steps.build.outputs.digest` is the multi-arch INDEX digest. Trivy
+      # resolves an index to the SCANNING HOST's platform unless `--platform`
+      # is set, and the runner is amd64 — so a single scan of the digest
+      # re-scanned the very same amd64 layers the pre-push gate had already
+      # covered, and NO job in the repo ever read the arm64 image. That is
+      # why each scan pins its platform explicitly via `TRIVY_PLATFORM`
+      # (trivy-action forwards `TRIVY_*` env vars to the CLI). The two halves
+      # are built by separate BuildKit workers with independently cached
+      # `apk upgrade` layers, so the arm64 package set CAN lag amd64; only a
+      # scan that actually selects the arm64 manifest sees that.
+      #
+      # The SARIF uploads below are `if: always()`, so findings still reach
+      # the Security tab when a scan step fails. The two uploads use distinct
+      # `category` values or the second would overwrite the first.
+      - name: Scan published image (amd64)
+        id: scan-amd64
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
@@ -281,10 +295,37 @@ jobs:
           format: sarif
           output: trivy-publish.sarif
           exit-code: '1'
+        env:
+          TRIVY_PLATFORM: linux/amd64
 
-      - name: Upload Trivy SARIF
+      # Runs even when the amd64 scan failed (so one half's finding cannot
+      # hide the other's) but not when the build itself failed — there is no
+      # digest to scan then, and `always()` would also run on cancellation.
+      - name: Scan published image (arm64)
+        id: scan-arm64
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-publish-arm64.sarif
+          exit-code: '1'
+        env:
+          TRIVY_PLATFORM: linux/arm64
+
+      - name: Upload Trivy SARIF (amd64)
         if: always()
-        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           sarif_file: trivy-publish.sarif
           category: trivy-publish
+
+      - name: Upload Trivy SARIF (arm64)
+        if: ${{ always() && steps.scan-arm64.outcome != 'skipped' }}
+        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          sarif_file: trivy-publish-arm64.sarif
+          category: trivy-publish-arm64

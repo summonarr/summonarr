@@ -5,6 +5,7 @@ import { parseBearerToken } from "@/lib/mobile-auth";
 import { matchesStoredFingerprint } from "@/lib/ua-fingerprint";
 import { machineIpAllowed } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@/generated/prisma";
 
 // Hash both sides first so timingSafeEqual compares equal-length buffers regardless of input length
 function safeCompareStrings(a: string, b: string): boolean {
@@ -62,6 +63,36 @@ function isSameOriginRequest(request: NextRequest): boolean {
 // honored immediately), not auth() which would trust a revoked admin's JWT until its exp (up to the 7d
 // admin ceiling). A presented-but-wrong Bearer is throttled per IP to bound CRON_SECRET guessing.
 export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
+  return (await getCronActor(request)) !== null;
+}
+
+/** Who is driving a cron/sync route: an admin (session path) or the scheduler (CRON_SECRET). */
+export interface CronActor {
+  userId: string;
+  userName: string;
+  trigger: "admin" | "cron";
+}
+
+export const CRON_SYSTEM_ACTOR: CronActor = Object.freeze({
+  userId: "system",
+  userName: "cron",
+  trigger: "cron",
+}) as CronActor;
+
+// The authorization decision AND the attribution in ONE session read.
+//
+// Every cron/sync route needs both: isCronAuthorized to gate, then "who was it"
+// for the admin-triggered audit row. Each route used to open-code the second
+// half as a fresh readActiveSummonarrSessionFromRequest after the gate, so an
+// admin "Run now" paid the DB-checked verifyAndRefreshSession twice — and, for a
+// bearer (native) admin with a pending sessionId rotation, the FIRST read
+// rotated the row and the second saw a dead token, mis-attributing the run to
+// "system/cron". Returning the actor from the single read removes both.
+//
+// null ⇒ unauthorized. A non-null actor with trigger "admin" carries the
+// DB-checked claims (revocation/cutoff/role-demotion honored); trigger "cron"
+// means the CRON_SECRET bearer matched and there is no session to attribute.
+export async function getCronActor(request: NextRequest): Promise<CronActor | null> {
   // Request-aware read: resolves a bearer JWT (native admin) FIRST, then the
   // cookie, so a native admin holding only a bearer token can use the session
   // path. readActiveSummonarrSession() read the cookie only.
@@ -77,11 +108,11 @@ export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
     // (no Origin/Referer header) out of every cron/sync route.
     const fromBearer = parseBearerToken(request.headers.get("authorization")) !== null;
     if (!fromBearer) {
-      if (!isSameOriginRequest(request)) return false;
+      if (!isSameOriginRequest(request)) return null;
       // Same UA-fingerprint replay defense the withAuth wrappers enforce: a stolen
       // admin cookie replayed from another device (with a forged trusted Origin) must
       // not drive /api/sync or /api/cron/*. machine:/no-fingerprint claims pass through.
-      if (!matchesStoredFingerprint(claims.uaFingerprint, request.headers.get("user-agent"))) return false;
+      if (!matchesStoredFingerprint(claims.uaFingerprint, request.headers.get("user-agent"))) return null;
     }
     // A machine session carries a mint-time IP allowlist as a claim; the withAuth/
     // requireAuth guards re-check it on /api/* but this cron/sync path is the machine
@@ -91,8 +122,8 @@ export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
     // gates above, the IP allowlist binds the token regardless of how it's presented
     // (parity with api-auth.ts, where the bearer skip covers only the fingerprint).
     // Absent/empty allowlist ⇒ machineIpAllowed returns true (no restriction).
-    if (!machineIpAllowed(claims, request.headers)) return false;
-    return true;
+    if (!machineIpAllowed(claims, request.headers)) return null;
+    return { userId: claims.id, userName: claims.name ?? "admin", trigger: "admin" };
   }
 
   const cronSecret = process.env.CRON_SECRET;
@@ -106,11 +137,11 @@ export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
       // User-Agent bucket: a wrong-secret caller sharing that bucket could then
       // deny the hourly sync and the 5s play-history poller. A valid Bearer must
       // never be deniable by someone else's failures.
-      if (safeCompareStrings(authHeader.slice(7), cronSecret)) return true;
+      if (safeCompareStrings(authHeader.slice(7), cronSecret)) return CRON_SYSTEM_ACTOR;
     }
   }
 
-  return false;
+  return null;
 }
 
 // Always pass BATCH_TX_TIMEOUT to $transaction for library-sized writes to avoid Prisma's default 5s timeout
@@ -127,21 +158,106 @@ export async function batchCreateMany<T extends Record<string, unknown>>(
   }
 }
 
-// Records the last time a cron/sync job ran. Stored in the `Setting` table
-// (key: `cron:lastRun:<target>`, value: JSON `{ at, durationMs, ok }`) so that
-// admin observability surfaces (settings page) don't depend on whether the
+/**
+ * Patch the show file paths a `skipShowFilePaths` TV walk left null onto the
+ * just-written PlexLibraryItem rows — ONE statement per CREATE_MANY_BATCH chunk,
+ * never one `updateMany` per show.
+ *
+ * The per-key loop this replaces issued N serialized UPDATE round-trips (N = TV
+ * show count) inside one interactive $transaction capped at BATCH_TX_TIMEOUT, on
+ * EVERY orchestrator run (the rows were just rewritten null, so its
+ * `filePath: null` guard never pruned anything). A multi-thousand-show library
+ * burned seconds per run and a large one could hit the timeout, after which
+ * every show's path stayed null until the next run repeated the same failure.
+ *
+ * Kept from the original: the serverInstance scope (ratingKeys are
+ * server-local) and the `"filePath" IS NULL` guard, which makes the patch a
+ * no-op if a concurrent writer replaced the rows. No wrapping transaction —
+ * each chunk is atomic on its own, and a partial patch across chunks is
+ * harmless (idempotent, null-scoped, retried next run).
+ */
+export async function patchPlexShowFilePaths(slug: string, paths: Map<string, string>): Promise<void> {
+  const entries = Array.from(paths.entries());
+  for (let i = 0; i < entries.length; i += CREATE_MANY_BATCH) {
+    const chunk = entries.slice(i, i + CREATE_MANY_BATCH);
+    await prisma.$executeRaw(Prisma.sql`
+      UPDATE "PlexLibraryItem" AS p
+      SET "filePath" = v."file"
+      FROM (VALUES ${Prisma.join(chunk.map(([ratingKey, file]) => Prisma.sql`(${ratingKey}::text, ${file}::text)`))}) AS v("ratingKey", "file")
+      WHERE p."serverInstance" = ${slug}
+        AND p."mediaType" = 'TV'
+        AND p."plexRatingKey" = v."ratingKey"
+        AND p."filePath" IS NULL
+    `);
+  }
+}
+
+/**
+ * How many recent runs the ledger keeps per target.
+ *
+ * 20 is chosen against the FASTEST configured job (warm-activity, 1800s = 2/h):
+ * a healthy ledger therefore spans hours, while a job looping once a minute
+ * fills all 20 slots inside 20 minutes and is unmistakable. Each entry is ~60
+ * bytes, so a full ledger row stays around 1.3 KB.
+ */
+export const CRON_RUN_HISTORY_LIMIT = 20;
+
+/** One recorded run. Same three fields the top-level ledger has always carried. */
+export interface CronRunEntry {
+  at: string;
+  durationMs: number;
+  ok: boolean;
+}
+
+// Records a cron/sync job run. Stored in the `Setting` table (key:
+// `cron:lastRun:<target>`, value: JSON `{ at, durationMs, ok, recent[] }`) so
+// that admin observability surfaces (settings page) don't depend on whether the
 // route also writes a `LIBRARY_SYNC` / `CACHE_WARM` audit row — several warm
 // jobs deliberately skip audit on cron triggers to avoid flooding the table.
 //
-// Single writer per `target`, so no coordination required (per CLAUDE.md
-// guardrail 14 on shared state).
+// The top-level `{ at, durationMs, ok }` fields are UNCHANGED and remain the
+// contract parseCronLastRun reads; `recent` is additive, so an older reader
+// ignores it and a row written before this shipped still parses.
+//
+// Why `recent` exists: the ledger used to keep only the newest run, which made
+// it structurally unable to answer the one question an operator actually has
+// when a job misbehaves — "how OFTEN is this running?". A single timestamp
+// looks identical whether the job ran once or four hundred times, so a runaway
+// trigger was invisible on the very panel the logs point at
+// (`[internal-trigger] … see the sync:full entry under Admin → Settings →
+// System`). `recent` is what makes a cadence anomaly legible without log
+// archaeology.
+//
+// Single writer per `target` in the normal case, so no coordination required
+// (per CLAUDE.md guardrail 14 on shared state). Two genuinely concurrent
+// recorders for one target could interleave the read and lose an entry from the
+// history; that is accepted — this row is observability, and the write below
+// still records the run that just finished either way.
 export async function recordCronRun(
   target: string,
   durationMs: number,
   ok: boolean = true,
 ): Promise<void> {
   const key = `cron:lastRun:${target}`;
-  const value = JSON.stringify({ at: new Date().toISOString(), durationMs, ok });
+  const entry: CronRunEntry = { at: new Date().toISOString(), durationMs, ok };
+
+  // Best-effort history read. Recording THIS run is the job's actual contract;
+  // its predecessors are a nicety. A read that throws — or a caller whose
+  // Prisma surface has no `setting.findUnique` at all — must therefore degrade
+  // to "no history yet" and still write, never propagate.
+  let recent: CronRunEntry[] = [];
+  try {
+    const existing = await prisma.setting.findUnique({
+      where: { key },
+      select: { value: true },
+    });
+    recent = parseCronRunHistory(existing?.value);
+  } catch { /* history unavailable — record the run without it */ }
+
+  const value = JSON.stringify({
+    ...entry,
+    recent: [entry, ...recent].slice(0, CRON_RUN_HISTORY_LIMIT),
+  });
   await prisma.setting.upsert({
     where: { key },
     create: { key, value },
@@ -200,4 +316,67 @@ export function parseCronLastRun(raw: string | null | undefined): CronLastRun | 
   } catch {
     return null;
   }
+}
+
+/**
+ * Read the bounded run history out of a `cron:lastRun:<target>` ledger value,
+ * most-recent-first. Returns `[]` rather than throwing on anything malformed —
+ * a corrupt observability row must never break the page rendering it.
+ *
+ * A row written BEFORE `recent` existed has no array, but its top-level fields
+ * are still a run we know about, so it degrades to a single-entry history
+ * instead of losing the last run on upgrade.
+ */
+export function parseCronRunHistory(raw: string | null | undefined): CronRunEntry[] {
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+
+  const entries = (parsed as { recent?: unknown }).recent;
+  if (!Array.isArray(entries)) {
+    const single = parseCronLastRun(raw);
+    return single ? [single] : [];
+  }
+
+  const out: CronRunEntry[] = [];
+  for (const e of entries) {
+    if (!e || typeof e !== "object" || Array.isArray(e)) continue;
+    const r = e as Partial<CronRunEntry>;
+    // `at` is the only load-bearing field — an entry without a timestamp cannot
+    // contribute to a cadence answer, so drop it rather than invent one.
+    if (typeof r.at !== "string") continue;
+    out.push({
+      at: r.at,
+      durationMs: typeof r.durationMs === "number" ? r.durationMs : 0,
+      // Matches parseCronLastRun: only a literal false reads as a failure, so
+      // pre-`ok` entries read as successful.
+      ok: r.ok !== false,
+    });
+    if (out.length >= CRON_RUN_HISTORY_LIMIT) break;
+  }
+  return out;
+}
+
+/**
+ * How many of `entries` ran at or after `sinceMs` (epoch ms).
+ *
+ * Saturates at CRON_RUN_HISTORY_LIMIT by construction, so callers that report
+ * this to a human should say "N+" once it reaches the cap rather than implying
+ * the count is exact.
+ */
+export function countCronRunsSince(
+  entries: readonly CronRunEntry[],
+  sinceMs: number,
+): number {
+  let n = 0;
+  for (const e of entries) {
+    const t = Date.parse(e.at);
+    if (Number.isFinite(t) && t >= sinceMs) n++;
+  }
+  return n;
 }

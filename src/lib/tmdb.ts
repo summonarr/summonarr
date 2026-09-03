@@ -13,6 +13,9 @@ import type {
   TmdbMedia, MediaType, CastMember, PersonDetails, PersonCredit,
   Genre, DiscoverFilters, WatchProvider, TmdbSeason, TmdbEpisode,
 } from "./tmdb-types";
+// languageName is the ONE ISO-639 → English display-name helper (the detail
+// pages consume the same export); tmdb.ts used to carry a private duplicate.
+import { languageName } from "./tmdb-types";
 
 // Merge a unified ratings payload (fetchUnifiedRatings) onto a media object.
 // `trailerUrl` must never displace an already-extracted TMDB YouTube trailerKey
@@ -250,21 +253,13 @@ interface PagedResponse<T> {
 }
 
 // Best-effort ISO-code → English display name. Intl.DisplayNames is available in the Node runtime;
-// fall back to the raw code if the lookup throws or returns nothing.
+// fall back to the raw code if the lookup throws or returns nothing. (The
+// language counterpart is `languageName` from ./tmdb-types.)
 let regionNames: Intl.DisplayNames | null = null;
-let languageNames: Intl.DisplayNames | null = null;
 function displayRegion(code: string): string {
   try {
     regionNames ??= new Intl.DisplayNames(["en"], { type: "region" });
     return regionNames.of(code.toUpperCase()) ?? code;
-  } catch {
-    return code;
-  }
-}
-function displayLanguage(code: string): string {
-  try {
-    languageNames ??= new Intl.DisplayNames(["en"], { type: "language" });
-    return languageNames.of(code) ?? code;
   } catch {
     return code;
   }
@@ -319,7 +314,7 @@ function normalizeMovie(r: RawMovie): TmdbMedia {
   if (r.original_title && r.original_title !== media.title) media.originalTitle = r.original_title;
   if (r.original_language) media.originalLanguage = r.original_language;
   if (r.spoken_languages?.length) {
-    media.spokenLanguages = r.spoken_languages.map((l) => l.english_name || l.name || displayLanguage(l.iso_639_1));
+    media.spokenLanguages = r.spoken_languages.map((l) => l.english_name || l.name || languageName(l.iso_639_1) || l.iso_639_1);
   }
   if (r.production_countries?.length) {
     media.productionCountries = r.production_countries.map((c) => c.name || displayRegion(c.iso_3166_1));
@@ -362,7 +357,7 @@ function normalizeTV(r: RawTV): TmdbMedia {
   if (r.original_name && r.original_name !== media.title) media.originalTitle = r.original_name;
   if (r.original_language) media.originalLanguage = r.original_language;
   if (r.spoken_languages?.length) {
-    media.spokenLanguages = r.spoken_languages.map((l) => l.english_name || l.name || displayLanguage(l.iso_639_1));
+    media.spokenLanguages = r.spoken_languages.map((l) => l.english_name || l.name || languageName(l.iso_639_1) || l.iso_639_1);
   }
   if (r.production_countries?.length) {
     media.productionCountries = r.production_countries.map((c) => c.name || displayRegion(c.iso_3166_1));
@@ -685,7 +680,11 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
     // payload widened to the full MDBList field set, so they lazily re-fetch and
     // gain the new fields within the 7-day TTL.
     if (cached.imdbRating === undefined || cached.rtAudienceScore === undefined || cached.mdblistScore === undefined) {
-      const r = await fetchUnifiedRatings(id, "movie", cached.releaseDate);
+      // Forward the row's stored imdbId (prewarm/fresh writers persist it) so a
+      // cold OMDB fallback skips its TMDB external_ids resolve — the fresh path
+      // below passes r.external_ids for the same reason. A stale hint self-heals
+      // in fetchAndCacheOmdbForTmdb (one live re-resolve), so it can't tombstone.
+      const r = await fetchUnifiedRatings(id, "movie", cached.releaseDate, cached.imdbId ?? null);
       if (r.found && r.data) {
         assignUnifiedRatings(cached, r.data);
         needsWrite = true;
@@ -775,7 +774,8 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
       // payload widened to the full MDBList field set, so they lazily re-fetch and
       // gain the new fields within the 7-day TTL.
       if (cached.imdbRating === undefined || cached.rtAudienceScore === undefined || cached.mdblistScore === undefined) {
-        const r = await fetchUnifiedRatings(id, "tv", cached.releaseDate);
+        // Stored imdbId forwarded for the same reason as the movie branch above.
+        const r = await fetchUnifiedRatings(id, "tv", cached.releaseDate, cached.imdbId ?? null);
         if (r.found && r.data) {
           assignUnifiedRatings(cached, r.data);
           needsWrite = true;
@@ -913,7 +913,9 @@ export async function getTVSeasonEpisodes(
 export async function getPersonDetails(id: number): Promise<PersonDetails> {
   // v2: shape grew (biography/birth/death/placeOfBirth + a larger credit cap) —
   // bump the key so pre-existing cached rows don't serve the old shape.
-  const key = `person:v2:${id}`;
+  // v3: credits are deduped per (mediaType, id) — v2 rows can still carry one
+  // entry per character, which collide under person-view's `${mediaType}-${id}` key.
+  const key = `person:v3:${id}`;
   const cached = await getCache<PersonDetails>(key);
   if (cached) return cached;
 
@@ -933,21 +935,38 @@ export async function getPersonDetails(id: number): Promise<PersonDetails> {
 
   // Defensive: a /person response missing the appended combined_credits (or its
   // cast array) must degrade to an empty filmography, not a route 500.
-  const credits: PersonCredit[] = (r.combined_credits?.cast ?? [])
+  // TMDB lists a title once PER CHARACTER (a series with several roles, a
+  // movie with a dual part), so dedupe on (media_type, id) BEFORE the cap —
+  // otherwise the 40-credit budget is spent on repeated roles and the UI would
+  // render two independent cards for one title (person-view keys cards by
+  // `${mediaType}-${id}`). First (newest-dated) entry wins; the extra roles
+  // fold into its `character` text so nothing is lost.
+  const byTitle = new Map<string, PersonCredit>();
+  for (const c of (r.combined_credits?.cast ?? [])
     .filter((c) => (c.media_type === "movie" || c.media_type === "tv") && c.poster_path && c.vote_count > 10)
     .sort((a, b) => {
       const aDate = a.release_date ?? a.first_air_date ?? "";
       const bDate = b.release_date ?? b.first_air_date ?? "";
       return bDate.localeCompare(aDate);
-    })
-    .slice(0, 40)
-    .map((c) => ({
+    })) {
+    const dedupeKey = `${c.media_type}:${c.id}`;
+    const existing = byTitle.get(dedupeKey);
+    if (existing) {
+      const role = c.character?.trim();
+      if (role && !existing.character.split(" / ").includes(role)) {
+        existing.character = existing.character ? `${existing.character} / ${role}` : role;
+      }
+      continue;
+    }
+    byTitle.set(dedupeKey, {
       id: c.id, mediaType: c.media_type as MediaType,
       title: c.title ?? c.name ?? "",
       posterPath: c.poster_path,
       releaseYear: (c.release_date ?? c.first_air_date ?? "").slice(0, 4),
-      character: c.character, voteAverage: c.vote_average,
-    }));
+      character: c.character ?? "", voteAverage: c.vote_average,
+    });
+  }
+  const credits: PersonCredit[] = [...byTitle.values()].slice(0, 40);
 
   const result: PersonDetails = {
     id: r.id, name: r.name, profilePath: r.profile_path,

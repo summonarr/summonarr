@@ -6,13 +6,13 @@ import { useEffect } from "react";
 // error in any admin page bubbles to the (app)-root boundary and unmounts the
 // whole authenticated shell; scoping it here keeps a failing admin panel from
 // taking down navigation. Mirrors src/app/(app)/error.tsx (Next 16 passes
-// `unstable_retry`, not `reset`).
+// `retry`, not `reset`).
 export default function AdminError({
   error,
-  unstable_retry,
+  retry,
 }: {
   error: Error & { digest?: string };
-  unstable_retry: () => void;
+  retry: () => void;
 }) {
   useEffect(() => {
     console.error("[admin/error]", error);
@@ -25,7 +25,7 @@ export default function AdminError({
         Something went wrong loading this admin section. The rest of the app is unaffected.
       </p>
       <button
-        onClick={() => unstable_retry()}
+        onClick={() => retry()}
         className="px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
       >
         Try again

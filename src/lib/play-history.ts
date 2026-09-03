@@ -1196,8 +1196,13 @@ export async function getMediaPlayStats(tmdbId: number, mediaType?: MediaType) {
       mt,
     ),
     prisma.$queryRawUnsafe<{ avg_pct: number | null }[]>(
+      // playDuration is wall-clock playing seconds and is NOT capped at the
+      // runtime (a looped/rewound sitting stores playDuration > duration), so
+      // each row's completion is clamped at 100% before it enters the mean —
+      // otherwise one looped session reads as 300% and drags the title's
+      // average past 100%.
       `SELECT AVG(
-         CASE WHEN "duration" > 0 THEN ("playDuration"::float / "duration") * 100 ELSE 0 END
+         CASE WHEN "duration" > 0 THEN LEAST("playDuration"::float / "duration", 1.0) * 100 ELSE 0 END
        )::float8 AS avg_pct
        FROM "PlayHistory" WHERE "tmdbId" = $1 AND ${mtClause}`,
       tmdbId,
@@ -1636,14 +1641,32 @@ async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, l
   >(
     // Carry the stored posterPath (like getTopWatchedUncached) as the fallback
     // beneath the live lookup below.
-    `SELECT "tmdbId", "mediaType"::text, MAX("title") AS title,
+    //
+    // "Rewatched" is decided PER EPISODE, not per title. A TV show's tmdbId
+    // aggregates every episode (one PlayHistory row per episode, keyed by
+    // seasonNumber/episodeNumber — the same COALESCE(…, -1) key the arc CTEs
+    // use), so a show-level `HAVING COUNT(*) > 1` ranked any show with two
+    // distinct episodes watched once each as a rewatch and pushed genuinely
+    // rewatched movies below every multi-episode show (f1d609a diagnosed this
+    // and sidestepped it only for the Top Watched cards). Rows whose episode
+    // was played more than once survive the filter; the title then rolls up
+    // plays/viewers over those rows only. Movies have NULL season/episode, so
+    // they form one -1/-1 partition and keep exactly the old semantics.
+    `WITH rewatched_rows AS (
+       SELECT "tmdbId", "mediaType"::text AS "mediaType", "title", "posterPath", "mediaServerUserId",
+              COUNT(*) OVER (
+                PARTITION BY "tmdbId", "mediaType", COALESCE("seasonNumber", -1), COALESCE("episodeNumber", -1)
+              ) AS episode_plays
+       FROM "PlayHistory"
+       WHERE ${where} AND "tmdbId" IS NOT NULL AND "watched" = true
+     )
+     SELECT "tmdbId", "mediaType", MAX("title") AS title,
             MAX("posterPath") AS "posterPath",
             COUNT(*)::bigint AS plays,
             COUNT(DISTINCT "mediaServerUserId")::bigint AS viewers
-     FROM "PlayHistory"
-     WHERE ${where} AND "tmdbId" IS NOT NULL AND "watched" = true
+     FROM rewatched_rows
+     WHERE episode_plays > 1
      GROUP BY "tmdbId", "mediaType"
-     HAVING COUNT(*) > 1
      ORDER BY plays DESC
      LIMIT $${limitIdx}`,
     ...params,
@@ -1819,17 +1842,14 @@ async function getPlayHistoryStatsUncached(filters: PlayHistoryStatsFilters = {}
   const days = filters.days ?? 30;
   const prevStart = new Date(Date.now() - days * 2 * 24 * 60 * 60 * 1000);
   const prevEnd = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  const prevConditions: string[] = [`"startedAt" >= $1 AND "startedAt" < $2`];
-  const prevParams: unknown[] = [prevStart, prevEnd];
-  if (filters.source && ["plex", "jellyfin"].includes(filters.source)) {
-    prevParams.push(filters.source);
-    prevConditions.push(`"source" = $${prevParams.length}`);
-  }
-  if (filters.mediaType && ["MOVIE", "TV"].includes(filters.mediaType)) {
-    prevParams.push(filters.mediaType);
-    prevConditions.push(`"mediaType"::text = $${prevParams.length}`);
-  }
-  const prevWhere = prevConditions.join(" AND ");
+  // The previous-period window binds $1/$2 itself; the source/mediaType suffix
+  // comes from appendPlayHistoryFilter (the single owner of that clause and its
+  // $-index math) rather than a hand copy that could drift from it.
+  const { sql: prevFilterSql, params: prevParams } = appendPlayHistoryFilter([prevStart, prevEnd], {
+    source: filters.source,
+    mediaType: filters.mediaType,
+  });
+  const prevWhere = `"startedAt" >= $1 AND "startedAt" < $2${prevFilterSql}`;
 
   // Arc-grouped completion: three sittings of one movie should count as one completion, not
   // "one watched + two incomplete". Same arc definition as getMostPopularOnServer — consecutive
@@ -2388,7 +2408,10 @@ export interface HeatmapCellDetail {
   dataTransferredGb: number;
   topResolutions: { resolution: string; count: number }[];
   network: { lan: number; wan: number; relay: number };
-  topTitles: { title: string; tmdbId: number | null; count: number }[];
+  // mediaType rides along because the query groups by (tmdbId, mediaType):
+  // TMDB movie and TV id spaces overlap, so a movie and a series sharing an
+  // integer are two rows and the popover needs the type to key + link them.
+  topTitles: { title: string; tmdbId: number | null; mediaType: string | null; count: number }[];
   // Top viewers for the bucket (up to 3). Empty on user-scoped pages (they would
   // always be the page's own user — redundant).
   topUsers: { id: string; username: string; count: number }[];
@@ -2511,8 +2534,8 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
     ),
     // Most-played titles in the bucket — same tmdbId/title dedup as the stats
     // topMedia query (null tmdbId falls back to lowercased title).
-    prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; count: bigint }[]>(
-      `SELECT MAX("title") AS title, "tmdbId", COUNT(*)::bigint AS count
+    prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; count: bigint }[]>(
+      `SELECT MAX("title") AS title, "tmdbId", "mediaType"::text AS "mediaType", COUNT(*)::bigint AS count
        FROM "PlayHistory" WHERE ${where} AND "title" IS NOT NULL AND "title" <> ''
        GROUP BY "tmdbId", "mediaType", CASE WHEN "tmdbId" IS NULL THEN LOWER("title") ELSE NULL END
        ORDER BY count DESC LIMIT 4`,
@@ -2570,7 +2593,12 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
       wan: Number(r?.net_wan ?? 0),
       relay: Number(r?.net_relay ?? 0),
     },
-    topTitles: titles.map((x) => ({ title: x.title, tmdbId: x.tmdbId, count: Number(x.count) })),
+    topTitles: titles.map((x) => ({
+      title: x.title,
+      tmdbId: x.tmdbId,
+      mediaType: x.mediaType,
+      count: Number(x.count),
+    })),
     topUsers: topUserRows.map((u) => ({
       id: u.id,
       username: u.username,
@@ -2586,7 +2614,11 @@ export async function getHeatmapCellDetail(q: HeatmapCellQuery): Promise<Heatmap
 // most server-side transcodes in the period. Transcodes are the expensive path
 // (CPU + bandwidth), so a ranked list helps an admin spot the heavy hitters.
 export interface TranscodeOffenders {
-  topUsers: { username: string; source: string; count: number }[];
+  // `id` is the MediaServerUser primary key — the only stable per-row key.
+  // username is NOT unique (@@unique is [source, serverInstance, sourceUserId]):
+  // the same person on two same-type servers (guardrail 35) or a departed row
+  // plus a re-created account (guardrail 28) legitimately share (source, username).
+  topUsers: { id: string; username: string; source: string; count: number }[];
   topTitles: { title: string; tmdbId: number | null; mediaType: string | null; count: number }[];
 }
 
@@ -2605,13 +2637,13 @@ export async function getTranscodeOffenders(
   const [users, titles] = await Promise.all([
     // Filter in a CTE (bare names) then join MediaServerUser — PlayHistory and
     // MediaServerUser both expose "source", so a direct join would be ambiguous.
-    prisma.$queryRawUnsafe<{ username: string; source: string; count: bigint }[]>(
+    prisma.$queryRawUnsafe<{ id: string; username: string; source: string; count: bigint }[]>(
       `WITH f AS (
          SELECT "mediaServerUserId", COUNT(*)::bigint AS count
          FROM "PlayHistory" WHERE ${twhere}
          GROUP BY "mediaServerUserId"
        )
-       SELECT m."username" AS username, m."source" AS source, f."count" AS count
+       SELECT m."id" AS id, m."username" AS username, m."source" AS source, f."count" AS count
        FROM f JOIN "MediaServerUser" m ON m."id" = f."mediaServerUserId"
        ORDER BY f."count" DESC LIMIT $${limitIdx}`,
       ...params,
@@ -2628,7 +2660,12 @@ export async function getTranscodeOffenders(
   ]);
 
   const result: TranscodeOffenders = {
-    topUsers: users.map((u) => ({ username: u.username, source: u.source, count: Number(u.count) })),
+    topUsers: users.map((u) => ({
+      id: u.id,
+      username: u.username,
+      source: u.source,
+      count: Number(u.count),
+    })),
     topTitles: titles.map((t) => ({
       title: t.title,
       tmdbId: t.tmdbId,

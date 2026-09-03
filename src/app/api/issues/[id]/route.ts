@@ -26,7 +26,7 @@ export const PATCH = withIssueAdmin(async (
   { params }: { params: Promise<{ id: string }> },
   session
 ) => {
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   const { id } = await params;
@@ -212,7 +212,7 @@ export const DELETE = withIssueAdmin(async (
   // preset carries MANAGE_ISSUES WITHOUT ADMIN. So during maintenance an issue
   // admin was refused every other action here and could still hard-delete a
   // row, which is the most destructive one in the family.
-  const maintenance = await maintenanceGuard();
+  const maintenance = await maintenanceGuard(session);
   if (maintenance) return maintenance;
 
   const { id } = await params;

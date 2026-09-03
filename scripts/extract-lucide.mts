@@ -219,7 +219,6 @@ function main() {
   exportLines.push(`export type IconComponent = (props: IconProps) => JSX.Element;`);
   exportLines.push("");
 
-  const seen = new Set<string>();
   const sortedNames = [...exposedToCanonical.keys()].sort((a, b) => a.localeCompare(b));
   for (const exposed of sortedNames) {
     const file = exposedToCanonical.get(exposed)!;
@@ -230,7 +229,6 @@ function main() {
     } else {
       exportLines.push(`export { ${meta.canonical} as ${exposed} } from "${importBase}";`);
     }
-    seen.add(exposed);
   }
 
   writeFileSync(join(OUT_DIR, "index.ts"), exportLines.join("\n") + "\n");

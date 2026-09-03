@@ -73,13 +73,15 @@ export async function POST(req: NextRequest) {
   if (instance === null) {
     return NextResponse.json({ error: "Invalid server" }, { status: 400 });
   }
+  // Rate-limit BEFORE the Setting read: this is an unauthenticated surface, so
+  // the limiter must bound anonymous DB load too, not only the outbound Jellyfin
+  // call (matches setup-status / machine-session / jellyfin/servers).
+  if (!checkRateLimit(`qc-initiate:${getClientIpKey(req.headers)}`, 10, 60_000)) {
+    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+  }
   const jellyfinUrl = await getConfiguredJellyfinUrl(instance);
   if (!jellyfinUrl) {
     return NextResponse.json({ error: "Jellyfin not configured" }, { status: 503 });
-  }
-
-  if (!checkRateLimit(`qc-initiate:${getClientIpKey(req.headers)}`, 10, 60_000)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
   try {
     const result = await initiateJellyfinQuickConnect(jellyfinUrl);
@@ -117,17 +119,14 @@ export async function GET(req: NextRequest) {
   if (instance === null) {
     return NextResponse.json({ error: "Invalid server" }, { status: 400 });
   }
-  const jellyfinUrl = await getConfiguredJellyfinUrl(instance);
-  if (!jellyfinUrl) {
-    return NextResponse.json({ error: "Jellyfin not configured" }, { status: 503 });
-  }
   const { searchParams } = new URL(req.url);
   const secret = searchParams.get("secret");
   if (!secret) {
     return NextResponse.json({ error: "Missing secret" }, { status: 400 });
   }
-  const wait = searchParams.get("wait") === "1";
 
+  // Both limiters run BEFORE the Setting read (same reason as POST above): an
+  // anonymous poller must not get a DB round-trip per request past its budget.
   if (!checkRateLimit(`qc-poll:${getClientIpKey(req.headers)}`, 60, 60_000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
@@ -135,6 +134,12 @@ export async function GET(req: NextRequest) {
   if (!checkRateLimit(`qc-poll-secret:${secret.slice(0, 32)}`, 30, 60_000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
   }
+
+  const jellyfinUrl = await getConfiguredJellyfinUrl(instance);
+  if (!jellyfinUrl) {
+    return NextResponse.json({ error: "Jellyfin not configured" }, { status: 503 });
+  }
+  const wait = searchParams.get("wait") === "1";
 
   const countKey = secret.slice(0, 32);
   const existingRaw = pollCounts.get(countKey);

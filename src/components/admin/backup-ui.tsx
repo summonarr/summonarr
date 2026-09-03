@@ -78,36 +78,26 @@ function SecondaryButton({
 }
 
 function DbExportSection() {
-  const [downloading, setDownloading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [lastFilename, setLastFilename] = useState<string | null>(null);
   // Default-filename preview includes today's date; gate to avoid SSR/CSR
   // drift across midnight UTC. See CLAUDE.md guardrail 16.
   const mounted = useHasMounted();
 
-  async function handleExport() {
-    setDownloading(true);
-    setError(null);
-    try {
-      const res = await fetch(withBasePath("/api/admin/backup/db-export"));
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error ?? "Export failed");
-      }
-      const blob = await res.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      const date = new Date().toISOString().slice(0, 10);
-      const filename = `summonarr-full-backup-${date}.sql.enc`;
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(a.href);
-      setLastFilename(filename);
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setDownloading(false);
-    }
+  function handleExport() {
+    // Direct navigation, not fetch()+Blob: the route streams the encrypted
+    // dump with backpressure precisely because it can be hundreds of MB, and
+    // `res.blob()` would re-materialize the whole artifact in the renderer
+    // (Safari keeps Blobs in memory) with no download-manager progress. The
+    // server's `Content-Disposition: attachment` names the file, so the
+    // browser streams straight to disk — the same pattern as the audit-log
+    // and play-history export buttons. A non-2xx response (429 rate limit,
+    // 500) renders as the route's JSON `{ error }` body in the new tab, as it
+    // does for those siblings. Navigation gives no completion signal, so
+    // there is no spinner: the filename preview is the only feedback.
+    window.open(withBasePath("/api/admin/backup/db-export"), "_blank");
+    // Same date formula as the route so the preview matches the served name.
+    const date = new Date().toISOString().slice(0, 10);
+    setLastFilename(`summonarr-full-backup-${date}.sql.enc`);
   }
 
   return (
@@ -140,34 +130,9 @@ function DbExportSection() {
         </span>
       </div>
 
-      <PrimaryButton onClick={handleExport} disabled={downloading}>
-        {downloading ? (
-          <>
-            <Loader2 className="w-4 h-4 animate-spin" /> Generating…
-          </>
-        ) : (
-          <>
-            <Download className="w-4 h-4" /> Download encrypted dump
-          </>
-        )}
+      <PrimaryButton onClick={handleExport}>
+        <Download className="w-4 h-4" /> Download encrypted dump
       </PrimaryButton>
-
-      {error && (
-        <div
-          className="flex items-start gap-2"
-          style={{
-            padding: "10px 12px",
-            borderRadius: 6,
-            background: "color-mix(in oklab, var(--ds-danger) 12%, transparent)",
-            border: "1px solid color-mix(in oklab, var(--ds-danger) 30%, var(--ds-border))",
-            color: "var(--ds-danger)",
-            fontSize: 12.5,
-          }}
-        >
-          <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
-          <span>{error}</span>
-        </div>
-      )}
     </div>
   );
 }

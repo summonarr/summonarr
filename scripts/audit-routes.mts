@@ -94,7 +94,7 @@ const PERMISSION_GUARDED_ADMIN_ROUTES: Array<{ route: string; reason: string }> 
 ];
 
 /** Tokens that prove an ADMIN-capable guard is present. */
-const ADMIN_TOKENS = ["withAdmin", "withIssueAdmin", "requireAuth", "isCronAuthorized"];
+const ADMIN_TOKENS = ["withAdmin", "withIssueAdmin", "requireAuth", "isCronAuthorized", "getCronActor"];
 /** Tokens that prove SOME auth guard is present (superset of ADMIN_TOKENS). */
 // `withPermission` wraps withAuth and gates on a capability bit — it proves
 // authentication but not a specific role, so it stays out of ADMIN_TOKENS
@@ -402,8 +402,8 @@ function main(): void {
 
     for (const handler of handlers) {
       if (isCronSync) {
-        if (!reachesToken(handler, ["isCronAuthorized"], byName)) {
-          failures.push({ route, file, reason: `${handler.name}: cron/sync handler missing isCronAuthorized` });
+        if (!reachesToken(handler, ["isCronAuthorized", "getCronActor"], byName)) {
+          failures.push({ route, file, reason: `${handler.name}: cron/sync handler missing isCronAuthorized / getCronActor` });
         }
       } else if (isWebhook) {
         if (!reachesToken(handler, ["timingSafeEqual"], byName)) {

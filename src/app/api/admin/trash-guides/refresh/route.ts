@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { logAudit } from "@/lib/audit";
-import { refreshCatalog, describeSchemaError, type RefreshResult } from "@/lib/trash";
+import { refreshCatalog, fetchTrashTree, describeSchemaError, type RefreshResult, type TrashTree } from "@/lib/trash";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { isFeatureEnabled } from "@/lib/features";
@@ -56,13 +56,30 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       const results: RefreshResult[] = [];
       const errors: string[] = [];
       let schemaDiagnostic: string | null = null;
-      for (const service of services) {
-        try {
-          results.push(await refreshCatalog(service));
-        } catch (err) {
-          const schemaHint = describeSchemaError(err);
-          if (schemaHint) schemaDiagnostic = schemaHint;
-          errors.push(`${service}: ${err instanceof Error ? err.message : String(err)}`);
+      // ONE recursive tree fetch shared by every service in this call — the
+      // ~573 KB GitHub listing is identical for RADARR and SONARR, and the
+      // UI's default "Refresh both" used to pull it back-to-back (2x transfer,
+      // 2x against the GitHub rate budget). Mirrors runTrashSync. A tree-fetch
+      // failure fails every requested service with the same per-service error
+      // line refreshCatalog would have thrown.
+      let sharedTree: TrashTree | null = null;
+      try {
+        sharedTree = await fetchTrashTree();
+      } catch (err) {
+        const schemaHint = describeSchemaError(err);
+        if (schemaHint) schemaDiagnostic = schemaHint;
+        const msg = err instanceof Error ? err.message : String(err);
+        for (const service of services) errors.push(`${service}: ${msg}`);
+      }
+      if (sharedTree !== null) {
+        for (const service of services) {
+          try {
+            results.push(await refreshCatalog(service, sharedTree));
+          } catch (err) {
+            const schemaHint = describeSchemaError(err);
+            if (schemaHint) schemaDiagnostic = schemaHint;
+            errors.push(`${service}: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
       }
 

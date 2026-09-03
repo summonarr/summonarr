@@ -72,6 +72,11 @@ const PERSON_CREDITS = [
   { id: 603, media_type: "movie", title: "The Matrix", poster_path: "/m.jpg", release_date: "1999-03-31", vote_average: 8.2, vote_count: 24_000, character: "Neo" },
   { id: 604, media_type: "movie", title: "The Matrix Reloaded", poster_path: "/m2.jpg", release_date: "2003-05-15", vote_average: 7.0, vote_count: 12_000, character: "Neo" },
   { id: 1399, media_type: "tv", name: "Game of Thrones", poster_path: "/got.jpg", first_air_date: "2011-04-17", vote_average: 8.4, vote_count: 21_000, character: "Self" },
+  // TMDB lists a title once PER CHARACTER — this second entry for the same
+  // series is what getPersonDetails must fold into ONE credit (review 2026-09
+  // f94: person-view keys cards by `${mediaType}-${id}`, so a duplicate would
+  // collide and render two independent, non-syncing cards).
+  { id: 1399, media_type: "tv", name: "Game of Thrones", poster_path: "/got.jpg", first_air_date: "2011-04-17", vote_average: 8.4, vote_count: 21_000, character: "Narrator" },
 ];
 
 globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -501,6 +506,22 @@ test("person: the TV credit's token is minted under the TV namespace", async () 
   const got = body.credits.find((c: { id: number; mediaType: string }) => c.id === 1399 && c.mediaType === "tv");
   assert.equal(verifyRequestToken(got.requestToken, 1399, "TV", me.userId), true);
   assert.equal(verifyRequestToken(got.requestToken, 1399, "MOVIE", me.userId), false);
+});
+
+test("person: a title listed once per character collapses to ONE credit carrying every role", async () => {
+  // Pin for review 2026-09 f94. The fixture lists 1399/tv twice ("Self" and
+  // "Narrator"); the payload must carry exactly one credit per (id, mediaType)
+  // — person-view keys MediaCards by `${mediaType}-${id}` — with the extra
+  // role folded into the kept entry's character text rather than dropped.
+  const me = await mintSession();
+  const body = await (await getPerson(me.token, "6384")).json();
+  const got = body.credits.filter((c: { id: number; mediaType: string }) => c.id === 1399 && c.mediaType === "tv");
+  assert.equal(got.length, 1, `duplicate credit survived dedupe: ${JSON.stringify(got)}`);
+  assert.equal(got[0].character, "Self / Narrator");
+  // Every credit in the payload is unique per (id, mediaType).
+  const keys = body.credits.map((c: { id: number; mediaType: string }) => `${c.mediaType}-${c.id}`);
+  assert.equal(new Set(keys).size, keys.length);
+  assert.equal(body.credits.length, 3);
 });
 
 test("person: a person with no credits short-circuits without touching the library tables", async () => {

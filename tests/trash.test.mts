@@ -163,9 +163,13 @@ const specUpserts: Array<{
 // the per-service containment tests' way of failing a single refresh/apply
 // pass now that the GitHub tree fetch is shared across services.
 let failSpecFindManyForService: string | null = null;
+// Every trashSpec.findMany `where`, in call order — the profile-body test pins
+// how many CF reads one profile costs.
+const specFindManyWheres: Array<Record<string, unknown> | undefined> = [];
 
 shadowPrismaModel(prisma, "trashSpec", {
   findMany: async (args: SpecFindManyArgs = {}) => {
+    specFindManyWheres.push(args.where);
     if (failSpecFindManyForService !== null && (args.where as { service?: string } | undefined)?.service === failSpecFindManyForService) {
       throw new Error(`trashSpec store exploded for ${failSpecFindManyForService} (unit test)`);
     }
@@ -455,6 +459,7 @@ beforeEach(() => {
   specRows.length = 0;
   appRows.length = 0;
   specUpserts.length = 0;
+  specFindManyWheres.length = 0;
   txCalls.length = 0;
   fetchCalls.length = 0;
   warns.length = 0;
@@ -1134,6 +1139,21 @@ test("applyQualityProfiles builds the full body: schema carry, allowed items, gr
   // The missing dependency CF was auto-applied on this instance before the profile.
   assert.equal(findApp(cfBad.id, "")!.remoteId, 33);
   assert.equal(findApp(qp.id, "")!.remoteId, 61);
+
+  // The scores above came from rows already in memory. Per profile, the
+  // referenced CUSTOM_FORMAT specs are read BY trashId exactly ONCE from
+  // TrashSpec (the specs-missing-an-application query; the applied ones ride
+  // along on the application read) — buildProfileBody used to re-read the
+  // identical set, payload JSON included, a further time just to pick out
+  // trash_scores. The cascade's own by-id load of the missing spec is a
+  // different read and is not counted here.
+  const cfReads = specFindManyWheres.filter((w) => w?.kind === "CUSTOM_FORMAT" && w.trashId !== undefined);
+  assert.equal(cfReads.length, 1, `expected one trashId-keyed CUSTOM_FORMAT read per profile, saw ${JSON.stringify(cfReads)}`);
+  assert.deepEqual(cfReads[0], {
+    service: "RADARR",
+    kind: "CUSTOM_FORMAT",
+    trashId: { in: ["cf-bad"] }, // cf-dv is already applied, so it is not re-read here either
+  });
 });
 
 test("a failed remote-profile prefetch fails the profile batch with its own sentinel error", async () => {

@@ -11,8 +11,15 @@ export const dynamic = "force-dynamic";
 // each `day` as YYYY-MM-DD. Optional source/mediaType filters match the heatmap.
 export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, _session) => {
   const params = request.nextUrl.searchParams;
-  const source = params.get("source") ?? undefined;
-  const mediaType = params.get("mediaType") ?? undefined;
+  // Whitelist BEFORE these reach getActivityCalendar — same reason as the
+  // sibling /api/play-history/stats route: the cache key is built from the raw
+  // strings while the SQL filter ignores unknown values, so every distinct junk
+  // value ran the full uncached 365-day scan under a key nothing would reuse
+  // and evicted real entries from the shared 500-key activity cache.
+  const rawSource = params.get("source");
+  const source = rawSource === "plex" || rawSource === "jellyfin" ? rawSource : undefined;
+  const rawMediaType = params.get("mediaType");
+  const mediaType = rawMediaType === "MOVIE" || rawMediaType === "TV" ? rawMediaType : undefined;
 
   const calendar = await getActivityCalendar(source, mediaType);
   return NextResponse.json(calendar);

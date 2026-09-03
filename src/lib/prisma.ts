@@ -87,11 +87,31 @@ function encryptSettingRowsInPlace(data: unknown): void {
 // haven't been successfully read since. The settings page reads this via
 // getSettingDecryptFailures() to render a banner. Entries are cleared on the next
 // successful read of the same key (which happens automatically on every findMany
-// that includes the key after the operator re-saves it).
+// that includes the key after the operator re-saves it) OR when the row is
+// deleted through setting.deleteMany — a deleted row is never read again, so
+// without that hook the banner would name a key with no row and no re-save
+// target until the process restarted (the "Disconnect Plex" and de-register-
+// instance paths both recover from a corrupt token by deleting, not re-saving).
 const settingDecryptFailures = new Set<string>();
 
 export function getSettingDecryptFailures(): string[] {
   return [...settingDecryptFailures].sort();
+}
+
+// Keys a `setting.deleteMany({ where })` targets, for releasing their decrypt-
+// failure entries. Recognizes the two shapes every caller uses — `{ key: "x" }`
+// and `{ key: { in: [...] } }` — and returns null for anything else (absent,
+// or a filter on some other column) so the hook can't guess wrong: an
+// unrecognized filter clears nothing rather than something it shouldn't.
+export function settingKeysFromDeleteWhere(where: unknown): string[] | null {
+  if (!where || typeof where !== "object") return null;
+  const key = (where as { key?: unknown }).key;
+  if (typeof key === "string") return [key];
+  if (key && typeof key === "object") {
+    const inList = (key as { in?: unknown }).in;
+    if (Array.isArray(inList) && inList.every((k) => typeof k === "string")) return inList as string[];
+  }
+  return null;
 }
 
 // Per-row decrypt guard for Setting.value reads. A corrupt/wrong-key row would otherwise
@@ -277,7 +297,19 @@ function createPrismaClient() {
           return rows;
         },
         async deleteMany({ args, query }) {
-          return query(args);
+          const result = await query(args);
+          // Release decrypt-failure entries only AFTER the delete resolved, so a
+          // failed delete leaves the banner in place (same after-the-write
+          // ordering as guardrail 27). An unfiltered deleteMany removes every
+          // row, so nothing recorded can still exist.
+          const where = (args as { where?: unknown }).where;
+          const keys = settingKeysFromDeleteWhere(where);
+          if (keys === null) {
+            if (where === undefined) settingDecryptFailures.clear();
+          } else {
+            for (const k of keys) settingDecryptFailures.delete(k);
+          }
+          return result;
         },
       },
       account: {

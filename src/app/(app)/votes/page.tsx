@@ -43,53 +43,62 @@ export default async function VotesPage({
   // both at once (search-box DoS, matches /api/votes).
   const q = sanitizeContainsSearch((first(sp.q) ?? "").trim());
 
+  // `session` is never null here — requireAppSession() redirects instead of
+  // returning — so the "mine" filter keys on the flag alone.
   const where: Prisma.DeletionVoteWhereInput = {
-    ...(mine && session ? { userId: session.user.id } : {}),
+    ...(mine ? { userId: session.user.id } : {}),
     ...(q ? { title: { contains: q, mode: "insensitive" } } : {}),
   };
-
-  const grouped = await prisma.deletionVote.groupBy({
-    by: ["tmdbId", "mediaType"],
-    where,
-    _count: { id: true },
-    _max: { createdAt: true },
-    // Both sorts need a TIEBREAKER, because both are paginated with skip/take.
-    // Neither key is unique across groups — most titles hold exactly one vote,
-    // so ordering by _count alone leaves the bulk of the table in one tied
-    // block that Postgres may return in a different order per query. Two
-    // requests for two pages are two queries, so a title could appear on both
-    // pages while another appeared on neither. Appending the group key makes
-    // the order total, and it is free: [tmdbId, mediaType] is the group key
-    // already being computed.
-    orderBy: [
-      sort === "recent"
-        ? { _max: { createdAt: "desc" } }
-        : { _count: { id: "desc" } },
-      { tmdbId: "asc" },
-      { mediaType: "asc" },
-    ],
-    skip: (page - 1) * PAGE_SIZE,
-    take: PAGE_SIZE,
-  });
 
   // Count distinct (tmdbId, mediaType) groups for pagination without
   // materializing one row per group into memory (which scales with the number
   // of distinct voted titles). Mirrors the `where` above with parameterized
-  // fragments.
+  // fragments. Built before the queries below so the page query and the count
+  // query — which depend only on the request, not on each other — can share
+  // one round-trip.
   const conditions: Prisma.Sql[] = [];
-  if (mine && session) conditions.push(Prisma.sql`"userId" = ${session.user.id}`);
+  if (mine) conditions.push(Prisma.sql`"userId" = ${session.user.id}`);
   if (q) conditions.push(Prisma.sql`"title" ILIKE ${`%${q}%`}`);
   const whereSql = conditions.length
     ? Prisma.sql`WHERE ${Prisma.join(conditions, " AND ")}`
     : Prisma.empty;
-  const [{ count }] = await prisma.$queryRaw<{ count: bigint }[]>(
-    Prisma.sql`SELECT COUNT(*)::bigint AS count FROM (SELECT 1 FROM "DeletionVote" ${whereSql} GROUP BY "tmdbId", "mediaType") AS g`,
-  );
+
+  const [grouped, [{ count }]] = await Promise.all([
+    prisma.deletionVote.groupBy({
+      by: ["tmdbId", "mediaType"],
+      where,
+      _count: { id: true },
+      _max: { createdAt: true },
+      // Both sorts need a TIEBREAKER, because both are paginated with skip/take.
+      // Neither key is unique across groups — most titles hold exactly one vote,
+      // so ordering by _count alone leaves the bulk of the table in one tied
+      // block that Postgres may return in a different order per query. Two
+      // requests for two pages are two queries, so a title could appear on both
+      // pages while another appeared on neither. Appending the group key makes
+      // the order total, and it is free: [tmdbId, mediaType] is the group key
+      // already being computed.
+      orderBy: [
+        sort === "recent"
+          ? { _max: { createdAt: "desc" } }
+          : { _count: { id: "desc" } },
+        { tmdbId: "asc" },
+        { mediaType: "asc" },
+      ],
+      skip: (page - 1) * PAGE_SIZE,
+      take: PAGE_SIZE,
+    }),
+    prisma.$queryRaw<{ count: bigint }[]>(
+      Prisma.sql`SELECT COUNT(*)::bigint AS count FROM (SELECT 1 FROM "DeletionVote" ${whereSql} GROUP BY "tmdbId", "mediaType") AS g`,
+    ),
+  ]);
   const totalPages = Math.max(1, Math.ceil(Number(count) / PAGE_SIZE));
 
-  // Batched lookup: 2 queries total (was 3×PAGE_SIZE = up to 120 round-trips/render).
-  // Split by mediaType so each becomes a `tmdbId: { in: [...] }` predicate that
-  // the planner can serve from the composite (tmdbId, mediaType) PK efficiently.
+  // Batched lookup: 1 query total (was 3×PAGE_SIZE = up to 120 round-trips/render,
+  // then 2). Split by mediaType so each becomes a `tmdbId: { in: [...] }`
+  // predicate that the planner can serve from the composite (tmdbId, mediaType)
+  // PK efficiently. The rows carry `userId`, so "did the viewer vote on this"
+  // is derived in memory instead of re-reading the same row set filtered to
+  // the viewer. `userId` is server-side only and never reaches the client.
   const movieIds = grouped.filter((g) => g.mediaType === "MOVIE").map((g) => g.tmdbId);
   const tvIds = grouped.filter((g) => g.mediaType === "TV").map((g) => g.tmdbId);
   const groupWhere: Prisma.DeletionVoteWhereInput = {
@@ -99,28 +108,21 @@ export default async function VotesPage({
     ],
   };
 
-  const [allVotes, userVotes] = grouped.length === 0
-    ? [[], []]
-    : await Promise.all([
-        prisma.deletionVote.findMany({
-          where: groupWhere,
-          select: {
-            tmdbId: true,
-            mediaType: true,
-            title: true,
-            posterPath: true,
-            reason: true,
-            user: { select: { name: true } },
-          },
-          orderBy: { createdAt: "desc" },
-        }),
-        session
-          ? prisma.deletionVote.findMany({
-              where: { ...groupWhere, userId: session.user.id },
-              select: { tmdbId: true, mediaType: true },
-            })
-          : Promise.resolve([] as Array<{ tmdbId: number; mediaType: "MOVIE" | "TV" }>),
-      ]);
+  const allVotes = grouped.length === 0
+    ? []
+    : await prisma.deletionVote.findMany({
+        where: groupWhere,
+        select: {
+          tmdbId: true,
+          mediaType: true,
+          userId: true,
+          title: true,
+          posterPath: true,
+          reason: true,
+          user: { select: { name: true } },
+        },
+        orderBy: { createdAt: "desc" },
+      });
 
   const byKey = new Map<string, typeof allVotes>();
   for (const v of allVotes) {
@@ -132,7 +134,6 @@ export default async function VotesPage({
     }
     arr.push(v);
   }
-  const userVoteSet = new Set(userVotes.map((v) => `${v.mediaType}:${v.tmdbId}`));
 
   const items = grouped.map((g) => {
     const k = `${g.mediaType}:${g.tmdbId}`;
@@ -145,12 +146,12 @@ export default async function VotesPage({
       title: representative?.title ?? "",
       posterPath: representative?.posterPath ?? null,
       voteCount: g._count.id,
-      userVoted: userVoteSet.has(k),
+      userVoted: votes.some((v) => v.userId === session.user.id),
       reasons: reasons.map((v) => ({ reason: v.reason!, userName: v.user.name ?? "Anonymous" })),
     };
   });
 
-  const isAdmin = !!session && hasPermission(session.user.permissions, Permission.ADMIN);
+  const isAdmin = hasPermission(session.user.permissions, Permission.ADMIN);
   const hasFilters = mine || sort !== "votes" || q !== "";
 
   return (

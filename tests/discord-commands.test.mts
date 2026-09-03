@@ -190,7 +190,13 @@ before(async () => {
   assert.equal(commandPuts.length, 1, "manual registration should publish exactly one command PUT");
   manualPut = commandPuts[0];
 
-  // Path 2 — a settings save that touches a discord* key.
+  // Path 2 — a settings save that CHANGES a registration input. The route only
+  // re-registers on a real change to discordBotToken/discordClientId/discordGuildId
+  // (the form posts every field on every save, so a presence gate fired the
+  // bulk-overwrite PUT on unrelated Channels/Roles saves). Park a stale guild id
+  // so the PATCH below is a genuine change back to GUILD_ID — both paths still
+  // end up publishing to the same guild-scoped URL.
+  settings.set("discordGuildId", "111111111111111111");
   const patchRes = await settingsRoute.PATCH(
     new NextRequest("http://localhost:3000/api/settings", {
       method: "PATCH",

@@ -21,6 +21,7 @@ export default async function StatsPage() {
     avgFulfillment,
     requestsByMonth,
     topRequesters,
+    diskSpace,
   ] = await Promise.all([
     prisma.mediaRequest.groupBy({ by: ["status"], _count: { _all: true } }),
     prisma.mediaRequest.groupBy({ by: ["mediaType"], _count: { _all: true } }),
@@ -59,6 +60,9 @@ export default async function StatsPage() {
       ORDER BY 3 DESC
       LIMIT 10
     `,
+    // Upstream Radarr/Sonarr round-trips overlap the DB batch instead of
+    // running after it — nothing here depends on the query results.
+    getArrDiskSpace(),
   ]);
 
   const statusMap = new Map(statusCounts.map((r) => [r.status, r._count._all]));
@@ -102,7 +106,6 @@ export default async function StatsPage() {
   const jellyfinItems =
     libCount(jellyfinLibByType, "MOVIE") + libCount(jellyfinLibByType, "TV");
 
-  const diskSpace = await getArrDiskSpace();
   const avgHours = avgFulfillment[0]?.avg_hours;
   const monthData = requestsByMonth.map((r) => ({ month: r.month, count: Number(r.count) }));
 

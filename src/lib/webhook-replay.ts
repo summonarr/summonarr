@@ -6,14 +6,13 @@ import { prisma } from "@/lib/prisma";
 const TTL_MS = 24 * 60 * 60 * 1000;
 
 // Digest binds source + secret + body so replays to a different endpoint or with a different secret are distinct keys
-function digest(source: string, secret: string, body: Uint8Array | string): string {
+function digest(source: string, secret: string, body: string): string {
   const h = createHash("sha256");
   h.update(source);
   h.update("\0");
   h.update(secret);
   h.update("\0");
-  if (typeof body === "string") h.update(body, "utf8");
-  else h.update(body);
+  h.update(body, "utf8");
   return h.digest("hex");
 }
 
@@ -29,19 +28,10 @@ function canonicalize(value: unknown): unknown {
   return out;
 }
 
-// JSON-payload digest for sources that always parse to JSON (Jellyfin, Sonarr, Radarr).
+// JSON-payload digest for the Sonarr/Radarr webhook handlers (the only callers; both parse JSON).
 // Canonicalizes key order before hashing so a replay with reordered fields still hits the same key.
 function digestForJson(source: string, secret: string, parsedJson: unknown): string {
   return digest(source, secret, JSON.stringify(canonicalize(parsedJson)));
-}
-
-export async function checkAndRecordWebhook(
-  source: string,
-  secret: string,
-  body: Uint8Array | string,
-): Promise<boolean> {
-  const key = digest(source, secret, body);
-  return checkAndRecordDigest(key);
 }
 
 export async function checkAndRecordWebhookJson(
@@ -122,8 +112,4 @@ export async function clearWebhookReplayDigestJson(
       err instanceof Error ? err.message : err,
     );
   }
-}
-
-export function __resetWebhookReplayCacheForTests(): void {
-  // No-op in DB-backed mode; kept for interface compatibility
 }

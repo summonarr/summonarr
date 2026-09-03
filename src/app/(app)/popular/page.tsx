@@ -20,6 +20,13 @@ import { PageHeader, EmptyState } from "@/components/ui/design";
 import { TrendingUp, Film } from "@/components/icons";
 
 type EnrichedMedia = TmdbMedia & {
+  // 1-based position in the SERVER-WIDE ranking (page offset included), fixed
+  // at resolve time from the item's index in the unfiltered page. Both later
+  // steps shrink the array — resolveMedia drops a rejected TMDB detail fetch and
+  // attachAllAvailability removes the viewer's hidden titles — so a badge or
+  // range computed from the survivor index re-labels every later title one
+  // rank too high and claims "1–39 of 200" with #40 on no page at all.
+  rank: number;
   plays: number;
   allTimePlays: number;
   viewers: number;
@@ -90,6 +97,7 @@ export default async function PopularOnServerPage({
   const totalPages = Math.max(moviesResult.totalPages, tvResult.totalPages);
   const totalMovies = moviesResult.totalItems;
   const totalTv = tvResult.totalItems;
+  const rankOffset = (page - 1) * POPULAR_PER_PAGE;
 
   async function resolveMedia(
     items: typeof moviesResult.items,
@@ -121,7 +129,7 @@ export default async function PopularOnServerPage({
     const results = await settleLimit(
       items,
       8,
-      async (item) => {
+      async (item, i) => {
         const core = coreMap.get(item.tmdbId);
         const details: TmdbMedia = core
           ? {
@@ -142,6 +150,9 @@ export default async function PopularOnServerPage({
             : await getTVDetails(item.tmdbId);
         return {
           ...details,
+          // The slot index is the item's position in the unfiltered page, so a
+          // later drop (rejected fetch, hidden title) never renumbers survivors.
+          rank: rankOffset + i + 1,
           plays: item.plays,
           allTimePlays: item.allTimePlays,
           viewers: item.viewers,
@@ -170,7 +181,10 @@ export default async function PopularOnServerPage({
   const showTV = mediaTypeFilter !== "movies";
   const hasAny = movies.length > 0 || tv.length > 0;
 
-  const rankOffset = (page - 1) * POPULAR_PER_PAGE;
+  // "first–last of N" from the surviving ranks, not from the survivor count:
+  // a filtered title in the middle of the page leaves the ends where they are.
+  const rankRange = (items: EnrichedMedia[], total: number) =>
+    `${items[0]!.rank}–${items[items.length - 1]!.rank} of ${total} titles`;
 
   function buildHref(overrides: Record<string, string | undefined>) {
     const merged: Record<string, string> = {};
@@ -288,14 +302,13 @@ export default async function PopularOnServerPage({
             <section>
               <PopularSectionHeader
                 title="Movies"
-                range={`${rankOffset + 1}–${rankOffset + movies.length} of ${totalMovies} titles`}
+                range={rankRange(movies, totalMovies)}
               />
               <MediaGrid
                 items={movies}
                 showPlex={showPlex}
                 showJellyfin={showJellyfin}
                 sort={sort}
-                rankOffset={rankOffset}
               />
             </section>
           )}
@@ -304,14 +317,13 @@ export default async function PopularOnServerPage({
             <section>
               <PopularSectionHeader
                 title="TV Shows"
-                range={`${rankOffset + 1}–${rankOffset + tv.length} of ${totalTv} titles`}
+                range={rankRange(tv, totalTv)}
               />
               <MediaGrid
                 items={tv}
                 showPlex={showPlex}
                 showJellyfin={showJellyfin}
                 sort={sort}
-                rankOffset={rankOffset}
               />
             </section>
           )}
@@ -359,17 +371,15 @@ function MediaGrid({
   showPlex,
   showJellyfin,
   sort,
-  rankOffset,
 }: {
   items: EnrichedMedia[];
   showPlex: boolean;
   showJellyfin: boolean;
   sort: PopularSort;
-  rankOffset: number;
 }) {
   return (
     <div className="ds-media-grid">
-      {items.map((media, i) => (
+      {items.map((media) => (
         <div key={`${media.mediaType}-${media.id}`} className="ds-ranked-card relative">
           <div
             className="ds-mono absolute z-10 flex items-center justify-center font-bold"
@@ -385,7 +395,7 @@ function MediaGrid({
               fontSize: 10.5,
             }}
           >
-            {rankOffset + i + 1}
+            {media.rank}
           </div>
           <MediaCard
             media={media}

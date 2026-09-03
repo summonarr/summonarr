@@ -37,6 +37,22 @@ function parseArgs(argv) {
   return opts;
 }
 
+// pg sends `user`/`password` verbatim, so a percent-encoded URL has to be
+// decoded here or authentication fails. Percent-encoding is the form Prisma
+// requires when the password holds "@", ":" or "/", AND the form
+// docker-entrypoint.sh always builds (encodeURIComponent(POSTGRES_PASSWORD)),
+// so the in-container DATABASE_URL is encoded too. A lone "%" that isn't a
+// valid escape makes decodeURIComponent throw — keep that value as typed.
+// Mirrors scripts/reset-password.mjs / scripts/create-user.mjs.
+function decodeCredential(value) {
+  if (value === undefined) return undefined;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 function connectionParams() {
   if (process.env.PGHOST && process.env.PGUSER && process.env.PGPASSWORD && process.env.PGDATABASE) {
     return {
@@ -48,11 +64,16 @@ function connectionParams() {
     };
   }
   if (process.env.DATABASE_URL) {
+    // Parsed by hand rather than with pg's URL parser, which rejects the
+    // unescaped reserved chars ("/", "=") a hand-written URL can carry. The
+    // password is optional so a trust-auth URL (postgres://user@host/db) works.
     const m = process.env.DATABASE_URL.match(
-      /^postgres(?:ql)?:\/\/([^:]+):(.+)@([^:/]+)(?::(\d+))?\/([^?]+)/
+      /^postgres(?:ql)?:\/\/([^:]+)(?::(.+))?@([^:/]+)(?::(\d+))?\/([^?]+)/,
     );
     if (!m) throw new Error("Cannot parse DATABASE_URL");
-    const [, user, password, host, port, database] = m;
+    const [, rawUser, rawPassword, host, port, database] = m;
+    const user = decodeCredential(rawUser);
+    const password = decodeCredential(rawPassword);
     return { user, password, host, port: port ? parseInt(port, 10) : 5432, database };
   }
   throw new Error("Set DATABASE_URL or PGHOST/PGUSER/PGPASSWORD/PGDATABASE");

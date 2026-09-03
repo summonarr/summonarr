@@ -70,6 +70,7 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 const fetchCalls: Array<{ url: URL; method: string; headers: Headers }> = [];
 let plexPinCreate: { id?: number; code?: string } | null = { id: 4242, code: "ABCD" };
 let plexPinStatus = 200;
+let plexPinCreateThrows: Error | null = null;
 let plexPinToken: string | null = null;
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -77,6 +78,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   fetchCalls.push({ url, method: init?.method ?? "GET", headers: new Headers(init?.headers) });
   const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { "content-type": "application/json" } });
   if (url.hostname === "plex.tv" && url.pathname === "/api/v2/pins") {
+    if (plexPinCreateThrows) throw plexPinCreateThrows;
     return plexPinStatus === 200 ? json(plexPinCreate ?? {}) : json({ error: "nope" }, plexPinStatus);
   }
   if (url.hostname === "plex.tv" && /^\/api\/v2\/pins\/\d+$/.test(url.pathname)) {
@@ -247,6 +249,7 @@ beforeEach(() => {
   errors.length = 0;
   plexPinCreate = { id: 4242, code: "ABCD" };
   plexPinStatus = 200;
+  plexPinCreateThrows = null;
   plexPinToken = null;
   delete process.env.OIDC_ISSUER;
   delete process.env.OIDC_CLIENT_ID;
@@ -554,6 +557,27 @@ test("plex start maps an upstream failure to 502 and sets no cookie", async () =
   const res = await inScope(() => plexStart.POST(startPost(JSON.stringify({ clientId: VALID_CLIENT_ID }))));
   assert.equal(res.status, 502);
   assert.ok(!setCookies(res).some((c) => c.startsWith(`${PLEX_FLOW_COOKIE}=`)));
+  // An upstream non-2xx is logged with its status so it is distinguishable
+  // from a network/SSRF failure in the operator's log.
+  assert.ok(
+    errors.some((e) => e.includes("[auth/plex/start]") && e.includes("500")),
+    "an upstream 5xx must be logged for the operator",
+  );
+});
+
+test("plex start logs a thrown fetch failure (DNS/SSRF/timeout) instead of swallowing it", async () => {
+  // safeFetchTrusted throws (rather than returning a response) on DNS failure,
+  // a non-public resolved address, or a timeout. Mapping that to a bare 502
+  // with no log left a misconfigured egress environment undiagnosable.
+  plexPinCreateThrows = new Error("getaddrinfo ENOTFOUND plex.tv");
+  const res = await inScope(() => plexStart.POST(startPost(JSON.stringify({ clientId: VALID_CLIENT_ID }))));
+  assert.equal(res.status, 502);
+  assert.equal((await res.json()).error, "Plex PIN create failed");
+  assert.ok(!setCookies(res).some((c) => c.startsWith(`${PLEX_FLOW_COOKIE}=`)));
+  assert.ok(
+    errors.some((e) => e.includes("[auth/plex/start]") && e.includes("ENOTFOUND")),
+    "the thrown fetch failure must be logged for the operator",
+  );
 });
 
 test("plex start maps a malformed upstream response to 502", async () => {

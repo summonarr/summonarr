@@ -26,13 +26,10 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { Prisma } from "@/generated/prisma";
 import { prisma } from "../src/lib/prisma.ts";
-import {
-  checkAndRecordWebhook,
-  checkAndRecordWebhookJson,
-  clearWebhookReplayDigestJson,
-  __resetWebhookReplayCacheForTests,
-} from "../src/lib/webhook-replay.ts";
+import * as webhookReplay from "../src/lib/webhook-replay.ts";
 import { shadowPrismaModel } from "./_helpers.mts";
+
+const { checkAndRecordWebhookJson, clearWebhookReplayDigestJson } = webhookReplay;
 
 const TTL_MS = 24 * 60 * 60 * 1000;
 const T0 = Date.UTC(2026, 0, 15, 12, 0, 0);
@@ -234,31 +231,6 @@ test("NUL separator pins the source/secret boundary — ('ab','c') never collide
   assert.notEqual(lastCreateDigest(), d1);
 });
 
-test("NUL separator pins the secret/body boundary on the raw variant", async () => {
-  assert.equal(await checkAndRecordWebhook("radarr", "sx", "y"), true);
-  const d1 = lastCreateDigest();
-  assert.equal(await checkAndRecordWebhook("radarr", "s", "xy"), true);
-  assert.notEqual(lastCreateDigest(), d1);
-});
-
-test("raw variant: string and Uint8Array of the same utf8 bytes hit the same key", async () => {
-  const body = '{"title":"Amélie"}'; // non-ASCII pins the utf8 encoding of the string path
-  assert.equal(await checkAndRecordWebhook("radarr", "s", body), true);
-  const first = lastCreateDigest();
-  assert.equal(await checkAndRecordWebhook("radarr", "s", new TextEncoder().encode(body)), false);
-  assert.equal(lastCreateDigest(), first);
-});
-
-test("raw variant does NOT canonicalize — reordered JSON text is a distinct key", async () => {
-  // checkAndRecordWebhook hashes the bytes as-received; only the Json variant
-  // normalizes. Pins the split so nobody 'unifies' them and breaks either
-  // signature-bound raw bodies or reorder-tolerant JSON dedup.
-  assert.equal(await checkAndRecordWebhook("radarr", "s", '{"a":1,"b":2}'), true);
-  const first = lastCreateDigest();
-  assert.equal(await checkAndRecordWebhook("radarr", "s", '{"b":2,"a":1}'), true);
-  assert.notEqual(lastCreateDigest(), first);
-});
-
 test("non-object JSON payloads (null, numbers) pass through canonicalization and dedupe", async () => {
   assert.equal(await checkAndRecordWebhookJson("sonarr", "s", null), true);
   assert.equal(await checkAndRecordWebhookJson("sonarr", "s", null), false);
@@ -428,6 +400,13 @@ test("FAIL-CLOSED PIN: a duck-typed { code: 'P2025' } plain Error still warns (i
   assert.equal(warn.mock.callCount(), 1);
 });
 
-test("__resetWebhookReplayCacheForTests is a callable no-op (interface compatibility)", () => {
-  assert.equal(__resetWebhookReplayCacheForTests(), undefined);
+test("EXPORT-SURFACE PIN: only the JSON check + rollback are exported (review 2026-09 f134)", () => {
+  // The raw-body checkAndRecordWebhook and the no-op __resetWebhookReplayCacheForTests
+  // were dead surface kept alive only by their own tests: the two *arr handlers are
+  // the sole callers and both go through the JSON variant. Re-adding either without a
+  // production caller fails here.
+  assert.deepEqual(
+    Object.keys(webhookReplay).sort(),
+    ["checkAndRecordWebhookJson", "clearWebhookReplayDigestJson"],
+  );
 });

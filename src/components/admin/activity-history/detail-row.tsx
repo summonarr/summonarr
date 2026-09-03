@@ -24,24 +24,29 @@ export function DetailRow({
   mounted: boolean;
 }) {
   // Mirror the row body's grouping-aware effective values: when this PlayHistory
-  // is a chain representative, the watch time / progress reflect the whole
-  // chain. In ungrouped mode the API mirrors these into single-segment
-  // defaults, so the expression is uniform.
+  // is a chain representative, EVERY duration/timestamp cell reflects the whole
+  // chain — watch time, paused time, and the started/stopped span — not just
+  // the newest segment the representative row happens to be. In ungrouped mode
+  // the API mirrors these into single-segment defaults, so the expression is
+  // uniform. (The table's Date column deliberately stays the representative's
+  // own startedAt: it is the grouped sort key; the panel spans the chain.)
   const effectivePlay = play.totalPlayDuration ?? play.playDuration;
+  const effectivePaused = play.totalPausedDuration ?? play.pausedDuration;
+  const startedAt = play.firstStartedAt ?? play.startedAt;
+  const stoppedAt = play.lastStoppedAt ?? play.stoppedAt;
   const segments = play.segmentCount ?? 1;
+  // Clamped like the row's progress bar: a chain's totalPlayDuration is a SUM
+  // over segments, so a rewatched span pushes it past the title's duration.
   const pct =
     play.duration > 0
-      ? Math.round((effectivePlay / play.duration) * 100)
+      ? Math.min(100, Math.round((effectivePlay / play.duration) * 100))
       : 0;
   const details: [string, React.ReactNode][] = [
-    ["Started", fmtTimestamp(play.startedAt, mounted)],
-    ["Stopped", fmtTimestamp(play.stoppedAt, mounted)],
+    ["Started", fmtTimestamp(startedAt, mounted)],
+    ["Stopped", fmtTimestamp(stoppedAt, mounted)],
     ["Total length", fmtDuration(play.duration)],
     ["Watch time", fmtDuration(effectivePlay)],
-    [
-      "Paused",
-      play.pausedDuration ? fmtDuration(play.pausedDuration) : "—",
-    ],
+    ["Paused", effectivePaused ? fmtDuration(effectivePaused) : "—"],
     ["Progress", `${pct}%`],
     ...(segments > 1 ? ([["Segments", `${segments} (grouped resume)`]] as [string, React.ReactNode][]) : []),
     ["Device", play.device ?? "—"],

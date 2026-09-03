@@ -15,7 +15,7 @@ export const DELETE = withAuth(async (
     return NextResponse.json({ error: "Deletion voting is disabled" }, { status: 403 });
   }
 
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   const { tmdbId: rawId } = await params;
@@ -61,7 +61,7 @@ export const PATCH = withAdmin(async (
   { params }: { params: Promise<{ tmdbId: string }> },
   session
 ) => {
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   if (!checkRateLimit(`votes-dismiss:${session.user.id}`, 10, 60_000)) {

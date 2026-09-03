@@ -73,11 +73,30 @@ export function IpInfo({ ip, inline = false }: Props) {
     if (fetchedRef.current) return;
     fetchedRef.current = true;
     setLoading(true);
+    setError(null);
     fetch(withBasePath(`/api/admin/ip-lookup?ip=${encodeURIComponent(ip)}`))
       .then(async (r) => {
-        if (!r.ok) {
+        if (r.status === 404) {
+          // The route answers 404 when `getIpLookup` has nothing — an unset
+          // ipinfo token is the common (and permanent) case, so negative-cache
+          // it in the shared map rather than re-hitting the backend on every
+          // open of every IP.
           cacheSet(ip, "missing");
           setError("Not available");
+          return;
+        }
+        if (!r.ok) {
+          // 429 (per-admin rate limit) / 5xx / a transient upstream blip: the
+          // SERVER stays retryable (no notFound row is written for these), so
+          // the client must too. Never write the shared cache here — the map
+          // outlives client navigations, and a single blip would otherwise pin
+          // "Not available" on this IP in every table until a full reload.
+          // Surface the route's own message (the 429 says "try again shortly")
+          // and release the fetch guard so the next open retries.
+          const body = (await r.json().catch(() => null)) as { error?: unknown } | null;
+          const msg = typeof body?.error === "string" && body.error ? body.error : null;
+          setError(msg ?? "Lookup failed — try again");
+          fetchedRef.current = false;
           return;
         }
         const json = (await r.json()) as Lookup;
@@ -85,8 +104,9 @@ export function IpInfo({ ip, inline = false }: Props) {
         setData(json);
       })
       .catch(() => {
-        cacheSet(ip, "missing");
-        setError("Lookup failed");
+        // Network error / aborted: transient, same rule as above.
+        setError("Lookup failed — try again");
+        fetchedRef.current = false;
       })
       .finally(() => setLoading(false));
   }

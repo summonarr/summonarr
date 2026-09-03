@@ -22,7 +22,12 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [errorMessage, setErrorMessage] = useState("");
 
-  const keyIsSet = initialRelayKey.length > 0;
+  // Tracks the PERSISTED key state, not the prop: the prop is derived once by
+  // the server page, and no settings form calls router.refresh(), so after a
+  // Remove + Save the hint and the Remove button would keep describing a key
+  // that no longer exists until a full reload. Re-derived on every confirmed
+  // save below.
+  const [keyIsSet, setKeyIsSet] = useState(initialRelayKey.length > 0);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -46,6 +51,9 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
       if (res.ok && data.ok !== false) {
         setStatus("ok");
+        // The masked placeholder is skipped server-side (key unchanged, still
+        // set); "" is clearable (key removed); anything else is a new key.
+        setKeyIsSet(relayKey.length > 0);
       } else {
         setStatus("error");
         setErrorMessage(typeof data.error === "string" ? data.error : "");

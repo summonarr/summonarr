@@ -13,6 +13,13 @@ import { isPurgedRow } from "@/lib/account-lifecycle";
 //   1. MediaServerUser.userId == the caller  (the FK — set by automatic linking
 //      at ingest, by the hourly Jellyfin sync, or by an admin's manual link)
 //   2. (source, sourceUserId) == the caller's OWN User.plexUserId/jellyfinUserId
+//      — and ONLY for a row that is NOT manually pinned (`manualUserLink`).
+//      Matcher 2 is automatic resolution, which guardrail 34 says must skip a
+//      pinned row: an admin's manual UNLINK (userId=null) or re-assignment to a
+//      DIFFERENT account still leaves this account's provider subject equal to
+//      the row's sourceUserId, and the resolver deliberately refuses to hand the
+//      history back on that equality. This dump must refuse it too, or it
+//      reports history as visible on exactly the case the pin exists to hide.
 // An empty union means an empty history page. This dump shows which matcher each
 // MediaServerUser row would satisfy, so the reason is visible rather than guessed.
 //
@@ -53,9 +60,15 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
 
   const rows = candidates.map((r) => {
     const matchesFk = r.userId === user.id;
-    const matchesSubject =
+    // The raw subject equality, then the pin. Mirrors the resolver's
+    // `{ source, sourceUserId, manualUserLink: false }` branches exactly — a
+    // pinned row satisfies the equality but is NOT resolved (guardrail 34), and
+    // the split is kept so the operator can see WHY a subject match did not fire.
+    const subjectEquals =
       (r.source === "plex" && !!user.plexUserId && r.sourceUserId === user.plexUserId) ||
       (r.source === "jellyfin" && !!user.jellyfinUserId && r.sourceUserId === user.jellyfinUserId);
+    const subjectSuppressedByPin = subjectEquals && r.manualUserLink;
+    const matchesSubject = subjectEquals && !r.manualUserLink;
     // NOT a matcher in the read path — shown because it IS the key automatic
     // linking falls back to at ingest, so it explains whether the FK would heal
     // itself on this person's next watch.
@@ -66,6 +79,7 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
       _count: undefined,
       matchesFk,
       matchesSubject,
+      subjectSuppressedByPin,
       visibleToUser: matchesFk || matchesSubject,
       emailWouldRelink,
     };
@@ -80,16 +94,21 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   // row that should have matched is visible — Plex reports the server OWNER's
   // sessions under a server-local account id (typically "1"), NOT their plex.tv
   // id, so the owner's row can carry a sourceUserId that no User.plexUserId will
-  // ever equal. Bounded and read-only.
-  const allIdentities = await prisma.mediaServerUser.findMany({
-    take: 200,
-    select: {
-      id: true, source: true, sourceUserId: true, username: true, email: true,
-      userId: true, manualUserLink: true, active: true, isServerAdmin: true,
-      _count: { select: { playHistory: true } },
-    },
-    orderBy: [{ source: "asc" }, { username: "asc" }],
-  });
+  // ever equal. Bounded and read-only — and issued ONLY in that empty case: the
+  // correlated PlayHistory count over 200 rows is the most expensive read on
+  // this route, and when a candidate matched its result is never emitted.
+  const allIdentities =
+    rows.length > 0
+      ? []
+      : await prisma.mediaServerUser.findMany({
+          take: 200,
+          select: {
+            id: true, source: true, sourceUserId: true, username: true, email: true,
+            userId: true, manualUserLink: true, active: true, isServerAdmin: true,
+            _count: { select: { playHistory: true } },
+          },
+          orderBy: [{ source: "asc" }, { username: "asc" }],
+        });
 
   return NextResponse.json({
     user: {
@@ -124,6 +143,9 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
       playHistoryRows: r.playHistoryRows,
       active: r.active,
       manualUserLink: r.manualUserLink,
+      // true = the account's own provider subject matches this row, and the
+      // ONLY thing hiding the history is the pin (manual unlink / re-assign).
+      subjectSuppressedByPin: r.subjectSuppressedByPin,
       linkedToOtherUserId: r.userId,
       emailWouldRelink: r.emailWouldRelink,
     })),

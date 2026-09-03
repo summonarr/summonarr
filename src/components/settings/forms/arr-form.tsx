@@ -58,6 +58,10 @@ export function ArrForm({
   const minAvailKey = `${service}${v}MinimumAvailability`;
   const langKey    = `${service}${v}LanguageProfileId`;
   const versionKey = `${service}${v}Version`;
+  // /api/settings answers a failed connection test with 422 and only the
+  // per-variant `<service><v>Error` key (no top-level `error`), so read that
+  // first — the same shape email-form reads via `smtpError`.
+  const errorKey   = `${service}${v}Error`;
 
   const [url,    setUrl]    = useState(initialUrl);
   const [apiKey, setApiKey] = useState(initialApiKey);
@@ -111,7 +115,7 @@ export function ArrForm({
         setStatus("ok");
         fetchOptions();
       } else {
-        setMessage(data.error ?? "Failed to save");
+        setMessage(data[errorKey] ?? data.error ?? "Failed to save");
         setStatus("error");
       }
     } catch {
@@ -211,6 +215,14 @@ export function ArrForm({
                     className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">— select a root folder —</option>
+                    {/* A saved folder the server no longer lists would otherwise
+                        make this controlled select silently display the first
+                        option (the placeholder) while the stale value stays in
+                        state — and keeps Save Defaults enabled — so surface it
+                        explicitly instead of hiding it (mirrors arr-instances-manager). */}
+                    {rootFolder && !options.rootFolders.some((f) => f.path === rootFolder) && (
+                      <option value={rootFolder}>{rootFolder} (not found on server)</option>
+                    )}
                     {options.rootFolders.map((f) => (
                       <option key={f.path} value={f.path}>{f.path}</option>
                     ))}
@@ -225,6 +237,9 @@ export function ArrForm({
                     className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">— select a quality profile —</option>
+                    {qualityProfileId && !options.qualityProfiles.some((p) => String(p.id) === qualityProfileId) && (
+                      <option value={qualityProfileId}>Profile #{qualityProfileId} (not found on server)</option>
+                    )}
                     {options.qualityProfiles.map((p) => (
                       <option key={p.id} value={String(p.id)}>{p.name}</option>
                     ))}
@@ -265,6 +280,9 @@ export function ArrForm({
                       className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     >
                       <option value="">— {label}&apos;s default —</option>
+                      {languageProfileId && !options.languageProfiles!.some((p) => String(p.id) === languageProfileId) && (
+                        <option value={languageProfileId}>Profile #{languageProfileId} (not found on server)</option>
+                      )}
                       {options.languageProfiles!.map((p) => (
                         <option key={p.id} value={String(p.id)}>{p.name}</option>
                       ))}

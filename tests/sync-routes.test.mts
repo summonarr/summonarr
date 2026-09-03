@@ -68,6 +68,9 @@ const okJson = (body: unknown, status = 200) =>
 type Op = { model: string; method: string; args: unknown };
 type TxRecord = { ops: Op[]; timeout: number | undefined; failed: boolean };
 const transactions: TxRecord[] = [];
+// Top-level (non-tx) $executeRaw statements — the plex route's show file-path
+// patch (patchPlexShowFilePaths) issues ONE VALUES-joined UPDATE per chunk here.
+const rawStatements: Array<{ sql: string; values: unknown[] }> = [];
 let failCreateManyOn: string | null = null; // tx model whose createMany should throw
 
 const settings = new Map<string, string>();
@@ -229,6 +232,10 @@ const fakePrisma = {
     }
     casCalls++;
     return casWinnerIds.map((id) => ({ id }));
+  },
+  $executeRaw: async (query: { sql: string; values: unknown[] }) => {
+    rawStatements.push({ sql: query.sql, values: query.values ?? [] });
+    return 0;
   },
   $transaction: async (arg: unknown, opts?: { timeout?: number }) => {
     if (typeof arg === "function") {
@@ -458,6 +465,7 @@ beforeEach(() => {
   warns.length = 0;
   errors.length = 0;
   transactions.length = 0;
+  rawStatements.length = 0;
   settingUpserts.length = 0;
   auditRows.length = 0;
   settings.clear();
@@ -721,6 +729,63 @@ test("as the ONLY Plex server it still rewrites the episode cache — single-ser
     transactions.flatMap((t) => t.ops).some((o) => o.model === "tVEpisodeCache" && o.method === "deleteMany"),
     "a lone Plex server must still maintain the episode cache, exactly as before",
   );
+});
+
+// One movie section (empty) + one show section with TMDB-identified shows
+// whose type=4 episode listing carries on-disk files — the data the full
+// path's skipShowFilePaths patch runs on.
+function plexShowResponder(shows: Array<{ ratingKey: string; tmdbId: number; file: string }>): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname === "/library/sections") {
+      return okJson({ MediaContainer: { Directory: [
+        { key: "1", title: "Movies", type: "movie" },
+        { key: "2", title: "TV", type: "show" },
+      ] } });
+    }
+    if (url.pathname === "/library/sections/1/all") return okJson({ MediaContainer: { totalSize: 0, Metadata: [] } });
+    if (url.pathname === "/library/sections/2/all" && url.searchParams.get("type") === "2") {
+      return okJson({ MediaContainer: {
+        totalSize: shows.length,
+        Metadata: shows.map((s) => ({ ratingKey: s.ratingKey, type: "show", title: `Show ${s.tmdbId}`, Guid: [{ id: `tmdb://${s.tmdbId}` }] })),
+      } });
+    }
+    if (url.pathname === "/library/sections/2/all" && url.searchParams.get("type") === "4") {
+      return okJson({ MediaContainer: {
+        totalSize: shows.length,
+        Metadata: shows.map((s) => ({ grandparentRatingKey: s.ratingKey, parentIndex: 1, index: 1, Media: [{ Part: [{ file: s.file }] }] })),
+      } });
+    }
+    throw new Error(`unexpected Plex fetch ${url}`);
+  };
+}
+
+test("plex { full: true } show file-path patch: ONE VALUES-joined UPDATE for every show (never one updateMany per show), default-instance-scoped and filePath-IS-NULL-guarded", async () => {
+  configurePlex();
+  respond = plexShowResponder([
+    { ratingKey: "show-a", tmdbId: 1399, file: "/tv/a/s01e01.mkv" },
+    { ratingKey: "show-b", tmdbId: 1400, file: "/tv/b/s01e01.mkv" },
+  ]);
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+
+  // The full replace wrote the show rows pathless (skipShowFilePaths on the
+  // lone-server full path) …
+  const tvRows = opsFor("plexLibraryItem", "createMany")
+    .flatMap((o) => (o.args as { data: Array<{ mediaType: string; plexRatingKey: string; filePath: string | null }> }).data)
+    .filter((r) => r.mediaType === "TV");
+  assert.deepEqual(tvRows.map((r) => [r.plexRatingKey, r.filePath]).sort(), [["show-a", null], ["show-b", null]]);
+  // … and the patch that follows the episode walk is ONE statement, not a
+  // per-show updateMany loop inside a BATCH_TX_TIMEOUT transaction.
+  assert.deepEqual(opsFor("plexLibraryItem", "updateMany"), [], "never one updateMany per show");
+  const patches = rawStatements.filter((r) => r.sql.includes('UPDATE "PlexLibraryItem"'));
+  assert.equal(patches.length, 1, "one VALUES-joined UPDATE for the whole instance");
+  const [patch] = patches;
+  assert.ok(patch.sql.includes('"filePath" IS NULL'), "the concurrent-writer no-op guard must survive");
+  assert.ok(patch.sql.includes('"serverInstance" = '), "must stay instance-scoped");
+  assert.ok(patch.values.includes(""), "the default instance's slug is bound");
+  for (const v of ["show-a", "show-b", "/tv/a/s01e01.mkv", "/tv/b/s01e01.mkv"]) assert.ok(patch.values.includes(v), `${v} bound`);
 });
 
 test("with a SECOND Jellyfin server registered, a resync leaves the shared TVEpisodeCache alone — and never walks the Episode list", async () => {

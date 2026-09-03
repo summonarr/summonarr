@@ -69,7 +69,9 @@ function ipv6ToBigInt(addr: string): bigint | null {
 // textual `unwrapV4Mapped`/regexes miss: NAT64 (64:ff9b::/96) in non-compressed
 // form, the deprecated IPv4-compatible (::/96), and SIIT (::ffff:0:0/96). Returns
 // the embedded IPv4 dotted string so callers can apply IPv4 rules; null otherwise.
-function unwrapEmbeddedV4(addr: string): string | null {
+// Exported so sibling classifiers (ip-lookup's bogon short-circuit) reuse THIS
+// unwrap instead of hand-copying a subset of it that then drifts.
+export function unwrapEmbeddedV4(addr: string): string | null {
   if (!addr.includes(":")) return null;
   const v = ipv6ToBigInt(addr);
   if (v === null) return null;

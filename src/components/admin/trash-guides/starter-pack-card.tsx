@@ -47,11 +47,23 @@ export function StarterPackCard({
   const load = useCallback(async () => {
     try {
       const res = await fetch(withBasePath(`/api/admin/trash-guides/starter-pack`));
-      const data = (await res.json()) as { items: StarterPackItem[] };
+      const data = (await res.json().catch(() => ({}))) as {
+        items?: StarterPackItem[];
+        error?: string;
+        schemaDiagnostic?: string;
+      };
+      if (!res.ok) {
+        // A failed load (500 from resolveStarterPack, 401/403 from withAdmin) must not
+        // masquerade as "Library is empty." — surface the reason and keep whatever
+        // list was already on screen rather than blanking it.
+        setRefreshError({ errors: [data.error ?? `HTTP ${res.status}`], schemaDiagnostic: data.schemaDiagnostic });
+        setLoaded(true);
+        return;
+      }
       setItems(data.items ?? []);
       setLoaded(true);
-    } catch {
-      setItems([]);
+    } catch (err) {
+      setRefreshError({ errors: [err instanceof Error ? err.message : String(err)] });
       setLoaded(true);
     }
   }, []);
@@ -137,6 +149,7 @@ export function StarterPackCard({
     if (selected.size === 0) return;
     setApplyState("running");
     setApplyLog([]);
+    setRefreshError(null);
     try {
       const res = await fetch(withBasePath(`/api/admin/trash-guides/apply`), {
         method: "POST",
@@ -150,13 +163,26 @@ export function StarterPackCard({
         setTimeout(() => setApplyState("idle"), 3000);
         return;
       }
-      const data = (await res.json()) as { ok: boolean; results: ApplyResult[] };
-      setApplyState(data.ok ? "ok" : "error");
-      if (data.results) setApplyLog(data.results);
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        results?: ApplyResult[];
+        error?: string;
+      };
+      const failed = !res.ok || !data.ok;
+      setApplyState(failed ? "error" : "ok");
+      if (data.results && data.results.length > 0) {
+        setApplyLog(data.results);
+      } else if (failed) {
+        // 403 (integration disabled), 429 (rate limit) and 400 (bad body) answer a bare
+        // `{ error }` with no per-spec results, so the log stays empty — surface the
+        // reason in the banner instead of an error badge pointing at nothing.
+        setRefreshError({ errors: [data.error ?? `HTTP ${res.status}`] });
+      }
       await load();
       onChanged?.();
-    } catch {
+    } catch (err) {
       setApplyState("error");
+      setRefreshError({ errors: [err instanceof Error ? err.message : String(err)] });
     }
     setTimeout(() => setApplyState("idle"), 3000);
   }
@@ -302,7 +328,7 @@ export function StarterPackCard({
           {refreshState === "ok"    && <span className="text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />Catalog refreshed</span>}
           {refreshState === "error" && <span className="text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />Refresh failed — see banner below</span>}
           {applyState === "ok"    && <span className="text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />Selection applied</span>}
-          {applyState === "error" && <span className="text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />One or more failed — see log below</span>}
+          {applyState === "error" && <span className="text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />One or more failed — see below</span>}
         </div>
       </Card>
 

@@ -231,11 +231,20 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
       {detail.topTitles.length > 0 && (
         <Section title="Top titles">
           {detail.topTitles.map((t) => (
+            // Key on the tuple the SQL groups by — (tmdbId, mediaType), falling
+            // back to the title when tmdbId is null. TMDB movie and TV ids are
+            // separate namespaces that overlap numerically, so a movie and a
+            // series sharing an integer are two rows: distinct keys, and the
+            // link carries ?type= so the stats page doesn't blend the two.
             <KV
-              key={t.tmdbId ?? t.title}
+              key={`${t.mediaType ?? ""}:${t.tmdbId != null ? `id:${t.tmdbId}` : `t:${t.title}`}`}
               k={t.title}
               v={`${t.count}`}
-              href={t.tmdbId ? `/admin/activity/media/${t.tmdbId}` : undefined}
+              href={
+                t.tmdbId
+                  ? `/admin/activity/media/${t.tmdbId}${t.mediaType ? `?type=${t.mediaType}` : ""}`
+                  : undefined
+              }
             />
           ))}
         </Section>

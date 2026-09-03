@@ -142,7 +142,21 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
           </div>
         )}
         {loadState === "error" && (
-          <p className="text-xs text-red-400 py-2">Failed to load messages.</p>
+          // The compose box stays disabled until the thread loads (a send would
+          // append to an empty list), so a failed mount fetch needs an explicit
+          // retry path — otherwise the only ways back to "ready" are a remount
+          // or an SSE-triggered silent reload that needs someone else to post.
+          <div className="flex items-center gap-2 py-2">
+            <p className="text-xs text-red-400">Failed to load messages.</p>
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost"
+              onClick={() => void loadMessages()}
+            >
+              Retry
+            </Button>
+          </div>
         )}
         {loadState === "ready" && messages.length === 0 && (
           <p className="text-xs text-zinc-500 py-2">No messages yet. Start the conversation below.</p>

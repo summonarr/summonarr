@@ -14,7 +14,7 @@ const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 export const POST = withAuth(async (req, _ctx, session) => {
   // Personal mutation — blocked during maintenance like profile delete/password.
   // DELETE (unsubscribe) intentionally stays open so users can always opt out.
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
   // Don't accept new subscriptions while push is disabled: the send path already
   // no-ops when off, so a registration stored here would never deliver.

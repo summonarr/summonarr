@@ -105,7 +105,7 @@ export const POST = withPermission([
   Permission.REQUEST_MOVIE,
   Permission.REQUEST_TV,
 ])(async (req, _ctx, session) => {
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   if (!checkRateLimit(`bulk:${session.user.id}`, 10, 60_000)) {

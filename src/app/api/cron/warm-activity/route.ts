@@ -2,24 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { clearActivityCache, warmActivityCache } from "@/lib/play-history";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
-import { isCronAuthorized, recordCronRun } from "@/lib/cron-auth";
-import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
-
-async function getAuthContext(request: NextRequest): Promise<{ userId: string; userName: string; trigger: "admin" | "cron" } | null> {
-  if (!(await isCronAuthorized(request))) return null;
-
-  // DB-checked attribution: bearer-first then cookie, with revocation/cutoff/role
-  // honored — so a stale or revoked admin JWT can't mis-attribute the audit row.
-  // verifyAndRefreshSession (inside the helper) already rejects expired tokens.
-  const claims = await readActiveSummonarrSessionFromRequest(request);
-  if (claims?.role === "ADMIN") {
-    return { userId: claims.id, userName: claims.name ?? "admin", trigger: "admin" };
-  }
-  return { userId: "system", userName: "cron", trigger: "cron" };
-}
+import { getCronActor, recordCronRun } from "@/lib/cron-auth";
 
 export async function POST(request: NextRequest) {
-  const authCtx = await getAuthContext(request);
+  const authCtx = await getCronActor(request);
   if (!authCtx) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }

@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { prisma } from "@/lib/prisma";
 import {
   getRadarrWantedTmdbIds,
@@ -22,7 +21,7 @@ import { syncDownloadPolicies } from "@/lib/download-policy";
 import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDownloadPending } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
-import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
+import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
 import { isFeatureEnabled } from "@/lib/features";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
@@ -32,6 +31,7 @@ import { DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
 import { settleLimit } from "@/lib/concurrency";
 import { effectivePermissions, parseMediaServerGrants } from "@/lib/permissions";
 import { visibleInstancesFor, type VisibleServerInstances } from "@/lib/media-visibility";
+import { warnOnChange } from "@/lib/log-dedup";
 
 // Advisory-lock id 2000 — distinct from 2001-2011 (cron warm/sync routes) and TRASH_SYNC_LOCK_ID (2010).
 // Held for the entire orchestrator run so a second concurrent invocation (admin "Resync" while
@@ -127,13 +127,14 @@ const droppedTmdbIds = <T extends { tmdbId: number }>(input: T[], kept: T[]): nu
 };
 
 export async function POST(request: NextRequest) {
-  if (!(await isCronAuthorized(request))) {
+  const actor = await getCronActor(request);
+  if (!actor) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   return withCronRunRecording("sync:full", () => withAdvisoryLock(
     SYNC_ORCHESTRATOR_LOCK_ID,
-    (signal: AbortSignal) => runSyncOrchestrator(request, signal),
+    (signal: AbortSignal) => runSyncOrchestrator(actor, signal),
     () => NextResponse.json({ skipped: true, reason: "sync already running" }, { status: 200 }),
   ));
 }
@@ -201,7 +202,14 @@ async function deduplicatePlexRowsByRatingKey<T extends PlexDedupeRow>(
   });
 
   if (dropped.length > 0) {
-    console.warn(
+    // Repeat-suppressed: a conflated ratingKey is a standing property of the
+    // Plex library plus its pinned mappings, so this recomputes to the same
+    // string on every orchestrator run. The signature is the dropped list
+    // itself — not just its length — so a different set of conflicts re-logs
+    // even when the count happens to match.
+    warnOnChange(
+      `sync-conflated:${mediaType}:${serverInstance}`,
+      dropped.join(", "),
       `[sync] ${dropped.length} conflated ratingKey(s) kept their pinned tmdbId ` +
         `(${mediaType}, instance="${serverInstance}"): ${dropped.join(", ")}`,
     );
@@ -209,7 +217,7 @@ async function deduplicatePlexRowsByRatingKey<T extends PlexDedupeRow>(
   return kept;
 }
 
-async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): Promise<NextResponse> {
+async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Promise<NextResponse> {
   // signal fires when withAdvisoryLock's hard timeout trips (before the lock is
   // released). Wired through so callers (e.g. arrFetch) can opt in later, but
   // currently unobserved — Prisma 7's $transaction(fn, opts) takes no AbortSignal.
@@ -936,17 +944,12 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
           // instance-scoped, and touches only rows still missing a path —
           // idempotent and harmless if a concurrent writer replaced the rows.
           // Best-effort: a failure leaves paths null until the next run, the
-          // same degradation a failed allLeaves probe had.
+          // same degradation a failed allLeaves probe had. One VALUES-joined
+          // statement per chunk (patchPlexShowFilePaths), never one updateMany
+          // per show — that loop was O(shows) serialized round-trips per run.
           if (episodeFilePaths.size > 0) {
             try {
-              await prisma.$transaction(async (tx) => {
-                for (const [ratingKey, file] of episodeFilePaths) {
-                  await tx.plexLibraryItem.updateMany({
-                    where: { serverInstance: slug, mediaType: "TV", plexRatingKey: ratingKey, filePath: null },
-                    data: { filePath: file },
-                  });
-                }
-              }, { timeout: BATCH_TX_TIMEOUT });
+              await patchPlexShowFilePaths(slug, episodeFilePaths);
             } catch (err) {
               console.warn(`[sync] Plex show file-path patch failed for instance "${slug}":`, err instanceof Error ? err.message : err);
             }
@@ -1134,11 +1137,15 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   // instance that is registered but temporarily unconfigured (an admin
   // mid-edit, a blanked token) must keep its rows, exactly as the arms above
   // leave a failed instance's rows intact.
+  //
+  // Read ONCE here, after the library writes, and shared with the demote guard
+  // below (which needs the same REGISTERED set, for the same reason) — the two
+  // used to issue this identical pair of registry reads ~50 lines apart.
+  const [registeredPlex, registeredJellyfin] = await Promise.all([
+    getMediaInstances("plex"),
+    getMediaInstances("jellyfin"),
+  ]);
   try {
-    const [registeredPlex, registeredJellyfin] = await Promise.all([
-      getMediaInstances("plex"),
-      getMediaInstances("jellyfin"),
-    ]);
     const [orphanedPlex, orphanedJellyfin] = await Promise.all([
       prisma.plexLibraryItem.deleteMany({ where: { serverInstance: { notIn: registeredPlex.map((i) => i.slug) } } }),
       prisma.jellyfinLibraryItem.deleteMany({ where: { serverInstance: { notIn: registeredJellyfin.map((i) => i.slug) } } }),
@@ -1204,12 +1211,9 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   // PlexLibraryItem/JellyfinLibraryItem rows are deliberately preserved (guardrail 35).
   // It never enters `fetched`, so it cannot make plexSyncSucceeded false either. A title
   // living only on that server therefore read as absent and its requests were demoted
-  // AVAILABLE -> APPROVED, from data that simply was not consulted. One registry
-  // findUnique per service.
-  const [registeredPlex, registeredJellyfin] = await Promise.all([
-    getMediaInstances("plex"),
-    getMediaInstances("jellyfin"),
-  ]);
+  // AVAILABLE -> APPROVED, from data that simply was not consulted. The
+  // registeredPlex/registeredJellyfin lists were read once, post-write, above
+  // the de-registered-instance sweep and are shared with it.
   // `plexInstances.length > 0` is load-bearing. getMediaInstances ALWAYS synthesizes the
   // default instance, so a service with nothing configured reads as 1 registered vs 0
   // syncable — "incomplete" — and without this term the guard below disabled demotes on
@@ -1730,14 +1734,14 @@ async function runSyncOrchestrator(request: NextRequest, signal?: AbortSignal): 
   // wrapper writes the Setting row on every run (including throws + non-2xx). The audit
   // row below stays scoped to admin-triggered runs to avoid hourly flooding of the
   // audit table.
-  // DB-checked attribution (bearer-first then cookie) so a stale/revoked admin
-  // JWT can't mis-attribute the audit row. The access-control gate stays
-  // isCronAuthorized (above); this only attributes the admin-triggered run.
-  const attributionClaims = await readActiveSummonarrSessionFromRequest(request);
-  if (attributionClaims) {
+  // DB-checked attribution comes from the SAME session read that authorized the
+  // request (getCronActor in POST) — a stale/revoked admin JWT can't
+  // mis-attribute the audit row, and the verify isn't paid twice. A CRON_SECRET
+  // run has no session to attribute, so it writes no audit row.
+  if (actor.trigger === "admin") {
     void logAudit({
-      userId: attributionClaims.id,
-      userName: attributionClaims.name ?? attributionClaims.id,
+      userId: actor.userId,
+      userName: actor.userName,
       action: "LIBRARY_SYNC",
       target: "sync:full",
       details: { marked, reverted, repushed, plexMarked, jellyfinMarked, radarrWanted, sonarrWanted, durationMs },

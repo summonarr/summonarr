@@ -16,7 +16,26 @@ export interface CronJobInfo {
   lastRun: string | null;
   lastDuration: number | null;
   lastStatus: "ok" | "error" | null;
+  /**
+   * Runs recorded in the hour before this page was rendered, or null when the
+   * ledger holds no history for this target (a job that has only ever reported
+   * through the audit-log fallback, or has not run since the history shipped).
+   *
+   * Computed on the SERVER and passed in as a plain number — never derived from
+   * Date.now() during render here, which would be a guardrail-16 hydration bug.
+   */
+  runsLastHour: number | null;
+  /** True when runsLastHour hit the ledger cap, so the true count may be higher. */
+  runsLastHourCapped: boolean;
 }
+
+// Above this many runs in an hour, the count is rendered as a warning rather
+// than as information. The fastest job in this table is Warm Activity at 1800s
+// (2/h), so 4/h is already double the rate of the most frequent thing here and
+// cannot be normal for any row. The COUNT is always shown regardless — this
+// threshold only decides the colour, so an operator can still judge a rate the
+// threshold does not catch.
+const RUNS_PER_HOUR_WARN_AT = 4;
 
 // Admin table of internal cron jobs with last-run/status and a per-job manual Run trigger.
 export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
@@ -47,6 +66,9 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                 lastRun: new Date().toISOString(),
                 lastDuration: data.durationMs ?? null,
                 lastStatus: succeeded ? "ok" : "error",
+                // A manual run is a run: recordCronRun writes it to the same
+                // ledger, so keep the visible rate honest without a reload.
+                runsLastHour: (j.runsLastHour ?? 0) + 1,
               }
             : j,
         ),
@@ -55,7 +77,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
       setJobs((prev) =>
         prev.map((j) =>
           j.name === name
-            ? { ...j, lastRun: new Date().toISOString(), lastDuration: null, lastStatus: "error" as const }
+            ? { ...j, lastRun: new Date().toISOString(), lastDuration: null, lastStatus: "error" as const, runsLastHour: (j.runsLastHour ?? 0) + 1 }
             : j,
         ),
       );
@@ -102,6 +124,24 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                     </span>
                   ) : (
                     <span className="text-zinc-500">never</span>
+                  )}
+                  {/* Cadence, not just recency. A lone timestamp reads the same
+                      whether the job ran once or four hundred times, which is
+                      exactly the blind spot that let a runaway sync trigger hide
+                      on this panel while the logs pointed operators at it. */}
+                  {job.runsLastHour != null && job.runsLastHour > 1 && (
+                    <div
+                      className={`text-[11px] mt-0.5 ${
+                        job.runsLastHour >= RUNS_PER_HOUR_WARN_AT ? "text-amber-400" : "text-zinc-500"
+                      }`}
+                      title={
+                        job.runsLastHourCapped
+                          ? "At least this many runs in the last hour — the ledger keeps a bounded history, so the true count may be higher."
+                          : "Runs recorded in the last hour."
+                      }
+                    >
+                      {job.runsLastHourCapped ? `${job.runsLastHour}+` : job.runsLastHour} runs/h
+                    </div>
                   )}
                 </td>
                 <td className="hidden sm:table-cell py-3 pr-4 text-zinc-400 text-xs tabular-nums whitespace-nowrap">

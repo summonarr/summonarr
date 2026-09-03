@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readJsonCappedOr } from "@/lib/body-size";
-import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { prisma } from "@/lib/prisma";
 import { getPlexTmdbIds, getPlexTVEpisodes, getPlexLibrarySections, type PlexLegacyGuidRef } from "@/lib/plex";
 import { resolvePlexLegacyGuids, mergeResolvedLegacyItems } from "@/lib/plex-legacy-resolve";
@@ -11,16 +10,18 @@ import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } from "@/lib/permissions";
-import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
+import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
+import { warnOnChange } from "@/lib/log-dedup";
 
 export async function POST(request: NextRequest) {
-  if (!(await isCronAuthorized(request))) {
+  const actor = await getCronActor(request);
+  if (!actor) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  return withCronRunRecording("plex-sync", () => syncPlex(request));
+  return withCronRunRecording("plex-sync", () => syncPlex(request, actor));
 }
 
 // Resyncs ONE Plex server — the default ("") unless the body names another via
@@ -36,7 +37,7 @@ export async function POST(request: NextRequest) {
 // the cache alone — previously it deleted `source: "plex"` unscoped and
 // repopulated from this server alone, silently destroying every other Plex
 // server's episode rows until the next orchestrator run.
-async function syncPlex(request: NextRequest) {
+async function syncPlex(request: NextRequest, actor: CronActor) {
   const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
   if (rawBody instanceof NextResponse) return rawBody;
   const recentOnly = rawBody.full !== true;
@@ -227,7 +228,13 @@ async function syncPlex(request: NextRequest) {
     });
 
     if (dropped.length > 0) {
-      console.warn(
+      // Repeat-suppressed for the same reason as the orchestrator's copy in
+      // /api/sync — see the comment there. Distinct dedup key: this route is
+      // the admin "Resync" button, and its finding should not be swallowed
+      // just because the hourly orchestrator logged the same conflicts.
+      warnOnChange(
+        `sync-plex-conflated:${mediaType}:${serverInstance}`,
+        dropped.join(", "),
         `[sync/plex] ${dropped.length} conflated ratingKey(s) kept their pinned tmdbId ` +
           `(${mediaType}, instance="${serverInstance}"): ${dropped.join(", ")}`,
       );
@@ -305,19 +312,14 @@ async function syncPlex(request: NextRequest) {
   // .then) is what guarantees the full-replace can't delete the patched rows.
   // Fire-and-forget like the episode cache itself; filePath:null-scoped so a
   // concurrent writer makes it a no-op, and a failure leaves paths null until
-  // the next run — the same degradation a failed allLeaves probe had.
+  // the next run — the same degradation a failed allLeaves probe had. One
+  // VALUES-joined statement per chunk (patchPlexShowFilePaths), never one
+  // updateMany per show.
   if (skipShowFilePaths) {
     void episodesPromise
       .then(async () => {
         if (episodeFilePaths.size === 0) return;
-        await prisma.$transaction(async (tx) => {
-          for (const [ratingKey, file] of episodeFilePaths) {
-            await tx.plexLibraryItem.updateMany({
-              where: { serverInstance: instance, mediaType: "TV", plexRatingKey: ratingKey, filePath: null },
-              data: { filePath: file },
-            });
-          }
-        }, { timeout: BATCH_TX_TIMEOUT });
+        await patchPlexShowFilePaths(instance, episodeFilePaths);
       })
       .catch((err) => console.warn("[sync/plex] show file-path patch failed:", err instanceof Error ? err.message : err));
   }
@@ -451,14 +453,14 @@ async function syncPlex(request: NextRequest) {
     }
   }
 
-  // DB-checked attribution (bearer-first then cookie) so a stale/revoked admin
-  // JWT can't mis-attribute the audit row. Access control stays isCronAuthorized
-  // (in POST above); this only attributes the admin-triggered run.
-  const attributionClaims = await readActiveSummonarrSessionFromRequest(request);
-  if (attributionClaims) {
+  // Attribution comes from the SAME DB-checked session read that authorized the
+  // request (getCronActor in POST): a stale/revoked admin JWT can't
+  // mis-attribute the audit row, and the verify isn't paid twice. A CRON_SECRET
+  // run has no session to attribute.
+  if (actor.trigger === "admin") {
     void logAudit({
-      userId: attributionClaims.id,
-      userName: attributionClaims.name ?? attributionClaims.id,
+      userId: actor.userId,
+      userName: actor.userName,
       action: "LIBRARY_SYNC",
       target: "sync:plex",
       details: { movies: movieIds.size, tv: tvIds.size, marked: toMark.length },

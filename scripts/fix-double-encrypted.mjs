@@ -24,6 +24,44 @@ import { createDecipheriv } from "node:crypto";
 
 const ENC_PREFIX = "enc:v1:";
 
+// MUST match SETTINGS_SENSITIVE_KEYS in src/lib/settings-sensitive-keys.ts (and
+// the copy in scripts/encrypt-existing-settings.mjs). This file can't import
+// from TS, so the list is duplicated. It scopes the "legacy plaintext" count
+// below: the Prisma extension encrypts ONLY these keys, so URLs, feature flags,
+// intervals, setup_completed_at and every cron:lastRun:* row are plaintext BY
+// DESIGN and must not be reported as rows encrypt-existing-settings.mjs could
+// fix. Unused entries are harmless, so err toward listing too many.
+const SENSITIVE_KEYS = [
+  "plexAdminToken",
+  "jellyfinApiKey",
+  "vapidPrivateKey",
+  "webhookSecret",
+  "sonarrWebhookSecret",
+  "radarrWebhookSecret",
+  "discordBotToken",
+  "radarrApiKey",
+  "sonarrApiKey",
+  "radarr4kApiKey",
+  "sonarr4kApiKey",
+  "radarr4kWebhookSecret",
+  "sonarr4kWebhookSecret",
+  "omdbApiKey",
+  "mdblistApiKey",
+  "traktClientId",
+  "ipinfoToken",
+  "resendApiKey",
+  "smtpPassword",
+  "trashGithubToken",
+  "apnsRelayKey",
+];
+
+// Per-instance Radarr/Sonarr and Plex/Jellyfin secret keys are admin-defined at
+// runtime and can't be enumerated statically. Mirror ARR_INSTANCE_SECRET_RE and
+// MEDIA_INSTANCE_SECRET_RE in settings-sensitive-keys.ts — the same shape gates
+// the Prisma extension uses to decide what to encrypt.
+const ARR_INSTANCE_SECRET_RE = /^(radarr|sonarr)([A-Z0-9][A-Za-z0-9]*)?(ApiKey|WebhookSecret)$/;
+const MEDIA_INSTANCE_SECRET_RE = /^(plex([A-Z0-9][A-Za-z0-9]*)?AdminToken|jellyfin([A-Z0-9][A-Za-z0-9]*)?ApiKey)$/;
+
 function getKey() {
   const hex = process.env.TOKEN_ENCRYPTION_KEY;
   if (!hex || !/^[0-9a-f]{64}$/i.test(hex)) {
@@ -56,6 +94,22 @@ function tryDecrypt(value, key) {
   }
 }
 
+// pg sends `user`/`password` verbatim, so a percent-encoded URL has to be
+// decoded here or authentication fails. Percent-encoding is the form Prisma
+// requires when the password holds "@", ":" or "/", AND the form
+// docker-entrypoint.sh always builds (encodeURIComponent(POSTGRES_PASSWORD)),
+// so the in-container DATABASE_URL is encoded too. A lone "%" that isn't a
+// valid escape makes decodeURIComponent throw — keep that value as typed.
+// Mirrors scripts/reset-password.mjs / scripts/create-user.mjs.
+function decodeCredential(value) {
+  if (value === undefined) return undefined;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 async function main() {
   const key = getKey();
 
@@ -67,11 +121,16 @@ async function main() {
     port = process.env.PGPORT ? parseInt(process.env.PGPORT, 10) : 5432;
     database = process.env.PGDATABASE;
   } else if (process.env.DATABASE_URL) {
+    // Parsed by hand rather than with pg's URL parser, which rejects the
+    // unescaped reserved chars ("/", "=") a hand-written URL can carry. The
+    // password is optional so a trust-auth URL (postgres://user@host/db) works.
     const m = process.env.DATABASE_URL.match(
-      /^postgres(?:ql)?:\/\/([^:]+):(.+)@([^:/]+)(?::(\d+))?\/([^?]+)/
+      /^postgres(?:ql)?:\/\/([^:]+)(?::(.+))?@([^:/]+)(?::(\d+))?\/([^?]+)/,
     );
     if (!m) throw new Error("Cannot parse DATABASE_URL");
     [, user, password, host, port, database] = m;
+    user = decodeCredential(user);
+    password = decodeCredential(password);
     port = port ? parseInt(port, 10) : 5432;
   } else {
     throw new Error("Set DATABASE_URL or PGHOST/PGUSER/PGPASSWORD/PGDATABASE");
@@ -107,9 +166,11 @@ async function main() {
       }
     }
 
+    // Only keys the Prisma extension would encrypt count as "legacy plaintext";
+    // every other Setting row is plaintext by design (see SENSITIVE_KEYS above).
     const plaintext = await client.query(
-      'SELECT COUNT(*)::int AS n FROM "Setting" WHERE value IS NOT NULL AND value <> \'\' AND value NOT LIKE $1',
-      [ENC_PREFIX + "%"]
+      'SELECT COUNT(*)::int AS n FROM "Setting" WHERE (key = ANY($2::text[]) OR key ~ $3 OR key ~ $4) AND value IS NOT NULL AND value <> \'\' AND value NOT LIKE $1',
+      [ENC_PREFIX + "%", SENSITIVE_KEYS, ARR_INSTANCE_SECRET_RE.source, MEDIA_INSTANCE_SECRET_RE.source]
     );
     settingsPlaintext = plaintext.rows[0].n;
 

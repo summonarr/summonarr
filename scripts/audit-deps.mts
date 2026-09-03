@@ -78,7 +78,7 @@ interface CliOptions {
 }
 
 /** One accepted advisory from .github/security-exceptions.json. */
-interface SecurityException {
+export interface SecurityException {
   id: string;
   package: string;
   owner: string;
@@ -89,7 +89,31 @@ interface SecurityException {
 
 const EXCEPTIONS_PATH = ".github/security-exceptions.json";
 
-interface AdvisoryFinding {
+/**
+ * A full GHSA identifier. The four-character segments use GitHub's base32
+ * alphabet (no 0/1/a/b/d/e/i/k/l/n/o/s/t/u/y/z).
+ */
+const GHSA_ID_RE = /^GHSA-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}$/i;
+
+/**
+ * Normalizes an exception `id` to a lower-cased GHSA id, accepting either the
+ * bare id or the advisory URL npm audit reports (`https://github.com/advisories/GHSA-…`).
+ * Returns null for anything else — including a TRUNCATED id such as `"GHSA"`.
+ *
+ * The format check is load-bearing: the gate matches an exception against an
+ * advisory by id, and every npm advisory URL contains the substring `GHSA`, so
+ * a partial id would silently cover every present and future advisory on the
+ * package (the blanket-accept guardrail 18a forbids).
+ */
+export function normalizeExceptionId(raw: string): string | null {
+  const trimmed = raw.trim();
+  const candidate = /^https?:\/\//i.test(trimmed)
+    ? (trimmed.split(/[?#]/)[0].replace(/\/+$/, "").split("/").pop() ?? "")
+    : trimmed;
+  return GHSA_ID_RE.test(candidate) ? candidate.toLowerCase() : null;
+}
+
+export interface AdvisoryFinding {
   source: number;
   name: string;
   dependency: string;
@@ -101,7 +125,7 @@ interface AdvisoryFinding {
   cvss?: { score: number };
 }
 
-interface VulnReport {
+export interface VulnReport {
   package: string;
   severity: Severity;
   isDirect: boolean;
@@ -434,7 +458,7 @@ function determineExitCode(totals: Record<Severity, number>, min: Severity): num
  * exceptions" here while a human reading the file believes an advisory is
  * consciously accepted. Those two states must never look the same.
  */
-function loadExceptions(cwd: string): { exceptions: SecurityException[]; errors: string[] } {
+export function loadExceptions(cwd: string): { exceptions: SecurityException[]; errors: string[] } {
   const path = join(cwd, EXCEPTIONS_PATH);
   if (!existsSync(path)) return { exceptions: [], errors: [] };
 
@@ -472,17 +496,33 @@ function loadExceptions(cwd: string): { exceptions: SecurityException[]; errors:
       errors.push(`${where}: "expires" must be an ISO date (YYYY-MM-DD), got "${expires}"`);
       return;
     }
+    const id = record.id as string;
+    if (normalizeExceptionId(id) === null) {
+      errors.push(
+        `${where}: "id" must be a full GHSA id (GHSA-xxxx-xxxx-xxxx) or a github.com/advisories URL, got "${id}"`,
+      );
+      return;
+    }
     exceptions.push(entry as unknown as SecurityException);
   });
 
   return { exceptions, errors };
 }
 
-/** Whether `advisory` is covered by `exception` (GHSA id or advisory URL). */
-function exceptionCovers(exception: SecurityException, pkg: string, advisory: AdvisoryFinding): boolean {
+/**
+ * Whether `advisory` is covered by `exception` (GHSA id or advisory URL).
+ *
+ * The comparison is an EXACT match between the exception's normalized GHSA id
+ * and the id in the advisory's URL — never a substring test. A substring test
+ * against the URL made `"GHSA"` (or `"github.com"`) cover every advisory on the
+ * package, and a substring test against the free-text title could match prose.
+ */
+export function exceptionCovers(exception: SecurityException, pkg: string, advisory: AdvisoryFinding): boolean {
   if (exception.package !== pkg) return false;
-  const id = exception.id.trim();
-  return advisory.url?.includes(id) === true || advisory.title?.includes(id) === true;
+  const id = normalizeExceptionId(exception.id);
+  if (id === null) return false;
+  const advisoryId = typeof advisory.url === "string" ? normalizeExceptionId(advisory.url) : null;
+  return advisoryId !== null && advisoryId === id;
 }
 
 /** An exception is expired once the day AFTER `expires` has begun (UTC). */
@@ -509,7 +549,7 @@ interface AllowlistOutcome {
  * enough — accepting one advisory must not blanket-accept the next one filed
  * against the same package.
  */
-function applyAllowlist(
+export function applyAllowlist(
   reports: VulnReport[],
   exceptions: SecurityException[],
   now: Date,

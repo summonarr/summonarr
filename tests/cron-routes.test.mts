@@ -612,3 +612,96 @@ test("no cron route source contains a console.log call (guardrail 7)", async () 
     assert.ok(!code.some((l) => /console\.log\s*\(/.test(l)), `${route.name} has a console.log`);
   }
 });
+
+// ── f41: the response verdict must match the ledger verdict ─────────────────
+// The admin "Run now" badge judges `res.ok && !data.error` (cron-job-table.tsx),
+// deliberately ignoring `ok`. These five routes used to hardcode `ok: true` and
+// emit no `error`, so a run in which every task failed painted the badge green
+// while recordCronRun wrote ok:false — the two only re-agreed after a reload.
+// Status stays 200: the container reschedules any non-2xx every
+// CRON_RETRY_INTERVAL, so the degraded signal is `error` + X-Cron-Degraded.
+
+const DERIVED_OK_ROUTES = ["warm-library", "warm-list-cache", "warm-mdblist", "warm-omdb", "warm-recommendations"] as const;
+
+function ledgerOk(target: string): boolean | undefined {
+  const row = opsOf("setting.upsert")
+    .map((o) => o.args as { where: { key: string }; update: { value: string } })
+    .find((a) => a.where.key === `cron:lastRun:${target}`);
+  if (!row) return undefined;
+  return (JSON.parse(row.update.value) as { ok: boolean }).ok;
+}
+
+const LEDGER_TARGET: Record<(typeof DERIVED_OK_ROUTES)[number], string> = {
+  "warm-library": "library",
+  "warm-list-cache": "list-cache",
+  "warm-mdblist": "mdblist",
+  "warm-omdb": "omdb",
+  "warm-recommendations": "recommendations",
+};
+
+for (const name of DERIVED_OK_ROUTES) {
+  test(`${name}: body.ok, the error key, X-Cron-Degraded and the ledger all tell the SAME story`, async () => {
+    const route = ROUTES.find((r) => r.name === name)!;
+    const res = await route.POST(authed(route));
+    assert.equal(res.status, 200, "status stays 200 — the entrypoint fast-retries any non-2xx");
+    const body = await res.json() as { ok: boolean; error?: unknown };
+    assert.equal(typeof body.ok, "boolean");
+    const recorded = ledgerOk(LEDGER_TARGET[name]);
+    assert.equal(recorded, body.ok, `${name}: ledger ok=${recorded} but body ok=${body.ok}`);
+    if (body.ok) {
+      assert.equal(body.error, undefined, "a clean run must not carry an error key — the badge reads it as failure");
+      assert.equal(res.headers.get("x-cron-degraded"), null);
+    } else {
+      assert.equal(typeof body.error, "string");
+      assert.ok(res.headers.get("x-cron-degraded"), "a degraded run must carry X-Cron-Degraded");
+    }
+  });
+}
+
+test("warm-list-cache: with upstream list fetches failing, the 200 body says ok:false + error and the ledger agrees", async () => {
+  // Under this harness every upstream answers 503; the list helpers that don't
+  // settle their pages internally reject, so Promise.allSettled counts them.
+  const route = ROUTES.find((r) => r.name === "warm-list-cache")!;
+  const res = await route.POST(authed(route));
+  assert.equal(res.status, 200, "status stays 200 — the entrypoint fast-retries any non-2xx");
+  const body = await res.json() as { ok: boolean; error?: string; errors: number };
+  assert.ok(body.errors > 0, `expected rejected list fetches, got ${JSON.stringify(body)}`);
+  assert.equal(body.ok, false);
+  assert.equal(typeof body.error, "string");
+  assert.match(body.error!, /list fetches failed/);
+  assert.equal(res.headers.get("x-cron-degraded"), String(body.errors));
+  assert.equal(ledgerOk("list-cache"), false);
+});
+
+test("warm-library: an all-clean run is ok:true with NO error key and no degraded header", async () => {
+  const route = ROUTES.find((r) => r.name === "warm-library")!;
+  const res = await route.POST(authed(route));
+  assert.equal(res.status, 200);
+  const body = await res.json() as { ok: boolean; error?: unknown; failed: number };
+  assert.equal(body.failed, 0);
+  assert.equal(body.ok, true);
+  assert.equal(body.error, undefined);
+  assert.equal(res.headers.get("x-cron-degraded"), null);
+  assert.equal(ledgerOk("library"), true);
+});
+
+test("no warm route hardcodes `ok: true` in its response body — the verdict is derived", async () => {
+  const { readFileSync } = await import("node:fs");
+  for (const name of DERIVED_OK_ROUTES) {
+    const src = readFileSync(`src/app/api/cron/${name}/route.ts`, "utf-8");
+    assert.ok(!/ok:\s*true\b/.test(src), `${name} still answers a literal ok: true`);
+  }
+});
+
+// ── f40: attribution comes from the SAME session read that authorized ────────
+
+test("every cron route resolves its actor through getCronActor — no second readActiveSummonarrSessionFromRequest", async () => {
+  const { readFileSync } = await import("node:fs");
+  for (const route of ROUTES) {
+    const src = readFileSync(`src/app/api/cron/${route.name}/route.ts`, "utf-8");
+    const usesAuth = /getCronActor\(|isCronAuthorized\(/.test(src);
+    assert.ok(usesAuth, `${route.name} has no cron gate`);
+    assert.ok(!src.includes("readActiveSummonarrSessionFromRequest"), `${route.name} re-reads the session for attribution — use getCronActor`);
+  }
+});
+

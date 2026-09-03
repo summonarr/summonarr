@@ -38,7 +38,7 @@ export const GET = withAuth(async (_req, { params }: RouteContext, session) => {
 });
 
 export const POST = withAuth(async (req, { params }: RouteContext, session) => {
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   if (!checkRateLimit(`issue-msg:${session.user.id}`, 10, 60 * 1000)) {

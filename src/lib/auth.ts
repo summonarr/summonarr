@@ -75,11 +75,14 @@ export async function findOrCreatePlexUser({
   email,
   name,
   image,
+  plexClientId,
 }: {
   plexUserId: string;
   email: string;
   name?: string | null;
   image?: string | null;
+  // The browser's X-Plex-Client-Identifier, when the sign-in carried a valid one.
+  plexClientId?: string | null;
 }): Promise<AuthorizedDbUser | ProviderRebindRequired | ProviderSetupRequired> {
   const normalized = normalizeEmail(email);
   // Provider-supplied display names are untrusted — strip HTML/control chars so
@@ -95,12 +98,17 @@ export async function findOrCreatePlexUser({
   //    user's row. Matching on plexUserId avoids that entirely.
   const bySub = await prisma.user.findUnique({ where: { plexUserId } });
   if (bySub) {
+    // notificationEmail is kept in lock-step with the Plex-verified email on every
+    // sign-in so notifications always go to the user's current Plex address. This
+    // is the ONE write per returning-user sign-in — the browser client id rides
+    // along rather than costing authorizeWithPlex a second UPDATE on the same row.
     await prisma.user.update({
       where: { id: bySub.id },
       data: {
         notificationEmail: normalized,
         ...(name ? { name } : {}),
         ...(image ? { image } : {}),
+        ...(plexClientId ? { plexClientId } : {}),
       },
     }).catch(() => {});
     return { id: bySub.id, email: bySub.email, name: name ?? bySub.name, role: bySub.role };
@@ -135,6 +143,7 @@ export async function findOrCreatePlexUser({
       permissions: defaultPermissionsForRole("USER"),
       plexUserId,
       notificationEmail: normalized,
+      plexClientId: plexClientId ?? null,
     },
     select: { id: true, email: true, name: true, role: true },
   });
@@ -462,19 +471,29 @@ export async function revokeSessionById(sessionId: string): Promise<void> {
   // its whole (now indefinite) life. Revoking a laptop therefore signed out every iOS device
   // that had been signed in longer. Revoke-all still stamps a cutoff ("now"), which
   // is correct for its everywhere semantics.
-  await prisma.$transaction(async (tx) => {
-    const row = await tx.authSession.findUnique({
-      where: { sessionId },
-      select: { userId: true },
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.authSession.delete({ where: { sessionId } });
     });
-    if (!row) return;
-    await tx.authSession.delete({ where: { sessionId } });
-  });
+  } catch (err) {
+    // Idempotent: a concurrent revoke of the SAME session (a retried native
+    // sign-out, or the admin route racing the user's own DELETE /api/sessions)
+    // already removed the row. The revocation the caller asked for is a fact, so
+    // a not-found (P2025) is success, not a 500 that skips the audit row. There
+    // is deliberately no find-then-delete: a plain SELECT takes no lock, so both
+    // racers observed the row and the loser's DELETE affected 0 rows anyway.
+    if (!isPrismaNotFound(err)) throw err;
+  }
   // Mark in-memory only AFTER the DB revocation commits (matches
-  // revokeAllUserSessions). The error is intentionally not swallowed: a failed
-  // revoke now propagates so the caller returns 500 instead of auditing a phantom
-  // revocation that left the AuthSession row live (it would resurrect on restart).
+  // revokeAllUserSessions). Every other error is intentionally not swallowed: a
+  // failed revoke propagates so the caller returns 500 instead of auditing a
+  // phantom revocation that left the AuthSession row live (it would resurrect on
+  // restart).
   markSessionForceRevoked(sessionId);
+}
+
+function isPrismaNotFound(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: string }).code === "P2025";
 }
 
 export async function revokeAllUserSessions(userId: string): Promise<void> {
@@ -535,17 +554,6 @@ export async function initializeTokenOnSignIn(token: JwtToken, user: Record<stri
   if (!token.sessionId) {
     // Credentials provider supplies _sessionId via DeviceMeta; OIDC/OAuth do not
     token.sessionId = crypto.randomUUID();
-  }
-
-  if (!token.uaFingerprint && token.provider === "oidc") {
-    try {
-      const { headers: getHeaders } = await import("next/headers");
-      const h = await getHeaders();
-      const ua = h.get("user-agent") ?? "";
-      if (ua) token.uaFingerprint = serializeFingerprint(extractUaFingerprint(ua));
-    } catch {
-      // jwt() invoked outside request context — fingerprint stays unset, populated on next refresh
-    }
   }
 
   const rememberMe = (user as { rememberMe?: string }).rememberMe === "true";
@@ -866,6 +874,7 @@ export async function authorizeWithPlex(
         email: verifiedEmail,
         name: plexName,
         image: plexThumb,
+        plexClientId: browserClientId,
       });
 
       if (plexDbUser === PROVIDER_REBIND_REQUIRED) {
@@ -873,15 +882,9 @@ export async function authorizeWithPlex(
       } else if (plexDbUser === PROVIDER_SETUP_REQUIRED) {
         void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "setup_required", emailHash: hashAuditEmail(verifiedEmail) } });
       } else {
-        // notificationEmail is kept in lock-step with the Plex-verified email on every
-        // sign-in so notifications always go to the user's current Plex address.
-        await prisma.user.update({
-          where: { id: plexDbUser.id },
-          data: {
-            notificationEmail: verifiedEmail,
-            ...(browserClientId ? { plexClientId: browserClientId } : {}),
-          },
-        }).catch(() => {});
+        // notificationEmail + plexClientId were written by findOrCreatePlexUser
+        // (one UPDATE for a returning user, the CREATE for a new one) — no second
+        // write on the same row here.
         const device = buildDeviceMeta(headers);
         plexResult = { ...plexDbUser, rememberMe: credentials.rememberMe as string | undefined, ...device };
       }

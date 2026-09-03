@@ -394,19 +394,25 @@ export function twMerge(input: string): string {
   const tokens = input.split(/\s+/).filter(Boolean);
   const lastIdx = new Map<string, number>();
   const parsed: Parsed[] = new Array(tokens.length);
+  // The merge key is computed ONCE per token and kept for the emit pass.
+  // `groupOf` is a linear first-match scan over the whole GROUPS regex table
+  // (an unmatched class pays every entry), and this is the `cn()` hot path on
+  // every render of every ui primitive — recomputing the identical key in the
+  // second loop doubled that work for no output change. tests/tw-merge.test.mts
+  // pins the single-scan-per-token count.
+  const keys: string[] = new Array(tokens.length);
 
   for (let i = 0; i < tokens.length; i++) {
     const p = parseToken(tokens[i]);
     parsed[i] = p;
     const key = `${p.variants}|${p.important ? "!" : ""}|${groupOf(p.base)}`;
+    keys[i] = key;
     lastIdx.set(key, i);
   }
 
   const out: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    const p = parsed[i];
-    const key = `${p.variants}|${p.important ? "!" : ""}|${groupOf(p.base)}`;
-    if (lastIdx.get(key) === i) out.push(p.full);
+    if (lastIdx.get(keys[i]) === i) out.push(parsed[i].full);
   }
   return out.join(" ");
 }
