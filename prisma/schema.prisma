@@ -364,7 +364,6 @@ model TVEpisodeCache {
   overview    String?
 
   @@id([source, tmdbId, seasonNumber, episodeNumber])
-  @@index([source, tmdbId])
 }
 
 // ─── Radarr Wanted Cache ──────────────────────────────────────────────────────
@@ -657,8 +656,6 @@ model AuditLog {
   sessionId String?     @db.VarChar(64)
 
   @@index([createdAt(sort: Desc)])
-  @@index([action])
-  @@index([userId])
   @@index([userName])
   @@index([target])
   @@index([userId, createdAt(sort: Desc)])
@@ -774,7 +771,6 @@ model MediaServerUser {
 
   @@unique([source, serverInstance, sourceUserId])
   @@index([userId])
-  @@index([source])
   @@index([source, serverInstance])
 }
 
@@ -869,8 +865,6 @@ model PlayHistory {
   @@index([mediaServerUserId, startedAt(sort: Desc)])
   @@index([tmdbId, mediaType])
   @@index([startedAt(sort: Desc)])
-  @@index([source])
-  @@index([source, sourceSessionId])
   @@index([source, sourceItemId, mediaServerUserId, startedAt])
   @@index([watched])
   @@index([referenceId])
@@ -968,7 +962,6 @@ model ActiveSession {
   creditsEndMs   Int?
 
   @@unique([source, serverInstance, sessionKey])
-  @@index([source])
   @@index([source, serverInstance])
 }
 
