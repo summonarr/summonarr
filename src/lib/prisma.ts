@@ -125,6 +125,17 @@ export function settingKeysFromDeleteWhere(where: unknown): string[] | null {
 // encryption. When the key is unknown (caller used `select: { value: true }` and didn't
 // project `key`), we conservatively fall through to the decrypt path so a sensitive read
 // still works — at the cost of a possible false-positive warning, which is the prior behavior.
+// A caller that selects only the value (`select: { value: true }`) gets a row with
+// no `key`, so the row cannot name itself and the legacy-plaintext / decrypt-failure
+// warnings printed "Setting.?" — naming no row an operator could go and re-save.
+// The query's own `where.key` identifies it in that case. Only a plain string is
+// accepted: a `{ in: [...] }` filter matches many rows and would mislabel them all.
+export function settingKeyFromArgs(args: unknown): string | undefined {
+  const where = (args as { where?: unknown } | undefined)?.where;
+  const key = (where as { key?: unknown } | undefined)?.key;
+  return typeof key === "string" ? key : undefined;
+}
+
 function safeDecryptSettingValue(key: string | undefined, value: string): string {
   if (typeof key === "string" && !isSensitiveKey(key)) {
     return value;
@@ -173,12 +184,12 @@ function createPrismaClient() {
       setting: {
         async findUnique({ args, query }) {
           const row = await query(args);
-          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key, row.value);
+          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key ?? settingKeyFromArgs(args), row.value);
           return row;
         },
         async findFirst({ args, query }) {
           const row = await query(args);
-          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key, row.value);
+          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key ?? settingKeyFromArgs(args), row.value);
           return row;
         },
         // The *OrThrow twins are separate Prisma operations, NOT aliases — an
@@ -187,12 +198,12 @@ function createPrismaClient() {
         // class). Kept in lockstep with findUnique/findFirst above.
         async findUniqueOrThrow({ args, query }) {
           const row = await query(args);
-          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key, row.value);
+          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key ?? settingKeyFromArgs(args), row.value);
           return row;
         },
         async findFirstOrThrow({ args, query }) {
           const row = await query(args);
-          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key, row.value);
+          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key ?? settingKeyFromArgs(args), row.value);
           return row;
         },
         async findMany({ args, query }) {

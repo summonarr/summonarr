@@ -452,3 +452,27 @@ test("nothing here logged an unexpected error beyond the deliberate connection f
       "reached the network, so they no longer prove it",
   );
 });
+
+// A caller that selects only the value (`select: { value: true }`) gets a row with
+// no `key`, so the row cannot name itself and both the legacy-plaintext warning
+// and the decrypt-failure error printed "Setting.?" — naming no row the operator
+// could go and re-save. The query's own `where.key` identifies it in that case.
+test("settingKeyFromArgs names the row a key-less select cannot name itself", async () => {
+  const { settingKeyFromArgs } = await import("../src/lib/prisma.ts");
+
+  // The shape that produced "Setting.?": findUnique by key, selecting value only.
+  assert.equal(
+    settingKeyFromArgs({ where: { key: "smtpPassword" }, select: { value: true } }),
+    "smtpPassword",
+  );
+  assert.equal(settingKeyFromArgs({ where: { key: "vapidPrivateKey" } }), "vapidPrivateKey");
+
+  // An `in` filter matches many rows, so borrowing it would mislabel every one of
+  // them — the row's own `key` is the only correct source there.
+  assert.equal(settingKeyFromArgs({ where: { key: { in: ["a", "b"] } } }), undefined);
+  assert.equal(settingKeyFromArgs({ where: { value: "x" } }), undefined);
+  assert.equal(settingKeyFromArgs({ where: {} }), undefined);
+  assert.equal(settingKeyFromArgs({}), undefined);
+  assert.equal(settingKeyFromArgs(undefined), undefined);
+  assert.equal(settingKeyFromArgs(null), undefined);
+});
