@@ -157,7 +157,12 @@ function cacheModel(name: string) {
 }
 for (const m of [
   "radarrWantedItem", "radarrAvailableItem", "sonarrWantedItem", "sonarrAvailableItem",
-  "tVEpisodeCache", "upcomingCacheItem", "tmdbCache", "tmdbMediaCore",
+  "tVEpisodeCache",
+  // Whole-table episode rewrites stage rows here OUTSIDE any transaction before
+  // swapping them across inside one. Unstubbed it reaches the real client and
+  // blocks forever, exactly like the auditLog case documented below.
+  "tVEpisodeCacheStaging",
+  "upcomingCacheItem", "tmdbCache", "tmdbMediaCore",
   "plexLibraryItem", "jellyfinLibraryItem", "mediaRequest", "user", "authSession",
 ]) {
   shadowPrismaModel(prisma, m, cacheModel(m));

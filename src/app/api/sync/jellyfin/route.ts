@@ -10,7 +10,7 @@ import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } from "@/lib/permissions";
-import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
+import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, replaceEpisodeCacheForSource, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
 
@@ -155,22 +155,27 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
       // (rejects → .catch), so an empty full result is a genuinely empty library whose
       // stale episode ownership must be cleared.
       if (episodeRecentOnly && episodes.length === 0) return;
-      await prisma.$transaction(async (tx) => {
-        // Advisory lock 2002,2 — Jellyfin TVEpisodeCache coordination. Shared with
-        // /api/sync/route and /api/sync/tv-episodes so a recentOnly tmdbId-scoped delete can't
-        // be interleaved with a wholesale rewrite from another runner.
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
-        if (episodeRecentOnly) {
+      if (episodeRecentOnly) {
+        // recentOnly stays inline: it is bounded by the 2-hour window, so the
+        // tmdbId-scoped delete plus its insert is small by construction and cheap
+        // to hold in one transaction. Advisory lock 2002,2 — Jellyfin
+        // TVEpisodeCache coordination, shared with /api/sync/route and
+        // /api/sync/tv-episodes so this scoped delete can't interleave with a
+        // wholesale rewrite from another runner.
+        await prisma.$transaction(async (tx) => {
+          await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
           if (tmdbIdsBeingReplaced.length > 0) {
             await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId: { in: tmdbIdsBeingReplaced } } });
           }
-        } else {
-          await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin" } });
-        }
-        if (episodes.length > 0) {
-          await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source: "jellyfin" as const, ...e })));
-        }
-      }, { timeout: BATCH_TX_TIMEOUT });
+          if (episodes.length > 0) {
+            await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source: "jellyfin" as const, ...e })));
+          }
+        }, { timeout: BATCH_TX_TIMEOUT });
+      } else {
+        // Full replace takes the staged-load + short-swap path (same lock, inside
+        // the helper) so the whole library never crosses the wire mid-transaction.
+        await replaceEpisodeCacheForSource("jellyfin", episodes);
+      }
     })
     .catch((err) => console.error("[sync/jellyfin] Episode cache failed:", err));
 

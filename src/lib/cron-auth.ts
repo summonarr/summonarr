@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
 import { parseBearerToken } from "@/lib/mobile-auth";
 import { matchesStoredFingerprint } from "@/lib/ua-fingerprint";
@@ -155,6 +155,91 @@ export async function batchCreateMany<T extends Record<string, unknown>>(
 ): Promise<void> {
   for (let i = 0; i < rows.length; i += CREATE_MANY_BATCH) {
     await tx.createMany({ data: rows.slice(i, i + CREATE_MANY_BATCH), skipDuplicates: true });
+  }
+}
+
+/** One episode row as the sync arms build it — the source column is added here. */
+export interface EpisodeCacheRow {
+  tmdbId: number;
+  seasonNumber: number;
+  episodeNumber: number;
+  episodeName?: string | null;
+  airDate?: string | null;
+  stillPath?: string | null;
+  runtime?: number | null;
+  overview?: string | null;
+}
+
+/** Staged rows older than this belong to a run that died before its finally block. */
+const EPISODE_STAGING_SWEEP_MS = 60 * 60_000;
+
+/**
+ * Replace every TVEpisodeCache row for one source, atomically, WITHOUT holding a
+ * transaction open for the data transfer.
+ *
+ * The shape this replaces was `deleteMany` + chunked `createMany` inside ONE
+ * interactive transaction. That pushes the entire episode set over the wire with
+ * the transaction open, so its cost grows with the library: on a large one it
+ * exceeded the 30s budget (observed 35,689ms → Prisma P2028), the transaction
+ * rolled back, and the episode cache silently stopped updating — permanently,
+ * because every later run failed at the same size. It also pinned one of the
+ * pool's 5 connections for those 35s, which is what produced "Unable to start a
+ * transaction in the given time" in the 5s play-history poller (guardrail 19's
+ * sole writer of Jellyfin history).
+ *
+ * Now the expensive half runs OUTSIDE any transaction, one statement per chunk,
+ * so a pooled connection is handed back between chunks. The transaction holds
+ * only a DELETE and an INSERT ... SELECT, both server-side, moving no rows over
+ * the wire — so its duration tracks the database's own work, not the network.
+ *
+ * Atomicity is unchanged, which guardrail 35 requires: readers still see either
+ * the whole previous set or the whole new one, never a partial union, because
+ * the visible swap is one transaction under the same advisory lock as before.
+ *
+ * `runId` scopes the staged rows to THIS call. Concurrent whole-table rewrites
+ * of one source are reachable (the hourly orchestrator holds lock 2000, but the
+ * admin "Resync" routes do not take it), and without the scope they would mix
+ * their rows in staging and swap across a blend of both.
+ */
+export async function replaceEpisodeCacheForSource(
+  source: "plex" | "jellyfin",
+  rows: EpisodeCacheRow[],
+): Promise<void> {
+  const runId = randomUUID();
+
+  // A run killed mid-flight (container restart, lock timeout) leaves its staged
+  // rows behind; nothing else would ever collect them. Best-effort so a sweep
+  // failure can never block the rewrite it precedes.
+  await prisma.tVEpisodeCacheStaging
+    .deleteMany({ where: { createdAt: { lt: new Date(Date.now() - EPISODE_STAGING_SWEEP_MS) } } })
+    .catch(() => {});
+
+  try {
+    await batchCreateMany(
+      prisma.tVEpisodeCacheStaging,
+      rows.map((r) => ({ ...r, runId, source })),
+    );
+
+    await prisma.$transaction(async (tx) => {
+      // Same lock ids the per-source routes take (2002,1 plex / 2002,2 jellyfin),
+      // as literals: pg_advisory_xact_lock has no (int, bigint) overload, so a
+      // parameterised objId fails to resolve the function.
+      if (source === "plex") await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
+      else await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
+      // Prisma, not raw SQL: the delete is server-side either way, and keeping it
+      // as a model call leaves the whole-namespace replace visible to the suites
+      // that pin "exactly one delete, scoped to this source".
+      await tx.tVEpisodeCache.deleteMany({ where: { source } });
+      await tx.$executeRaw`
+        INSERT INTO "TVEpisodeCache" ("source", "tmdbId", "seasonNumber", "episodeNumber", "episodeName", "airDate", "stillPath", "runtime", "overview")
+        SELECT "source", "tmdbId", "seasonNumber", "episodeNumber", "episodeName", "airDate", "stillPath", "runtime", "overview"
+        FROM "TVEpisodeCacheStaging" WHERE "runId" = ${runId}
+      `;
+    }, { timeout: BATCH_TX_TIMEOUT });
+  } finally {
+    // Drop this run's staged rows even when the swap threw, so a failed rewrite
+    // does not leave a full copy of the library sitting in staging until the sweep.
+    await prisma.tVEpisodeCacheStaging.deleteMany({ where: { runId } }).catch(() => {});
   }
 }
 

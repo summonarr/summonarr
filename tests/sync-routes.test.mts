@@ -136,6 +136,12 @@ function recordingDelegate(rec: TxRecord, model: string) {
   };
 }
 
+// Staged-load bookkeeping for the episode-cache rewrite: chunk sizes handed to
+// the staging table, and every staging deleteMany (the stale sweep + this run's
+// cleanup). Both happen outside the swap transaction by design.
+const episodeStagingLoads: number[] = [];
+const episodeStagingDeletes: (Record<string, unknown> | undefined)[] = [];
+
 const fakePrisma = {
   setting: {
     findUnique: async (args: { where: { key: string } }) => {
@@ -236,6 +242,20 @@ const fakePrisma = {
   $executeRaw: async (query: { sql: string; values: unknown[] }) => {
     rawStatements.push({ sql: query.sql, values: query.values ?? [] });
     return 0;
+  },
+  // Whole-table episode rewrites (replaceEpisodeCacheForSource) stage their rows
+  // here OUTSIDE any transaction, then swap them across inside one. Unstubbed,
+  // these calls reach the real Prisma client and block forever on a DB that does
+  // not exist in this harness — the route simply never resolves.
+  tVEpisodeCacheStaging: {
+    createMany: async (args: { data: unknown[] }) => {
+      episodeStagingLoads.push(args.data.length);
+      return { count: args.data.length };
+    },
+    deleteMany: async (args?: { where?: Record<string, unknown> }) => {
+      episodeStagingDeletes.push(args?.where);
+      return { count: 0 };
+    },
   },
   $transaction: async (arg: unknown, opts?: { timeout?: number }) => {
     if (typeof arg === "function") {

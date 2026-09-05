@@ -366,6 +366,43 @@ model TVEpisodeCache {
   @@id([source, tmdbId, seasonNumber, episodeNumber])
 }
 
+// ─── TV Episode Cache — staging buffer ────────────────────────────────────────
+// Whole-table TVEpisodeCache rewrites bulk-load here FIRST, outside any
+// transaction, and are then swapped across by one short server-side
+// INSERT ... SELECT (see replaceEpisodeCacheForSource in src/lib/cron-auth.ts).
+//
+// Why this table exists: the rewrite used to be `deleteMany` + chunked
+// `createMany` inside ONE interactive transaction. That transfers the whole
+// episode set over the wire while holding a transaction open, and on a large
+// library it blew the 30s budget (observed: 35,689ms, Prisma P2028) — the
+// transaction rolled back, so episode data silently stopped updating and every
+// later run failed the same way. It also pinned one of only 5 pooled
+// connections for the duration, which is what starved the 5s play-history
+// poller ("Unable to start a transaction in the given time").
+//
+// `runId` scopes each rewrite's rows so two concurrent rewrites of the same
+// source (the hourly orchestrator and an admin "Resync" click) cannot mix their
+// staged rows. `createdAt` exists only so a crashed run's rows can be swept.
+// Never read by application code outside that helper.
+model TVEpisodeCacheStaging {
+  runId         String
+  source        String
+  tmdbId        Int
+  seasonNumber  Int
+  episodeNumber Int
+
+  episodeName String?
+  airDate     String?
+  stillPath   String?
+  runtime     Int?
+  overview    String?
+
+  createdAt DateTime @default(now())
+
+  @@id([runId, source, tmdbId, seasonNumber, episodeNumber])
+  @@index([createdAt])
+}
+
 // ─── Radarr Wanted Cache ──────────────────────────────────────────────────────
 // Movies in Radarr that have no file yet (monitored/unmonitored, not downloaded).
 // Populated by /api/sync/radarr; cleared per-movie by the Radarr webhook on Download.

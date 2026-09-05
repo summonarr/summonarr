@@ -304,7 +304,15 @@ export async function resolveMediaServerUser(params: {
     });
 
     return record.id;
-  }, { timeout: 15_000 });
+    // maxWait is explicit because the default (2s) is short against a pool of 5:
+    // while a library-sized write held a connection, this resolve failed outright
+    // with "Unable to start a transaction in the given time" and the 5s poller
+    // dropped that tick — and the poller is the sole writer of Jellyfin play
+    // history (guardrail 19), so a session that ENDS inside such a window is lost
+    // for good. Waiting is safe here: the poll loop is serial (docker-entrypoint's
+    // _play_history_loop sleeps between runs), so a slow tick delays the next one
+    // instead of stacking concurrent ones.
+  }, { timeout: 15_000, maxWait: 10_000 });
 }
 
 export function calculateWatched(

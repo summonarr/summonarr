@@ -26,6 +26,11 @@ export const BACKUP_TABLES = [
   "PlexLibraryItem",
   "JellyfinLibraryItem",
   "TVEpisodeCache",
+  // Transient staging buffer for whole-table TVEpisodeCache rewrites. Listed
+  // because BACKUP_TABLES must cover every model (the TRUNCATE step on import
+  // reads this same list), not because its contents matter: the rewrite helper
+  // clears its own rows in a finally block, so it is empty except during a run.
+  "TVEpisodeCacheStaging",
   "RadarrWantedItem",
   "RadarrAvailableItem",
   "SonarrWantedItem",

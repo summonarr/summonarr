@@ -21,7 +21,7 @@ import { syncDownloadPolicies } from "@/lib/download-policy";
 import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDownloadPending } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
-import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
+import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, replaceEpisodeCacheForSource, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
 import { isFeatureEnabled } from "@/lib/features";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
@@ -968,13 +968,11 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
       // episode data is still a complete picture).
       if (allEpisodesFetched && writable.length === fetched.length && writable.length > 0) {
         try {
-          await prisma.$transaction(async (tx) => {
-            // Advisory lock 2002,1 — shared with /api/sync/tv-episodes and sync/plex so the
-            // wholesale Plex TVEpisodeCache rewrite can't be interleaved with another writer.
-            await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
-            await tx.tVEpisodeCache.deleteMany({ where: { source: "plex" } });
-            if (allPlexEpisodeRows.length > 0) await batchCreateMany(tx.tVEpisodeCache, allPlexEpisodeRows);
-          }, { timeout: BATCH_TX_TIMEOUT });
+          // Staged load + short atomic swap under advisory lock 2002,1 (shared with
+          // /api/sync/tv-episodes and sync/plex). The rows no longer cross the wire
+          // inside the transaction, which is what used to blow BATCH_TX_TIMEOUT on a
+          // large library and leave the episode cache frozen — see the helper.
+          await replaceEpisodeCacheForSource("plex", allPlexEpisodeRows);
         } catch (err) {
           console.error("[sync] Plex TV episode cache failed:", err);
         }
@@ -1103,12 +1101,8 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
       // the length of its outage.
       if (allEpisodesFetched && writable.length === fetched.length && writable.length > 0) {
         try {
-          await prisma.$transaction(async (tx) => {
-            // Advisory lock 2002,2 — Jellyfin counterpart; same coordination contract as 2002,1.
-            await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
-            await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin" } });
-            if (allEpisodeRows.length > 0) await batchCreateMany(tx.tVEpisodeCache, allEpisodeRows);
-          }, { timeout: BATCH_TX_TIMEOUT });
+          // Jellyfin counterpart (advisory lock 2002,2); same contract as the Plex arm.
+          await replaceEpisodeCacheForSource("jellyfin", allEpisodeRows);
         } catch (err) {
           console.error("[sync] Jellyfin TV episode cache failed:", err);
         }

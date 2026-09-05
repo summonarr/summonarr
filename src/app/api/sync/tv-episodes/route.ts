@@ -6,7 +6,7 @@ import { getPlexTVEpisodes, getPlexLibrarySections, type PlexTVEpisodeData } fro
 import { getPlexConfig } from "@/lib/plex-config";
 import { getJellyfinTVEpisodes, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
-import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
+import { isCronAuthorized, replaceEpisodeCacheForSource, withCronRunRecording } from "@/lib/cron-auth";
 
 // 5-minute timeout: fetching episodes for large TV libraries can be slow
 export const maxDuration = 300;
@@ -146,18 +146,8 @@ async function rewrite(
   source: "plex" | "jellyfin",
   episodes: Array<PlexTVEpisodeData | JellyfinTVEpisodeData>,
 ): Promise<void> {
-  await prisma.$transaction(
-    async (tx) => {
-      // Tagged template, not Unsafe: the existing rewrite sites use this exact
-      // shape and the suite observes it.
-      if (source === "plex") await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
-      else await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
-      await tx.tVEpisodeCache.deleteMany({ where: { source } });
-      if (episodes.length > 0) {
-        await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source, ...e })));
-      }
-    },
-    { timeout: BATCH_TX_TIMEOUT },
-  );
+  // Staged load + short atomic swap; the helper takes the same advisory lock this
+  // site used to take inline (2002,1 plex / 2002,2 jellyfin).
+  await replaceEpisodeCacheForSource(source, episodes);
 }
 

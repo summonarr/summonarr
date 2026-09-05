@@ -10,7 +10,7 @@ import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } from "@/lib/permissions";
-import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
+import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, replaceEpisodeCacheForSource, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
 import { warnOnChange } from "@/lib/log-dedup";
@@ -148,15 +148,10 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
   episodesPromise
     .then(async (episodes) => {
       if (episodes === null) return;
-      await prisma.$transaction(async (tx) => {
-        // Advisory lock 2002,1 — Plex TVEpisodeCache coordination. Shared with /api/sync/route
-        // and /api/sync/tv-episodes so concurrent runners can't interleave delete/insert phases.
-        await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
-        await tx.tVEpisodeCache.deleteMany({ where: { source: "plex" } });
-        if (episodes.length > 0) {
-          await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source: "plex" as const, ...e })));
-        }
-      }, { timeout: BATCH_TX_TIMEOUT });
+      // Advisory lock 2002,1 — Plex TVEpisodeCache coordination, taken inside the
+      // helper's swap transaction. Shared with /api/sync/route and
+      // /api/sync/tv-episodes so concurrent runners can't interleave phases.
+      await replaceEpisodeCacheForSource("plex", episodes);
     })
     .catch((err) => console.error("[sync/plex] Episode cache failed:", err));
 
