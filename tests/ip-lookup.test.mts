@@ -3,7 +3,8 @@
 // surfaces. The contracts pinned here:
 //   - garbage input (non-IP, empty, whitespace) → null before ANY DB read;
 //   - private/reserved addresses (RFC1918, loopback, link-local, CGNAT, 0.x,
-//     multicast, IPv6 ::1/::/fe80:/fc../fd..) short-circuit to a bogon result
+//     multicast, IPv6 ::1/::/fe80:/fc../fd.., and IPv4-mapped/embedded IPv6
+//     literals classified by their IPv4 payload) short-circuit to a bogon result
 //     locally — no cache read, no token read, no network round-trip. The UI
 //     labels these LAN; leaking them to ipinfo would be both a privacy leak
 //     and a wasted quota hit;
@@ -180,14 +181,29 @@ test("IPv6 loopback/unspecified/link-local/ULA short-circuit (case-insensitively
     const result = await getIpLookup(ip);
     assert.equal(result?.bogon, true, `${ip} must be bogon`);
   }
-  assert.equal(cacheReads.length, 0);
+  // An IPv4-mapped/embedded IPv6 literal is classified by its IPv4 payload —
+  // Jellyfin on a dual-stack host reports RemoteEndPoint as `::ffff:a.b.c.d`,
+  // and before the unwrap every such LAN client was a billed ipinfo lookup
+  // (answered bogon:true, stored on the 24h notFound TTL, re-billed daily).
+  // Dotted-quad, upper-case, loopback, the all-hex pair form, and NAT64.
+  for (const ip of [
+    "::ffff:192.168.1.10", "::FFFF:10.0.0.5", "::ffff:127.0.0.1", "::ffff:172.16.4.4",
+    "::ffff:c0a8:10a", "::ffff:a00:1", "64:ff9b::10.0.0.9",
+  ]) {
+    const result = await getIpLookup(ip);
+    assert.equal(result?.bogon, true, `${ip} must be bogon`);
+  }
+  assert.equal(cacheReads.length, 0, "mapped LAN IPs must never touch the cache");
+  assert.equal(settingReads, 0, "mapped LAN IPs must never read the token");
+  assert.equal(fetchCalls.length, 0);
 
   // Boundary pin: the addresses just OUTSIDE the reserved ranges proceed to
-  // the cache path (public as far as the local check is concerned).
-  for (const ip of ["172.15.0.1", "172.32.0.1", "100.128.0.1", "2606:4700:4700::1111"]) {
+  // the cache path (public as far as the local check is concerned) — including
+  // a mapped PUBLIC address, whose payload is what gets classified.
+  for (const ip of ["172.15.0.1", "172.32.0.1", "100.128.0.1", "2606:4700:4700::1111", "::ffff:8.8.8.8", "::ffff:808:808"]) {
     assert.equal(await getIpLookup(ip), null, `${ip} is public → cold miss with no token → null`);
   }
-  assert.deepEqual(cacheReads, ["172.15.0.1", "172.32.0.1", "100.128.0.1", "2606:4700:4700::1111"]);
+  assert.deepEqual(cacheReads, ["172.15.0.1", "172.32.0.1", "100.128.0.1", "2606:4700:4700::1111", "::ffff:8.8.8.8", "::ffff:808:808"]);
   assert.equal(fetchCalls.length, 0); // no token configured → never fetches
 });
 

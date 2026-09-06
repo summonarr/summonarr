@@ -54,6 +54,14 @@ export interface HistoryRow {
   segmentCount?: number;
   chainId?: string;
   totalPlayDuration?: number;
+  // Chain-wide counterparts of pausedDuration / startedAt / stoppedAt. The
+  // grouped path computes them over the whole chain (SUM / MIN / MAX window
+  // aggregates); ungrouped mirrors the row's own values, same as above. The
+  // representative row's own startedAt stays the table's Date column (it is
+  // the grouped sort key); the detail panel spans the chain with these.
+  totalPausedDuration?: number | null;
+  firstStartedAt?: string;
+  lastStoppedAt?: string | null;
   mediaServerUserId: string;
   mediaServerUser: {
     username: string;

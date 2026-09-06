@@ -8,6 +8,18 @@ export interface StarterPackItem {
   service: TrashService;
   kind: TrashSpecKind;
 
+  /**
+   * Match descriptor resolved against the local TrashSpec cache by resolveCurated.
+   * - `trashId` is the ONLY stable-id lookup key: the upstream hex trash_id for a
+   *   QUALITY_PROFILE, the "default" pseudo-id for NAMING.
+   * - `name` is the rename-tolerance fallback (exact, then UNIQUE partial,
+   *   case-insensitive).
+   * - `slug` is the upstream filename slug and is informational ONLY (it rides
+   *   into the trash-diagnostic `missing` report). It is NEVER a lookup key:
+   *   the sync stores `parsedRaw.trash_id`, which isQualityProfilePayload
+   *   requires to be non-empty, so a stored trashId can never equal a slug and
+   *   a slug lookup is a guaranteed-miss round-trip.
+   */
   match?: { trashId?: string; name?: string; slug?: string };
   label: string;
   rationale: string;
@@ -89,32 +101,43 @@ function deriveRationale(spec: { kind: TrashSpecKind; payload: unknown }): strin
 async function resolveCurated(item: StarterPackItem) {
   const { service, kind, match } = item;
   if (!match) return null;
-  const candidates: string[] = [];
-  if (match.trashId) candidates.push(match.trashId);
-  if (match.slug) candidates.push(match.slug);
+  const include = { applications: { where: { arrInstance: "" } } } as const;
 
   let spec = null as Awaited<
     ReturnType<typeof prisma.trashSpec.findFirst<{ include: { applications: true } }>>
   > | null;
-  for (const trashId of candidates) {
+  // Stable-id path. Only match.trashId is a candidate — match.slug is not a key
+  // the sync ever stores (see the StarterPackItem.match doc), so querying it
+  // was one guaranteed-miss round-trip per slug-bearing entry on every call.
+  if (match.trashId) {
     spec = await prisma.trashSpec.findFirst({
-      where: { service, kind, trashId },
-      include: { applications: { where: { arrInstance: "" } } },
+      where: { service, kind, trashId: match.trashId },
+      include,
     });
-    if (spec) break;
   }
   if (!spec && match.name) {
     spec = await prisma.trashSpec.findFirst({
       where: { service, kind, name: { equals: match.name, mode: "insensitive" } },
-      include: { applications: { where: { arrInstance: "" } } },
+      include,
     });
   }
   if (!spec && match.name) {
-    // Fall back to partial name match so minor TRaSH upstream renames don't break the starter pack display
-    spec = await prisma.trashSpec.findFirst({
+    // Partial-name fallback so a minor TRaSH upstream rename doesn't blank the
+    // starter pack. This is APPLY-facing, not just display: POST starter-pack
+    // pushes every resolved curated spec to Radarr/Sonarr, so the match must be
+    // UNAMBIGUOUS. TRaSH ships supersets of these names in the same
+    // (service, kind) — "UHD Bluray + WEB" / "German HD Bluray + WEB" contain
+    // "HD Bluray + WEB", "WEB-1080p (Alternative)" contains "WEB-1080p" — and an
+    // unordered findFirst would hand whichever row Postgres yields first to the
+    // one-click apply under the 1080p label. Two or more hits ⇒ unresolved
+    // (POST reports the label in `missing`, GET renders it unsynced).
+    const hits = await prisma.trashSpec.findMany({
       where: { service, kind, name: { contains: match.name, mode: "insensitive" } },
-      include: { applications: { where: { arrInstance: "" } } },
+      include,
+      take: 2,
     });
+    const [only] = hits;
+    if (hits.length === 1 && only) spec = only;
   }
   return spec;
 }

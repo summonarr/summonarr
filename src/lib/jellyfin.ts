@@ -1,4 +1,5 @@
 import { safeFetchAdminConfigured } from "./safe-fetch";
+import { warnOnChange } from "./log-dedup";
 
 export interface JellyfinUser {
   id: string;
@@ -509,7 +510,14 @@ async function getJellyfinItemsByType(
     duplicatedTmdbIds++;
   }
   if (duplicatedTmdbIds > 0) {
-    console.warn(
+    // Repeat-suppressed: this restates a stable property of the LIBRARY, not an
+    // event, and the orchestrator re-derives it on every run — so at one run an
+    // hour it is a daily reminder, and at one run a minute it is the flood that
+    // hides everything else. Keyed per server + item type; the signature is the
+    // count, so gaining or losing an overlapping copy re-logs immediately.
+    warnOnChange(
+      `jellyfin-dupes:${itemType}:${baseUrl}`,
+      String(duplicatedTmdbIds),
       `[jellyfin] ${duplicatedTmdbIds} TMDB id(s) matched more than one ${itemType} across the scanned libraries; keeping the most recently added copy. The other copies stay resolvable for episode mapping, but only the winner's file path and ratings are stored.`,
     );
   }

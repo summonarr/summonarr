@@ -6,13 +6,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { withBasePath } from "@/lib/base-path";
 
-interface Props {
-  variant?: "setup" | "register";
-}
-
-// Account-creation form (first-run admin `setup` or self-`register`); registers then auto-signs in.
-export function SetupForm({ variant = "setup" }: Props) {
-  const isSetup = variant === "setup";
+// First-run admin account form; registers then auto-signs in. There is no
+// self-registration variant — /register redirects to /setup or /login.
+export function SetupForm() {
   const [form, setForm] = useState({ name: "", email: "", password: "", confirm: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -89,7 +85,7 @@ export function SetupForm({ variant = "setup" }: Props) {
           type="email"
           value={form.email}
           onChange={(e) => set("email", e.target.value)}
-          placeholder={isSetup ? "admin@example.com" : "you@example.com"}
+          placeholder="admin@example.com"
           className="bg-zinc-800 border-zinc-700"
           required
         />
@@ -127,9 +123,9 @@ export function SetupForm({ variant = "setup" }: Props) {
       <Button
         type="submit"
         disabled={loading}
-        className={`w-full bg-indigo-600 hover:bg-indigo-500${isSetup ? " mt-2" : ""}`}
+        className="w-full bg-indigo-600 hover:bg-indigo-500 mt-2"
       >
-        {loading ? "Creating account..." : isSetup ? "Create admin account" : "Create account"}
+        {loading ? "Creating account..." : "Create admin account"}
       </Button>
     </form>
   );

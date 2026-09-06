@@ -112,11 +112,17 @@ let requestRow: { status: string } | null = null;
 // Request ids whose pendingNotifyAt-clear updateMany returns count 0 — i.e. the
 // row was deleted mid-check. runDownloadCheck must abort before notifying.
 const deletedRowIds = new Set<string>();
+// Request ids whose pendingNotifyAt is ALREADY null — consumed by an earlier
+// job or the orchestrator sweep, or cleared by an ARR-push rollback. The clear
+// is a compare-and-swap (`pendingNotifyAt: { not: null }`), so it must read
+// count 0 here; an id-only predicate would read 1 and DM a second time.
+const consumedRowIds = new Set<string>();
 // Per-id overrides for the multi-target sweep tests; unset ids fall back to requestRow.
 const requestRowById = new Map<string, { status: string } | null>();
 let throwForRequestId: string | null = null;
 const requestUpdates: Array<Record<string, unknown>> = [];
 const requestUpdateIds: string[] = [];
+const requestUpdateWheres: Array<Record<string, unknown>> = [];
 shadowPrismaModel(prisma, "mediaRequest", {
   findUnique: async (args: { where: { id: string } }) => {
     if (throwForRequestId !== null && args.where.id === throwForRequestId) {
@@ -133,11 +139,17 @@ shadowPrismaModel(prisma, "mediaRequest", {
   // runDownloadCheck clears pendingNotifyAt via updateMany (not update) so a
   // request deleted mid-check no-ops instead of throwing P2025. A deleted row
   // returns count 0 (see deletedRowIds), which must ABORT before the notify.
-  updateMany: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+  updateMany: async (args: { where: { id: string; pendingNotifyAt?: { not: null } }; data: Record<string, unknown> }) => {
     order.push("clear");
     requestUpdates.push(args.data);
     requestUpdateIds.push(args.where.id);
-    return { count: deletedRowIds.has(args.where.id) ? 0 : 1 };
+    requestUpdateWheres.push(args.where);
+    if (deletedRowIds.has(args.where.id)) return { count: 0 };
+    // Models the `pendingNotifyAt: { not: null }` CAS: an already-consumed row
+    // matches only when the predicate is absent (the id-only shape the fix removed).
+    if (args.where.pendingNotifyAt !== undefined && consumedRowIds.has(args.where.id)) return { count: 0 };
+    if ("pendingNotifyAt" in args.data && args.data.pendingNotifyAt === null) consumedRowIds.add(args.where.id);
+    return { count: 1 };
   },
 });
 
@@ -202,8 +214,10 @@ beforeEach(() => {
   order.length = 0;
   requestUpdates.length = 0;
   requestUpdateIds.length = 0;
+  requestUpdateWheres.length = 0;
   requestRowById.clear();
   deletedRowIds.clear();
+  consumedRowIds.clear();
   throwForRequestId = null;
   requestRow = { status: "APPROVED" };
   requesterDeactivatedAt = null;
@@ -297,6 +311,44 @@ test("a request deleted mid-check (clear returns count 0) aborts BEFORE any DM",
 
   assert.deepEqual(requestUpdates, [{ pendingNotifyAt: null }], "the clear was still attempted");
   assert.equal(discordPosts().length, 0, "a vanished request must not be DMed");
+});
+
+// ── the clear is a CONSUME, not a blind write ───────────────────────────────
+
+test("the pendingNotifyAt clear carries a `{ not: null }` CAS predicate, not just the id", async () => {
+  setSettings(DISCORD_CFG);
+
+  await runDownloadCheck(target());
+
+  assert.deepEqual(requestUpdateWheres, [{ id: target().requestId, pendingNotifyAt: { not: null } }],
+    "an id-only predicate reads count 1 for a row whose backstop was already consumed, so every " +
+    "overlapping job (rollback + re-approve inside 90s, or a job racing the sync sweep) DMs again");
+});
+
+test("an APPROVED row whose backstop is ALREADY consumed (pendingNotifyAt null) is not DMed", async () => {
+  // The shape a rolled-back-then-re-approved row leaves behind once the first
+  // job has fired: still APPROVED, ARR queue still empty, pendingNotifyAt null.
+  setSettings(DISCORD_CFG);
+  consumedRowIds.add(target().requestId);
+
+  await runDownloadCheck(target());
+
+  assert.equal(requestUpdateWheres.length, 1, "the CAS clear was still attempted");
+  assert.equal(discordPosts().length, 0, "a consumed backstop must not produce a second 'Download Pending' DM");
+});
+
+test("two overlapping jobs for ONE row DM exactly once — the second consume reads count 0", async () => {
+  // Reproduces the duplicate: approve → ARR push fails → rollback (job A still
+  // queued under the old unconditional schedule) → admin re-approves inside the
+  // 90s window (job B queued, pendingNotifyAt re-armed). Both fire against an
+  // APPROVED row with an empty ARR queue.
+  setSettings(DISCORD_CFG);
+
+  await runDownloadCheck(target());
+  await runDownloadCheck(target());
+
+  assert.equal(requestUpdateWheres.length, 2, "both jobs reach the clear");
+  assert.equal(discordPosts().length, 1, "the second job must find the backstop already consumed and stay silent");
 });
 
 // ── guardrail 33 ────────────────────────────────────────────────────────────

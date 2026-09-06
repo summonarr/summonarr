@@ -11,7 +11,7 @@ import { hashPassword, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/passwor
 // PATCH /api/profile/password — the signed-in user changes their own local
 // password; revokes all existing sessions on success.
 export const PATCH = withAuth(async (req, _ctx, session) => {
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
   if (!checkRateLimit(`profile-password:${session.user.id}`, 5, 15 * 60 * 1000)) {
     return NextResponse.json(

@@ -12,6 +12,7 @@ import { getArrInstances } from "@/lib/arr-instance-registry";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { FOURK_ARR_INSTANCE } from "@/lib/arr-instances";
 import { isPurgedRow } from "@/lib/account-lifecycle";
+import { deriveUserSource } from "@/lib/user-source";
 
 export const dynamic = "force-dynamic";
 
@@ -37,6 +38,10 @@ export default async function UsersPage() {
         tvQuotaDays: true,
         mediaServer: true,
         maxContentRating: true,
+        // The provider SUBJECT columns are the authoritative binding for the
+        // source chip (deriveUserSource); the email suffix is only a fallback.
+        plexUserId: true,
+        jellyfinUserId: true,
         notifyOnApproved: true,
         notifyOnAvailable: true,
         notifyOnDeclined: true,
@@ -182,13 +187,13 @@ export default async function UsersPage() {
             mediaServerGrants: parseMediaServerGrants(u.mediaServerGrants),
             mediaServer: u.mediaServer as "plex" | "jellyfin" | null,
             maxContentRating: u.maxContentRating,
-            source: localAuthIds.has(u.id)
-              ? "local"
-              : oidcAuthIds.has(u.id)
-              ? "oidc"
-              : u.email.endsWith("@jellyfin.local")
-              ? "jellyfin"
-              : "plex",
+            source: deriveUserSource({
+              email: u.email,
+              plexUserId: u.plexUserId,
+              jellyfinUserId: u.jellyfinUserId,
+              hasLocalCredentials: localAuthIds.has(u.id),
+              hasOidcAccount: oidcAuthIds.has(u.id),
+            }),
           }))}
           currentUserId={session.user.id}
           has4k={has4k}

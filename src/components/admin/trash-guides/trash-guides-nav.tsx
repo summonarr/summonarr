@@ -85,8 +85,12 @@ export function TrashGuidesNav({
     const v = params.get("variant");
     if (v && !nextInstances.some((i) => i.slug === v)) params.delete("variant");
     const qs = params.toString();
+    // No router.refresh() after the push: every trash-guides page is
+    // force-dynamic and awaits searchParams, so a push to a new ?service= /
+    // ?variant= URL is already a client-cache miss (dynamic staleTime is 0s)
+    // that fetches a fresh server render. A trailing refresh re-rendered the
+    // same tree a second time per toggle.
     router.push(qs ? `${pathname}?${qs}` : pathname);
-    router.refresh();
   }
 
   function setVariant(next: string) {
@@ -97,8 +101,7 @@ export function TrashGuidesNav({
       params.set("variant", next);
     }
     const qs = params.toString();
-    router.push(qs ? `${pathname}?${qs}` : pathname);
-    router.refresh();
+    router.push(qs ? `${pathname}?${qs}` : pathname); // see setService
   }
 
   // Build sub-page links so they preserve the current ?service= and ?variant= params.

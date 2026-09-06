@@ -10,7 +10,11 @@
 //
 //   matchesFk       — MediaServerUser.userId == the account
 //   matchesSubject  — (source, sourceUserId) == the account's own
-//                     User.plexUserId / jellyfinUserId
+//                     User.plexUserId / jellyfinUserId, AND the row is not
+//                     manually pinned (the resolver's branches carry
+//                     `manualUserLink: false` — guardrail 34). A pinned row that
+//                     satisfies the equality is reported as
+//                     `subjectSuppressedByPin` instead, so the operator sees why.
 //
 // The pins that matter:
 //   1. visibleToUser is exactly `matchesFk || matchesSubject`, and NOT influenced
@@ -293,6 +297,69 @@ test("a provider-subject match is visible even with no FK", async () => {
   assert.equal(row.visibleToUser, true);
 });
 
+test("a manually UNLINKED row is NOT a subject match — the pin wins (guardrail 34)", async () => {
+  // An admin's manual unlink clears userId and sets manualUserLink. The account's
+  // plexUserId still equals the row's sourceUserId, but the resolver's subject
+  // branch is `{ source, sourceUserId, manualUserLink: false }`, so the real
+  // /watch-history is EMPTY. The dump must say the same, and must list the row
+  // as the orphan it is — reporting it visible here is the inverse verdict on
+  // exactly the case the pin exists to hide.
+  const t = await mintSession();
+  targets = [target({ id: "u1", plexUserId: "plex-77" })];
+  msus = [msu({ id: "unlinked", source: "plex", sourceUserId: "plex-77", userId: null, manualUserLink: true, historyRows: 5 })];
+  const body = await (await link(t, "?userId=u1")).json();
+  const row = body.candidates.find((r: { id: string }) => r.id === "unlinked");
+  assert.ok(row, "the row is still a candidate — the operator needs to see it");
+  assert.equal(row.matchesFk, false);
+  assert.equal(row.matchesSubject, false, "a pinned row must not satisfy the subject matcher");
+  assert.equal(row.subjectSuppressedByPin, true, "and the dump says WHY the subject equality did not fire");
+  assert.equal(row.visibleToUser, false);
+  assert.deepEqual(body.resolvedMediaServerUserIds, []);
+  assert.equal(body.visibleHistoryRows, 0);
+  assert.equal(body.orphanedWithHistory.length, 1);
+  assert.equal(body.orphanedWithHistory[0].mediaServerUserId, "unlinked");
+  assert.equal(body.orphanedWithHistory[0].subjectSuppressedByPin, true);
+  assert.equal(body.orphanedWithHistory[0].linkedToOtherUserId, null);
+});
+
+test("a row manually RE-ASSIGNED to another account is NOT a subject match, and names the holder", async () => {
+  const t = await mintSession();
+  targets = [target({ id: "u1", jellyfinUserId: "jf-77" })];
+  msus = [msu({ id: "moved", source: "jellyfin", sourceUserId: "jf-77", userId: "someone-else", manualUserLink: true, historyRows: 8 })];
+  const body = await (await link(t, "?userId=u1")).json();
+  const row = body.candidates.find((r: { id: string }) => r.id === "moved");
+  assert.ok(row);
+  assert.equal(row.matchesFk, false);
+  assert.equal(row.matchesSubject, false);
+  assert.equal(row.subjectSuppressedByPin, true);
+  assert.equal(row.visibleToUser, false);
+  assert.deepEqual(body.resolvedMediaServerUserIds, []);
+  assert.equal(body.orphanedWithHistory.length, 1);
+  assert.equal(body.orphanedWithHistory[0].mediaServerUserId, "moved");
+  assert.equal(body.orphanedWithHistory[0].linkedToOtherUserId, "someone-else");
+  assert.equal(body.orphanedWithHistory[0].subjectSuppressedByPin, true);
+});
+
+test("subjectSuppressedByPin is false when the subject simply does not match, pinned or not", async () => {
+  // The flag means "the equality held and ONLY the pin hid it" — a pinned row
+  // that never matched the subject must not claim that, or the operator would
+  // release a pin that was never the reason.
+  const t = await mintSession();
+  targets = [target({ id: "u1", email: "p@example.com", plexUserId: "plex-77" })];
+  msus = [
+    msu({ id: "pinned-fk", userId: "u1", manualUserLink: true, sourceUserId: "other", historyRows: 1 }),
+    msu({ id: "pinned-nomatch", email: "p@example.com", userId: null, manualUserLink: true, sourceUserId: "other", historyRows: 1 }),
+    msu({ id: "unpinned-subject", source: "plex", sourceUserId: "plex-77", userId: null, manualUserLink: false, historyRows: 1 }),
+  ];
+  const body = await (await link(t, "?userId=u1")).json();
+  const byId = Object.fromEntries(body.candidates.map((r: { id: string }) => [r.id, r]));
+  assert.equal(byId["pinned-fk"].subjectSuppressedByPin, false);
+  assert.equal(byId["pinned-fk"].visibleToUser, true, "a pinned FK link is still honored — that is the point of pinning");
+  assert.equal(byId["pinned-nomatch"].subjectSuppressedByPin, false);
+  assert.equal(byId["unpinned-subject"].subjectSuppressedByPin, false);
+  assert.equal(byId["unpinned-subject"].matchesSubject, true);
+});
+
 test("the subject matcher is SOURCE-scoped — a Jellyfin row with the Plex id does not match", async () => {
   // The row only becomes a CANDIDATE via the email key here; source-scoping is
   // then enforced again in the verdict. (The candidate query pairs
@@ -439,6 +506,14 @@ test("allServerIdentities is omitted when candidates were found", async () => {
   msus = [msu({ id: "m1", userId: "u1" })];
   const body = await (await link(t, "?userId=u1")).json();
   assert.equal(body.allServerIdentities, undefined);
+  // ...and the bounded dump query (200 rows × a correlated PlayHistory count) is
+  // NOT issued at all when its result would only be discarded.
+  const queries = opsOf("mediaServerUser.findMany");
+  assert.equal(queries.length, 1, "only the targeted candidate query should run");
+  assert.ok(
+    queries.every((o) => (o.args as { take?: number }).take == null),
+    "the take:200 identity dump must not be queried when a candidate matched",
+  );
 });
 
 test("allServerIdentities appears when NOTHING matched — the hardest case to read", async () => {

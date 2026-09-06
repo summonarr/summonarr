@@ -798,3 +798,51 @@ test("the search paths stay silent (guardrail 7)", () => {
   assert.deepEqual(warns, []);
   assert.deepEqual(errors, []);
 });
+
+// The grouped path computes chain-wide counterparts of pausedDuration /
+// startedAt / stoppedAt (SUM / MIN / MAX window aggregates) that the detail
+// panel reads beside totalPlayDuration. Both modes have to carry them: the
+// panel reads `totalPausedDuration ?? pausedDuration` (etc.) unconditionally,
+// so an ungrouped response that omits the mirror is fine, but a grouped one
+// that stops mapping the aliases silently regresses the panel to the newest
+// segment's values (the defect this pins). The mirror's grouped rows are all
+// single-segment chains, so the SUM/MIN/MAX arithmetic itself is Postgres's
+// and is not exercised here — only that the route maps the aliases through.
+interface ChainFields {
+  pausedDuration: number | null;
+  startedAt: string;
+  stoppedAt: string | null;
+  segmentCount: number;
+  totalPlayDuration: number;
+  totalPausedDuration: number | null;
+  firstStartedAt: string;
+  lastStoppedAt: string | null;
+}
+
+test("ungrouped: every item mirrors the chain-wide fields from its own single segment", async () => {
+  addPlay("msu-plain", { title: "Paused Twice", pausedDuration: 120 });
+  const { items } = await fetchList({ ungrouped: "true", search: "Paused Twice" });
+  assert.equal(items.length, 1);
+  const it = items[0] as unknown as ChainFields;
+  assert.equal(it.segmentCount, 1);
+  assert.equal(it.totalPausedDuration, 120);
+  assert.equal(it.totalPausedDuration, it.pausedDuration);
+  assert.equal(it.firstStartedAt, it.startedAt);
+  assert.equal(it.lastStoppedAt, it.stoppedAt);
+  assert.ok(typeof it.firstStartedAt === "string" && it.firstStartedAt.length > 0);
+});
+
+test("grouped: the window aliases map through as totalPausedDuration / firstStartedAt / lastStoppedAt", async () => {
+  addPlay("msu-plain", { title: "Paused Twice", pausedDuration: 120 });
+  const { items } = await fetchList({ search: "Paused Twice" });
+  assert.equal(items.length, 1);
+  const it = items[0] as unknown as ChainFields & Record<string, unknown>;
+  assert.equal(it.totalPausedDuration, 120);
+  assert.equal(it.firstStartedAt, it.startedAt);
+  assert.equal(it.lastStoppedAt, it.stoppedAt);
+  // The raw aliases the mirror emitted are what the route read — the mapped
+  // values must equal them, not the representative row's columns by accident.
+  assert.equal(it.totalPausedDuration, it.total_paused_duration);
+  assert.equal(it.firstStartedAt, it.first_started_at);
+  assert.equal(it.lastStoppedAt, it.last_stopped_at);
+});

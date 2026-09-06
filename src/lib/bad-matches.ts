@@ -366,6 +366,15 @@ export async function getBadMatches(activeType?: "MOVIE" | "TV"): Promise<BadMat
     ? raw.filter((m) => m.plex.mediaType === activeType || m.jellyfin.mediaType === activeType)
     : raw;
 
+  // Nothing to verdict → nothing to look up. The arr maps below are consumed only
+  // inside the per-match map, and on the common healthy library they used to be
+  // built anyway: two TmdbCache reads + a library-sized JSON.parse when warm, and
+  // when cold a full /api/v3/movie + /api/v3/series arrFetch across EVERY syncable
+  // instance — on every request, since a configured-but-empty instance is
+  // deliberately never cached (`cached?.length` above). posterPathMap already
+  // short-circuits on empty input; this guard covers the arr builders too.
+  if (filtered.length === 0) return [];
+
   const [posters, movieArr, tvArr] = await Promise.all([
     posterPathMap(filtered.flatMap((m) => [m.plex, m.jellyfin])),
     buildArrPathMap("MOVIE"),

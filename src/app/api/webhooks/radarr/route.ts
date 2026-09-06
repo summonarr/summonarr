@@ -251,21 +251,16 @@ export async function POST(req: NextRequest) {
   await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 1)`;
     // Do NOT touch notifiedAvailable here; the orchestrator's CAS (guardrail #14) is the sole authority.
-    const resetNotify = await tx.mediaRequest.updateMany({
-      where: { tmdbId, mediaType: "MOVIE", arrInstance, status: "APPROVED", availableAt: null },
+    // One UPDATE covers both a fresh approval (availableAt null) and a re-push of
+    // an already-available title — the two used to differ only in a
+    // notifiedAvailable write that guardrail 14 removed.
+    updated = await tx.mediaRequest.updateMany({
+      where: { tmdbId, mediaType: "MOVIE", arrInstance, status: "APPROVED" },
       // Clear the approve-time 90s backstop: the item is downloaded, so a stale
       // timer would fire a false "download pending" if a later sync revert flips
       // this back to APPROVED.
       data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
     });
-    const alreadyAvailable = await tx.mediaRequest.updateMany({
-      where: { tmdbId, mediaType: "MOVIE", arrInstance, status: "APPROVED", availableAt: { not: null } },
-      // Clear the approve-time 90s backstop: the item is downloaded, so a stale
-      // timer would fire a false "download pending" if a later sync revert flips
-      // this back to APPROVED.
-      data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
-    });
-    updated = { count: resetNotify.count + alreadyAvailable.count };
     await tx.radarrWantedItem.deleteMany({ where: { tmdbId, arrInstance } });
   }, { timeout: 30_000 });
 

@@ -8,10 +8,14 @@
 // or a data-loss bug the code comments already name:
 //
 //   1. EVERY TRANSITION IS A COMPARE-AND-SWAP ON THE CURRENT STATUS. batch claims
-//      each row individually with `updateMany({ where: { id, status: "PENDING" }})`
-//      and drives every side effect off the rows whose count came back 1 — the
-//      older shared findMany-then-updateMany snapshot let two concurrent calls
-//      both act on the same request and double-push it to ARR. requests/[id] does
+//      its rows with ONE `updateManyAndReturn({ where: { id: { in }, status:
+//      "PENDING" }})` — a single UPDATE … RETURNING whose per-row status predicate
+//      is re-checked at write time — and drives every side effect off the rows it
+//      returned. (It used to be one updateMany per id: same CAS, up to 100
+//      sequential round-trips per click, plus a third findMany to learn the
+//      owners the RETURNING clause now carries.) The older shared
+//      findMany-then-updateMany snapshot let two concurrent calls both act on
+//      the same request and double-push it to ARR. requests/[id] does
 //      the same against `existing.status` and answers 409 when the row moved
 //      underneath it, because its transition-table check ran on a stale read.
 //   2. THE adminNote GUARD IS ON THE **RAW** BODY FIELD. sanitizeOptional maps
@@ -33,8 +37,9 @@
 //
 // Harness: real wrapped handlers, genuine signed session JWTs, a synthetic Next
 // request scope, in-memory prisma stubs whose mediaRequest delegate MODELS the
-// status state machine (updateMany honours the status predicate, so the CAS is
-// actually exercised rather than assumed). No DB, no network.
+// status state machine (updateMany / updateManyAndReturn honour the status
+// predicate, so the CAS is actually exercised rather than assumed). No DB, no
+// network.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
@@ -60,14 +65,14 @@ console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" "));
 console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
 
 // ── scripted upstreams ───────────────────────────────────────────────────────
-const fetchCalls: Array<{ url: URL; method: string }> = [];
+const fetchCalls: Array<{ url: URL; method: string; body?: string }> = [];
 let arrOk = true;
 let arrFailTmdbIds = new Set<number>();
 let profilesOk = true;
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
-  fetchCalls.push({ url, method: init?.method ?? "GET" });
+  fetchCalls.push({ url, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : undefined });
   const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { "content-type": "application/json" } });
 
   if (url.pathname.includes("/api/v3/qualityprofile")) {
@@ -148,9 +153,10 @@ shadowPrismaModel(prisma, "user", {
 });
 
 // ── MediaRequest store: MODELS the status state machine ──────────────────────
-// updateMany honours a `status` predicate, so the compare-and-swap the routes
-// rely on is genuinely exercised — a mutation that drops the predicate produces
-// a different count here and the assertions move.
+// updateMany / updateManyAndReturn honour a `status` predicate, so the
+// compare-and-swap the routes rely on is genuinely exercised — a mutation that
+// drops the predicate produces a different count / row set here and the
+// assertions move.
 type ReqStatus = "PENDING" | "APPROVED" | "DECLINED" | "AVAILABLE";
 type ReqRow = {
   id: string; tmdbId: number; mediaType: "MOVIE" | "TV"; arrInstance: string;
@@ -211,6 +217,24 @@ shadowPrismaModel(prisma, "mediaRequest", {
     }
     return { count: n };
   },
+  // Same matchReq + Object.assign semantics as updateMany, but returns the rows
+  // it transitioned projected through `select` — models `UPDATE … RETURNING`,
+  // which is how the batch route learns WHICH rows this call claimed.
+  updateManyAndReturn: async (args: { where: Record<string, unknown>; data: Record<string, unknown>; select?: Record<string, boolean> }) => {
+    rec("mediaRequest.updateManyAndReturn", args);
+    const out: Array<Record<string, unknown>> = [];
+    for (const r of reqRows) {
+      if (!matchReq(r, args.where)) continue;
+      Object.assign(r, args.data);
+      const full = { ...r } as Record<string, unknown>;
+      out.push(
+        args.select
+          ? Object.fromEntries(Object.entries(full).filter(([k]) => args.select![k] === true))
+          : full,
+      );
+    }
+    return out;
+  },
   update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
     rec("mediaRequest.update", args);
     const r = reqRows.find((x) => x.id === args.where.id);
@@ -264,6 +288,7 @@ shadowPrismaClientMethod(prisma, "$executeRawUnsafe", async () => 1);
 
 const batchRoute = await import("../src/app/api/requests/batch/route.ts");
 const idRoute = await import("../src/app/api/requests/[id]/route.ts");
+const { DOWNLOAD_CHECK_DELAY_MS } = await import("../src/lib/download-check.ts");
 const profilesRoute = await import("../src/app/api/requests/quality-profiles/route.ts");
 
 // ── scope ────────────────────────────────────────────────────────────────────
@@ -389,7 +414,7 @@ test("quality-profiles admits MANAGE_REQUESTS or REQUEST_ADVANCED, not just admi
 
 // ── 1: the batch compare-and-swap ────────────────────────────────────────────
 
-test("batch claims each row individually and drives side effects off the CLAIMED set", async () => {
+test("batch claims its rows in ONE updateManyAndReturn and drives side effects off the RETURNED set", async () => {
   const { token, userId } = await manager();
   const owner = await mintSession();
   reqRows = [
@@ -400,14 +425,39 @@ test("batch claims each row individually and drives side effects off the CLAIMED
   void userId;
   const res = await doBatch(token, { ids: ["r1", "r2", "r3"], status: "APPROVED" });
   assert.equal(res.status, 200);
-  // Each claim is its OWN updateMany carrying the PENDING predicate.
-  const claims = opsOf("mediaRequest.updateMany").filter(
-    (o) => (o.args as { where: { status?: string } }).where.status === "PENDING",
+  // ONE claim statement for the whole batch — `UPDATE … WHERE id IN (…) AND
+  // status = 'PENDING' RETURNING` — not one round-trip per id (the old shape was
+  // up to 100 sequential updateMany calls per click).
+  const claims = opsOf("mediaRequest.updateManyAndReturn");
+  assert.equal(claims.length, 1, "one bulk claim, not one update per id");
+  const claim = claims[0].args as { where: Record<string, unknown>; select: Record<string, boolean> };
+  assert.deepEqual(claim.where, { id: { in: ["r1", "r2", "r3"] }, status: "PENDING" }, "the CAS predicate must ride the single UPDATE");
+  // The RETURNING projection carries the owner, so the SSE emit needs no re-read.
+  assert.equal(claim.select.id, true);
+  assert.equal(claim.select.requestedBy, true);
+  // No per-id claim loop survives: the only updateMany calls left in an approve
+  // are the post-Sonarr tvdbId bookkeeping and the failed-push rollback.
+  assert.equal(
+    opsOf("mediaRequest.updateMany").filter((o) => (o.args as { where: { status?: string } }).where.status === "PENDING").length,
+    0,
+    "no per-id updateMany claim",
   );
-  assert.equal(claims.length, 3, "one claim per id, not one bulk update");
-  for (const c of claims) {
-    assert.equal((c.args as { where: { status: string } }).where.status, "PENDING");
-  }
+  // Only the PENDING rows transitioned; r2 was already APPROVED and is skipped.
+  assert.equal(reqRows.find((r) => r.id === "r1")!.status, "APPROVED");
+  assert.equal(reqRows.find((r) => r.id === "r3")!.status, "APPROVED");
+  const adds = fetchCalls.filter((c) => c.method === "POST" && c.url.pathname.includes("/api/v3/movie"));
+  assert.deepEqual(
+    adds.map((c) => JSON.parse(String(c.body)).tmdbId).sort(),
+    [1, 3],
+    "ARR push only for the rows THIS call claimed — r2 must not be re-pushed",
+  );
+  // The third findMany (id IN claimedIds, select id+requestedBy) is gone — the
+  // owners came back with the claim.
+  const ownerReads = opsOf("mediaRequest.findMany").filter((o) => {
+    const w = o.args as { id?: { in?: string[] }; status?: unknown } | undefined;
+    return w?.id?.in !== undefined && w.status === undefined;
+  });
+  assert.equal(ownerReads.length, 0, "no status-less owner re-read after the claim");
 });
 
 test("a row that is ALREADY non-PENDING is skipped, not re-approved", async () => {
@@ -917,5 +967,50 @@ test("a single approve is audited with the before/after status", async () => {
   const details = JSON.parse(data.details);
   assert.equal(details.before.status, "PENDING");
   assert.equal(details.after.status, "APPROVED");
+});
+
+// ── the 90s download-check job is queued only for a push that LANDED ─────────
+// scheduleDelayed (src/lib/delayed-jobs.ts) is the only thing on the PATCH path
+// that arms a DOWNLOAD_CHECK_DELAY_MS timer, so recording setTimeout delays is a
+// faithful "was the job queued?" probe without reaching into the pool.
+async function withTimeoutSpy<T>(fn: () => Promise<T>): Promise<{ result: T; queued: number }> {
+  const orig = globalThis.setTimeout;
+  const delays: number[] = [];
+  globalThis.setTimeout = ((cb: (...a: unknown[]) => void, ms?: number, ...rest: unknown[]) => {
+    delays.push(ms ?? 0);
+    return (orig as unknown as (...a: unknown[]) => ReturnType<typeof setTimeout>)(cb, ms, ...rest);
+  }) as unknown as typeof setTimeout;
+  try {
+    const result = await fn();
+    return { result, queued: delays.filter((d) => d === DOWNLOAD_CHECK_DELAY_MS).length };
+  } finally {
+    globalThis.setTimeout = orig;
+  }
+}
+
+test("a successful single approve queues the 90s download check", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId })];
+  const { result, queued } = await withTimeoutSpy(() => doPatch(token, "r1", { status: "APPROVED" }));
+  assert.equal(result.status, 200);
+  assert.equal(reqRows[0].status, "APPROVED");
+  assert.equal(queued, 1, "the prompt path must be scheduled — arming pendingNotifyAt alone waits for the sync sweep");
+});
+
+test("a FAILED ARR push does NOT queue the download check for the rolled-back row", async () => {
+  // Mirrors the POST auto-approve and batch routes: the rollback has already
+  // cleared pendingNotifyAt, so the job would only burn a bounded pool slot — and
+  // if the admin re-approves inside the 90s window it fires alongside the
+  // re-approve's own job for the same row.
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "bad", requestedBy: owner.userId, tmdbId: 999 })];
+  arrFailTmdbIds = new Set([999]);
+  const { result, queued } = await withTimeoutSpy(() => doPatch(token, "bad", { status: "APPROVED" }));
+  assert.equal(result.status, 200);
+  assert.equal(reqRows[0].status, "PENDING", "fixture sanity: the push failed and the row rolled back");
+  assert.equal(reqRows[0].pendingNotifyAt, null);
+  assert.equal(queued, 0, "a rolled-back row has nothing for the job to consume");
 });
 

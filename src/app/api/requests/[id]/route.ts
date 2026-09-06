@@ -22,7 +22,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   { params }: { params: Promise<{ id: string }> },
   session
 ) => {
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   if (!checkRateLimit(`admin-req:${session.user.id}`, 60, 60 * 1000)) {
@@ -335,14 +335,22 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       notifyRequestStatusChange("APPROVED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
     }
 
-    scheduleDownloadCheck({
-      requestId: id,
-      tmdbId: updated.tmdbId,
-      mediaType: updated.mediaType,
-      arrInstance: variant,
-      requestedBy: updated.requestedBy,
-      title: updated.title,
-    }, { name: "requests:90s-download-check" });
+    // Run the pendingNotifyAt check PROMPTLY at ~90s instead of leaving it to the
+    // orchestrator's next sweep. Scheduled only on the push-succeeded path, like
+    // the POST auto-approve and batch routes: the rollback above already cleared
+    // pendingNotifyAt, so a job queued for that row would only burn a bounded
+    // delayed-job slot — and, should the admin re-approve inside the 90s window,
+    // it would fire alongside the re-approve's own job for the same row.
+    if (arrPushSucceeded) {
+      scheduleDownloadCheck({
+        requestId: id,
+        tmdbId: updated.tmdbId,
+        mediaType: updated.mediaType,
+        arrInstance: variant,
+        requestedBy: updated.requestedBy,
+        title: updated.title,
+      }, { name: "requests:90s-download-check" });
+    }
 
     // `updated` was read before the arr push; after a rollback it is stale
     // (APPROVED + armed pendingNotifyAt for a row that is PENDING again). A
@@ -395,7 +403,7 @@ export const DELETE = withAuth(async (
   { params }: { params: Promise<{ id: string }> },
   session
 ) => {
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   const { id } = await params;

@@ -14,6 +14,7 @@ import {
 import { isValidInstanceSlug } from "@/lib/arr-instances";
 import { logAudit, auditContext } from "@/lib/audit";
 import { maintenanceGuard } from "@/lib/maintenance";
+import { emitSSE } from "@/lib/sse-emitter";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -77,7 +78,7 @@ export const GET = withIssueAdmin(async (req, { params }: RouteContext, _session
 });
 
 export const POST = withIssueAdmin(async (req, { params }: RouteContext, session) => {
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   const { id } = await params;
@@ -129,6 +130,14 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
     return NextResponse.json({ error: "Issue is resolved — reopen it before grabbing a release" }, { status: 409 });
   }
   const statusChanged = issue.status !== "IN_PROGRESS";
+  // Announce the flip BEFORE the grab: the row already holds IN_PROGRESS, and the
+  // 422/502 early returns below deliberately leave it there — so every other admin's
+  // list and the reporter's page must learn of it here, exactly like the refetch path
+  // in issues/[id]/route.ts. Only a real change is broadcast (no re-announcing an
+  // already-IN_PROGRESS issue).
+  if (statusChanged) {
+    emitSSE({ type: "issue:updated", issueId: id, status: "IN_PROGRESS", userId: issue.reportedBy });
+  }
 
   let resolvedTvdbId: number | null = issue.tvdbId;
 

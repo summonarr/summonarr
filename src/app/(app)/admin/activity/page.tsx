@@ -153,7 +153,13 @@ export default async function ActivityPage({
     }),
     prisma.playHistory.findMany({
       where: prismaWhere,
-      orderBy: { startedAt: "desc" },
+      // This seeds page 1; `ActivityRecentPlays` loads page 2+ from
+      // /api/play-history (ungrouped), whose query orders
+      // `ORDER BY startedAt DESC, id DESC`. The `id` tiebreak — and its DESC
+      // direction — must match so both walk ONE total order: same-poll
+      // sessions share a stamped startedAt, and a tie straddling the page-1/2
+      // boundary would otherwise repeat one row and silently skip the other.
+      orderBy: [{ startedAt: "desc" }, { id: "desc" }],
       take: 20,
       include: {
         mediaServerUser: {

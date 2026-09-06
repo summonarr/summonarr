@@ -43,14 +43,20 @@ export default async function TVDetailPage({
   // check — overlapping it with getTVDetails let an unauthenticated caller
   // burn TMDB/OMDB/MDBList quota and write cache rows before the redirect fired.
   const session = await requireAppSession();
-  let media;
-  try {
-    media = await getTVDetails(Number(id));
-  } catch {
-    notFound();
-  }
+  // A malformed id or a genuine TMDB 404 is a not-found; ANY other failure
+  // (TMDB outage/timeout/5xx, missing credentials, a ratings-chain throw)
+  // propagates to (app)/error.tsx, which offers a retry. The old bare
+  // catch-all-to-notFound showed "might have been removed" for an existing
+  // title during a TMDB blip — same shape as person/[id]/page.tsx.
+  const tmdbId = Number(id);
+  if (!Number.isFinite(tmdbId) || tmdbId <= 0) notFound();
+  const media = await getTVDetails(tmdbId).catch((err: unknown) => {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/failed: 404\b/.test(message)) notFound();
+    throw err;
+  });
 
-  const provider = session?.user.provider;
+  const provider = session.user.provider;
   const providerSources =
     provider === "plex"
       ? ["plex"]
@@ -98,16 +104,16 @@ export default async function TVDetailPage({
       where: { tmdbId: media.id, mediaType: "TV", tvdbId: { not: null } },
       select: { tvdbId: true },
     }),
-    session ? prisma.mediaRequest.findFirst({
+    prisma.mediaRequest.findFirst({
       // Any non-4K instance: the main request button owns the default AND named
       // (auto-routed, e.g. anime) requests; only 4K has its own separate button.
       where: { tmdbId: media.id, mediaType: "TV", requestedBy: session.user.id, arrInstance: { not: "4k" }, status: { not: "DECLINED" } },
       select: { id: true },
-    }) : Promise.resolve(null),
-    session ? prisma.deletionVote.findFirst({
+    }),
+    prisma.deletionVote.findFirst({
       where: { tmdbId: media.id, mediaType: "TV", userId: session.user.id },
       select: { id: true },
-    }) : Promise.resolve(null),
+    }),
     prisma.sonarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "" } } }),
     getTVCredits(media.id).catch(() => []),
     getTVSuggestions(media.id).catch(() => []),
@@ -123,12 +129,10 @@ export default async function TVDetailPage({
     getTVGenres().catch(() => []),
     isBlacklisted(media.id, "TV"),
     isArrConfigured("sonarr", "4k"),
-    session
-      ? prisma.mediaRequest.findFirst({
-          where: { tmdbId: media.id, mediaType: "TV", requestedBy: session.user.id, arrInstance: "4k", status: { not: "DECLINED" } },
-          select: { id: true },
-        })
-      : Promise.resolve(null),
+    prisma.mediaRequest.findFirst({
+      where: { tmdbId: media.id, mediaType: "TV", requestedBy: session.user.id, arrInstance: "4k", status: { not: "DECLINED" } },
+      select: { id: true },
+    }),
     prisma.setting.findUnique({ where: { key: "request4kAll" } }),
     prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
     prisma.sonarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
@@ -136,16 +140,12 @@ export default async function TVDetailPage({
     isFeatureEnabled("feature.page.issues"),
     isFeatureEnabled("feature.integration.plex"),
     isFeatureEnabled("feature.integration.jellyfin"),
-    session
-      ? prisma.watchlistItem
-          .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "TV" } }, select: { id: true } })
-          .then((r) => !!r)
-      : Promise.resolve(false),
-    session
-      ? prisma.hiddenItem
-          .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "TV" } }, select: { id: true } })
-          .then((r) => !!r)
-      : Promise.resolve(false),
+    prisma.watchlistItem
+      .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "TV" } }, select: { id: true } })
+      .then((r) => !!r),
+    prisma.hiddenItem
+      .findUnique({ where: { userId_tmdbId_mediaType: { userId: session.user.id, tmdbId: media.id, mediaType: "TV" } }, select: { id: true } })
+      .then((r) => !!r),
   ]);
   const genreNameToId = new Map(genreList.map((g) => [g.name, g.id]));
 
@@ -169,10 +169,10 @@ export default async function TVDetailPage({
   const arrPending        = !!sonarrWanted;
   const requested         = !!userRequest;
   const tvdbId = tvdbRequest?.tvdbId ?? null;
-  const canOnBehalf = session ? hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF) : false;
-  const canChooseProfile = session ? hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED) : false;
+  const canOnBehalf = hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF);
+  const canChooseProfile = hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED);
   const requested4k = !!userRequest4k;
-  const canRequest4k = session ? canRequest(session.user.permissions, "TV", true, request4kAllRow?.value === "true") : false;
+  const canRequest4k = canRequest(session.user.permissions, "TV", true, request4kAllRow?.value === "true");
   // Only surface 4K availability to viewers who can request 4K (instance configured + permission).
   const show4k = has4k && canRequest4k;
   const arr4kAvailable = show4k && !!sonarr4kAvailable;
@@ -183,16 +183,14 @@ export default async function TVDetailPage({
   // page and GET /api/requests/instances so the three can't drift — see
   // resolveNamedInstanceTargets.
   const [suggestions, namedTargets] = await Promise.all([
-    attachAllAvailability(rawSuggestions, session?.user.id, { blockRatings: true, show4k }),
-    session
-      ? resolveNamedInstanceTargets({
-          tmdbId: media.id,
-          mediaType: "TV",
-          userId: session.user.id,
-          permissions: session.user.permissions,
-          blacklisted,
-        })
-      : Promise.resolve([]),
+    attachAllAvailability(rawSuggestions, session.user.id, { blockRatings: true, show4k }),
+    resolveNamedInstanceTargets({
+      tmdbId: media.id,
+      mediaType: "TV",
+      userId: session.user.id,
+      permissions: session.user.permissions,
+      blacklisted,
+    }),
   ]);
   const { showPlex, showJellyfin } = getBadgeVisibility(session, { plex: plexEnabled, jellyfin: jellyfinEnabled });
 
@@ -373,7 +371,7 @@ export default async function TVDetailPage({
                 requested={requested}
                 showPlex={showPlex}
                 showJellyfin={showJellyfin}
-                requestToken={generateRequestToken(media.id, "TV", session?.user.id ?? "")}
+                requestToken={generateRequestToken(media.id, "TV", session.user.id)}
                 canRequestOnBehalf={canOnBehalf}
                 canChooseProfile={canChooseProfile}
                 blacklisted={blacklisted}
@@ -382,7 +380,7 @@ export default async function TVDetailPage({
                 <Request4kButton
                   tmdbId={media.id}
                   mediaType="TV"
-                  requestToken={generateRequestToken(media.id, "TV", session?.user.id ?? "")}
+                  requestToken={generateRequestToken(media.id, "TV", session.user.id)}
                   requested={requested4k}
                   available={arr4kAvailable}
                   blacklisted={blacklisted}
@@ -395,24 +393,20 @@ export default async function TVDetailPage({
                   mediaType="TV"
                   instance={t.slug}
                   instanceName={t.name}
-                  requestToken={generateRequestToken(media.id, "TV", session?.user.id ?? "")}
+                  requestToken={generateRequestToken(media.id, "TV", session.user.id)}
                   requested={t.requested}
                   available={t.available}
                   blacklisted={blacklisted}
                 />
               ))}
-              {session && (
-                <WatchlistButton tmdbId={media.id} mediaType="TV" initialOnWatchlist={onWatchlist} />
-              )}
-              {session && (
-                <HideButton
+              <WatchlistButton tmdbId={media.id} mediaType="TV" initialOnWatchlist={onWatchlist} />
+              <HideButton
                   tmdbId={media.id}
                   mediaType="TV"
                   title={media.title}
                   posterPath={media.posterPath}
-                  initialHidden={onHidden}
-                />
-              )}
+                initialHidden={onHidden}
+              />
               {issuesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
                 <ReportIssueButton
                   tmdbId={media.id}
@@ -422,7 +416,7 @@ export default async function TVDetailPage({
                   posterPath={media.posterPath}
                 />
               )}
-              {votesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && session && (
+              {votesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
                 <VoteDeleteButton
                   tmdbId={media.id}
                   mediaType="TV"

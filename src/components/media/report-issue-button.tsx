@@ -42,6 +42,26 @@ interface ReportIssueButtonProps {
 
 type DialogState = "idle" | "loading" | "open" | "submitting" | "submitted" | "error";
 
+// The form is mounted for BOTH `open` and `submitting` (see the render below),
+// so the season/episode control type must be decided on the same predicate.
+// Keying this on `dialogState === "open"` alone made a not-in-library show
+// (`/api/tv-availability` answers 200 `{ seasons: [] }`, so `availabilityFailed`
+// stays false) swap its manual NumberInputs for an empty, disabled <select>
+// for the duration of every submit — and flip back on a server error. Kept as
+// a module-level pure function so tests/report-issue-manual-inputs.test.mts
+// can pin it without rendering the component.
+function shouldUseManualInputs(
+  isTV: boolean,
+  availabilityFailed: boolean,
+  dialogState: DialogState,
+  seasonCount: number,
+): boolean {
+  if (!isTV) return false;
+  if (availabilityFailed) return true;
+  const formVisible = dialogState === "open" || dialogState === "submitting";
+  return formVisible && seasonCount === 0;
+}
+
 export function ReportIssueButton({
   tmdbId,
   tvdbId,
@@ -89,7 +109,7 @@ export function ReportIssueButton({
   }
 
   const isTV = mediaType === "TV";
-  const useManualInputs = isTV && (availabilityFailed || (dialogState === "open" && tvSeasons.length === 0));
+  const useManualInputs = shouldUseManualInputs(isTV, availabilityFailed, dialogState, tvSeasons.length);
 
   // Per-open generation, bumped by closeDialog. openDialog awaits a fetch and
   // must not write back to a run the user already dismissed.

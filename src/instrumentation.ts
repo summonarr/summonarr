@@ -8,6 +8,8 @@ export async function register() {
     // itself defers validation to first call (so `next build` can evaluate server
     // modules without an env var). Here we explicitly assert the key at boot so a
     // running server refuses to serve traffic without encryption configured.
+    // This is the SOLE TOKEN_ENCRYPTION_KEY check: it exits in EVERY environment,
+    // so no later (production-gated) re-check of the same var can ever be reached.
     try {
       const { assertTokenEncryptionKey } = await import("@/lib/token-crypto");
       assertTokenEncryptionKey();
@@ -110,15 +112,6 @@ export async function register() {
       if (process.env.NODE_ENV === "production") {
         process.exit(1);
       }
-    }
-
-    if (!process.env.TOKEN_ENCRYPTION_KEY || process.env.TOKEN_ENCRYPTION_KEY.length !== 64) {
-      console.error(
-        "[startup] TOKEN_ENCRYPTION_KEY is not set or is not a valid 64-character hex string. " +
-        "Without it, stored API keys, OAuth tokens, and sensitive settings are plaintext in the database. " +
-        "Generate one with: openssl rand -hex 32"
-      );
-      if (process.env.NODE_ENV === "production") process.exit(1);
     }
 
     if (!process.env.TMDB_READ_TOKEN) {

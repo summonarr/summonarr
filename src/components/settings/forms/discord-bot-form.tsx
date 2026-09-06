@@ -68,11 +68,42 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
     setStatus("saving");
     setMessage("");
 
+    // Send only the fields that differ from what the page loaded. Posting all 16
+    // on every save made a Channels/Roles-tab edit re-register the slash commands
+    // with Discord (the route keyed on the ids' presence), stamped the 10s write
+    // cooldown on every key (so a second tab's save within 10s 429'd), and wrote
+    // an audit row listing 16 "changed" keys with identical before/after values.
+    const fields: Array<[key: string, current: string, initial: string]> = [
+      ["discordBotToken", botToken, initialBotToken],
+      ["discordClientId", clientId, initialClientId],
+      ["discordGuildId", guildId, initialGuildId],
+      ["discordPublicKey", publicKey, initialPublicKey],
+      ["discordAutoApproveRoles", autoApproveRoles, initialAutoApproveRoles],
+      ["discordRequireLinkedAccount", requireLinkedAccount ? "true" : "false", initialRequireLinkedAccount ? "true" : "false"],
+      ["discordRequireLinkedAccountSite", requireLinkedAccountSite ? "true" : "false", initialRequireLinkedAccountSite ? "true" : "false"],
+      ["discordAdminRequestChannelId", adminRequestChannelId, initialAdminRequestChannelId],
+      ["discordWelcomeChannelId", welcomeChannelId, initialWelcomeChannelId],
+      ["discordNotifyChannelId", notifyChannelId, initialNotifyChannelId],
+      ["discordInviteUrl", inviteUrl, initialInviteUrl],
+      ["discordLinkedRoleId", linkedRoleId, initialLinkedRoleId],
+      ["discordPlexRoleId", plexRoleId, initialPlexRoleId],
+      ["discordJellyfinRoleId", jellyfinRoleId, initialJellyfinRoleId],
+      ["discordAdminRoleId", adminRoleId, initialAdminRoleId],
+      ["discordIssueAdminRoleId", issueAdminRoleId, initialIssueAdminRoleId],
+    ];
+    const changed = Object.fromEntries(fields.filter(([, current, initial]) => current !== initial).map(([key, current]) => [key, current]));
+    if (Object.keys(changed).length === 0) {
+      setMessage("No changes to save");
+      setStatus("ok");
+      setTimeout(() => setStatus("idle"), 5000);
+      return;
+    }
+
     try {
       const res = await fetch(withBasePath("/api/settings"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ discordBotToken: botToken, discordClientId: clientId, discordGuildId: guildId, discordPublicKey: publicKey, discordAutoApproveRoles: autoApproveRoles, discordRequireLinkedAccount: requireLinkedAccount ? "true" : "false", discordRequireLinkedAccountSite: requireLinkedAccountSite ? "true" : "false", discordAdminRequestChannelId: adminRequestChannelId, discordWelcomeChannelId: welcomeChannelId, discordNotifyChannelId: notifyChannelId, discordInviteUrl: inviteUrl, discordLinkedRoleId: linkedRoleId, discordPlexRoleId: plexRoleId, discordJellyfinRoleId: jellyfinRoleId, discordAdminRoleId: adminRoleId, discordIssueAdminRoleId: issueAdminRoleId }),
+        body: JSON.stringify(changed),
       });
 
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };

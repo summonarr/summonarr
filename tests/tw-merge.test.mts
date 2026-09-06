@@ -4,7 +4,7 @@
 // trailing-! important flag each form independent class spaces.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { twMerge } from "../src/lib/tw-merge.ts";
+import { twMerge, matchGroup } from "../src/lib/tw-merge.ts";
 
 test("same-group utilities collapse to the last write", () => {
   assert.equal(twMerge("p-2 p-4"), "p-4");
@@ -668,4 +668,44 @@ test("PIN: modifier ORDER forms distinct class spaces", () => {
   // Variants are compared as a raw concatenated string, so hover:dark: and
   // dark:hover: never merge. Real tailwind-merge normalizes modifier order.
   assert.equal(twMerge("hover:dark:p-2 dark:hover:p-4"), "hover:dark:p-2 dark:hover:p-4");
+});
+
+test("PERF PIN: the group scan runs ONCE per token, not once per pass (review 2026-09 f132)", () => {
+  // twMerge makes two passes over the tokens (fill lastIdx, then emit). The
+  // merge key includes groupOf(base), a linear first-match scan over the GROUPS
+  // regex table with no memo, and the emit pass used to recompute the identical
+  // key — doubling the regex work on the cn() hot path. matchGroup is the only
+  // `RegExp#test` call site in the module (parseToken uses `.match`), so counting
+  // prototype `test` invocations measures exactly the group-scan work.
+  const nativeTest = RegExp.prototype.test;
+  let calls = 0;
+  RegExp.prototype.test = function (this: RegExp, s: string) {
+    calls += 1;
+    return nativeTest.call(this, s);
+  };
+  try {
+    // An unmatched class pays the FULL table on every scan, so a doubled scan
+    // shows up as a doubled count here regardless of table size.
+    const unmatched = "zz-not-a-tailwind-class";
+    assert.equal(matchGroup(unmatched), null, "fixture must miss every group");
+    calls = 0;
+    matchGroup(unmatched);
+    const fullTable = calls;
+    assert.ok(fullTable > 0);
+
+    // Three tokens, all unmatched: exactly three full-table scans, not six.
+    calls = 0;
+    assert.equal(twMerge(`${unmatched} ${unmatched}-2 hover:${unmatched}`), `${unmatched} ${unmatched}-2 hover:${unmatched}`);
+    assert.equal(calls, 3 * fullTable, "each token is classified exactly once per twMerge call");
+
+    // Mixed input: the unmatched token costs one full scan and the two `p-*`
+    // tokens match early, so the total sits under two full tables. A second
+    // classification pass would spend 2 × full on the unmatched token alone.
+    calls = 0;
+    assert.equal(twMerge(`p-2 ${unmatched} p-4`), `${unmatched} p-4`);
+    assert.ok(calls > fullTable, "the unmatched token alone costs a full scan");
+    assert.ok(calls < 2 * fullTable, `expected < ${2 * fullTable} regex tests, saw ${calls}`);
+  } finally {
+    RegExp.prototype.test = nativeTest;
+  }
 });

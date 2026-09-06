@@ -5,6 +5,7 @@ import { invalidateSessionDurationsCache } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { testRadarrConnection, testSonarrConnection } from "@/lib/arr";
 import { pingPlexToken } from "@/lib/plex";
+import { getJellyfinMediaFolders } from "@/lib/jellyfin";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { sendTestEmail } from "@/lib/email";
 import { invalidatePublicKeyCache } from "@/app/api/interactions/route";
@@ -732,6 +733,9 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   const updated = Object.fromEntries(entries);
   const testResults: Record<string, unknown> = {};
   let testFailed = false;
+  // Pre-write snapshot: the rollback restores from it, and the Discord
+  // re-registration gate diffs against it.
+  const preWriteByKey = new Map(oldRows.map((r) => [r.key, r.value]));
 
   if (updated.plexAdminToken) {
     const tokenRow = await prisma.setting.findUnique({ where: { key: "plexAdminToken" } });
@@ -802,6 +806,27 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     }
   }
 
+  // Jellyfin gets the same post-write probe + rollback as Radarr/Sonarr/Plex.
+  // Without it the Jellyfin form's "Save & Test" persisted a mistyped URL/key
+  // durably and only THEN discovered it could not load libraries — the previous
+  // working config was already gone, and the hourly orchestrator, the 5s
+  // play-history poller (guardrail 19's sole Jellyfin history writer) and
+  // Jellyfin sign-in all read that row via getConfiguredJellyfinUrl immediately.
+  // getJellyfinMediaFolders routes through safeFetchAdminConfigured (guardrail 5a).
+  if (updated.jellyfinUrl || updated.jellyfinApiKey) {
+    const rows = await prisma.setting.findMany({ where: { key: { in: ["jellyfinUrl", "jellyfinApiKey"] } } });
+    const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    if (map.jellyfinUrl && map.jellyfinApiKey) {
+      try {
+        await getJellyfinMediaFolders(map.jellyfinUrl, map.jellyfinApiKey);
+        testResults.jellyfinTested = true;
+      } catch {
+        testResults.jellyfinError = "Jellyfin connection failed";
+        testFailed = true;
+      }
+    }
+  }
+
   if (updated.discordBotToken || updated.discordClientId || updated.discordGuildId || updated.discordPublicKey) {
     invalidatePublicKeyCache();
   }
@@ -824,7 +849,6 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   // remain durably persisted on disk. Restore the pre-write values for keys
   // that existed before, delete keys we created.
   if (testFailed) {
-    const preWriteByKey = new Map(oldRows.map((r) => [r.key, r.value]));
     // Restore only the keys still holding the value THIS request wrote. The
     // tests above run for up to ~30s (arrFetch's timeout, longer for SMTP) while
     // the per-key cooldown is 10s, so a second PATCH can commit and answer 200
@@ -904,10 +928,17 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   // installed on a guild the persisted config no longer references. The task also
   // re-reads the DB, so its findMany could land either side of the rollback tx and the
   // same request could produce two different remote states.
-  if (
-    !testFailed &&
-    (updated.discordBotToken || updated.discordClientId || updated.discordGuildId || updated.discordPublicKey)
-  ) {
+  //
+  // Gate on a real CHANGE to the registration inputs, not on presence. The Discord
+  // form posts every field on every save and discordClientId/discordGuildId are
+  // plaintext (never masked), so a presence gate fired this bulk-overwrite PUT on
+  // a Channels/Roles-tab save that touched neither. The bot token is masked, so it
+  // is only present when it changed; the two ids compare against the pre-write
+  // rows. discordPublicKey does not affect command registration and is left out.
+  const discordRegistrationChanged = (["discordBotToken", "discordClientId", "discordGuildId"] as const).some(
+    (k) => k in updated && updated[k] !== preWriteByKey.get(k),
+  );
+  if (!testFailed && discordRegistrationChanged) {
     void (async () => {
       try {
         const rows = await prisma.setting.findMany({

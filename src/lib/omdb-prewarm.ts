@@ -12,18 +12,29 @@ interface DetailsCacheData {
   releaseDate?: string | null;
 }
 
-// Refreshes the OMDB ratings cache for every library item, skipping rows still
-// within 25% of their TTL and re-fetching the rest in throttled concurrent batches.
-export async function prewarmOmdbCache(): Promise<{
+export interface OmdbPrewarmResult {
   total: number;
   fetched: number;
+  // Authoritative misses only (TMDB has no IMDb id / OMDB knows no such title):
+  // these were negative-cached. A transient failure NEVER lands here — see `failed`.
   notFound: number;
   skipped: number;
+  // Rejected chains PLUS fulfilled `{ found: false, transient: true }` results.
+  // fetchAndCacheOmdbForTmdb swallows every network/5xx/401/quota failure into a
+  // transient miss, so this counter is the only thing that lets the cron ledger
+  // (`recordCronRun(..., failed === 0)`) turn red on a bad key or an outage.
   failed: number;
-}> {
+  // Set when the in-process OMDB quota lockout cut the run short (mirrors
+  // mdblist-prewarm); the unattempted items appear in no counter.
+  quotaExhausted?: boolean;
+}
+
+// Refreshes the OMDB ratings cache for every library item, skipping rows still
+// within 25% of their TTL and re-fetching the rest in throttled concurrent batches.
+export async function prewarmOmdbCache(): Promise<OmdbPrewarmResult> {
   if (isOmdbQuotaLocked()) {
     console.warn("[omdb-prewarm] OMDB quota locked — aborting before any calls");
-    return { total: 0, fetched: 0, notFound: 0, skipped: 0, failed: 0 };
+    return { total: 0, fetched: 0, notFound: 0, skipped: 0, failed: 0, quotaExhausted: true };
   }
 
   const apiKey = await prisma.setting.findUnique({ where: { key: "omdbApiKey" } });
@@ -96,10 +107,12 @@ export async function prewarmOmdbCache(): Promise<{
   let fetched = 0;
   let notFound = 0;
   let failed = 0;
+  let quotaHit = false;
 
   for (let i = 0; i < toFetch.length; i += CONCURRENCY) {
     if (isOmdbQuotaLocked()) {
       console.warn(`[omdb-prewarm] Quota exhausted after ${fetched} fetches — stopping early`);
+      quotaHit = true;
       break;
     }
 
@@ -119,16 +132,24 @@ export async function prewarmOmdbCache(): Promise<{
       })
     );
     for (const r of results) {
-      // A fulfilled promise can still be a {found:false} miss (no IMDb match /
-      // negative-cache). Count only an actual rating hit as fetched so the metric
-      // reflects work that produced data rather than every completed call.
+      // A fulfilled promise can still be a {found:false} miss. Count only an
+      // actual rating hit as fetched, and split the misses on `transient`:
+      // fetchAndCacheOmdbForTmdb catches every network/timeout/5xx/401
+      // "Invalid API key"/quota failure and RESOLVES with transient:true (its
+      // only remaining rejection is the getApiKey read before its try), so a
+      // run against a rotated-bad key or an OMDB/TMDB outage used to settle
+      // every item as notFound with failed=0 — and the cron ledger, which
+      // derives ok from `failed === 0`, recorded the fully-failed run green.
+      // Only an authoritative miss (negative-cached upstream) is notFound.
       if (r.status === "fulfilled") {
         if (r.value.found) fetched++;
+        else if (r.value.transient) failed++; // omdb.ts already logged the per-item cause
         else notFound++;
       } else { failed++; console.warn("[omdb-prewarm] item failed:", r.reason); }
     }
     if (isOmdbQuotaLocked()) {
       console.warn(`[omdb-prewarm] Quota hit mid-batch after ${fetched} fetches — stopping early`);
+      quotaHit = true;
       break;
     }
     if (i + CONCURRENCY < toFetch.length) {
@@ -136,5 +157,5 @@ export async function prewarmOmdbCache(): Promise<{
     }
   }
 
-  return { total: items.length, fetched, notFound, skipped, failed };
+  return { total: items.length, fetched, notFound, skipped, failed, ...(quotaHit ? { quotaExhausted: true } : {}) };
 }

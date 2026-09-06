@@ -9,10 +9,10 @@ import "./globals.css";
 // below would be undefined and the page would render unstyled.
 export default function GlobalError({
   error,
-  unstable_retry,
+  retry,
 }: {
   error: Error & { digest?: string };
-  unstable_retry: () => void;
+  retry: () => void;
 }) {
   useEffect(() => {
     console.error("[global/error]", error);
@@ -41,7 +41,7 @@ export default function GlobalError({
             A critical error occurred. Please reload the page.
           </p>
           <button
-            onClick={() => unstable_retry()}
+            onClick={() => retry()}
             style={{
               padding: "0.5rem 1rem",
               borderRadius: "0.375rem",

@@ -149,9 +149,26 @@ function libraryDelegate(name: "plexLibraryItem" | "jellyfinLibraryItem", rows: 
   };
 }
 
+// Per-test knob for the post-remap tx's "does any OTHER instance still hold
+// the old tmdbId" count (guardrail 35: TVEpisodeCache has no serverInstance
+// column, so the old-id episode purge must be skipped while another server's
+// legitimate rows share the namespace). Default 0 = sole holder.
+let otherInstanceHolders = 0;
+
 function makeTx() {
   const libTx = (name: "plexLibraryItem" | "jellyfinLibraryItem") => ({
-    delete: async (args: unknown) => { rec(`${name}.delete`, args); return {}; },
+    // `delete` THROWS a P2025-shaped error on purpose: the confirmation poll
+    // runs unlocked for minutes, so by the time the tx opens a library sync may
+    // already have reconciled the old-id row away. Prisma's `delete` on a
+    // missing unique row is not a no-op — it throws — which turned a landed
+    // remap into a 502 / failed job. The route must use `deleteMany`; any
+    // regression back to `delete` fails every POST test in this file.
+    delete: async (args: unknown) => {
+      rec(`${name}.delete`, args);
+      throw Object.assign(new Error("Record to delete does not exist."), { code: "P2025" });
+    },
+    deleteMany: async (args: unknown) => { rec(`${name}.deleteMany`, args); return { count: 0 }; },
+    count: async (args: unknown) => { rec(`${name}.count`, args); return otherInstanceHolders; },
     upsert: async (args: unknown) => { rec(`${name}.upsert`, args); return {}; },
   });
   return {
@@ -308,6 +325,7 @@ beforeEach(() => {
   tmdbCacheRows.clear();
   plexRows.length = 0;
   jellyfinRows.length = 0;
+  otherInstanceHolders = 0;
   respond = (url) => { throw new Error(`unexpected fetch ${url}`); };
 });
 
@@ -439,8 +457,9 @@ test("POST reads and rewrites the COMPOUND-KEY row for the named instance only",
   const read = opsOf("plexLibraryItem.findFirst")[0].args as { where: Record<string, unknown> };
   assert.deepEqual(read.where, { tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote" });
 
-  const del = opsOf("plexLibraryItem.delete")[0].args as { where: Record<string, unknown> };
-  assert.deepEqual(del.where, { tmdbId_mediaType_serverInstance: { tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote" } });
+  const del = opsOf("plexLibraryItem.deleteMany")[0].args as { where: Record<string, unknown> };
+  assert.deepEqual(del.where, { tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote" });
+  assert.equal(opsOf("plexLibraryItem.delete").length, 0, "the old-id row is removed with a count-insensitive deleteMany, never a throwing delete");
 
   const up = opsOf("plexLibraryItem.upsert")[0].args as { where: Record<string, unknown>; create: Record<string, unknown> };
   assert.deepEqual(up.where, { tmdbId_mediaType_serverInstance: { tmdbId: 222, mediaType: "MOVIE", serverInstance: "remote" } });
@@ -454,6 +473,129 @@ test("POST reads and rewrites the COMPOUND-KEY row for the named instance only",
   const details = JSON.parse(auditRows[0].details as string) as { source: string; serverInstance: string };
   assert.equal(details.serverInstance, "remote");
   assert.equal(details.source, "plex");
+});
+
+// ── review 2026-09 f37: the old-id row may already be gone when the tx opens ──
+// The confirm poll holds NO lock and can run for minutes (background mode: up
+// to ~10). A library sync landing inside that window rewrites the row under the
+// corrected id, so the old-keyed row no longer exists. The tx must tolerate
+// that (deleteMany, count 0) and still report ok + still upsert the new row —
+// the makeTx `delete` stub throws P2025 so a regression cannot pass this.
+
+test("POST (plex): a remap whose old row was already reconciled by a sync still reports ok and upserts", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote", filePath: "/d/rem.mkv", plexRatingKey: "2002" });
+  respond = plexRemapResponder(PLEX_REMOTE, "2002", 222);
+
+  const res = await fixMatch(postBody(
+    { server: "plex", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, canonicalGuid: "plex://movie/xyz", serverInstance: "remote" },
+    a.header,
+  ), undefined);
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+  assert.equal(opsOf("plexLibraryItem.delete").length, 0);
+  assert.equal(opsOf("plexLibraryItem.deleteMany").length, 1);
+  assert.equal(opsOf("plexLibraryItem.upsert").length, 1, "the corrected row is still written");
+  assert.ok(!warns.some((w) => w.includes("remapped remotely but the DB update failed")), "a landed remap must not be reported as a cache failure");
+});
+
+test("POST (jellyfin): a remap whose old row was already reconciled by a sync still reports ok and upserts", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote", filePath: "/d/rem.mkv", jellyfinItemId: "bbbbbbbb" });
+  respond = jellyfinRemapResponder(JF_REMOTE, "bbbbbbbb", 222);
+
+  const res = await fixMatch(postBody(
+    { server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, serverInstance: "remote" },
+    a.header,
+  ), undefined);
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+  assert.equal(opsOf("jellyfinLibraryItem.delete").length, 0);
+  const del = opsOf("jellyfinLibraryItem.deleteMany")[0].args as { where: Record<string, unknown> };
+  assert.deepEqual(del.where, { tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote" });
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 1, "the corrected row is still written");
+  assert.ok(!warns.some((w) => w.includes("remapped remotely but the DB update failed")));
+});
+
+// ── review 2026-09 f38: the old-id episode purge is instance-aware ───────────
+// TVEpisodeCache has no serverInstance column. If ANOTHER server of the same
+// type legitimately holds the old tmdbId, purging `{ source, tmdbId }` erases
+// that server's episode rows until the next orchestrator run; when this
+// instance is the sole holder the purge must still fire (or its stale episodes
+// stay attributed to the wrong id for the same hour).
+
+test("POST (plex, TV): old-id episode purge fires when no other instance holds the old id", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "TV", serverInstance: "remote", filePath: "/d/show", plexRatingKey: "2002" });
+  otherInstanceHolders = 0;
+  respond = (url) => {
+    // The post-tx episode re-cache reads /library/metadata/2002/allLeaves; an
+    // empty container short-circuits it before any further write.
+    if (url.pathname === "/library/metadata/2002/allLeaves") return okJson({ MediaContainer: { Metadata: [] } });
+    return plexRemapResponder(PLEX_REMOTE, "2002", 222)(url);
+  };
+
+  const res = await fixMatch(postBody(
+    { server: "plex", tmdbId: 111, mediaType: "TV", correctTmdbId: 222, canonicalGuid: "plex://show/xyz", serverInstance: "remote" },
+    a.header,
+  ), undefined);
+  assert.equal(res.status, 200);
+
+  const cnt = opsOf("plexLibraryItem.count")[0].args as { where: Record<string, unknown> };
+  assert.deepEqual(cnt.where, { tmdbId: 111, mediaType: "TV", serverInstance: { not: "remote" } });
+  const purges = opsOf("tVEpisodeCache.deleteMany").filter((o) => (o.args as { where: { tmdbId: number } }).where.tmdbId === 111);
+  assert.equal(purges.length, 1, "sole holder ⇒ the old-id episode rows are purged");
+  assert.deepEqual((purges[0].args as { where: unknown }).where, { source: "plex", tmdbId: 111 });
+  await flush();
+});
+
+test("POST (plex, TV): old-id episode purge is SKIPPED while another instance still holds the old id; the library row is still rewritten", async () => {
+  const a = await admin();
+  configureServers();
+  plexRows.push({ tmdbId: 111, mediaType: "TV", serverInstance: "", filePath: "/d/def-show", plexRatingKey: "1001" });
+  plexRows.push({ tmdbId: 111, mediaType: "TV", serverInstance: "remote", filePath: "/d/show", plexRatingKey: "2002" });
+  otherInstanceHolders = 1;
+  respond = (url) => {
+    if (url.pathname === "/library/metadata/2002/allLeaves") return okJson({ MediaContainer: { Metadata: [] } });
+    return plexRemapResponder(PLEX_REMOTE, "2002", 222)(url);
+  };
+
+  const res = await fixMatch(postBody(
+    { server: "plex", tmdbId: 111, mediaType: "TV", correctTmdbId: 222, canonicalGuid: "plex://show/xyz", serverInstance: "remote" },
+    a.header,
+  ), undefined);
+  assert.equal(res.status, 200);
+
+  const purges = opsOf("tVEpisodeCache.deleteMany").filter((o) => (o.args as { where: { tmdbId: number } }).where.tmdbId === 111);
+  assert.equal(purges.length, 0, "another server's legitimate episode rows for tmdb 111 must survive");
+  assert.equal(opsOf("plexLibraryItem.deleteMany").length, 1, "the instance's own library row is still removed");
+  assert.equal(opsOf("plexLibraryItem.upsert").length, 1, "…and rewritten under the corrected id");
+  await flush();
+});
+
+test("POST (jellyfin, MOVIE): old-id episode purge is SKIPPED while another instance still holds the old id", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/def.mkv", jellyfinItemId: "aaaaaaaa" });
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "remote", filePath: "/d/rem.mkv", jellyfinItemId: "bbbbbbbb" });
+  otherInstanceHolders = 1;
+  respond = jellyfinRemapResponder(JF_REMOTE, "bbbbbbbb", 222);
+
+  const res = await fixMatch(postBody(
+    { server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222, serverInstance: "remote" },
+    a.header,
+  ), undefined);
+  assert.equal(res.status, 200);
+
+  const cnt = opsOf("jellyfinLibraryItem.count")[0].args as { where: Record<string, unknown> };
+  assert.deepEqual(cnt.where, { tmdbId: 111, mediaType: "MOVIE", serverInstance: { not: "remote" } });
+  assert.equal(opsOf("tVEpisodeCache.deleteMany").length, 0);
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 1);
 });
 
 test("POST rejects an invalid serverInstance with 400 before touching the DB or the network", async () => {
@@ -587,7 +729,7 @@ test("POST (jellyfin): apply timeout that never confirms → 502, NO DB write, N
   ), undefined);
 
   assert.equal(res.status, 502);
-  assert.equal(opsOf("jellyfinLibraryItem.delete").length, 0, "an unconfirmed match must not touch the DB");
+  assert.equal(opsOf("jellyfinLibraryItem.deleteMany").length, 0, "an unconfirmed match must not touch the DB");
   assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 0);
   assert.ok(fetchCalls.every((c) => !c.url.pathname.endsWith("/Refresh")), "no refresh may be queued on a box that is already mid-apply");
   assert.ok(errors.some((e) => e.includes("still processing the match")), "the failure must say the server is still working, not imply a revert");

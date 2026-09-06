@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes, createHash } from "crypto";
+import { processSingleton } from "./process-singleton";
 
 // Version prefix lets us detect whether a stored value is encrypted or plaintext (legacy passthrough)
 const ENC_PREFIX = "enc:v1:";
@@ -51,7 +52,13 @@ export function tokenEncryptionKeyFingerprint(): string | null {
 // We dedupe by label (e.g. `Setting.jellyfinApiKey`, `Account.access_token (id=…)`)
 // so an operator can see exactly which rows still need re-saving without the same
 // row spamming the log on every read.
-const legacyPlaintextWarned = new Set<string>();
+// Process-wide, not module-wide: this module is compiled into ~10 server chunks,
+// and a per-chunk Set made "warn once" mean "warn once per chunk" — operators saw
+// the same Setting key warn again each time a different route touched it.
+const legacyPlaintextWarned = processSingleton(
+  "token-crypto:legacyPlaintextWarned",
+  () => new Set<string>(),
+);
 function warnLegacyPlaintextOnce(label: string): void {
   if (legacyPlaintextWarned.has(label)) return;
   legacyPlaintextWarned.add(label);

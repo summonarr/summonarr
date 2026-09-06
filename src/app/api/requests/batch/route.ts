@@ -119,7 +119,7 @@ async function writeBatchInboxRows(
 }
 
 export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx, session) => {
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   if (!checkRateLimit(`batch:${session.user.id}`, 10, 60_000)) {
@@ -164,30 +164,33 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
 
   const pendingNotifyAt = typedStatus === "APPROVED" ? new Date(Date.now() + 90_000) : null;
 
-  // Atomically CLAIM each row (PENDING -> typedStatus) one at a time: updateMany's
-  // count tells us which rows THIS call actually transitioned. A concurrent batch on
-  // the same ids finds them already non-PENDING (count 0) and skips them, so the ARR
-  // push, notifications, and audit below can't double-fire on the same request. The
-  // old bulk findMany(PENDING) + updateMany shared a pre-update snapshot that two
-  // concurrent calls could both act on.
-  const claimedIds: string[] = [];
-  for (const id of typedIds) {
-    const res = await prisma.mediaRequest.updateMany({
-      where: { id, status: "PENDING" },
-      data: {
-        status: typedStatus,
-        pendingNotifyAt,
-        // Guard on the RAW body field: sanitizeOptional never returns undefined
-        // (it maps undefined → null), so guarding on typedAdminNote would always
-        // be true and wipe the stored note on every batch transition.
-        ...(adminNote !== undefined ? { adminNote: typedAdminNote } : {}),
-        // Approving clears any prior decline; otherwise an APPROVED row keeps
-        // permanentlyDeclined=true and the owner's future re-requests stay blocked.
-        ...(typedStatus === "APPROVED" ? { permanentlyDeclined: false } : { permanentlyDeclined: typedPermanent }),
-      },
-    });
-    if (res.count === 1) claimedIds.push(id);
-  }
+  // Atomically CLAIM the rows (PENDING -> typedStatus) in ONE `UPDATE … WHERE id IN
+  // (…) AND status = 'PENDING' RETURNING id, requestedBy`. The returned rows are
+  // exactly the ones THIS call transitioned: Postgres re-evaluates the status
+  // predicate per row at write time (after taking the row lock), so a concurrent
+  // batch on the same ids finds them already non-PENDING and gets them back in
+  // ITS result set — never both. That is the same CAS the old per-id updateMany
+  // loop gave, minus up to 100 sequential round-trips per click, and the
+  // returned `requestedBy` is what the SSE emit below needs, so no re-read. The
+  // even older bulk findMany(PENDING) + updateMany shared a pre-update snapshot
+  // that two concurrent calls could both act on — do not regress to that.
+  const claimed = await prisma.mediaRequest.updateManyAndReturn({
+    where: { id: { in: typedIds }, status: "PENDING" },
+    data: {
+      status: typedStatus,
+      pendingNotifyAt,
+      // Guard on the RAW body field: sanitizeOptional never returns undefined
+      // (it maps undefined → null), so guarding on typedAdminNote would always
+      // be true and wipe the stored note on every batch transition.
+      ...(adminNote !== undefined ? { adminNote: typedAdminNote } : {}),
+      // Approving clears any prior decline; otherwise an APPROVED row keeps
+      // permanentlyDeclined=true and the owner's future re-requests stay blocked.
+      ...(typedStatus === "APPROVED" ? { permanentlyDeclined: false } : { permanentlyDeclined: typedPermanent }),
+    },
+    select: { id: true, requestedBy: true },
+  });
+  const claimedIds = claimed.map((r) => r.id);
+  const ownerMap = new Map(claimed.map((r) => [r.id, r.requestedBy]));
   // The set of rows THIS call transitioned — drives every side effect below.
   const pendingBeforeIds = new Set(claimedIds);
   // Hoisted to function scope so the SSE emit below can report the TRUE status of
@@ -285,12 +288,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
   // Emit only for rows THIS call actually transitioned (claimedIds) — an
   // unclaimed id (already non-PENDING, or claimed by a concurrent batch) was
   // left untouched, and announcing the batch target for it would push a status
-  // the row never entered.
-  const batchRequests = await prisma.mediaRequest.findMany({
-    where: { id: { in: claimedIds } },
-    select: { id: true, requestedBy: true },
-  });
-  const ownerMap = new Map(batchRequests.map((r) => [r.id, r.requestedBy]));
+  // the row never entered. ownerMap came back with the claim itself.
   for (const id of claimedIds) {
     const userId = ownerMap.get(id);
     if (!userId) continue;

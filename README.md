@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.24.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.24.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,38 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.24.1
+
+A read-only burn test of a live instance surfaced 20 defects across the interface, the statistics and the copy. All are fixed here.
+
+**Added**
+
+- A root "page not found". An unmatched URL outside the app's own routes fell through to the framework's stock 404 with no way back.
+
+**Changed**
+
+- Upcoming is paginated at 40 titles. It previously rendered every cached row — 447 on a live instance — and each card queues a ratings lookup as it mounts.
+- The header bell and the mobile notification badge share one poll. Both are mounted at every window size, so every page was issuing the same request twice.
+- Settings' side navigation uses plain anchors: section links are now deep-linkable, keyboard-navigable and work with JavaScript disabled.
+- Job intervals in Settings are shown in human units, and the misleading "Set to 0 to disable" hint is gone — the server rejects 0.
+- The admin activity warm-cache control now says that it starts work on the first click, and carries a label for screen readers.
+- Cron entries in the audit log show a summary; an unrecognised payload goes behind the existing toggle instead of dumping raw JSON into the table.
+- Detail pages name themselves in the breadcrumb instead of reading "Detail".
+- An out-of-range custom period in the activity filters is rejected with a reason rather than in silence.
+
+**Fixed**
+
+- MDBList's "no score" sentinel was printed as a real rating, and could hide a title's OMDB score behind it.
+- Settings could report TV coverage above 100% (1798 of 1796, on a live instance) — the two halves of the ratio were counted from different tables.
+- My Watch History and the admin per-user view reported different play counts for the same account (818 against 525).
+- The transcode-reason breakdown rolled its tail into "Other reasons" instead of dropping it, so the listed counts did not sum to the transcode total.
+- A short date range on the activity charts could print the same date twice on the axis.
+- Changing two filters in quick succession silently reverted the first. Both filter bars now reconcile changes that are still in flight.
+- On Requests, Vote to Delete and My Issues, the search box could crush the sort control into a vertical stack at some window widths.
+- On Popular, the rank badge and the availability chips were drawn on top of each other.
+- An available request showed its status twice on wider screens.
+- An admin activity section heading could overlap the control beside it.
 
 ### v0.24.0
 
@@ -575,7 +607,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.24.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.24.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

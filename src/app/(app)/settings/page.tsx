@@ -1,7 +1,7 @@
 import { authActive } from "@/lib/auth";
 import { prisma, getSettingDecryptFailures } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
-import { parseCronLastRun } from "@/lib/cron-auth";
+import { parseCronLastRun, parseCronRunHistory, countCronRunsSince, CRON_RUN_HISTORY_LIMIT } from "@/lib/cron-auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getPlexAccounts } from "@/lib/plex";
@@ -265,18 +265,16 @@ export default async function SettingsPage({
       countUniqueLibraryItems(),
     ]);
 
-    const [plexTokenRow, jellyfinUrlRow, jellyfinKeyRow] = await Promise.all([
-      prisma.setting.findUnique({ where: { key: "plexAdminToken" } }),
-      prisma.setting.findUnique({ where: { key: "jellyfinUrl" } }),
-      prisma.setting.findUnique({ where: { key: "jellyfinApiKey" } }),
-    ]);
+    // plexAdminToken / jellyfinUrl / jellyfinApiKey are all in ALL_KEYS, so `cfg`
+    // already holds the decrypted values (the prisma extension decrypts findMany
+    // rows exactly as it does findUnique) — no second read needed.
     let currentShares: number | null = null;
     const shareCounts = await Promise.allSettled([
-      cfg.plexServerUrl && plexTokenRow?.value
-        ? getPlexAccounts(cfg.plexServerUrl, plexTokenRow.value).then((a) => a.length)
+      cfg.plexServerUrl && cfg.plexAdminToken
+        ? getPlexAccounts(cfg.plexServerUrl, cfg.plexAdminToken).then((a) => a.length)
         : Promise.resolve(null),
-      jellyfinUrlRow?.value && jellyfinKeyRow?.value
-        ? getJellyfinUserCount(jellyfinUrlRow.value, jellyfinKeyRow.value)
+      cfg.jellyfinUrl && cfg.jellyfinApiKey
+        ? getJellyfinUserCount(cfg.jellyfinUrl, cfg.jellyfinApiKey)
         : Promise.resolve(null),
     ]);
     const plexCount = shareCounts[0].status === "fulfilled" ? shareCounts[0].value : null;
@@ -300,29 +298,56 @@ export default async function SettingsPage({
         where: { key: { in: settingKeys } },
         select: { key: true, value: true },
       }),
-      prisma.auditLog.findMany({
-        where: { target: { in: cronTargets } },
-        orderBy: { createdAt: "desc" },
-        distinct: ["target"],
-        select: { target: true, createdAt: true, details: true },
-      }),
+      // One index-bounded LIMIT-1 read per target (`@@index([target])`), NOT a
+      // single `distinct: ["target"]` query: Prisma's query compiler implements
+      // `distinct` client-side, so that shape transferred EVERY audit row for
+      // these targets (the orchestrator writes one per run, kept for 365 days)
+      // into Node on each System-tab render just to keep one per target.
+      Promise.all(
+        cronTargets.map((target) =>
+          prisma.auditLog.findFirst({
+            where: { target },
+            orderBy: { createdAt: "desc" },
+            select: { target: true, createdAt: true, details: true },
+          }),
+        ),
+      ),
     ]);
     const lastRunMap = new Map<string, { createdAt: Date; details: string | null }>();
+    // Bounded run history, Setting-rows only — the audit-log fallback below has
+    // no equivalent, so a target that only ever reported there stays null and
+    // the table simply omits a rate for it rather than showing a wrong one.
+    const historyMap = new Map<string, ReturnType<typeof parseCronRunHistory>>();
+    for (const s of lastRunSettings) {
+      historyMap.set(s.key.replace(/^cron:lastRun:/, ""), parseCronRunHistory(s.value));
+    }
+    // Read the clock ONCE, here on the server, and pass the resulting counts to
+    // the client component as plain numbers (guardrail 16) — the cron table is
+    // a "use client" component, so a clock read on its side of the boundary
+    // would be the hydration bug that guardrail exists to prevent.
+    // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
+    const oneHourAgoMs = Date.now() - 60 * 60 * 1000;
     // Audit log is the fallback for jobs that already wrote there before this
     // change shipped (e.g. upcoming-cache, trash-sync) — nothing about that
     // breaks, the Setting row simply takes precedence once it exists.
     for (const r of lastRuns) {
+      if (!r) continue;
       lastRunMap.set(r.target, { createdAt: r.createdAt, details: r.details });
     }
     for (const s of lastRunSettings) {
       const target = s.key.replace(/^cron:lastRun:/, "");
       const parsed = parseCronLastRun(s.value);
-      if (parsed) {
-        lastRunMap.set(target, {
-          createdAt: new Date(parsed.at),
-          details: JSON.stringify({ durationMs: parsed.durationMs, ok: parsed.ok }),
-        });
-      }
+      if (!parsed) continue;
+      // parseCronLastRun passes `at` through verbatim (its tests pin that), so a
+      // corrupted / hand-edited row can carry a non-date here. `new Date(garbage)`
+      // is an Invalid Date and `toISOString()` on it throws, taking the whole
+      // System tab down — skip the row and let the audit-log fallback stand.
+      const atMs = Date.parse(parsed.at);
+      if (!Number.isFinite(atMs)) continue;
+      lastRunMap.set(target, {
+        createdAt: new Date(atMs),
+        details: JSON.stringify({ durationMs: parsed.durationMs, ok: parsed.ok }),
+      });
     }
 
     metrics = {
@@ -338,14 +363,31 @@ export default async function SettingsPage({
       playHistoryEntries, mediaServerUsers, discordCacheEntries,
       uniqueLibraryItems,
       currentShares,
-      cronJobs: buildCronJobs(lastRunMap),
+      cronJobs: buildCronJobs(lastRunMap, historyMap, oneHourAgoMs),
     };
   }
 
-  function buildCronJobs(lastRunMap: Map<string, { createdAt: Date; details: string | null }>): CronJobInfo[] {
-    function lastRunInfo(target: string): { lastRun: string | null; lastDuration: number | null; lastStatus: "ok" | "error" | null } {
+  function buildCronJobs(
+    lastRunMap: Map<string, { createdAt: Date; details: string | null }>,
+    historyMap: Map<string, ReturnType<typeof parseCronRunHistory>>,
+    oneHourAgoMs: number,
+  ): CronJobInfo[] {
+    function lastRunInfo(target: string): {
+      lastRun: string | null;
+      lastDuration: number | null;
+      lastStatus: "ok" | "error" | null;
+      runsLastHour: number | null;
+      runsLastHourCapped: boolean;
+    } {
+      const history = historyMap.get(target);
+      // null (not 0) when there is no ledger history at all: "we do not know
+      // this job's rate" and "this job ran zero times in the last hour" are
+      // different answers, and only the second one is worth rendering.
+      const runsLastHour = history && history.length > 0 ? countCronRunsSince(history, oneHourAgoMs) : null;
+      // The history is bounded, so a saturated count is a floor, not a total.
+      const runsLastHourCapped = runsLastHour != null && runsLastHour >= CRON_RUN_HISTORY_LIMIT;
       const row = lastRunMap.get(target);
-      if (!row) return { lastRun: null, lastDuration: null, lastStatus: null };
+      if (!row) return { lastRun: null, lastDuration: null, lastStatus: null, runsLastHour, runsLastHourCapped };
       let durationMs: number | null = null;
       // ok=false marks the run as failed. Setting-row writes always include `ok`;
       // legacy audit-log fallback rows don't, so default to "ok" when absent.
@@ -355,7 +397,7 @@ export default async function SettingsPage({
         if (d?.durationMs != null) durationMs = d.durationMs;
         if (d?.ok === false) lastStatus = "error";
       } catch { }
-      return { lastRun: row.createdAt.toISOString(), lastDuration: durationMs, lastStatus };
+      return { lastRun: row.createdAt.toISOString(), lastDuration: durationMs, lastStatus, runsLastHour, runsLastHourCapped };
     }
 
     return [

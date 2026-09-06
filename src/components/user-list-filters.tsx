@@ -150,11 +150,26 @@ export function SearchBox({
     [router, pathname, searchParams, param, preserve],
   );
 
+  // The debounced timer must read the LATEST `push`, not the one from the
+  // render that armed it. `push` closes over `searchParams`, so a timer holding
+  // the keystroke-time identity replays a stale snapshot of every `preserve`d
+  // param: type "abc" (timer armed with ?status=PENDING), click the APPROVED
+  // pill inside the 350ms window (FilterPills pushes ?status=APPROVED), then
+  // the timer fires push("abc") from the old snapshot → ?status=PENDING&q=abc,
+  // silently undoing the pill click. Routing through a ref that tracks the
+  // current identity makes the eventual URL the combined intent
+  // (?status=APPROVED&q=abc). Synced in an effect (not during render) to stay
+  // clear of react-hooks' ref-write-in-render rule.
+  const pushRef = useRef(push);
+  useEffect(() => {
+    pushRef.current = push;
+  }, [push]);
+
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
     const next = e.target.value;
     setValue(next);
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => push(next), 350);
+    debounceRef.current = setTimeout(() => pushRef.current(next), 350);
   }
 
   function handleClear() {

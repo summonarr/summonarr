@@ -31,7 +31,11 @@ export interface TitleDetailData {
   totalPlays: number;
   uniqueViewers: number;
   avgCompletion: number;
+  // Both derived from the ≤50-row recent-plays sample (any watched status),
+  // NOT from the all-time watched-only `totalPlays` — the two populations
+  // differ, so never pair them in one label.
   watchedCount: number;
+  recentSampleSize: number;
   libraryHref: string;
   topViewers: {
     id: string;
@@ -253,7 +257,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
         <ActivityCard>
           <SectionHeader
             label="Plays per day · 90d"
-            sub={`${s.totalPlays} total · ${s.watchedCount} watched fully`}
+            sub={`${s.watchedCount} of last ${s.recentSampleSize} plays watched fully · recent sample`}
           />
           <AreaChart
             data={playsByDay}

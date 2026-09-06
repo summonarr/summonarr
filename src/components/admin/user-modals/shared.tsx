@@ -1,6 +1,7 @@
 "use client";
 
 import type { MediaServerGrants } from "@/lib/permissions";
+import type { UserSource } from "@/lib/user-source";
 
 // A named (non-default, non-4K) Radarr/Sonarr instance eligible for per-user
 // grants. Mirrors the registry's ArrInstanceConfig access fields.
@@ -44,11 +45,13 @@ export interface User {
   // (guardrail 16), and only the on/off state drives the UI.
   disabled: boolean;
   purged: boolean;
-  // How the account authenticates, derived by the page: "local" = passwordHash,
-  // "oidc" = an oidc Account row, "jellyfin"/"plex" = the provider-pinned rest.
-  // Only the first two have no provider-pinned media server, so only those two
-  // get the Server access controls in user-table.tsx.
-  source: "local" | "oidc" | "plex" | "jellyfin";
+  // How the account authenticates, derived by the page via deriveUserSource
+  // (src/lib/user-source.ts): "local" = passwordHash, "oidc" = an oidc Account
+  // row, "jellyfin"/"plex" = the provider-pinned rest, "discord" = a shadow
+  // account minted by the Discord interactions route. Only local and oidc have
+  // no provider-pinned media server, so only those two get the Server access
+  // controls in user-table.tsx.
+  source: UserSource;
   discordId: string | null;
   permissions: string;
   instanceGrants: InstanceGrantMap;

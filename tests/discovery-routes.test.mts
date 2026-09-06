@@ -210,6 +210,10 @@ for (const m of [
   // state. Any model the route touches but the harness omits throws into its
   // catch and 502s the whole request rather than failing visibly.
   "watchlistItem", "ratingsCache", "auditLog", "notification", "deletionVote",
+  // userRecommendation: the home route's For You source. Shadowed so its read
+  // is RECORDED (the flag-gate pins below count it) instead of rejecting inside
+  // home's allSettled, where it would pass by accident of the degrade path.
+  "userRecommendation",
 ]) {
   shadowPrismaModel(prisma, m, {
     findMany: async (args: unknown) => { rec(`${m}.findMany`, args); return []; },
@@ -402,6 +406,36 @@ test("the UNFLAGGED routes stay available regardless of the page flags", async (
   for (const route of ROUTES.filter((r) => !r.flag)) {
     assert.equal((await route.call(token)).status, 200, `${route.name} should be unaffected`);
   }
+});
+
+// home's For You rail is gated at emit time, so the recommendation read (and
+// the enrichment of the 20 extra titles it feeds) must be skipped when the flag
+// is off — the DEFAULT state, and the one the warm-recommendations cron
+// deliberately populates rows in, so the read is never trivially empty there.
+// Both directions are pinned: reverting the gate fails the first, and a gate
+// that never reads (e.g. a hardcoded []) fails the second.
+test("home: does NOT read recommendations when feature.page.forYou is off (the default)", async () => {
+  const { token } = await mintSession();
+  const res = await inScope(() => home.GET(mk("/api/home", token, ""), undefined));
+  assert.equal(res.status, 200);
+  assert.ok(
+    !ops.some((o) => o.op === "userRecommendation.findMany"),
+    "home read userRecommendation for a rail it then discards",
+  );
+  const body = await res.json() as { carousels: { id: string }[] };
+  assert.ok(!body.carousels.some((c) => c.id === "for-you"));
+});
+
+test("home: DOES read recommendations when feature.page.forYou is on", async () => {
+  settings.set("feature.page.forYou", "true");
+  invalidateFeatureFlagCache();
+  const { token } = await mintSession();
+  const res = await inScope(() => home.GET(mk("/api/home", token, ""), undefined));
+  assert.equal(res.status, 200);
+  assert.ok(
+    ops.some((o) => o.op === "userRecommendation.findMany"),
+    "home skipped the recommendation read with the flag on",
+  );
 });
 
 // ── 3: per-user rate limits ──────────────────────────────────────────────────

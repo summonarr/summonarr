@@ -2,6 +2,7 @@ import { PrismaClient } from "@/generated/prisma";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { decryptToken, encryptToken } from "@/lib/token-crypto";
 import { isSensitiveSettingKey } from "@/lib/settings-sensitive-keys";
+import { processSingleton } from "@/lib/process-singleton";
 
 type ExtendedPrismaClient = ReturnType<typeof createPrismaClient>;
 const globalForPrisma = globalThis as unknown as { prisma: ExtendedPrismaClient };
@@ -87,11 +88,37 @@ function encryptSettingRowsInPlace(data: unknown): void {
 // haven't been successfully read since. The settings page reads this via
 // getSettingDecryptFailures() to render a banner. Entries are cleared on the next
 // successful read of the same key (which happens automatically on every findMany
-// that includes the key after the operator re-saves it).
-const settingDecryptFailures = new Set<string>();
+// that includes the key after the operator re-saves it) OR when the row is
+// deleted through setting.deleteMany — a deleted row is never read again, so
+// without that hook the banner would name a key with no row and no re-save
+// target until the process restarted (the "Disconnect Plex" and de-register-
+// instance paths both recover from a corrupt token by deleting, not re-saving).
+// Process-wide: prisma.ts is compiled into several server chunks, and a per-chunk
+// Set meant getSettingDecryptFailures() showed the admin banner only the failures
+// recorded by whichever chunk served that render.
+const settingDecryptFailures = processSingleton(
+  "prisma:settingDecryptFailures",
+  () => new Set<string>(),
+);
 
 export function getSettingDecryptFailures(): string[] {
   return [...settingDecryptFailures].sort();
+}
+
+// Keys a `setting.deleteMany({ where })` targets, for releasing their decrypt-
+// failure entries. Recognizes the two shapes every caller uses — `{ key: "x" }`
+// and `{ key: { in: [...] } }` — and returns null for anything else (absent,
+// or a filter on some other column) so the hook can't guess wrong: an
+// unrecognized filter clears nothing rather than something it shouldn't.
+export function settingKeysFromDeleteWhere(where: unknown): string[] | null {
+  if (!where || typeof where !== "object") return null;
+  const key = (where as { key?: unknown }).key;
+  if (typeof key === "string") return [key];
+  if (key && typeof key === "object") {
+    const inList = (key as { in?: unknown }).in;
+    if (Array.isArray(inList) && inList.every((k) => typeof k === "string")) return inList as string[];
+  }
+  return null;
 }
 
 // Per-row decrypt guard for Setting.value reads. A corrupt/wrong-key row would otherwise
@@ -105,6 +132,17 @@ export function getSettingDecryptFailures(): string[] {
 // encryption. When the key is unknown (caller used `select: { value: true }` and didn't
 // project `key`), we conservatively fall through to the decrypt path so a sensitive read
 // still works — at the cost of a possible false-positive warning, which is the prior behavior.
+// A caller that selects only the value (`select: { value: true }`) gets a row with
+// no `key`, so the row cannot name itself and the legacy-plaintext / decrypt-failure
+// warnings printed "Setting.?" — naming no row an operator could go and re-save.
+// The query's own `where.key` identifies it in that case. Only a plain string is
+// accepted: a `{ in: [...] }` filter matches many rows and would mislabel them all.
+export function settingKeyFromArgs(args: unknown): string | undefined {
+  const where = (args as { where?: unknown } | undefined)?.where;
+  const key = (where as { key?: unknown } | undefined)?.key;
+  return typeof key === "string" ? key : undefined;
+}
+
 function safeDecryptSettingValue(key: string | undefined, value: string): string {
   if (typeof key === "string" && !isSensitiveKey(key)) {
     return value;
@@ -153,12 +191,12 @@ function createPrismaClient() {
       setting: {
         async findUnique({ args, query }) {
           const row = await query(args);
-          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key, row.value);
+          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key ?? settingKeyFromArgs(args), row.value);
           return row;
         },
         async findFirst({ args, query }) {
           const row = await query(args);
-          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key, row.value);
+          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key ?? settingKeyFromArgs(args), row.value);
           return row;
         },
         // The *OrThrow twins are separate Prisma operations, NOT aliases — an
@@ -167,12 +205,12 @@ function createPrismaClient() {
         // class). Kept in lockstep with findUnique/findFirst above.
         async findUniqueOrThrow({ args, query }) {
           const row = await query(args);
-          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key, row.value);
+          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key ?? settingKeyFromArgs(args), row.value);
           return row;
         },
         async findFirstOrThrow({ args, query }) {
           const row = await query(args);
-          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key, row.value);
+          if (row && typeof row.value === "string") row.value = safeDecryptSettingValue(row.key ?? settingKeyFromArgs(args), row.value);
           return row;
         },
         async findMany({ args, query }) {
@@ -277,7 +315,19 @@ function createPrismaClient() {
           return rows;
         },
         async deleteMany({ args, query }) {
-          return query(args);
+          const result = await query(args);
+          // Release decrypt-failure entries only AFTER the delete resolved, so a
+          // failed delete leaves the banner in place (same after-the-write
+          // ordering as guardrail 27). An unfiltered deleteMany removes every
+          // row, so nothing recorded can still exist.
+          const where = (args as { where?: unknown }).where;
+          const keys = settingKeysFromDeleteWhere(where);
+          if (keys === null) {
+            if (where === undefined) settingDecryptFailures.clear();
+          } else {
+            for (const k of keys) settingDecryptFailures.delete(k);
+          }
+          return result;
         },
       },
       account: {

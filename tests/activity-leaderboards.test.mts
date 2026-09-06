@@ -32,10 +32,12 @@ let rows: Row[] = [];
 let coreRows: { tmdbId: number; mediaType?: string; posterPath: string | null }[] = [];
 let cacheRows: { key: string; data: string }[] = [];
 const rawSql: string[] = [];
+const rawParams: unknown[][] = [];
 
 const fakePrisma = {
-  $queryRawUnsafe: async (sql: string): Promise<Row[]> => {
+  $queryRawUnsafe: async (sql: string, ...params: unknown[]): Promise<Row[]> => {
     rawSql.push(sql);
+    rawParams.push(params);
     return rows;
   },
   tmdbMediaCore: {
@@ -111,4 +113,37 @@ test("the memoized wrapper is still a memo — a repeat call issues no second qu
   const second = await getMostRewatched({ days: 15 }, 10);
   assert.equal(rawSql.length, 1);
   assert.deepEqual(second, first);
+});
+
+// "Rewatched" is a PER-EPISODE verdict. PlayHistory holds one row per episode
+// under the show's tmdbId, so a title-level `HAVING COUNT(*) > 1` ranked any
+// show with two different episodes watched once each as a rewatch, and every
+// multi-episode show outranked a genuinely rewatched movie. The query must
+// count plays inside a (tmdbId, mediaType, season, episode) partition — the
+// same COALESCE(…, -1) key the arc CTEs use — and only then roll up per title.
+test("the rewatch verdict is keyed per episode, and the limit stays the last bound param", async () => {
+  rows = [];
+  rawSql.length = 0;
+  rawParams.length = 0;
+  await getMostRewatched({ days: 16, source: "plex", mediaType: "TV" }, 7);
+
+  assert.equal(rawSql.length, 1, "one leaderboard query, no poster lookup on an empty board");
+  const sql = rawSql[0]!.replace(/\s+/g, " ");
+  const params = rawParams[0]!;
+
+  const partition = sql.match(/PARTITION BY (.+?) \) AS episode_plays/)?.[1] ?? "";
+  assert.ok(partition.includes(`"tmdbId"`) && partition.includes(`"mediaType"`), `partition carries the title key: ${partition}`);
+  assert.ok(partition.includes(`COALESCE("seasonNumber", -1)`), `partition carries the season: ${partition}`);
+  assert.ok(partition.includes(`COALESCE("episodeNumber", -1)`), `partition carries the episode: ${partition}`);
+  assert.ok(/WHERE episode_plays > 1/.test(sql), "rows survive only when THEIR episode was played more than once");
+  assert.ok(
+    !/HAVING COUNT\(\*\) > 1/.test(sql),
+    "no title-level HAVING COUNT(*) > 1 — that is the 'two episodes once each = rewatch' bug",
+  );
+  assert.ok(/GROUP BY "tmdbId", "mediaType" ORDER BY plays DESC/.test(sql), "the roll-up is still per title");
+
+  // Push-then-read-length: the limit is the last param and its $-index points at it.
+  assert.equal(params.at(-1), 7);
+  assert.ok(sql.endsWith(`LIMIT $${params.length}`), `limit binds the last placeholder: ${sql.slice(-40)}`);
+  assert.deepEqual(params.slice(1), ["plex", "TV", 7], "cutoff, then the whitelisted filters, then the limit");
 });

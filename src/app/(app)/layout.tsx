@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { cache } from "react";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Header } from "@/components/layout/header";
 import { MobileNav } from "@/components/layout/mobile-nav";
@@ -18,10 +19,25 @@ import { RatingsVisibilityProvider } from "@/components/media/ratings-visibility
 import { DetailTitleProvider } from "@/components/layout/detail-title";
 import { NotificationStoreProvider } from "@/components/notifications/notification-store";
 
+// One settings read per request, shared by generateMetadata and the layout
+// body. Next memoizes only `fetch()` across those two; a Prisma read is not
+// deduped, so without React `cache` siteTitle was fetched twice on every
+// (app) page render (generate-metadata.md: "React `cache` can be used if
+// `fetch` is unavailable"). The cache is per-request — it does not persist
+// across renders, so a settings change is still picked up on the next page.
+const LAYOUT_SETTING_KEYS = [
+  "motdEnabled", "motdTitle", "motdBody", "siteTitle", "discordInviteUrl",
+  "maintenanceEnabled", "maintenanceMessage", "ratingsHiddenSources",
+  ...DONATION_SETTING_KEYS,
+];
+const readLayoutSettings = cache(async () =>
+  prisma.setting.findMany({ where: { key: { in: LAYOUT_SETTING_KEYS } } }),
+);
+
 export async function generateMetadata(): Promise<Metadata> {
   try {
-    const row = await prisma.setting.findUnique({ where: { key: "siteTitle" } });
-    if (row?.value) return { title: row.value };
+    const title = (await readLayoutSettings()).find((r) => r.key === "siteTitle")?.value;
+    if (title) return { title };
   } catch { }
   return {};
 }
@@ -47,9 +63,16 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   let featureFlags: FeatureFlags | undefined;
   let hiddenRatingSources: string[] = [];
   try {
-    const [rows, flags] = await Promise.all([
-      prisma.setting.findMany({ where: { key: { in: ["motdEnabled", "motdTitle", "motdBody", "siteTitle", "discordInviteUrl", "maintenanceEnabled", "maintenanceMessage", "ratingsHiddenSources", ...DONATION_SETTING_KEYS] } } }),
+    // The discordId read is issued alongside the settings/flags reads rather
+    // than serially after them: session.user.id is already known here, and
+    // awaiting it afterwards added one full DB round-trip of latency to every
+    // page render on any deployment with a Discord invite configured. The
+    // trade: deployments WITHOUT an invite now pay one PK lookup they did not
+    // before, in parallel with reads they were already waiting on.
+    const [rows, flags, user] = await Promise.all([
+      readLayoutSettings(),
       getFeatureFlags(),
+      prisma.user.findUnique({ where: { id: session.user.id }, select: { discordId: true } }),
     ]);
     const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
     hiddenRatingSources = parseHiddenRatingSources(cfg.ratingsHiddenSources);
@@ -62,10 +85,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     // Auto-hide the Donate nav link when no donation methods are configured —
     // nothing to link to, regardless of the feature toggle.
     featureFlags        = hasDonationLinks(cfg) ? flags : { ...flags, "feature.page.donate": false };
-    if (discordInviteUrl && session.user.id) {
-      const user = await prisma.user.findUnique({ where: { id: session.user.id }, select: { discordId: true } });
-      userDiscordId = user?.discordId ?? null;
-    }
+    userDiscordId       = discordInviteUrl ? (user?.discordId ?? null) : null;
   } catch {
 
   }

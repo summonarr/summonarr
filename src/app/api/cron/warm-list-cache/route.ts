@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
-import { isCronAuthorized, recordCronRun } from "@/lib/cron-auth";
-import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
+import { getCronActor, recordCronRun } from "@/lib/cron-auth";
 import {
   getTrending, getPopularMovies, getPopularTV,
   getUpcomingMovies, getUpcomingTV, getOnTheAirTV,
@@ -13,18 +12,6 @@ import {
 import { getTraktPopularMovies, getTraktPopularTV } from "@/lib/trakt";
 import { getMdblistTopRated } from "@/lib/mdblist";
 
-async function getAuthContext(request: NextRequest): Promise<{ userId: string; userName: string; trigger: "admin" | "cron" } | null> {
-  if (!(await isCronAuthorized(request))) return null;
-
-  // DB-checked attribution: bearer-first then cookie, with revocation/cutoff/role
-  // honored — so a stale or revoked admin JWT can't mis-attribute the audit row.
-  const claims = await readActiveSummonarrSessionFromRequest(request);
-  if (claims?.role === "ADMIN") {
-    return { userId: claims.id, userName: claims.name ?? "admin", trigger: "admin" };
-  }
-  return { userId: "system", userName: "cron", trigger: "cron" };
-}
-
 // No try/catch: a failed fetch must REJECT so the Promise.allSettled below counts
 // it (errorCount) and recordCronRun reports ok=false. Swallowing the error to 0
 // here made every run look green even when upstream fetches failed.
@@ -34,7 +21,7 @@ async function warm<T>(fn: () => Promise<T[]>): Promise<number> {
 }
 
 export async function POST(request: NextRequest) {
-  const authCtx = await getAuthContext(request);
+  const authCtx = await getCronActor(request);
   if (!authCtx) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -126,14 +113,22 @@ export async function POST(request: NextRequest) {
       });
     }
 
-      return NextResponse.json({
-        ok: true,
+    // `ok` in the BODY is the same derived verdict the ledger just recorded —
+    // never a literal true. The admin "Run now" badge judges `res.ok && !error`
+    // (cron-job-table.tsx), so a run in which every task failed painted green
+    // until a reload re-read the ledger's ok:false. Status stays 200 on purpose:
+    // the container reschedules any non-2xx every CRON_RETRY_INTERVAL (300s)
+    // instead of the job's own interval. `error` + X-Cron-Degraded are the
+    // documented degraded-but-completed signal (see withCronRunRecording).
+    return NextResponse.json({
+        ok: errorCount === 0,
         ...counts,
         totalItems,
         errors: errorCount,
+        ...(errorCount > 0 ? { error: `${errorCount} of ${allResults.length} list fetches failed` } : {}),
         durationMs,
         timestamp: new Date().toISOString(),
-      });
+      }, errorCount > 0 ? { headers: { "X-Cron-Degraded": String(errorCount) } } : undefined);
     },
     () => NextResponse.json({ skipped: true, reason: "already running" }),
   );

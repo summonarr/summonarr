@@ -110,7 +110,13 @@ export default async function DiscoverPage({
     getOnTheAirTV(),
     getTopRatedMovies(),
     getTopRatedTV(),
-    getUserRecommendations(session.user.id),
+    // The For You rail is gated at emit time below, so don't pay the
+    // recommendation read plus the enrichment of its 20 extra titles for a
+    // rail the default (flag-off) configuration then discards. Mirrors
+    // src/app/api/home/route.ts — keep the two in sync.
+    forYouEnabled
+      ? getUserRecommendations(session.user.id)
+      : Promise.resolve([] as TmdbMedia[]),
   ]);
 
   const trending  = settled(trendingRes);

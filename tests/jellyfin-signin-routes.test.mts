@@ -14,7 +14,9 @@
 //   server.
 //
 //   POST /api/auth/jellyfin/quickconnect (initiate) — an invalid instance
-//   slug is rejected before any fetch.
+//   slug is rejected before any fetch; a rate-limited caller is refused
+//   BEFORE the Setting read (the limiter bounds anonymous DB load, not only
+//   the outbound Jellyfin call). GET (poll) carries the same order pin.
 //
 //   POST /api/auth/sign-in/jellyfin-quickconnect (finalize) — the
 //   SECURITY-CRITICAL pin: the instance used is whatever the INITIATE step
@@ -67,6 +69,9 @@ type AuthSessionRow = {
 };
 
 const settings = new Map<string, string>();
+// Counts every setting.findUnique so a test can pin that a request rejected by
+// the rate limiter never reached the DB at all.
+let settingReads = 0;
 const users: UserRow[] = [];
 const mediaServerUsers: MsuRow[] = [];
 const authSessions = new Map<string, AuthSessionRow>();
@@ -92,6 +97,7 @@ function findUserRow(where: UserWhere): UserRow | undefined {
 const models = {
   setting: {
     findUnique: async (args: { where: { key: string } }) => {
+      settingReads++;
       const v = settings.get(args.where.key);
       return v === undefined ? null : { key: args.where.key, value: v };
     },
@@ -214,7 +220,7 @@ const { NextRequest } = await import("next/server");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { POST: jellyfinSignInPost } = await import("../src/app/api/auth/sign-in/jellyfin/route.ts");
 const { POST: jellyfinQcSignInPost } = await import("../src/app/api/auth/sign-in/jellyfin-quickconnect/route.ts");
-const { POST: qcInitiatePost } = await import("../src/app/api/auth/jellyfin/quickconnect/route.ts");
+const { POST: qcInitiatePost, GET: qcPollGet } = await import("../src/app/api/auth/jellyfin/quickconnect/route.ts");
 
 type Req = InstanceType<typeof NextRequest>;
 
@@ -246,6 +252,7 @@ beforeEach(() => {
   authSessions.clear();
   auditRows.length = 0;
   userSeq = 0;
+  settingReads = 0;
   warns.length = 0;
   errors.length = 0;
   fetchCalls.length = 0;
@@ -358,6 +365,78 @@ test("QuickConnect initiate: an invalid instance slug is rejected (400) before a
   );
   assert.equal(res.status, 400);
   assert.equal(fetchCalls.length, 0);
+});
+
+test("QuickConnect initiate: a rate-limited caller is refused (429) BEFORE the Setting read", async () => {
+  // The route used to read the jellyfin<Instance>Url Setting first and only
+  // then consult the per-IP limiter, so an anonymous caller cost one DB
+  // round-trip per request regardless of the 10/min budget — the limiter only
+  // bounded the outbound Jellyfin call. Siblings (setup-status,
+  // machine-session, jellyfin/servers) limit first for exactly this reason.
+  settings.set("jellyfinRemoteUrl", "http://10.20.0.6:8096");
+  respond = (url) => {
+    if (url.pathname === "/QuickConnect/Initiate") {
+      return jsonResponse({ Secret: "qc-secret-rl-test", Code: "RL0001" });
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+  // TRUST_PROXY is unset → the bucket is per-UA-hash, so ONE fixed UA (fresh
+  // to this test) is one caller.
+  const ua = uniqueUa();
+  const initiate = () =>
+    qcInitiatePost(
+      new NextRequest("http://localhost:3000/api/auth/jellyfin/quickconnect?instance=remote", {
+        method: "POST",
+        headers: { "user-agent": ua },
+      }),
+    );
+
+  for (let i = 0; i < 10; i++) {
+    const res = await initiate();
+    assert.equal(res.status, 200, `initiate #${i + 1} is within the 10/min budget`);
+  }
+  assert.equal(settingReads, 10, "each in-budget initiate reads the instance URL once");
+
+  const readsBefore = settingReads;
+  const fetchesBefore = fetchCalls.length;
+  const res = await initiate();
+  assert.equal(res.status, 429);
+  assert.equal(settingReads, readsBefore, "a rate-limited initiate must not touch the Setting table");
+  assert.equal(fetchCalls.length, fetchesBefore, "a rate-limited initiate must not contact Jellyfin");
+});
+
+test("QuickConnect poll: a rate-limited caller is refused (429) BEFORE the Setting read", async () => {
+  // GET twin of the pin above. Each poll carries a DISTINCT secret so only the
+  // per-IP limiter (60/min) can fire — the per-secret limiter (30/min) never
+  // sees a repeat.
+  settings.set("jellyfinRemoteUrl", "http://10.20.0.7:8096");
+  respond = (url) => {
+    if (url.pathname === "/QuickConnect/Connect") {
+      return jsonResponse({ Authenticated: false });
+    }
+    throw new Error(`unexpected fetch to ${url}`);
+  };
+  const ua = uniqueUa();
+  const poll = (i: number) =>
+    qcPollGet(
+      new NextRequest(`http://localhost:3000/api/auth/jellyfin/quickconnect?instance=remote&secret=rl-secret-${i}`, {
+        method: "GET",
+        headers: { "user-agent": ua },
+      }),
+    );
+
+  for (let i = 0; i < 60; i++) {
+    const res = await poll(i);
+    assert.equal(res.status, 200, `poll #${i + 1} is within the 60/min budget`);
+  }
+  assert.equal(settingReads, 60, "each in-budget poll reads the instance URL once");
+
+  const readsBefore = settingReads;
+  const fetchesBefore = fetchCalls.length;
+  const res = await poll(60);
+  assert.equal(res.status, 429);
+  assert.equal(settingReads, readsBefore, "a rate-limited poll must not touch the Setting table");
+  assert.equal(fetchCalls.length, fetchesBefore, "a rate-limited poll must not contact Jellyfin");
 });
 
 test("QuickConnect finalize trusts ONLY the cookie-pinned instance — a spoofed body.instance naming an unconfigured server is ignored", async () => {

@@ -5,7 +5,14 @@
 # Usage:
 #   bash scripts/smoke-test.sh                                    # uses http://localhost:3001
 #   bash scripts/smoke-test.sh https://requests.example.com       # remote target
-#   ADMIN_COOKIE='__Secure-authjs.session-token=...' bash scripts/smoke-test.sh
+#   ADMIN_COOKIE='__Host-summonarr-session=...' bash scripts/smoke-test.sh
+#
+# ADMIN_COOKIE is the Summonarr session cookie (see getSessionCookieName() in
+# src/lib/session-cookie.ts): `__Host-summonarr-session` when AUTH_URL is
+# https:// (or NODE_ENV=production with no AUTH_URL), `summonarr-session` for
+# an http:// target such as http://localhost:3001. Copy it from the browser's
+# DevTools → Application → Cookies. The old NextAuth `__Secure-authjs.session-token`
+# cookie is no longer honoured by the server.
 #
 # What it covers (unattended):
 #   - HTTP health + bearer-auth flow with CRON_SECRET
@@ -111,7 +118,7 @@ fi
 code=$(curl -s -o /dev/null -w "%{http_code}" "$URL/api/auth/setup-status")
 [ "$code" = "200" ] && pass "GET /api/auth/setup-status → 200" || fail "setup-status" "got $code"
 
-# 3. /api/openapi requires auth (NextAuth's authorized() returns 302 → /login for unauth)
+# 3. /api/openapi requires auth (the proxy in src/proxy.ts answers 302 → /login or 401 for unauth)
 code=$(curl -s -o /dev/null -w "%{http_code}" "$URL/api/openapi")
 case "$code" in
   302|401|403) pass "GET /api/openapi requires auth (got $code)" ;;
@@ -323,7 +330,7 @@ case "$code" in
   *) fail "machine-session" "got $code, want 403 (default) or 200 (if enabled)" ;;
 esac
 
-# 22. revoke-all requires auth (302 to /login is the NextAuth-default unauth response)
+# 22. revoke-all requires auth (the proxy in src/proxy.ts answers 302 → /login or 401 for unauth)
 code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
   -H "Content-Type: application/json" -d '{}' \
   "$URL/api/sessions/revoke-all")
@@ -369,7 +376,7 @@ if [ -n "${ADMIN_COOKIE:-}" ]; then
   [ "$code" = "200" ] && pass "GET /api/sessions (with cookie) → 200" \
     || fail "/api/sessions GET" "got $code"
 else
-  skip "revoke-all step-up + sessions GET" "set ADMIN_COOKIE='__Secure-authjs.session-token=...' to run these"
+  skip "revoke-all step-up + sessions GET" "set ADMIN_COOKIE='__Host-summonarr-session=...' (https) or ADMIN_COOKIE='summonarr-session=...' (http) to run these"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

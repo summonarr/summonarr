@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { Film, Tv2, X } from "@/components/icons";
@@ -15,6 +15,7 @@ import {
 import { Chip } from "@/components/ui/design";
 import { IssueThread } from "@/components/issues/issue-thread";
 import { useHasMounted } from "@/hooks/use-has-mounted";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import { ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL, ISSUE_TYPE_LABELS } from "@/lib/status-labels";
 
 export interface IssueDrawerPayload {
@@ -53,7 +54,10 @@ export function IssueDetailMobileDrawer({ selectedIssue, closeHref }: Props) {
   // Gate every Date-in-render against post-mount so server-locale SSR doesn't disagree with
   // the browser-locale hydration pass (guardrail 16 in CLAUDE.md).
   const mounted = useHasMounted();
-  const [isMobile, setIsMobile] = useState(false);
+  // Complement of the desktop pane's `xl` breakpoint; the pane's thread is gated
+  // on `(min-width: 1280px)` in desktop-issue-thread.tsx so exactly one IssueThread
+  // mounts per viewport. null (SSR/hydration) and false both render nothing.
+  const isMobile = useMediaQuery("(max-width: 1279.98px)") === true;
   const [stickyIssue, setStickyIssue] = useState<IssueDrawerPayload | null>(
     selectedIssue,
   );
@@ -65,15 +69,6 @@ export function IssueDetailMobileDrawer({ selectedIssue, closeHref }: Props) {
   if (selectedIssue === null && closedId !== null) {
     setClosedId(null);
   }
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const mq = window.matchMedia("(max-width: 1279.98px)");
-    const update = () => setIsMobile(mq.matches);
-    update();
-    mq.addEventListener("change", update);
-    return () => mq.removeEventListener("change", update);
-  }, []);
 
   if (!isMobile) return null;
 

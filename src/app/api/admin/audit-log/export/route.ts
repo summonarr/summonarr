@@ -36,11 +36,6 @@ function escapeCSV(value: string): string {
 }
 
 export const GET = withAdmin(async (req, _ctx, session) => {
-  // Audit-log export streams up to MAX_EXPORT_RECORDS rows of PII; throttle to 3/hour per admin
-  if (!checkRateLimit(`audit-log-export:${session.user.id}`, 3, 3_600_000)) {
-    return NextResponse.json({ error: "Too many exports — try again later" }, { status: 429 });
-  }
-
   const url = req.nextUrl;
   const format = url.searchParams.get("format") === "json" ? "json" : "csv";
   const action = url.searchParams.get("action") as AuditAction | null;
@@ -97,6 +92,16 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   // filter labelled "Showing only real users" silently removed it — including
   // from the CSV/JSON export.
   if (hideCron) where.AND = [{ OR: [{ userId: null }, { userId: { not: "system" } }] }];
+
+  // Audit-log export streams up to MAX_EXPORT_RECORDS rows of PII; throttle to 3/hour per admin.
+  // The check sits AFTER parameter validation on purpose: `checkRateLimit` records a hit on every
+  // call under the limit, so running it first let three malformed-date 400s (which export nothing)
+  // burn the whole hourly budget and lock the admin out of a corrected request. Everything above
+  // this line is synchronous, so the placement is equivalent for concurrent callers, and it still
+  // precedes the paper-trail `auditLog.create` below — a throttled request writes and reads nothing.
+  if (!checkRateLimit(`audit-log-export:${session.user.id}`, 3, 3_600_000)) {
+    return NextResponse.json({ error: "Too many exports — try again later" }, { status: 429 });
+  }
 
   const date = new Date().toISOString().slice(0, 10);
 

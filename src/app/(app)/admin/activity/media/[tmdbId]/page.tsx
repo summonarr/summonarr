@@ -18,6 +18,34 @@ const COMPLETION_BUCKETS = [
   "95-100%",
 ];
 
+// getMediaPlayStats' 90-day window (`ninetyDaysAgo` in play-history.ts).
+const PLAYS_BY_DAY_WINDOW_DAYS = 90;
+
+// Postgres GROUP BY day omits zero-play days, and getMediaPlayStats hands its
+// daily series over unpadded — unlike its two siblings, which run it through
+// play-history.ts's private padDailySeries. AreaChart positions points evenly
+// by index with no date awareness and renders NOTHING for fewer than two
+// points, so an unpadded feed collapses the "90d" x-axis onto the non-zero
+// days (a Jun 1 → Aug 30 gap looks like Jun 1 → Jun 2) and a title watched on
+// one day in the window shows a blank box. Pad here, mirroring that helper
+// (UTC day keys, oldest → newest, `daysBack` entries), so the chart reads the
+// same way as the user-detail page's identical card.
+function padPlaysByDay(
+  rows: { day: string; count: number }[],
+  daysBack: number,
+): { day: string; count: number }[] {
+  const byDay = new Map(rows.map((r) => [r.day, r]));
+  const out: { day: string; count: number }[] = [];
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  for (let i = daysBack - 1; i >= 0; i--) {
+    const d = new Date(today.getTime() - i * 24 * 60 * 60 * 1000);
+    const key = d.toISOString().slice(0, 10);
+    out.push(byDay.get(key) ?? { day: key, count: 0 });
+  }
+  return out;
+}
+
 export default async function MediaActivityPage({
   params,
   searchParams,
@@ -40,7 +68,17 @@ export default async function MediaActivityPage({
   const stats = await getMediaPlayStats(tmdbId, mediaType);
 
   // Real TMDB poster art from the cache (same source the overview uses).
-  const posterSrc = (await resolvePosterMap([{ tmdbId }]))[posterPathKey(tmdbId)] ?? null;
+  // Pass the mediaType we already know: TMDB numbers movies and TV separately,
+  // and an untyped lookup files BOTH rows under their own keys while
+  // `posterPathKey(id)` reads the movie one — so a show sharing its number with
+  // a cached movie would render the movie's poster. `?type=` wins when the
+  // linking surface sent it; otherwise the type the stats resolved to (the
+  // heatmap popover links without `?type=`).
+  const posterMediaType = mediaType ?? stats.mediaType;
+  const posterSrc =
+    (await resolvePosterMap([{ tmdbId, mediaType: posterMediaType }]))[
+      posterPathKey(tmdbId, posterMediaType)
+    ] ?? null;
 
   // Per-play distributions getMediaPlayStats doesn't aggregate — derived from
   // the recent-plays sample (≤50 rows), labelled "recent sample" in the UI.
@@ -76,13 +114,14 @@ export default async function MediaActivityPage({
     uniqueViewers: stats.uniqueViewers,
     avgCompletion: stats.avgCompletion,
     watchedCount,
+    recentSampleSize: stats.recentPlays.length,
     libraryHref: stats.mediaType === "TV" ? `/tv/${tmdbId}` : `/movie/${tmdbId}`,
     topViewers: stats.topViewers,
     transcodeRatio: stats.transcodeRatio,
     resolutionBreakdown: stats.resolutionBreakdown,
     platforms,
     completionHist,
-    playsByDay: stats.playsByDay,
+    playsByDay: padPlaysByDay(stats.playsByDay, PLAYS_BY_DAY_WINDOW_DAYS),
     recentPlays: stats.recentPlays.slice(0, 14).map((p) => ({
       id: p.id,
       username: p.mediaServerUser.username,

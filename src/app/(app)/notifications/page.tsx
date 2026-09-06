@@ -12,21 +12,19 @@ export const dynamic = "force-dynamic";
 // caller's own id.
 export default async function NotificationsPage() {
   const session = await requireAppSession();
-  const [rows, total] = session
-    ? await Promise.all([
-        prisma.notification.findMany({
-          where: { userId: session.user.id },
-          select: { id: true, type: true, title: true, body: true, tmdbId: true, mediaType: true, posterPath: true, readAt: true, createdAt: true },
-          // Must match the API cursor ordering in /api/notifications (createdAt
-          // desc, id desc) so the client's keyset cursor cannot skip a same-timestamp
-          // row at the first-page boundary — sync createMany writes a batch of
-          // notifications that share one transaction timestamp.
-          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-          take: 30,
-        }),
-        prisma.notification.count({ where: { userId: session.user.id } }),
-      ])
-    : [[], 0];
+  const [rows, total] = await Promise.all([
+    prisma.notification.findMany({
+      where: { userId: session.user.id },
+      select: { id: true, type: true, title: true, body: true, tmdbId: true, mediaType: true, posterPath: true, readAt: true, createdAt: true },
+      // Must match the API cursor ordering in /api/notifications (createdAt
+      // desc, id desc) so the client's keyset cursor cannot skip a same-timestamp
+      // row at the first-page boundary — sync createMany writes a batch of
+      // notifications that share one transaction timestamp.
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: 30,
+    }),
+    prisma.notification.count({ where: { userId: session.user.id } }),
+  ]);
 
   const items: NotificationListItem[] = rows.map((n) => ({
     ...n,

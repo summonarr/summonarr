@@ -3,6 +3,8 @@
 // defeats every IP-keyed limit), so its anti-spoof behaviour is covered here.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   parseRateLimit,
   checkRateLimit,
@@ -44,6 +46,28 @@ test("parseRateLimit falls back to the default on junk", () => {
   assert.equal(parseRateLimit(undefined, 20), 20);
   assert.equal(parseRateLimit("abc", 20), 20);
   assert.equal(parseRateLimit("-3", 20), 20);
+});
+
+// The /profile page renders the push-device cap (`N / cap`) from the same
+// `maxPushSubscriptions` Setting the push routes enforce. Those routes go
+// through `parseRateLimit` (0 = unlimited, negative/junk = default), and the
+// page used to fork its own `parseInt(...) || 5`, which collapsed the admin's
+// "0 = no limit" into "5" — a user with 7 devices saw `7 / 5` while
+// registration kept succeeding. Pin the page to the shared parser so the cap
+// can't be re-forked.
+test("profile page derives the push-device cap through parseRateLimit, not a private parseInt", () => {
+  const src = readFileSync(
+    join(process.cwd(), "src", "app", "(app)", "profile", "page.tsx"),
+    "utf-8",
+  );
+  assert.match(src, /import \{ parseRateLimit \} from "@\/lib\/rate-limit"/);
+  assert.match(src, /parseRateLimit\(maxPushSetting\?\.value,/);
+  assert.doesNotMatch(src, /parseInt\(maxPushSetting/);
+  // 0 must read as "unlimited" (the routes gate eviction on cap > 0) and a
+  // negative value must fall back to the routes' default, not leak through.
+  assert.equal(parseRateLimit("0", 5), 0);
+  assert.equal(parseRateLimit("-1", 5), 5);
+  assert.equal(parseRateLimit("7", 5), 7);
 });
 
 test("checkRateLimit allows up to `limit` hits per window, then blocks", () => {

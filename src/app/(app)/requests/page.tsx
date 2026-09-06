@@ -158,11 +158,28 @@ export default async function RequestsPage({
         </div>
       </div>
 
-      {total === 0 ? (
+      {requests.length === 0 ? (
+        // Key on the paged slice, not `total`: `?page=9` with 3 requests has
+        // total=3 and requests=[], and the pager below is hidden whenever
+        // totalPages <= 1 — so a past-the-end page used to render the "3
+        // requests" header above an empty list with no way back short of
+        // editing the URL. Mirrors /popular's "No more results" state.
         <EmptyState>
-          {hasFilters
-            ? "No requests match these filters."
-            : "No requests yet. Find something on Discover, Movies, or TV and hit Request."}
+          {total > 0 ? (
+            <>
+              No more requests on this page.{" "}
+              <Link
+                href={pageHref(1)}
+                style={{ color: "var(--ds-accent)", fontWeight: 500 }}
+              >
+                Back to page 1
+              </Link>
+            </>
+          ) : hasFilters ? (
+            "No requests match these filters."
+          ) : (
+            "No requests yet. Find something on Discover, Movies, or TV and hit Request."
+          )}
         </EmptyState>
       ) : (
         <>

@@ -766,13 +766,6 @@ function DetailSection({ details, action, expanded }: { details: string | null; 
               <span className="text-green-400/70">{Object.entries(after).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join(", ")}</span>
             </div>
           )}
-          {after && (action === "BACKUP_IMPORT") && (
-            <div className="text-zinc-500 mt-1">
-              {Object.entries(after).map(([k, v]) => (
-                <span key={k} className="mr-3">{k}: <span className="text-zinc-400">{String(v)}</span></span>
-              ))}
-            </div>
-          )}
         </div>
       )}
     </div>

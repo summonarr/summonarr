@@ -410,14 +410,34 @@ export default async function LibraryDiffPage({
   ]);
   const libraryCapped = plexItems.length >= LIBRARY_ITEM_CAP || jellyfinItems.length >= LIBRARY_ITEM_CAP;
 
+  const plexConfigured    = plexItems.length > 0;
+  const jellyfinConfigured = jellyfinItems.length > 0;
+  // A diff needs BOTH sides. With only one server holding rows the set-difference
+  // degenerates to that server's entire library — "every Plex title is missing
+  // from Jellyfin" is technically true and completely useless, and it is exactly
+  // the render that falls over: measured at ~12MB of HTML and 70k DOM elements
+  // for an ordinary 5,000-title library, ~61MB and 350k at the 25,000 cap, plus
+  // the same rows again in the RSC payload. The old gate only caught BOTH sides
+  // being empty, so every single-server deployment — which guardrail 35 notes is
+  // the common shape — walked into it from a first-class nav link.
+  const oneSided = !plexConfigured || !jellyfinConfigured;
+
   // Start the ARR path-map builds now (external Radarr/Sonarr HTTP, independent
   // of everything below) so they overlap the fetchOverviews/enrichItems DB
   // stages; awaited in the bad-match Promise.all where they are consumed. The
   // no-op catches only mark the promises handled if an intermediate await
   // throws first — the awaits below still rethrow a buildArrPathMap failure.
-  const movieArrMapPromise = buildArrPathMap("MOVIE");
+  //
+  // Skipped on a one-sided deployment, matching the fetchOverviews/enrichItems
+  // gate below: every consumer (the bad-match verdicts, toClientItem over
+  // onlyPlex/onlyJellyfin) is empty there, yet the build is a full /api/v3/movie
+  // and /api/v3/series list from EVERY syncable instance, sequentially, on a
+  // 30s timeout each — and it is only memoized when no instance failed, so with
+  // Radarr down every load of this page blocked on the timeouts to render a
+  // one-line notice.
+  const movieArrMapPromise = oneSided ? Promise.resolve(new Map<string, number>()) : buildArrPathMap("MOVIE");
   movieArrMapPromise.catch(() => {});
-  const tvArrMapPromise = buildArrPathMap("TV");
+  const tvArrMapPromise = oneSided ? Promise.resolve(new Map<string, number>()) : buildArrPathMap("TV");
   tvArrMapPromise.catch(() => {});
 
   const prefixCfg: Record<string, string> = Object.fromEntries(prefixRows.map((r) => [r.key, r.value]));
@@ -456,18 +476,6 @@ export default async function LibraryDiffPage({
   })();
 
   const uncachedCount = Math.max(0, uniqueLibraryCount - (freshMovieCount + freshTvCount));
-
-  const plexConfigured    = plexItems.length > 0;
-  const jellyfinConfigured = jellyfinItems.length > 0;
-  // A diff needs BOTH sides. With only one server holding rows the set-difference
-  // degenerates to that server's entire library — "every Plex title is missing
-  // from Jellyfin" is technically true and completely useless, and it is exactly
-  // the render that falls over: measured at ~12MB of HTML and 70k DOM elements
-  // for an ordinary 5,000-title library, ~61MB and 350k at the 25,000 cap, plus
-  // the same rows again in the RSC payload. The old gate only caught BOTH sides
-  // being empty, so every single-server deployment — which guardrail 35 notes is
-  // the common shape — walked into it from a first-class nav link.
-  const oneSided = !plexConfigured || !jellyfinConfigured;
 
   const jellyfinSet = new Set(jellyfinItems.map((i) => `${i.tmdbId}:${i.mediaType}`));
   const plexSet     = new Set(plexItems.map((i)     => `${i.tmdbId}:${i.mediaType}`));

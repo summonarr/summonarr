@@ -178,9 +178,13 @@ export function PersonView({
           <div style={{ fontSize: 13, color: "var(--ds-fg-subtle)", padding: "20px 0" }}>No titles to show.</div>
         ) : (
           <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-3">
-            {shown.map((c, i) => (
+            {shown.map((c) => (
               <MediaCard
-                key={`${c.mediaType}-${c.id}-${i}`}
+                // Same identity key as every other MediaCard grid. An index in the
+                // key remounted every card on a filter toggle and dropped a
+                // just-made request's local state; getPersonDetails dedupes
+                // credits per (mediaType, id) so this can't collide.
+                key={`${c.mediaType}-${c.id}`}
                 media={toMedia(c)}
                 requestToken={c.requestToken}
                 showPlex={showPlex}

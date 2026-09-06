@@ -113,9 +113,12 @@ shadowPrismaModel(prisma, "tmdbMediaCore", {
 type CacheRow = { key: string; data: string; cachedAt: Date; expiresAt: Date };
 const cacheRows = new Map<string, CacheRow>();
 const cacheUpserts: string[] = [];
+const cacheGets: string[] = [];
 shadowPrismaModel(prisma, "tmdbCache", {
-  findUnique: async (args: { where: { key: string } }): Promise<CacheRow | null> =>
-    cacheRows.get(args.where.key) ?? null,
+  findUnique: async (args: { where: { key: string } }): Promise<CacheRow | null> => {
+    cacheGets.push(args.where.key);
+    return cacheRows.get(args.where.key) ?? null;
+  },
   findMany: async (args: { where: { key: { in: string[] } } }): Promise<CacheRow[]> =>
     args.where.key.in
       .map((k) => cacheRows.get(k))
@@ -172,6 +175,7 @@ beforeEach(() => {
   coreRows = [];
   cacheRows.clear();
   cacheUpserts.length = 0;
+  cacheGets.length = 0;
   plexFindManyCalls.length = 0;
   coreCalls.length = 0;
   warns.length = 0;
@@ -193,6 +197,13 @@ test("agreeing libraries across different mounts → no matches, poster lookup s
   assert.deepEqual(await getBadMatches(), []);
   assert.equal(coreCalls.length, 0); // posterPathMap short-circuits on zero mismatches
   assert.equal(cacheUpserts.length, 0);
+  // The arr path maps are consumed only per-match, so with zero mismatches they
+  // must not be built at all: no `arr:*:paths:name` cache read (and therefore no
+  // cold-cache arrFetch fan-out across every syncable instance either).
+  assert.ok(
+    !cacheGets.some((k) => k.startsWith("arr:")),
+    `arr path maps are not built when there are no mismatches (reads: ${cacheGets.join(", ")})`,
+  );
   assert.deepEqual(warns, []); // unconfigured ARR degrades silently, not warnly
   // The library reads are capped (LIBRARY_ITEM_CAP) so a huge library can't
   // be slurped unbounded into one request.

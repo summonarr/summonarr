@@ -121,11 +121,21 @@ let settingReads = 0;
 let throwOnDb = false; // fast-path proof: any model read throws
 let txRowMissing = false; // rotation tx: the AuthSession row vanished mid-flight
 let txThrows = false; // rotation tx: the whole transaction rejects
+// Sibling-race harness: when set, the AuthSession read parks on this promise so
+// two verifies of ONE token can be in flight at the same time (the coalescing
+// pins below release it once both have started).
+let holdAuthSessionRead: Promise<void> | null = null;
+let heldReads = 0; // verifies currently parked on holdAuthSessionRead
+let txRenames = 0; // sessionId renames committed by the rotation tx
 
 shadowPrismaModel(prisma, "authSession", {
   findUnique: async (args: { where: { sessionId: string } }) => {
     dbReads++;
     if (throwOnDb) throw new Error("unit-test: DB must not be touched on this path");
+    if (holdAuthSessionRead) {
+      heldReads++;
+      await holdAuthSessionRead;
+    }
     return sessionRows.has(args.where.sessionId)
       ? {
           id: `row-${args.where.sessionId}`,
@@ -176,6 +186,7 @@ const txStub = {
         ? { id: `row-${args.where.sessionId}` }
         : null,
     update: async (args: { where: { sessionId: string }; data: { sessionId: string } }) => {
+      txRenames++;
       // sessionId rotation preserves session identity → carry createdAt forward.
       const born = sessionCreatedAt.get(args.where.sessionId);
       sessionRows.delete(args.where.sessionId);
@@ -281,6 +292,9 @@ beforeEach(() => {
   throwOnDb = false;
   txRowMissing = false;
   txThrows = false;
+  holdAuthSessionRead = null;
+  heldReads = 0;
+  txRenames = 0;
 });
 
 // ── guards ──────────────────────────────────────────────────────────────────
@@ -673,6 +687,71 @@ test("a rotation that cannot complete fails CLOSED: missing row mid-transaction 
     null,
     "a thrown transaction must be swallowed into a rejection, not a stale session",
   );
+});
+
+// ── the sibling race: N in-flight verifies of ONE stale token ───────────────
+
+// jose's signature check resolves off the event loop, so two verifies of one
+// token reach the slow path on different macrotasks. Releasing the held read
+// after only the first arrived lets it run its whole (in-memory,
+// microtask-only) slow path before the second even starts — the sequential
+// case, not the race. Spin until `expected` reads are parked, then give the
+// event loop a few more turns so a sibling that JOINS an in-flight execution
+// (and therefore never reaches the read itself) has finished its JWT verify.
+async function parked(expected: number): Promise<void> {
+  for (let i = 0; i < 1_000 && heldReads < expected; i++) {
+    await new Promise((r) => setImmediate(r));
+  }
+  assert.equal(heldReads, expected, `${expected} verify(ies) must be parked on the held read`);
+  for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 2));
+}
+
+test("concurrent slow-path verifies of the same token share ONE rotation — every sibling gets the same rotated session, none fails closed", async () => {
+  // A page's burst of fetches carries one cookie past its dbCheckedAt window
+  // while a privilege change is pending. Un-coalesced, the first sibling to
+  // commit renames the row and the rest hit a missing row inside their own tx
+  // → null → a 401 (or a cookie-clearing /login redirect on a document
+  // navigation that undoes the winner's Set-Cookie). Both must succeed with
+  // the SAME rotated sessionId and the rotation must land exactly once.
+  const { sessionId, token } = await mint({ role: "USER", permissions: "0", dbPermissions: 8n });
+  let release!: () => void;
+  holdAuthSessionRead = new Promise<void>((resolve) => { release = resolve; });
+  const a = verifyAndRefreshSession(token);
+  const b = verifyAndRefreshSession(token);
+  await parked(1); // coalesced: only ONE read is ever issued; the twin joins it
+  release();
+  const [ra, rb] = await Promise.all([a, b]);
+  assert.ok(ra, "the first sibling must survive the rotation");
+  assert.ok(rb, "the second sibling must NOT fail closed behind its twin's rotation");
+  assert.notEqual(ra.claims.sessionId, sessionId, "the privilege change still rotates");
+  assert.equal(rb.claims.sessionId, ra.claims.sessionId, "both siblings must carry the same rotated sessionId");
+  assert.equal(rb.refreshed?.token, ra.refreshed?.token, "both siblings must be handed the same refreshed token");
+  assert.equal(txRenames, 1, "the rotation transaction must run exactly once for the in-flight token");
+  assert.ok(!sessionRows.has(sessionId), "the old sessionId row must be gone");
+});
+
+test("a rotating and a NON-rotating verify of the same token in flight together do NOT share a result", async () => {
+  // session-server.ts verifies with allowRotation:false (a server component
+  // cannot deliver a replacement cookie). Sharing that execution with the
+  // proxy's rotating verify would hand one side the wrong token shape, so the
+  // coalescing key must carry the mode: the proxy sees the rotated id, the
+  // server component sees the ORIGINAL id (with the fresh privileges), and the
+  // single rotation is still the proxy's.
+  const { sessionId, token } = await mint({ role: "USER", permissions: "0", dbPermissions: 8n });
+  let release!: () => void;
+  holdAuthSessionRead = new Promise<void>((resolve) => { release = resolve; });
+  const rotating = verifyAndRefreshSession(token);
+  const reading = verifyAndRefreshSession(token, { allowRotation: false });
+  await parked(2); // different modes ⇒ two independent reads, both parked
+  release();
+  const [rr, rn] = await Promise.all([rotating, reading]);
+  assert.ok(rr, "rotating must resolve for a live session");
+  assert.ok(rn, "non-rotating must resolve for a live session");
+  assert.notEqual(rr.claims.sessionId, sessionId, "the rotating caller gets the rotated id");
+  assert.equal(rn.claims.sessionId, sessionId, "the non-rotating caller keeps the original id");
+  assert.equal(rn.claims.permissions, "8", "the non-rotating caller still sees the fresh privileges");
+  assert.notEqual(rn.refreshed?.token, rr.refreshed?.token, "the two modes must not share one refreshed token");
+  assert.equal(txRenames, 1, "only the rotating caller rotates");
 });
 
 // ── mediaServer refresh + the plex membership hook ──────────────────────────

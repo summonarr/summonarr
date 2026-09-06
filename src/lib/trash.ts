@@ -205,6 +205,15 @@ async function ghTree(
   return { entries: data.tree ?? [], truncated: Boolean(data.truncated) };
 }
 
+// The one recursive TRaSH tree fetch, for callers that refresh BOTH services
+// and want to hand the same listing to each `refreshCatalog` call (the nightly
+// cron and the admin refresh route). Exposed as a thin wrapper so `ghTree`
+// itself stays private to this module.
+export type TrashTree = { entries: GhTreeEntry[]; truncated: boolean };
+export async function fetchTrashTree(): Promise<TrashTree> {
+  return ghTree(TRASH_REPO, TRASH_BRANCH);
+}
+
 async function setRefreshTruncated(truncated: boolean): Promise<void> {
   if (truncated) {
     const value = new Date().toISOString();
@@ -1305,6 +1314,17 @@ async function buildProfileBody(
       trashId: { in: [...referencedTrashIds].filter((id) => !appliedByTrashId.has(id)) },
     },
   });
+  // Every referenced CF spec that exists is already in memory: a referenced
+  // trashId is either in appliedByTrashId (its row rode along on the
+  // application read above) or it is not (then it is in specsMissingApplication).
+  // Build the score lookup from that union now — the dependency cascade below
+  // writes TrashApplication rows and the *arr server, never TrashSpec.payload,
+  // so these rows stay current — instead of re-reading the identical set
+  // (payload JSON included) a third time per profile.
+  type SpecRow = (typeof specsMissingApplication)[number];
+  const specByTrashId = new Map<string, SpecRow>();
+  for (const a of applications) specByTrashId.set(a.trashSpec.trashId, a.trashSpec);
+  for (const s of specsMissingApplication) specByTrashId.set(s.trashId, s);
   let cascadeApplied = false;
   if (specsMissingApplication.length > 0) {
     const depResults = await applyCustomFormats(
@@ -1386,10 +1406,6 @@ async function buildProfileBody(
   }
 
   const scoreSet = profile.score_set ?? "default";
-  const specsForScores = await prisma.trashSpec.findMany({
-    where: { service, kind: "CUSTOM_FORMAT", trashId: { in: [...referencedTrashIds] } },
-  });
-  const specByTrashId = new Map(specsForScores.map((s) => [s.trashId, s]));
   const scoreByTrashId = new Map<string, number>();
   for (const trashId of referencedTrashIds) {
     const spec = specByTrashId.get(trashId);

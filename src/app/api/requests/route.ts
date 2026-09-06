@@ -16,7 +16,7 @@ import { notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { sanitizeForLog, sanitizeContainsSearch } from "@/lib/sanitize";
 import { canRequestInstance, canAutoApproveInstance, parseInstanceGrants, hasPermission, Permission } from "@/lib/permissions";
-import { getArrInstances, getSyncableArrInstances, isInstanceConfigured } from "@/lib/arr-instance-registry";
+import { getArrInstancesWithConfigured } from "@/lib/arr-instance-registry";
 import { getVisibleServerInstances } from "@/lib/media-visibility";
 import { routeMediaToSlug, type RoutableMedia } from "@/lib/arr-instances";
 import { resolveUserQuota, parseQuotaLimit, type ResolvedQuota } from "@/lib/quota";
@@ -101,7 +101,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
 });
 
 export const POST = withAuth(async (req, _ctx, session) => {
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   const [settingsRows, userRecord] = await Promise.all([
@@ -173,7 +173,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
   //   explicit `arrInstance` slug (validated) > legacy `is4k:true` (→ "4k") >
   //   auto-route by TMDB metadata (anime/genre/language rules) > default instance ("").
   const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
-  const instances = await getArrInstances(service);
+  // One registry read + one batched connection probe serve every branch below:
+  // explicit-slug validation needs the FULL list, auto-routing the configured subset.
+  const { all: instances, configured: configuredSlugs } = await getArrInstancesWithConfigured(service);
   const rawInstance = typeof body.arrInstance === "string" ? body.arrInstance.trim() : undefined;
 
   let instanceSlug: string;
@@ -185,7 +187,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
     instanceSlug = "4k";
   } else {
     // No explicit target — auto-route. Only pay the TMDB details fetch when at least
-    // one CONFIGURED non-default instance carries an autoRoute rule; otherwise default.
+    // one REGISTERED non-default instance carries an autoRoute rule; otherwise default.
+    // (Configured-ness is applied below, over the same already-read list.)
     const autoCandidates = instances.filter((i) => i.slug !== "" && i.autoRoute);
     if (autoCandidates.length === 0) {
       instanceSlug = "";
@@ -204,8 +207,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
       } catch {
         // TMDB details unavailable ⇒ fall back to the default instance.
       }
-      // Route only over configured instances so we never auto-select an unconfigured target.
-      const configured = await getSyncableArrInstances(service);
+      // Route only over configured instances so we never auto-select an unconfigured
+      // target — the subset of the list already read above, no second registry read.
+      const configured = instances.filter((i) => configuredSlugs.has(i.slug));
       instanceSlug = routeMediaToSlug(configured, routable);
     }
   }
@@ -222,7 +226,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
   // A non-default instance must have a configured connection (url + apiKey). The default
   // instance ("") is always allowed — a request with no arr configured simply stays pending.
-  if (instanceSlug !== "" && !(await isInstanceConfigured(service, instanceSlug))) {
+  if (instanceSlug !== "" && !configuredSlugs.has(instanceSlug)) {
     return NextResponse.json(
       { error: `Requests to "${instance.name}" aren't available — that instance isn't configured` },
       { status: 400 },

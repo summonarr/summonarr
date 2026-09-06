@@ -399,6 +399,43 @@ test("the extension's decrypt failures are observable to the settings UI", () =>
   })();
 });
 
+// The failure set is cleared on a successful re-read of the key — but the two
+// operator recovery paths for a corrupt token ("Disconnect Plex", de-register a
+// media/arr instance) DELETE the row instead of re-saving it, and a deleted row
+// is never read again. Without the deleteMany hook releasing the entry, the
+// settings banner named a key with no row and no re-save target until restart.
+test("settingKeysFromDeleteWhere recognizes exactly the where-shapes callers use", async () => {
+  const { settingKeysFromDeleteWhere } = await import("../src/lib/prisma.ts");
+  assert.deepEqual(settingKeysFromDeleteWhere({ key: "plexAdminToken" }), ["plexAdminToken"]);
+  assert.deepEqual(settingKeysFromDeleteWhere({ key: { in: ["a", "b"] } }), ["a", "b"]);
+  assert.deepEqual(settingKeysFromDeleteWhere({ key: { in: [] } }), []);
+  // Anything it cannot read precisely must be null — the hook then clears
+  // NOTHING for a filtered delete, never a guess.
+  assert.equal(settingKeysFromDeleteWhere(undefined), null);
+  assert.equal(settingKeysFromDeleteWhere(null), null);
+  assert.equal(settingKeysFromDeleteWhere({ id: 1 }), null);
+  assert.equal(settingKeysFromDeleteWhere({ key: { in: ["a", 2] } }), null);
+  assert.equal(settingKeysFromDeleteWhere({ key: { startsWith: "a" } }), null);
+});
+
+test("setting.deleteMany releases the decrypt-failure entry for the deleted key(s)", () => {
+  // Same source-read technique as the read/write handler pins above (no DB to
+  // observe a round-trip): reverting the handler to a bare `return query(args)`
+  // must fail here.
+  const body = handlerBody("setting", "deleteMany");
+  assert.ok(
+    body.includes("settingDecryptFailures") && body.includes("settingKeysFromDeleteWhere"),
+    "setting.deleteMany no longer releases decrypt-failure entries — a corrupt row removed via " +
+      "Disconnect / de-register keeps the settings banner alive until the process restarts.\n  " +
+      body.replace(/\s+/g, " ").slice(0, 200),
+  );
+  // Release AFTER the delete resolves (guardrail 27 ordering): a failed delete
+  // must leave the entry in place.
+  const queryAt = body.indexOf("await query(args)");
+  const releaseAt = body.indexOf("settingDecryptFailures");
+  assert.ok(queryAt >= 0 && releaseAt > queryAt, "the release must run after `await query(args)`, not before");
+});
+
 test("nothing here logged an unexpected error beyond the deliberate connection failures", () => {
   console.error = realError;
   console.log = realLog;
@@ -414,4 +451,28 @@ test("nothing here logged an unexpected error beyond the deliberate connection f
     "no connection failure was logged at all — the tests that prove a call got PAST the bypass guard never " +
       "reached the network, so they no longer prove it",
   );
+});
+
+// A caller that selects only the value (`select: { value: true }`) gets a row with
+// no `key`, so the row cannot name itself and both the legacy-plaintext warning
+// and the decrypt-failure error printed "Setting.?" — naming no row the operator
+// could go and re-save. The query's own `where.key` identifies it in that case.
+test("settingKeyFromArgs names the row a key-less select cannot name itself", async () => {
+  const { settingKeyFromArgs } = await import("../src/lib/prisma.ts");
+
+  // The shape that produced "Setting.?": findUnique by key, selecting value only.
+  assert.equal(
+    settingKeyFromArgs({ where: { key: "smtpPassword" }, select: { value: true } }),
+    "smtpPassword",
+  );
+  assert.equal(settingKeyFromArgs({ where: { key: "vapidPrivateKey" } }), "vapidPrivateKey");
+
+  // An `in` filter matches many rows, so borrowing it would mislabel every one of
+  // them — the row's own `key` is the only correct source there.
+  assert.equal(settingKeyFromArgs({ where: { key: { in: ["a", "b"] } } }), undefined);
+  assert.equal(settingKeyFromArgs({ where: { value: "x" } }), undefined);
+  assert.equal(settingKeyFromArgs({ where: {} }), undefined);
+  assert.equal(settingKeyFromArgs({}), undefined);
+  assert.equal(settingKeyFromArgs(undefined), undefined);
+  assert.equal(settingKeyFromArgs(null), undefined);
 });

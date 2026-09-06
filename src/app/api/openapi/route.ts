@@ -315,7 +315,7 @@ const spec = {
         parameters: [
           { name: "page", in: "query", schema: { type: "integer", default: 1 } },
           { name: "status", in: "query", schema: { $ref: "#/components/schemas/RequestStatus" } },
-          { name: "sort", in: "query", schema: { type: "string", enum: ["newest", "oldest", "title"] } },
+          { name: "sort", in: "query", schema: { type: "string", enum: ["newest", "oldest"] } },
           { name: "q", in: "query", schema: { type: "string" }, description: "Title search filter" },
         ],
         responses: {
@@ -358,7 +358,24 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Request created or already exists", content: { "application/json": { schema: { $ref: "#/components/schemas/MediaRequest" } } } },
+          "201": { description: "Request created", content: { "application/json": { schema: { $ref: "#/components/schemas/MediaRequest" } } } },
+          "200": {
+            description: "Title is already available in a library the caller can see — no request created",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["alreadyAvailable", "tmdbId", "mediaType", "title"],
+                  properties: {
+                    alreadyAvailable: { type: "boolean", enum: [true] },
+                    tmdbId: { type: "integer" },
+                    mediaType: { $ref: "#/components/schemas/MediaType" },
+                    title: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
           "400": { description: "Validation error" },
           "409": { description: "Duplicate request" },
           "429": { description: "Quota exceeded" },
@@ -385,7 +402,7 @@ const spec = {
     "/requests/{id}": {
       patch: {
         tags: ["Requests"],
-        summary: "Update request status or trigger ARR action (ADMIN)",
+        summary: "Update request status or trigger ARR action (MANAGE_REQUESTS)",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: {
           content: {
@@ -1356,7 +1373,7 @@ const spec = {
                 required: ["email", "password"],
                 properties: {
                   email: { type: "string", format: "email" },
-                  password: { type: "string", minLength: 12 },
+                  password: { type: "string", minLength: 8 },
                   name: { type: "string", nullable: true, maxLength: 100 },
                   role: { $ref: "#/components/schemas/UserRole" },
                 },
@@ -1370,7 +1387,8 @@ const spec = {
     "/admin/users/{id}": {
       patch: {
         tags: ["Admin – Users"],
-        summary: "Update user settings (ADMIN)",
+        summary: "Update user settings (MANAGE_USERS)",
+        description: "Conferring the ADMIN role, or editing an account that is already ADMIN, additionally requires the caller to hold ADMIN.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: {
           content: {

@@ -15,7 +15,7 @@ type RouteContext = { params: Promise<{ id: string }> };
 // Notifications for replies on a claimed issue narrow to the claimer + the
 // reporter — see src/app/api/issues/[id]/messages/route.ts.
 export const POST = withIssueAdmin(async (req, { params }: RouteContext, session) => {
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   const { id } = await params;

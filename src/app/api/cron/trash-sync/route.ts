@@ -1,26 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
+import { getCronActor, withCronRunRecording } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { runTrashSync } from "@/lib/trash";
-import { readActiveSummonarrSessionFromRequest } from "@/lib/session-server";
-
-async function getAuthContext(request: NextRequest): Promise<
-  { userId: string; userName: string; trigger: "admin" | "cron" } | null
-> {
-  if (!(await isCronAuthorized(request))) return null;
-
-  // Use the request-aware DB-checked reader (honors revocation/cutoffs) for attribution.
-  // Falls back to "cron" label if no active admin session (pure scheduled run).
-  const claims = await readActiveSummonarrSessionFromRequest(request);
-  if (claims?.role === "ADMIN") {
-    return { userId: claims.id, userName: claims.name ?? "admin", trigger: "admin" };
-  }
-  return { userId: "system", userName: "cron", trigger: "cron" };
-}
 
 export async function POST(request: NextRequest) {
-  const authCtx = await getAuthContext(request);
+  const authCtx = await getCronActor(request);
   if (!authCtx) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -56,6 +41,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         ok: result.errors.length === 0,
         ...result,
+        // `error` (singular) is the field the admin Run-now badge surfaces.
+        ...(result.errors.length > 0 ? { error: `${result.errors.length} TRaSH sync error(s)` } : {}),
         durationMs,
         timestamp: new Date().toISOString(),
       }, { status });

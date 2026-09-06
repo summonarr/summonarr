@@ -19,7 +19,7 @@ type ContentType = (typeof CONTENT_TYPES)[number];
 const MAX_REASON = 500;
 
 export const POST = withAuth(async (req, _ctx, session) => {
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   // 10 reports/hour/user — a spam guard, not a security boundary.

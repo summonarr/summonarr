@@ -483,7 +483,58 @@ test("arr-state: a scripted live Radarr check drives liveArrApi.result=true even
     fetchCalls.some((u) => u.pathname.endsWith("/api/v3/movie") && u.searchParams.get("tmdbId") === "603"),
     "the live Radarr lookup went out over the wire",
   );
+  // ONE live call per configured instance: the legacy top-level `liveArrApi` is
+  // derived from the per-instance pass, not re-fetched (each extra call is a
+  // redundant 30s-timeout round-trip on a route hit whenever a badge looks wrong).
+  assert.equal(
+    fetchCalls.filter((u) => u.pathname.endsWith("/api/v3/movie")).length, 1,
+    "the default instance is live-checked exactly once, not once per legacy section",
+  );
+  assert.equal(
+    readLog.filter((r) => r === "radarrWantedItem.findUnique").length, 1,
+    "the default instance's wanted row is read exactly once",
+  );
   assert.equal(writes.length, 0, "a live GET check writes nothing");
+});
+
+test("arr-state: with a legacy 4K instance configured the `fourK` section is derived from the per-instance pass — exactly one live call and one row read per instance", async () => {
+  configureRadarr();
+  settings.set("radarr4kUrl", "http://radarr4k.debug-test:7878");
+  settings.set("radarr4kApiKey", "radarr4k-debug-key");
+  radarrWanted.rows.push({ tmdbId: 603, arrInstance: "4k" });
+  fetchImpl = (url) => {
+    // The 4K server reports the movie as wanted; the default server does not know it.
+    if (url.pathname.endsWith("/api/v3/movie")) {
+      return url.hostname === "radarr4k.debug-test"
+        ? jsonResponse([{ tmdbId: 603, hasFile: false }])
+        : jsonResponse([]);
+    }
+    throw new Error(`unexpected Arr path ${url.pathname}`);
+  };
+  const token = await mintSession();
+  const body = await bodyOf(await arrStateGET(arrReq(token, "?tmdbId=603&type=movie"), undefined));
+
+  const instances = body.instances as Array<{ slug: string; cacheRow: ArrRow | null; hasEntry: boolean; liveArrApi: { result: boolean } }>;
+  assert.deepEqual(instances.map((i) => i.slug), ["", "4k"], "default first, then the synthesized legacy 4K instance");
+  assert.deepEqual(instances[0].liveArrApi, { result: false });
+  assert.deepEqual(instances[1].liveArrApi, { result: true });
+  // The legacy sections mirror the per-instance results — same objects, not a second probe.
+  assert.deepEqual(body.liveArrApi, instances[0].liveArrApi);
+  const fourK = body.fourK as { instanceConfigured: boolean; cacheRow: ArrRow | null; hasEntry: boolean; liveArrApi: { result: boolean } };
+  assert.equal(fourK.instanceConfigured, true);
+  assert.deepEqual(fourK.liveArrApi, instances[1].liveArrApi);
+  assert.deepEqual(fourK.cacheRow, { tmdbId: 603, arrInstance: "4k" });
+  assert.equal(fourK.hasEntry, true);
+  assert.deepEqual(body.cacheTable, { tableName: "radarrWantedItem", row: null, hasEntry: false });
+
+  const movieCalls = fetchCalls.filter((u) => u.pathname.endsWith("/api/v3/movie"));
+  assert.equal(movieCalls.length, 2, "exactly one live call per configured instance (default + 4K)");
+  assert.deepEqual(movieCalls.map((u) => u.hostname).sort(), ["radarr.debug-test", "radarr4k.debug-test"]);
+  assert.equal(
+    readLog.filter((r) => r === "radarrWantedItem.findUnique").length, 2,
+    "one wanted-row read per instance — the legacy HD/4K sections do not re-read them",
+  );
+  assert.equal(writes.length, 0);
 });
 
 test("arr-state: a TV query with a configured Sonarr + scripted lookup surfaces the tvdb→tmdb section and the sonarr cache table", async () => {
@@ -501,6 +552,32 @@ test("arr-state: a TV query with a configured Sonarr + scripted lookup surfaces 
   const cacheTable = body.cacheTable as { tableName: string };
   assert.equal(cacheTable.tableName, "sonarrWantedItem", "a TV query reads the Sonarr wanted table");
   assert.deepEqual(body.tvdbInfo, { tvdbId: 5678, cachedMapping: { tmdbId: 1399 } });
+});
+
+test("arr-state: a FAILED Sonarr lookup reports cachedMapping=null + the generic error — never the `{ tmdbId: null }` look-alike of a negative cache hit", async () => {
+  configureSonarr();
+  // A stale negative entry sits in the cache; the failed lookup must not be
+  // mistaken for having read it (the route never learned a tvdbId to key on).
+  seedCache("tvdb-to-tmdb:5678", { tmdbId: null }, 60_000);
+  fetchImpl = (url) => {
+    if (url.pathname.endsWith("/series/lookup")) return jsonResponse({ error: "sonarr down" }, 503);
+    // The per-instance live check swallows its own failure (isSeriesWantedInSonarr → false).
+    if (url.pathname.endsWith("/api/v3/series")) return jsonResponse([]);
+    throw new Error(`unexpected Arr path ${url.pathname}`);
+  };
+  const token = await mintSession();
+  const res = await arrStateGET(arrReq(token, "?tmdbId=1399&type=tv"), undefined);
+  assert.equal(res.status, 200, "an upstream Sonarr failure degrades the section, never the whole dump");
+  const body = await bodyOf(res);
+
+  assert.deepEqual(body.tvdbInfo, { tvdbId: null, cachedMapping: null, error: "sonarr lookup failed" });
+  assert.equal(
+    readLog.filter((r) => r === "tmdbCache.findUnique").length, 0,
+    "no tvdb→tmdb cache read happens when the lookup never yielded a tvdbId",
+  );
+  assert.ok(errors.some((e) => e.startsWith("[arr-state] sonarr series lookup failed:")), "the real failure is logged server-side");
+  assert.ok(!JSON.stringify(body).includes("sonarr.debug-test"), "the configured server URL never reaches the client");
+  assert.equal(writes.length, 0);
 });
 
 // ══ ratings-state response assembly ══════════════════════════════════════════

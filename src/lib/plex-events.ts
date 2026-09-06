@@ -829,21 +829,32 @@ class PlexEventStreamManager {
   /**
    * Is Plex still reporting this session key?
    *
-   * Returns false when Plex is unreachable: a real stop must win over a
-   * transient error, and the ledger entry the caller then writes is what closes
-   * the re-create race. This cannot keep a genuine ghost alive — a ghost is
-   * reaped by the poller's independent stall detector, which keys on a frozen
-   * progressUpdatedAt and never consults this path.
+   * Tri-state on purpose — "unknown" (no url/token, or /status/sessions threw)
+   * is NOT the same answer as "absent", and the two finalizeStopped branches
+   * must read it differently:
+   *
+   * - The existing-row branch treats unknown as absent: a real stop must win
+   *   over a transient error, and the ledger entry it writes closes the
+   *   re-create race behind a PlayHistory row that HAS been written.
+   * - The no-row branch must NOT: nothing was written, so there is no re-create
+   *   race to close, and ledgering a still-playing key there blinds the poller
+   *   to the whole watch for the 1h TTL (it filters ledgered keys out before it
+   *   can create the row, and clearFinalizedNotInCurrentSnapshot only releases
+   *   keys ABSENT from the snapshot). Skipping the ledger on a blip costs
+   *   nothing: a genuine ghost the poller then creates a row for is reaped by
+   *   its independent stall detector (frozen progressUpdatedAt, 60s), which
+   *   ledgers it itself, and never reaches PlayHistory under
+   *   MIN_PLAY_DURATION_S.
    */
-  private async stillReportedByPlex(sessionKey: string): Promise<boolean> {
-    if (!this.currentUrl || !this.currentToken) return false;
+  private async stillReportedByPlex(sessionKey: string): Promise<"present" | "absent" | "unknown"> {
+    if (!this.currentUrl || !this.currentToken) return "unknown";
     try {
       const sessions = await getPlexSessions(this.currentUrl, this.currentToken);
-      return sessions.some((s) => s.sessionKey === sessionKey);
+      return sessions.some((s) => s.sessionKey === sessionKey) ? "present" : "absent";
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[plex-events] stop cross-check failed for ${sessionKey}: ${msg}`);
-      return false;
+      return "unknown";
     }
   }
 
@@ -860,7 +871,12 @@ class PlexEventStreamManager {
         // clearFinalizedNotInCurrentSnapshot only releases keys ABSENT from the
         // snapshot, so a still-playing key can never release itself. The whole
         // watch was lost. Cross-check first; only ledger a key Plex agrees is gone.
-        if (await this.stillReportedByPlex(sessionKey)) return;
+        // "Agrees" is literal: a failed cross-check ("unknown") is NOT agreement.
+        // Nothing has been written here, so there is no re-create race for the
+        // ledger to close — ledgering on a blip would blind the poller to a real
+        // play for an hour, while NOT ledgering a genuine ghost only lets the
+        // poller create a row the 60s stall detector reaps (and ledgers) itself.
+        if ((await this.stillReportedByPlex(sessionKey)) !== "absent") return;
         markPlexSessionFinalized(id);
         return;
       }
@@ -880,7 +896,7 @@ class PlexEventStreamManager {
       // the SSE as advisory and let the poller drive. A network blip falls
       // through and finalizes — real stops win over transient errors, and the
       // ledger entry below closes the re-create race.
-      if (await this.stillReportedByPlex(sessionKey)) return;
+      if ((await this.stillReportedByPlex(sessionKey)) === "present") return;
 
       const now = new Date();
       const finalized = applyFinalTick(existing, now, {

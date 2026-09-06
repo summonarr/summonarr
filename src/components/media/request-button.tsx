@@ -57,6 +57,34 @@ interface RequestButtonProps {
   blacklisted?: boolean;
 }
 
+// Per-item outcome → status line for the on-behalf flow. The keys mirror the
+// bulk route's `ItemResult` union (src/app/api/requests/bulk/route.ts) and
+// tests/request-button-on-behalf.test.mts pins the two in step. Every outcome
+// used to collapse into "Already requested or available", which was false for
+// no-permission (target lacks the instance grant), rating-blocked, blacklisted
+// and error — the requester never learned the real reason.
+export const ON_BEHALF_MESSAGES: Record<string, string> = {
+  created: "Requested for user ✓",
+  "auto-approved": "Requested and auto-approved for user ✓",
+  "already-available": "Already available for that user",
+  "already-requested": "Already requested by that user",
+  "skipped-declined": "Permanently declined for that user",
+  "no-permission": "That user can't request this title on that instance",
+  blacklisted: "This title is blacklisted",
+  "rating-blocked": "Blocked by that user's content-rating limit",
+  error: "Request failed — try again",
+};
+
+// Pure: resolves the status line from the bulk response. `result` is the first
+// item's outcome; `created` is the fallback for an older server whose response
+// carries no `results` array.
+export function onBehalfMessage(result: string | undefined, created: number | undefined): string {
+  if (result !== undefined && Object.hasOwn(ON_BEHALF_MESSAGES, result)) {
+    return ON_BEHALF_MESSAGES[result];
+  }
+  return created ? ON_BEHALF_MESSAGES.created : "Already requested or available for that user";
+}
+
 const btnBase: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
@@ -189,12 +217,16 @@ export function RequestButton({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ items: [{ tmdbId, mediaType }], onBehalfOfUserId: obUserId }),
       });
-      const data: { created?: number; error?: string } = await res.json().catch(() => ({}));
+      const data: {
+        created?: number;
+        results?: { result?: string }[];
+        error?: string;
+      } = await res.json().catch(() => ({}));
       if (!res.ok) {
         setObMsg(data.error ?? "Something went wrong");
         return;
       }
-      setObMsg(data.created ? "Requested for user ✓" : "Already requested or available for that user");
+      setObMsg(onBehalfMessage(data.results?.[0]?.result, data.created));
     } catch {
       setObMsg("Network error — please try again");
     } finally {

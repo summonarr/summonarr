@@ -74,9 +74,22 @@ export async function POST(req: NextRequest) {
     },
     body: "strong=true",
     timeoutMs: 15_000,
-  }).catch(() => null);
+  }).catch((err: unknown) => {
+    // A thrown SafeFetchError (DNS failure, non-public resolved address,
+    // timeout) is an operator-side egress problem; log it so a "Plex PIN
+    // create failed" on the login page can be diagnosed from the server log.
+    console.error(
+      "[auth/plex/start] PIN create failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+    return null;
+  });
 
-  if (!res?.ok) {
+  if (!res) {
+    return NextResponse.json({ error: "Plex PIN create failed" }, { status: 502 });
+  }
+  if (!res.ok) {
+    console.error("[auth/plex/start] plex.tv returned", res.status);
     return NextResponse.json({ error: "Plex PIN create failed" }, { status: 502 });
   }
   const data = (await res.json()) as { id?: number; code?: string };

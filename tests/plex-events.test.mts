@@ -253,6 +253,10 @@ const TOKEN_R = "remote token/9"; // the named instance's token
 interface StreamHandle { origin: string; push(text: string): void; end(): void; ended: boolean }
 const sseStreams: StreamHandle[] = [];
 let plexSnapshotSessions: Array<Record<string, unknown>> = [];
+// The /status/sessions HTTP status — a test flips it to 500 to make the stop
+// cross-check THROW (getPlexSessions rejects on non-2xx), exercising the
+// "unknown" verdict. Tests that set it must reset it to 200 before returning.
+let plexSnapshotStatus = 200;
 // The /api/sync loopback's response body — a test can flip it to
 // { skipped: true } to exercise the lock-race re-arm.
 let syncResponseBody: Record<string, unknown> = { ok: true };
@@ -289,7 +293,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const parsed = new URL(url);
   if (parsed.pathname === "/status/sessions") {
     return new Response(JSON.stringify({ MediaContainer: { Metadata: plexSnapshotSessions } }), {
-      status: 200,
+      status: plexSnapshotStatus,
       headers: { "content-type": "application/json" },
     });
   }
@@ -832,6 +836,77 @@ test("PIN: a spurious stop for a session Plex STILL reports must not ledger it �
     "a session Plex still reports must stay un-ledgered so the poller can create its row",
   );
   assert.equal(historyRows().length, histBefore, "nothing to finalize — there was no row");
+});
+
+test("PIN: a stop for an untracked session whose cross-check FAILS must not ledger it — 'unknown' is not 'absent'", async () => {
+  // Same brand-new-play window as above, but /status/sessions errors (network
+  // blip, Plex busy during a library scan, the 60s plexFetch timeout). The
+  // cross-check used to fail-FALSE and the no-row branch read that as "Plex
+  // agrees the key is gone" — ledgering a still-playing key with no row and no
+  // PlayHistory written, so the poller never created one for the 1h TTL. The
+  // asymmetry the existing-row branch relies on (a real stop wins over a blip
+  // because the ledger closes a re-create race behind a WRITTEN history row)
+  // does not exist here: nothing was written, and a ghost the poller then
+  // creates a row for is reaped by its own 60s stall detector.
+  plexSnapshotSessions = [];
+  plexSnapshotStatus = 500;
+  const sessBefore = sessionFetches().length;
+  const histBefore = historyRows().length;
+  const warnsBefore = warns.length;
+  try {
+    pushFrame(playingFrame({ sessionKey: "stop-blind", state: "stopped", viewOffset: 1_000 }));
+    await waitFor(() => sessionFetches().length > sessBefore, "the cross-check fetch");
+    await waitFor(
+      () => warns.slice(warnsBefore).some((w) => w.includes("stop cross-check failed for stop-blind")),
+      "the cross-check-failed warn",
+    );
+    await drain(20);
+
+    assert.equal(
+      isPlexSessionRecentlyFinalized("plex:stop-blind"),
+      false,
+      "a failed cross-check is 'unknown', not 'absent' — the no-row branch must not ledger a key Plex never agreed was gone",
+    );
+    assert.equal(historyRows().length, histBefore, "no PlayHistory row — there was no row to finalize");
+    assert.equal(deletesFor("plex:stop-blind").length, 0, "no ActiveSession delete either");
+  } finally {
+    plexSnapshotStatus = 200;
+  }
+});
+
+test("existing-row branch still finalizes when the cross-check FAILS — a real stop wins over a transient error", async () => {
+  // The fail-false side of the asymmetry: with a row (and so a PlayHistory
+  // write to make), a cross-check error must NOT turn the stop advisory —
+  // otherwise a Plex blip at stop time leaves a Stopped session live until the
+  // poller's 60s stall sweep, and the ledger below is what closes the
+  // re-create race behind the row this branch writes.
+  plexSnapshotSessions = [];
+  plexSnapshotStatus = 500;
+  const row = armLiveRow("stop-errfin", {
+    state: "paused",
+    playtimeMs: 100_000n,
+    progressMs: 100_000n,
+    durationMs: 1_260_000n,
+    startedAt: new Date(Date.now() - 2_000_000),
+    lastSeenAt: new Date(Date.now() - 30_000),
+  });
+  const sessBefore = sessionFetches().length;
+  try {
+    pushFrame(playingFrame({ sessionKey: "stop-errfin", state: "stopped", viewOffset: 900_000 }));
+    await waitFor(() => isPlexSessionRecentlyFinalized("plex:stop-errfin"), "the ledger mark after the finalize");
+    await waitFor(() => deletesFor("plex:stop-errfin").length === 2, "both ActiveSession deletes");
+    assert.ok(sessionFetches().length > sessBefore, "the cross-check was attempted");
+    assert.ok(
+      warns.some((w) => w.includes("stop cross-check failed for stop-errfin")),
+      "the failed cross-check is warned, not swallowed",
+    );
+    assert.ok(
+      historyRows().some((r) => r.sourceSessionId === `stop-errfin:${row.startedAt.toISOString()}`),
+      "the PlayHistory row is written despite the cross-check error — the existing-row branch treats 'unknown' as 'absent'",
+    );
+  } finally {
+    plexSnapshotStatus = 200;
+  }
 });
 
 // ═══ Phase F — SSE frame plumbing and event routing ═════════════════════════

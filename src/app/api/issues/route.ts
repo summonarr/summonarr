@@ -55,7 +55,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Issue reporting is disabled" }, { status: 403 });
   }
 
-  const maint = await maintenanceGuard();
+  const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   const rlRow = await prisma.setting.findUnique({ where: { key: "rateLimitIssues" } });

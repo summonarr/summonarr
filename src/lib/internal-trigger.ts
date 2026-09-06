@@ -46,9 +46,40 @@ class TriggerWaitExpired extends Error {
  */
 export type TriggerFullSyncResult = "ran" | "skipped" | "failed";
 
+/**
+ * When this process last dispatched a trigger (0 = never).
+ *
+ * Exists purely so the warnings below can state the INTERVAL, not just the
+ * event. "sync still running after 30000ms" is identical whether it is the
+ * first trigger in an hour or the fortieth in ten minutes, so on its own it
+ * cannot distinguish a slow sync (fine — the run continues) from a trigger loop
+ * (not fine). The caller applies a cooldown floor of TIMELINE_RESYNC_COOLDOWN_MS
+ * between dispatches, so an elapsed time well under that is direct evidence the
+ * floor is being defeated, visible at the callsite instead of by reconstructing
+ * timings from surrounding log lines.
+ *
+ * Deliberately NOT importing the cooldown constant to name the expected floor:
+ * plex-events imports this module, and the back-reference would be circular.
+ */
+let lastTriggerAt = 0;
+
+/** " Previous trigger 41s ago." / " No previous trigger this process." */
+function sinceLastTriggerSuffix(nowMs: number): string {
+  if (lastTriggerAt === 0) return " No previous trigger this process.";
+  return ` Previous trigger ${Math.round((nowMs - lastTriggerAt) / 1000)}s ago.`;
+}
+
 export async function triggerFullSync(): Promise<TriggerFullSyncResult> {
   const secret = process.env.CRON_SECRET;
   if (!secret) return "failed"; // no auth token available — silently skip (matches prior behaviour)
+
+  // Stamped for the NEXT call before dispatching, and read into the suffix
+  // first, so the interval reported is always dispatch-to-dispatch. A trigger
+  // that is about to be abandoned at the 30s cap still counts as a dispatch —
+  // the orchestrator run it started is real and continues server-side.
+  const triggeredAt = Date.now();
+  const sinceLast = sinceLastTriggerSuffix(triggeredAt);
+  lastTriggerAt = triggeredAt;
 
   const port = process.env.PORT ?? "3000";
   // On a sub-path deployment Next serves the route at `${BASE_PATH}/api/sync`;
@@ -102,7 +133,8 @@ export async function triggerFullSync(): Promise<TriggerFullSyncResult> {
       // and do not use the word "failed" for something that did not fail.
       console.warn(
         `[internal-trigger] sync still running after ${TRIGGER_WAIT_MS}ms; stopped waiting ` +
-          `(the run continues — see the sync:full entry under Admin → Settings → System)`,
+          `(the run continues — see the sync:full entry under Admin → Settings → System).` +
+          sinceLast,
       );
       return "ran";
     }

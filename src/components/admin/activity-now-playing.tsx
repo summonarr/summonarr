@@ -58,13 +58,11 @@ function terminateTargetFor(
 }
 
 // Format a ms offset as m:ss (or h:mm:ss if >=1h). Used for marker labels.
+// Delegates to the shared formatMs (same shape as the progress/duration
+// labels in the card); the clamp is the only delta — a negative marker offset
+// must never render as "-1:-5".
 function fmtOffset(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const sec = s % 60;
-  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
-  return `${m}:${String(sec).padStart(2, "0")}`;
+  return formatMs(Math.max(0, ms));
 }
 
 function MarkersChip({ s }: { s: ActiveSessionLive }) {

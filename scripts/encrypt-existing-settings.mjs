@@ -58,6 +58,10 @@ const SENSITIVE_KEYS = [
 // the same shape gate the Prisma extension uses to decide what to encrypt.
 const ARR_INSTANCE_SECRET_RE = /^(radarr|sonarr)([A-Z0-9][A-Za-z0-9]*)?(ApiKey|WebhookSecret)$/;
 
+// Same for named Plex/Jellyfin servers (plexRemoteAdminToken, jellyfinRemoteApiKey, …).
+// Mirrors MEDIA_INSTANCE_SECRET_RE in settings-sensitive-keys.ts.
+const MEDIA_INSTANCE_SECRET_RE = /^(plex([A-Z0-9][A-Za-z0-9]*)?AdminToken|jellyfin([A-Z0-9][A-Za-z0-9]*)?ApiKey)$/;
+
 const ENC_PREFIX = "enc:v1:";
 
 function getKey() {
@@ -78,6 +82,22 @@ function encrypt(plaintext, key) {
   return ENC_PREFIX + iv.toString("hex") + ":" + tag.toString("hex") + ":" + ct.toString("hex");
 }
 
+// pg sends `user`/`password` verbatim, so a percent-encoded URL has to be
+// decoded here or authentication fails. Percent-encoding is the form Prisma
+// requires when the password holds "@", ":" or "/", AND the form
+// docker-entrypoint.sh always builds (encodeURIComponent(POSTGRES_PASSWORD)),
+// so the in-container DATABASE_URL is encoded too. A lone "%" that isn't a
+// valid escape makes decodeURIComponent throw — keep that value as typed.
+// Mirrors scripts/reset-password.mjs / scripts/create-user.mjs.
+function decodeCredential(value) {
+  if (value === undefined) return undefined;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 async function main() {
   const key = getKey();
 
@@ -91,13 +111,16 @@ async function main() {
     port = process.env.PGPORT ? parseInt(process.env.PGPORT, 10) : 5432;
     database = process.env.PGDATABASE;
   } else if (process.env.DATABASE_URL) {
-    // Parse manually — pg's URL parser rejects passwords containing unescaped
-    // reserved chars like "/" or "=", which the entrypoint's URL doesn't escape.
+    // Parsed by hand rather than with pg's URL parser, which rejects the
+    // unescaped reserved chars ("/", "=") a hand-written URL can carry. The
+    // password is optional so a trust-auth URL (postgres://user@host/db) works.
     const m = process.env.DATABASE_URL.match(
-      /^postgres(?:ql)?:\/\/([^:]+):(.+)@([^:/]+)(?::(\d+))?\/([^?]+)/
+      /^postgres(?:ql)?:\/\/([^:]+)(?::(.+))?@([^:/]+)(?::(\d+))?\/([^?]+)/,
     );
     if (!m) throw new Error("Cannot parse DATABASE_URL");
     [, user, password, host, port, database] = m;
+    user = decodeCredential(user);
+    password = decodeCredential(password);
     port = port ? parseInt(port, 10) : 5432;
   } else {
     throw new Error("Set DATABASE_URL or PGHOST/PGUSER/PGPASSWORD/PGDATABASE");
@@ -113,12 +136,15 @@ async function main() {
     let settingsEmpty = 0;
 
     // Union the static list with every Setting row whose KEY SHAPE marks it as a
-    // per-instance arr secret, so admin-defined instances are migrated too.
+    // per-instance arr or media-server secret, so admin-defined instances are
+    // migrated too.
     const allKeys = await client.query('SELECT key FROM "Setting"');
     const targetKeys = [
       ...new Set([
         ...SENSITIVE_KEYS,
-        ...allKeys.rows.map((r) => r.key).filter((k) => ARR_INSTANCE_SECRET_RE.test(k)),
+        ...allKeys.rows
+          .map((r) => r.key)
+          .filter((k) => ARR_INSTANCE_SECRET_RE.test(k) || MEDIA_INSTANCE_SECRET_RE.test(k)),
       ]),
     ];
 

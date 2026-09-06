@@ -2,7 +2,7 @@ import { requireAppSession } from "@/lib/require-app-session";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb";
 import { EmptyState } from "@/components/ui/empty-state";
-import { IssueThread } from "@/components/issues/issue-thread";
+import { DesktopIssueThread } from "@/components/issues/desktop-issue-thread";
 import {
   IssueDetailMobileDrawer,
   type IssueDrawerPayload,
@@ -509,10 +509,7 @@ export default async function IssuesPage({
                     </p>
                   )}
                 </div>
-                <IssueThread
-                  issueId={selectedIssue.id}
-                  variant="panel"
-                />
+                <DesktopIssueThread issueId={selectedIssue.id} />
               </div>
             ) : (
               <div

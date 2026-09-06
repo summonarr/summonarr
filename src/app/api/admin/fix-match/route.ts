@@ -706,14 +706,27 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
         // remap. Acquire 2001 before 2002 (one consistent global order → no deadlock).
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 1)`;
-        await tx.plexLibraryItem.delete({ where: { tmdbId_mediaType_serverInstance: { tmdbId, mediaType, serverInstance } } });
+        // deleteMany, NOT delete: the confirmation poll above ran UNLOCKED for
+        // up to minutes, so a library sync may already have reconciled this row
+        // under the corrected id. `delete` on a missing unique row throws P2025
+        // and would report a landed remap as a failed job (guardrail 37a).
+        await tx.plexLibraryItem.deleteMany({ where: { tmdbId, mediaType, serverInstance } });
         await tx.plexLibraryItem.upsert({
           where: { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance } },
           create: { tmdbId: correctTmdbId, mediaType, serverInstance, filePath: item.filePath, plexRatingKey: item.plexRatingKey },
           update: { plexRatingKey: item.plexRatingKey },
         });
-        // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID
-        await tx.tVEpisodeCache.deleteMany({ where: { source: "plex", tmdbId } });
+        // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID.
+        // TVEpisodeCache has NO serverInstance column, so this purge would also
+        // erase another plex server's legitimately-matched rows for the old id.
+        // Only purge when no other instance still holds it; otherwise the sync
+        // orchestrator's union rebuild owns the shared namespace.
+        const othersHoldOldId = await tx.plexLibraryItem.count({
+          where: { tmdbId, mediaType, serverInstance: { not: serverInstance } },
+        });
+        if (othersHoldOldId === 0) {
+          await tx.tVEpisodeCache.deleteMany({ where: { source: "plex", tmdbId } });
+        }
       }, { timeout: BATCH_TX_TIMEOUT });
       void logAudit({ userId: actor.userId, userName: actor.userName, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "plex", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType, serverInstance } });
 
@@ -799,14 +812,28 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
         // 2002, so a concurrent sync can't clobber/interleave this manual remap.
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
         await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
-        await tx.jellyfinLibraryItem.delete({ where: { tmdbId_mediaType_serverInstance: { tmdbId, mediaType, serverInstance } } });
+        // deleteMany, NOT delete: the confirmation poll above ran UNLOCKED for
+        // up to ~10 minutes in background mode, so a library sync may already
+        // have reconciled this row under the corrected id. `delete` on a missing
+        // unique row throws P2025 and would report a landed remap as a failed
+        // job (guardrail 37a).
+        await tx.jellyfinLibraryItem.deleteMany({ where: { tmdbId, mediaType, serverInstance } });
         await tx.jellyfinLibraryItem.upsert({
           where: { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance } },
           create: { tmdbId: correctTmdbId, mediaType, serverInstance, filePath: item?.filePath ?? null, jellyfinItemId: resolvedItemId, jellyfinItemIds: resolvedItemIds },
           update: { jellyfinItemId: resolvedItemId, jellyfinItemIds: resolvedItemIds },
         });
-        // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID
-        await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId } });
+        // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID.
+        // TVEpisodeCache has NO serverInstance column, so this purge would also
+        // erase another jellyfin server's legitimately-matched rows for the old
+        // id. Only purge when no other instance still holds it; otherwise the
+        // sync orchestrator's union rebuild owns the shared namespace.
+        const othersHoldOldId = await tx.jellyfinLibraryItem.count({
+          where: { tmdbId, mediaType, serverInstance: { not: serverInstance } },
+        });
+        if (othersHoldOldId === 0) {
+          await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId } });
+        }
       }, { timeout: BATCH_TX_TIMEOUT });
       void logAudit({ userId: actor.userId, userName: actor.userName, action: "FIX_MATCH", target: `tmdb:${tmdbId}`, details: { type: "fix-match", source: "jellyfin", fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType, serverInstance } });
 

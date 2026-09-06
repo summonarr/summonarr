@@ -52,10 +52,17 @@ interface CompositeKey {
   kind: "id" | "unique";
   cols: string[];
 }
+/** One @@index — column names only (sort modifiers stripped), plus its access method. */
+interface SecondaryIndex {
+  cols: string[];
+  /** true for a `type: Gin` index; false for the btree default. */
+  gin: boolean;
+}
 interface Model {
   name: string;
   fields: string[];
   keys: CompositeKey[];
+  indexes: SecondaryIndex[];
   /** Full source line of each field carrying an @relation attribute. */
   relations: string[];
   body: string;
@@ -69,6 +76,7 @@ function parseModels(src: string): Map<string, Model> {
     const [, name, body] = m;
     const fields: string[] = [];
     const keys: CompositeKey[] = [];
+    const indexes: SecondaryIndex[] = [];
     const relations: string[] = [];
     for (const raw of body.split("\n")) {
       const line = raw.replace(/\/\/.*$/, "").trim();
@@ -76,13 +84,23 @@ function parseModels(src: string): Map<string, Model> {
       if (line.startsWith("@@")) {
         const k = /^@@(id|unique)\(\s*\[([^\]]*)\]/.exec(line);
         if (k) keys.push({ kind: k[1] as "id" | "unique", cols: k[2].split(",").map((s) => s.trim()) });
+        const ix = /^@@index\(\s*\[([^\]]*)\]([^)]*)/.exec(line);
+        if (ix) {
+          indexes.push({
+            // `startedAt(sort: Desc)` → `startedAt`: only the column identity
+            // matters for prefix reasoning — a btree serves an equality scan on
+            // its leading columns regardless of their sort direction.
+            cols: ix[1].split(",").map((s) => s.trim().replace(/\(.*$/, "")),
+            gin: /type:\s*Gin/.test(ix[2]),
+          });
+        }
         continue;
       }
       const f = /^(\w+)\s+\S/.exec(line);
       if (f) fields.push(f[1]);
       if (line.includes("@relation")) relations.push(line);
     }
-    models.set(name, { name, fields, keys, relations, body });
+    models.set(name, { name, fields, keys, indexes, relations, body });
   }
   return models;
 }
@@ -105,7 +123,14 @@ test("the schema parser found a realistic model set — a broken parse must not 
   const ph = model("PlayHistory");
   assert.ok(ph.fields.length > 15, "PlayHistory's fields did not parse");
   assert.ok(ph.keys.length > 0, "PlayHistory's composite keys did not parse");
+  assert.ok(ph.indexes.length > 5, "PlayHistory's @@index lines did not parse");
   assert.ok(ph.relations.length > 0, "PlayHistory's relations did not parse");
+  // The sort-modifier strip must actually happen, or the prefix pin below
+  // compares `startedAt(sort: Desc)` against `startedAt` and never matches.
+  assert.ok(
+    ph.indexes.some((ix) => ix.cols.length === 2 && ix.cols[0] === "source" && ix.cols[1] === "startedAt"),
+    `PlayHistory's [source, startedAt(sort: Desc)] index did not parse to [source, startedAt]: ${JSON.stringify(ph.indexes)}`,
+  );
 });
 
 // ── guardrail 28: play history outlives the account that made it ────────────
@@ -155,6 +180,24 @@ test("guardrail 19: PlayHistory is deduped on exactly [source, serverInstance, s
       "inflates play counts and watch hours on admin/activity.",
   );
   assert.equal(key.kind, "unique", "it must be a @@unique — the row keeps its own id primary key");
+});
+
+test("guardrail 19: the @@unique is the ONLY key over sourceSessionId — no shadow @@index([source, sourceSessionId])", () => {
+  // A 2-column @@index([source, sourceSessionId]) shipped beside the unique for
+  // a long time. Nothing ever read it: the single writer is recordCompletedSession's
+  // createMany({ skipDuplicates: true }), whose ON CONFLICT DO NOTHING is resolved
+  // by the @@unique's own btree, and no Prisma `where` or raw-SQL predicate
+  // filters on (source, sourceSessionId). It was a leftover from before
+  // serverInstance widened the unique key — one extra btree maintained on every
+  // session finalize (the 5s poller and the SSE path), consulted by nothing.
+  const ph = model("PlayHistory");
+  const shadows = ph.indexes.filter((ix) => ix.cols.includes("sourceSessionId"));
+  assert.deepEqual(
+    shadows,
+    [],
+    `PlayHistory carries a secondary @@index over sourceSessionId: ${JSON.stringify(shadows)}. The dedup ` +
+      "constraint's own btree already covers every lookup on it; a second index is pure write amplification.",
+  );
 });
 
 // ── guardrail 32: arrInstance replaced is4k, non-destructively ──────────────
@@ -376,4 +419,77 @@ test("guardrail 37: JellyfinLibraryItem keeps jellyfinItemIds alongside jellyfin
     "jellyfinItemIds needs a GIN index: the 5s play-history poller ORs a has/hasSome over it on every tick, " +
       "and a btree cannot serve an array containment operator — the query degrades to a full scan of the library",
   );
+});
+
+// ── index hygiene: no @@index that a sibling key already serves ─────────────
+//
+// A Postgres btree answers any query on a LEADING-column prefix of its key, so
+// an @@index whose column list is a prefix of another btree key on the same
+// model (an @@id, an @@unique, or a wider @@index) adds nothing the planner can
+// use — it only adds a btree write per row and its share of vacuum/bloat. Seven
+// such indexes shipped from the initial squash: TVEpisodeCache [source, tmdbId]
+// under its PK (rewritten wholesale on every hourly sync, so that one was a full
+// btree rebuild per run), AuditLog [action] and [userId] under their
+// [_, createdAt desc] composites, a bare [source] on PlayHistory,
+// ActiveSession and MediaServerUser under their [source, serverInstance]
+// composites, and PlayHistory's [source, sourceSessionId] under the dedup
+// unique (pinned by name above). All were dropped; `db push` applies that as a
+// plain DROP INDEX with no data-loss prompt, so the entrypoint's auto-safe
+// classifier is not involved.
+//
+// GIN indexes are exempt in both directions: a GIN over an array column serves
+// containment operators no btree can, and no btree serves what it does.
+
+/** [model, index columns] pairs that are prefix-redundant but deliberately still present. */
+const KNOWN_PREFIX_REDUNDANT_INDEXES = new Set([
+  // Same shape as the seven that were dropped — a [a, b] @@index sitting under a
+  // [a, b, c] @@unique on the same model. Left in place pending their own review
+  // rather than removed on the strength of a structural argument alone; delete
+  // the entry here when the index goes.
+  "DeletionVote:[tmdbId,mediaType]",
+  "TrashSpec:[service,kind]",
+  "MediaServerUser:[source,serverInstance]",
+  "PlayHistory:[source,serverInstance]",
+  "ActiveSession:[source,serverInstance]",
+]);
+
+test("no @@index is a leading-column prefix of another btree key on the same model", () => {
+  const offenders: string[] = [];
+  let compared = 0;
+  for (const m of models.values()) {
+    const btreeKeys: { label: string; cols: string[] }[] = [
+      ...m.keys.map((k) => ({ label: `@@${k.kind}([${k.cols.join(", ")}])`, cols: k.cols })),
+      ...m.indexes.filter((ix) => !ix.gin).map((ix) => ({ label: `@@index([${ix.cols.join(", ")}])`, cols: ix.cols })),
+    ];
+    for (const ix of m.indexes) {
+      if (ix.gin) continue;
+      for (const other of btreeKeys) {
+        if (other.cols === ix.cols) continue; // itself
+        compared += 1;
+        const isPrefix = other.cols.length >= ix.cols.length && ix.cols.every((c, i) => c === other.cols[i]);
+        if (!isPrefix) continue;
+        const tag = `${m.name}:[${ix.cols.join(",")}]`;
+        if (KNOWN_PREFIX_REDUNDANT_INDEXES.has(tag)) continue;
+        offenders.push(`${m.name} @@index([${ix.cols.join(", ")}]) is a prefix of ${other.label}`);
+      }
+    }
+  }
+  assert.ok(compared > 50, `only ${compared} index/key comparisons were made — the schema walk is broken, not the invariant`);
+  assert.deepEqual(
+    offenders,
+    [],
+    "each listed @@index is fully served by the wider key beside it and only adds a btree write per row. " +
+      "Drop it (db push emits a plain DROP INDEX) — or, if a reader genuinely needs it, add it to " +
+      "KNOWN_PREFIX_REDUNDANT_INDEXES with the reason.",
+  );
+});
+
+test("KNOWN_PREFIX_REDUNDANT_INDEXES carries no stale entries", () => {
+  // An allowlist entry that no longer matches a real index is either a typo
+  // (the pin silently stopped guarding what it names) or a cleanup that forgot
+  // to remove its own exemption. Either way it must go red.
+  const present = new Set<string>();
+  for (const m of models.values()) for (const ix of m.indexes) present.add(`${m.name}:[${ix.cols.join(",")}]`);
+  const stale = [...KNOWN_PREFIX_REDUNDANT_INDEXES].filter((tag) => !present.has(tag));
+  assert.deepEqual(stale, [], `allowlisted index(es) no longer exist in schema.prisma — remove the entry: ${stale.join(", ")}`);
 });

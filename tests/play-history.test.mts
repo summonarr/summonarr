@@ -680,7 +680,13 @@ test("MediaServerMismatchError: a real Error subclass carrying the (source, sour
 test("resolveMediaServerUser: minimal upsert — advisory lock in namespace 2020 with a 31-bit key, subject lookup only (no email), row read carries the manual-link pin", async () => {
   const id = await resolveMediaServerUser({ source: "plex", serverInstance: "", sourceUserId: "u-1", username: "alice" });
   assert.equal(id, "msu-row-1");
-  assert.deepEqual(txOptions, { timeout: 15_000 });
+  // maxWait is explicit and load-bearing: the default (2s) is short against a
+  // pool of 5, so while a library-sized write held a connection this resolve
+  // failed outright with "Unable to start a transaction in the given time" and
+  // the 5s poller dropped that tick — and the poller is the sole writer of
+  // Jellyfin play history (guardrail 19), so a session ENDING inside such a
+  // window was lost. Waiting is safe: the poll loop is serial.
+  assert.deepEqual(txOptions, { timeout: 15_000, maxWait: 10_000 });
 
   // Advisory lock: pg_advisory_xact_lock(int, int) — the key MUST be masked
   // into the signed-int32 positive range or Postgres rejects the overload.

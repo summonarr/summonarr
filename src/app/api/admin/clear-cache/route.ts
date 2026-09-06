@@ -7,8 +7,25 @@ import { checkRateLimit } from "@/lib/rate-limit";
 // Cache "sources" map to TmdbCache key prefixes. TMDB details (movie:/tv:) is where the bulk of
 // metadata lives — including the country/language/keyword/watch-provider fields — and previously had
 // no clear button (only a warm one). MDBList and OMDB are the external ratings caches.
+// The tmdb list must name EVERY key namespace src/lib/tmdb.ts writes (a drift pin in
+// tests/review-2026-09-p44.test.mts scans that file): `movies:` is a separate entry because
+// `movie:` does not prefix-match `movies:popular` / `movies:upcoming` / `movies:top_rated` /
+// `movies:popular:page:<p>` (the "s" precedes the colon), and `search:` / `collection:` were
+// simply missing — search results and collection pages kept serving stale rows after a
+// "cleared" TMDB cache.
 const SOURCE_PREFIXES: Record<string, string[]> = {
-  tmdb: ["movie:", "tv:", "person:", "trending:", "discover:", "genres:", "watchproviders:"],
+  tmdb: [
+    "movie:",
+    "movies:",
+    "tv:",
+    "person:",
+    "search:",
+    "collection:",
+    "trending:",
+    "discover:",
+    "genres:",
+    "watchproviders:",
+  ],
   mdblist: ["mdblist:"],
   omdb: ["omdb:"],
 };

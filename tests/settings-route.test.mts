@@ -83,6 +83,15 @@ const deleteManyCalls: Array<{ where: { key: string } }> = [];
 const auditAttempts: Array<Record<string, unknown>> = [];
 const auditRows: Array<Record<string, unknown>> = [];
 let auditThrows = false;
+// Every top-level setting.findMany key filter, in order. The Discord slash-command
+// re-registration task's FIRST step is a findMany over exactly the three
+// registration keys, so its presence/absence here pins whether the (fire-and-
+// forget) task was launched at all — without seeding a bot token, so it returns
+// before safeFetchTrusted would touch DNS.
+const findManyKeys: Array<string[] | null> = [];
+const DISCORD_REG_KEYS = ["discordBotToken", "discordClientId", "discordGuildId"];
+const discordRegistrationReads = () =>
+  findManyKeys.filter((k) => k !== null && k.length === 3 && DISCORD_REG_KEYS.every((x) => k.includes(x)));
 
 type DbUser = {
   id: string; role: string; permissions: bigint; name: string | null; email: string | null;
@@ -137,6 +146,7 @@ const fakePrisma = {
   setting: {
     findMany: async (args?: { where?: { key?: { in?: string[] } } }) => {
       const only = args?.where?.key?.in;
+      findManyKeys.push(only ?? null);
       const rows = [...settings.entries()].map(([key, value]) => ({ key, value }));
       return only ? rows.filter((r) => only.includes(r.key)) : rows;
     },
@@ -201,6 +211,7 @@ beforeEach(() => {
   auditAttempts.length = 0;
   auditRows.length = 0;
   fetchCalls.length = 0;
+  findManyKeys.length = 0;
   warns.length = 0;
   errors.length = 0;
   respond = (url) => { throw new Error(`unexpected fetch ${url}`); };
@@ -625,4 +636,102 @@ test("machine-session: enabling alongside a non-empty allowlist in the SAME patc
   );
   assert.equal(res.status, 200);
   assert.equal(settings.get("enableMachineSession"), "true");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// PATCH — Jellyfin gets the same post-write probe + rollback as Radarr/Sonarr.
+// "Save & Test" used to persist a mistyped URL durably and only then fail to load
+// libraries — the previous working config was already gone, and the orchestrator,
+// the 5s poller (guardrail 19) and Jellyfin sign-in all read the new row at once.
+// Order matters within this pair: the failure runs first and its rollback releases
+// the jellyfinUrl cooldown, which the success case then reuses. Only jellyfinUrl is
+// posted — jellyfinApiKey was written by the guardrail-7a test above and is still
+// inside its 10s cooldown (the cooldown keys on submitted body keys).
+// ════════════════════════════════════════════════════════════════════════════
+
+test("PATCH: a Jellyfin URL that fails the connectivity probe is rolled back to the previous WORKING config (422)", async () => {
+  settings.set("jellyfinUrl", "http://10.0.0.9:8096");
+  settings.set("jellyfinApiKey", "working-key");
+  const admin = await mintSession("ADMIN");
+  // Default respond() throws ⇒ getJellyfinMediaFolders throws ⇒ 422 + rollback.
+  const res = await PATCH(patchReq(JSON.stringify({ jellyfinUrl: "http://10.0.0.3:8096" }), admin.header), undefined);
+  assert.equal(res.status, 422, "a failed Jellyfin probe must surface as 422, like Radarr/Sonarr/Plex");
+  const body = (await res.json()) as { ok: boolean; jellyfinError?: string };
+  assert.equal(body.ok, false);
+  assert.equal(body.jellyfinError, "Jellyfin connection failed");
+  // Proof the probe hit the NEW url with the stored key's endpoint.
+  assert.ok(
+    fetchCalls.some((c) => c.url.hostname === "10.0.0.3" && c.url.pathname === "/Library/MediaFolders"),
+    "the Jellyfin MediaFolders probe must have been issued against the freshly-written URL",
+  );
+  // Proof of rollback: the pre-existing working URL is what the DB holds again.
+  assert.equal(settings.get("jellyfinUrl"), "http://10.0.0.9:8096", "the previous working URL must be restored");
+  assert.equal(settings.get("jellyfinApiKey"), "working-key", "the untouched key stays");
+  assert.equal(deleteManyCalls.length, 0, "a pre-existing row is restored, not deleted");
+  const writes = upsertFor("jellyfinUrl").map((u) => u.create.value);
+  assert.deepEqual(writes, ["http://10.0.0.3:8096", "http://10.0.0.9:8096"], "write, then restore");
+});
+
+test("PATCH: a Jellyfin URL that passes the probe persists → 200 + jellyfinTested", async () => {
+  settings.set("jellyfinApiKey", "working-key");
+  const admin = await mintSession("ADMIN");
+  respond = (url) => {
+    if (url.hostname === "10.0.0.4" && url.pathname === "/Library/MediaFolders") {
+      return okJson({ Items: [{ Id: "lib-1", Name: "Movies", CollectionType: "movies" }] });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const res = await PATCH(patchReq(JSON.stringify({ jellyfinUrl: "http://10.0.0.4:8096" }), admin.header), undefined);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { ok: boolean; jellyfinTested?: boolean };
+  assert.equal(body.ok, true);
+  assert.equal(body.jellyfinTested, true);
+  assert.equal(settings.get("jellyfinUrl"), "http://10.0.0.4:8096", "the value persists after a passing probe");
+  assert.equal(deleteManyCalls.length, 0, "a passing probe never rolls back");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// PATCH — Discord slash-command re-registration fires on a CHANGE to the
+// registration inputs, not on their mere presence. The Discord form used to post
+// every field on every save, and discordClientId/discordGuildId are plaintext
+// (never masked), so a Channels/Roles-tab save re-PUT the whole command set.
+// Distinct keys per test: discordClientId is written (unchanged) in the first,
+// discordGuildId in the second — the 10s cooldown keys on submitted body keys.
+// ════════════════════════════════════════════════════════════════════════════
+
+test("PATCH: re-posting UNCHANGED Discord ids alongside a channel edit does NOT launch command re-registration", async () => {
+  settings.set("discordClientId", "111111111111111111");
+  settings.set("discordGuildId", "222222222222222222");
+  const admin = await mintSession("ADMIN");
+  const res = await PATCH(
+    patchReq(
+      JSON.stringify({ discordClientId: "111111111111111111", discordNotifyChannelId: "333333333333333333" }),
+      admin.header,
+    ),
+    undefined,
+  );
+  assert.equal(res.status, 200);
+  assert.equal(upsertFor("discordNotifyChannelId")[0]?.create.value, "333333333333333333", "the channel edit itself is written");
+  await new Promise((r) => setImmediate(r)); // let a (wrongly) launched fire-and-forget task reach its first read
+  assert.equal(discordRegistrationReads().length, 0, "no re-registration task may be launched when the ids did not change");
+  assert.equal(fetchCalls.length, 0, "and nothing was PUT to Discord");
+});
+
+test("PATCH: a CHANGED discordGuildId launches command re-registration exactly once", async () => {
+  // No bot token seeded: the task reads the three registration keys and returns
+  // before putDiscordCommands, so the launch is observable with zero network.
+  settings.set("discordClientId", "111111111111111111");
+  settings.set("discordGuildId", "222222222222222222");
+  const admin = await mintSession("ADMIN");
+  const res = await PATCH(
+    patchReq(
+      JSON.stringify({ discordGuildId: "444444444444444444", discordAdminRequestChannelId: "555555555555555555" }),
+      admin.header,
+    ),
+    undefined,
+  );
+  assert.equal(res.status, 200);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(discordRegistrationReads().length, 1, "a changed guild id must still trigger the re-registration task, once");
+  assert.equal(fetchCalls.length, 0, "with no bot token stored the task stops before any Discord call");
 });

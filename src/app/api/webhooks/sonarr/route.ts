@@ -277,19 +277,15 @@ export async function POST(req: NextRequest) {
     await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
       // Do NOT touch notifiedAvailable here; the orchestrator's CAS (guardrail #14) is the sole authority.
-      const resetNotify = await tx.mediaRequest.updateMany({
-        where: { tmdbId: safeMdbId, mediaType: "TV", arrInstance, status: "APPROVED", availableAt: null },
+      // One UPDATE covers both a fresh approval (availableAt null) and a re-push
+      // of an already-available title — the two used to differ only in a
+      // notifiedAvailable write that guardrail 14 removed.
+      updated = await tx.mediaRequest.updateMany({
+        where: { tmdbId: safeMdbId, mediaType: "TV", arrInstance, status: "APPROVED" },
         // Clear the approve-time 90s backstop so a stale timer can't fire a
         // false "download pending" after a later revert.
         data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
       });
-      const alreadyAvailable = await tx.mediaRequest.updateMany({
-        where: { tmdbId: safeMdbId, mediaType: "TV", arrInstance, status: "APPROVED", availableAt: { not: null } },
-        // Clear the approve-time 90s backstop so a stale timer can't fire a
-        // false "download pending" after a later revert.
-        data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
-      });
-      updated = { count: resetNotify.count + alreadyAvailable.count };
       await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: safeMdbId, arrInstance } });
       // Backfill tvdbId on the matched request(s). A later Download webhook for the same
       // series may arrive with only tvdbId (Sonarr omits tmdbId on some events); without
@@ -315,19 +311,14 @@ export async function POST(req: NextRequest) {
         where: { tvdbId: safeVdbId!, mediaType: "TV", arrInstance },
         select: { tmdbId: true },
       });
-      const resetNotify = await tx.mediaRequest.updateMany({
-        where: { tvdbId: safeVdbId!, mediaType: "TV", arrInstance, status: "APPROVED", availableAt: null },
+      // Do NOT touch notifiedAvailable here (guardrail #14); one UPDATE covers
+      // both availableAt branches, same as the tmdbId path above.
+      updated = await tx.mediaRequest.updateMany({
+        where: { tvdbId: safeVdbId!, mediaType: "TV", arrInstance, status: "APPROVED" },
         // Clear the approve-time 90s backstop so a stale timer can't fire a
         // false "download pending" after a later revert.
         data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
       });
-      const alreadyAvailable = await tx.mediaRequest.updateMany({
-        where: { tvdbId: safeVdbId!, mediaType: "TV", arrInstance, status: "APPROVED", availableAt: { not: null } },
-        // Clear the approve-time 90s backstop so a stale timer can't fire a
-        // false "download pending" after a later revert.
-        data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
-      });
-      updated = { count: resetNotify.count + alreadyAvailable.count };
       if (req && updated.count > 0) {
         await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: req.tmdbId, arrInstance } });
         tvdbPathTmdbId = req.tmdbId;

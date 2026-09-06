@@ -117,13 +117,54 @@ async function readRegistryJson(service: ArrService): Promise<ArrInstanceConfig[
   }
 }
 
+// The slugs (of `slugs`) whose connection is configured — url + apiKey BOTH
+// non-empty — read with ONE Setting query over every slug's two keys. Every
+// configured-ness probe in this module funnels through here so the per-request
+// cost is a fixed two round-trips (registry + this), not 2 + N: the old shape
+// issued one findMany per instance and re-probed the 4K keys on every call.
+async function readConfiguredSlugs(service: ArrService, slugs: readonly string[]): Promise<Set<string>> {
+  if (slugs.length === 0) return new Set();
+  const keys = slugs.flatMap((slug) => [arrSettingKey(service, slug, "Url"), arrSettingKey(service, slug, "ApiKey")]);
+  const rows = await prisma.setting.findMany({ where: { key: { in: keys } } });
+  const map = new Map(rows.map((r) => [r.key, r.value]));
+  const out = new Set<string>();
+  for (const slug of slugs) {
+    // Presence of the row is not enough — a blanked value is "unconfigured".
+    if (map.get(arrSettingKey(service, slug, "Url")) && map.get(arrSettingKey(service, slug, "ApiKey"))) out.add(slug);
+  }
+  return out;
+}
+
 // Whether an instance's connection is configured (url + apiKey both present).
 export async function isInstanceConfigured(service: ArrService, slug: string): Promise<boolean> {
-  const rows = await prisma.setting.findMany({
-    where: { key: { in: [arrSettingKey(service, slug, "Url"), arrSettingKey(service, slug, "ApiKey")] } },
-  });
-  const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-  return !!map[arrSettingKey(service, slug, "Url")] && !!map[arrSettingKey(service, slug, "ApiKey")];
+  return (await readConfiguredSlugs(service, [slug])).has(slug);
+}
+
+// The registry list + which of its instances are configured, in exactly two
+// queries: the registry row, then one findMany over the default, legacy 4K and
+// every registry slug's connection keys. The 4K probe rides on the same query —
+// normalizeEntry rejects a registry "4k" entry, so it is never registry-backed
+// and always has to be probed.
+//
+// Exported for a caller that needs BOTH views of one read — the request route
+// resolves an explicit slug against the FULL list (an unregistered slug and a
+// registered-but-unconfigured one are different 400s) and auto-routes over the
+// configured subset; calling getArrInstances + getSyncableArrInstances +
+// isInstanceConfigured for that paid the registry read twice and probed the
+// chosen slug a third time.
+export async function getArrInstancesWithConfigured(
+  service: ArrService,
+): Promise<{ all: ArrInstanceConfig[]; configured: ReadonlySet<string> }> {
+  const registry = await readRegistryJson(service);
+  const configured = await readConfiguredSlugs(service, [
+    DEFAULT_ARR_INSTANCE,
+    FOURK_ARR_INSTANCE,
+    ...registry.map((i) => i.slug),
+  ]);
+  const all: ArrInstanceConfig[] = [defaultInstanceConfig()];
+  if (configured.has(FOURK_ARR_INSTANCE)) all.push(legacyFourKConfig());
+  all.push(...registry);
+  return { all, configured };
 }
 
 // All registered instances for a service, default first, then registry entries in
@@ -131,25 +172,14 @@ export async function isInstanceConfigured(service: ArrService, slug: string): P
 // configured but absent from the registry JSON — the back-compat path for installs
 // that had a 4K instance before the registry existed.
 export async function getArrInstances(service: ArrService): Promise<ArrInstanceConfig[]> {
-  const registry = await readRegistryJson(service);
-  const out: ArrInstanceConfig[] = [defaultInstanceConfig()];
-  const seen = new Set<string>([DEFAULT_ARR_INSTANCE]);
-  for (const entry of registry) {
-    out.push(entry);
-    seen.add(entry.slug);
-  }
-  if (!seen.has(FOURK_ARR_INSTANCE) && (await isInstanceConfigured(service, FOURK_ARR_INSTANCE))) {
-    out.splice(1, 0, legacyFourKConfig());
-  }
-  return out;
+  return (await getArrInstancesWithConfigured(service)).all;
 }
 
 // Only the instances whose connection is actually configured — the set the sync
 // orchestrator fans out over. Always includes the default if configured.
 export async function getSyncableArrInstances(service: ArrService): Promise<ArrInstanceConfig[]> {
-  const all = await getArrInstances(service);
-  const results = await Promise.all(all.map((i) => isInstanceConfigured(service, i.slug)));
-  return all.filter((_, idx) => results[idx]);
+  const { all, configured } = await getArrInstancesWithConfigured(service);
+  return all.filter((i) => configured.has(i.slug));
 }
 
 // Persist the named-instance registry (admin settings). Validates and de-dupes;
