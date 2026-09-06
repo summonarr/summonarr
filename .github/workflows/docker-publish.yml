@@ -169,8 +169,16 @@ jobs:
     runs-on: ubuntu-latest
     # The arm64 half runs under QEMU and can hang; without a timeout a stuck
     # build holds the runner for GitHub's 360-minute default. A warm-cache
-    # build finishes in ~3 min and a cold multi-arch build in ~15-30.
-    timeout-minutes: 90
+    # build finishes in ~3 min.
+    #
+    # 180, not 90: the v0.24.2 release build was KILLED by the old 90-minute
+    # budget at 90:17, mid-way through `Build and push`, and GitHub records a
+    # job timeout as `cancelled` — so it read as someone hitting cancel rather
+    # than as a bust budget, and `:0.24.2` silently never published while
+    # `:latest` kept serving the previous release. A genuinely cold arm64 half
+    # (no prior release to warm the GHA cache; security-gate primes only
+    # amd64) exceeds 90 minutes under emulation on its own.
+    timeout-minutes: 180
     # Skip the main-push build when the push contains a `chore(release):`
     # commit — the subsequent tag push (per the PR-then-tag flow in CLAUDE.md)
     # publishes the same SHA with version tags + `:latest`, so the main-push
@@ -317,7 +325,11 @@ jobs:
           TRIVY_PLATFORM: linux/arm64
 
       - name: Upload Trivy SARIF (amd64)
-        if: always()
+        # Skipped-scan guard, matching the arm64 upload below: on a cancelled or
+        # failed build the scan never runs, and a bare `always()` then fails this
+        # step trying to upload a SARIF that was never written — noise stacked on
+        # whatever actually went wrong.
+        if: ${{ always() && steps.scan-amd64.outcome != 'skipped' }}
         uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           sarif_file: trivy-publish.sarif
