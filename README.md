@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.24.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.24.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,25 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.24.2
+
+**Fixed**
+- TV episode availability silently stopped updating on large Plex and Jellyfin libraries. The whole-table episode-cache rewrite ran inside one transaction, passed its 30-second budget and rolled back on every run; it now stages the rows outside the transaction and swaps them in atomically.
+- Watch history could be lost while a library sync was running: the 5-second poller failed to start its transaction instead of waiting, and it is the only writer of Jellyfin play history.
+- The "Try again" button on every error page threw instead of retrying (Next.js 16.3 renamed the prop it was reading).
+- The navigation progress bar never appeared during a page load, only flashing after it completed.
+- Repeated "re-save this row to encrypt at rest" warnings for the same setting, and warnings that could not name the setting at all.
+- Admin fix-match reported a successful remap as a failure when a library sync reconciled the row first.
+- The For You rail was computed on every home-page load even when the feature was switched off.
+- Patched seven security advisories in bundled dependencies (five high).
+- Around 110 further fixes from a full-codebase review, spanning the sync orchestrator, admin pages, settings forms and request handling.
+
+**Changed**
+- Cron runs now record a short history, so Admin -> Settings -> System shows how often a job actually ran.
+- Warnings that restate an unchanged condition are logged once instead of on every pass.
+- "Most rewatched" counts a TV show only when an episode was genuinely watched more than once.
+- Published images are now scanned for both amd64 and arm64 before release.
 
 ### v0.24.1
 
@@ -607,7 +626,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.24.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.24.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
