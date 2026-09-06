@@ -27,6 +27,8 @@
 // Precedent: PlexEventStreamManager.persistReachability already holds a
 // `lastReachable` value and no-ops on an unchanged one for exactly this reason.
 
+import { processSingleton } from "./process-singleton";
+
 /**
  * Upper bound on tracked keys. The real key space is small and bounded by admin
  * config — (media type x registered instance) — but de-registering and
@@ -36,7 +38,13 @@
  */
 const MAX_TRACKED_KEYS = 256;
 
-const lastSignature = new Map<string, string>();
+// Process-wide (see process-singleton): a per-chunk Map would let the same
+// unchanged condition warn once per server chunk, which is the flood guardrail 7b
+// exists to stop.
+const lastSignature = processSingleton(
+  "log-dedup:lastSignature",
+  () => new Map<string, string>(),
+);
 
 /**
  * Emit `message` via console.warn only when `signature` differs from the last

@@ -2,6 +2,7 @@ import { PrismaClient } from "@/generated/prisma";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { decryptToken, encryptToken } from "@/lib/token-crypto";
 import { isSensitiveSettingKey } from "@/lib/settings-sensitive-keys";
+import { processSingleton } from "@/lib/process-singleton";
 
 type ExtendedPrismaClient = ReturnType<typeof createPrismaClient>;
 const globalForPrisma = globalThis as unknown as { prisma: ExtendedPrismaClient };
@@ -92,7 +93,13 @@ function encryptSettingRowsInPlace(data: unknown): void {
 // without that hook the banner would name a key with no row and no re-save
 // target until the process restarted (the "Disconnect Plex" and de-register-
 // instance paths both recover from a corrupt token by deleting, not re-saving).
-const settingDecryptFailures = new Set<string>();
+// Process-wide: prisma.ts is compiled into several server chunks, and a per-chunk
+// Set meant getSettingDecryptFailures() showed the admin banner only the failures
+// recorded by whichever chunk served that render.
+const settingDecryptFailures = processSingleton(
+  "prisma:settingDecryptFailures",
+  () => new Set<string>(),
+);
 
 export function getSettingDecryptFailures(): string[] {
   return [...settingDecryptFailures].sort();
