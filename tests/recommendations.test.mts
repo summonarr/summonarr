@@ -111,6 +111,7 @@ const { computeRecommendationsForUser, selectSeedPlan, warmRecommendationsCache,
   await import("../src/lib/recommendations.ts");
 const { invalidateBlacklistCache } = await import("../src/lib/blacklist.ts");
 const { refreshRecommendationGraph, prewarmSuggestionEdges } = await import("../src/lib/recommendation-graph.ts");
+const { getOmdbRatings, isOmdbQuotaLocked } = await import("../src/lib/omdb.ts");
 
 // ── in-memory tables ─────────────────────────────────────────────────────────
 type MT = "MOVIE" | "TV";
@@ -425,8 +426,12 @@ shadowPrismaClientMethod(prisma, "$transaction", async (fn: (tx: unknown) => Pro
 // (`if (!apiKey) return`), so the quality prior runs on CACHED ratings alone and
 // this suite can never reach the network — while still exercising the real
 // attachRatingsUnified path rather than a stub of it.
+// `omdbKeyConfigured` switches on a key so the OMDB path can actually be
+// reached — needed only by the transport-failure test at the bottom of the file.
+let omdbKeyConfigured = false;
 shadowPrismaModel(prisma, "setting", {
-  findUnique: async () => null,
+  findUnique: async (args: { where: { key: string } }) =>
+    omdbKeyConfigured && args.where.key === "omdbApiKey" ? { key: "omdbApiKey", value: "test-omdb-key" } : null,
   findMany: async () => [],
 });
 
@@ -850,9 +855,16 @@ const fetchCalls: string[] = [];
 // and return [], which is exactly why an outage is indistinguishable from "no
 // suggestions" one layer up and why the conclusive flag has to exist.
 let tmdbOutage = false;
+let omdbTimesOut = false;
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = new URL(String(input));
   fetchCalls.push(url.pathname);
+  if (omdbTimesOut && url.hostname === "www.omdbapi.com") {
+    // The shape safe-fetch discriminates on to raise SafeFetchError("timeout").
+    const err = new Error("The operation was aborted due to timeout");
+    err.name = "TimeoutError";
+    throw err;
+  }
   if (tmdbOutage) throw new TypeError("fetch failed");
   // Not anchored to the start: TMDB's real paths carry a version prefix
   // (/3/movie/{id}/similar) — match the suffix shape regardless of it.
@@ -2714,4 +2726,46 @@ test("prewarmSuggestionEdges reaches sources a required set never can — an INA
 
   assert.equal(warmed.refreshed, 1);
   assert.deepEqual(edgeRows.map((e) => [e.sourceTmdbId, e.tmdbId]), [[42, 777]]);
+});
+
+// ── a failed ratings lookup is not a verdict ────────────────────────────────
+// ORDER-DEPENDENT and deliberately LAST in the file: it trips omdb.ts's
+// module-global lockout, which has no reset export and holds for an hour of
+// mocked time that this file never advances.
+
+test("a null verdict is NOT stamped while a provider is locked out — an outage must not earn a week-long 'nobody answered'", async () => {
+  // attachRatingsUnified swallows its own upstream failures, so it returns the
+  // full item list whether the lookup worked or not. Without this guard every
+  // title in the batch got qualityRatedAt stamped with a null quality, which the
+  // obscurity damp then reads as evidence and multiplies by OBSCURITY_DAMP — a
+  // network blip quietly demoting every sub-50-vote candidate it touched, for a
+  // full QUALITY_TTL_MS.
+  omdbKeyConfigured = true;
+  omdbTimesOut = true;
+  // omdb.ts memoizes the API key for API_KEY_TTL_MS (30s) and the clock has been
+  // frozen at T0 all file, so earlier tests have a "no key configured" memo
+  // pinned. Step past it or getOmdbRatings short-circuits before the network.
+  mock.timers.setTime(T0 + 60_000);
+
+  // Trip the breaker first — this is the coupling: without omdb.ts counting
+  // transport failures, a timeout storm never sets the flag this guard reads.
+  for (let i = 0; i < 5; i++) {
+    await getOmdbRatings(`tt900000${i}`).catch(() => {});
+  }
+  assert.equal(isOmdbQuotaLocked(), true, "precondition: the provider is known-unreachable");
+
+  libraryRows = [{ tmdbId: 10, mediaType: "MOVIE", serverInstance: "" }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+
+  const result = await refreshRecommendationGraph();
+
+  assert.ok(result.verdictsDeferred > 0, "the unanswerable titles were deferred, not stamped");
+  assert.equal(result.titlesRated, 0, "and none of them counted as rated");
+  for (const node of nodeRows) {
+    assert.equal(
+      node.qualityRatedAt,
+      null,
+      "no node may carry a verdict earned by an outage — they are re-asked next run",
+    );
+  }
 });

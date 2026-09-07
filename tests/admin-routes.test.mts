@@ -104,6 +104,10 @@ let casRows = 1; // rows the in-tx CAS ($executeRaw) reports affected
 let txAuthDeleteThrows = false; // simulate the AuthSession DB delete failing (guardrail 27)
 let counts = { requests: 0, issues: 0, votes: 0 };
 let tmdbDeleteCount = 3;
+// The derived tables a TMDB/ratings reset also has to reach.
+let coreDeleteCount = 0;
+let edgeDeleteCount = 0;
+let verdictResetCount = 0;
 let trashDeleteCount = 1;
 
 // Audit surface: attempts are recorded even on throw (proves logAudit was
@@ -134,6 +138,16 @@ function makeTx() {
     hiddenItem: { deleteMany: rec("hiddenItem.deleteMany") },
     notification: { deleteMany: rec("notification.deleteMany") },
     userRecommendation: { deleteMany: rec("userRecommendation.deleteMany") },
+    // The TMDB reset's graph half. Both live in ONE transaction so an unstamped
+    // node can never be observed alongside its still-present edges (or, far
+    // worse, the reverse) — see the route's comment.
+    recommendationTitle: { updateMany: rec("recommendationTitle.updateMany") },
+    titleSuggestion: {
+      deleteMany: async (args?: unknown) => {
+        txOps.push({ op: "titleSuggestion.deleteMany", args });
+        return { count: edgeDeleteCount };
+      },
+    },
     mediaServerUser: {
       updateMany: rec("mediaServerUser.updateMany"),
       deleteMany: async () => {
@@ -235,6 +249,12 @@ const fakePrisma = {
   },
   tmdbCache: {
     deleteMany: async (args: unknown) => { txOps.push({ op: "tmdbCache.deleteMany", args }); return { count: tmdbDeleteCount }; },
+  },
+  tmdbMediaCore: {
+    deleteMany: async (args: unknown) => { txOps.push({ op: "tmdbMediaCore.deleteMany", args }); return { count: coreDeleteCount }; },
+  },
+  recommendationTitle: {
+    updateMany: async (args: unknown) => { txOps.push({ op: "recommendationTitle.updateMany", args }); return { count: verdictResetCount }; },
   },
   trashApplication: {
     findUnique: async (args: { where: { id: string } }) => trashAppsById.get(args.where.id) ?? null,
@@ -362,6 +382,9 @@ beforeEach(() => {
   txAuthDeleteThrows = false;
   counts = { requests: 0, issues: 0, votes: 0 };
   tmdbDeleteCount = 3;
+  coreDeleteCount = 0;
+  edgeDeleteCount = 0;
+  verdictResetCount = 0;
   trashDeleteCount = 1;
   auditAttempts.length = 0;
   auditRows.length = 0;
@@ -419,7 +442,7 @@ test("GUARDRAIL 26 (clear-cache): auditLog throws → 200 kept, the wipe already
   tmdbDeleteCount = 7;
   const res = await clearCache(req("http://localhost:3000/api/admin/clear-cache?source=tmdb", { method: "DELETE", headers: admin.header }), undefined);
   assert.equal(res.status, 200, "a failed audit write must not 500 a successful cache clear (logAudit, not logAuditOrFail)");
-  assert.deepEqual(await res.json(), { source: "tmdb", cleared: 7 });
+  assert.deepEqual(await res.json(), { source: "tmdb", cleared: 7, coreCleared: 0, edgesCleared: 0, verdictsCleared: 0 });
   assert.equal(txOps.filter((o) => o.op === "tmdbCache.deleteMany").length, 1, "the destructive deleteMany committed before the audit");
   await flush();
   assert.equal(auditAttempts.length, 1, "logAudit WAS invoked (proves it isn't skipped)");
@@ -432,7 +455,7 @@ test("clear-cache: happy path writes exactly one RATINGS_CACHE_CLEAR audit row a
   tmdbDeleteCount = 12;
   const res = await clearCache(req("http://localhost:3000/api/admin/clear-cache?source=all", { method: "DELETE", headers: admin.header }), undefined);
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { source: "all", cleared: 12 });
+  assert.deepEqual(await res.json(), { source: "all", cleared: 12, coreCleared: 0, edgesCleared: 0, verdictsCleared: 0 });
   await flush();
   assert.equal(auditRows.length, 1);
   assert.equal(auditRows[0].action, "RATINGS_CACHE_CLEAR");
@@ -1255,4 +1278,86 @@ test("mediaServerGrants: prototype-pollution keys are dropped at BOTH nesting le
   assert.equal(proto.remote, undefined, "Object.prototype must not have gained a slug key");
   assert.equal(proto.view, undefined);
   assert.equal(({} as Record<string, unknown>).remote, undefined);
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// clear-cache: a reset has to reach the DERIVED copies, not just TmdbCache
+// ════════════════════════════════════════════════════════════════════════════
+
+test("clear-cache source=tmdb also resets grid metadata and the suggestion graph, unstamping BEFORE it deletes", async () => {
+  const admin = await mintSession("ADMIN");
+  tmdbDeleteCount = 11;
+  coreDeleteCount = 22;
+  edgeDeleteCount = 33;
+
+  const res = await clearCache(
+    req("http://localhost:3000/api/admin/clear-cache?source=tmdb", { method: "DELETE", headers: admin.header }),
+    undefined,
+  );
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), {
+    source: "tmdb",
+    cleared: 11,
+    coreCleared: 22,
+    edgesCleared: 33,
+    verdictsCleared: 0,
+  });
+
+  const ops = txOps.map((o) => o.op);
+  assert.ok(ops.includes("tmdbMediaCore.deleteMany"), "the normalized grid table is read INSTEAD of the blob — leaving it keeps every grid stale");
+  // Order is the load-bearing part. An edge set deleted while its node still
+  // says "refreshed" reads as COVERED WITH NO SUGGESTIONS — an authoritative
+  // answer that would replace every user's shelf with a fallback one.
+  const unstamp = ops.indexOf("recommendationTitle.updateMany");
+  const del = ops.indexOf("titleSuggestion.deleteMany");
+  assert.ok(unstamp >= 0 && del >= 0, "both halves of the graph reset ran");
+  assert.ok(unstamp < del, "the node must be unstamped BEFORE its edges are deleted");
+
+  // …and a TMDB reset must NOT touch the verdicts: they have no TMDB input.
+  const unstampArgs = txOps[unstamp].args as { data?: Record<string, unknown> };
+  assert.deepEqual(
+    unstampArgs.data,
+    { suggestionsRefreshedAt: null, suggestionCount: 0 },
+    "a TMDB clear resets suggestion bookkeeping only — quality verdicts come from MDBList/OMDB",
+  );
+});
+
+test("clear-cache source=mdblist resets the stored quality verdicts, and leaves the suggestion graph alone", async () => {
+  const admin = await mintSession("ADMIN");
+  tmdbDeleteCount = 4;
+  verdictResetCount = 55;
+
+  const res = await clearCache(
+    req("http://localhost:3000/api/admin/clear-cache?source=mdblist", { method: "DELETE", headers: admin.header }),
+    undefined,
+  );
+
+  assert.deepEqual(await res.json(), {
+    source: "mdblist",
+    cleared: 4,
+    coreCleared: 0,
+    edgesCleared: 0,
+    verdictsCleared: 55,
+  });
+  const ops = txOps.map((o) => o.op);
+  assert.ok(!ops.includes("titleSuggestion.deleteMany"), "ratings have no bearing on which titles are similar");
+  assert.ok(!ops.includes("tmdbMediaCore.deleteMany"), "nor on TMDB's own metadata");
+  // Without this, re-fetched ratings would not move a single For You ranking
+  // until the verdict's own 7-day TTL rolled.
+  const reset = txOps.find((o) => o.op === "recommendationTitle.updateMany")!.args as { data?: Record<string, unknown> };
+  assert.deepEqual(reset.data, { quality: null, evidence: 0, qualityRatedAt: null });
+});
+
+test("clear-cache never wipes a user's shelf — UserRecommendation is left for the next warm run to rebuild", async () => {
+  const admin = await mintSession("ADMIN");
+  await clearCache(
+    req("http://localhost:3000/api/admin/clear-cache?source=all", { method: "DELETE", headers: admin.header }),
+    undefined,
+  );
+  assert.equal(
+    txOps.filter((o) => o.op === "userRecommendation.deleteMany").length,
+    0,
+    "clearing them would blank every For You page for up to 12h to save the same staleness window",
+  );
 });

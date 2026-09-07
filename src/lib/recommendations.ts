@@ -1089,6 +1089,7 @@ const NO_GRAPH: GraphRefreshResult = {
   edgesWritten: 0,
   sourcesSwept: 0,
   titlesRated: 0,
+  verdictsDeferred: 0,
   ratingsFailed: 0,
 };
 

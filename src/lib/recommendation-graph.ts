@@ -395,6 +395,10 @@ export interface GraphRefreshResult {
   edgesWritten: number;
   sourcesSwept: number;
   titlesRated: number;
+  // Titles whose lookup produced nothing while a provider was locked out, so no
+  // verdict was written. They are re-asked next run rather than carrying a
+  // week-long "nobody answered" earned by an outage.
+  verdictsDeferred: number;
   ratingsFailed: number;
 }
 
@@ -408,6 +412,7 @@ const EMPTY_REFRESH: GraphRefreshResult = {
   edgesWritten: 0,
   sourcesSwept: 0,
   titlesRated: 0,
+  verdictsDeferred: 0,
   ratingsFailed: 0,
 };
 
@@ -647,20 +652,45 @@ async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefre
       continue;
     }
 
+    // A NULL verdict is only authoritative if the providers were actually
+    // answering. attachRatingsUnified swallows its own upstream failures
+    // (getOmdbRatingsForTmdb is wrapped in .catch), so it returns the full item
+    // list whether the lookup worked or not and the try/catch above never fires
+    // for a transport failure — every title would reach the write below and get
+    // "asked, nobody answered" stamped on it for a full QUALITY_TTL_MS.
+    //
+    // That is the same mistake the edge writer above is explicitly guarded
+    // against (a page where nothing came back is written nowhere), one layer
+    // over, and it shipped: an OMDB outage was baking week-long null verdicts
+    // into the graph, which the obscurity damp then reads as evidence and
+    // multiplies by OBSCURITY_DAMP — so a network blip quietly demoted every
+    // sub-50-vote candidate it touched.
+    //
+    // Checked AFTER the batch so a lockout tripped mid-flight is seen. This is
+    // what makes the OMDB transport circuit breaker (omdb.ts) load-bearing
+    // rather than merely tidy: without it a timeout storm never sets this flag.
+    const providersAnswering = !isMdblistQuotaLocked() && !isOmdbQuotaLocked();
+
     const now = new Date();
     for (const media of rated) {
       const mediaType: MediaType = media.mediaType === "movie" ? "MOVIE" : "TV";
       const verdict = qualityScoreOf(media);
+      // A real verdict is authoritative however the rest of the batch fared —
+      // a provider answered for THIS title. Only the nulls are in question.
+      if (verdict === null && !providersAnswering) {
+        stats.verdictsDeferred++;
+        continue;
+      }
       try {
         await prisma.recommendationTitle.update({
           where: { tmdbId_mediaType: { tmdbId: media.id, mediaType } },
           data: {
             quality: verdict?.quality ?? null,
             evidence: verdict?.evidence ?? 0,
-            // Stamped even when NOTHING answered. That is the whole point of
-            // separating qualityRatedAt from quality: "asked, nobody answered"
-            // is the state the obscurity damp keys on, and leaving it null
-            // would both lose that verdict and re-ask every run forever.
+            // Stamped even when nothing answered — PROVIDED the providers were
+            // reachable (see above). "Asked, nobody answered" is the state the
+            // obscurity damp keys on, and leaving it null would both lose that
+            // verdict and re-ask every run forever.
             qualityRatedAt: now,
           },
         });
