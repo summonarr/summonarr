@@ -135,6 +135,7 @@ const {
   notifyAdminsIssueMessagePush,
   notifyAdminsDeletionVoteThresholdPush,
   notifyAdminGrabCompletedPush,
+  notifyAdminsManualInteractionRequiredPush,
   notifyUserIssueMessagePush,
   notifyUserRequestApprovedPush,
   notifyUserRequestDeclinedPush,
@@ -747,6 +748,39 @@ test("admin pushes go to MANAGE_REQUESTS holders only: ADMIN superbit and raw gr
   );
   assert.equal(relayCalls[0].body.collapseId, "deletion_votes");
   assert.equal(relayCalls[0].body.payload.url, "/votes");
+});
+
+test("manual-import push names the Radarr/Sonarr INSTANCE, never the download client; the default instance stays bare", async () => {
+  const device = makeDevice();
+  subRows = [iosSub("u-admin", "token-manual", { e2e: device, user: { role: "ADMIN", permissions: 0n } })];
+
+  // A named instance: both the title and body carry the *arr instance the admin
+  // has to open. The webhook used to pass payload.downloadClient ("SABnzbd") here,
+  // which named where the file sat instead of which queue to resolve it in.
+  await notifyAdminsManualInteractionRequiredPush({ service: "Sonarr", title: "Frieren S02E03", instanceName: "Anime" });
+  assert.equal(relayCalls.length, 1);
+  assert.equal(relayCalls[0].body.collapseId, "manual_interaction");
+  assert.equal(relayCalls[0].body.payload.url, "/admin");
+  assert.deepEqual(decryptE2e(device, relayCalls[0].body.payload.e2e!), {
+    t: "Sonarr (Anime): manual import needed",
+    b: "Frieren S02E03 is stuck in the Sonarr (Anime) queue and needs a manual import",
+  });
+  for (const field of ["t", "b"] as const) {
+    assert.doesNotMatch(decryptE2e(device, relayCalls[0].body.payload.e2e!)[field], /sab|nzb|torrent|qbit/i);
+  }
+
+  // The synthesized default instance ("Default") and an absent name both read as
+  // the bare service — a single-instance deployment must not see "(Default)".
+  await notifyAdminsManualInteractionRequiredPush({ service: "Radarr", title: "Dune", instanceName: "Default" });
+  await notifyAdminsManualInteractionRequiredPush({ service: "Radarr", title: "Dune" });
+  assert.equal(relayCalls.length, 3);
+  for (const call of relayCalls.slice(1)) {
+    assert.deepEqual(decryptE2e(device, call.body.payload.e2e!), {
+      t: "Radarr: manual import needed",
+      b: "Dune is stuck in the Radarr queue and needs a manual import",
+    });
+  }
+  assert.deepEqual(errors, []);
 });
 
 test("issue pushes: notifyOnIssue rides the where clause, MANAGE_ISSUES the bitmask; restrict==exclude is a zero-query no-op", async () => {

@@ -909,10 +909,15 @@ export async function notifyAdminsNewIssuePush(data: {
 // Radarr/Sonarr fire ManualInteractionRequired when a grabbed release can't be imported
 // automatically and is parked in the queue waiting for an operator. Best-effort push to all
 // admins so they know to go resolve it; there's nothing to mark available.
+// `instanceName` is the Radarr/Sonarr INSTANCE's display name (registry `name`,
+// e.g. "Default", "4K", "Anime") — never the download client. The webhook payload's
+// `downloadClient` ("SABnzbd", "qBittorrent") used to fill this slot, which told the
+// admin where the file sits but not which *arr queue to open to resolve it; with
+// several instances that is the one thing they need to know.
 export async function notifyAdminsManualInteractionRequiredPush(data: {
   service: "Radarr" | "Sonarr";
   title: string;
-  detail?: string;
+  instanceName?: string;
 }) {
   try {
     const ctx = await pushContext();
@@ -922,11 +927,11 @@ export async function notifyAdminsManualInteractionRequiredPush(data: {
     if (!subs.length) return;
 
     const title = data.title.length > 100 ? data.title.slice(0, 97) + "…" : data.title;
+    const name = data.instanceName?.trim();
+    const where = name && name !== "Default" ? `${data.service} (${name})` : data.service;
     const payload: PushPayload = {
-      title: `${data.service}: manual import needed`,
-      body: data.detail
-        ? `${title} — stuck in ${data.detail}, needs manual intervention`
-        : `${title} needs manual intervention in ${data.service}`,
+      title: `${where}: manual import needed`,
+      body: `${title} is stuck in the ${where} queue and needs a manual import`,
       url: "/admin",
       category: "manual_interaction",
     };
