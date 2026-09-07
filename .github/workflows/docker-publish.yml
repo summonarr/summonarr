@@ -330,14 +330,14 @@ jobs:
         # step trying to upload a SARIF that was never written — noise stacked on
         # whatever actually went wrong.
         if: ${{ always() && steps.scan-amd64.outcome != 'skipped' }}
-        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: trivy-publish.sarif
           category: trivy-publish
 
       - name: Upload Trivy SARIF (arm64)
         if: ${{ always() && steps.scan-arm64.outcome != 'skipped' }}
-        uses: github/codeql-action/upload-sarif@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: trivy-publish-arm64.sarif
           category: trivy-publish-arm64
