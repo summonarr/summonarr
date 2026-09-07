@@ -29,7 +29,6 @@ interface RadarrWebhookPayload {
     tmdbId: number;
     title: string;
   };
-  downloadClient?: string;
   // MovieFileDelete only — Radarr's DeleteMediaFileReason, camelCased by its
   // serializer ("upgrade" when the file is being replaced by a better one).
   deleteReason?: string;
@@ -165,7 +164,7 @@ export async function POST(req: NextRequest) {
     }
     if (shouldNotify) {
       after(async () => {
-        await notifyAdminsManualInteractionRequiredPush({ service: "Radarr", title, detail: payload.downloadClient })
+        await notifyAdminsManualInteractionRequiredPush({ service: "Radarr", title, instanceName: instances.find((i) => i.slug === arrInstance)?.name })
           .catch((err) => console.warn("[webhook/radarr] manual-interaction alert failed:", err));
         // Bound the one-shot marker table: a Setting row is inserted per distinct stuck
         // movie and never removed. The identical prune lives in the Sonarr twin, but it

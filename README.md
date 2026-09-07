@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.24.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.24.3 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,15 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.24.3
+
+**Fixed**
+- Manual-import push alerts for Radarr/Sonarr named the download client (for example "stuck in SABnzbd") instead of the arr instance whose queue needs attention. Multi-instance setups now see the instance name; single-instance ones see the bare service.
+
+**Changed**
+- Runtime image moved to Node 26.8.1 (Alpine 3.23).
+- Bundled dependencies updated (Next.js 16.3.4, jose 6.2.11) and CodeQL actions bumped to 4.37.9.
 
 ### v0.24.2
 
@@ -626,7 +635,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.24.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.24.3 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

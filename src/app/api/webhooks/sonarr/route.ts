@@ -31,7 +31,6 @@ interface SonarrWebhookPayload {
     title: string;
   };
   episodes?: Array<{ seasonNumber?: number; episodeNumber?: number }>;
-  downloadClient?: string;
 }
 
 export async function POST(req: NextRequest) {
@@ -178,7 +177,7 @@ export async function POST(req: NextRequest) {
     }
     if (shouldNotify) {
       after(() =>
-        notifyAdminsManualInteractionRequiredPush({ service: "Sonarr", title, detail: payload.downloadClient })
+        notifyAdminsManualInteractionRequiredPush({ service: "Sonarr", title, instanceName: instances.find((i) => i.slug === arrInstance)?.name })
           .catch((err) => console.warn("[webhook/sonarr] manual-interaction alert failed:", err)),
       );
       // Bound the one-shot marker table: a Setting row is inserted per distinct

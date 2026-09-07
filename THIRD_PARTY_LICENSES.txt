@@ -940,63 +940,63 @@ License: Apache-2.0 AND LGPL-3.0-or-later
 
 ------------------------------------------------------------------------------
 
-@next/env@16.3.2
+@next/env@16.3.4
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-darwin-arm64@16.3.2
+@next/swc-darwin-arm64@16.3.4
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-darwin-x64@16.3.2
+@next/swc-darwin-x64@16.3.4
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-arm64-gnu@16.3.2
+@next/swc-linux-arm64-gnu@16.3.4
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-arm64-musl@16.3.2
+@next/swc-linux-arm64-musl@16.3.4
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-x64-gnu@16.3.2
+@next/swc-linux-x64-gnu@16.3.4
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-x64-musl@16.3.2
+@next/swc-linux-x64-musl@16.3.4
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-win32-arm64-msvc@16.3.2
+@next/swc-win32-arm64-msvc@16.3.4
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-win32-x64-msvc@16.3.2
+@next/swc-win32-x64-msvc@16.3.4
 License: MIT
 
 (No license file shipped in the package.)
@@ -4688,7 +4688,7 @@ MIT License
 
 ------------------------------------------------------------------------------
 
-@types/node@26.2.0
+@types/node@26.4.1
 License: MIT
 
 MIT License
@@ -7342,7 +7342,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-jose@6.2.10
+jose@6.2.11
 License: MIT
 
 The MIT License (MIT)
@@ -7761,7 +7761,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-next@16.3.2
+next@16.3.4
 License: MIT
 
 The MIT License (MIT)
