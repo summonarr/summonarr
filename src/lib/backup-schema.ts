@@ -53,6 +53,12 @@ export const BACKUP_TABLES = [
   "HiddenItem",
   "Notification",
   "UserRecommendation",
+  // The server-wide "For You" graph (recommendation-graph.ts). Derived data —
+  // a restore that dropped it would simply be rebuilt by the next
+  // warm-recommendations run — but BACKUP_TABLES must cover EVERY model (the
+  // import's TRUNCATE step reads this same list), so both are listed.
+  "RecommendationTitle",
+  "TitleSuggestion",
   "BlacklistItem",
 ] as const;
 

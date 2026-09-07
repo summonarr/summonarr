@@ -153,6 +153,11 @@ for (const model of [
   "user", "mediaServerUser", "playHistory", "activeSession", "tmdbCache",
   "cronRun", "trashApplication", "trashSpec", "mediaRequest", "plexLibraryItem",
   "jellyfinLibraryItem", "notification", "pushSubscription", "deletionVote", "issue",
+  // warm-recommendations reaches these through warmRecommendationsCache: the
+  // per-user shelf, and the server-wide graph it refreshes first (guardrail 40).
+  // An unstubbed model here does not fail — it tries to open a real connection
+  // and the suite hangs.
+  "userRecommendation", "watchlistItem", "titleSuggestion", "recommendationTitle",
 ]) {
   shadowPrismaModel(prisma, model, counter(model));
 }

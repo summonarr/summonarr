@@ -1209,6 +1209,93 @@ enum RecommendationSeed {
   TRENDING
 }
 
+// ─── Recommendation Graph ─────────────────────────────────────────────────────
+// The SERVER-WIDE half of the "For You" engine: every title the server can seed
+// a recommendation from carries its own suggestion list and its own quality
+// verdict here, computed ONCE for the whole instance by the warm-recommendations
+// cron. Before this existed the engine re-derived both PER USER — up to ~148
+// TmdbCache blob reads (or live TMDB calls) and a 300-title MDBList/OMDB pass
+// each — so the same library title was fanned out again for every account, and a
+// cold cache made the first user of each cycle pay for everyone.
+//
+// Per-user compute now reads two indexed queries out of these two tables and
+// issues no upstream request at all. The live TMDB/ratings path survives only as
+// a self-healing fallback for a title the graph has not covered yet (a watchlist
+// entry added since the last refresh), and it disappears as the graph fills.
+
+// One row per (source title, suggested title) edge, ordered by the position TMDB
+// returned it at — the same ordering the engine's positionFactor scores on.
+//
+// The suggested title's display fields are denormalized (as UserRecommendation
+// already does, and for the same reason): a suggestion-only tmdbId is not
+// guaranteed a TmdbCache/TmdbMediaCore row, so a join could not reconstruct a
+// TmdbMedia. originalLanguage and voteCount are here because the engine's
+// language profile and its TMDB quality term read them off the raw suggestion —
+// they are inputs to scoring, not display.
+model TitleSuggestion {
+  sourceTmdbId    Int
+  sourceMediaType MediaType
+
+  tmdbId    Int
+  mediaType MediaType
+  position  Int
+
+  title            String  @db.VarChar(500)
+  overview         String?
+  posterPath       String? @db.VarChar(500)
+  backdropPath     String? @db.VarChar(500)
+  releaseDate      String? @db.VarChar(16)
+  voteAverage      Float   @default(0)
+  voteCount        Int     @default(0)
+  originalLanguage String? @db.VarChar(16)
+
+  // The compound PK's leading (sourceTmdbId, sourceMediaType) prefix serves the
+  // only read this table has — "every edge out of these seeds" — so no separate
+  // index is carried for it. `position` is sorted in memory over the <= 40 rows
+  // one source can hold rather than in Postgres.
+  @@id([sourceTmdbId, sourceMediaType, tmdbId, mediaType])
+}
+
+// One row per title the graph knows about, in EITHER role: as a suggestion
+// source (the library title whose edges above were built) or as a suggestion
+// target (a candidate whose ratings were resolved into a quality verdict). Most
+// titles are both, which is why this is one node table and not two.
+model RecommendationTitle {
+  tmdbId    Int
+  mediaType MediaType
+
+  // The one piece of metadata the verdict below actually needs: OMDB
+  // disambiguates a title match by YEAR, so this is an INPUT to the rating
+  // lookup, not decoration. Written when the node is first created (from the
+  // edge that introduced the title, or from the fallback pool). No title
+  // column on purpose — every display surface reads TitleSuggestion or
+  // UserRecommendation, and a second copy would just be one more thing to keep
+  // in step with an upstream rename.
+  releaseDate String? @db.VarChar(16)
+
+  // Suggestion-source bookkeeping. suggestionsRefreshedAt is what the
+  // incremental refresh triages on, and it is stamped even when the fetch
+  // yielded ZERO edges — otherwise a title TMDB genuinely has no suggestions
+  // for would be re-fetched on every single run, forever.
+  suggestionsRefreshedAt DateTime?
+  suggestionCount        Int       @default(0)
+
+  // Precomputed quality verdict (see qualityScoreOf in recommendation-quality.ts).
+  // The two null states are DIFFERENT and the engine reads them differently:
+  //   qualityRatedAt == null  → never rated; no opinion, no obscurity damp;
+  //   qualityRatedAt != null && quality == null → rated, and not one provider
+  //     answered — which is what the damp is for.
+  quality        Float?
+  evidence       Float     @default(0)
+  qualityRatedAt DateTime?
+
+  @@id([tmdbId, mediaType])
+  // Drives the refresh triage's "which nodes are stale/unrated" scans; the PK
+  // cannot serve either ordering.
+  @@index([suggestionsRefreshedAt])
+  @@index([qualityRatedAt])
+}
+
 // In-app notification inbox (the header bell). One row per user-facing event
 // (request approved / available / declined). Written alongside the email/push/
 // Discord fan-out in request-notifications.ts — UNCONDITIONALLY (unlike the

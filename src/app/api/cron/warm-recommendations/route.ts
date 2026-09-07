@@ -35,8 +35,12 @@ export async function POST(request: NextRequest) {
       // Error, and the container reschedules a failing job every
       // CRON_RETRY_INTERVAL (300s) — so a job broken for a week showed a green
       // tick while being retried 12x an hour.
+      // The graph is load-bearing now that nothing falls back to a live lookup:
+      // a refresh that threw means NOBODY was recomputed, so it must go red
+      // rather than reporting a clean run in which zero users happened to
+      // update. A per-user failure still counts the same as it always did.
       const failed = result.usersFailed;
-      await recordCronRun("recommendations", durationMs, failed === 0);
+      await recordCronRun("recommendations", durationMs, failed === 0 && !result.graphFailed);
 
       if (authCtx.trigger !== "cron") {
         await logAudit({
@@ -55,12 +59,19 @@ export async function POST(request: NextRequest) {
       // the container reschedules any non-2xx every CRON_RETRY_INTERVAL (300s)
       // instead of the job's own interval. `error` + X-Cron-Degraded are the
       // documented degraded-but-completed signal (see withCronRunRecording).
+      const degraded = failed > 0 || result.graphFailed;
+      const error = result.graphFailed
+        ? "the recommendation graph refresh failed — no user was recomputed and every shelf was left as-is"
+        : failed > 0
+          ? `${failed} user(s) failed to warm`
+          : undefined;
+
       return NextResponse.json({
-        ok: failed === 0,
+        ok: !degraded,
         ...result,
-        ...(failed > 0 ? { error: `${failed} user(s) failed to warm` } : {}),
+        ...(error ? { error } : {}),
         timestamp: new Date().toISOString(),
-      }, failed > 0 ? { headers: { "X-Cron-Degraded": String(failed) } } : undefined);
+      }, degraded ? { headers: { "X-Cron-Degraded": String(result.graphFailed ? "graph" : failed) } } : undefined);
     },
     () => NextResponse.json({ skipped: true, reason: "already running" }),
   );

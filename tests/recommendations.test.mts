@@ -16,7 +16,7 @@
 //     long-ago 40-episode binge outranks something watched two days ago;
 //   - the match-strength band is assigned by RANK over the viewer's surviving
 //     set (top 10% / top 33%), independently of whether a row carries a reason;
-//   - seed SELECTION is recency-first (the last 100 titles played), so a heavy
+//   - seed SELECTION is recency-first (the last 200 titles played), so a heavy
 //     series can no longer occupy the slots on play count alone. The stub's
 //     groupBy honours args.orderBy for exactly this reason — hardcoding a sort
 //     there made the real query's ordering untestable;
@@ -107,9 +107,10 @@ if ((dns as { lookup: unknown }).lookup !== fakeLookup) {
 
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
-const { computeRecommendationsForUser, warmRecommendationsCache, getUserRecommendations, getRecommendationSummary, qualityScoreOf } =
+const { computeRecommendationsForUser, selectSeedPlan, warmRecommendationsCache, getUserRecommendations, getRecommendationSummary, qualityScoreOf } =
   await import("../src/lib/recommendations.ts");
 const { invalidateBlacklistCache } = await import("../src/lib/blacklist.ts");
+const { refreshRecommendationGraph, prewarmSuggestionEdges } = await import("../src/lib/recommendation-graph.ts");
 
 // ── in-memory tables ─────────────────────────────────────────────────────────
 type MT = "MOVIE" | "TV";
@@ -199,6 +200,16 @@ let mediaRequests: RequestRow[] = [];
 let deletionVotes: VoteRow[] = [];
 let blacklistItems: BlacklistRow[] = [];
 let transactionCalls = 0;
+// Transactions that actually WROTE UserRecommendation. The graph refresh now
+// opens transactions of its own in the same run (it rebuilds the server-wide
+// suggestion edges before the per-user fan-out), so a bare transaction count no
+// longer isolates the "one transaction PER USER, never one spanning all users"
+// pin. Derived from whether the callback increased the userRecommendation
+// deleteMany counter, which is what actually distinguishes a per-user write from
+// one big one — the graph's own transactions complete before any user pass
+// starts, so they can never be miscounted here.
+let userRecTransactionCalls = 0;
+let userRecDeletes = 0;
 let watchlistFindManyCalls = 0;
 
 // ── prisma.user ───────────────────────────────────────────────────────────
@@ -233,13 +244,15 @@ shadowPrismaModel(prisma, "mediaServerUser", {
 // ── prisma.playHistory (seed groupBy + exclusion/drift findMany) ──────────
 shadowPrismaModel(prisma, "playHistory", {
   groupBy: async (args: {
-    where: { mediaServerUserId: { in: string[] }; watched: boolean; startedAt?: { gte: Date } };
+    // mediaServerUserId is ABSENT on collectGraphSources' read: the graph is
+    // server-wide, so it groups every watched title regardless of whose it is.
+    where: { mediaServerUserId?: { in: string[] }; watched: boolean; startedAt?: { gte: Date } };
     take: number;
     _sum?: { playDuration?: true };
     _max?: { startedAt?: true; title?: true; duration?: true };
     orderBy?: ({ _count?: { tmdbId: "desc" } } | { _max?: { startedAt: "desc" } })[];
   }) => {
-    const ids = new Set(args.where.mediaServerUserId.in);
+    const ids = args.where.mediaServerUserId ? new Set(args.where.mediaServerUserId.in) : null;
     const cutoff = args.where.startedAt?.gte.getTime();
     // HONOUR where.watched. This stub used to hardcode `p.watched` (truthy),
     // which silently served the watched:FALSE abandoned-play query the same
@@ -247,7 +260,7 @@ shadowPrismaModel(prisma, "playHistory", {
     // and the guard branches would be exercised against the wrong data.
     const eligible = playHistoryRows.filter(
       (p) =>
-        ids.has(p.mediaServerUserId) &&
+        (ids === null || ids.has(p.mediaServerUserId)) &&
         p.watched === args.where.watched &&
         p.tmdbId != null &&
         p.mediaType != null &&
@@ -328,9 +341,11 @@ shadowPrismaModel(prisma, "playHistory", {
 
 // ── prisma.watchlistItem ────────────────────────────────────────────────────
 shadowPrismaModel(prisma, "watchlistItem", {
-  findMany: async (args: { where: { userId: string }; orderBy?: { createdAt: "desc" }; take?: number }) => {
+  // `where` is ABSENT on collectGraphSources' read — the graph seeds from every
+  // user's watchlist, not one account's.
+  findMany: async (args: { where?: { userId: string }; orderBy?: { createdAt: "desc" }; take?: number }) => {
     watchlistFindManyCalls++;
-    let rows = watchlistRows.filter((w) => w.userId === args.where.userId);
+    let rows = args.where ? watchlistRows.filter((w) => w.userId === args.where!.userId) : [...watchlistRows];
     if (args.orderBy?.createdAt === "desc") rows = [...rows].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     if (args.take != null) rows = rows.slice(0, args.take);
     return rows.map((r) => ({
@@ -382,6 +397,7 @@ shadowPrismaModel(prisma, "userRecommendation", {
     return out;
   },
   deleteMany: async (args: { where: { userId: string } }) => {
+    userRecDeletes++;
     const before = userRecRows.length;
     userRecRows = userRecRows.filter((r) => r.userId !== args.where.userId);
     return { count: before - userRecRows.length };
@@ -398,7 +414,10 @@ shadowPrismaModel(prisma, "userRecommendation", {
 // tx.userRecommendation resolves to the same shadowed delegate above.
 shadowPrismaClientMethod(prisma, "$transaction", async (fn: (tx: unknown) => Promise<unknown>) => {
   transactionCalls++;
-  return fn(prisma);
+  const before = userRecDeletes;
+  const out = await fn(prisma);
+  if (userRecDeletes > before) userRecTransactionCalls++;
+  return out;
 });
 
 // ── prisma.setting ──────────────────────────────────────────────────────────
@@ -424,16 +443,17 @@ shadowPrismaModel(prisma, "mediaRequest", {
   //     OR permanentlyDeclined) — status-filtered;
   //   - selectSeeds' seed read: requestedBy alone, newest-first with a take —
   //     every status seeds.
+  //   - collectGraphSources' server-wide read: no `where` at all.
   findMany: async (args: {
-    where: {
+    where?: {
       requestedBy: string;
       OR?: [{ status: { in: string[] } }, { permanentlyDeclined: boolean }];
     };
     orderBy?: { createdAt: "desc" };
     take?: number;
   }) => {
-    let rows = mediaRequests.filter((r) => r.requestedBy === args.where.requestedBy);
-    if (args.where.OR) {
+    let rows = args.where ? mediaRequests.filter((r) => r.requestedBy === args.where!.requestedBy) : [...mediaRequests];
+    if (args.where?.OR) {
       const or = args.where.OR;
       return rows
         .filter((r) => or[0].status.in.includes(r.status) || r.permanentlyDeclined === or[1].permanentlyDeclined)
@@ -461,6 +481,257 @@ shadowPrismaModel(prisma, "blacklistItem", {
   findMany: async () => blacklistItems.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType })),
 });
 
+// ── the SERVER-WIDE recommendation graph (recommendation-graph.ts) ──────────
+// TitleSuggestion holds the precomputed edges, RecommendationTitle the per-title
+// node (refresh bookkeeping + the quality verdict). Both are empty in most tests
+// here, which is exactly the cold-graph state: the engine then falls back to the
+// scripted TMDB fetch, so every pre-graph assertion in this file still exercises
+// the path it was written for. The graph-specific tests seed them directly.
+interface EdgeRow {
+  sourceTmdbId: number;
+  sourceMediaType: MT;
+  tmdbId: number;
+  mediaType: MT;
+  position: number;
+  title: string;
+  overview: string | null;
+  posterPath: string | null;
+  backdropPath: string | null;
+  releaseDate: string | null;
+  voteAverage: number;
+  voteCount: number;
+  originalLanguage: string | null;
+}
+interface NodeRow {
+  tmdbId: number;
+  mediaType: MT;
+  releaseDate: string | null;
+  suggestionsRefreshedAt: Date | null;
+  suggestionCount: number;
+  quality: number | null;
+  evidence: number;
+  qualityRatedAt: Date | null;
+}
+let edgeRows: EdgeRow[] = [];
+let nodeRows: NodeRow[] = [];
+let libraryRows: { tmdbId: number; mediaType: MT; serverInstance: string }[] = [];
+
+// Seeds one source's edge list plus the node stamp that marks it COVERED — the
+// two together are what let readGraphSuggestions answer without a TMDB call, and
+// the stamp alone is what distinguishes "TMDB has nothing for this title" from
+// "not built yet".
+function seedGraph(
+  source: { tmdbId: number; mediaType: MT },
+  suggestions: { tmdbId: number; mediaType: MT; voteAverage?: number; voteCount?: number; originalLanguage?: string }[],
+  refreshedAt: Date = new Date(T0),
+): void {
+  nodeRows.push({
+    tmdbId: source.tmdbId,
+    mediaType: source.mediaType,
+    releaseDate: null,
+    suggestionsRefreshedAt: refreshedAt,
+    suggestionCount: suggestions.length,
+    quality: null,
+    evidence: 0,
+    qualityRatedAt: null,
+  });
+  suggestions.forEach((sug, position) => {
+    edgeRows.push({
+      sourceTmdbId: source.tmdbId,
+      sourceMediaType: source.mediaType,
+      tmdbId: sug.tmdbId,
+      mediaType: sug.mediaType,
+      position,
+      title: sug.mediaType === "MOVIE" ? `Movie ${sug.tmdbId}` : `Show ${sug.tmdbId}`,
+      overview: `overview ${sug.tmdbId}`,
+      posterPath: `/poster${sug.tmdbId}.jpg`,
+      backdropPath: `/backdrop${sug.tmdbId}.jpg`,
+      releaseDate: "2020-01-01",
+      voteAverage: sug.voteAverage ?? 7,
+      voteCount: sug.voteCount ?? 0,
+      originalLanguage: sug.originalLanguage ?? null,
+    });
+  });
+}
+
+// Stores a precomputed verdict for a candidate. `quality: null` with a stamped
+// qualityRatedAt is the "asked, nobody answered" state the obscurity damp reads.
+function seedVerdict(tmdbId: number, mediaType: MT, quality: number | null, evidence: number): void {
+  const existing = nodeRows.find((n) => n.tmdbId === tmdbId && n.mediaType === mediaType);
+  if (existing) {
+    existing.quality = quality;
+    existing.evidence = evidence;
+    existing.qualityRatedAt = new Date(T0);
+    return;
+  }
+  nodeRows.push({
+    tmdbId,
+    mediaType,
+    releaseDate: null,
+    suggestionsRefreshedAt: null,
+    suggestionCount: 0,
+    quality,
+    evidence,
+    qualityRatedAt: new Date(T0),
+  });
+}
+
+type KeyPair = { tmdbId: number; mediaType: MT };
+const matchesAny = (row: KeyPair, or: KeyPair[]) =>
+  or.some((c) => c.tmdbId === row.tmdbId && c.mediaType === row.mediaType);
+
+let edgeFindManyCalls = 0;
+shadowPrismaModel(prisma, "titleSuggestion", {
+  // Counted: the whole point of the edge table is ONE read for every seed a user
+  // holds, in place of one cache read per seed.
+  findMany: async (args: { where: { OR: { sourceTmdbId: number; sourceMediaType: MT }[] } }) => (
+    edgeFindManyCalls++,
+    edgeRows.filter((e) =>
+      args.where.OR.some((c) => c.sourceTmdbId === e.sourceTmdbId && c.sourceMediaType === e.sourceMediaType),
+    )
+  ),
+  groupBy: async (args: { where: { OR: { sourceTmdbId: number; sourceMediaType: MT }[] } }) => {
+    const seen = new Set<string>();
+    const out: KeyPair[] = [];
+    for (const e of edgeRows) {
+      if (!args.where.OR.some((c) => c.sourceTmdbId === e.sourceTmdbId && c.sourceMediaType === e.sourceMediaType)) continue;
+      const k = `${e.tmdbId}:${e.mediaType}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push({ tmdbId: e.tmdbId, mediaType: e.mediaType });
+    }
+    return out;
+  },
+  deleteMany: async (args: { where: { OR: { sourceTmdbId: number; sourceMediaType: MT }[] } }) => {
+    const before = edgeRows.length;
+    edgeRows = edgeRows.filter(
+      (e) => !args.where.OR.some((c) => c.sourceTmdbId === e.sourceTmdbId && c.sourceMediaType === e.sourceMediaType),
+    );
+    return { count: before - edgeRows.length };
+  },
+  createMany: async (args: { data: EdgeRow[] }) => {
+    edgeRows.push(...args.data);
+    return { count: args.data.length };
+  },
+});
+
+shadowPrismaModel(prisma, "recommendationTitle", {
+  // Three query shapes share this delegate, discriminated by the where clause:
+  //   - readGraphSuggestions' covered-source probe (OR of keys + a non-null
+  //     suggestionsRefreshedAt);
+  //   - readTitleQuality / the refresh triage (OR of keys, no extra predicate);
+  //   - refreshQualityVerdicts' stale scan (OR over qualityRatedAt).
+  findMany: async (args: {
+    where: {
+      OR?: (KeyPair | { qualityRatedAt: null | { lt: Date } })[];
+      suggestionsRefreshedAt?: { not: null };
+    };
+    take?: number;
+  }) => {
+    const or = args.where.OR;
+    // sweepOrphanSources' scan: every BUILT source, no key filter at all.
+    if (or === undefined) {
+      const rows = nodeRows.filter((n) => n.suggestionsRefreshedAt !== null);
+      return args.take != null ? rows.slice(0, args.take) : rows;
+    }
+    if (or.length > 0 && "qualityRatedAt" in or[0]) {
+      const staleBefore = or
+        .map((c) => ("qualityRatedAt" in c && c.qualityRatedAt !== null ? c.qualityRatedAt.lt : null))
+        .find((d): d is Date => d instanceof Date);
+      let rows = nodeRows.filter(
+        (n) => n.qualityRatedAt === null || (staleBefore != null && n.qualityRatedAt.getTime() < staleBefore.getTime()),
+      );
+      rows = [...rows].sort((a, b) => (a.qualityRatedAt?.getTime() ?? -1) - (b.qualityRatedAt?.getTime() ?? -1));
+      if (args.take != null) rows = rows.slice(0, args.take);
+      return rows;
+    }
+    const keys = or as KeyPair[];
+    return nodeRows.filter(
+      (n) =>
+        matchesAny(n, keys) &&
+        (args.where.suggestionsRefreshedAt === undefined || n.suggestionsRefreshedAt !== null),
+    );
+  },
+  count: async (args: { where: { OR: KeyPair[]; suggestionsRefreshedAt?: { not: null } } }) =>
+    nodeRows.filter(
+      (n) =>
+        matchesAny(n, args.where.OR) &&
+        (args.where.suggestionsRefreshedAt === undefined || n.suggestionsRefreshedAt !== null),
+    ).length,
+  groupBy: async () => [],
+  createMany: async (args: { data: { tmdbId: number; mediaType: MT; releaseDate: string | null }[] }) => {
+    let count = 0;
+    for (const row of args.data) {
+      if (nodeRows.some((n) => n.tmdbId === row.tmdbId && n.mediaType === row.mediaType)) continue;
+      nodeRows.push({
+        tmdbId: row.tmdbId,
+        mediaType: row.mediaType,
+        releaseDate: row.releaseDate ?? null,
+        suggestionsRefreshedAt: null,
+        suggestionCount: 0,
+        quality: null,
+        evidence: 0,
+        qualityRatedAt: null,
+      });
+      count++;
+    }
+    return { count };
+  },
+  upsert: async (args: {
+    where: { tmdbId_mediaType: KeyPair };
+    create: Partial<NodeRow> & KeyPair;
+    update: Partial<NodeRow>;
+  }) => {
+    const k = args.where.tmdbId_mediaType;
+    const existing = nodeRows.find((n) => n.tmdbId === k.tmdbId && n.mediaType === k.mediaType);
+    if (existing) {
+      Object.assign(existing, args.update);
+      return existing;
+    }
+    const row: NodeRow = {
+      releaseDate: null,
+      suggestionsRefreshedAt: null,
+      suggestionCount: 0,
+      quality: null,
+      evidence: 0,
+      qualityRatedAt: null,
+      ...args.create,
+      tmdbId: k.tmdbId,
+      mediaType: k.mediaType,
+    };
+    nodeRows.push(row);
+    return row;
+  },
+  updateMany: async (args: { where: { OR: KeyPair[] }; data: Partial<NodeRow> }) => {
+    let count = 0;
+    for (const n of nodeRows) {
+      if (!matchesAny(n, args.where.OR)) continue;
+      Object.assign(n, args.data);
+      count++;
+    }
+    return { count };
+  },
+  update: async (args: { where: { tmdbId_mediaType: KeyPair }; data: Partial<NodeRow> }) => {
+    const k = args.where.tmdbId_mediaType;
+    const existing = nodeRows.find((n) => n.tmdbId === k.tmdbId && n.mediaType === k.mediaType);
+    if (!existing) throw new Error("RecommendationTitle row not found");
+    Object.assign(existing, args.data);
+    return existing;
+  },
+});
+
+// collectAllLibraryItems walks both library tables; one shared row set is enough
+// here (the helper dedupes across sources anyway).
+let libraryThrows = false;
+const libraryFindMany = async (args: { where: { mediaType: MT }; take: number; cursor?: unknown }) => {
+  // The cheapest way to make refreshRecommendationGraph throw outright:
+  // collectGraphSources walks the library, and nothing above it catches.
+  if (libraryThrows) throw new Error("library read failed");
+  return args.cursor !== undefined ? [] : libraryRows.filter((r) => r.mediaType === args.where.mediaType).slice(0, args.take);
+};
+shadowPrismaModel(prisma, "plexLibraryItem", { findMany: libraryFindMany });
+shadowPrismaModel(prisma, "jellyfinLibraryItem", { findMany: async () => [] });
+
 // ── tmdbCache ───────────────────────────────────────────────────────────────
 // findUnique always misses (suggestion-cache correctness is tmdb.ts's concern,
 // not this file's) and writes are swallowed. findMany DOES serve, because it is
@@ -468,6 +739,7 @@ shadowPrismaModel(prisma, "blacklistItem", {
 // driven deterministically with zero network — MDBList/OMDB are only consulted
 // for keys the cache misses, and here it never misses for a seeded title.
 let ratingRows: { key: string; data: string; expiresAt: Date }[] = [];
+let ratingsCacheReads = 0;
 // Warm list rows for the cold-start fallback (trending:week / movies:popular /
 // tv:popular). Empty in most tests, so getTrending & co fetch through the
 // scripted TMDB mock (which answers unknown paths with empty pages) and the
@@ -480,10 +752,28 @@ shadowPrismaModel(prisma, "tmdbCache", {
     return { key: args.where.key, data: JSON.stringify(seeded), cachedAt: new Date(T0), expiresAt: new Date(T0 + 7 * DAY_MS) };
   },
   findMany: async (args: { where: { key: { in: string[] } } }) => {
+    // Counted: this is the ratings cache read, i.e. the per-user ratings query
+    // the precomputed verdicts exist to remove. A test that seeds a verdict for
+    // every candidate asserts this stays at zero.
+    ratingsCacheReads++;
     const wanted = new Set(args.where.key.in);
     return ratingRows.filter((r) => wanted.has(r.key));
   },
-  upsert: async () => ({}),
+  // Writes PERSIST, so a cache warmed inside a test is warm for the rest of it.
+  // That is what makes the fallback pool's warm-then-read guarantee observable:
+  // refreshRecommendationGraph reads trending/popular (filling these rows), and
+  // the compute path's own read then has to be a hit rather than a fetch.
+  upsert: async (args: { where: { key: string }; create?: { data?: string }; update?: { data?: string } }) => {
+    const raw = args.create?.data ?? args.update?.data;
+    if (typeof raw === "string") {
+      try {
+        listCacheRows.set(args.where.key, JSON.parse(raw));
+      } catch {
+        // not a shape this stub serves back; the write is simply dropped
+      }
+    }
+    return {};
+  },
   deleteMany: async () => ({ count: 0 }),
 });
 
@@ -522,6 +812,10 @@ interface RawFixture {
   // costs no extra request — normalizeMovie/normalizeTV carry it straight
   // through onto the suggestion items.
   original_language?: string;
+  // /trending/all/week is a MIXED list — normalizeTrending discriminates on
+  // this, and an entry without it is dropped (which would leave the pool empty,
+  // and an empty pool is never cached).
+  media_type?: "movie" | "tv";
 }
 function movieItem(id: number): RawFixture {
   return {
@@ -546,6 +840,10 @@ function tvItem(id: number): RawFixture {
   };
 }
 
+// Trending/popular payloads, by path suffix. Separate from suggestionsFor
+// because these are LIST endpoints with no seed id in the path.
+const listFixtures = new Map<string, RawFixture[]>();
+
 const fetchCalls: string[] = [];
 // Simulates TMDB being unreachable. A network failure rejects, which lands in the
 // Promise.allSettled INSIDE getMovieSuggestions/getTVSuggestions — those swallow it
@@ -558,8 +856,9 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
   if (tmdbOutage) throw new TypeError("fetch failed");
   // Not anchored to the start: TMDB's real paths carry a version prefix
   // (/3/movie/{id}/similar) — match the suffix shape regardless of it.
+  const listed = [...listFixtures.entries()].find(([path]) => url.pathname.endsWith(path));
   const match = url.pathname.match(/\/(movie|tv)\/(\d+)\/(similar|recommendations)$/);
-  const items = match ? (suggestionsFor.get(`${match[1]}:${match[2]}`) ?? []) : [];
+  const items = match ? (suggestionsFor.get(`${match[1]}:${match[2]}`) ?? []) : (listed?.[1] ?? []);
   return new Response(JSON.stringify({ page: 1, results: items, total_pages: 1, total_results: items.length }), {
     status: 200,
     headers: { "content-type": "application/json" },
@@ -569,6 +868,25 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
 // ── shared fixtures ──────────────────────────────────────────────────────────
 function daysAgo(n: number): Date {
   return new Date(T0 - n * DAY_MS);
+}
+
+// Runs a compute the way the CRON runs one, which since the fallback was removed
+// is the only way it is ever run for real: select the user's seeds, build the
+// graph for exactly that union, then compute against it. The engine has no live
+// path — a seed the graph cannot answer for contributes nothing — so a test that
+// skipped the build would be testing an unbuilt graph, not the engine.
+//
+// Deliberately the REAL refresh rather than a hand-seeded fixture: it keeps the
+// scripted-TMDB fixtures every test below is written around, and it means each
+// of them also exercises the build-then-read contract end to end. Tests that
+// want to probe an incompletely-built graph seed edgeRows/nodeRows directly and
+// call computeRecommendationsForUser themselves.
+async function computeSeeded(userId: string) {
+  const plan = await selectSeedPlan(userId);
+  await refreshRecommendationGraph({
+    required: plan.seeds.map((s) => ({ tmdbId: s.tmdbId, mediaType: s.mediaType })),
+  });
+  return computeRecommendationsForUser(userId, plan);
 }
 
 beforeEach(() => {
@@ -587,11 +905,20 @@ beforeEach(() => {
   // a test's blacklist rows leak into every later test in the file.
   invalidateBlacklistCache();
   suggestionsFor.clear();
+  listFixtures.clear();
   ratingRows = [];
   fetchCalls.length = 0;
   tmdbOutage = false;
   transactionCalls = 0;
+  userRecTransactionCalls = 0;
+  userRecDeletes = 0;
   watchlistFindManyCalls = 0;
+  edgeRows = [];
+  nodeRows = [];
+  libraryRows = [];
+  ratingsCacheReads = 0;
+  edgeFindManyCalls = 0;
+  libraryThrows = false;
 });
 
 // ── cold start ───────────────────────────────────────────────────────────────
@@ -602,7 +929,7 @@ test("TV seeds route through getTVSuggestions and round-trip the Prisma MediaTyp
   playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 40, mediaType: "TV", watched: true, startedAt: daysAgo(1) }];
   suggestionsFor.set("tv:40", [tvItem(900)]);
 
-  const result = await computeRecommendationsForUser("u1");
+  const result = await computeSeeded("u1");
   assert.deepEqual(result.candidates.map((c) => ({ tmdbId: c.tmdbId, mediaType: c.mediaType })), [{ tmdbId: 900, mediaType: "TV" }]);
   assert.ok(fetchCalls.some((p) => p.endsWith("/tv/40/similar") || p.endsWith("/tv/40/recommendations")));
 });
@@ -614,7 +941,7 @@ test("cold start with the fallback pool UNAVAILABLE: empty and INCONCLUSIVE — 
   // empty pages — the pool reads as unavailable. Before the fallback existed
   // this was a CONCLUSIVE empty; now conclusive=false, so a transient TMDB
   // outage can no longer wipe a cold-start user's previous (fallback) shelf.
-  const result = await computeRecommendationsForUser("u1");
+  const result = await computeSeeded("u1");
   assert.deepEqual(result.candidates, []);
   assert.equal(result.conclusive, false);
   // No seed fan-out happened — only the fallback pool reads.
@@ -633,7 +960,7 @@ test("only watched:true rows seed the engine — a merely-sampled (watched:false
   suggestionsFor.set("movie:10", [movieItem(500)]);
   suggestionsFor.set("movie:99", [movieItem(600)]); // must never be fetched — 99 isn't a seed
 
-  const result = await computeRecommendationsForUser("u1");
+  const result = await computeSeeded("u1");
   assert.deepEqual(result.candidates.map((c) => c.tmdbId), [500]);
   assert.ok(!fetchCalls.some((p) => p.startsWith("/movie/99/")), "watched:false row must not become a seed");
 });
@@ -659,7 +986,7 @@ test("seed recency window: an old episode binge outside 180 days seeds BEHIND th
   suggestionsFor.set("tv:10", [tvItem(111)]);
   suggestionsFor.set("tv:20", [tvItem(222), tvItem(10)]);
 
-  const result = await computeRecommendationsForUser("u1");
+  const result = await computeSeeded("u1");
 
   assert.deepEqual(
     result.candidates.map((c) => c.tmdbId),
@@ -682,7 +1009,7 @@ test("windowed-first top-up: a busy user's few recent watches keep the TOP slots
   suggestionsFor.set("movie:50", [movieItem(555)]);
   suggestionsFor.set("movie:60", [movieItem(666)]);
 
-  const result = await computeRecommendationsForUser("u1");
+  const result = await computeSeeded("u1");
 
   // Both seed — but the recent watch is weighted on its OWN age, so it wins
   // despite the old favorite having 3x the plays. This is the case the scoring
@@ -720,7 +1047,7 @@ test("seed recency window: ONLY-old history falls back to all-time seeding inste
   ];
   suggestionsFor.set("movie:10", [movieItem(333)]);
 
-  const result = await computeRecommendationsForUser("u1");
+  const result = await computeSeeded("u1");
 
   assert.deepEqual(result.candidates.map((c) => c.tmdbId), [333]);
   assert.equal(result.conclusive, true);
@@ -751,7 +1078,7 @@ test("scoring: recency + compressed play-count per seed, positional decay per su
   suggestionsFor.set("movie:20", [movieItem(999), movieItem(888)]);
   suggestionsFor.set("movie:30", [movieItem(999)]);
 
-  const result = await computeRecommendationsForUser("u1");
+  const result = await computeSeeded("u1");
   const byId = new Map(result.candidates.map((c) => [c.tmdbId, c]));
   const near = (actual: number | undefined, expected: number, msg: string) =>
     assert.ok(actual !== undefined && Math.abs(actual - expected) < 1e-9, `${msg} (got ${actual}, want ~${expected})`);
@@ -792,7 +1119,7 @@ test("scoring: a fresh single watch outweighs an old binge — recency beats raw
   suggestionsFor.set("tv:70", [tvItem(700)]);
   suggestionsFor.set("movie:80", [movieItem(800)]);
 
-  const result = await computeRecommendationsForUser("u1");
+  const result = await computeSeeded("u1");
   assert.deepEqual(
     result.candidates.map((c) => c.tmdbId),
     [800, 700],
@@ -826,7 +1153,7 @@ test("reason: a candidate names the STRONGEST seed that surfaced it, not the fir
   suggestionsFor.set("movie:10", [movieItem(999)]);
   suggestionsFor.set("movie:30", [movieItem(999)]);
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   assert.equal(candidates.length, 1);
   const c = candidates[0];
   // Decay-summed strongest-first: (1.5 + 0.75 × 0.9856975(history, 5d)) × 0.9
@@ -855,7 +1182,7 @@ test("reason: a WEAKER later seed does not steal the reason, and seedCount still
   suggestionsFor.set("movie:10", [movieItem(999)]);
   suggestionsFor.set("movie:20", [movieItem(999)]);
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   assert.equal(candidates[0].reasonTitle, "Top Seed");
   assert.equal(candidates[0].reasonSource, "WATCH_HISTORY");
   assert.equal(candidates[0].seedCount, 2);
@@ -869,7 +1196,7 @@ test("reason: a TV seed's reason keeps its own mediaType, independent of the rec
   ];
   suggestionsFor.set("tv:40", [tvItem(900)]);
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   assert.equal(candidates[0].mediaType, "TV");
   assert.equal(candidates[0].reasonMediaType, "TV");
   assert.equal(candidates[0].reasonTitle, "Some Show");
@@ -1033,7 +1360,7 @@ test("exclusion: a hidden title never enters the stored set, and hiding later va
   // lowercase keyspace would silently never match (the casing trap).
   hiddenItems = [{ userId: "u1", tmdbId: 111, mediaType: "MOVIE", createdAt: daysAgo(0) }];
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   assert.deepEqual(candidates.map((c) => c.tmdbId), [222], "the hidden title is excluded at COMPUTE");
 
   // Read-time drift: a row stored before the hide must vacate on the next render.
@@ -1065,7 +1392,7 @@ test("exclusion: open requests are out, AVAILABLE and re-requestable DECLINED st
     { requestedBy: "u1", tmdbId: 5, mediaType: "MOVIE", status: "DECLINED", permanentlyDeclined: true },
   ];
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   assert.deepEqual(
     candidates.map((c) => c.tmdbId).sort((a, b) => a - b),
     [3, 4],
@@ -1083,7 +1410,7 @@ test("exclusion: another user's requests and votes do NOT poison this user's she
   mediaRequests = [{ requestedBy: "someone-else", tmdbId: 111, mediaType: "MOVIE", status: "PENDING", permanentlyDeclined: false }];
   deletionVotes = [{ userId: "someone-else", tmdbId: 111, mediaType: "MOVIE" }];
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   assert.deepEqual(candidates.map((c) => c.tmdbId), [111], "exclusions are strictly per-user (blacklist aside)");
 });
 
@@ -1097,7 +1424,7 @@ test("exclusion: own DeletionVotes and the admin blacklist are out, at compute A
   deletionVotes = [{ userId: "u1", tmdbId: 111, mediaType: "MOVIE" }];
   blacklistItems = [{ tmdbId: 222, mediaType: "MOVIE" }];
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   assert.deepEqual(candidates.map((c) => c.tmdbId), [333]);
 
   // Read-time: rows stored before the vote/blacklisting vacate on render.
@@ -1160,7 +1487,7 @@ test("quality: TMDB's own score now participates — a well-voted 8.5 outranks a
     { ...movieItem(222), vote_average: 8.5, vote_count: 5000 }, // real acclaim
   ]);
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
   // 222: TMDB term at 5000 votes → weight 0.75×5000/6000 = 0.625, so
   //      confidence 0.625/1.625 and q = 0.85:
@@ -1184,7 +1511,7 @@ test("quality: unrated-obscure is damped by exactly OBSCURITY_DAMP — a real au
   ]);
   seedRatings(333, "movie", {}); // unrelated row; must not affect anything
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
   const w = 0.9971174404154314;
   assert.ok(Math.abs(byId.get(111)!.score - w * 0.9) < 1e-9, "obscure: damped by exactly OBSCURITY_DAMP");
@@ -1210,7 +1537,7 @@ test("seed dedup: a watched title's stale watchlist entry does not double-seed",
   watchlistRows = [{ userId: "u1", tmdbId: 10, mediaType: "MOVIE", createdAt: daysAgo(0), title: "Both Pools" }];
   suggestionsFor.set("movie:10", [movieItem(999)]);
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   assert.equal(candidates.length, 1);
   const c = candidates[0];
   // Exactly ONE contribution, from the HISTORY seed (the fulfilled list entry is
@@ -1236,7 +1563,7 @@ test("request seeds: a serverless account's requests build the shelf, worded as 
   suggestionsFor.set("movie:10", [movieItem(111)]);
   suggestionsFor.set("movie:20", [movieItem(222)]);
 
-  const { candidates, conclusive } = await computeRecommendationsForUser("u1");
+  const { candidates, conclusive } = await computeSeeded("u1");
   assert.equal(conclusive, true);
   const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
   assert.equal(byId.get(111)!.reasonSource, "REQUEST");
@@ -1262,7 +1589,7 @@ test("request seeds: one title in all three pools seeds ONCE — history > watch
   suggestionsFor.set("movie:10", [movieItem(111)]);
   suggestionsFor.set("movie:30", [movieItem(222)]);
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
   // 111: exactly one contribution from the HISTORY seed.
   assert.equal(byId.get(111)!.seedCount, 1);
@@ -1283,7 +1610,7 @@ test("request seeds: per-arrInstance duplicate rows collapse to one seed, newest
   ];
   suggestionsFor.set("movie:10", [movieItem(111)]);
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   assert.equal(candidates.length, 1);
   assert.equal(candidates[0].seedCount, 1, "two instance rows are one want");
   // Weight dated by the NEWER row (2d), not the older (10d).
@@ -1301,14 +1628,16 @@ test("request seeds: the pool is capped at 24, newest first — a request-hoarde
   }));
   for (let i = 0; i < 30; i++) suggestionsFor.set(`movie:${100 + i}`, []);
 
-  await computeRecommendationsForUser("u1");
-  const requestFetches = new Set(
-    fetchCalls.map((pth) => pth.match(/\/movie\/(1\d\d)\/(?:similar|recommendations)$/)?.[1]).filter(Boolean),
-  );
-  assert.equal(requestFetches.size, 24, "exactly the cap");
-  assert.ok(requestFetches.has("100"), "the newest request seeds");
-  assert.ok(requestFetches.has("123"), "the 24th-newest seeds");
-  assert.ok(!requestFetches.has("124"), "the 25th-newest does not");
+  // On the SEED PLAN rather than on fetches — see the note in the
+  // "last 200 titles played" test for why a fetch stopped being an observable
+  // of selection once the live path went away.
+  const { seeds } = await selectSeedPlan("u1");
+  const seeded = new Set(seeds.map((sd) => sd.tmdbId));
+
+  assert.equal(seeds.length, 24, "exactly the cap");
+  assert.ok(seeded.has(100), "the newest request seeds");
+  assert.ok(seeded.has(123), "the 24th-newest seeds");
+  assert.ok(!seeded.has(124), "the 25th-newest does not");
 });
 
 test("request seeds: an AVAILABLE request seeds WITHOUT self-excluding — the kept classes stay recommendable", async () => {
@@ -1324,7 +1653,7 @@ test("request seeds: an AVAILABLE request seeds WITHOUT self-excluding — the k
   suggestionsFor.set("movie:20", [movieItem(10), movieItem(30)]);
   suggestionsFor.set("movie:10", []);
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   const ids = candidates.map((c) => c.tmdbId).sort((a, b) => a - b);
   assert.deepEqual(ids, [10, 30], "the AVAILABLE request title survives as a candidate; the PENDING one is excluded by status");
 });
@@ -1347,7 +1676,7 @@ test("cold start with a warm pool: an honest TRENDING shelf — no reasons, no c
   // Exclusions still apply to a seedless user: 904 is hidden.
   hiddenItems = [{ userId: "u1", tmdbId: 904, mediaType: "MOVIE", createdAt: daysAgo(0) }];
 
-  const { candidates, conclusive } = await computeRecommendationsForUser("u1");
+  const { candidates, conclusive } = await computeSeeded("u1");
   assert.equal(conclusive, true, "a served pool is an authoritative answer");
   assert.deepEqual(
     candidates.map((c) => c.tmdbId).sort((a, b) => a - b),
@@ -1398,7 +1727,7 @@ test("thin shelf: fallback tops up BELOW every real pick, and tiers count only t
   suggestionsFor.set("movie:10", [movieItem(111), movieItem(222)]);
   seedFallbackPool();
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   // 2 real + 4 fallback (whole pool fits inside the target).
   assert.equal(candidates.length, 6);
   assert.deepEqual(candidates.slice(0, 2).map((c) => c.reasonSource), ["WATCH_HISTORY", "WATCH_HISTORY"], "real picks first");
@@ -1440,7 +1769,7 @@ test("corroboration: amplification is decay-bounded — equal agreements can nev
   for (let i = 0; i < 4; i++) suggestionsFor.set(`movie:${10 + i}`, [movieItem(999)]);
   suggestionsFor.set("movie:14", [movieItem(111)]);
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
   const w = 0.9971174404154314; // each seed's weight at 1d, count 1
   assert.ok(Math.abs(byId.get(999)!.score - 2.453843701022351) < 1e-9, `got ${byId.get(999)!.score}`);
@@ -1471,7 +1800,7 @@ test("abandoned: a settled low-completion bail dampens THAT title 0.3x — split
   ];
   suggestionsFor.set("movie:10", [movieItem(111), movieItem(222), movieItem(333), movieItem(444)]);
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
   const w = 0.9971174404154314 * 0.9; // seed weight × obscurity damp, at each position
   const pos = (i: number) => 1 / (1 + i / 10);
@@ -1483,7 +1812,7 @@ test("abandoned: a settled low-completion bail dampens THAT title 0.3x — split
 
 // ── seed selection is recency-first ──────────────────────────────────────────
 
-test("seed SELECTION is the last 100 titles played — a heavy old binge no longer takes a slot", async () => {
+test("seed SELECTION is the last 200 titles played — a heavy old binge no longer takes a slot", async () => {
   // The selection key used to be play count, and PlayHistory writes one row per
   // EPISODE, so a long series could occupy the top slots forever while recent
   // films never seeded at all. The cap has to BITE for this to be observable,
@@ -1491,32 +1820,45 @@ test("seed SELECTION is the last 100 titles played — a heavy old binge no long
   users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
   mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
   playHistoryRows = [
-    // Exactly MAX_WATCH_HISTORY_SEEDS recent titles, one play each.
-    ...Array.from({ length: 100 }, (_, i) => ({
+    // Exactly MAX_WATCH_HISTORY_SEEDS recent titles, one play each. Spaced at
+    // half-day steps so all 200 land INSIDE the 180-day window: at one-day steps
+    // the tail would fall outside it and be re-admitted by the all-time top-up
+    // in recency order, which puts the binge (newest play 150 days ago) ahead of
+    // them — the cap would then not be what excluded it and the test would prove
+    // nothing.
+    ...Array.from({ length: 200 }, (_, i) => ({
       mediaServerUserId: "msu1", tmdbId: 1000 + i, mediaType: "MOVIE" as MT,
-      watched: true, startedAt: daysAgo(i + 1), title: `Recent ${i}`,
+      watched: true, startedAt: daysAgo(1 + i * 0.5), title: `Recent ${i}`,
     })),
     // A series with 50 plays, INSIDE the 180-day window but older than all 100
     // titles above. The window must not be what excludes it — otherwise this
     // test passes under either ordering and proves nothing (it did: the first
     // version put this at 200 days and was satisfied by the window alone).
     // Under count-first it was seed #1 by a wide margin and pushed the oldest
-    // recent title out; under recency-first it is #101 and never seeds.
+    // recent title out; under recency-first it is #201 and never seeds.
     ...Array.from({ length: 50 }, (_, i) => ({
       mediaServerUserId: "msu1", tmdbId: 5000, mediaType: "TV" as MT,
       watched: true, startedAt: daysAgo(150 + i), title: "Heavy Binge",
     })),
   ];
-  for (let i = 0; i < 100; i++) suggestionsFor.set(`movie:${1000 + i}`, [movieItem(9000 + i)]);
+  for (let i = 0; i < 200; i++) suggestionsFor.set(`movie:${1000 + i}`, [movieItem(9000 + i)]);
   suggestionsFor.set("tv:5000", [tvItem(9999)]);
 
-  await computeRecommendationsForUser("u1");
+  // Asserted on the SEED PLAN, not on which titles got fetched. Since the engine
+  // lost its live path, the fan-out is the graph build — and that builds every
+  // library/history title it can reach, seeded or not, so a fetch no longer
+  // tells you anything about selection. The plan is what selection produces and
+  // what the build is handed, so it is now both the more direct observable and
+  // the correct one.
+  const { seeds } = await selectSeedPlan("u1");
+  const seeded = new Set(seeds.map((sd) => `${sd.mediaType}:${sd.tmdbId}`));
 
-  assert.ok(fetchCalls.some((p) => p.includes("/movie/1000/")), "the most recent title seeds");
-  assert.ok(fetchCalls.some((p) => p.includes("/movie/1099/")), "the 100th-most-recent title seeds");
+  assert.equal(seeds.length, 200, "exactly the cap");
+  assert.ok(seeded.has("MOVIE:1000"), "the most recent title seeds");
+  assert.ok(seeded.has("MOVIE:1199"), "the 200th-most-recent title seeds");
   assert.ok(
-    !fetchCalls.some((p) => p.includes("/tv/5000/")),
-    "the 50-play binge is #101 by recency and must NOT seed, despite dwarfing every other title on play count",
+    !seeded.has("TV:5000"),
+    "the 50-play binge is #201 by recency and must NOT seed, despite dwarfing every other title on play count",
   );
 });
 
@@ -1542,7 +1884,7 @@ test("language: a one-off foreign title is de-emphasised, but a substantial seco
   suggestionsFor.set("movie:21", [{ ...movieItem(601), original_language: "ja" }]);
   suggestionsFor.set("movie:22", [{ ...movieItem(700), original_language: "ko" }]);
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
   const en = byId.get(500)!;
   const ja = byId.get(600)!;
@@ -1570,7 +1912,7 @@ test("language: with only one language present, nothing is penalised", async () 
   ];
   suggestionsFor.set("movie:10", [{ ...movieItem(555), original_language: "en" }]);
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   // Share is 1.0, so languageFactor is exactly 1 and the score is the raw
   // contribution times only OBSCURITY_DAMP (unrated, vote_count 0) — a
   // monolingual viewer must not be silently scaled down by LANGUAGE.
@@ -1591,7 +1933,7 @@ test("language: a title with no language recorded is left alone", async () => {
   // anything, so it must not be treated as a rare language and demoted.
   suggestionsFor.set("movie:15", [movieItem(900)]);
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   const unknown = candidates.find((c) => c.tmdbId === 900)!;
   const english = candidates.find((c) => c.tmdbId === 500)!;
   assert.ok(Math.abs(unknown.score - english.score) < 1e-9, "an unknown language scores exactly as the dominant one");
@@ -1615,7 +1957,7 @@ test("quality: better-rated candidates outrank equally-relevant worse-rated ones
   seedRatings(111, "movie", { imdbRating: "3.1", rottenTomatoes: "18", metacritic: "24" });
   seedRatings(222, "movie", { imdbRating: "8.6", rottenTomatoes: "94", metacritic: "88" });
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   assert.deepEqual(
     candidates.map((c) => c.tmdbId),
     [222, 111],
@@ -1635,7 +1977,7 @@ test("quality: an unrated title is neutral — never penalised against a rated o
   ]);
   seedRatings(111, "movie", { imdbRating: "2.0", rottenTomatoes: "9", metacritic: "12" });
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   // Ratings coverage is partial by design (OMDB is quota-bound), so "unrated"
   // must never be read as "bad" — otherwise the shelf silently becomes
   // whatever the rating providers happened to cover.
@@ -1660,7 +2002,7 @@ test("quality: a ratings outage degrades to relevance-only instead of failing th
     throw new Error("ratings backend unavailable");
   };
   try {
-    const { candidates, conclusive } = await computeRecommendationsForUser("u1");
+    const { candidates, conclusive } = await computeSeeded("u1");
     assert.equal(conclusive, true, "a ratings failure must not be read as a TMDB outage");
     assert.deepEqual(candidates.map((c) => c.tmdbId), [111, 222], "relevance order stands");
   } finally {
@@ -1689,7 +2031,7 @@ test("quality: IMDb vote depth decides — a million-vote 8.6 overtakes a 200-vo
   // OMDB delivers counts comma-formatted — this exercises that parse in situ.
   seedRatings(222, "movie", { imdbRating: "8.6", imdbVotes: "1,000,000" });
 
-  const { candidates } = await computeRecommendationsForUser("u1");
+  const { candidates } = await computeSeeded("u1");
   assert.deepEqual(
     candidates.map((c) => c.tmdbId),
     [222, 111],
@@ -1783,7 +2125,7 @@ test("exclusion covers the FULL current watchlist and watched-set, not just the 
   suggestionsFor.set("movie:10", [movieItem(700), movieItem(800), movieItem(555)]);
   for (const id of [301, 302, 303, 304, 305]) suggestionsFor.set(`movie:${id}`, []);
 
-  const result = await computeRecommendationsForUser("u1");
+  const result = await computeSeeded("u1");
   assert.deepEqual(result.candidates.map((c) => c.tmdbId).sort((a, b) => a - b), [555]);
   // Seed 10 answered, so this empty-after-exclusion answer is trustworthy.
   assert.equal(result.conclusive, true);
@@ -1818,7 +2160,7 @@ test("warmRecommendationsCache: one $transaction per eligible user, and the acti
   assert.equal(result.usersFailed, 0);
   assert.equal(result.usersSkipped, 0);
   assert.equal(result.candidatesWritten, 1);
-  assert.equal(transactionCalls, 1, "exactly one transaction — never one spanning all users");
+  assert.equal(userRecTransactionCalls, 1, "exactly one transaction — never one spanning all users");
   assert.deepEqual(
     userRecRows.map((r) => [r.userId, r.tmdbId]),
     [["active", 500]],
@@ -1884,7 +2226,7 @@ test("a TMDB outage yields an INCONCLUSIVE empty, not an authoritative one", asy
   suggestionsFor.set("movie:10", [movieItem(500)]);
   tmdbOutage = true;
 
-  const result = await computeRecommendationsForUser("u1");
+  const result = await computeSeeded("u1");
   assert.deepEqual(result.candidates, []);
   assert.equal(result.conclusive, false, "seeds existed but nothing came back — the caller must not trust this empty");
 });
@@ -1900,7 +2242,7 @@ test("upstream answering with everything already excluded is a CONCLUSIVE empty"
   ];
   suggestionsFor.set("movie:10", [movieItem(700)]); // the only suggestion is already watched
 
-  const result = await computeRecommendationsForUser("u1");
+  const result = await computeSeeded("u1");
   assert.deepEqual(result.candidates, []);
   assert.equal(result.conclusive, true, "a real answer that filters down to nothing is authoritative");
 });
@@ -1921,7 +2263,7 @@ test("warmRecommendationsCache: a TMDB outage KEEPS existing recommendations and
   const result = await warmRecommendationsCache();
 
   assert.deepEqual(userRecRows.map((r) => r.tmdbId).sort((a, b) => a - b), [500, 501], "yesterday's recommendations must survive");
-  assert.equal(transactionCalls, 0, "no destructive replace may even be attempted");
+  assert.equal(userRecTransactionCalls, 0, "no destructive replace may even be attempted");
   assert.equal(result.usersSkipped, 1);
   assert.equal(result.usersUpdated, 0, "a skipped user must NOT be reported as updated");
   assert.equal(result.candidatesWritten, 0);
@@ -1943,7 +2285,433 @@ test("warmRecommendationsCache: a CONCLUSIVE empty still clears the user's stale
   const result = await warmRecommendationsCache();
 
   assert.deepEqual(userRecRows, [], "an authoritative empty answer must clear the shelf");
-  assert.equal(transactionCalls, 1);
+  assert.equal(userRecTransactionCalls, 1);
   assert.equal(result.usersUpdated, 1);
   assert.equal(result.usersSkipped, 0);
+});
+
+// ── the server-wide graph: no per-user upstream query ───────────────────────
+// These are the pins for the split the engine hangs on — a seed's suggestion
+// list and a candidate's quality verdict are properties of the TITLE, computed
+// once for the whole server, so a user's pass must reach neither TMDB nor the
+// ratings cache when the graph covers them.
+
+test("graph-served seeds: the engine reads the precomputed edges and makes NO TMDB request", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  // The scripted fetch would answer this seed too — if the engine asked. It must not.
+  suggestionsFor.set("movie:10", [movieItem(999)]);
+  seedGraph({ tmdbId: 10, mediaType: "MOVIE" }, [{ tmdbId: 500, mediaType: "MOVIE" }]);
+
+  const { candidates, conclusive } = await computeRecommendationsForUser("u1");
+
+  assert.deepEqual(candidates.map((c) => c.tmdbId), [500], "the graph's edge won, not the live fetch");
+  assert.equal(conclusive, true);
+  assert.equal(
+    fetchCalls.some((p) => /\/(similar|recommendations)$/.test(p)),
+    false,
+    "a graph-covered seed must not be fanned out to TMDB per user",
+  );
+});
+
+test("after a refresh, a compute makes NO upstream call at all — the pool read is a warm hit too", async () => {
+  // The suggestion fan-out is not quite the whole story: buildFallbackCandidates
+  // tops a thin shelf up from trending/popular DURING the compute. Those are
+  // instance-wide coalesced caches rather than per-user work, but on a cold one
+  // the first user of a cycle would still pay for the fetch — so the refresh
+  // reads them itself (warmFallbackPool), immediately before the fan-out. This
+  // pins that ordering by its only observable consequence.
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  // A pool with something in it. An EMPTY pool is deliberately never cached
+  // (tmdb.ts's don't-cache-an-empty guard), so it can never be warm and this
+  // test would pass for the wrong reason — it would be measuring an absent
+  // feature rather than a warm one.
+  listFixtures.set("/trending/all/week", [{ ...movieItem(901), media_type: "movie" as const }]);
+  listFixtures.set("/movie/popular", [movieItem(902)]);
+  listFixtures.set("/tv/popular", [tvItem(903)]);
+
+  await refreshRecommendationGraph({ required: [{ tmdbId: 10, mediaType: "MOVIE" }] });
+  assert.ok(
+    fetchCalls.some((p) => p.includes("/trending/all/week")),
+    "the refresh is what pays for the pool",
+  );
+  fetchCalls.length = 0;
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+
+  assert.equal(candidates[0]?.tmdbId, 500, "the real pick leads");
+  assert.ok(
+    candidates.slice(1).every((c) => c.reasonSource === "TRENDING"),
+    "and the thin shelf was topped up from the pool — i.e. the pool path really did run",
+  );
+  assert.deepEqual(fetchCalls, [], "the compute path makes NO upstream call of any kind");
+});
+
+test("graph-served seeds: ONE edge query covers every seed, not one per seed", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) },
+    { mediaServerUserId: "msu1", tmdbId: 11, mediaType: "MOVIE", watched: true, startedAt: daysAgo(2) },
+    { mediaServerUserId: "msu1", tmdbId: 12, mediaType: "TV", watched: true, startedAt: daysAgo(3) },
+  ];
+  seedGraph({ tmdbId: 10, mediaType: "MOVIE" }, [{ tmdbId: 500, mediaType: "MOVIE" }]);
+  seedGraph({ tmdbId: 11, mediaType: "MOVIE" }, [{ tmdbId: 501, mediaType: "MOVIE" }]);
+  seedGraph({ tmdbId: 12, mediaType: "TV" }, [{ tmdbId: 502, mediaType: "TV" }]);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+
+  assert.deepEqual(candidates.map((c) => c.tmdbId).sort((a, b) => a - b), [500, 501, 502]);
+  assert.equal(edgeFindManyCalls, 1, "three seeds, one query");
+});
+
+test("a graph-covered seed with ZERO suggestions is not re-fetched — covered is not the same as edge-bearing", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  suggestionsFor.set("movie:10", [movieItem(999)]);
+  // Stamped as refreshed, but TMDB genuinely had nothing for it: no edges.
+  seedGraph({ tmdbId: 10, mediaType: "MOVIE" }, []);
+
+  const { candidates, conclusive } = await computeRecommendationsForUser("u1");
+
+  assert.deepEqual(candidates, [], "an edgeless covered seed contributes nothing");
+  assert.equal(
+    conclusive,
+    true,
+    "but it is a real ANSWER, not an outage: full coverage is authoritative even when the answer is empty",
+  );
+  assert.equal(
+    fetchCalls.some((p) => /\/movie\/10\//.test(p)),
+    false,
+    "without the node probe this seed would look uncovered and re-fetch for every user, forever",
+  );
+});
+
+test("an uncovered seed contributes NOTHING and makes the run inconclusive — the build is what closes the gap", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  // A watchlist entry added since the last graph refresh — the case the removed
+  // fallback used to cover.
+  watchlistRows = [{ userId: "u1", tmdbId: 20, mediaType: "MOVIE", createdAt: daysAgo(0) }];
+  seedGraph({ tmdbId: 10, mediaType: "MOVIE" }, [{ tmdbId: 500, mediaType: "MOVIE" }]);
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  suggestionsFor.set("movie:20", [movieItem(501)]);
+
+  // Computing against the graph AS IT STANDS: seed 20 is uncovered and there is
+  // nowhere else to look, so it contributes nothing…
+  const bare = await computeRecommendationsForUser("u1");
+  assert.deepEqual(bare.candidates.map((c) => c.tmdbId), [500]);
+  assert.equal(
+    fetchCalls.some((p) => /\/movie\/20\//.test(p)),
+    false,
+    "and NOTHING reaches TMDB to make up the difference — that is the point of the cutover",
+  );
+  // …and the half-covered answer is refused the right to replace the shelf.
+  assert.equal(bare.conclusive, false, "1 of 2 seeds covered is below the coverage floor");
+
+  // The cron shape closes it: seeds are selected first, the graph is built for
+  // exactly that union, and only then is anything computed.
+  const seeded = await computeSeeded("u1");
+  assert.deepEqual(seeded.candidates.map((c) => c.tmdbId).sort((a, b) => a - b), [500, 501]);
+  assert.equal(seeded.conclusive, true, "full coverage is authoritative");
+});
+
+test("a precomputed quality verdict re-ranks the shelf WITHOUT any ratings query", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  // 500 leads on relevance (position 0 beats position 1)…
+  seedGraph({ tmdbId: 10, mediaType: "MOVIE" }, [
+    { tmdbId: 500, mediaType: "MOVIE", voteCount: 5000 },
+    { tmdbId: 501, mediaType: "MOVIE", voteCount: 5000 },
+  ]);
+  // …and loses it to the stored verdicts, which is the prior doing its job.
+  seedVerdict(500, "MOVIE", 0.2, 3);
+  seedVerdict(501, "MOVIE", 1.0, 3);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+
+  assert.deepEqual(candidates.map((c) => c.tmdbId), [501, 500], "the quality prior overturned the relevance order");
+  assert.equal(ratingsCacheReads, 0, "every candidate already had a verdict — nothing may re-derive it per user");
+});
+
+test("a stored null verdict damps; a title the graph has not rated is left completely alone", async () => {
+  // The two null states, which is the whole reason qualityRatedAt is a separate
+  // column. With no live lookup left to paper over the difference, collapsing
+  // them would silently penalise every title the ratings pass has not reached
+  // yet — i.e. most of a young instance's catalogue.
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  seedGraph({ tmdbId: 10, mediaType: "MOVIE" }, [
+    // voteAverage 0 throughout, so TMDB abstains from the prior for all three
+    // and the ONLY multiplier in play is the damp this test is measuring.
+    // ASKED, and nobody answered — the damp's actual meaning.
+    { tmdbId: 500, mediaType: "MOVIE", voteAverage: 0, voteCount: 0 },
+    // NOT YET ASKED. Just as obscure, and must be untouched.
+    { tmdbId: 501, mediaType: "MOVIE", voteAverage: 0, voteCount: 0 },
+    // The control: not asked either, but with a real audience. Pins the base.
+    { tmdbId: 502, mediaType: "MOVIE", voteAverage: 0, voteCount: 5000 },
+  ]);
+  seedVerdict(500, "MOVIE", null, 0);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  const score = new Map(candidates.map((c) => [c.tmdbId, c.score]));
+
+  assert.equal(ratingsCacheReads, 0, "nothing may reach the ratings path — there is no live path any more");
+  // 502 sits at position 2 and is untouched, so it pins the seed's base weight:
+  // base = score(502) x positionFactor(2)^-1 = score(502) x 1.2.
+  const base = (score.get(502) ?? 0) * 1.2;
+  assert.ok(base > 0);
+  assert.ok(
+    Math.abs((score.get(500) ?? 0) - base * 0.9) < 1e-9,
+    "a STORED null verdict damps the obscure candidate by exactly OBSCURITY_DAMP",
+  );
+  assert.ok(
+    Math.abs((score.get(501) ?? 0) - base / 1.1) < 1e-9,
+    "an UNRATED candidate keeps its relevance score exactly — absence of data is not a bad review",
+  );
+});
+
+test("a node that exists only as a SUGGESTION SOURCE is not read as an unrated verdict", async () => {
+  // 500 is a library title the graph has built edges FOR, so it already has a
+  // node row — with suggestionsRefreshedAt stamped and qualityRatedAt still
+  // null. It is also, separately, a candidate here. Reading that row as a
+  // verdict would declare "asked, nobody answered" about a title nobody has
+  // asked about, and damp it for being obscure on no evidence at all.
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  seedGraph({ tmdbId: 10, mediaType: "MOVIE" }, [
+    { tmdbId: 500, mediaType: "MOVIE", voteAverage: 0, voteCount: 0 },
+    { tmdbId: 501, mediaType: "MOVIE", voteAverage: 0, voteCount: 0 },
+  ]);
+  seedGraph({ tmdbId: 500, mediaType: "MOVIE" }, [{ tmdbId: 900, mediaType: "MOVIE" }]);
+
+  const { candidates } = await computeRecommendationsForUser("u1");
+  const score = new Map(candidates.map((c) => [c.tmdbId, c.score]));
+
+  // 500 and 501 are equally unrated and sit at positions 0 and 1, so relevance
+  // alone puts them exactly 1.1x apart. Only a spurious damp on 500 moves that.
+  assert.ok(
+    Math.abs((score.get(500) ?? 0) / (score.get(501) ?? 1) - 1.1) < 1e-9,
+    "a source-only node must not stand in for a verdict",
+  );
+});
+
+// ── refreshRecommendationGraph: the server-wide build ───────────────────────
+
+test("refreshRecommendationGraph builds edges for library and seed-pool titles, stamps the node, and skips them next run", async () => {
+  libraryRows = [{ tmdbId: 10, mediaType: "MOVIE", serverInstance: "" }];
+  watchlistRows = [{ userId: "u1", tmdbId: 20, mediaType: "MOVIE", createdAt: daysAgo(1) }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  suggestionsFor.set("movie:20", [movieItem(501)]);
+
+  const first = await refreshRecommendationGraph();
+
+  assert.equal(first.sourcesRefreshed, 2, "both the library title and the watchlist title were built");
+  assert.equal(first.edgesWritten, 2);
+  assert.equal(transactionCalls, 1, "one page, one transaction — the scoped delete and its replacement rows are atomic");
+  assert.deepEqual(
+    edgeRows.map((e) => [e.sourceTmdbId, e.tmdbId]).sort((a, b) => a[0] - b[0]),
+    [[10, 500], [20, 501]],
+  );
+  // The suggestion TARGETS registered themselves as nodes — that is what makes
+  // the ratings pass a bounded indexed scan instead of a distinct-over-edges.
+  assert.deepEqual(
+    nodeRows.filter((n) => n.suggestionsRefreshedAt === null).map((n) => n.tmdbId).sort((a, b) => a - b),
+    [500, 501],
+  );
+
+  fetchCalls.length = 0;
+  const second = await refreshRecommendationGraph();
+  assert.equal(second.sourcesRefreshed, 0, "a fresh source is not rebuilt");
+  assert.equal(second.sourcesSkipped, 2);
+  assert.equal(
+    fetchCalls.some((p) => /\/(similar|recommendations)$/.test(p)),
+    false,
+    "and costs no TMDB request",
+  );
+});
+
+test("refreshRecommendationGraph: a TMDB outage stamps NOTHING — an empty page is never mistaken for 'no suggestions'", async () => {
+  libraryRows = [{ tmdbId: 10, mediaType: "MOVIE", serverInstance: "" }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  tmdbOutage = true;
+
+  const result = await refreshRecommendationGraph();
+
+  assert.equal(result.sourcesRefreshed, 0);
+  assert.equal(edgeRows.length, 0, "no edges");
+  assert.equal(nodeRows.length, 0, "and crucially no node stamp — a stamped zero would serve 'no suggestions' for a week");
+
+  // The next run, with TMDB back, builds it.
+  tmdbOutage = false;
+  const recovered = await refreshRecommendationGraph();
+  assert.equal(recovered.sourcesRefreshed, 1);
+  assert.deepEqual(edgeRows.map((e) => e.tmdbId), [500]);
+});
+
+test("refreshRecommendationGraph sweeps a source that has left the server, and keeps its verdict", async () => {
+  // 10 is still in the library; 11 was removed from it and nobody has watched,
+  // watchlisted or requested it — nothing will ever list it as a source again,
+  // so its edges would sit there at full width forever.
+  libraryRows = [{ tmdbId: 10, mediaType: "MOVIE", serverInstance: "" }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  seedGraph({ tmdbId: 10, mediaType: "MOVIE" }, [{ tmdbId: 500, mediaType: "MOVIE" }]);
+  seedGraph({ tmdbId: 11, mediaType: "MOVIE" }, [{ tmdbId: 501, mediaType: "MOVIE" }]);
+  seedVerdict(11, "MOVIE", 0.8, 3);
+
+  const result = await refreshRecommendationGraph();
+
+  assert.equal(result.sourcesSwept, 1);
+  assert.deepEqual(edgeRows.map((e) => e.sourceTmdbId), [10], "only the departed source's edges went");
+  const node11 = nodeRows.find((n) => n.tmdbId === 11);
+  assert.equal(node11?.suggestionsRefreshedAt, null, "cleared, so the sweep is idempotent");
+  assert.equal(node11?.quality, 0.8, "but the verdict survives — 11 can still be somebody else's suggestion");
+});
+
+// ── the scheduling contract that replaced the fallback ──────────────────────
+
+test("warmRecommendationsCache builds the graph from the seed union BEFORE computing — a first-ever run already yields a shelf", async () => {
+  // The cold-graph case. Before the cutover this worked because the compute
+  // could fetch what the graph lacked; now it works because the build is handed
+  // the exact seed set the compute is about to read, and runs first. Nothing is
+  // pre-seeded here: edgeRows and nodeRows start empty.
+  users = [{ id: "active", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  authSessions = [{ userId: "active", lastSeenAt: daysAgo(1) }];
+  mediaServerUsers = [{ id: "msu-active", source: "plex", sourceUserId: "p1", userId: "active" }];
+  playHistoryRows = [{ mediaServerUserId: "msu-active", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  watchlistRows = [{ userId: "active", tmdbId: 20, mediaType: "MOVIE", createdAt: daysAgo(0) }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  suggestionsFor.set("movie:20", [movieItem(501)]);
+
+  const result = await warmRecommendationsCache();
+
+  assert.equal(result.graph.requiredSources, 2, "both seeds were demanded of the build");
+  assert.equal(result.graph.requiredCovered, 2, "and both were covered before anything was computed");
+  assert.equal(result.usersUpdated, 1);
+  assert.equal(result.usersSkipped, 0);
+  assert.deepEqual(userRecRows.map((r) => r.tmdbId).sort((a, b) => a - b), [500, 501]);
+});
+
+test("warmRecommendationsCache: a graph refresh that THROWS recomputes nobody and leaves every shelf standing", async () => {
+  // Without a live path an unbuilt graph covers nothing, which `conclusive`
+  // correctly reads as "keep yesterday's shelf" — so running the fan-out anyway
+  // would be thousands of queries whose only possible outcome is no change.
+  // The run aborts instead, and says so.
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  authSessions = [{ userId: "u1", lastSeenAt: daysAgo(1) }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  userRecRows = [storedRec("u1", 777)];
+  libraryThrows = true;
+
+  const result = await warmRecommendationsCache();
+
+  assert.equal(result.graphFailed, true, "and the cron is told, so it can go red");
+  assert.equal(result.usersUpdated, 0);
+  assert.equal(result.usersSkipped, 1);
+  assert.equal(userRecTransactionCalls, 0, "no destructive replace may even be attempted");
+  assert.deepEqual(userRecRows.map((r) => r.tmdbId), [777], "yesterday's shelf survives untouched");
+});
+
+test("the coverage floor is a floor, not a demand for perfection — one dead seed does not freeze a shelf", async () => {
+  // A source that permanently fails to build (a TMDB id that errors forever)
+  // must not be able to hold a user's shelf hostage. Ten seeds, nine covered:
+  // 0.9 clears SEED_COVERAGE_FLOOR, so the answer stands.
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = Array.from({ length: 10 }, (_, i) => ({
+    mediaServerUserId: "msu1", tmdbId: 10 + i, mediaType: "MOVIE" as MT,
+    watched: true, startedAt: daysAgo(i + 1), title: `Watched ${i}`,
+  }));
+  for (let i = 0; i < 9; i++) seedGraph({ tmdbId: 10 + i, mediaType: "MOVIE" }, [{ tmdbId: 500 + i, mediaType: "MOVIE" }]);
+
+  const { candidates, conclusive } = await computeRecommendationsForUser("u1");
+
+  assert.equal(candidates.length, 9);
+  assert.equal(conclusive, true, "9 of 10 covered is above the floor — the answer is trusted");
+});
+
+// ── prewarmSuggestionEdges: the same edges, built earlier ───────────────────
+
+test("prewarmSuggestionEdges builds the graph on the library cron's cadence, and the recommendations run then finds it warm", async () => {
+  // The point of the pass: a library title nobody has watched yet is already
+  // covered, so the day somebody does watch it the required build is a no-op.
+  libraryRows = [
+    { tmdbId: 10, mediaType: "MOVIE", serverInstance: "" },
+    { tmdbId: 11, mediaType: "MOVIE", serverInstance: "" },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  suggestionsFor.set("movie:11", [movieItem(501)]);
+
+  const warmed = await prewarmSuggestionEdges();
+
+  assert.equal(warmed.refreshed, 2);
+  assert.equal(warmed.edgesWritten, 2);
+  assert.deepEqual(
+    edgeRows.map((e) => [e.sourceTmdbId, e.tmdbId]).sort((a, b) => a[0] - b[0]),
+    [[10, 500], [11, 501]],
+  );
+
+  // Somebody watches 10. Its edges already exist, so the required build has
+  // nothing to fetch — which is the whole benefit, and the thing that must not
+  // be confused with the build being skippable.
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  fetchCalls.length = 0;
+
+  const graph = await refreshRecommendationGraph({ required: [{ tmdbId: 10, mediaType: "MOVIE" }] });
+
+  assert.equal(graph.requiredCovered, 1, "covered — by the earlier pass");
+  assert.equal(graph.sourcesRefreshed, 0, "and rebuilt by nobody");
+  assert.equal(
+    fetchCalls.some((p) => /\/(similar|recommendations)$/.test(p)),
+    false,
+    "the required build cost no TMDB request at all",
+  );
+});
+
+test("prewarmSuggestionEdges is an ACCELERANT, not a substitute — the required build still runs when it has not", async () => {
+  // The failure this guards against is a future optimisation that says "the
+  // library cron warms the graph, so the recommendations run can trust it".
+  // Nothing may assume the prewarm reached a title: it is capped, it runs on a
+  // different (daily) schedule, and it can fail on its own.
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [{ mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) }];
+  suggestionsFor.set("movie:10", [movieItem(500)]);
+  // No prewarm has run: the graph is empty. (.length, not deepEqual([]) —
+  // deepEqual narrows edgeRows to never[] for the rest of the test.)
+  assert.equal(edgeRows.length, 0);
+
+  const graph = await refreshRecommendationGraph({ required: [{ tmdbId: 10, mediaType: "MOVIE" }] });
+
+  assert.equal(graph.sourcesRefreshed, 1, "the required build fetched it itself");
+  assert.equal(graph.requiredCovered, 1);
+  assert.deepEqual(edgeRows.map((e) => e.tmdbId), [500]);
+});
+
+test("prewarmSuggestionEdges reaches sources a required set never can — an INACTIVE user's history", async () => {
+  // A required set is built from ACTIVE users' seeds. Someone who has not opened
+  // the app in a month is out of that cohort entirely, so this pass is the only
+  // thing that covers their history before they sign back in.
+  users = [{ id: "dormant", plexUserId: "p9", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu9", source: "plex", sourceUserId: "p9", userId: "dormant" }];
+  playHistoryRows = [{ mediaServerUserId: "msu9", tmdbId: 42, mediaType: "MOVIE", watched: true, startedAt: daysAgo(40) }];
+  suggestionsFor.set("movie:42", [movieItem(777)]);
+
+  const warmed = await prewarmSuggestionEdges();
+
+  assert.equal(warmed.refreshed, 1);
+  assert.deepEqual(edgeRows.map((e) => [e.sourceTmdbId, e.tmdbId]), [[42, 777]]);
 });

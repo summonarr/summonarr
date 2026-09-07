@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prewarmLibraryCache } from "@/lib/tmdb-prewarm";
+import { prewarmSuggestionEdges } from "@/lib/recommendation-graph";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock, WARM_LIBRARY_LOCK_ID } from "@/lib/advisory-lock";
 import { getCronActor, recordCronRun } from "@/lib/cron-auth";
@@ -28,8 +29,16 @@ export async function POST(request: NextRequest) {
     async () => {
       const startTime = Date.now();
       let result;
+      let edges;
       try {
         result = await prewarmLibraryCache();
+        // Same walk, same cadence: while this cron is fetching each library
+        // title's metadata it also builds that title's suggestion edges, so the
+        // recommendation graph is warm long before the 12h recommendations run
+        // asks for it (see prewarmSuggestionEdges). Deliberately NOT wrapped in
+        // its own try/catch — a throw here belongs in the same failure bucket as
+        // a details-walk throw, and the ledger write below already covers it.
+        edges = await prewarmSuggestionEdges();
       } catch (err) {
         // A throw used to skip the ledger write altogether, so the row kept the
         // last SUCCESSFUL run — the dashboard stayed green and only the ageing
@@ -48,7 +57,7 @@ export async function POST(request: NextRequest) {
       // Error, and the container reschedules a failing job every
       // CRON_RETRY_INTERVAL (300s) — so a job broken for a week showed a green
       // tick while being retried 12x an hour.
-      const failed = result.failed;
+      const failed = result.failed + edges.failed;
       await recordCronRun("library", durationMs, failed === 0);
 
       if (authCtx.trigger !== "cron") {
@@ -57,7 +66,7 @@ export async function POST(request: NextRequest) {
           userName: authCtx.userName,
           action: "CACHE_WARM",
           target: "library",
-          details: { ...result, durationMs, trigger: authCtx.trigger },
+          details: { ...result, edges, durationMs, trigger: authCtx.trigger },
         });
       }
 
@@ -71,7 +80,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({
         ok: failed === 0,
         ...result,
-        ...(failed > 0 ? { error: `${failed} of ${result.total} library items failed to warm` } : {}),
+        edges,
+        ...(failed > 0
+          ? { error: `${result.failed} of ${result.total} library items and ${edges.failed} of ${edges.sources} suggestion sources failed to warm` }
+          : {}),
         timestamp: new Date().toISOString(),
       }, failed > 0 ? { headers: { "X-Cron-Degraded": String(failed) } } : undefined);
     },
