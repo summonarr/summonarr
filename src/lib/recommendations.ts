@@ -106,14 +106,27 @@ const ACTIVE_USER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 // How fast a seed's influence fades with age, and how far it can fade. The floor
 // is what makes deep history worth seeding at all: a pure half-life sends a
 // three-year-old watch to ~0.004, so the extra slots above would buy nothing.
-// At FLOOR 0.25 / half-life 180d a seed is worth 1.0 today, 0.63 at six months,
-// 0.42 at a year, and never less than a quarter of a fresh one.
+// At FLOOR 0.25 / half-life 400d a seed is worth 1.0 today, 0.80 at six months,
+// 0.65 at a year, 0.46 at two, and never less than a quarter of a fresh one.
+//
+// Widened from 180d deliberately, to give older taste more of a vote. The trade
+// is a COMPRESSED DYNAMIC RANGE — fresh-to-oldest falls from ~3.8x to ~2.8x —
+// so the shelf carries more variety (flatter weights spread the reason slots
+// across more seeds) at the cost of steering a little less on what the viewer is
+// watching right now. That responsiveness is otherwise protected only here:
+// selection is recency-FIRST, but once the 200 seeds are chosen this decay is
+// the sole thing still ranking recent taste above old.
+//
+// NOTE this is NOT the same knob as SEED_RECENCY_WINDOW_MS above, which happens
+// to share a name and used to share a value. That one only bounds the first
+// query — the all-time top-up makes the selected set "the 200 most recently
+// played distinct titles" regardless of it — so widening THAT changes nothing.
 //
 // This replaces weighting by POSITION IN THE SEED LIST, which was ordered
 // count-first — so a movie watched once last week ranked below a show binged
 // years ago, and its recommendations were weighted as though it mattered less.
-const SEED_RECENCY_HALF_LIFE_MS = 180 * 24 * 60 * 60 * 1000;
-const SEED_RECENCY_FLOOR = 0.25;
+export const SEED_RECENCY_HALF_LIFE_MS = 400 * 24 * 60 * 60 * 1000;
+export const SEED_RECENCY_FLOOR = 0.25;
 
 // Watching something repeatedly is a real signal, but PlayHistory writes one row
 // PER EPISODE, so raw counts put a 62-episode series two orders of magnitude

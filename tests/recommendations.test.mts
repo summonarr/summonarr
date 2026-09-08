@@ -107,7 +107,7 @@ if ((dns as { lookup: unknown }).lookup !== fakeLookup) {
 
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
-const { computeRecommendationsForUser, selectSeedPlan, warmRecommendationsCache, getUserRecommendations, getRecommendationSummary, qualityScoreOf } =
+const { computeRecommendationsForUser, selectSeedPlan, warmRecommendationsCache, getUserRecommendations, getRecommendationSummary, qualityScoreOf, SEED_RECENCY_HALF_LIFE_MS, SEED_RECENCY_FLOOR } =
   await import("../src/lib/recommendations.ts");
 const { invalidateBlacklistCache } = await import("../src/lib/blacklist.ts");
 const { refreshRecommendationGraph, prewarmSuggestionEdges } = await import("../src/lib/recommendation-graph.ts");
@@ -877,6 +877,32 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
   });
 }) as typeof fetch;
 
+// ── seed-weight derivation ───────────────────────────────────────────────────
+// Every expected score below is COMPUTED from the engine's own constants rather
+// than frozen as a literal. The literals were correct but they pinned the
+// CONSTANT, not the mechanism: a deliberate half-life change (180d -> 400d) broke
+// thirteen tests that had no opinion about the half-life at all, and the only
+// way to fix them was to paste in new magic numbers — which is how a pin quietly
+// stops testing anything. These derivations still fail if recency, count,
+// position or the damp is dropped, which is what they exist for.
+//
+// Mirrors recencyFactor / countFactor / positionFactor in recommendations.ts.
+const recency = (days: number) =>
+  SEED_RECENCY_FLOOR + (1 - SEED_RECENCY_FLOOR) * Math.pow(0.5, (days * DAY_MS) / SEED_RECENCY_HALF_LIFE_MS);
+const countF = (plays: number) => 1 + 0.3 * Math.log10(Math.max(1, plays));
+const positionF = (i: number) => 1 / (1 + i / 10);
+const OBSCURITY = 0.9;
+
+// Policy bound, so a value drifting to "never fades" or "fades instantly" still
+// fails even though every derivation above would follow it.
+test("seed recency policy: the half-life stays within a defensible band", () => {
+  const days = SEED_RECENCY_HALF_LIFE_MS / DAY_MS;
+  assert.ok(days >= 90 && days <= 730, `half-life must stay within 3-24 months, got ${days}d`);
+  assert.ok(SEED_RECENCY_FLOOR > 0 && SEED_RECENCY_FLOOR < 0.5, "the floor must keep old taste alive without flattening recency");
+  assert.ok(recency(0) === 1, "a watch today is worth exactly 1.0");
+  assert.ok(recency(3650) > SEED_RECENCY_FLOOR, "the floor is approached, never crossed");
+});
+
 // ── shared fixtures ──────────────────────────────────────────────────────────
 function daysAgo(n: number): Date {
   return new Date(T0 - n * DAY_MS);
@@ -1042,8 +1068,8 @@ test("windowed-first top-up: a busy user's few recent watches keep the TOP slots
   const byId = new Map(result.candidates.map((c) => [c.tmdbId, c]));
   const near = (actual: number, expected: number, msg: string) =>
     assert.ok(Math.abs(actual - expected) < 1e-9, `${msg} (got ${actual}, want ~${expected})`);
-  near(byId.get(666)!.score, 0.8922469637382048, "one contribution — a duplicated seed would double this");
-  near(byId.get(555)!.score, 0.5002498269171234, "the older, more-watched seed contributes less");
+  near(byId.get(666)!.score, recency(3) * countF(1) * OBSCURITY, "one contribution — a duplicated seed would double this");
+  near(byId.get(555)!.score, recency(300) * countF(3) * OBSCURITY, "the older, more-watched seed contributes less");
   assert.ok(byId.get(666)!.score < 1.5, "a doubled seed would land far above this");
 });
 
@@ -1099,15 +1125,15 @@ test("scoring: recency + compressed play-count per seed, positional decay per su
   // decay-summed strongest-first (1.5 + 0.75×1.0871661 + 0.5625×0.9913855),
   // × 0.9 OBSCURITY_DAMP (unrated zero-vote fixtures). An unbounded sum would
   // read 3.2206964699785716 here — the difference IS the corroboration cap.
-  near(byId.get(999)?.score, 2.585726046783016, "corroboration decay-sums every seed's contribution");
-  assert.ok(byId.get(999)!.score < 3.2206964699785716, "strictly below the unbounded sum");
+  near(byId.get(999)?.score, (1.5 + 0.75 * (recency(1) * countF(2)) + 0.5625 * (recency(3) * countF(1))) * OBSCURITY, "corroboration decay-sums every seed's contribution");
+  assert.ok(byId.get(999)!.score < (1.5 + recency(1) * countF(2) + recency(3) * countF(1)) * OBSCURITY, "strictly below the unbounded sum");
 
   // 888 sits SECOND in seed 20's list, so it is discounted by position(1) =
   // 1/(1 + 1/10). Without positional decay it would score seed 20's full
   // damped weight (0.9913855 × 0.9) — the assertion below distinguishes the two.
-  near(byId.get(888)?.score, 0.811133603398368, "a later suggestion in the same list is worth less");
+  near(byId.get(888)?.score, recency(3) * countF(1) * positionF(1) * OBSCURITY, "a later suggestion in the same list is worth less");
   assert.ok(
-    byId.get(888)!.score < 0.9913855152646721 * 0.9,
+    byId.get(888)!.score < recency(3) * countF(1) * OBSCURITY,
     "position 1 must score strictly below the seed's full (damped) weight",
   );
 
@@ -1170,7 +1196,7 @@ test("reason: a candidate names the STRONGEST seed that surfaced it, not the fir
   const c = candidates[0];
   // Decay-summed strongest-first: (1.5 + 0.75 × 0.9856975(history, 5d)) × 0.9
   // OBSCURITY_DAMP, both contributions at position 0.
-  assert.ok(Math.abs(c.score - 2.015345856882388) < 1e-9, `score was ${c.score}`);
+  assert.ok(Math.abs(c.score - (1.5 + 0.75 * recency(5)) * OBSCURITY) < 1e-9, `score was ${c.score}`);
   assert.equal(c.reasonTitle, "The Strong One");
   assert.equal(c.reasonTmdbId, 30);
   assert.equal(c.reasonSource, "WATCHLIST");
@@ -1506,7 +1532,7 @@ test("quality: TMDB's own score now participates — a well-voted 8.5 outranks a
   //      ×(1 + 0.9×(0.625/1.625)×0.20) = ×1.06923; at position 1 (1/1.1) → 0.9720×w
   // 111: q = null (10 < 50 votes) → OBSCURITY_DAMP ×0.9 at position 0 → 0.9×w
   assert.deepEqual(candidates.map((c) => c.tmdbId), [222, 111], "the vote term reorders; dead voteCount could not");
-  const w = 0.9971174404154314; // seed weight at 1d, count 1
+  const w = recency(1) * countF(1); // seed weight at 1d, count 1
   assert.ok(Math.abs(byId.get(222)!.score - w * (1 / 1.1) * (1 + 0.9 * (0.625 / 1.625) * (0.85 - 0.65))) < 1e-9, `got ${byId.get(222)!.score}`);
   assert.ok(Math.abs(byId.get(111)!.score - w * 0.9) < 1e-9, `got ${byId.get(111)!.score}`);
 });
@@ -1525,7 +1551,7 @@ test("quality: unrated-obscure is damped by exactly OBSCURITY_DAMP — a real au
 
   const { candidates } = await computeSeeded("u1");
   const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
-  const w = 0.9971174404154314;
+  const w = recency(1) * countF(1);
   assert.ok(Math.abs(byId.get(111)!.score - w * 0.9) < 1e-9, "obscure: damped by exactly OBSCURITY_DAMP");
   // 222: TMDB-only evidence 0.625 (5000 votes), q = 0.7 →
   //      ×(1 + 0.9×(0.625/1.625)×0.05) = ×1.01731, at position 1 → w × (1/1.1) × 1.01731
@@ -1555,7 +1581,7 @@ test("seed dedup: a watched title's stale watchlist entry does not double-seed",
   // Exactly ONE contribution, from the HISTORY seed (the fulfilled list entry is
   // bookkeeping; history carries the real recency + count):
   // 1.0 × recency(1d) × count(2) × position(0) × 0.9 damp = 0.97844950…
-  assert.ok(Math.abs(c.score - 1.0871661180448523 * 0.9) < 1e-9, `got ${c.score} — ~2.24 means it double-seeded`);
+  assert.ok(Math.abs(c.score - recency(1) * countF(2) * OBSCURITY) < 1e-9, `got ${c.score} — a double-seed would roughly double this`);
   assert.equal(c.seedCount, 1, "one seed, not two");
   assert.equal(c.reasonSource, "WATCH_HISTORY", "the history seed wins the dedup");
 });
@@ -1581,7 +1607,7 @@ test("request seeds: a serverless account's requests build the shelf, worded as 
   assert.equal(byId.get(111)!.reasonSource, "REQUEST");
   assert.equal(byId.get(111)!.reasonTitle, "Fulfilled Want");
   // Weight: 1.5 (request) × recency(1d) × count(1) × pos(0) × 0.9 damp.
-  assert.ok(Math.abs(byId.get(111)!.score - 1.5 * 0.9971174404154314 * 0.9) < 1e-9, `got ${byId.get(111)!.score}`);
+  assert.ok(Math.abs(byId.get(111)!.score - 1.5 * recency(1) * countF(1) * OBSCURITY) < 1e-9, `got ${byId.get(111)!.score}`);
   assert.ok(byId.get(111)!.score > byId.get(222)!.score, "the fresher request weighs more");
 });
 
@@ -1606,7 +1632,7 @@ test("request seeds: one title in all three pools seeds ONCE — history > watch
   // 111: exactly one contribution from the HISTORY seed.
   assert.equal(byId.get(111)!.seedCount, 1);
   assert.equal(byId.get(111)!.reasonSource, "WATCH_HISTORY");
-  assert.ok(Math.abs(byId.get(111)!.score - 0.9971174404154314 * 0.9) < 1e-9, "a triple-pool title contributes once");
+  assert.ok(Math.abs(byId.get(111)!.score - recency(1) * countF(1) * OBSCURITY) < 1e-9, "a triple-pool title contributes once");
   // 222: exactly one contribution, and the WATCHLIST seed kept the slot.
   assert.equal(byId.get(222)!.seedCount, 1);
   assert.equal(byId.get(222)!.reasonSource, "WATCHLIST");
@@ -1626,7 +1652,7 @@ test("request seeds: per-arrInstance duplicate rows collapse to one seed, newest
   assert.equal(candidates.length, 1);
   assert.equal(candidates[0].seedCount, 1, "two instance rows are one want");
   // Weight dated by the NEWER row (2d), not the older (10d).
-  assert.ok(Math.abs(candidates[0].score - 1.5 * (0.25 + 0.75 * 0.5 ** (2 / 180)) * 0.9) < 1e-9, `got ${candidates[0].score}`);
+  assert.ok(Math.abs(candidates[0].score - 1.5 * recency(2) * OBSCURITY) < 1e-9, `got ${candidates[0].score}`);
 });
 
 test("request seeds: the pool is capped at 24, newest first — a request-hoarder cannot monopolise the fan-out", async () => {
@@ -1783,8 +1809,8 @@ test("corroboration: amplification is decay-bounded — equal agreements can nev
 
   const { candidates } = await computeSeeded("u1");
   const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
-  const w = 0.9971174404154314; // each seed's weight at 1d, count 1
-  assert.ok(Math.abs(byId.get(999)!.score - 2.453843701022351) < 1e-9, `got ${byId.get(999)!.score}`);
+  const w = recency(1) * countF(1); // each seed's weight at 1d, count 1
+  assert.ok(Math.abs(byId.get(999)!.score - 2.734375 * (recency(1) * countF(1)) * OBSCURITY) < 1e-9, `got ${byId.get(999)!.score}`);
   assert.ok(byId.get(999)!.score < 4 * w * 0.9, "strictly below the unbounded sum");
   // The bound itself: even infinite equal corroborations converge to 4x one seed.
   assert.ok(byId.get(999)!.score < 4 * w * 0.9, "the 1/(1-0.75) = 4x ceiling holds");
@@ -1814,7 +1840,7 @@ test("abandoned: a settled low-completion bail dampens THAT title 0.3x — split
 
   const { candidates } = await computeSeeded("u1");
   const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
-  const w = 0.9971174404154314 * 0.9; // seed weight × obscurity damp, at each position
+  const w = recency(1) * countF(1) * OBSCURITY; // seed weight × obscurity damp, at each position
   const pos = (i: number) => 1 / (1 + i / 10);
   assert.ok(Math.abs(byId.get(111)!.score - w * pos(0) * 0.3) < 1e-9, "the settled bail is dampened by exactly ABANDON_DAMP");
   assert.ok(Math.abs(byId.get(222)!.score - w * pos(1)) < 1e-9, "cumulative 90% playtime reads as in-progress, not abandoned");
@@ -1929,8 +1955,8 @@ test("language: with only one language present, nothing is penalised", async () 
   // contribution times only OBSCURITY_DAMP (unrated, vote_count 0) — a
   // monolingual viewer must not be silently scaled down by LANGUAGE.
   // 1.0 (type) × recency(1d) × count(1) × position(0) × 0.9
-  //   = (0.25 + 0.75 × 0.5^(1/180)) × 0.9 = 0.8974056963738883
-  assert.ok(Math.abs(candidates[0].score - 0.8974056963738883) < 1e-12, `score was ${candidates[0].score}`);
+  //   = recency(1d) × 0.9
+  assert.ok(Math.abs(candidates[0].score - recency(1) * OBSCURITY) < 1e-12, `score was ${candidates[0].score}`);
 });
 
 test("language: a title with no language recorded is left alone", async () => {
@@ -2054,7 +2080,7 @@ test("quality: IMDb vote depth decides — a million-vote 8.6 overtakes a 200-vo
   // vote_count, so the TMDB term abstains), weight 3×votes/(votes+5000),
   // confidence ev/(ev+1), multiplier 1 + 0.9×conf×(q−0.65).
   const byId = new Map(candidates.map((c) => [c.tmdbId, c]));
-  const w = 0.9971174404154314; // seed weight at 1d, count 1
+  const w = recency(1) * countF(1); // seed weight at 1d, count 1
   const conf = (ev: number) => ev / (ev + 1);
   const thin = 3 * (200 / 5200);
   const deep = 3 * (1_000_000 / 1_005_000);
