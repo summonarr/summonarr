@@ -2459,3 +2459,51 @@ test("source-pinning: the ARR-available pass EXCLUDES a pinned user outright, le
   assert.equal(requests.get("r-pinned")!.notifiedAvailable, false);
   assert.ok(!notifiedUserIds().includes("u-pinned"), "pinned user was notified off an unreached library");
 });
+
+// ── guardrail 41: the run must wind down when its lock times out ────────────
+// STRUCTURAL, not behavioural, and deliberately so: withAdvisoryLock's abort is
+// a 30-MINUTE real timer, and the route gives no seam to shorten it. What can be
+// pinned is that every arm boundary is still guarded, which is the property that
+// stops a >30min run continuing lock-free while the next trigger starts a second
+// concurrent full library sync.
+test("GUARDRAIL 41: every sync arm is gated on the advisory-lock abort, and no check sits inside a transaction", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync("src/app/api/sync/route.ts", "utf-8");
+
+  assert.match(
+    src,
+    /const windDownBefore = \(arm: string\): boolean => \{/,
+    "the wind-down helper must exist — `void signal` was the bug",
+  );
+  assert.equal(
+    /\bvoid signal;/.test(src),
+    false,
+    "the signal must be observed, not discarded",
+  );
+  // …and the helper must actually READ it. Without this, neutering the check to
+  // a constant leaves every assertion above green.
+  assert.match(
+    src,
+    /const windDownBefore[\s\S]{0,300}?signal\?\.aborted/,
+    "windDownBefore must key on signal?.aborted",
+  );
+
+  for (const arm of ["Radarr", "Sonarr", "Plex library", "Jellyfin library"]) {
+    assert.ok(
+      src.includes(`windDownBefore("${arm}")`),
+      `the ${arm} arm must be gated on the abort`,
+    );
+  }
+
+  // The check must never land inside a transaction callback: Prisma 7's
+  // $transaction takes no AbortSignal, and bailing between a scoped deleteMany
+  // and its repopulate is far worse than running long.
+  const txBodies = src.match(/\$transaction\(\s*async \([^)]*\) => \{[\s\S]*?\n {4}\}/g) ?? [];
+  for (const body of txBodies) {
+    assert.equal(
+      body.includes("windDownBefore("),
+      false,
+      "a wind-down check inside a transaction could strand a delete without its repopulate",
+    );
+  }
+});

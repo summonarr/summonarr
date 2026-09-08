@@ -218,10 +218,34 @@ async function deduplicatePlexRowsByRatingKey<T extends PlexDedupeRow>(
 }
 
 async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Promise<NextResponse> {
-  // signal fires when withAdvisoryLock's hard timeout trips (before the lock is
-  // released). Wired through so callers (e.g. arrFetch) can opt in later, but
-  // currently unobserved — Prisma 7's $transaction(fn, opts) takes no AbortSignal.
-  void signal;
+  // withAdvisoryLock aborts at DEFAULT_WORK_TIMEOUT_MS (30 min) and RELEASES the
+  // lock; it cannot cancel this function (guardrail 41). Left unobserved, a run
+  // past 30 minutes carried on lock-free while the next trigger acquired the
+  // freed lock and started a SECOND concurrent full library sync — two
+  // delete-and-replace passes over the same tables (guardrail 13). Live logs
+  // showed runs already exceeding 10 minutes with a 30-second trigger poll
+  // queued behind them, so the margin was not comfortable.
+  //
+  // Checked ONLY at arm boundaries, never inside one. Prisma 7's
+  // $transaction(fn, opts) takes no AbortSignal, so a mid-transaction bail is not
+  // expressible — and stopping between a scoped deleteMany and its repopulate
+  // would be far worse than running long.
+  //
+  // Skipping an arm needs no new downstream handling: its *SyncSucceeded flag
+  // simply stays false, which is exactly the state a failed fetch produces and
+  // exactly what already gates the revert, re-push and stale-fallback paths.
+  let abortLogged = false;
+  const windDownBefore = (arm: string): boolean => {
+    if (!signal?.aborted) return false;
+    if (!abortLogged) {
+      abortLogged = true;
+      console.warn(
+        `[sync] advisory lock timed out — winding down at the ${arm} arm; ` +
+          "the remaining arms are skipped and this run's partial state stands",
+      );
+    }
+    return true;
+  };
   const startTime = Date.now();
 
   const [approved, available] = await Promise.all([
@@ -420,7 +444,7 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
   let radarrWanted = 0;
   let radarrSyncSucceeded = false;
   let radarrSyncedSlugs = new Set<string>();
-  if (radarrEnabled) {
+  if (radarrEnabled && !windDownBefore("Radarr")) {
     try {
       // Fan out over every configured Radarr instance (default first, plus the legacy
       // 4K and any named instances). getRadarrWantedTmdbIds returns empty sets when an
@@ -476,7 +500,7 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
   let sonarrWanted = 0;
   let sonarrSyncSucceeded = false;
   let sonarrSyncedSlugs = new Set<string>();
-  if (sonarrEnabled) {
+  if (sonarrEnabled && !windDownBefore("Sonarr")) {
     try {
       // Fan out over every configured Sonarr instance; same contract as the Radarr block.
       const instances = await getSyncableArrInstances("sonarr");
@@ -771,6 +795,11 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
       () => [],
     ),
     (async () => {
+      // Same shape as the not-enabled early return below it, deliberately: an
+      // arm that contributes nothing leaves plexSyncSucceeded false, and every
+      // consumer already treats that as "this run's union is not a complete
+      // picture". syncResults is only scanned for rejections.
+      if (windDownBefore("Plex library")) return;
       if (!plexEnabled) return;
       if (plexInstances.length === 0) return;
 
@@ -979,6 +1008,7 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
       }
     })(),
     (async () => {
+      if (windDownBefore("Jellyfin library")) return;
       if (!jellyfinEnabled) return;
       if (jellyfinInstances.length === 0) return;
 
