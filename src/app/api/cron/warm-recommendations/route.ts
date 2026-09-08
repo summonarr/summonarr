@@ -12,11 +12,11 @@ export async function POST(request: NextRequest) {
 
   return withAdvisoryLock(
     WARM_RECOMMENDATIONS_LOCK_ID,
-    async () => {
+    async (signal) => {
       const startTime = Date.now();
       let result;
       try {
-        result = await warmRecommendationsCache();
+        result = await warmRecommendationsCache({ signal });
       } catch (err) {
         // A throw used to skip the ledger write altogether, so the row kept the
         // last SUCCESSFUL run — the dashboard stayed green and only the ageing

@@ -26,19 +26,19 @@ export async function POST(request: NextRequest) {
 
   return withAdvisoryLock(
     WARM_LIBRARY_LOCK_ID,
-    async () => {
+    async (signal) => {
       const startTime = Date.now();
       let result;
       let edges;
       try {
-        result = await prewarmLibraryCache();
+        result = await prewarmLibraryCache({ signal });
         // Same walk, same cadence: while this cron is fetching each library
         // title's metadata it also builds that title's suggestion edges, so the
         // recommendation graph is warm long before the 12h recommendations run
         // asks for it (see prewarmSuggestionEdges). Deliberately NOT wrapped in
         // its own try/catch — a throw here belongs in the same failure bucket as
         // a details-walk throw, and the ledger write below already covers it.
-        edges = await prewarmSuggestionEdges();
+        edges = await prewarmSuggestionEdges({ signal });
       } catch (err) {
         // A throw used to skip the ledger write altogether, so the row kept the
         // last SUCCESSFUL run — the dashboard stayed green and only the ageing

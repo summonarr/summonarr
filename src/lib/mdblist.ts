@@ -414,28 +414,46 @@ export async function fetchMdblistBatch(
         cacheWrites.push(() => setCache(cacheKey, ratings, ttl));
       }
 
-      if (arr.length >= page.length && unmatchedRows === 0) {
-        // Only negative-cache when the response covered the full request AND every
-        // row mapped to a requested id. MDBList normally echoes one entry per
-        // requested id (with null ratings for ones it has no data on), so a short
-        // response means a truncated/partial batch, not genuine absence — and a
-        // full-count response padded with unmatched rows didn't actually answer
-        // for the ids those rows displaced. Caching either case's omitted ids
-        // would suppress their ratings for 24h even though they exist.
+      // A SHORT response is genuine per-id absence, not truncation, so the ids
+      // MDBList left out are negative-cached like any other miss.
+      //
+      // This reverses an earlier reading. The old rule required
+      // `arr.length >= page.length` on the theory that MDBList "echoes one entry
+      // per requested id (with null ratings for ones it has no data on)", making
+      // a short response a truncated batch. Live logs refute that:
+      //   - the numerator tracks the request (197/200, 87/88, 30/31, 8/9) — a
+      //     truncation ceiling would cap at a constant, not scale;
+      //   - the shortfall varies 0.5%-36% with batch CONTENT, which is what
+      //     per-id coverage looks like (deep suggestion-tail batches lose most);
+      //   - nine-id requests come back with eight. Nothing truncates one row out
+      //     of nine.
+      // The cost of the old rule was unbounded: an id MDBList simply does not
+      // have was re-requested on every page load forever AND pushed into the
+      // OMDB fallback each time, which is most of where the OMDB load came from.
+      // If a short response ever IS transient, the damage is one
+      // MDBLIST_NEGATIVE_TTL (24h) and it self-heals.
+      //
+      // The two genuinely ambiguous shapes below still skip: an EMPTY array
+      // (indistinguishable from an upstream blip) and any response carrying
+      // UNMATCHED rows (they displaced requested ids MDBList never answered for).
+      if (unmatchedRows === 0 && arr.length > 0) {
         for (const item of page) {
           if (!result.has(item.id)) {
             const cacheKey = `mdblist:tmdb:${mediaType}:${item.id}`;
             cacheWrites.push(() => setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL));
           }
         }
+        // No routine log for the shortfall any more: it is now expected, and it
+        // is self-limiting — a negative-cached id is not in the next run's page,
+        // so the volume that flooded the boot log decays to nothing on its own.
+        // A genuine coverage collapse still surfaces as absent ratings and via
+        // /api/admin/debug/ratings-state.
       } else if (arr.length === 0) {
         // An empty array likely means MDBList had a transient issue, not that all items are absent —
         // skip negative-caching to avoid poisoning future lookups.
         console.warn(`[mdblist] batch ${mediaType} returned empty array for ${page.length} items — skipping NOT_FOUND caching`);
-      } else if (unmatchedRows > 0) {
-        console.warn(`[mdblist] batch ${mediaType} returned ${unmatchedRows} unmatched row(s) (${arr.length} rows for ${page.length} ids) — skipping NOT_FOUND caching for omitted ids`);
       } else {
-        console.warn(`[mdblist] batch ${mediaType} returned partial response (${arr.length}/${page.length}) — skipping NOT_FOUND caching for omitted ids`);
+        console.warn(`[mdblist] batch ${mediaType} returned ${unmatchedRows} unmatched row(s) (${arr.length} rows for ${page.length} ids) — skipping NOT_FOUND caching for omitted ids`);
       }
 
       // Flush this page's cache writes a few at a time. A rejection propagates to

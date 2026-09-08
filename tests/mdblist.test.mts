@@ -16,8 +16,9 @@
 //     chunking, per-item release-date TTLs, a failed page warns and does NOT
 //     abort later pages, one 503 retry, id-based response matching (out-of-order
 //     rows, positional fallback for id-less rows, over-length rows dropped),
-//     and the negative-cache coverage rule: only a FULL-length response
-//     sentinels omitted ids — short and empty responses never negative-cache.
+//     and the negative-cache coverage rule: a SHORT response sentinels the
+//     ids MDBList left out (genuine per-id absence), while the two ambiguous
+//     shapes — an empty array, or a response carrying unmatched rows — never do.
 //   - getMdblistTopLists / getMdblistListItems / getMdblistTopRated: wire +
 //     TmdbMedia-skeleton parsing (tmdb_id guards, show→tv mapping, media-type
 //     filter, dedup), DISCOVER-TTL caching, and cache-first second calls.
@@ -451,19 +452,29 @@ test("a full-length response padded with an unknown id drops the foreign row and
   );
 });
 
-test("short and empty batch responses NEVER negative-cache the omitted ids (warned as partial/transient instead)", async () => {
-  // Short response: 1 of 3 → no sentinels for 2 and 3.
+test("a SHORT batch response negative-caches the ids MDBList left out — absence, not truncation", async () => {
+  // Reversed deliberately. The old rule required a full-length response and
+  // read anything shorter as truncation; live logs refute that (the numerator
+  // tracks the request — 197/200, 87/88, 8/9 — and the shortfall varies with
+  // batch CONTENT). The cost of the old reading was unbounded: an id MDBList
+  // does not have was re-requested on every page load forever AND pushed into
+  // the OMDB fallback each time.
   respond = () => jsonResponse([{ id: 1, ratings: [{ source: "imdb", value: 8 }] }]);
   const map = await fetchMdblistBatch([{ id: 1 }, { id: 2 }, { id: 3 }], "movie");
   assert.deepEqual([...map.keys()], [1]);
-  assert.equal(cacheRows.has("mdblist:tmdb:movie:2"), false);
-  assert.equal(cacheRows.has("mdblist:tmdb:movie:3"), false);
-  assert.ok(
-    warns.some((w) => w.includes("[mdblist] batch movie returned partial response (1/3)")),
-    "a short response must be warned as partial",
+  assert.equal(cacheRows.has("mdblist:tmdb:movie:2"), true, "the omitted id is negative-cached");
+  assert.equal(cacheRows.has("mdblist:tmdb:movie:3"), true);
+  // Self-limiting, so it no longer narrates the shortfall on every batch: a
+  // negative-cached id is not in the next run's page.
+  assert.equal(
+    warns.some((w) => w.includes("partial response")),
+    false,
+    "a short response is expected now, not an anomaly to warn about",
   );
+});
 
-  // Empty response: likely transient — nothing cached at all.
+test("the two AMBIGUOUS response shapes still never negative-cache", async () => {
+  // Empty array: indistinguishable from an upstream blip.
   respond = () => jsonResponse([]);
   const map2 = await fetchMdblistBatch([{ id: 5 }], "movie");
   assert.equal(map2.size, 0);
@@ -472,6 +483,19 @@ test("short and empty batch responses NEVER negative-cache the omitted ids (warn
     warns.some((w) => w.includes("[mdblist] batch movie returned empty array for 1 items")),
     "an empty response must be warned",
   );
+
+  // Unmatched rows: they displaced requested ids MDBList never answered for, so
+  // the ids they displaced must not be sentinelled on their behalf.
+  warns.length = 0;
+  // An EXPLICIT tmdb id that is not in the page. A bare `id` would not do it:
+  // batchRowTmdbId ignores MDBList's internal `id`, so such a row falls back to
+  // POSITIONAL binding and matches page[0] instead of going unmatched.
+  respond = () => jsonResponse([{ tmdb_id: 999, ratings: [{ source: "imdb", value: 7 }] }]);
+  const map3 = await fetchMdblistBatch([{ id: 6 }, { id: 7 }], "movie");
+  assert.equal(map3.size, 0);
+  assert.equal(cacheRows.has("mdblist:tmdb:movie:6"), false);
+  assert.equal(cacheRows.has("mdblist:tmdb:movie:7"), false);
+  assert.ok(warns.some((w) => w.includes("unmatched row(s)")), "an unmatched row must be warned");
 });
 
 test("a 503 page is retried once after a pause, and the retry's response is used", async () => {

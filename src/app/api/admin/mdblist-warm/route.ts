@@ -27,7 +27,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // 5-minute cooldown (or write the force timestamp) for a warm that never ran.
   return withAdvisoryLock(
     WARM_MDBLIST_LOCK_ID,
-    async () => {
+    async (signal) => {
       const now = Date.now();
 
       if (force) {
@@ -63,7 +63,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       }
 
       const startTime = Date.now();
-      const result = await prewarmMdblistCache({ force });
+      const result = await prewarmMdblistCache({ force, signal });
       const durationMs = Date.now() - startTime;
 
       await logAudit({

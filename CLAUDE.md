@@ -671,6 +671,19 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - **What scheduling genuinely cannot cover, and is accepted:** a source whose TMDB fetch *fails during the build* stays uncovered, and its seed contributes nothing that cycle. There is no arrangement of the schedule that fixes this — the fallback that used to "cover" it re-tried the same failing endpoint from the same process seconds later. The protection is `conclusive`, not a retry: a materially incomplete seed set is refused the right to replace a good shelf, and the next run rebuilds.
     - `tests/recommendations.test.mts` pins all of the above, each mutation-verified: building without the required set, reverting `conclusive` to the any-suggestion rule, letting a graph throw proceed to the fan-out, capping the required set, dropping the pool warm, dropping the node probe, dropping `readTitleQuality`, neutering `withTmdbTerm`, stamping an inconclusive page, sweeping without regard to the live source set, and reading a source-only node as a verdict each fail a named test.
 
+41. **A `withAdvisoryLock` callback that can run for minutes MUST observe its AbortSignal.**
+
+    Why:
+    - `withAdvisoryLock` races the work against a `DEFAULT_WORK_TIMEOUT_MS` (30 min) timer. On expiry it calls `controller.abort(err)`, rejects, and **releases `pg_advisory_unlock` in its `finally`** — but it cannot kill a promise. Work that ignores the signal keeps running with no lock held.
+    - The route then throws, the entrypoint's `_cron_next` reschedules at `CRON_RETRY_INTERVAL` (300s), and the next run acquires the now-free lock and starts a SECOND copy alongside the first. The lock provides no protection at all against this — it was released.
+    - Observed live: OMDB timing out at 10s/request made `prewarmOmdbCache` a ~6-hour walk over an 11k library. It blew lock 2004, orphaned itself, and respawned roughly every 2100s. The Prisma pool is `max: 5` ([prisma.ts](src/lib/prisma.ts)), and each orphan runs 5 concurrent fetch-and-store chains — so a single one can monopolise it. That is what surfaced as `Transaction API error: Unable to start a transaction in the given time` on unrelated paths.
+
+    Rules:
+    - Take the signal as the callback's first parameter (`withAdvisoryLock(ID, async (signal) => …)`) and thread it into the long-running helper. `prewarmLibraryCache`, `prewarmMdblistCache`, `prewarmOmdbCache`, `prewarmSuggestionEdges` and `refreshRecommendationGraph` all take `{ signal }`.
+    - Check it at the loop's existing batch boundary and **`break`** — cheap, and it bounds the overshoot to one in-flight batch. `prewarmLibraryCache` checks per ITEM rather than per page, because its page buffer only flushes every `LIBRARY_PAGE_SIZE` items and a per-page check would keep fetching for hundreds past the abort.
+    - **RETURN, never throw, on abort.** `withAdvisoryLock`'s `Promise.race` has already settled on the timeout rejection, so a throw becomes an unhandled rejection. The partial result is discarded by the race; stopping is the entire point.
+    - The admin-triggered warms share the same lock ids as their crons, so they need the same treatment — they have exactly the same orphan exposure.
+
 ## Working principles
 
 Guardrails above are *what the code should look like*. These are *how to approach changes* — process rules adapted from a sibling project. They matter disproportionately in this codebase because Summonarr is an API-juggling aggregator: five upstream services (Plex, Jellyfin, Radarr, Sonarr, TMDB), multiple cache tables mirroring them, and a sync orchestrator that mutates shared state from several paths.

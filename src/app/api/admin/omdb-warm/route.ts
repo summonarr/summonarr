@@ -22,7 +22,7 @@ export const POST = withAdmin(async (_req, _ctx, session) => {
   // 5-minute cooldown for a warm that never ran.
   return withAdvisoryLock(
     WARM_OMDB_LOCK_ID,
-    async () => {
+    async (signal) => {
       const now = Date.now();
 
       // Atomic upsert acts as a distributed CAS: only succeeds if the cooldown window has elapsed
@@ -45,7 +45,7 @@ export const POST = withAdmin(async (_req, _ctx, session) => {
       }
 
       const startTime = Date.now();
-      const result = await prewarmOmdbCache();
+      const result = await prewarmOmdbCache({ signal });
       const durationMs = Date.now() - startTime;
 
       await logAudit({

@@ -447,7 +447,7 @@ test("a quota trip mid-run stops the batch loop: later batches are never issued 
   assert.ok(warns.some((w) => w.includes("[omdb-prewarm] Quota hit mid-batch after 5 fetches — stopping early")));
 });
 
-test("already locked at start: aborts before the key read and the library scan (runs LAST — rides the lockout the previous test tripped)", async () => {
+test("already locked at start: aborts before the key read and the library scan (rides the lockout the previous test tripped)", async () => {
   assert.equal(isOmdbQuotaLocked(), true); // the mocked clock never advances past the trip
   tables.plex = [{ tmdbId: 900, mediaType: "MOVIE" }];
   assert.deepEqual(await prewarmOmdbCache(), { ...ZERO, quotaExhausted: true });
@@ -455,4 +455,46 @@ test("already locked at start: aborts before the key read and the library scan (
   assert.equal(libCalls.length, 0);
   assert.equal(fetchCalls.length, 0);
   assert.ok(warns.some((w) => w.includes("[omdb-prewarm] OMDB quota locked — aborting before any calls")));
+});
+
+// ── the advisory-lock abort ─────────────────────────────────────────────────
+
+test("an aborted signal stops the walk mid-run instead of orphaning it past the lock", async () => {
+  // Step past the 1h lockout the two tests above deliberately leave standing —
+  // the lockout is module-global with no reset export.
+  mock.timers.setTime(T0 + 4 * HOUR_MS);
+  // withAdvisoryLock aborts at DEFAULT_WORK_TIMEOUT_MS and RELEASES the lock,
+  // but it cannot kill a promise. A pass that ignored the signal kept running
+  // lock-free for hours while the cron's retry started another one alongside
+  // it — observed live as a 30-minute lock blowout followed by pool starvation.
+  // CONCURRENCY is 5, so aborting after the first batch must stop at 5 items,
+  // not walk all 12.
+  tables.plex = Array.from({ length: 12 }, (_, i) => ({ tmdbId: 100 + i, mediaType: "MOVIE" as const }));
+
+  const controller = new AbortController();
+  let omdbCalls = 0;
+  respond = (url) => {
+    if (url.hostname === "api.themoviedb.org") {
+      return jsonResponse({ imdb_id: `tt000${url.pathname.match(/\/(\d+)\//)?.[1] ?? "0"}` });
+    }
+    if (url.hostname === "www.omdbapi.com") {
+      omdbCalls++;
+      // Abort part-way through the first batch of 5, the way the lock timer does.
+      if (omdbCalls === 3) controller.abort(new Error("Advisory lock 2004 work exceeded 1800000ms"));
+      return jsonResponse({ Response: "True", imdbRating: "7.0" });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+
+  const result = await prewarmOmdbCache({ signal: controller.signal });
+
+  // The in-flight batch finishes (its 5 promises are already dispatched); what
+  // must NOT happen is the remaining 7 items being walked.
+  assert.equal(result.total, 12, "the library scan still reports what it found");
+  assert.ok(omdbCalls <= 5, `stopped after the in-flight batch, got ${omdbCalls} OMDB calls`);
+  assert.ok(result.fetched < 12, "the walk did not run to completion");
+  assert.ok(
+    warns.some((w) => w.includes("[omdb-prewarm] aborted after")),
+    "and it says why it stopped",
+  );
 });

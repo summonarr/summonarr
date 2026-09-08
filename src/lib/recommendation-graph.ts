@@ -422,6 +422,7 @@ async function refreshSuggestionEdges(
   sources: GraphSource[],
   stats: GraphRefreshResult,
   limit: number,
+  signal?: AbortSignal,
 ): Promise<void> {
   const refreshedAt = new Map<string, Date | null>();
   for (let i = 0; i < sources.length; i += TRIAGE_PAGE) {
@@ -451,6 +452,9 @@ async function refreshSuggestionEdges(
 
   const batch = Number.isFinite(limit) ? stale.slice(0, limit) : stale;
   for (let i = 0; i < batch.length; i += SOURCE_WRITE_PAGE) {
+    // An ignored abort keeps this walking after withAdvisoryLock released the
+    // lock — see the note in omdb-prewarm.
+    if (signal?.aborted) break;
     const page = batch.slice(i, i + SOURCE_WRITE_PAGE);
     const results = await settleLimit(page, SOURCE_CONCURRENCY, (source) =>
       source.mediaType === "MOVIE"
@@ -578,7 +582,7 @@ async function staleQualityTitles(
 // anything the speculative library walk has dragged in. Whatever budget is left
 // goes to the general oldest-first scan, which is what eventually covers the
 // trending/popular fallback pool and the pre-warmed tail.
-async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefreshResult): Promise<void> {
+async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefreshResult, signal?: AbortSignal): Promise<void> {
   const cutoff = new Date(Date.now() - QUALITY_TTL_MS);
 
   const priority = required.length > 0
@@ -608,6 +612,7 @@ async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefre
   if (stale.length === 0) return;
 
   for (let i = 0; i < stale.length; i += QUALITY_BATCH) {
+    if (signal?.aborted) break;
     // Both providers locked out means every remaining batch would resolve to
     // "nobody answered" and then STAMP that as a verdict for a week. Stop, and
     // let the next run rate them for real. Mirrors prewarmMdblistCache's
@@ -772,7 +777,7 @@ export interface SuggestionEdgePrewarmResult {
 // scoped per source page, and a page that loses a lock race fails alone and is
 // retried next run. That is accepted rather than serialized: making the two crons
 // share a lock would let a long library walk block shelf refreshes outright.
-export async function prewarmSuggestionEdges(): Promise<SuggestionEdgePrewarmResult> {
+export async function prewarmSuggestionEdges(opts: { signal?: AbortSignal } = {}): Promise<SuggestionEdgePrewarmResult> {
   if (!tmdbAuth()) return { sources: 0, refreshed: 0, skipped: 0, failed: 0, edgesWritten: 0 };
 
   // The same source universe the graph defines for itself — library titles PLUS
@@ -781,7 +786,7 @@ export async function prewarmSuggestionEdges(): Promise<SuggestionEdgePrewarmRes
   // the only pass that reaches them before the person signs back in.
   const { sources } = await collectGraphSources();
   const stats: GraphRefreshResult = { ...EMPTY_REFRESH };
-  if (sources.length > 0) await refreshSuggestionEdges(sources, stats, MAX_PREWARM_EDGE_SOURCES_PER_RUN);
+  if (sources.length > 0) await refreshSuggestionEdges(sources, stats, MAX_PREWARM_EDGE_SOURCES_PER_RUN, opts.signal);
 
   return {
     sources: sources.length,
@@ -818,7 +823,7 @@ async function countCovered(required: GraphSource[]): Promise<number> {
 // an uncovered seed is a seed that contributes nothing that cycle. Everything
 // after it is speculative pre-warming and is capped.
 export async function refreshRecommendationGraph(
-  opts: { required?: GraphSource[] } = {},
+  opts: { required?: GraphSource[]; signal?: AbortSignal } = {},
 ): Promise<GraphRefreshResult> {
   if (!tmdbAuth()) return { ...EMPTY_REFRESH };
 
@@ -835,7 +840,7 @@ export async function refreshRecommendationGraph(
   stats.requiredSources = required.length;
 
   // 1. The guarantee: every seed the fan-out is about to read, uncapped.
-  if (required.length > 0) await refreshSuggestionEdges(required, stats, Infinity);
+  if (required.length > 0) await refreshSuggestionEdges(required, stats, Infinity, opts.signal);
   stats.requiredCovered = required.length > 0 ? await countCovered(required) : 0;
 
   // 2. Speculative pre-warming for seeds that do not exist yet — the library,
@@ -845,7 +850,7 @@ export async function refreshRecommendationGraph(
   const requiredKeys = new Set(required.map((r) => key(r.tmdbId, r.mediaType)));
   const tail = sources.filter((s) => !requiredKeys.has(key(s.tmdbId, s.mediaType)));
   stats.sources = required.length + tail.length;
-  if (tail.length > 0) await refreshSuggestionEdges(tail, stats, MAX_SOURCES_PER_RUN);
+  if (tail.length > 0) await refreshSuggestionEdges(tail, stats, MAX_SOURCES_PER_RUN, opts.signal);
 
   // 3. Reap sources that have left the server. Only on a COMPLETE source list —
   //    see SourceSet.complete. (The clipped case is guarded here rather than
@@ -863,7 +868,7 @@ export async function refreshRecommendationGraph(
   await warmFallbackPool();
 
   // 5. Verdicts, priority-first over the required set's own candidates.
-  await refreshQualityVerdicts(required, stats);
+  await refreshQualityVerdicts(required, stats, opts.signal);
 
   return stats;
 }

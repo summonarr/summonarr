@@ -1093,7 +1093,7 @@ const NO_GRAPH: GraphRefreshResult = {
   ratingsFailed: 0,
 };
 
-export async function warmRecommendationsCache(): Promise<WarmRecommendationsResult> {
+export async function warmRecommendationsCache(opts: { signal?: AbortSignal } = {}): Promise<WarmRecommendationsResult> {
   const userIds = await getActiveUserIds();
 
   // ── Phase 1: decide what every user will read ────────────────────────────
@@ -1130,7 +1130,7 @@ export async function warmRecommendationsCache(): Promise<WarmRecommendationsRes
   // nothing. Every stored shelf survives untouched either way.
   let graph: GraphRefreshResult;
   try {
-    graph = await refreshRecommendationGraph({ required: [...required.values()] });
+    graph = await refreshRecommendationGraph({ required: [...required.values()], signal: opts.signal });
   } catch (err) {
     console.error("[recommendations] graph refresh failed; no user was recomputed and every shelf was left as-is:", err);
     return {
