@@ -15,7 +15,7 @@ interface DetailsCacheData {
 
 // Refreshes MDBList ratings cache for every library item, purging stale/NOT_FOUND
 // rows and re-fetching in interleaved movie/TV batch pages, stopping early on quota.
-export async function prewarmMdblistCache(opts: { force?: boolean } = {}): Promise<{
+export async function prewarmMdblistCache(opts: { force?: boolean; signal?: AbortSignal } = {}): Promise<{
   total: number;
   fetched: number;
   skipped: number;
@@ -117,6 +117,12 @@ export async function prewarmMdblistCache(opts: { force?: boolean } = {}): Promi
   const totalPages = Math.max(moviePages, tvPages);
 
   for (let page = 0; page < totalPages; page++) {
+    // See the note in omdb-prewarm: an ignored abort keeps the pass running
+    // lock-free after withAdvisoryLock has already released the lock.
+    if (opts.signal?.aborted) {
+      console.warn(`[mdblist-prewarm] aborted after ${fetched} fetches — the advisory lock timed out`);
+      break;
+    }
     if (isMdblistQuotaLocked()) {
       quotaHit = true;
       console.warn(`[mdblist-prewarm] Quota exhausted after ${fetched} fetches — stopping early`);

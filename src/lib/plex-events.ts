@@ -141,6 +141,9 @@ const TIMELINE_RESYNC_DEBOUNCE_MS = 30_000;
 // a continuous stream from resetting the debounce forever and starving the
 // resync entirely. Exported for the test pins.
 export const TIMELINE_RESYNC_COOLDOWN_MS = 10 * 60_000;
+// How many consecutive lock-held retries the debounce will spend before backing
+// off to the cooldown. See resyncSkipStreak.
+export const MAX_RESYNC_SKIP_RETRIES = 3;
 export const TIMELINE_RESYNC_MAX_WAIT_MS = 2 * 60_000;
 // Max cadence for broadcasting the full active-sessions snapshot to admin SSE clients.
 // Bounds scrub-driven fan-out without noticeably delaying the visible "now playing" UI.
@@ -661,6 +664,18 @@ class PlexEventStreamManager {
   private resyncDeadline = 0;
   // When this manager last dispatched a trigger that actually RAN (0 = never).
   private lastResyncFiredAt = 0;
+  // Consecutive "skipped" re-arms for the burst currently waiting on the
+  // orchestrator lock. Reset whenever a trigger actually runs.
+  //
+  // The re-arm below is rate-bounded (one probe per debounce window) but was not
+  // COUNT-bounded, so a long run was shadowed by a 30-second poll for its entire
+  // duration. Each probe is a loopback POST that reaches pg_try_advisory_lock,
+  // and withAdvisoryLock opens its own dedicated `new Client()` for that — so a
+  // 20-minute run cost ~40 Postgres connect/disconnect cycles to learn nothing,
+  // on a box already reporting "Unable to start a transaction in the given time".
+  // Past the cap the trigger simply waits for the ordinary cooldown, which loses
+  // nothing: the run currently holding the lock is itself a full library sync.
+  private resyncSkipStreak = 0;
   private requestLibraryResync(): void {
     // A trigger that resolved "skipped" re-arms this AFTER an await, by which
     // point stop() may have run (play-history disabled, instance de-registered
@@ -670,13 +685,18 @@ class PlexEventStreamManager {
     // requested; if the lock is still held it re-arms again, forever.
     if (!this.running) return;
     const now = Date.now();
+    // Past the cap, fall back to the plain cooldown floor rather than the
+    // debounce — stop polling, keep the pending resync.
+    const capped = this.resyncSkipStreak >= MAX_RESYNC_SKIP_RETRIES;
     const notBefore = this.lastResyncFiredAt + TIMELINE_RESYNC_COOLDOWN_MS;
     if (this.resyncTimer) {
       clearTimeout(this.resyncTimer);
     } else {
       this.resyncDeadline = Math.max(now + TIMELINE_RESYNC_MAX_WAIT_MS, notBefore);
     }
-    const fireAt = Math.min(Math.max(now + TIMELINE_RESYNC_DEBOUNCE_MS, notBefore), this.resyncDeadline);
+    const fireAt = capped
+      ? Math.max(now + TIMELINE_RESYNC_COOLDOWN_MS, notBefore)
+      : Math.min(Math.max(now + TIMELINE_RESYNC_DEBOUNCE_MS, notBefore), this.resyncDeadline);
     this.resyncTimer = setTimeout(() => {
       this.resyncTimer = null;
       // Re-check liveness at fire time too: a stop() between arming and firing
@@ -700,6 +720,9 @@ class PlexEventStreamManager {
       // the stamp rolls back — otherwise a lock race would silently push the
       // next change out by a whole cooldown.
       if (result !== "ran") this.lastResyncFiredAt = previousFiredAt;
+      // Streak tracks CONSECUTIVE skips only: a trigger that ran means the lock
+      // was free, so the next burst starts from a clean slate.
+      this.resyncSkipStreak = result === "skipped" ? this.resyncSkipStreak + 1 : 0;
       // "skipped" = the orchestrator's advisory lock was held (an in-flight
       // cron/admin/previous-SSE run). Dropping the trigger there made the
       // library change wait up to SYNC_INTERVAL (1h) — re-arm the debounce so

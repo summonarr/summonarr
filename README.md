@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.24.3 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.25.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,23 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.25.0
+
+**Changed**
+
+- "For You" recommendations are now built from a server-wide graph instead of being re-derived for every user. A title's similar-titles list and its rating verdict are the same for everyone, so they are computed once per instance and reused — the per-user pass is now two database reads and no upstream call at all.
+- Watch-history seeding reaches deeper: the last 200 titles you played, up from 100 (titles, not plays — one episode is not one seed).
+- Older watches keep more of their influence. A year-old watch now counts about 65% of a fresh one, up from 43%, so shelves carry more variety at the cost of steering slightly less on the last few weeks.
+- Clearing the TMDB cache now genuinely resets everything derived from it — grid metadata and the recommendation graph included — instead of leaving them serving the data you just cleared. Clearing MDBList or OMDB likewise resets stored rating verdicts.
+
+**Fixed**
+
+- An unreachable OMDB no longer poisons recommendations. Timeouts previously went unrecognised, so a network problem was recorded as "nobody has rated this" for a week and quietly demoted the affected titles.
+- OMDB is now suspended after a run of connection failures, instead of spending ten seconds per request discovering the same outage thousands of times.
+- Long-running cache warms stop when their lock expires. Previously they kept running unsupervised while the next scheduled run started a second copy alongside them, which could exhaust the database connection pool and surface as unrelated errors.
+- A library sync that overruns now winds down safely rather than continuing without its lock, which could allow two full syncs to run at once.
+- Titles MDBList has no record of are remembered as such, instead of being looked up again on every page load and falling through to OMDB each time.
 
 ### v0.24.3
 
@@ -635,7 +652,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.24.3 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.25.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

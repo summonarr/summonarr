@@ -65,6 +65,13 @@ const fakePrisma = {
     },
   },
   auditLog: { create: async (args: { data: Record<string, unknown> }) => args.data },
+  // A clear also resets the tables holding denormalized copies of the same
+  // upstream data (guardrail 40). This file only pins the TmdbCache PREFIX set,
+  // so these just have to exist and report nothing.
+  tmdbMediaCore: { deleteMany: async () => ({ count: 0 }) },
+  recommendationTitle: { updateMany: async () => ({ count: 0 }) },
+  titleSuggestion: { deleteMany: async () => ({ count: 0 }) },
+  $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(fakePrisma),
 };
 (globalThis as unknown as { prisma: unknown }).prisma = fakePrisma;
 
@@ -98,7 +105,7 @@ async function prefixesFor(source: string): Promise<string[]> {
     undefined,
   );
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { source, cleared: 4 });
+  assert.deepEqual(await res.json(), { source, cleared: 4, coreCleared: 0, edgesCleared: 0, verdictsCleared: 0 });
   assert.equal(deleteManyArgs.length, 1, "exactly one TmdbCache.deleteMany per clear");
   return deleteManyArgs[0].where.OR.map((c) => c.key.startsWith);
 }

@@ -416,7 +416,7 @@ async function processPrewarmPage(
 // Walk the Plex + Jellyfin libraries (deduped), fetching each title's full TMDB
 // detail page into the cache so browse/detail views hit warm rows; fresh entries
 // are skipped and cache-only rows are backfilled into TmdbMediaCore without a live fetch.
-export async function prewarmLibraryCache(): Promise<{ total: number; fetched: number; backfilled: number; skipped: number; failed: number }> {
+export async function prewarmLibraryCache(opts: { signal?: AbortSignal } = {}): Promise<{ total: number; fetched: number; backfilled: number; skipped: number; failed: number }> {
   if (!tmdbAuth()) {
     return { total: 0, fetched: 0, backfilled: 0, skipped: 0, failed: 0 };
   }
@@ -439,6 +439,14 @@ export async function prewarmLibraryCache(): Promise<{ total: number; fetched: n
   outer: for (const source of sources) {
     for (const mediaType of mediaTypes) {
       for await (const item of iterateLibrary(source, mediaType)) {
+        // See the note in omdb-prewarm. Checked per ITEM rather than per page:
+        // the page buffer only flushes every LIBRARY_PAGE_SIZE items, so a
+        // per-page check could keep fetching for hundreds of items past the
+        // abort.
+        if (opts.signal?.aborted) {
+          console.warn(`[prewarm] aborted after ${total} items — the advisory lock timed out`);
+          break outer;
+        }
         const k = `${item.tmdbId}:${item.mediaType}`;
         if (seen.has(k)) continue;
         seen.add(k);

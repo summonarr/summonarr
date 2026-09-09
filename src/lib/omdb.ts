@@ -54,6 +54,49 @@ function tripQuotaLockout(reason: string) {
   console.warn(`[omdb] Quota lockout tripped (${sanitizeForLog(reason)}) — suspending calls for ${QUOTA_LOCKOUT_MS / 60000} min`);
 }
 
+// ── Transport circuit breaker ──────────────────────────────────────────────
+// Every tripQuotaLockout call site above requires a RESPONSE — a 429, or a body
+// whose Error names a limit. A request that never gets one (connection refused,
+// a host that blackholes, broken IPv6 in the container) therefore tripped
+// nothing, and isOmdbQuotaLocked() stayed false no matter how comprehensively
+// OMDB was unreachable. Every defence keyed off that flag was inert in exactly
+// the case it most needed to fire, and each attempt cost a full
+// OMDB_FETCH_TIMEOUT_MS to learn nothing: an unreachable host was strictly more
+// expensive than an exhausted quota.
+//
+// Observed live: 100% of requests failing at exactly 10000ms while MDBList
+// calls through the same safeFetchTrusted succeeded, so DNS, TLS and egress
+// were all fine and only this host was unresponsive.
+//
+// Threshold rather than one-strike, deliberately: a quota response is
+// authoritative on the first one, but a single timeout is a blip and must not
+// disable ratings for an hour. A RUN of them is a reachability verdict. Any
+// response at all — including a 4xx/5xx — proves the host is up and clears the
+// count.
+const TRANSPORT_FAILURE_LIMIT = 5;
+let consecutiveTransportFailures = 0;
+
+function noteTransportSuccess(): void {
+  consecutiveTransportFailures = 0;
+}
+
+function noteTransportFailure(reason: string): void {
+  consecutiveTransportFailures++;
+  if (consecutiveTransportFailures < TRANSPORT_FAILURE_LIMIT) return;
+  consecutiveTransportFailures = 0;
+  // Reuses the quota lockout rather than adding a second flag: every caller
+  // already asks "should I skip OMDB right now", and unreachable and exhausted
+  // are the same answer to that question.
+  tripQuotaLockout(`${TRANSPORT_FAILURE_LIMIT} consecutive transport failures (${sanitizeForLog(reason)})`);
+}
+
+// A failure that means "no response arrived", as opposed to one that means "the
+// answer was no". ssrf-blocked/redirect/size are policy verdicts about a host
+// that DID answer (or that we refuse to call) and must not count toward it.
+function isTransportFailure(err: unknown): boolean {
+  return err instanceof SafeFetchError && (err.reason === "timeout" || err.reason === "network");
+}
+
 // Deliberately narrower than isOmdbTransientError: only rate/quota conditions trip the
 // lockout. "Invalid API key" stays transient (never negative-cached) but must NOT lock —
 // it's an operator-config problem, and an admin actively fixing their key needs immediate
@@ -133,6 +176,8 @@ export async function getOmdbRatings(imdbId: string, _releaseDate?: string | nul
     url.searchParams.set("i", imdbId);
 
     const res = await safeFetchTrusted(url.toString(), { allowedHosts: ["www.omdbapi.com"], timeoutMs: OMDB_FETCH_TIMEOUT_MS });
+    // A response of ANY status proves the host is reachable.
+    noteTransportSuccess();
     if (!res.ok) {
       if (res.status === 429) {
         tripQuotaLockout(`HTTP 429 for ${imdbId}`);
@@ -191,6 +236,7 @@ export async function getOmdbRatings(imdbId: string, _releaseDate?: string | nul
   } catch (err) {
 
     const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
+    if (isTransportFailure(err)) noteTransportFailure(reason);
     console.error(`[omdb] fetch failed for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(reason)}`);
     // Transient (network/timeout/SSRF) — propagate so fetchAndCacheOmdbForTmdb's
     // catch returns without negative-caching a title that may exist.

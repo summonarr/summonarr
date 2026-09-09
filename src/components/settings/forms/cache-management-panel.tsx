@@ -27,7 +27,7 @@ const CACHE_SOURCES: CacheSourceDef[] = [
   {
     id: "tmdb",
     label: "TMDB",
-    description: "Titles, overviews, genres, country, language, keywords, watch providers.",
+    description: "Titles, overviews, genres, country, language, keywords, watch providers. Also resets grid metadata and the For You suggestion graph.",
     warmUrl: "/api/admin/library-warm",
   },
   {
@@ -46,6 +46,19 @@ const CACHE_SOURCES: CacheSourceDef[] = [
 ];
 
 type WarmResult = { fetched?: number; skipped?: number; total?: number; failed?: number; purged?: number; cleared?: number; error?: string };
+
+// A clear also resets the tables that hold denormalized copies of the same
+// upstream data — the grid-metadata table and the recommendation graph — so the
+// count of cache rows alone under-reports what the button did.
+type ClearResult = WarmResult & { coreCleared?: number; edgesCleared?: number; verdictsCleared?: number };
+
+function summarizeClear(d: ClearResult): string {
+  const parts = [`${d.cleared ?? 0} cache entries`];
+  if ((d.coreCleared ?? 0) > 0) parts.push(`${d.coreCleared} metadata rows`);
+  if ((d.edgesCleared ?? 0) > 0) parts.push(`${d.edgesCleared} suggestion links`);
+  if ((d.verdictsCleared ?? 0) > 0) parts.push(`${d.verdictsCleared} rating verdicts`);
+  return `Cleared ${parts.join(", ")}`;
+}
 
 function summarizeWarm(d: WarmResult): string {
   if (d.error) return d.error;
@@ -66,8 +79,8 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
     setMsg(null);
     try {
       const res = await fetch(withBasePath(`/api/admin/clear-cache?source=${source.id}`), { method: "DELETE" });
-      const data: WarmResult = await res.json().catch(() => ({}));
-      if (res.ok) setMsg({ kind: "ok", text: `Cleared ${data.cleared ?? 0} entries` });
+      const data: ClearResult = await res.json().catch(() => ({}));
+      if (res.ok) setMsg({ kind: "ok", text: summarizeClear(data) });
       else setMsg({ kind: "err", text: data.error ?? "Clear failed" });
     } catch {
       setMsg({ kind: "err", text: "Request failed" });

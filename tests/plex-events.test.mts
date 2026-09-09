@@ -316,6 +316,7 @@ const {
   PLEX_STALL_THRESHOLD_MS,
   TIMELINE_RESYNC_COOLDOWN_MS,
   TIMELINE_RESYNC_MAX_WAIT_MS,
+  MAX_RESYNC_SKIP_RETRIES,
   markPlexSessionFinalized,
   isPlexSessionRecentlyFinalized,
   pruneRecentlyFinalized,
@@ -1043,6 +1044,48 @@ test("timeline: a lock-race 'skipped' response re-arms the debounce instead of d
     t.mock.timers.tick(120_000);
     await drain(30);
     assert.equal(syncFetches().length, syncBefore + 2, "a completed retry must end the chain");
+  } finally {
+    syncResponseBody = { ok: true };
+  }
+});
+
+test("timeline: the lock-race retry is COUNT-bounded — it stops polling and falls back to the cooldown", async (t) => {
+  // The re-arm above is rate-bounded (one probe per debounce window) but was not
+  // count-bounded, so a run holding the lock for 20 minutes was shadowed by a
+  // 30-second poll for its whole duration. Each probe reaches
+  // pg_try_advisory_lock, and withAdvisoryLock opens its own dedicated pg Client
+  // for that — ~40 connect/disconnect cycles to learn nothing, on a box already
+  // reporting "Unable to start a transaction in the given time".
+  assert.ok(MAX_RESYNC_SKIP_RETRIES >= 1 && MAX_RESYNC_SKIP_RETRIES <= 10, "the cap must retry a bit, but not indefinitely");
+  enableTimelineClock(t);
+  const syncBefore = syncFetches().length;
+  syncResponseBody = { skipped: true, reason: "sync already running" };
+  try {
+    pushFrame(timelineFrame({ itemID: 77, metadataState: "created" }));
+    await drain(20);
+
+    // MAX_RESYNC_SKIP_RETRIES debounce-spaced probes: the streak is incremented
+    // by each skip, and the (streak >= cap) check gates the NEXT re-arm — so the
+    // cap is the number of 30s probes, the last of which takes the streak TO the
+    // cap and thereby defers the one after it.
+    for (let i = 0; i < MAX_RESYNC_SKIP_RETRIES; i++) {
+      t.mock.timers.tick(30_000);
+      await waitFor(() => syncFetches().length === syncBefore + i + 1, `probe ${i + 1}`);
+      await drain(30);
+    }
+    const afterCap = syncFetches().length;
+
+    // Past the cap the debounce no longer fires: a further debounce window is
+    // silent, because the next attempt is deferred to the cooldown floor.
+    t.mock.timers.tick(30_000);
+    await drain(30);
+    assert.equal(syncFetches().length, afterCap, "the 30s poll must stop once the cap is reached");
+
+    // …and it is deferred, not dropped: the cooldown still brings it back.
+    syncResponseBody = { ok: true };
+    t.mock.timers.tick(TIMELINE_RESYNC_COOLDOWN_MS);
+    await waitFor(() => syncFetches().length === afterCap + 1, "the cooldown-floor retry");
+    await drain(30);
   } finally {
     syncResponseBody = { ok: true };
   }

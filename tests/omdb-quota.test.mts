@@ -261,3 +261,53 @@ test("an HTTP 401 with a NON-JSON body still throws cleanly (no trip, no crash o
   await assert.rejects(() => getOmdbRatings("tt0000010"), /502/);
   assert.equal(isOmdbQuotaLocked(), false);
 });
+
+// ── transport circuit breaker ───────────────────────────────────────────────
+// Every trip site above needs a RESPONSE. A request that never gets one — a
+// blackholed host, a container with broken IPv6 — tripped nothing, so
+// isOmdbQuotaLocked() stayed false however comprehensively OMDB was
+// unreachable, and each attempt burned a full 10s timeout to learn nothing.
+// Observed live at 100% failure while MDBList calls through the same
+// safeFetchTrusted succeeded.
+function omdbTimeout(): () => Response {
+  return () => {
+    // The shape safe-fetch discriminates on to raise SafeFetchError("timeout").
+    const err = new Error("The operation was aborted due to timeout");
+    err.name = "TimeoutError";
+    throw err;
+  };
+}
+
+test("a RUN of timeouts trips the lockout, but a single one does not", async () => {
+  mock.timers.setTime(T0 + 4 * HOUR_MS); // past every lockout above
+  assert.equal(isOmdbQuotaLocked(), false);
+  script(omdbTimeout());
+
+  // Threshold, not one-strike: a quota body is authoritative immediately, but a
+  // lone timeout is a blip and must not suspend ratings for an hour.
+  for (let i = 0; i < 4; i++) {
+    await assert.rejects(() => getOmdbRatings(`tt000010${i}`), /timed out/);
+    assert.equal(isOmdbQuotaLocked(), false, `${i + 1} timeout(s) is a blip, not a verdict`);
+  }
+
+  await assert.rejects(() => getOmdbRatings("tt0000105"), /timed out/);
+  assert.equal(isOmdbQuotaLocked(), true, "the 5th consecutive transport failure IS a reachability verdict");
+  assert.ok(warns.some((w) => w.includes("consecutive transport failures")), "the trip warn names the cause");
+});
+
+test("any response clears the transport count — failures must be CONSECUTIVE to trip", async () => {
+  mock.timers.setTime(T0 + 6 * HOUR_MS); // past the lockout the test above tripped
+  assert.equal(isOmdbQuotaLocked(), false);
+
+  script(omdbTimeout());
+  for (let i = 0; i < 4; i++) await assert.rejects(() => getOmdbRatings(`tt000020${i}`), /timed out/);
+
+  // One real response proves the host is up. Note it is a 502 — the point is
+  // that ANY response clears the count, not that the call succeeded.
+  script(() => new Response("<html>bad gateway</html>", { status: 502 }));
+  await assert.rejects(() => getOmdbRatings("tt0000210"), /502/);
+
+  script(omdbTimeout());
+  for (let i = 0; i < 4; i++) await assert.rejects(() => getOmdbRatings(`tt000022${i}`), /timed out/);
+  assert.equal(isOmdbQuotaLocked(), false, "the count restarted at the response — 4 + 4 is not 5 in a row");
+});

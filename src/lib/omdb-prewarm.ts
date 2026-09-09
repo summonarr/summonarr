@@ -31,7 +31,7 @@ export interface OmdbPrewarmResult {
 
 // Refreshes the OMDB ratings cache for every library item, skipping rows still
 // within 25% of their TTL and re-fetching the rest in throttled concurrent batches.
-export async function prewarmOmdbCache(): Promise<OmdbPrewarmResult> {
+export async function prewarmOmdbCache(opts: { signal?: AbortSignal } = {}): Promise<OmdbPrewarmResult> {
   if (isOmdbQuotaLocked()) {
     console.warn("[omdb-prewarm] OMDB quota locked — aborting before any calls");
     return { total: 0, fetched: 0, notFound: 0, skipped: 0, failed: 0, quotaExhausted: true };
@@ -110,6 +110,21 @@ export async function prewarmOmdbCache(): Promise<OmdbPrewarmResult> {
   let quotaHit = false;
 
   for (let i = 0; i < toFetch.length; i += CONCURRENCY) {
+    // withAdvisoryLock aborts at DEFAULT_WORK_TIMEOUT_MS and RELEASES the lock,
+    // but it cannot kill a promise — so a pass that ignores this signal keeps
+    // running lock-free, and the cron's own retry starts another one alongside
+    // it. Observed live: OMDB timing out at 10s/request made this walk ~6h long,
+    // and stacked orphans starved the 5-connection Prisma pool into
+    // "Unable to start a transaction in the given time".
+    //
+    // RETURN rather than throw: withAdvisoryLock's Promise.race has already
+    // settled on the timeout rejection, so a throw here would surface as an
+    // unhandled rejection. The partial stats are discarded by the race; stopping
+    // is the whole point.
+    if (opts.signal?.aborted) {
+      console.warn(`[omdb-prewarm] aborted after ${fetched} fetches — the advisory lock timed out`);
+      break;
+    }
     if (isOmdbQuotaLocked()) {
       console.warn(`[omdb-prewarm] Quota exhausted after ${fetched} fetches — stopping early`);
       quotaHit = true;
