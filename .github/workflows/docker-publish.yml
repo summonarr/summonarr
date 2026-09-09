@@ -164,31 +164,50 @@ jobs:
           format: table
           exit-code: '1'
 
-  build-and-push:
+  # ── Per-platform build, each on its own NATIVE runner ────────────────────
+  # Replaces a single emulated `platforms: linux/amd64,linux/arm64` build.
+  # amd64 was already native here (the runner is x64); arm64 was the odd one
+  # out, built under QEMU, and that emulation cost two distinct failures:
+  #
+  #   - CORRECTNESS: the pruned Prisma CLI's wasm get-config returns corrupted
+  #     bytes under QEMU and reports every line of a valid schema as
+  #     unparseable, which blocked v0.25.0 twice. The Dockerfile currently
+  #     works around it by skipping that smoke test when cross-building — a
+  #     workaround this change makes unnecessary (see the follow-up note in
+  #     Dockerfile: with both halves native, the test can go back to
+  #     unconditional).
+  #   - TIME: a cold emulated arm64 half exceeds 90 minutes on its own, and
+  #     the v0.24.2 release was KILLED at 90:17 by the previous budget. GitHub
+  #     records a job timeout as `cancelled`, so it read as a human hitting
+  #     cancel while `:0.24.2` silently never published.
+  #
+  # Each job pushes its platform BY DIGEST with no tags; `merge` below stitches
+  # the digests into one manifest list and applies the real tags. Consumers see
+  # an identical multi-arch image.
+  build:
     needs: [security-gate]
-    runs-on: ubuntu-latest
-    # The arm64 half runs under QEMU and can hang; without a timeout a stuck
-    # build holds the runner for GitHub's 360-minute default. A warm-cache
-    # build finishes in ~3 min.
-    #
-    # 180, not 90: the v0.24.2 release build was KILLED by the old 90-minute
-    # budget at 90:17, mid-way through `Build and push`, and GitHub records a
-    # job timeout as `cancelled` — so it read as someone hitting cancel rather
-    # than as a bust budget, and `:0.24.2` silently never published while
-    # `:latest` kept serving the previous release. A genuinely cold arm64 half
-    # (no prior release to warm the GHA cache; security-gate primes only
-    # amd64) exceeds 90 minutes under emulation on its own.
-    timeout-minutes: 180
-    # Skip the main-push build when the push contains a `chore(release):`
-    # commit — the subsequent tag push (per the PR-then-tag flow in CLAUDE.md)
-    # publishes the same SHA with version tags + `:latest`, so the main-push
-    # build would just duplicate work. Tag pushes and manual dispatches always
-    # run; non-release main pushes still publish `:main` and `:sha-<short>`.
-    # `gate_only` lets the security gate be exercised on demand WITHOUT
-    # publishing — so a surprise high/critical surfaces when someone chooses
-    # to look, not when it blocks a release someone is trying to ship. On any
-    # non-dispatch event `inputs.gate_only` is empty, and `!''` is true, so
-    # this term is a no-op for push and tag triggers.
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Publish nothing rather than half a manifest: if one platform fails the
+      # other must not race ahead into `merge`, and `merge` needs both digests
+      # anyway. fail-fast also stops a doomed run holding an ARM runner.
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    # Native, so the emulation budget no longer applies. Kept well above the
+    # ~3 min warm-cache build because a cold FIRST run on the new arm64 cache
+    # scope still has to do a full `npm ci` + `next build` from scratch.
+    timeout-minutes: 60
+    # Unchanged from the single-job version — see the original rationale: skip
+    # the main-push build when the push carries a `chore(release):` commit,
+    # since the tag push publishes the same SHA with version tags + `:latest`.
+    # `gate_only` exercises the security gate without publishing.
     if: |
       !inputs.gate_only && (
         startsWith(github.ref, 'refs/tags/') ||
@@ -198,24 +217,14 @@ jobs:
     permissions:
       contents: read
       packages: write
-      # id-token: write enables BuildKit to mint a keyless signing
-      # identity for SLSA build provenance attestations. Without it,
-      # `provenance: mode=max` falls back to the unsigned form.
       id-token: write
-      # attestations: write lets `docker/build-push-action` upload the
-      # provenance + SBOM attestation referrers alongside the image.
       attestations: write
-      # security-events: write uploads the post-publish Trivy SARIF so
-      # every published tag is scanned at publish time, not only `:latest`
-      # on the weekly schedule.
       security-events: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Don't leave the GITHUB_TOKEN persisted in .git/config —
-          # build-push-action doesn't push back to the repo. (zizmor:artipacked)
           persist-credentials: false
 
       - name: Set up Docker Buildx
@@ -228,6 +237,103 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # No tags here: a by-digest push is untagged by definition, and tagging
+      # per-platform would leave `:latest` pointing at whichever half finished
+      # last instead of at the manifest list.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          # Per-arch cache scopes: one shared scope would have the two halves
+          # evicting each other's layers on every run. amd64 ALSO reads the
+          # default (unscoped) entry, which is what `security-gate` writes —
+          # so the gate keeps priming the amd64 half exactly as it does today.
+          cache-from: |
+            type=gha,scope=build-${{ matrix.arch }}
+            type=gha
+          cache-to: type=gha,mode=max,scope=build-${{ matrix.arch }}
+          provenance: mode=max
+          sbom: true
+
+      # Each runner now matches the image it just built, so these scan
+      # natively. The `TRIVY_PLATFORM` pinning the single-job version needed
+      # (Trivy resolves a multi-arch index to the SCANNING HOST's platform, so
+      # an unpinned scan of the index re-scanned amd64 twice and never read
+      # arm64) is unnecessary here — there is no index yet, just this
+      # platform's manifest.
+      - name: Scan pushed image
+        id: scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          scanners: vuln
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-publish-${{ matrix.arch }}.sarif
+          exit-code: '1'
+
+      # Distinct categories per arch, or one upload overwrites the other and
+      # the Security tab shows a single platform's findings.
+      - name: Upload Trivy SARIF
+        if: ${{ always() && steps.scan.outcome != 'skipped' }}
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        with:
+          sarif_file: trivy-publish-${{ matrix.arch }}.sarif
+          category: trivy-publish-${{ matrix.arch }}
+
+      # The digest is the only thing `merge` needs from this job. Written as a
+      # file named after the digest so the two jobs cannot collide on upload.
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ── Stitch the per-platform digests into one tagged manifest list ─────────
+  # This is where the image the world pulls actually comes into existence:
+  # until now GHCR holds two untagged, per-platform manifests.
+  merge:
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Same tag set as before the split — `{{version}}` still strips the `v`,
+      # so a `v0.25.0` tag publishes `:0.25.0` (see the Releasing section of
+      # CLAUDE.md; a `v`-prefixed image tag has never existed).
       - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -241,103 +347,26 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
 
-      - name: Build and push
-        id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          # Supply-chain attestations attached to the image manifest:
-          #   - provenance (SLSA v1, mode=max) — full builder + invocation
-          #     metadata, signed via the id-token above.
-          #   - sbom — SPDX SBOM generated by BuildKit's syft frontend.
-          # Both are visible on the GHCR "Provenance" tab and queryable
-          # via `cosign verify-attestation` / `docker buildx imagetools`.
-          provenance: mode=max
-          sbom: true
-
-      # Scan the freshly published image by digest so every published tag
-      # (not just `:latest` on the weekly trivy.yml schedule) gets its
-      # runtime surface checked.
-      #
-      # `exit-code: 1` — this FAILS the workflow on a high/critical finding.
-      #
-      # The blocking check now happens BEFORE publishing (the `Trivy image
-      # gate` step in security-gate, against a loadable amd64 build), so this
-      # is no longer the only image check and no longer merely an after-the-
-      # fact alarm. It stays for two things the gate cannot cover:
-      #   - the exact published digest, which is what users actually pull
-      #     (the amd64 scan below);
-      #   - the arm64 half of the manifest, which cannot be loaded and so
-      #     cannot be scanned pre-push (the arm64 scan below).
-      # Divergence between the two is the interesting signal.
-      #
-      # `steps.build.outputs.digest` is the multi-arch INDEX digest. Trivy
-      # resolves an index to the SCANNING HOST's platform unless `--platform`
-      # is set, and the runner is amd64 — so a single scan of the digest
-      # re-scanned the very same amd64 layers the pre-push gate had already
-      # covered, and NO job in the repo ever read the arm64 image. That is
-      # why each scan pins its platform explicitly via `TRIVY_PLATFORM`
-      # (trivy-action forwards `TRIVY_*` env vars to the CLI). The two halves
-      # are built by separate BuildKit workers with independently cached
-      # `apk upgrade` layers, so the arm64 package set CAN lag amd64; only a
-      # scan that actually selects the arm64 manifest sees that.
-      #
-      # The SARIF uploads below are `if: always()`, so findings still reach
-      # the Security tab when a scan step fails. The two uploads use distinct
-      # `category` values or the second would overwrite the first.
-      - name: Scan published image (amd64)
-        id: scan-amd64
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-          scanners: vuln
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          format: sarif
-          output: trivy-publish.sarif
-          exit-code: '1'
+      # Values reach the shell through `env`, never `${{ }}` interpolation
+      # directly in `run:` — that is zizmor's template-injection remediation,
+      # and it keeps the script readable besides.
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
         env:
-          TRIVY_PLATFORM: linux/amd64
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          METADATA_JSON: ${{ steps.meta.outputs.json }}
+        run: |
+          # Word splitting is INTENDED on both expansions: the first yields one
+          # `-t <tag>` pair per tag, the second one `image@sha256:<digest>` ref
+          # per downloaded digest file. Quoting either would pass a single
+          # argument and imagetools would reject it.
+          # shellcheck disable=SC2046
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$METADATA_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
 
-      # Runs even when the amd64 scan failed (so one half's finding cannot
-      # hide the other's) but not when the build itself failed — there is no
-      # digest to scan then, and `always()` would also run on cancellation.
-      - name: Scan published image (arm64)
-        id: scan-arm64
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-          scanners: vuln
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          format: sarif
-          output: trivy-publish-arm64.sarif
-          exit-code: '1'
+      - name: Inspect published image
         env:
-          TRIVY_PLATFORM: linux/arm64
-
-      - name: Upload Trivy SARIF (amd64)
-        # Skipped-scan guard, matching the arm64 upload below: on a cancelled or
-        # failed build the scan never runs, and a bare `always()` then fails this
-        # step trying to upload a SARIF that was never written — noise stacked on
-        # whatever actually went wrong.
-        if: ${{ always() && steps.scan-amd64.outcome != 'skipped' }}
-        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        with:
-          sarif_file: trivy-publish.sarif
-          category: trivy-publish
-
-      - name: Upload Trivy SARIF (arm64)
-        if: ${{ always() && steps.scan-arm64.outcome != 'skipped' }}
-        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
-        with:
-          sarif_file: trivy-publish-arm64.sarif
-          category: trivy-publish-arm64
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: docker buildx imagetools inspect "${IMAGE}:${VERSION}"
