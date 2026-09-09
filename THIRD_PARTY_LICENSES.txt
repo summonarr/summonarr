@@ -640,7 +640,7 @@ Apache License
 
 ------------------------------------------------------------------------------
 
-@emnapi/runtime@1.11.2
+@emnapi/runtime@1.11.3
 License: MIT
 
 (No license file shipped in the package.)
@@ -758,182 +758,182 @@ License: MIT
 
 ------------------------------------------------------------------------------
 
-@img/sharp-darwin-arm64@0.35.3
+@img/sharp-darwin-arm64@0.35.4
 License: Apache-2.0
 
 (No license file shipped in the package. Full text of Apache-2.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-darwin-x64@0.35.3
+@img/sharp-darwin-x64@0.35.4
 License: Apache-2.0
 
 (No license file shipped in the package. Full text of Apache-2.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-freebsd-wasm32@0.35.3
+@img/sharp-freebsd-wasm32@0.35.4
 License: Apache-2.0
 
 (No license file shipped in the package. Full text of Apache-2.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-libvips-darwin-arm64@1.3.2
+@img/sharp-libvips-darwin-arm64@1.3.3
 License: LGPL-3.0-or-later
 
 (No license file shipped in the package. Full text of LGPL-3.0 + GPL-3.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-libvips-darwin-x64@1.3.2
+@img/sharp-libvips-darwin-x64@1.3.3
 License: LGPL-3.0-or-later
 
 (No license file shipped in the package. Full text of LGPL-3.0 + GPL-3.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-libvips-linux-arm@1.3.2
+@img/sharp-libvips-linux-arm@1.3.3
 License: LGPL-3.0-or-later
 
 (No license file shipped in the package. Full text of LGPL-3.0 + GPL-3.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-libvips-linux-arm64@1.3.2
+@img/sharp-libvips-linux-arm64@1.3.3
 License: LGPL-3.0-or-later
 
 (No license file shipped in the package. Full text of LGPL-3.0 + GPL-3.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-libvips-linux-ppc64@1.3.2
+@img/sharp-libvips-linux-ppc64@1.3.3
 License: LGPL-3.0-or-later
 
 (No license file shipped in the package. Full text of LGPL-3.0 + GPL-3.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-libvips-linux-riscv64@1.3.2
+@img/sharp-libvips-linux-riscv64@1.3.3
 License: LGPL-3.0-or-later
 
 (No license file shipped in the package. Full text of LGPL-3.0 + GPL-3.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-libvips-linux-s390x@1.3.2
+@img/sharp-libvips-linux-s390x@1.3.3
 License: LGPL-3.0-or-later
 
 (No license file shipped in the package. Full text of LGPL-3.0 + GPL-3.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-libvips-linux-x64@1.3.2
+@img/sharp-libvips-linux-x64@1.3.3
 License: LGPL-3.0-or-later
 
 (No license file shipped in the package. Full text of LGPL-3.0 + GPL-3.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-libvips-linuxmusl-arm64@1.3.2
+@img/sharp-libvips-linuxmusl-arm64@1.3.3
 License: LGPL-3.0-or-later
 
 (No license file shipped in the package. Full text of LGPL-3.0 + GPL-3.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-libvips-linuxmusl-x64@1.3.2
+@img/sharp-libvips-linuxmusl-x64@1.3.3
 License: LGPL-3.0-or-later
 
 (No license file shipped in the package. Full text of LGPL-3.0 + GPL-3.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-linux-arm@0.35.3
+@img/sharp-linux-arm@0.35.4
 License: Apache-2.0
 
 (No license file shipped in the package. Full text of Apache-2.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-linux-arm64@0.35.3
+@img/sharp-linux-arm64@0.35.4
 License: Apache-2.0
 
 (No license file shipped in the package. Full text of Apache-2.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-linux-ppc64@0.35.3
+@img/sharp-linux-ppc64@0.35.4
 License: Apache-2.0
 
 (No license file shipped in the package. Full text of Apache-2.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-linux-riscv64@0.35.3
+@img/sharp-linux-riscv64@0.35.4
 License: Apache-2.0
 
 (No license file shipped in the package. Full text of Apache-2.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-linux-s390x@0.35.3
+@img/sharp-linux-s390x@0.35.4
 License: Apache-2.0
 
 (No license file shipped in the package. Full text of Apache-2.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-linux-x64@0.35.3
+@img/sharp-linux-x64@0.35.4
 License: Apache-2.0
 
 (No license file shipped in the package. Full text of Apache-2.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-linuxmusl-arm64@0.35.3
+@img/sharp-linuxmusl-arm64@0.35.4
 License: Apache-2.0
 
 (No license file shipped in the package. Full text of Apache-2.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-linuxmusl-x64@0.35.3
+@img/sharp-linuxmusl-x64@0.35.4
 License: Apache-2.0
 
 (No license file shipped in the package. Full text of Apache-2.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-wasm32@0.35.3
+@img/sharp-wasm32@0.35.4
 License: Apache-2.0 AND LGPL-3.0-or-later AND MIT
 
 (No license file shipped in the package. Full text of Apache-2.0 + LGPL-3.0 + GPL-3.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-webcontainers-wasm32@0.35.3
+@img/sharp-webcontainers-wasm32@0.35.4
 License: Apache-2.0
 
 (No license file shipped in the package. Full text of Apache-2.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-win32-arm64@0.35.3
+@img/sharp-win32-arm64@0.35.4
 License: Apache-2.0 AND LGPL-3.0-or-later
 
 (No license file shipped in the package. Full text of Apache-2.0 + LGPL-3.0 + GPL-3.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-win32-ia32@0.35.3
+@img/sharp-win32-ia32@0.35.4
 License: Apache-2.0 AND LGPL-3.0-or-later
 
 (No license file shipped in the package. Full text of Apache-2.0 + LGPL-3.0 + GPL-3.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
 
 ------------------------------------------------------------------------------
 
-@img/sharp-win32-x64@0.35.3
+@img/sharp-win32-x64@0.35.4
 License: Apache-2.0 AND LGPL-3.0-or-later
 
 (No license file shipped in the package. Full text of Apache-2.0 + LGPL-3.0 + GPL-3.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
@@ -8994,7 +8994,7 @@ License: ISC
 
 ------------------------------------------------------------------------------
 
-sharp@0.35.3
+sharp@0.35.4
 License: Apache-2.0
 
 (No license file shipped in the package. Full text of Apache-2.0 is reproduced in the CANONICAL LICENSE TEXTS appendix at the end of this file.)
