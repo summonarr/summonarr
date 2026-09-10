@@ -259,15 +259,20 @@ jobs:
           provenance: mode=max
           sbom: true
 
-      # Each runner now matches the image it just built, so these scan
-      # natively. The `TRIVY_PLATFORM` pinning the single-job version needed
-      # (Trivy resolves a multi-arch index to the SCANNING HOST's platform, so
-      # an unpinned scan of the index re-scanned amd64 twice and never read
-      # arm64) is unnecessary here — there is no index yet, just this
-      # platform's manifest.
+      # Each runner scans the image it just built, but the platform MUST still
+      # be pinned. Two reasons, both of which the unpinned version got wrong:
+      #   1. This digest IS an index, even though the build is single-platform
+      #      — `provenance`/`sbom` push the attestation manifests alongside the
+      #      image manifest, so Trivy has to resolve a child.
+      #   2. Trivy defaults that resolution to `linux/amd64`, NOT the scanning
+      #      host's platform. On the arm64 runner it looked for an amd64 child
+      #      and died: `no child with platform linux/amd64 in index`. amd64
+      #      passed only because the default happened to match.
       - name: Scan pushed image
         id: scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: ${{ matrix.platform }}
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
           scanners: vuln
