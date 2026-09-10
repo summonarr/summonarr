@@ -7342,7 +7342,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-jose@6.2.11
+jose@6.2.12
 License: MIT
 
 The MIT License (MIT)
@@ -7788,7 +7788,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-oauth4webapi@3.8.7
+oauth4webapi@3.8.8
 License: MIT
 
 The MIT License (MIT)
@@ -7842,7 +7842,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-openid-client@6.8.7
+openid-client@6.8.8
 License: MIT
 
 The MIT License (MIT)
