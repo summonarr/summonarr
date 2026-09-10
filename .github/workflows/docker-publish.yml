@@ -288,12 +288,14 @@ jobs:
 
       # The digest is the only thing `merge` needs from this job. Written as a
       # file named after the digest so the two jobs cannot collide on upload.
+      # The `sha256:` prefix MUST be stripped: an artifact path may not contain
+      # a colon, and `merge` re-adds the prefix when it rebuilds the refs.
       - name: Export digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           mkdir -p /tmp/digests
-          touch "/tmp/digests/${DIGEST}"
+          touch "/tmp/digests/${DIGEST#sha256:}"
 
       - name: Upload digest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
