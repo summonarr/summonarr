@@ -123,36 +123,11 @@ RUN node scripts/prune-migrate-deps.mjs
 # if the CLI tries to download an engine at this point, that's a bug too.
 COPY prisma ./prisma
 COPY prisma.config.ts ./prisma.config.ts
-# EXECUTED only when not cross-building. Under QEMU emulation the pruned CLI
-# reads the schema through a wasm get-config that returns corrupted bytes: every
-# line comes back "does not start with any known Prisma schema keyword" for a
-# schema `prisma validate` accepts and that this very stage builds cleanly from
-# on a NATIVE arm64 host. Emulator, not architecture and not schema — confirmed
-# by `docker build --platform linux/arm64 --target migrate-deps` passing on an
-# arm64 machine while the emulated CI build failed identically twice. It stayed
-# hidden until now because both the release security gate and ci.yml's docker
-# build are amd64-only, so the emulated arm64 leg is first exercised at release.
-#
-# Skipping the RUN loses less than it looks like. What this proves is that
-# pruning left the CLI's JS module graph loadable, and that is arch-independent
-# — the amd64 leg gates it on every build. The one arch-SPECIFIC artefact, the
-# native schema-engine binary (absent, it is silently re-downloaded at boot,
-# which breaks offline deploys), is already gated on every platform by
-# prune-migrate-deps.mjs, which exits 1 when the glob finds nothing.
-#
-# The proper fix is building arm64 on a native ARM runner instead of emulating
-# it; this keeps the release moving without pretending the check ran.
-ARG TARGETPLATFORM
-ARG BUILDPLATFORM
-RUN if [ "$TARGETPLATFORM" != "$BUILDPLATFORM" ]; then \
-      echo "[migrate-deps] smoke test skipped: cross-building $BUILDPLATFORM -> $TARGETPLATFORM under emulation (the native leg gates the module graph; the engine binary is gated by prune-migrate-deps.mjs)"; \
-    else \
-      out=$(DATABASE_URL="postgresql://smoke:smoke@127.0.0.1:9/smoke" \
-        PRISMA_ENGINES_MIRROR="http://127.0.0.1:9" \
-        node node_modules/prisma/build/index.js db push 2>&1); \
-      echo "$out" | grep -q "P1001" || { echo "$out"; \
-        echo "[migrate-deps] smoke test FAILED: pruned prisma CLI cannot reach P1001 — module graph is broken"; exit 1; }; \
-    fi
+RUN out=$(DATABASE_URL="postgresql://smoke:smoke@127.0.0.1:9/smoke" \
+      PRISMA_ENGINES_MIRROR="http://127.0.0.1:9" \
+      node node_modules/prisma/build/index.js db push 2>&1); \
+    echo "$out" | grep -q "P1001" || { echo "$out"; \
+      echo "[migrate-deps] smoke test FAILED: pruned prisma CLI cannot reach P1001 — module graph is broken"; exit 1; }
 
 # ── Stage 4: runner ───────────────────────────────────────────────────────────
 FROM node:26.8.1-alpine3.23@sha256:871eb674ad6e692c91330a8959f1ce2f80ba3f445cdc54e306869d2ea265e42d AS runner
