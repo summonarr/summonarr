@@ -24,7 +24,13 @@
 //  - Event handling: Download flips APPROVED→AVAILABLE (one UPDATE covers both
 //    availableAt branches, pendingNotifyAt cleared, PENDING/DECLINED untouched) under the
 //    per-service advisory lock; the payload's id is verified against the arr's
-//    own API first (tri-state: false → flip refused, true/null → proceed);
+//    own API first. Radarr is tri-state (false → flip refused, true/null →
+//    proceed). Sonarr (guardrail 14a) flips ONLY on a confirmed-COMPLETE series
+//    — every aired regular-season episode on disk, specials excluded — answers
+//    an in-progress import with {skipped, reason:"incomplete"} while still
+//    scheduling the library scan, refuses the forgery shapes (absent /
+//    ids-disagree), and DEFERS an unverifiable verdict (no optimistic flip): the
+//    after() task re-verifies once the scan settles and flips then.
 //    Test short-circuits before the replay digest; Grab/unknown events are
 //    acknowledged-but-skipped (and still replay-recorded); malformed and
 //    non-object JSON → 400; oversized bodies → 413 (header fast-path before
@@ -37,10 +43,12 @@
 //
 // NOT covered here: arrSettingKey derivation (tests/arr-instances.test.mts owns
 // it; this file consumes it to seed Setting keys), digest construction (see
-// above), the deferred after() notification/library-scan bodies (captured but
-// not executed — scheduleLibraryScan opens a real 15s debounce timer chain, so
-// running the Download task would stall the file; the ManualInteraction after()
-// tasks ARE executed, they short-circuit safely on empty subscriptions), and
+// above), the deferred after() notification bodies (captured but not executed
+// — scheduleLibraryScan opens a real 15s debounce timer chain, so running a
+// Download task would stall the file; the ONE exception is the Sonarr
+// deferred-verify test, which runs its task under node:test's mock timers and
+// ticks the debounce by hand; the ManualInteraction after() tasks ARE executed,
+// they short-circuit safely on empty subscriptions), and
 // resolveSingleTvdbToTmdb's deferred wanted eviction (reachable only through a
 // findFirst-miss/updateMany-hit DB race a consistent in-memory table cannot
 // produce).
@@ -1005,9 +1013,55 @@ test("sonarr: both transports work on the sibling route; Test event returns the 
   assert.equal(wrong.res.status, 401, "a radarr secret must not authenticate the sonarr route");
 });
 
-test("sonarr Download by tmdbId: instance-scoped flip + wanted eviction + tvdbId backfill", async () => {
+// ── Sonarr fixtures (guardrail 14a) ─────────────────────────────────────────
+//
+// A Sonarr Download event flips a request only on a CONFIRMED-COMPLETE series,
+// so these tests configure the firing instance and script its /api/v3 answers.
+// `series` rows are what /api/v3/series?tvdbId= returns; `lookup` is what
+// /api/v3/series/lookup?term=tmdb:<id> returns (default: one row carrying the
+// requested ids, i.e. Sonarr agrees with the payload); `queue` feeds the
+// library-scan gate's /api/v3/queue read.
+const SONARR_DEFAULT_URL = "http://127.0.0.1:8989";
+const SONARR_ANIME_URL = "http://127.0.0.1:8990";
+function configureSonarr(slug: "" | "anime"): void {
+  settings.set(arrSettingKey("sonarr", slug, "Url"), slug === "" ? SONARR_DEFAULT_URL : SONARR_ANIME_URL);
+  settings.set(arrSettingKey("sonarr", slug, "ApiKey"), slug === "" ? "sonarr-default-key" : "sonarr-anime-key");
+}
+const season = (seasonNumber: number, episodeFileCount: number, episodeCount: number) =>
+  ({ seasonNumber, monitored: seasonNumber > 0, statistics: { episodeFileCount, episodeCount } });
+type SonarrScript = {
+  series: (url: URL) => unknown;
+  lookup?: (url: URL) => unknown;
+  queue?: unknown;
+};
+function scriptSonarr(script: SonarrScript): void {
+  fetchHandler = (raw) => {
+    const url = new URL(raw);
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (url.pathname === "/api/v3/series/lookup") {
+      if (script.lookup) return json(script.lookup(url));
+      const term = url.searchParams.get("term") ?? "";
+      const tmdbId = Number(term.replace(/^tmdb:/, ""));
+      return json([{ tmdbId, tvdbId: LOOKUP_TVDB_FOR[tmdbId] ?? 0 }]);
+    }
+    if (url.pathname === "/api/v3/series") return json(script.series(url));
+    if (url.pathname === "/api/v3/queue") return json(script.queue ?? { records: [], totalRecords: 0 });
+    throw new Error(`unexpected Sonarr fetch ${raw}`);
+  };
+}
+// The tmdb→tvdb pairs the default lookup script answers with.
+const LOOKUP_TVDB_FOR: Record<number, number> = { 888: 777, 999: 5555, 84503: 332335 };
+// A complete series for a given tvdbId (two full regular seasons + specials nobody has).
+const completeSeries = (tvdbId: number, tmdbId?: number) => [
+  { tvdbId, tmdbId, status: "continuing", seasons: [season(0, 0, 4), season(1, 10, 10), season(2, 10, 10)] },
+];
+
+test("sonarr Download by tmdbId: instance-scoped flip + wanted eviction + tvdbId backfill, verified against the FIRING instance's Sonarr", async () => {
   const animeRow = seedRequest({ tmdbId: 888, mediaType: "TV", arrInstance: "anime", tvdbId: null });
   const defaultRow = seedRequest({ tmdbId: 888, mediaType: "TV", arrInstance: "", tvdbId: null });
+  configureSonarr("anime");
+  scriptSonarr({ series: () => completeSeries(777, 888) });
 
   const { res, body } = await post(
     sonarrPOST,
@@ -1033,12 +1087,22 @@ test("sonarr Download by tmdbId: instance-scoped flip + wanted eviction + tvdbId
   // later tvdbId-only Download for either instance can then find its request.
   assert.equal(animeRow.tvdbId, 777);
   assert.equal(defaultRow.tvdbId, 777);
-  assert.equal(fetchCalls.length, 0, "sonarr unconfigured → indeterminate verify, no network");
+
+  // The verify (tmdb lookup + the tvdbId-filtered library read) hit the ANIME
+  // instance's URL with its own key — never the default's.
+  assert.equal(fetchCalls.length, 2);
+  for (const c of fetchCalls) {
+    assert.ok(c.url.startsWith(`${SONARR_ANIME_URL}/api/v3/series`), c.url);
+    assert.equal(new Headers(c.init?.headers).get("x-api-key"), "sonarr-anime-key");
+  }
+  assert.ok(fetchCalls[1].url.includes("tvdbId=777"), "the library read is the cheap ?tvdbId= filter, not a full-library fetch");
 });
 
 test("sonarr Download by tvdbId only: the request is matched via tvdbId and the wanted row evicted via ITS tmdbId", async () => {
   const defaultRow = seedRequest({ tmdbId: 999, tvdbId: 5555, mediaType: "TV", arrInstance: "" });
   const animeRow = seedRequest({ tmdbId: 999, tvdbId: 5555, mediaType: "TV", arrInstance: "anime" });
+  configureSonarr("");
+  scriptSonarr({ series: () => completeSeries(5555) });
 
   const { res, body } = await post(
     sonarrPOST,
@@ -1052,6 +1116,9 @@ test("sonarr Download by tvdbId only: the request is matched via tvdbId and the 
   assert.deepEqual(body, { ok: true, marked: 1 });
   assert.equal(defaultRow.status, "AVAILABLE");
   assert.equal(animeRow.status, "APPROVED", "the tvdb path is arrInstance-scoped too");
+  // No tmdbId in the payload ⇒ no lookup round-trip; just the filtered library read.
+  assert.equal(fetchCalls.length, 1);
+  assert.ok(fetchCalls[0].url.startsWith(`${SONARR_DEFAULT_URL}/api/v3/series?tvdbId=5555`));
 
   // The wanted table is tmdbId-keyed: eviction uses the matched request's own
   // tmdbId, scoped to the firing instance.
@@ -1146,4 +1213,228 @@ test("sonarr: non-Download events and a Download without series are acknowledged
   assert.equal(requests[0].status, "APPROVED");
   assert.equal(requestUpdateManyCalls.length, 0);
   assert.equal(sonarrWantedDeletes.length, 0);
+});
+
+// ── Sonarr: guardrail 14a — "ready" means the series is COMPLETE ────────────
+//
+// Sonarr fires one Download event per EPISODE. Under the old rule a continuing
+// series counted as downloaded with any single file, so the first event of a
+// 24-episode season pack flipped the request AVAILABLE and told the requester
+// it was ready to watch; the claim burned and nothing announced the real
+// completion. These pin the new contract end-to-end through the real
+// isSeriesDownloadedInSonarr against scripted /api/v3 payloads.
+
+test("sonarr 14a: an in-progress import (3/10 aired episodes) does NOT flip, answers {skipped, reason:incomplete} with the counts, still schedules the library scan, and logs nothing", async () => {
+  const row = seedRequest({ tmdbId: 888, tvdbId: 777, mediaType: "TV", arrInstance: "" });
+  configureSonarr("");
+  scriptSonarr({
+    series: () => [{ tvdbId: 777, tmdbId: 888, status: "continuing", seasons: [season(1, 3, 10)] }],
+  });
+
+  const { res, body, tasks } = await post(
+    sonarrPOST,
+    webhookReq("sonarr", {
+      token: SONARR_SECRET,
+      body: { eventType: "Download", series: { tvdbId: 777, tmdbId: 888, title: "Frieren" }, episodes: [{ seasonNumber: 1, episodeNumber: 3 }] },
+    }),
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(body, { ok: true, skipped: true, reason: "incomplete", episodeFileCount: 3, episodeCount: 10 });
+
+  assert.equal(row.status, "APPROVED", "a request must not go AVAILABLE off a partial season");
+  assert.equal(row.availableAt, null);
+  assert.equal(requestUpdateManyCalls.length, 0, "no status write at all");
+  assert.equal(sonarrWantedDeletes.length, 0, "the wanted row stays — the series IS still wanted");
+  // The episode landed, so the library scan is still scheduled: Plex/Jellyfin
+  // should show the new episode even while the request waits.
+  assert.equal(tasks.length, 1, "the deferred library-scan task must be scheduled on the incomplete path");
+  // Silent by design (guardrail 7): this is the state of every event but the last.
+  assert.ok(!warns.some((w) => w.includes("[webhook/sonarr]")), `unexpected webhook warning: ${warns.join(" | ")}`);
+});
+
+test("sonarr 14a: specials are EXCLUDED — a season-0 gap never holds a complete series back, and the series-level block Sonarr ships (which sums season 0) is ignored", async () => {
+  const row = seedRequest({ tmdbId: 888, tvdbId: 777, mediaType: "TV", arrInstance: "" });
+  configureSonarr("");
+  scriptSonarr({
+    series: () => [{
+      tvdbId: 777, tmdbId: 888, status: "ended",
+      // What Sonarr really sends: the series aggregate includes the six missing specials.
+      statistics: { episodeFileCount: 20, episodeCount: 26 },
+      seasons: [season(0, 0, 6), season(1, 10, 10), season(2, 10, 10)],
+    }],
+  });
+
+  const { body } = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "Download", series: { tvdbId: 777, tmdbId: 888, title: "Frieren" } } }),
+  );
+  assert.deepEqual(body, { ok: true, marked: 1 });
+  assert.equal(row.status, "AVAILABLE");
+});
+
+test("sonarr 14a: a COMPLETE continuing series flips — completeness is about aired episodes, not series status", async () => {
+  const row = seedRequest({ tmdbId: 888, tvdbId: 777, mediaType: "TV", arrInstance: "" });
+  configureSonarr("");
+  scriptSonarr({
+    // Season 3 has aired 4 of a planned 12; all 4 are on disk. Sonarr's
+    // per-season episodeCount already excludes the unaired 8.
+    series: () => [{ tvdbId: 777, tmdbId: 888, status: "continuing", seasons: [season(1, 10, 10), season(2, 10, 10), season(3, 4, 4)] }],
+  });
+
+  const { body } = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "Download", series: { tvdbId: 777, tmdbId: 888, title: "Frieren" } } }),
+  );
+  assert.deepEqual(body, { ok: true, marked: 1 });
+  assert.equal(row.status, "AVAILABLE");
+});
+
+test("sonarr forgery rejection: Sonarr reports the series ABSENT → flip refused with a warning naming the reason; no scan scheduled", async () => {
+  const row = seedRequest({ tmdbId: 888, tvdbId: 777, mediaType: "TV", arrInstance: "" });
+  configureSonarr("");
+  scriptSonarr({ series: () => [] });
+
+  const { body, tasks } = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "Download", series: { tvdbId: 777, tmdbId: 888, title: "Forged" } } }),
+  );
+  assert.deepEqual(body, { ok: true, skipped: true, reason: "not_downloaded" });
+  assert.equal(row.status, "APPROVED");
+  assert.equal(tasks.length, 0, "a disowned event must not trigger a library scan either");
+  // The harness joins console.warn args without %s substitution, so the reason
+  // arrives as a trailing argument rather than inside the parentheses.
+  assert.ok(warns.some((w) => w.includes("not confirmed downloaded in Sonarr") && w.endsWith("absent")), warns.join(" | "));
+});
+
+test("sonarr ids-disagree: a lookup row that MATCHES the payload's tmdbId but names another tvdbId is refused (the forgery shape)", async () => {
+  const row = seedRequest({ tmdbId: 888, tvdbId: 777, mediaType: "TV", arrInstance: "" });
+  configureSonarr("");
+  scriptSonarr({
+    lookup: () => [{ tmdbId: 888, tvdbId: 99999 }], // Sonarr says tmdb 888 IS tvdb 99999, not the payload's 777
+    series: () => completeSeries(777, 888),
+  });
+
+  const { body } = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "Download", series: { tvdbId: 777, tmdbId: 888, title: "Paired" } } }),
+  );
+  assert.deepEqual(body, { ok: true, skipped: true, reason: "not_downloaded" });
+  assert.equal(row.status, "APPROVED");
+  assert.ok(warns.some((w) => w.includes("payload ids disagree")));
+  assert.ok(warns.some((w) => w.includes("not confirmed downloaded in Sonarr") && w.endsWith("ids-disagree")), warns.join(" | "));
+});
+
+test("sonarr lone-row regression: a degraded lookup answering ONE row for a DIFFERENT title is ignored, and the genuine event flips on the payload's tvdbId", async () => {
+  // Observed live: `term=tmdb:84503` came back as a single row whose tvdbId was
+  // 84503 — a different show — and the ids-disagree guard then refused a real
+  // Download for tvdbId 332335. pickSeriesByTmdbId must treat that row as no
+  // answer, so the verify proceeds on the payload's own tvdbId.
+  const row = seedRequest({ tmdbId: 84503, tvdbId: 332335, mediaType: "TV", arrInstance: "" });
+  configureSonarr("");
+  scriptSonarr({
+    lookup: () => [{ tmdbId: 4321, tvdbId: 84503 }],
+    series: (url) => (url.searchParams.get("tvdbId") === "332335" ? completeSeries(332335, 84503) : []),
+  });
+
+  const { body } = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "Download", series: { tvdbId: 332335, tmdbId: 84503, title: "Real Show" } } }),
+  );
+  assert.deepEqual(body, { ok: true, marked: 1 });
+  assert.equal(row.status, "AVAILABLE");
+  assert.ok(!warns.some((w) => w.includes("payload ids disagree")), "a rejected lone row must not be reported as a disagreement");
+  assert.ok(fetchCalls.some((c) => c.url.includes("tvdbId=332335")), "the library read used the payload's tvdbId");
+});
+
+test("sonarr 14a: an UNVERIFIABLE verdict (Sonarr 503) never flips optimistically — it defers, and the after() task re-verifies once the scan settles and flips then", async () => {
+  const row = seedRequest({ tmdbId: 888, tvdbId: 777, mediaType: "TV", arrInstance: "" });
+  configureSonarr("");
+  // Sonarr 503s the library read on the FIRST verify (it does, under import
+  // load), then answers complete on the re-check after the scan has settled.
+  let seriesReads = 0;
+  fetchHandler = (raw) => {
+    const url = new URL(raw);
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (url.pathname === "/api/v3/series/lookup") return json([{ tmdbId: 888, tvdbId: 777 }]);
+    if (url.pathname === "/api/v3/series") {
+      seriesReads++;
+      return seriesReads === 1 ? json({ message: "Service Unavailable" }, 503) : json(completeSeries(777, 888));
+    }
+    if (url.pathname === "/api/v3/queue") return json({ records: [], totalRecords: 0 });
+    throw new Error(`unexpected Sonarr fetch ${raw}`);
+  };
+
+  const { res, body, tasks } = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "Download", series: { tvdbId: 777, tmdbId: 888, title: "Frieren" } } }),
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(body, { ok: true, deferred: true, reason: "unverified" });
+  assert.equal(row.status, "APPROVED", "the old optimistic flip announced an incomplete series as ready off a transient 503");
+  assert.equal(requestUpdateManyCalls.length, 0);
+  assert.ok(warns.some((w) => w.includes("[arr] isSeriesDownloadedInSonarr failed:")));
+  assert.equal(tasks.length, 1, "exactly one deferred task: the scan + re-verify");
+
+  // Run the deferred task. scheduleLibraryScan arms a real 15s debounce timer,
+  // so drive it with mock timers: enable BEFORE the task registers its
+  // setTimeout, tick the debounce, then let the async chain drain (the scan's
+  // queue read answers "empty" above, so no second timer is armed; with no
+  // media server configured the scan itself is a no-op).
+  const { mock } = await import("node:test");
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const running = runTasks(tasks);
+    await drainMicrotasks();
+    mock.timers.tick(15_000);
+    await running;
+  } finally {
+    mock.timers.reset();
+  }
+
+  assert.equal(row.status, "AVAILABLE", "the re-verify confirmed completion and flipped the request from the after() task");
+  assert.ok(row.availableAt instanceof Date);
+  assert.equal(seriesReads, 2, "one 503'd verify, then exactly one re-check");
+  assert.deepEqual(sonarrWantedDeletes, [{ tmdbId: 888, arrInstance: "" }], "the late flip evicts the wanted row like the synchronous one");
+});
+
+test("sonarr 14a: an unverifiable verdict whose re-check is STILL incomplete leaves the request to the periodic sync — no flip from the after() task either", async () => {
+  const row = seedRequest({ tmdbId: 888, tvdbId: 777, mediaType: "TV", arrInstance: "" });
+  configureSonarr("");
+  let seriesReads = 0;
+  fetchHandler = (raw) => {
+    const url = new URL(raw);
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (url.pathname === "/api/v3/series/lookup") return json([{ tmdbId: 888, tvdbId: 777 }]);
+    if (url.pathname === "/api/v3/series") {
+      seriesReads++;
+      return seriesReads === 1
+        ? json({ message: "Service Unavailable" }, 503)
+        : json([{ tvdbId: 777, tmdbId: 888, status: "continuing", seasons: [season(1, 5, 10)] }]);
+    }
+    if (url.pathname === "/api/v3/queue") return json({ records: [], totalRecords: 0 });
+    throw new Error(`unexpected Sonarr fetch ${raw}`);
+  };
+
+  const { body, tasks } = await post(
+    sonarrPOST,
+    webhookReq("sonarr", { token: SONARR_SECRET, body: { eventType: "Download", series: { tvdbId: 777, tmdbId: 888, title: "Frieren" } } }),
+  );
+  assert.deepEqual(body, { ok: true, deferred: true, reason: "unverified" });
+
+  const { mock } = await import("node:test");
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const running = runTasks(tasks);
+    await drainMicrotasks();
+    mock.timers.tick(15_000);
+    await running;
+  } finally {
+    mock.timers.reset();
+  }
+
+  assert.equal(row.status, "APPROVED");
+  assert.equal(requestUpdateManyCalls.length, 0);
+  assert.equal(seriesReads, 2, "exactly one re-check, never a retry loop");
 });

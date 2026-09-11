@@ -13,6 +13,7 @@ import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } fr
 import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, replaceEpisodeCacheForSource, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
+import { sonarrIncompleteKeys } from "@/lib/arr-availability";
 
 // 2 hours — intentionally wider than the 1-hour sync interval so one missed run is survivable
 const RECENT_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -241,11 +242,18 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
 
   const requests = await prisma.mediaRequest.findMany({
     where: { status: { in: ["PENDING", "APPROVED"] } },
-    select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
+    select: { id: true, tmdbId: true, mediaType: true, arrInstance: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
   });
 
+  // Sonarr completeness gate (guardrail 14a) — see the Plex route for the full
+  // reasoning: a series Sonarr still lists as wanted is incomplete, and library
+  // presence alone must not flip (or notify) its request. Pre-CAS.
+  const sonarrHeld = await sonarrIncompleteKeys(requests);
+
   let toMark = requests.filter((req) =>
-    req.mediaType === "MOVIE" ? movieIds.has(req.tmdbId) : tvIds.has(req.tmdbId)
+    req.mediaType === "MOVIE"
+      ? movieIds.has(req.tmdbId)
+      : tvIds.has(req.tmdbId) && !sonarrHeld.has(`${req.tmdbId}:${req.arrInstance}`)
   );
 
   // Per-user visibility gate for a RESTRICTED named server (guardrail 35) — the Jellyfin

@@ -22,6 +22,7 @@ import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDown
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, replaceEpisodeCacheForSource, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
+import { sonarrIncompleteKeys } from "@/lib/arr-availability";
 import { isFeatureEnabled } from "@/lib/features";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
@@ -500,10 +501,17 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
   let sonarrWanted = 0;
   let sonarrSyncSucceeded = false;
   let sonarrSyncedSlugs = new Set<string>();
+  // Every CONFIGURED Sonarr instance this run knows about (not just the ones whose
+  // fetch succeeded) — the completeness gate below holds a TV request only on an
+  // instance Sonarr is actually the oracle for, and a Sonarr outage this run must
+  // still hold (sonarrSyncedSlugs would drop the slug and let an incomplete
+  // series flip off library presence mid-outage).
+  let sonarrConfiguredSlugs = new Set<string>();
   if (sonarrEnabled && !windDownBefore("Sonarr")) {
     try {
       // Fan out over every configured Sonarr instance; same contract as the Radarr block.
       const instances = await getSyncableArrInstances("sonarr");
+      sonarrConfiguredSlugs = new Set(instances.map((i) => i.slug));
       const settled = await settleLimit(instances, CONCURRENCY_LIMIT, async (inst) => ({
         slug: inst.slug,
         result: await getSonarrWantedTmdbIds(inst.slug),
@@ -1431,11 +1439,37 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
   // status are coherent.
   const stillPendingAll = await prisma.mediaRequest.findMany({
     where: { status: { in: ["PENDING", "APPROVED"] } },
-    select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
+    select: { id: true, tmdbId: true, mediaType: true, arrInstance: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
   });
   const stillPending = revertedIds.size === 0
     ? stillPendingAll
     : stillPendingAll.filter((r) => !revertedIds.has(r.id));
+
+  // ── Sonarr completeness gate for the library passes (guardrail 14a) ────────
+  //
+  // A TV title is in Plex/Jellyfin the moment its FIRST episode imports, but a
+  // TV request is "ready" only once Sonarr reports the series COMPLETE (every
+  // aired, monitored, regular-season episode on disk). The Sonarr cache
+  // refresh above already encodes that verdict: an incomplete series sits in
+  // SonarrWantedItem for its instance. So a still-pending TV request whose
+  // (tmdbId, arrInstance) has a wanted row is held back from BOTH library
+  // marking passes — it stays PENDING/APPROVED, un-notified, and is
+  // re-evaluated next run; the ARR passes flip it once the row moves to
+  // SonarrAvailableItem (or the webhook confirms completion first).
+  //
+  // Read ONCE here, for the union of both passes' TV candidates, so it rides the
+  // single stillPending snapshot rather than re-querying per source (guardrail
+  // 15 constrains the READ; a filter over the snapshot afterwards is fine —
+  // the grants gate below does the same). Pre-CAS by construction: a gated id
+  // never reaches claimAvailableNotifications, so its once-only claim is never
+  // burned (guardrail 14). A title Sonarr does not track at all (no wanted row)
+  // keeps the pre-existing behaviour — library presence alone marks it — which
+  // is the only sensible answer for a deployment with no Sonarr, or a show that
+  // arrived by some other route. sonarrIncompleteKeys is the shared helper the
+  // per-source Resync routes use too; its keys are vkey-shaped.
+  const sonarrIncompleteSet = await sonarrIncompleteKeys(stillPending, { configuredSlugs: sonarrConfiguredSlugs });
+  const heldBySonarr = (req: { tmdbId: number; mediaType: string; arrInstance: string }): boolean =>
+    req.mediaType === "TV" && sonarrIncompleteSet.has(vkey(req.tmdbId, req.arrInstance));
 
   // ── Per-user media-server visibility (multi-server grants) ─────────────────
   //
@@ -1466,8 +1500,10 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
     tvIds: Map<number, unknown>,
     source: "plex" | "jellyfin",
   ): Promise<number> => {
+    // heldBySonarr: an incomplete series (guardrail 14a) is not a candidate at
+    // all, whatever the library holds — see the gate's comment above.
     const candidates = stillPending.filter((req) =>
-      req.mediaType === "MOVIE" ? movieIds.has(req.tmdbId) : tvIds.has(req.tmdbId)
+      (req.mediaType === "MOVIE" ? movieIds.has(req.tmdbId) : tvIds.has(req.tmdbId)) && !heldBySonarr(req)
     );
     if (candidates.length === 0) return 0;
 

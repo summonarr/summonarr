@@ -13,6 +13,7 @@ import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } fr
 import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, replaceEpisodeCacheForSource, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
+import { sonarrIncompleteKeys } from "@/lib/arr-availability";
 import { warnOnChange } from "@/lib/log-dedup";
 
 export async function POST(request: NextRequest) {
@@ -330,13 +331,22 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
 
   const requests = await prisma.mediaRequest.findMany({
     where: { status: { in: ["PENDING", "APPROVED"] } },
-    select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
+    select: { id: true, tmdbId: true, mediaType: true, arrInstance: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
   });
+
+  // Sonarr completeness gate (guardrail 14a), the per-source twin of the
+  // orchestrator's: a TV request whose series Sonarr still lists as WANTED
+  // (incomplete — not every aired regular-season episode is on disk) must not
+  // flip AVAILABLE off library presence, or the admin Resync button would
+  // announce a show as ready off its first imported episode while the hourly
+  // orchestrator holds it back. Pre-CAS, like the visibility gate below: the
+  // gated row keeps notifiedAvailable = false and is re-evaluated later.
+  const sonarrHeld = await sonarrIncompleteKeys(requests);
 
   let toMark = requests.filter((req) =>
     req.mediaType === "MOVIE"
       ? movieIds.has(req.tmdbId) && !droppedMovieIds.has(req.tmdbId)
-      : tvIds.has(req.tmdbId) && !droppedTvIds.has(req.tmdbId)
+      : tvIds.has(req.tmdbId) && !droppedTvIds.has(req.tmdbId) && !sonarrHeld.has(`${req.tmdbId}:${req.arrInstance}`)
   );
 
   // Per-user visibility gate for a RESTRICTED named server (guardrail 35). This run

@@ -256,6 +256,10 @@ function arrAvailableRead(model: ArrAvailRow["model"], ids: number[] | undefined
 
 const casCalls: CasCall[] = [];
 
+// Seedable SonarrWantedItem rows + every read's where (guardrail 14a gate).
+const sonarrWantedRows: Array<{ tmdbId: number; arrInstance: string }> = [];
+const sonarrWantedFindManyWheres: Array<Record<string, unknown> | undefined> = [];
+
 type Op = { model: string; method: string; args: unknown };
 type TxRecord = { ops: Op[]; timeout: number | undefined; failed: boolean };
 const transactions: TxRecord[] = [];
@@ -410,7 +414,19 @@ const fakePrisma = {
     findMany: async (args?: { where?: { tmdbId?: { in?: number[] } } }) =>
       arrAvailableRead("sonarrAvailableItem", args?.where?.tmdbId?.in),
   },
-  sonarrWantedItem: { findMany: async () => [] },
+  // Seedable (guardrail 14a): a wanted row is what HOLDS a TV request back from
+  // the library marking passes. The read is recorded so the gate's shape — one
+  // read per run, scoped to the configured instances — is pinnable.
+  sonarrWantedItem: {
+    findMany: async (args?: { where?: { tmdbId?: { in?: number[] }; arrInstance?: { in?: string[] } } }) => {
+      sonarrWantedFindManyWheres.push(args?.where);
+      const ids = args?.where?.tmdbId?.in;
+      const slugs = args?.where?.arrInstance?.in;
+      return sonarrWantedRows
+        .filter((r) => (!ids || ids.includes(r.tmdbId)) && (!slugs || slugs.includes(r.arrInstance)))
+        .map((r) => ({ tmdbId: r.tmdbId, arrInstance: r.arrInstance }));
+    },
+  },
   plexLibraryItem: {
     // The dedupe prior-mapping lookup. Wheres are recorded so the instance-scoping
     // pin can assert the read carries serverInstance; no fixture seeds prior
@@ -652,6 +668,8 @@ beforeEach(() => {
   arrAvailableRows.length = 0;
   arrAvailableReadCounts.radarrAvailableItem = 0;
   arrAvailableReadCounts.sonarrAvailableItem = 0;
+  sonarrWantedRows.length = 0;
+  sonarrWantedFindManyWheres.length = 0;
   pgLockCalls.length = 0;
   requests.clear();
   usersById.clear();
@@ -2506,4 +2524,149 @@ test("GUARDRAIL 41: every sync arm is gated on the advisory-lock abort, and no c
       "a wind-down check inside a transaction could strand a delete without its repopulate",
     );
   }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GUARDRAIL 14a — a TV request is "now available" only once Sonarr reports the
+// series COMPLETE. Library presence alone never flips a request Sonarr still
+// lists as wanted.
+//
+// Plex indexes a show from its FIRST imported episode, so before this gate the
+// library marking pass flipped the request AVAILABLE (and notified "ready to
+// watch") off episode 1 of a season pack, burning the once-only claim. The
+// Sonarr cache refresh already encodes completeness — an incomplete series
+// lands in SonarrWantedItem — and that row is what holds the request back.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SONARR_BASE = "http://10.77.0.4:8989";
+const SONARR_ORIGIN = new URL(SONARR_BASE).origin;
+function configureSonarr(): void {
+  settings.set("sonarrUrl", SONARR_BASE);
+  settings.set("sonarrApiKey", "sonarr-api-key");
+}
+const seasonStats = (seasonNumber: number, episodeFileCount: number, episodeCount: number) =>
+  ({ seasonNumber, monitored: seasonNumber > 0, statistics: { episodeFileCount, episodeCount } });
+// Answers the one endpoint getSonarrWantedTmdbIds hits. Rows carry a native
+// tmdbId so no tvdb→tmdb resolution (TMDB network) is needed.
+function sonarrResponder(series: unknown[]): (url: URL) => Response {
+  return (url) => {
+    if (url.pathname === "/api/v3/series") return okJson(series);
+    throw new Error(`unexpected Sonarr fetch ${url.href}`);
+  };
+}
+function plexShowAndSonarr(shows: Array<{ ratingKey: string; tmdbId: number; files: string[] }>, series: unknown[]): void {
+  const plex = plexShowResponder(shows);
+  const sonarr = sonarrResponder(series);
+  respond = (url) => (url.origin === SONARR_ORIGIN ? sonarr(url) : plex(url));
+}
+const sonarrTxRows = (model: "sonarrWantedItem" | "sonarrAvailableItem") =>
+  transactions
+    .flatMap((t) => t.ops)
+    .filter((o) => o.model === model && o.method === "createMany")
+    .flatMap((o) => (o.args as { data: Array<{ tmdbId: number; arrInstance: string }> }).data);
+
+test("guardrail 14a: a show in Plex whose series Sonarr still lists as WANTED is NOT flipped, NOT notified, and its claim is left un-burned — and the cache writer classifies a partial CONTINUING series as wanted", async () => {
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-1");
+  configureSonarr();
+  // Plex holds the show (its first episode imported); Sonarr reports 3 of 10
+  // aired episodes on disk for a continuing series — the shape the OLD writer
+  // called "available".
+  plexShowAndSonarr(
+    [{ ratingKey: "show-1399", tmdbId: 1399, files: ["/tv/got/s01e01.mkv"] }],
+    // The series-level block Sonarr really sends rides along; the verdict must come from the seasons.
+    [{ tvdbId: 121361, tmdbId: 1399, status: "continuing", statistics: { episodeFileCount: 3, episodeCount: 10 }, seasons: [seasonStats(1, 3, 10)] }],
+  );
+  sonarrWantedRows.push({ tmdbId: 1399, arrInstance: "" });
+  seedUser("u1", {});
+  seedRequest({
+    id: "req-partial", tmdbId: 1399, mediaType: "TV", requestedBy: "u1", status: "APPROVED",
+    lastArrPushAt: new Date(), // inside the re-push backoff: keep the *arr add path out of this test
+  });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  const b = await bodyOf(res);
+  await settle();
+
+  // The writer's verdict, end-to-end through the real getSonarrWantedTmdbIds:
+  // wanted, not available.
+  assert.deepEqual(sonarrTxRows("sonarrWantedItem"), [{ tmdbId: 1399, arrInstance: "" }], "a continuing series at 3/10 is WANTED");
+  assert.deepEqual(sonarrTxRows("sonarrAvailableItem"), [], "…and never available");
+
+  // The library pass saw the show in Plex and still held the request.
+  assert.equal(b.plexMarked, 0, "library presence must not mark a request Sonarr lists as wanted");
+  assert.equal(requests.get("req-partial")?.status, "APPROVED");
+  assert.equal(requests.get("req-partial")?.notifiedAvailable, false, "the once-only claim is NOT burned — the real completion must still notify");
+  assert.equal(casCalls.filter((c) => c.ids.includes("req-partial")).length, 0, "PRE-CAS: a gated id never reaches the notification claim");
+
+  // One wanted read, scoped to the configured Sonarr instance(s).
+  const gateReads = sonarrWantedFindManyWheres.filter((w) => Array.isArray((w?.tmdbId as { in?: number[] } | undefined)?.in));
+  assert.equal(gateReads.length, 1, "the gate reads the wanted table ONCE per run, off the shared stillPending snapshot");
+  assert.deepEqual((gateReads[0]?.arrInstance as { in: string[] }).in, [""], "…and only for CONFIGURED instances");
+});
+
+test("guardrail 14a counterpart: the SAME show with NO wanted row flips and notifies as before — the gate holds on the row, not on Sonarr merely being configured", async () => {
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-1");
+  configureSonarr();
+  plexShowAndSonarr(
+    [{ ratingKey: "show-1399", tmdbId: 1399, files: ["/tv/got/s01e01.mkv"] }],
+    // Complete: every aired regular-season episode on disk (specials missing, and irrelevant).
+    // Sonarr's own aggregate SUMS season 0 (10/13 here) — the per-season blocks are what decide.
+    [{ tvdbId: 121361, tmdbId: 1399, status: "continuing", statistics: { episodeFileCount: 10, episodeCount: 13 }, seasons: [seasonStats(0, 0, 3), seasonStats(1, 10, 10)] }],
+  );
+  seedUser("u1", {});
+  seedRequest({ id: "req-complete", tmdbId: 1399, mediaType: "TV", requestedBy: "u1", status: "APPROVED", lastArrPushAt: new Date() });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.deepEqual(sonarrTxRows("sonarrAvailableItem"), [{ tmdbId: 1399, arrInstance: "" }], "a complete series is AVAILABLE in the cache");
+  assert.deepEqual(sonarrTxRows("sonarrWantedItem"), []);
+  assert.equal(b.plexMarked, 1);
+  assert.equal(requests.get("req-complete")?.status, "AVAILABLE");
+  assert.ok(casCalls.some((c) => c.mode === "markAvailable" && c.ids.includes("req-complete")), "the ungated request reaches the claim");
+});
+
+test("guardrail 14a: a wanted row on an UNCONFIGURED Sonarr instance does not hold — Sonarr is not the oracle there, so library presence decides", async () => {
+  // The default instance can never be de-registered, so its rows survive an
+  // operator blanking the Sonarr connection for good. Reading them would strand
+  // every such request in APPROVED forever.
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-1");
+  respond = plexShowResponder([{ ratingKey: "show-1399", tmdbId: 1399, files: ["/tv/got/s01e01.mkv"] }]);
+  sonarrWantedRows.push({ tmdbId: 1399, arrInstance: "" }); // stale: no Sonarr configured
+  seedUser("u1", {});
+  seedRequest({ id: "req-stale", tmdbId: 1399, mediaType: "TV", requestedBy: "u1", status: "APPROVED" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.equal(b.plexMarked, 1);
+  assert.equal(requests.get("req-stale")?.status, "AVAILABLE");
+});
+
+test("guardrail 14a: the hold is per INSTANCE — a wanted row on the default Sonarr does not hold a request targeting a different instance", async () => {
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-1");
+  configureSonarr();
+  plexShowAndSonarr(
+    [{ ratingKey: "show-1399", tmdbId: 1399, files: ["/tv/got/s01e01.mkv"] }],
+    // The series-level block Sonarr really sends rides along; the verdict must come from the seasons.
+    [{ tvdbId: 121361, tmdbId: 1399, status: "continuing", statistics: { episodeFileCount: 3, episodeCount: 10 }, seasons: [seasonStats(1, 3, 10)] }],
+  );
+  sonarrWantedRows.push({ tmdbId: 1399, arrInstance: "" });
+  seedUser("u1", {});
+  seedUser("u2", {});
+  seedRequest({ id: "req-default", tmdbId: 1399, mediaType: "TV", arrInstance: "", requestedBy: "u1", status: "APPROVED", lastArrPushAt: new Date() });
+  seedRequest({ id: "req-anime", tmdbId: 1399, mediaType: "TV", arrInstance: "anime", requestedBy: "u2", status: "APPROVED", lastArrPushAt: new Date() });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.equal(requests.get("req-default")?.status, "APPROVED", "held: its own instance lists the series as wanted");
+  assert.equal(requests.get("req-anime")?.status, "AVAILABLE", "not held: the anime instance has no wanted row (nothing tracks it there), so library presence decides");
 });

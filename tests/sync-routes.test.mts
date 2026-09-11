@@ -79,6 +79,9 @@ const settings = new Map<string, string>();
 interface PendingRequest {
   id: string; tmdbId: number; mediaType: "MOVIE" | "TV"; requestedBy: string;
   title: string; posterPath: string | null; notifiedAvailable: boolean;
+  // Optional so the movie fixtures stay untouched; the routes select it for the
+  // guardrail-14a gate, which keys on (tmdbId, arrInstance).
+  arrInstance?: string;
 }
 interface RequesterRow {
   id: string; role: string; permissions: bigint; mediaServerGrants: unknown; mediaServer: string | null;
@@ -87,6 +90,7 @@ interface RequesterRow {
 }
 let pendingRequests: PendingRequest[] = [];
 let requesterRows: RequesterRow[] = [];
+const sonarrWantedRows: Array<{ tmdbId: number; arrInstance: string }> = [];
 let casCalls = 0;
 // Ids the notifiedAvailable CAS should report as winners. Default [] — every
 // existing test keeps the "nothing was claimed, so the notify path stops here"
@@ -193,6 +197,17 @@ const fakePrisma = {
     updateMany: async (args: unknown) => {
       requestUpdateManys.push(args);
       return { count: 0 };
+    },
+  },
+  // Seedable (guardrail 14a): a wanted row on the request's instance HOLDS a TV
+  // request back from the marking pass, however present the show is in the library.
+  sonarrWantedItem: {
+    findMany: async (args?: { where?: { tmdbId?: { in?: number[] }; arrInstance?: { in?: string[] } } }) => {
+      const ids = args?.where?.tmdbId?.in;
+      const slugs = args?.where?.arrInstance?.in;
+      return sonarrWantedRows
+        .filter((r) => (!ids || ids.includes(r.tmdbId)) && (!slugs || slugs.includes(r.arrInstance)))
+        .map((r) => ({ tmdbId: r.tmdbId, arrInstance: r.arrInstance }));
     },
   },
   user: {
@@ -495,6 +510,7 @@ beforeEach(() => {
   failCreateManyOn = null;
   pendingRequests = [];
   requesterRows = [];
+  sonarrWantedRows.length = 0;
   requestUpdateManys.length = 0;
   casCalls = 0;
   casWinnerIds = [];
@@ -1290,4 +1306,73 @@ test("a DEACTIVATED requester's winner still wipes stale deletion votes and disa
       "is burned but the delivery is suppressed",
   );
   assert.deepEqual(errors, [], "no channel blew up on the way through");
+});
+
+// ── guardrail 14a on the per-source Resync routes ───────────────────────────
+//
+// The admin "Resync" button runs THIS marking pass, not the orchestrator's, so
+// without its own gate it would announce a show as ready off its first imported
+// episode while the hourly run held the request back. A SonarrWantedItem row on
+// the request's (configured) instance means Sonarr still lists the series as
+// incomplete, and the row must never reach the notification CAS.
+
+// Plex fixture: the file's existing plexShowResponder (one movie section, one
+// show section with a TMDB-identified show and its on-disk episode).
+function configureSonarr(): void {
+  settings.set("sonarrUrl", "http://10.77.0.4:8989");
+  settings.set("sonarrApiKey", "sonarr-api-key");
+}
+function pendingShowFor(userId: string, arrInstance = ""): PendingRequest {
+  return { id: "req-show", tmdbId: 1399, mediaType: "TV", arrInstance, requestedBy: userId, title: "Show 1399", posterPath: null, notifiedAvailable: false };
+}
+
+test("guardrail 14a: a Plex resync does NOT flip or notify a TV request whose series Sonarr still lists as wanted", async () => {
+  configurePlex();
+  configureSonarr();
+  respond = plexShowResponder([{ ratingKey: "show-1399", tmdbId: 1399, file: "/tv/got/s01e01.mkv" }]);
+  sonarrWantedRows.push({ tmdbId: 1399, arrInstance: "" });
+  pendingRequests = [pendingShowFor("u1")];
+  requesterRows = [{ id: "u1", role: "USER", permissions: 0n, mediaServerGrants: {}, mediaServer: null }];
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  await settleFireAndForget();
+  assert.equal(res.status, 200);
+
+  assert.equal(casCalls, 0, "a request Sonarr lists as wanted must never reach the notification CAS");
+  assert.equal(requestUpdateManys.length, 0, "no AVAILABLE flip off a partial series");
+});
+
+test("guardrail 14a counterpart: with NO wanted row the same resync flips and notifies", async () => {
+  configurePlex();
+  configureSonarr();
+  respond = plexShowResponder([{ ratingKey: "show-1399", tmdbId: 1399, file: "/tv/got/s01e01.mkv" }]);
+  pendingRequests = [pendingShowFor("u1")];
+  requesterRows = [{ id: "u1", role: "USER", permissions: 0n, mediaServerGrants: {}, mediaServer: null }];
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }));
+  await settleFireAndForget();
+  assert.equal(res.status, 200);
+
+  assert.equal(casCalls, 1, "an ungated request reaches the claim exactly once");
+});
+
+test("guardrail 14a: a wanted row on an UNCONFIGURED Sonarr does not hold (stale rows must not strand a request), and the hold is per instance", async () => {
+  configurePlex();
+  // No Sonarr configured at all: the row is stale, Sonarr is not the oracle.
+  respond = plexShowResponder([{ ratingKey: "show-1399", tmdbId: 1399, file: "/tv/got/s01e01.mkv" }]);
+  sonarrWantedRows.push({ tmdbId: 1399, arrInstance: "" });
+  pendingRequests = [pendingShowFor("u1")];
+  requesterRows = [{ id: "u1", role: "USER", permissions: 0n, mediaServerGrants: {}, mediaServer: null }];
+  assert.equal((await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }))).status, 200);
+  await settleFireAndForget();
+  assert.equal(casCalls, 1, "stale wanted rows on an unconfigured instance must not hold");
+
+  // Configured default Sonarr with a wanted row, but the request targets "anime":
+  // nothing tracks it there, so library presence decides.
+  casCalls = 0;
+  configureSonarr();
+  pendingRequests = [pendingShowFor("u1", "anime")];
+  assert.equal((await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true }) }))).status, 200);
+  await settleFireAndForget();
+  assert.equal(casCalls, 1, "a wanted row on the DEFAULT instance does not hold a request on another instance");
 });

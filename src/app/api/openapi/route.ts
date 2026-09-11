@@ -1811,7 +1811,8 @@ const spec = {
         ],
         responses: {
           "200": {
-            description: "Cache rows, live ARR check, tvdb→tmdb mapping, wanted-table counts, last LIBRARY_SYNC audit row",
+            description:
+              "Cache rows, live ARR check, tvdb→tmdb mapping, wanted-table counts, last LIBRARY_SYNC audit row. For type=tv each instance also carries liveCompletion — Sonarr's aired-episode counts (specials excluded) and whether the series reads complete, which is the sole condition for a TV request to flip AVAILABLE.",
           },
         },
       },
@@ -2172,6 +2173,8 @@ const spec = {
       post: {
         tags: ["Webhooks"],
         summary: "Sonarr webhook (episode grabbed / imported / deleted)",
+        description:
+          "A Download event flips the series' APPROVED requests to AVAILABLE only once Sonarr confirms the series COMPLETE (every aired regular-season episode on disk). Mid-import deliveries answer { skipped: true, reason: \"incomplete\", episodeFileCount, episodeCount }; an unverifiable delivery (Sonarr unreachable) answers { deferred: true } and is re-checked after the library scan settles.",
         security: [],
         parameters: [{ name: "token", in: "query", schema: { type: "string" } }],
         requestBody: { content: { "application/json": { schema: { type: "object" } } } },
