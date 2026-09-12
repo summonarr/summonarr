@@ -625,6 +625,19 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - The same key (server + instance + mediaType + from→to) already running ⇒ the same job is returned, never a second remap of one title.
     - A job's `error` is the client-safe message only — the route still logs the real detail before throwing `FixMatchError`.
 
+37b. **Exactly one TMDB id may keep a `PlexLibraryItem` row per conflated Plex ratingKey, and WHICH one must resolve the same way on every run.** The Plex twin of 37's `prefersCandidate`. One definition — [plex-dedupe.ts](src/lib/plex-dedupe.ts) — called by BOTH writers, the orchestrator's Plex arm and the admin Resync route.
+
+    Why:
+    - Plex merges metadata bundles, so one item can claim several tmdb guids. `PlexLibraryItem` is keyed `([tmdbId, mediaType, serverInstance])`, so every candidate would become its own row pointing at the same item and nothing mapping ratingKey → title (play-history, fix-match) could answer. The losers get NO row at all — no availability badge, no `TVEpisodeCache` entry — so which one wins is user-visible.
+    - The prior mapping was read as `tmdbId IN (this batch's candidates)`, which finds the pin only when the pinned title is in the CURRENT fetch. A partial fetch is routine while Plex is mid-scan — exactly when the SSE timeline handler runs the sync most often — and with no mapping found the code kept "the first occurrence" of an array filled by a concurrent section walk (`Promise.all` in `getPlexTmdbIds`). That wrote a different winner and read it back as the pin from then on. Observed live: ratingKey 473163 (four shows) pinned to tmdb 225634 for two runs and 113988 on a later one, silently swapping which show had a library row.
+
+    Rules:
+    - **Look the prior mapping up BY RATING KEY**, still instance- and mediaType-scoped (guardrail 35). Never by the batch's candidate tmdbIds — that is the pin-losing shape, and it reads as harmless because the query still returns the right row in the common case.
+    - **Honour a pin only when its tmdbId is in the batch.** A pin naming an absent title drops every candidate and leaves the ratingKey with no row — which on the full-replace path destroys the pin too, so the next run starts over.
+    - **Every remaining choice is a total order over the candidates, never arrival order.** That includes resolving a duplicate stored mapping: `plexRatingKey` is indexed but NOT unique and `findMany` has no defined order, so last-write-wins there is the same bug from the other side. Lowest tmdbId in both places.
+    - **One definition, not two agreeing copies.** The two writers held near-identical private copies that a comment asked you to keep in sync by hand; a drift means one writer drops the row the other just wrote, on every run.
+    - `tests/plex-dedupe.test.mts` pins all of it, each mutation-verified: first-occurrence order, the tmdbId-keyed lookup, an unconditional pin, and last-write-wins over the stored rows each fail a named test.
+
 38. **`'unsafe-eval'` in the CSP is gated on `NODE_ENV === "development"` and NEVER widens. Don't delete the branch either.**
 
     Why:

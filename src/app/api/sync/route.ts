@@ -16,7 +16,7 @@ import { getPlexConfig } from "@/lib/plex-config";
 import { buildSeriesItemIdIndex, libraryItemIds, getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { getMediaInstances, getSyncableMediaInstances } from "@/lib/media-instance-registry";
-import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
+import { DEFAULT_MEDIA_INSTANCE, plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
 import { syncDownloadPolicies } from "@/lib/download-policy";
 import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDownloadPending } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
@@ -32,7 +32,7 @@ import { DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
 import { settleLimit } from "@/lib/concurrency";
 import { effectivePermissions, parseMediaServerGrants } from "@/lib/permissions";
 import { visibleInstancesFor, type VisibleServerInstances } from "@/lib/media-visibility";
-import { warnOnChange } from "@/lib/log-dedup";
+import { deduplicatePlexRowsByRatingKey } from "@/lib/plex-dedupe";
 
 // Advisory-lock id 2000 — distinct from 2001-2011 (cron warm/sync routes) and TRASH_SYNC_LOCK_ID (2010).
 // Held for the entire orchestrator run so a second concurrent invocation (admin "Resync" while
@@ -148,75 +148,6 @@ const sanitizeStr = (s: string | null | undefined, maxLen = 1000): string | null
   if (s == null) return null;
   return s.replace(/[<>]/g, "").replace(/\0/g, "").slice(0, maxLen) || null;
 };
-
-// Plex can conflate two TMDB IDs onto the same ratingKey when metadata bundles merge.
-// Prefer the previously stored mapping so ownership doesn't flip-flop on every sync.
-// Mirrors deduplicateByRatingKey in /api/sync/plex so the two writers agree on the row set.
-// Scoped per instance: ratingKeys are small server-local integers, so the SAME key on two
-// independently-administered servers is routine and legitimate — NOT conflation. Callers run
-// this per instance batch, and the prior-mapping lookup consults only THAT instance's stored
-// rows (an unscoped read could import another server's ratingKey→tmdbId mapping and wrongly
-// drop this server's row).
-type PlexDedupeRow = { tmdbId: number; plexRatingKey: string | null };
-async function deduplicatePlexRowsByRatingKey<T extends PlexDedupeRow>(
-  rows: T[],
-  mediaType: "MOVIE" | "TV",
-  serverInstance: MediaInstanceKey,
-): Promise<T[]> {
-  const ratingKeyCount = new Map<string, number>();
-  for (const r of rows) {
-    if (r.plexRatingKey) ratingKeyCount.set(r.plexRatingKey, (ratingKeyCount.get(r.plexRatingKey) ?? 0) + 1);
-  }
-  const conflatedKeys = new Set([...ratingKeyCount.entries()].filter(([, n]) => n > 1).map(([k]) => k));
-  if (conflatedKeys.size === 0) return rows;
-
-  const conflatedTmdbIds = rows.filter((r) => r.plexRatingKey && conflatedKeys.has(r.plexRatingKey)).map((r) => r.tmdbId);
-  const existing = await prisma.plexLibraryItem.findMany({
-    where: { mediaType, serverInstance, tmdbId: { in: conflatedTmdbIds } },
-    select: { tmdbId: true, plexRatingKey: true },
-  });
-  const fixedIdByRatingKey = new Map<string, number>();
-  for (const e of existing) {
-    if (e.plexRatingKey) fixedIdByRatingKey.set(e.plexRatingKey, e.tmdbId);
-  }
-
-  const seenRatingKeys = new Set<string>();
-  // Collected, not logged per row. The same handful of conflations recurs on
-  // EVERY sync — they describe a stable property of the library, not an event
-  // — so a line per dropped item made the library sync the loudest thing in
-  // the log while saying nothing new each time. One summary per run keeps the
-  // signal (how many, which keys, which instance) without the repetition.
-  const dropped: string[] = [];
-  const kept = rows.filter((r) => {
-    if (!r.plexRatingKey || !conflatedKeys.has(r.plexRatingKey)) return true;
-    const fixed = fixedIdByRatingKey.get(r.plexRatingKey);
-    if (fixed !== undefined) {
-      if (r.tmdbId !== fixed) {
-        dropped.push(`${r.plexRatingKey}→${fixed} (dropped ${r.tmdbId})`);
-        return false;
-      }
-    } else if (seenRatingKeys.has(r.plexRatingKey)) {
-      return false;
-    }
-    seenRatingKeys.add(r.plexRatingKey);
-    return true;
-  });
-
-  if (dropped.length > 0) {
-    // Repeat-suppressed: a conflated ratingKey is a standing property of the
-    // Plex library plus its pinned mappings, so this recomputes to the same
-    // string on every orchestrator run. The signature is the dropped list
-    // itself — not just its length — so a different set of conflicts re-logs
-    // even when the count happens to match.
-    warnOnChange(
-      `sync-conflated:${mediaType}:${serverInstance}`,
-      dropped.join(", "),
-      `[sync] ${dropped.length} conflated ratingKey(s) kept their pinned tmdbId ` +
-        `(${mediaType}, instance="${serverInstance}"): ${dropped.join(", ")}`,
-    );
-  }
-  return kept;
-}
 
 async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Promise<NextResponse> {
   // withAdvisoryLock aborts at DEFAULT_WORK_TIMEOUT_MS (30 min) and RELEASES the
@@ -898,8 +829,8 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
             writable.map(async ({ slug, movieIds, tvIds }) => {
               const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, serverInstance: slug, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
               const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, serverInstance: slug, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
-              const finalMovieRows = await deduplicatePlexRowsByRatingKey(movieRows, "MOVIE", slug);
-              const finalTvRows    = await deduplicatePlexRowsByRatingKey(tvRows, "TV", slug);
+              const finalMovieRows = await deduplicatePlexRowsByRatingKey(movieRows, "MOVIE", slug, "sync");
+              const finalTvRows    = await deduplicatePlexRowsByRatingKey(tvRows, "TV", slug, "sync");
               return {
                 slug,
                 finalMovieRows,

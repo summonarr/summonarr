@@ -1144,12 +1144,12 @@ test("multi-server safety: the plex dedupe clone's prior-mapping lookup is defau
 
   assert.deepEqual(
     plexFindManyWheres,
-    [{ mediaType: "MOVIE", serverInstance: "", tmdbId: { in: [601, 602] } }],
+    [{ mediaType: "MOVIE", serverInstance: "", plexRatingKey: { in: ["rk-dup"] } }],
     "the conflated-ratingKey read must consult only the default instance's rows — ratingKeys are " +
       "small server-local integers, so an unscoped read could import a named instance's mapping " +
       "and wrongly drop this server's row",
   );
-  // No prior mapping ⇒ keep the first occurrence: only tmdb 601 is inserted.
+  // No prior mapping ⇒ the order-independent tiebreak: only tmdb 601 is inserted.
   const creates = opsFor("plexLibraryItem", "createMany");
   assert.equal(creates.length, 1);
   assert.deepEqual(

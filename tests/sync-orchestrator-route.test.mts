@@ -1327,14 +1327,18 @@ test("multi-server: the conflated-ratingKey dedupe is instance-scoped — the pr
   // Exactly ONE prior-mapping lookup fired — for the default instance's conflated
   // MOVIE batch — and it is scoped to THAT instance. An unscoped read could import
   // the remote server's rk-shared→400 mapping and wrongly drop the default's rows.
+  // Keyed on the ratingKey itself: keying it on the batch's candidate tmdbIds lost
+  // the pin whenever the pinned title was absent from the fetch (see
+  // tests/plex-dedupe.test.mts).
   assert.deepEqual(
     plexLibraryItemFindManyWheres,
-    [{ mediaType: "MOVIE", serverInstance: "", tmdbId: { in: [601, 602] } }],
+    [{ mediaType: "MOVIE", serverInstance: "", plexRatingKey: { in: ["rk-shared"] } }],
     "the dedupe's conflated-ratingKey DB read must be scoped to the instance batch being deduped",
   );
 
-  // Dedupe resolved WITHIN the default instance (no prior mapping ⇒ keep first
-  // occurrence), while the remote instance's same-ratingKey row survived untouched.
+  // Dedupe resolved WITHIN the default instance (no prior mapping ⇒ the
+  // order-independent tiebreak), while the remote instance's same-ratingKey row
+  // survived untouched.
   const plexTx = txTouching("plexLibraryItem");
   assert.equal(plexTx.length, 1);
   const allCreatedRows = plexTx[0].ops
