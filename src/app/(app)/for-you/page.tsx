@@ -24,6 +24,7 @@ import { LiveRefresh } from "@/components/live-refresh";
 import { PageHeader, EmptyState } from "@/components/ui/design";
 import { PillFilter } from "@/components/media/pill-filter";
 import { NotInterestedButton } from "@/components/media/not-interested-button";
+import { RebuildRecommendationsButton } from "@/components/media/rebuild-recommendations-button";
 import { Filter, Sparkles } from "@/components/icons";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 
@@ -123,7 +124,15 @@ export default async function ForYouPage({
     <div className="ds-page-enter">
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
 
-      <PageHeader title="For You" subtitle={subtitle} />
+      {/* Admin-only, and cosmetic: the real gate is the endpoint, which resolves
+          an admin session through getCronActor and 401s anything else. The role
+          here comes from requireAppSession (DB-checked), so a demotion hides it
+          on the next render rather than after the JWT expires. */}
+      <PageHeader
+        title="For You"
+        subtitle={subtitle}
+        right={session.user.role === "ADMIN" ? <RebuildRecommendationsButton /> : undefined}
+      />
 
       {enriched.length > 0 && (
         <div className="flex items-center gap-x-5 gap-y-3 flex-wrap mb-5">
