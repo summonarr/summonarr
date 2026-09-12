@@ -8,7 +8,11 @@ import { requireAppSession } from "@/lib/require-app-session";
 import { requireFeature } from "@/lib/features";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
-import { getUserRecommendations, getRecommendationSummary } from "@/lib/recommendations";
+import {
+  getUserRecommendations,
+  getRecommendationsComputedAt,
+  summarizeRecommendationSeeds,
+} from "@/lib/recommendations";
 import { formatRelativeTime } from "@/lib/relative-time";
 import {
   applyRecommendationView,
@@ -48,18 +52,19 @@ export default async function ForYouPage({
   const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
 
-  const [recommendations, summary, show4k] = await Promise.all([
+  const [recommendations, computedAt, show4k] = await Promise.all([
     getUserRecommendations(session.user.id),
-    getRecommendationSummary(session.user.id),
+    getRecommendationsComputedAt(session.user.id),
     getShow4kVisibility(session),
   ]);
 
-  // Enrich the WHOLE ranked set (≤ MAX_STORED_RECOMMENDATIONS_PER_USER, 200):
-  // the availability filter below reads post-enrichment fields, so filtering
-  // before enriching only the visible page would break both the filter and the
-  // total count. attachAllAvailability preserves rank order and drops hidden
-  // titles, and its availability answer is already per-user visibility-scoped
-  // (a restricted server the viewer holds no grant for reads as unavailable).
+  // Enrich the WHOLE ranked set (≤ MAX_SERVED_RECOMMENDATIONS, 200 — the store
+  // holds a deeper reserve that never reaches a read surface): the availability
+  // filter below reads post-enrichment fields, so filtering before enriching
+  // only the visible page would break both the filter and the total count.
+  // attachAllAvailability preserves rank order and drops hidden titles, and its
+  // availability answer is already per-user visibility-scoped (a restricted
+  // server the viewer holds no grant for reads as unavailable).
   const enriched = await attachAllAvailability(recommendations, session.user.id, { show4k });
   const filtered = applyRecommendationView(enriched, { availability, type, sort });
 
@@ -72,15 +77,21 @@ export default async function ForYouPage({
   // server component), so the string is computed once and hydration receives the
   // identical text — the guardrail-16 hazard is a Date.now() inside a "use
   // client" render, which this is not.
+  //
+  // The seed counts are taken off `enriched` — the same set the "of N picks"
+  // denominator reports — so the sentence describes ONE population throughout.
+  // (`filtered` would re-count on every pill click; the shelf's provenance does
+  // not change because the reader narrowed to TV.)
+  const seeds = summarizeRecommendationSeeds(enriched);
   const seedParts: string[] = [];
-  if (summary.watchHistorySeeds > 0) {
-    seedParts.push(`${summary.watchHistorySeeds} you watched`);
+  if (seeds.watchHistorySeeds > 0) {
+    seedParts.push(`${seeds.watchHistorySeeds} you watched`);
   }
-  if (summary.watchlistSeeds > 0) {
-    seedParts.push(`${summary.watchlistSeeds} on your watchlist`);
+  if (seeds.watchlistSeeds > 0) {
+    seedParts.push(`${seeds.watchlistSeeds} on your watchlist`);
   }
-  if (summary.requestSeeds > 0) {
-    seedParts.push(`${summary.requestSeeds} you requested`);
+  if (seeds.requestSeeds > 0) {
+    seedParts.push(`${seeds.requestSeeds} you requested`);
   }
   const seedList =
     seedParts.length > 1
@@ -96,14 +107,14 @@ export default async function ForYouPage({
         ? [
             `${filtered.length} popular picks while your taste profile builds`,
             "watch, list or request a few titles to make these personal",
-            summary.computedAt ? `updated ${formatRelativeTime(summary.computedAt)}` : null,
+            computedAt ? `updated ${formatRelativeTime(computedAt)}` : null,
           ]
             .filter(Boolean)
             .join(" · ")
         : [
             `${filtered.length} of ${enriched.length} picks`,
             seedParts.length > 0 ? `built from ${seedList}` : null,
-            summary.computedAt ? `updated ${formatRelativeTime(summary.computedAt)}` : null,
+            computedAt ? `updated ${formatRelativeTime(computedAt)}` : null,
           ]
             .filter(Boolean)
             .join(" · ");

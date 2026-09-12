@@ -50,8 +50,8 @@ export type { QualityVerdict } from "@/lib/recommendation-quality";
 // seconds later. The protection that matters is `conclusive` below — a shelf
 // built from a materially incomplete seed set must never REPLACE a good one.
 
-// "The last 200 titles you played". Note TITLES, not PlayHistory rows: one row is
-// one EPISODE, so 200 rows can be a single series — the groupBy below collapses
+// "The last 300 titles you played". Note TITLES, not PlayHistory rows: one row is
+// one EPISODE, so 300 rows can be a single series — the groupBy below collapses
 // to distinct titles first, which is the unit a seed actually is. Counting raw
 // plays instead would hand a 62-episode series 62 of the slots, which is the
 // exact failure this file's selection order was rewritten to avoid.
@@ -66,7 +66,22 @@ export type { QualityVerdict } from "@/lib/recommendation-quality";
 // capped speculative tail into the uncapped must-build-now tier. The bill is
 // therefore paid on a COLD graph and at the 7-day TTL roll, not per run: in the
 // steady state a source refreshes once every 14 runs.
-const MAX_WATCH_HISTORY_SEEDS = 200;
+//
+// The two ceilings guardrail 40 requires re-checking on any change, at the
+// 300 + 24 + 24 = 348 titles per user this now admits:
+//   - MAX_REQUIRED_SOURCES (50k, a wall-clock bound) binds at ~144 zero-overlap
+//     active users, down from ~200. Households share a library, so the real
+//     figure is far higher — and overrun is a console.error naming the shortfall,
+//     never a silent truncation.
+//   - MAX_QUALITY_TITLES_PER_RUN (10k) is unchanged, so with ~1.4x the required
+//     sources competing for the same verdict budget, quality convergence on a
+//     cold instance takes roughly 1.4x as many runs. Verdicts are spent
+//     priority-first and an unrated candidate still ranks on relevance, so this
+//     is a warm-up cost, not a correctness one.
+// Exported so tests derive from it instead of re-pasting the number (the
+// SEED_RECENCY_* precedent, and the same reason: a pin holding a literal stops
+// testing the mechanism the moment the policy moves).
+export const MAX_WATCH_HISTORY_SEEDS = 300;
 const MAX_WATCHLIST_SEEDS = 24;
 // A request is the strongest single-title signal a user can emit — they filled
 // in a form asking for it — and for local/OIDC accounts with no linked media-
@@ -128,14 +143,39 @@ const ACTIVE_USER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 export const SEED_RECENCY_HALF_LIFE_MS = 400 * 24 * 60 * 60 * 1000;
 export const SEED_RECENCY_FLOOR = 0.25;
 
-// Watching something repeatedly is a real signal, but PlayHistory writes one row
-// PER EPISODE, so raw counts put a 62-episode series two orders of magnitude
-// above any film. log10 at a 0.3 coefficient compresses that to 1.0x for a movie
-// vs ~1.5x for the whole of Breaking Bad — present, but unable to outrun the 4x
-// span of recency above. Weighting by raw count is the bug this file has always
-// been designed against (see selectSeeds); this is the smallest dose that keeps
-// the signal without reopening it.
-const SEED_COUNT_WEIGHT = 0.3;
+// How much depth of engagement counts. PlayHistory writes one row PER EPISODE,
+// so for a series this is effectively "how many episodes you played" (a movie
+// contributes its rewatches). Raw counts put a 62-episode series two orders of
+// magnitude above any film, so the signal is log10-compressed; the coefficient
+// sets how much of that survives:
+//
+//     plays      1      5     10     24     40     62    200
+//     at 0.3   1.00   1.21   1.30   1.41   1.48   1.54   1.69
+//     at 0.4   1.00   1.28   1.40   1.55   1.64   1.72   1.92
+//
+// RAISED from 0.3 to 0.4: a series someone has put sixty episodes into should
+// weigh appreciably more than a title they saw once, and at 0.3 it earned only
+// a tenth more. The trade is deliberate — a heavy show's suggestions now sit
+// higher on the shelf, so single-watch films sit lower than they did.
+//
+// This does NOT reopen the failure this file is designed against. That bug was
+// count-first SELECTION — because of the per-episode rows, one long binge took
+// every seed slot and films never seeded at all — and it is fixed at the source
+// by the recency-first ordering in selectSeeds, which no coefficient here can
+// undo. Depth only reweights titles recency already admitted.
+//
+// WHAT THIS COEFFICIENT ACTUALLY BUYS, stated plainly because the obvious
+// reading of it is wrong: depth and recency MULTIPLY, so enough depth offsets
+// any amount of age. The crossover — how stale a 40-episode binge must get
+// before a watch from today outranks it — is ~327 days at 0.3 and ~424 days at
+// 0.4. So "recency beats play count" was never absolute; it holds past the
+// crossover and fails inside it, and this raise moves that line by ~3 months.
+// Do not reason about it as "recency spans 4x so it dominates": the floor is
+// only approached after many years, and at realistic ages recency's live range
+// is far narrower than its full span. Past ~0.45 the crossover passes the
+// fixture in "scoring: a fresh single watch outweighs an old binge" and that
+// test — a real policy pin, not an incidental one — starts failing.
+export const SEED_COUNT_WEIGHT = 0.4;
 
 // Position of a suggestion WITHIN its seed's list. TMDB returns its behavioural
 // /recommendations first and the cruder /similar after (see getMovieSuggestions),
@@ -1261,42 +1301,57 @@ function rowToTmdbMedia(row: {
   };
 }
 
-export interface RecommendationSummary {
-  // When THIS user's set was last rebuilt. Read per-user rather than from the
-  // global `cron:lastRun:recommendations` Setting because the cron deliberately
-  // skips users (inconclusive TMDB run, or dormant and out of the active
-  // cohort) — the global timestamp would claim a refresh they never got.
-  computedAt: Date | null;
-  // How many DISTINCT seed titles actually produced a visible pick, split by
-  // pool. Counted off the stored reasons rather than by re-running selectSeeds:
-  // it is one small per-user query instead of three, and it answers the more
-  // honest question — not "what did we feed the engine" but "what did the
-  // engine actually get something out of". Fallback rows never count: their
-  // reasonTmdbId is null, so the groupBy's non-null predicate drops them.
+// When THIS user's set was last rebuilt. Read per-user rather than from the
+// global `cron:lastRun:recommendations` Setting because the cron deliberately
+// skips users (inconclusive TMDB run, or dormant and out of the active cohort)
+// — the global timestamp would claim a refresh they never got.
+export async function getRecommendationsComputedAt(userId: string): Promise<Date | null> {
+  const agg = await prisma.userRecommendation.aggregate({ where: { userId }, _max: { computedAt: true } });
+  return agg._max.computedAt;
+}
+
+export interface RecommendationSeedCounts {
   watchHistorySeeds: number;
   watchlistSeeds: number;
   requestSeeds: number;
 }
 
-export async function getRecommendationSummary(userId: string): Promise<RecommendationSummary> {
-  const [agg, seedRows] = await Promise.all([
-    prisma.userRecommendation.aggregate({ where: { userId }, _max: { computedAt: true } }),
-    prisma.userRecommendation.groupBy({
-      by: ["reasonSource", "reasonTmdbId"],
-      where: { userId, reasonSource: { not: null }, reasonTmdbId: { not: null } },
-    }),
-  ]);
-
+// How many DISTINCT seed titles produced a pick the viewer can actually SEE,
+// split by pool — the number the /for-you header renders beside the pick count.
+//
+// Derived from the served items rather than from a `groupBy` over the table,
+// because the table is the wrong population in two ways at once and both of
+// them inflate the figure:
+//   - the store holds a reserve BELOW the serve line (MAX_STORED_… is deeper
+//     than MAX_SERVED_…), and getUserRecommendations additionally drops rows
+//     the user has watched/hidden/requested since the last cron — so a groupBy
+//     counts seeds whose every pick is invisible on the page it describes;
+//   - grouping by (reasonSource, reasonTmdbId) alone collapses a movie seed and
+//     a TV seed that share a TMDB id, since the two id spaces are independent.
+//     mediaType belongs in the key.
+// Taking it off the items the page is about to render makes it right by
+// construction, and costs a pass over ≤200 objects instead of a query.
+//
+// Fallback rows never count: rowToTmdbMedia leaves `recommendedBecause` off a
+// row with no seed, which is the same honesty gate the reason line hangs on.
+export function summarizeRecommendationSeeds(items: TmdbMedia[]): RecommendationSeedCounts {
+  const seen = new Set<string>();
   let watchHistorySeeds = 0;
   let watchlistSeeds = 0;
   let requestSeeds = 0;
-  for (const row of seedRows) {
-    if (row.reasonSource === "WATCHLIST") watchlistSeeds++;
-    else if (row.reasonSource === "WATCH_HISTORY") watchHistorySeeds++;
-    else if (row.reasonSource === "REQUEST") requestSeeds++;
+
+  for (const item of items) {
+    const why = item.recommendedBecause;
+    if (!why) continue;
+    const key = `${why.source}:${why.mediaType}:${why.tmdbId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (why.source === "WATCHLIST") watchlistSeeds++;
+    else if (why.source === "WATCH_HISTORY") watchHistorySeeds++;
+    else if (why.source === "REQUEST") requestSeeds++;
   }
 
-  return { computedAt: agg._max.computedAt, watchHistorySeeds, watchlistSeeds, requestSeeds };
+  return { watchHistorySeeds, watchlistSeeds, requestSeeds };
 }
 
 // Read path — called directly by home/route.ts and page.tsx. Re-filters the

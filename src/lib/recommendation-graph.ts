@@ -81,9 +81,9 @@ const MAX_PREWARM_EDGE_SOURCES_PER_RUN = 10_000;
 // much more than ~69k sources cannot finish inside one run at all. 50k leaves
 // room for the writes and the ratings pass underneath it.
 //
-// The set is bounded by real user activity — selectSeeds admits at most 248
-// titles per user (200 history + 24 watchlist + 24 request) and households
-// overlap heavily — so reaching this needs ~200 users sharing almost nothing.
+// The set is bounded by real user activity — selectSeeds admits at most 348
+// titles per user (300 history + 24 watchlist + 24 request) and households
+// overlap heavily — so reaching this needs ~144 users sharing almost nothing.
 // Exceeding it is LOUD rather than silent: past this point some seeds go
 // uncovered and their users' shelves stop refreshing, which an operator must
 // be told about.

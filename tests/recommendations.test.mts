@@ -75,8 +75,9 @@
 //     and skips those queries entirely when the cache is empty;
 //   - each candidate records WHY it was picked — the strongest seed that
 //     surfaced it (not the first one encountered) plus the corroborating seed
-//     count — and getRecommendationSummary reports the distinct seed count per
-//     pool, so a row predating those columns degrades to no reason at all.
+//     count — and summarizeRecommendationSeeds counts the distinct seeds behind
+//     the SERVED picks per pool, so a row predating those columns degrades to no
+//     reason at all.
 //
 // No DB or network: every Prisma model recommendations.ts touches (directly,
 // or transitively via resolveLinkedMediaServerUserIds / getMovieSuggestions /
@@ -107,7 +108,7 @@ if ((dns as { lookup: unknown }).lookup !== fakeLookup) {
 
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
-const { computeRecommendationsForUser, selectSeedPlan, warmRecommendationsCache, getUserRecommendations, getRecommendationSummary, qualityScoreOf, SEED_RECENCY_HALF_LIFE_MS, SEED_RECENCY_FLOOR } =
+const { computeRecommendationsForUser, selectSeedPlan, warmRecommendationsCache, getUserRecommendations, getRecommendationsComputedAt, summarizeRecommendationSeeds, qualityScoreOf, SEED_RECENCY_HALF_LIFE_MS, SEED_RECENCY_FLOOR, SEED_COUNT_WEIGHT, MAX_WATCH_HISTORY_SEEDS } =
   await import("../src/lib/recommendations.ts");
 const { invalidateBlacklistCache } = await import("../src/lib/blacklist.ts");
 const { refreshRecommendationGraph, prewarmSuggestionEdges } = await import("../src/lib/recommendation-graph.ts");
@@ -372,7 +373,11 @@ shadowPrismaModel(prisma, "userRecommendation", {
       seedCount: r.seedCount ?? 1,
     }));
   },
-  // getRecommendationSummary: newest build time for the user…
+  // getRecommendationsComputedAt: newest build time for this user. The seed
+  // counts have NO query behind them any more — summarizeRecommendationSeeds is
+  // pure over the served items (see its own tests), so there is deliberately no
+  // userRecommendation.groupBy stub here: re-adding one would let a regression
+  // that reintroduces the table-wide query pass silently.
   aggregate: async (args: { where: { userId: string } }) => {
     const rows = userRecRows.filter((r) => r.userId === args.where.userId);
     const max = rows.reduce<Date | null>(
@@ -380,22 +385,6 @@ shadowPrismaModel(prisma, "userRecommendation", {
       null,
     );
     return { _max: { computedAt: max } };
-  },
-  // …and the DISTINCT (source, seed) pairs behind the visible picks. Real
-  // groupBy returns one row per distinct combination, which is the whole point
-  // of the query — one seed that produced 40 picks must count once.
-  groupBy: async (args: { where: { userId: string } }) => {
-    const seen = new Set<string>();
-    const out: { reasonSource: string | null; reasonTmdbId: number | null }[] = [];
-    for (const r of userRecRows) {
-      if (r.userId !== args.where.userId) continue;
-      if (r.reasonSource == null || r.reasonTmdbId == null) continue;
-      const key = `${r.reasonSource}:${r.reasonTmdbId}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({ reasonSource: r.reasonSource, reasonTmdbId: r.reasonTmdbId });
-    }
-    return out;
   },
   deleteMany: async (args: { where: { userId: string } }) => {
     userRecDeletes++;
@@ -889,7 +878,7 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
 // Mirrors recencyFactor / countFactor / positionFactor in recommendations.ts.
 const recency = (days: number) =>
   SEED_RECENCY_FLOOR + (1 - SEED_RECENCY_FLOOR) * Math.pow(0.5, (days * DAY_MS) / SEED_RECENCY_HALF_LIFE_MS);
-const countF = (plays: number) => 1 + 0.3 * Math.log10(Math.max(1, plays));
+const countF = (plays: number) => 1 + SEED_COUNT_WEIGHT * Math.log10(Math.max(1, plays));
 const positionF = (i: number) => 1 / (1 + i / 10);
 const OBSCURITY = 0.9;
 
@@ -901,6 +890,47 @@ test("seed recency policy: the half-life stays within a defensible band", () => 
   assert.ok(SEED_RECENCY_FLOOR > 0 && SEED_RECENCY_FLOOR < 0.5, "the floor must keep old taste alive without flattening recency");
   assert.ok(recency(0) === 1, "a watch today is worth exactly 1.0");
   assert.ok(recency(3650) > SEED_RECENCY_FLOOR, "the floor is approached, never crossed");
+});
+
+// Same shape, for the two knobs the "deeper history, weigh episodes more" change
+// moved. Both are policy, so both need a band a derivation cannot follow.
+test("seed depth policy: episode depth counts, but stays under the crossover that would swallow recency", () => {
+  assert.ok(SEED_COUNT_WEIGHT > 0, "depth must count for something — at 0 a 60-episode show equals a single watch");
+  // Depth and recency MULTIPLY, so enough depth offsets any age. Past ~0.45 the
+  // crossover (how stale a 40-episode binge must get before a watch from today
+  // outranks it) passes the 500-day fixture in "scoring: a fresh single watch
+  // outweighs an old binge" and that pin starts failing. Guard the boundary
+  // here so the failure arrives as this named policy test rather than as a
+  // confusing ordering assertion two hundred lines away.
+  assert.ok(SEED_COUNT_WEIGHT <= 0.45, `past 0.45 an old binge outranks fresh taste, got ${SEED_COUNT_WEIGHT}`);
+  assert.equal(countF(1), 1, "a single play is the unit — never a penalty");
+  assert.ok(countF(10) < countF(60), "more episodes played is always more weight");
+  // log-compressed, not linear: 60x the rows must not be anywhere near 60x the
+  // weight. That compression is what stops per-episode rows owning the shelf.
+  assert.ok(countF(60) < 3, `depth must stay compressed, got ${countF(60)}x for 60 plays`);
+});
+
+test("seed depth policy: a 60-episode show is worth MATERIALLY more than a single watch", () => {
+  // The pin for the actual ask. At the previous 0.3 coefficient a show someone
+  // had put sixty episodes into earned 1.53x a title they saw once, which is
+  // close enough to nothing that heavy shows barely moved the shelf; 0.4 makes
+  // it 1.71x. Reverting the coefficient fails HERE, by name.
+  assert.ok(
+    countF(60) / countF(1) >= 1.6,
+    `sixty episodes must be worth >=1.6x one watch, got ${(countF(60) / countF(1)).toFixed(3)}x`,
+  );
+});
+
+test("seed cap policy: history seeds stay deep enough to matter and bounded enough to build", () => {
+  // Deep: at the original 20 the engine saw a sliver of a real library.
+  // Bounded: every seed joins the REQUIRED set, which refreshRecommendationGraph
+  // builds uncapped, against MAX_REQUIRED_SOURCES (50k, a wall-clock bound).
+  // 300 + 24 watchlist + 24 request = 348/user, which binds at ~144
+  // zero-overlap active users — see the constant's own comment.
+  assert.ok(
+    MAX_WATCH_HISTORY_SEEDS >= 100 && MAX_WATCH_HISTORY_SEEDS <= 1000,
+    `history seed cap must stay within 100-1000 titles, got ${MAX_WATCH_HISTORY_SEEDS}`,
+  );
 });
 
 // ── shared fixtures ──────────────────────────────────────────────────────────
@@ -1173,6 +1203,43 @@ test("scoring: a fresh single watch outweighs an old binge — recency beats raw
   assert.ok(byId.get(700)!.score < byId.get(800)!.score, "but never above fresh taste");
 });
 
+test("scoring: with recency held equal, the show with more episodes played ranks higher", async () => {
+  // The formula pins live beside the other policy tests; this pins the WIRING —
+  // that _count.tmdbId reaches countFactor and changes the ranked order. Both
+  // shows were last played the same day, so recency cancels exactly and depth
+  // is the only thing left that can separate them.
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  playHistoryRows = [
+    // 60 episodes of one show…
+    ...Array.from({ length: 60 }, () => ({
+      mediaServerUserId: "msu1", tmdbId: 70, mediaType: "TV" as MT, watched: true, startedAt: daysAgo(5),
+    })),
+    // …and a single episode of another, the same day.
+    { mediaServerUserId: "msu1", tmdbId: 71, mediaType: "TV", watched: true, startedAt: daysAgo(5) },
+  ];
+  suggestionsFor.set("tv:70", [tvItem(700)]);
+  suggestionsFor.set("tv:71", [tvItem(710)]);
+
+  const result = await computeSeeded("u1");
+  assert.deepEqual(
+    result.candidates.map((c) => c.tmdbId),
+    [700, 710],
+    "the deeply-watched show's suggestion outranks the one-episode show's",
+  );
+
+  // Same recency, same position, same damp — so the score ratio IS the depth
+  // ratio. Asserted numerically because the ORDER alone would still pass with a
+  // depth factor of 1.0000001.
+  const byId = new Map(result.candidates.map((c) => [c.tmdbId, c]));
+  const ratio = byId.get(700)!.score / byId.get(710)!.score;
+  assert.ok(
+    Math.abs(ratio - countF(60) / countF(1)) < 1e-9,
+    `the ranking gap must be exactly the depth factor, got ${ratio}`,
+  );
+  assert.ok(ratio >= 1.6, `and it must be material, got ${ratio.toFixed(3)}x`);
+});
+
 // ── the stored "why" ─────────────────────────────────────────────────────────
 
 test("reason: a candidate names the STRONGEST seed that surfaced it, not the first one seen", async () => {
@@ -1354,34 +1421,90 @@ test("matchTier: a pre-reason row is still banded — rank is known even when th
   assert.equal(out[0].matchTier, "top", "the two labels are independent");
 });
 
-test("getRecommendationSummary: DISTINCT seeds per pool, and the newest build time", async () => {
+test("summarizeRecommendationSeeds: DISTINCT seeds per pool", () => {
+  const seed = (source: string, mediaType: "movie" | "tv", tmdbId: number) => ({
+    recommendedBecause: { tmdbId, title: `s${tmdbId}`, mediaType, source, seedCount: 1 },
+  });
+  const seeds = summarizeRecommendationSeeds([
+    // Two picks from ONE watched seed — it must count once, not twice.
+    { id: 1, ...seed("WATCH_HISTORY", "movie", 10) },
+    { id: 2, ...seed("WATCH_HISTORY", "movie", 10) },
+    { id: 3, ...seed("WATCH_HISTORY", "movie", 11) },
+    { id: 4, ...seed("WATCHLIST", "movie", 30) },
+    { id: 5, ...seed("REQUEST", "tv", 40) },
+    // A fallback pick (rowToTmdbMedia omits recommendedBecause) counts nowhere.
+    { id: 6, fromTrendingFallback: true },
+  ] as never);
+
+  assert.equal(seeds.watchHistorySeeds, 2, "seeds 10 and 11 — NOT 3 picks");
+  assert.equal(seeds.watchlistSeeds, 1);
+  assert.equal(seeds.requestSeeds, 1);
+});
+
+// The seed key is (source, mediaType, tmdbId). Dropping mediaType — which the
+// old table-wide groupBy did, since it grouped on (reasonSource, reasonTmdbId)
+// alone — collapses these two into one seed, because TMDB's movie and TV id
+// spaces are independent and both dense at low ids.
+test("summarizeRecommendationSeeds: a movie seed and a TV seed sharing a TMDB id are TWO seeds", () => {
+  const seeds = summarizeRecommendationSeeds([
+    { id: 1, recommendedBecause: { tmdbId: 1399, title: "movie 1399", mediaType: "movie", source: "WATCH_HISTORY", seedCount: 1 } },
+    { id: 2, recommendedBecause: { tmdbId: 1399, title: "tv 1399", mediaType: "tv", source: "WATCH_HISTORY", seedCount: 1 } },
+  ] as never);
+
+  assert.equal(seeds.watchHistorySeeds, 2);
+});
+
+test("summarizeRecommendationSeeds: nothing to count reports zeroes rather than throwing", () => {
+  assert.deepEqual(summarizeRecommendationSeeds([]), {
+    watchHistorySeeds: 0,
+    watchlistSeeds: 0,
+    requestSeeds: 0,
+  });
+});
+
+// The whole point of counting off the served items: a seed whose only pick the
+// drift filter just removed must stop being advertised in the header. A query
+// over the table cannot see that, and reported the seed anyway.
+test("summarizeRecommendationSeeds over getUserRecommendations: a drift-excluded pick takes its seed with it", async () => {
   users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
   const base = {
     userId: "u1", mediaType: "MOVIE" as MT, title: "t", overview: null,
     posterPath: null, backdropPath: null, releaseDate: null, voteAverage: 0, seedCount: 1,
   };
   userRecRows = [
-    // Two picks from ONE watched seed — it must count once, not twice.
     { ...base, id: "a", tmdbId: 1, score: 3, rank: 0, computedAt: daysAgo(2), reasonTmdbId: 10, reasonTitle: "A", reasonMediaType: "MOVIE", reasonSource: "WATCH_HISTORY" },
-    { ...base, id: "b", tmdbId: 2, score: 2, rank: 1, computedAt: daysAgo(2), reasonTmdbId: 10, reasonTitle: "A", reasonMediaType: "MOVIE", reasonSource: "WATCH_HISTORY" },
-    { ...base, id: "c", tmdbId: 3, score: 2, rank: 2, computedAt: daysAgo(2), reasonTmdbId: 11, reasonTitle: "B", reasonMediaType: "MOVIE", reasonSource: "WATCH_HISTORY" },
-    { ...base, id: "d", tmdbId: 4, score: 1, rank: 3, computedAt: daysAgo(1), reasonTmdbId: 30, reasonTitle: "C", reasonMediaType: "MOVIE", reasonSource: "WATCHLIST" },
-    // A reasonless row contributes to neither count.
-    { ...base, id: "e", tmdbId: 5, score: 1, rank: 4, computedAt: daysAgo(3) },
-    // Another user's rows must not leak in.
-    { ...base, userId: "u2", id: "f", tmdbId: 6, score: 9, rank: 0, computedAt: daysAgo(0), reasonTmdbId: 99, reasonTitle: "X", reasonMediaType: "MOVIE", reasonSource: "WATCHLIST" },
+    { ...base, id: "b", tmdbId: 2, score: 2, rank: 1, computedAt: daysAgo(2), reasonTmdbId: 11, reasonTitle: "B", reasonMediaType: "MOVIE", reasonSource: "WATCH_HISTORY" },
   ];
 
-  const summary = await getRecommendationSummary("u1");
-  assert.equal(summary.watchHistorySeeds, 2); // seeds 10 and 11 — NOT 3 rows
-  assert.equal(summary.watchlistSeeds, 1);
-  assert.equal(summary.computedAt?.getTime(), daysAgo(1).getTime());
+  assert.equal(summarizeRecommendationSeeds(await getUserRecommendations("u1")).watchHistorySeeds, 2);
+
+  // The user watchlists pick #2 after the cron ran: getUserRecommendations drops
+  // the row, so seed 11 is no longer behind anything the page shows.
+  watchlistRows = [{ userId: "u1", tmdbId: 2, mediaType: "MOVIE", createdAt: daysAgo(0) }];
+  const after = await getUserRecommendations("u1");
+  assert.deepEqual(after.map((m) => m.id), [1]);
+  assert.equal(summarizeRecommendationSeeds(after).watchHistorySeeds, 1);
 });
 
-test("getRecommendationSummary: a user with no cached picks reports nothing rather than throwing", async () => {
+test("getRecommendationsComputedAt: the newest build time for this user only", async () => {
   users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
-  const summary = await getRecommendationSummary("u1");
-  assert.deepEqual(summary, { computedAt: null, watchHistorySeeds: 0, watchlistSeeds: 0, requestSeeds: 0 });
+  const base = {
+    userId: "u1", mediaType: "MOVIE" as MT, title: "t", overview: null,
+    posterPath: null, backdropPath: null, releaseDate: null, voteAverage: 0, seedCount: 1,
+  };
+  userRecRows = [
+    { ...base, id: "a", tmdbId: 1, score: 3, rank: 0, computedAt: daysAgo(2) },
+    { ...base, id: "b", tmdbId: 2, score: 2, rank: 1, computedAt: daysAgo(1) },
+    // Another user's newer build must not leak in.
+    { ...base, userId: "u2", id: "c", tmdbId: 3, score: 9, rank: 0, computedAt: daysAgo(0) },
+  ];
+
+  assert.equal((await getRecommendationsComputedAt("u1"))?.getTime(), daysAgo(1).getTime());
+});
+
+test("getRecommendationsComputedAt: a user with no cached picks reports null rather than throwing", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  assert.equal(await getRecommendationsComputedAt("u1"), null);
 });
 
 // ── exclusion widening: hidden / requests / votes / blacklist ────────────────
@@ -1850,36 +1973,41 @@ test("abandoned: a settled low-completion bail dampens THAT title 0.3x — split
 
 // ── seed selection is recency-first ──────────────────────────────────────────
 
-test("seed SELECTION is the last 200 titles played — a heavy old binge no longer takes a slot", async () => {
+test("seed SELECTION is the last MAX_WATCH_HISTORY_SEEDS titles played — a heavy old binge no longer takes a slot", async () => {
   // The selection key used to be play count, and PlayHistory writes one row per
   // EPISODE, so a long series could occupy the top slots forever while recent
   // films never seeded at all. The cap has to BITE for this to be observable,
   // so there are more distinct titles here than there are slots.
   users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
   mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  const BINGE_NEWEST_DAYS = 150;
+  // Quarter-day steps so every one of the MAX_WATCH_HISTORY_SEEDS titles lands
+  // INSIDE the 180-day window AND newer than the binge. Both halves are
+  // load-bearing: a tail outside the window would be re-admitted by the
+  // all-time top-up in recency order, and a tail older than the binge would let
+  // recency (not the cap) be what excludes it — either way the test would pass
+  // under count-first ordering too and prove nothing. Asserted below.
+  const STEP_DAYS = 0.25;
+  const oldestRecentDays = 1 + (MAX_WATCH_HISTORY_SEEDS - 1) * STEP_DAYS;
+  assert.ok(oldestRecentDays < 180, "every recent title must sit inside the 180-day window");
+  assert.ok(oldestRecentDays < BINGE_NEWEST_DAYS, "every recent title must be NEWER than the binge");
+
   playHistoryRows = [
-    // Exactly MAX_WATCH_HISTORY_SEEDS recent titles, one play each. Spaced at
-    // half-day steps so all 200 land INSIDE the 180-day window: at one-day steps
-    // the tail would fall outside it and be re-admitted by the all-time top-up
-    // in recency order, which puts the binge (newest play 150 days ago) ahead of
-    // them — the cap would then not be what excluded it and the test would prove
-    // nothing.
-    ...Array.from({ length: 200 }, (_, i) => ({
+    // Exactly MAX_WATCH_HISTORY_SEEDS recent titles, one play each.
+    ...Array.from({ length: MAX_WATCH_HISTORY_SEEDS }, (_, i) => ({
       mediaServerUserId: "msu1", tmdbId: 1000 + i, mediaType: "MOVIE" as MT,
-      watched: true, startedAt: daysAgo(1 + i * 0.5), title: `Recent ${i}`,
+      watched: true, startedAt: daysAgo(1 + i * STEP_DAYS), title: `Recent ${i}`,
     })),
-    // A series with 50 plays, INSIDE the 180-day window but older than all 100
-    // titles above. The window must not be what excludes it — otherwise this
-    // test passes under either ordering and proves nothing (it did: the first
-    // version put this at 200 days and was satisfied by the window alone).
-    // Under count-first it was seed #1 by a wide margin and pushed the oldest
-    // recent title out; under recency-first it is #201 and never seeds.
+    // A series with 50 plays, INSIDE the 180-day window but older than every
+    // title above. Under count-first it was seed #1 by a wide margin and pushed
+    // the oldest recent title out; under recency-first it is one past the cap
+    // and never seeds.
     ...Array.from({ length: 50 }, (_, i) => ({
       mediaServerUserId: "msu1", tmdbId: 5000, mediaType: "TV" as MT,
-      watched: true, startedAt: daysAgo(150 + i), title: "Heavy Binge",
+      watched: true, startedAt: daysAgo(BINGE_NEWEST_DAYS + i), title: "Heavy Binge",
     })),
   ];
-  for (let i = 0; i < 200; i++) suggestionsFor.set(`movie:${1000 + i}`, [movieItem(9000 + i)]);
+  for (let i = 0; i < MAX_WATCH_HISTORY_SEEDS; i++) suggestionsFor.set(`movie:${1000 + i}`, [movieItem(9000 + i)]);
   suggestionsFor.set("tv:5000", [tvItem(9999)]);
 
   // Asserted on the SEED PLAN, not on which titles got fetched. Since the engine
@@ -1891,9 +2019,12 @@ test("seed SELECTION is the last 200 titles played — a heavy old binge no long
   const { seeds } = await selectSeedPlan("u1");
   const seeded = new Set(seeds.map((sd) => `${sd.mediaType}:${sd.tmdbId}`));
 
-  assert.equal(seeds.length, 200, "exactly the cap");
+  assert.equal(seeds.length, MAX_WATCH_HISTORY_SEEDS, "exactly the cap");
   assert.ok(seeded.has("MOVIE:1000"), "the most recent title seeds");
-  assert.ok(seeded.has("MOVIE:1199"), "the 200th-most-recent title seeds");
+  assert.ok(
+    seeded.has(`MOVIE:${1000 + MAX_WATCH_HISTORY_SEEDS - 1}`),
+    "the last title inside the cap seeds",
+  );
   assert.ok(
     !seeded.has("TV:5000"),
     "the 50-play binge is #201 by recency and must NOT seed, despite dwarfing every other title on play count",
