@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.25.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.25.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,25 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.25.2
+
+**Added**
+
+- A **Rebuild picks** button in the "For You" page header lets admins refresh recommendations on demand instead of waiting for the 12-hour cycle. It rebuilds every active user's shelf, not just yours, and can take a few minutes on a cold recommendation graph.
+- Settings → System → Scheduled Jobs now lists **Warm Recommendations** and **Warm Library**, each with its last run, duration, status and a Run button. Both jobs already ran on schedule but had no row, so there was no way to see when they last ran or to start one by hand. Warm Library is the full walk — TMDB metadata for the whole library plus the "For You" suggestion graph.
+
+**Changed**
+
+- A TV request now becomes available — and its requester is told it is ready to watch — only once Sonarr has every aired, monitored episode of the regular seasons on disk; specials don't count. Previously the first episode of a season pack could announce the whole show, either through Sonarr's download event or by the show turning up in Plex or Jellyfin. Shows Sonarr isn't tracking still become available when they appear in your library.
+- As a result, a series with an aired episode that can never be found stays approved. Unmonitor that episode in Sonarr and the next sync marks the series complete, or mark the request available by hand. The admin debug endpoint `GET /api/admin/debug/arr-state` now reports series completion per Sonarr instance, for checking why a request is still waiting.
+- "For You" now seeds from the last 300 titles you played, up from 200 (titles, not plays), and gives more weight to series you have watched in depth: sixty episodes of a show now count 1.7× as much as a title you saw once, up from 1.5×.
+
+**Fixed**
+
+- A Plex item that claims several TMDB titles (Plex merged their metadata) now resolves to the same title on every sync. The winner used to change between runs — most often while Plex was mid-scan — so availability badges and episode lists moved between the shows involved.
+- Jellyfin fix-match no longer blames the metadata provider when Jellyfin could not be read at all while confirming a match. The error now says the item was unreadable, that whether the match applied is unknown, and that retrying straight away only queues another refresh on a server that is already not answering.
+- The seed counts in the "For You" page header ("N you watched", "N on your watchlist", "N you requested") now come from the picks actually shown. They previously included picks that were never shown, and merged a movie and a TV show that share a TMDB ID.
 
 ### v0.25.1
 
@@ -664,7 +683,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.25.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.25.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
