@@ -285,7 +285,7 @@ export default async function SettingsPage({
 
     const cronTargets = [
       "sync:full", "upcoming-cache", "ratings-sync", "list-cache",
-      "activity", "mdblist", "omdb", "audit-log:pii-scrub", "auth-sessions:purge-expired",
+      "activity", "mdblist", "omdb", "recommendations", "audit-log:pii-scrub", "auth-sessions:purge-expired",
       "trash-sync", "download-policies",
     ];
     // Primary source: `Setting` rows written by `recordCronRun` on every run
@@ -408,6 +408,7 @@ export default async function SettingsPage({
       { name: "Warm Activity", description: "Play history stats for admin dashboard", endpoint: "/api/cron/warm-activity", interval: formatInterval(process.env.WARM_ACTIVITY_INTERVAL, "1800"), ...lastRunInfo("activity") },
       { name: "Warm MDBList", description: "MDBList ratings for entire library", endpoint: "/api/cron/warm-mdblist", interval: formatInterval(process.env.WARM_MDBLIST_INTERVAL, "86400"), ...lastRunInfo("mdblist") },
       { name: "Warm OMDB", description: "OMDB ratings fallback for entire library", endpoint: "/api/cron/warm-omdb", interval: formatInterval(process.env.WARM_OMDB_INTERVAL, "86400"), ...lastRunInfo("omdb") },
+      { name: "Warm Recommendations", description: "Rebuild every active user's \"For You\" shelf", endpoint: "/api/cron/warm-recommendations", interval: formatInterval(process.env.WARM_RECOMMENDATIONS_INTERVAL, "43200"), ...lastRunInfo("recommendations") },
       { name: "Purge Sessions", description: "Delete expired auth sessions", endpoint: "/api/cron/purge-auth-sessions", interval: formatInterval(process.env.PURGE_SESSIONS_INTERVAL, "86400"), ...lastRunInfo("auth-sessions:purge-expired") },
       { name: "Scrub Audit PII", description: "Remove IP/UA from audit entries older than 90 days", endpoint: "/api/cron/scrub-audit-pii", interval: formatInterval(process.env.SCRUB_AUDIT_PII_INTERVAL, "86400"), ...lastRunInfo("audit-log:pii-scrub") },
       { name: "TRaSH Sync", description: "Refresh TRaSH-Guides catalog (capped at hourly) and re-apply managed specs each tick", endpoint: "/api/cron/trash-sync", interval: formatInterval(process.env.TRASH_SYNC_INTERVAL, "86400"), ...lastRunInfo("trash-sync") },
