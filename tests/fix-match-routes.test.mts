@@ -744,6 +744,46 @@ test("POST (jellyfin): apply timeout that never confirms → 502, NO DB write, N
 // .nfo, or a metadata-locked item) as what to look at if it KEEPS happening.
 // ════════════════════════════════════════════════════════════════════════════
 
+test("POST (jellyfin): when EVERY confirmation read fails, the error says the item could not be read back — not that the match was refused", async () => {
+  // The other diagnosis branches all infer from what Jellyfin REPORTED. With no
+  // successful read there is nothing to infer from — lastSeenTmdbId stays null
+  // and itemLocked stays false only because nothing was observed — and the
+  // fall-through message blamed Jellyfin's metadata provider for what is really
+  // an unreachable or erroring Jellyfin. Seen live: four items, 120/120 reads
+  // failed, every one reported as a provider problem.
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({ tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/media/movies/Wrong (1999)/wrong.mkv", jellyfinItemId: "aaaaaaaa" });
+
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) return new Response("", { status: 200 });
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Correct Title" }]);
+    if (p === "/Items/aaaaaaaa/Refresh") return new Response("", { status: 200 });
+    // The server answers nothing for the rest of the window: the direct
+    // confirmation read AND the path/name fallback search both fail.
+    if (p === "/Items/aaaaaaaa" || p === "/Items") return new Response("", { status: 500 });
+    throw new Error(`unexpected Jellyfin path ${p}`);
+  };
+
+  const res = await fixMatch(postBody(
+    { server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222 },
+    a.header,
+  ), undefined);
+
+  assert.equal(res.status, 502);
+  assert.equal(opsOf("jellyfinLibraryItem.upsert").length, 0, "an unconfirmed match must not touch the DB");
+  const msg = errors.find((e) => e.includes("Could not read the item back"));
+  assert.ok(msg, `the error must name the unreadable server, got: ${errors.join(" | ")}`);
+  assert.ok(msg.includes("all 4 confirmation reads failed"), "the operator needs the count — it is the evidence for the claim");
+  assert.ok(
+    !msg.includes("metadata provider"),
+    "blaming Jellyfin's metadata provider is the fall-through message for an item that DID answer; " +
+      "reaching it here sends the operator to the wrong system",
+  );
+  assert.ok(msg.includes("unknown"), "we genuinely do not know whether the match applied — the message must not assert it failed");
+});
+
 test("POST (jellyfin): old-id-after-window failure says re-sync-first and names the library's enabled Nfo reader (and saver)", async () => {
   const a = await admin();
   configureServers();

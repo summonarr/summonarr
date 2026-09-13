@@ -241,115 +241,146 @@ export async function POST(req: NextRequest) {
   // who learns the secret (or replays a captured request) could POST a forged
   // Download event for arbitrary tvdbId/tmdbId and flip an APPROVED request straight
   // to AVAILABLE for a series Sonarr never grabbed. Verify against Sonarr's own
-  // authoritative API before changing any status. Tri-state result: `false` =
-  // Sonarr is reachable and confirms NO episode file exists, so we SKIP the flip
-  // (the forgery case we reject); `true` = confirmed downloaded, proceed; `null` =
-  // indeterminate (the firing instance isn't configured, or Sonarr is unreachable) so
-  // we proceed optimistically and let the periodic library sync reconcile
-  // availability independently. Proceeding on null is safe against forgery because
-  // an attacker cannot force a null result without breaking the operator's own
-  // Sonarr connectivity.
-  const seriesDownloaded = await isSeriesDownloadedInSonarr(
+  // authoritative API before changing any status.
+  //
+  // The verdict decides more than forgery now (guardrail 14a): a TV request is
+  // "ready" only once Sonarr reports the series COMPLETE — every aired,
+  // monitored, regular-season episode on disk, specials excluded — and Sonarr
+  // fires one Download event per EPISODE, so most deliveries of a season-pack
+  // import arrive while the series is still incomplete.
+  //   • downloaded        → confirmed complete: flip + notify now.
+  //   • "incomplete"      → the normal mid-import state. Skip the flip, but STILL
+  //                         schedule the library scan so Plex/Jellyfin pick up the
+  //                         new episodes; a later event (or the periodic sync's
+  //                         wanted/available refresh) flips it once complete.
+  //   • "absent"/"ids-disagree" → the forgery shapes the guard exists to refuse.
+  //   • null              → unverifiable (instance unconfigured, or Sonarr
+  //                         unreachable — it 503s under import load). This used
+  //                         to flip OPTIMISTICALLY, which under a per-episode
+  //                         event stream means a 503 on episode 1 of 24 announced
+  //                         the whole series as ready. Now it DEFERS: the after()
+  //                         task re-verifies once the library scan has settled
+  //                         (that wait already spans Sonarr's queue draining) and
+  //                         flips then; failing that, the periodic sync — whose
+  //                         wanted/available refresh reads the same statistics —
+  //                         reconciles. Nothing here ever needs the optimistic
+  //                         path: an attacker still cannot induce null without
+  //                         breaking the operator's own Sonarr connectivity, and
+  //                         a null now produces NO transition at all.
+  const verdict = await isSeriesDownloadedInSonarr(
     { tvdbId: safeVdbId, tmdbId: safeMdbId },
     arrInstance,
   );
-  if (seriesDownloaded === false) {
-    console.warn("[webhook/sonarr] Download event for tvdbId=%s tmdbId=%s not confirmed downloaded in Sonarr; skipping status flip.", sanitizeForLog(safeVdbId ?? "?"), sanitizeForLog(safeMdbId ?? "?"));
+  if (verdict !== null && !verdict.downloaded && verdict.reason !== "incomplete") {
+    console.warn("[webhook/sonarr] Download event for tvdbId=%s tmdbId=%s not confirmed downloaded in Sonarr (%s); skipping status flip.", sanitizeForLog(safeVdbId ?? "?"), sanitizeForLog(safeMdbId ?? "?"), verdict.reason);
     syncCompleted = true;
     return NextResponse.json({ ok: true, skipped: true, reason: "not_downloaded" });
   }
+  const seriesComplete = verdict?.downloaded === true;
+  const deferVerify = verdict === null;
 
-  let updated: Awaited<ReturnType<typeof prisma.mediaRequest.updateMany>> = { count: 0 };
+  type FlipResult = { count: number; effectiveMdbId: number | null; effectiveVdbId: number | null };
+  // The APPROVED→AVAILABLE flip, id-keyed: tmdbId first, then the tvdbId fallback
+  // (Sonarr omits tmdbId on some events). Factored out because it runs from two
+  // places — synchronously on a confirmed-complete verdict, and from the after()
+  // task when the verdict was unverifiable and the deferred re-check confirms.
+  const flipApprovedRequests = async (): Promise<FlipResult> => {
+    let updated: Awaited<ReturnType<typeof prisma.mediaRequest.updateMany>> = { count: 0 };
+    let effectiveMdbId: number | null = null;
+    let effectiveVdbId: number | null = null;
+    // Lifted out of the tvdb-path tx so we can wipe DeletionVotes after the tx commits.
+    let tvdbPathTmdbId: number | null = null;
+    // True when the tvdb-path flipped a request but no MediaRequest carried the tvdbId,
+    // so the tmdbId-keyed wanted row couldn't be evicted inside the tx — resolve + evict
+    // it after the tx commits (best-effort; the next full sync rewrites it regardless).
+    let tvdbWantedEvictPending = false;
 
-  let effectiveMdbId: number | null = null;
-  let effectiveVdbId: number | null = null;
-  // Lifted out of the tvdb-path tx so we can wipe DeletionVotes after the tx commits.
-  let tvdbPathTmdbId: number | null = null;
-  // True when the tvdb-path flipped a request but no MediaRequest carried the tvdbId,
-  // so the tmdbId-keyed wanted row couldn't be evicted inside the tx — resolve + evict
-  // it after the tx commits (best-effort; the next full sync rewrites it regardless).
-  let tvdbWantedEvictPending = false;
-
-  // Try tmdbId first; fall back to tvdbId because Sonarr may not always send tmdbId
-  if (safeMdbId) {
-    // Advisory lock 1001,2 prevents a concurrent Sonarr sync from overwriting the wanted table mid-transaction
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
-      // Do NOT touch notifiedAvailable here; the orchestrator's CAS (guardrail #14) is the sole authority.
-      // One UPDATE covers both a fresh approval (availableAt null) and a re-push
-      // of an already-available title — the two used to differ only in a
-      // notifiedAvailable write that guardrail 14 removed.
-      updated = await tx.mediaRequest.updateMany({
-        where: { tmdbId: safeMdbId, mediaType: "TV", arrInstance, status: "APPROVED" },
-        // Clear the approve-time 90s backstop so a stale timer can't fire a
-        // false "download pending" after a later revert.
-        data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
-      });
-      await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: safeMdbId, arrInstance } });
-      // Backfill tvdbId on the matched request(s). A later Download webhook for the same
-      // series may arrive with only tvdbId (Sonarr omits tmdbId on some events); without
-      // this, that tvdbId-only path can't find the request to evict its wanted-cache row.
-      if (safeVdbId) {
-        await tx.mediaRequest.updateMany({
-          where: { tmdbId: safeMdbId, mediaType: "TV", tvdbId: null },
-          data: { tvdbId: safeVdbId },
+    if (safeMdbId) {
+      // Advisory lock 1001,2 prevents a concurrent Sonarr sync from overwriting the wanted table mid-transaction
+      await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
+        // Do NOT touch notifiedAvailable here; the orchestrator's CAS (guardrail #14) is the sole authority.
+        // One UPDATE covers both a fresh approval (availableAt null) and a re-push
+        // of an already-available title — the two used to differ only in a
+        // notifiedAvailable write that guardrail 14 removed.
+        updated = await tx.mediaRequest.updateMany({
+          where: { tmdbId: safeMdbId, mediaType: "TV", arrInstance, status: "APPROVED" },
+          // Clear the approve-time 90s backstop so a stale timer can't fire a
+          // false "download pending" after a later revert.
+          data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
         });
-      }
-    }, { timeout: 30_000 });
-    if (updated.count > 0) {
-      effectiveMdbId = safeMdbId;
-      void clearDeletionVotesForTmdbs([{ tmdbId: safeMdbId, mediaType: "TV" }]);
-    }
-  }
-
-  if (updated.count === 0 && safeVdbId) {
-    await prisma.$transaction(async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
-
-      const req = await tx.mediaRequest.findFirst({
-        where: { tvdbId: safeVdbId!, mediaType: "TV", arrInstance },
-        select: { tmdbId: true },
-      });
-      // Do NOT touch notifiedAvailable here (guardrail #14); one UPDATE covers
-      // both availableAt branches, same as the tmdbId path above.
-      updated = await tx.mediaRequest.updateMany({
-        where: { tvdbId: safeVdbId!, mediaType: "TV", arrInstance, status: "APPROVED" },
-        // Clear the approve-time 90s backstop so a stale timer can't fire a
-        // false "download pending" after a later revert.
-        data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
-      });
-      if (req && updated.count > 0) {
-        await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: req.tmdbId, arrInstance } });
-        tvdbPathTmdbId = req.tmdbId;
-      } else if (!req && updated.count > 0) {
-        // No MediaRequest mapped this tvdbId; the wanted table is tmdbId-keyed, so
-        // defer the eviction to after the tx where we can resolve tvdb→tmdb.
-        tvdbWantedEvictPending = true;
-      }
-    }, { timeout: 30_000 });
-    if (updated.count > 0) {
-      effectiveVdbId = safeVdbId;
-      if (tvdbPathTmdbId !== null) {
-        void clearDeletionVotesForTmdbs([{ tmdbId: tvdbPathTmdbId, mediaType: "TV" }]);
-      }
-      if (tvdbWantedEvictPending) {
-        void (async () => {
-          const resolved = await resolveSingleTvdbToTmdb(safeVdbId!);
-          if (resolved !== null) {
-            await prisma.sonarrWantedItem.deleteMany({ where: { tmdbId: resolved, arrInstance } });
-          } else {
-            console.warn(`[webhooks/sonarr] could not evict sonarrWantedItem: unresolvable tvdbId ${sanitizeForLog(safeVdbId)}`);
-          }
-        })().catch((err) => console.warn("[webhooks/sonarr] deferred wanted eviction failed:", err));
+        await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: safeMdbId, arrInstance } });
+        // Backfill tvdbId on the matched request(s). A later Download webhook for the same
+        // series may arrive with only tvdbId (Sonarr omits tmdbId on some events); without
+        // this, that tvdbId-only path can't find the request to evict its wanted-cache row.
+        if (safeVdbId) {
+          await tx.mediaRequest.updateMany({
+            where: { tmdbId: safeMdbId, mediaType: "TV", tvdbId: null },
+            data: { tvdbId: safeVdbId },
+          });
+        }
+      }, { timeout: 30_000 });
+      if (updated.count > 0) {
+        effectiveMdbId = safeMdbId;
+        void clearDeletionVotesForTmdbs([{ tmdbId: safeMdbId, mediaType: "TV" }]);
       }
     }
-  }
+
+    if (updated.count === 0 && safeVdbId) {
+      await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 2)`;
+
+        const req = await tx.mediaRequest.findFirst({
+          where: { tvdbId: safeVdbId!, mediaType: "TV", arrInstance },
+          select: { tmdbId: true },
+        });
+        // Do NOT touch notifiedAvailable here (guardrail #14); one UPDATE covers
+        // both availableAt branches, same as the tmdbId path above.
+        updated = await tx.mediaRequest.updateMany({
+          where: { tvdbId: safeVdbId!, mediaType: "TV", arrInstance, status: "APPROVED" },
+          // Clear the approve-time 90s backstop so a stale timer can't fire a
+          // false "download pending" after a later revert.
+          data: { status: "AVAILABLE", availableAt: new Date(), pendingNotifyAt: null },
+        });
+        if (req && updated.count > 0) {
+          await tx.sonarrWantedItem.deleteMany({ where: { tmdbId: req.tmdbId, arrInstance } });
+          tvdbPathTmdbId = req.tmdbId;
+        } else if (!req && updated.count > 0) {
+          // No MediaRequest mapped this tvdbId; the wanted table is tmdbId-keyed, so
+          // defer the eviction to after the tx where we can resolve tvdb→tmdb.
+          tvdbWantedEvictPending = true;
+        }
+      }, { timeout: 30_000 });
+      if (updated.count > 0) {
+        effectiveVdbId = safeVdbId;
+        if (tvdbPathTmdbId !== null) {
+          void clearDeletionVotesForTmdbs([{ tmdbId: tvdbPathTmdbId, mediaType: "TV" }]);
+        }
+        if (tvdbWantedEvictPending) {
+          void (async () => {
+            const resolved = await resolveSingleTvdbToTmdb(safeVdbId!);
+            if (resolved !== null) {
+              await prisma.sonarrWantedItem.deleteMany({ where: { tmdbId: resolved, arrInstance } });
+            } else {
+              console.warn(`[webhooks/sonarr] could not evict sonarrWantedItem: unresolvable tvdbId ${sanitizeForLog(safeVdbId)}`);
+            }
+          })().catch((err) => console.warn("[webhooks/sonarr] deferred wanted eviction failed:", err));
+        }
+      }
+    }
+    return { count: updated.count, effectiveMdbId, effectiveVdbId };
+  };
+
+  const flip: FlipResult = seriesComplete
+    ? await flipApprovedRequests()
+    : { count: 0, effectiveMdbId: null, effectiveVdbId: null };
 
   // A completed import ends the "stuck" episode the ManualInteractionRequired
   // marker one-shots — clear it so a future re-park of the same series can
   // alert again. The marker's stable key prefers tvdbId and falls back to
   // tmdbId, so clear both candidates. Post-commit fire-and-forget, idempotent;
-  // the not-confirmed/skipped paths return before reaching here.
+  // the not-confirmed/skipped paths return before reaching here. An INCOMPLETE
+  // series still imported an episode, so the marker clears on that path too.
   const manualMarkerKeys = [safeVdbId, safeMdbId]
     .filter((id): id is number => id !== null)
     .map((id) => `manualInteractionNotified:sonarr:${arrInstance}:${id}`);
@@ -359,7 +390,29 @@ export async function POST(req: NextRequest) {
 
   // Deferred work runs after the response is sent; library scan and notification can be slow
   after(async () => {
+    // Scheduled on every confirmed, incomplete, or unverifiable import — an
+    // episode landed either way, and the library should show it even while
+    // the request stays APPROVED waiting for the rest of the series.
     await scheduleLibraryScan("tv", safeMdbId ?? undefined, arrInstance);
+
+    let { effectiveMdbId, effectiveVdbId } = flip;
+    if (deferVerify) {
+      // The scan above already waited for Sonarr's queue to drain (or gave up
+      // after its retries), so a transient 503 has had a real window to clear.
+      // One re-check; still not confirmed complete → leave it to the periodic
+      // sync rather than retrying here indefinitely.
+      let late: FlipResult | null = null;
+      try {
+        const recheck = await isSeriesDownloadedInSonarr({ tvdbId: safeVdbId, tmdbId: safeMdbId }, arrInstance);
+        if (recheck?.downloaded !== true) return;
+        late = await flipApprovedRequests();
+      } catch (err) {
+        console.warn("[webhooks/sonarr] deferred verification failed:", err instanceof Error ? err.message : err);
+        return;
+      }
+      effectiveMdbId = late.effectiveMdbId;
+      effectiveVdbId = late.effectiveVdbId;
+    }
 
     // Scope by arrInstance to the instance that fired this webhook: one instance's
     // Download must not sweep in a sibling instance's request and notify it off the
@@ -451,7 +504,21 @@ export async function POST(req: NextRequest) {
   }
 
   syncCompleted = true;
-  return NextResponse.json({ ok: true, marked: updated.count });
+  if (seriesComplete) return NextResponse.json({ ok: true, marked: flip.count });
+  if (deferVerify) return NextResponse.json({ ok: true, deferred: true, reason: "unverified" });
+  // Incomplete: no transition, and deliberately no log line — this is the
+  // expected state of every episode but the last of an import, and per-event
+  // warnings here only bury the anomalies (guardrail 7). The counts travel in
+  // the response and in GET /api/admin/debug/arr-state for anyone asking why a
+  // request has not flipped.
+  const incomplete = verdict as Extract<NonNullable<typeof verdict>, { reason: "incomplete" }>;
+  return NextResponse.json({
+    ok: true,
+    skipped: true,
+    reason: "incomplete",
+    episodeFileCount: incomplete.episodeFileCount,
+    episodeCount: incomplete.episodeCount,
+  });
   } finally {
     if (!syncCompleted) {
       await clearWebhookReplayDigestJson("sonarr", secret, payload);

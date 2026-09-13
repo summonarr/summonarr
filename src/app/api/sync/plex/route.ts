@@ -13,7 +13,8 @@ import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } fr
 import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, replaceEpisodeCacheForSource, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
-import { warnOnChange } from "@/lib/log-dedup";
+import { sonarrIncompleteKeys } from "@/lib/arr-availability";
+import { deduplicatePlexRowsByRatingKey } from "@/lib/plex-dedupe";
 
 export async function POST(request: NextRequest) {
   const actor = await getCronActor(request);
@@ -169,76 +170,8 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
   const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, serverInstance: instance, mediaType: "MOVIE" as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
   const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, serverInstance: instance, mediaType: "TV"    as const, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
 
-  // Plex can conflate two TMDB IDs onto the same ratingKey when metadata bundles merge;
-  // deduplicate by preferring the previously stored mapping to avoid flip-flopping on every
-  // sync. Keep in agreement with deduplicatePlexRowsByRatingKey in /api/sync/route so the
-  // two writers agree on the row set — including the per-instance scoping: ratingKeys are
-  // small server-local integers, so the prior-mapping lookup must consult only the instance
-  // being written (`instance`, which the body may name — NOT always the default).
-  type PlexRow = { tmdbId: number; mediaType: "MOVIE" | "TV"; filePath: string | null; plexRatingKey: string | null };
-  // Generic in the row type so the caller's extra columns — `serverInstance` above in
-  // particular — survive in the TYPE and not just at runtime. A concrete PlexRow[]
-  // return would erase them, hiding the very field whose omission moved a named
-  // server's library onto the default.
-  const deduplicateByRatingKey = async <T extends PlexRow>(
-    rows: T[],
-    mediaType: "MOVIE" | "TV",
-    serverInstance: MediaInstanceKey,
-  ): Promise<T[]> => {
-    const ratingKeyCount = new Map<string, number>();
-    for (const r of rows) {
-      if (r.plexRatingKey) ratingKeyCount.set(r.plexRatingKey, (ratingKeyCount.get(r.plexRatingKey) ?? 0) + 1);
-    }
-    const conflatedKeys = new Set([...ratingKeyCount.entries()].filter(([, n]) => n > 1).map(([k]) => k));
-    if (conflatedKeys.size === 0) return rows;
-
-    const conflatedTmdbIds = rows.filter((r) => r.plexRatingKey && conflatedKeys.has(r.plexRatingKey)).map((r) => r.tmdbId);
-    const existing = await prisma.plexLibraryItem.findMany({
-      where: { mediaType, serverInstance, tmdbId: { in: conflatedTmdbIds } },
-      select: { tmdbId: true, plexRatingKey: true },
-    });
-    const fixedIdByRatingKey = new Map<string, number>();
-    for (const e of existing) {
-      if (e.plexRatingKey) fixedIdByRatingKey.set(e.plexRatingKey, e.tmdbId);
-    }
-
-    const seenRatingKeys = new Set<string>();
-    // One summary per run rather than a line per dropped row — see the
-    // matching comment in the orchestrator's copy in ../route.ts.
-    const dropped: string[] = [];
-    const kept = rows.filter((r) => {
-      if (!r.plexRatingKey || !conflatedKeys.has(r.plexRatingKey)) return true;
-      const fixed = fixedIdByRatingKey.get(r.plexRatingKey);
-      if (fixed !== undefined) {
-        if (r.tmdbId !== fixed) {
-          dropped.push(`${r.plexRatingKey}→${fixed} (dropped ${r.tmdbId})`);
-          return false;
-        }
-      } else if (seenRatingKeys.has(r.plexRatingKey)) {
-        // No prior DB mapping; keep the first occurrence, drop subsequent duplicates
-        return false;
-      }
-      seenRatingKeys.add(r.plexRatingKey);
-      return true;
-    });
-
-    if (dropped.length > 0) {
-      // Repeat-suppressed for the same reason as the orchestrator's copy in
-      // /api/sync — see the comment there. Distinct dedup key: this route is
-      // the admin "Resync" button, and its finding should not be swallowed
-      // just because the hourly orchestrator logged the same conflicts.
-      warnOnChange(
-        `sync-plex-conflated:${mediaType}:${serverInstance}`,
-        dropped.join(", "),
-        `[sync/plex] ${dropped.length} conflated ratingKey(s) kept their pinned tmdbId ` +
-          `(${mediaType}, instance="${serverInstance}"): ${dropped.join(", ")}`,
-      );
-    }
-    return kept;
-  };
-
-  let finalMovieRows = await deduplicateByRatingKey(movieRows, "MOVIE", instance);
-  let finalTvRows    = await deduplicateByRatingKey(tvRows,    "TV",    instance);
+  let finalMovieRows = await deduplicatePlexRowsByRatingKey(movieRows, "MOVIE", instance, "sync/plex");
+  let finalTvRows    = await deduplicatePlexRowsByRatingKey(tvRows,    "TV",    instance, "sync/plex");
 
   // Ids the dedupe dropped never get a library row, so they must not reach the
   // marking pass below — it would flip requests AVAILABLE (and notify) for
@@ -330,13 +263,22 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
 
   const requests = await prisma.mediaRequest.findMany({
     where: { status: { in: ["PENDING", "APPROVED"] } },
-    select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
+    select: { id: true, tmdbId: true, mediaType: true, arrInstance: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
   });
+
+  // Sonarr completeness gate (guardrail 14a), the per-source twin of the
+  // orchestrator's: a TV request whose series Sonarr still lists as WANTED
+  // (incomplete — not every aired regular-season episode is on disk) must not
+  // flip AVAILABLE off library presence, or the admin Resync button would
+  // announce a show as ready off its first imported episode while the hourly
+  // orchestrator holds it back. Pre-CAS, like the visibility gate below: the
+  // gated row keeps notifiedAvailable = false and is re-evaluated later.
+  const sonarrHeld = await sonarrIncompleteKeys(requests);
 
   let toMark = requests.filter((req) =>
     req.mediaType === "MOVIE"
       ? movieIds.has(req.tmdbId) && !droppedMovieIds.has(req.tmdbId)
-      : tvIds.has(req.tmdbId) && !droppedTvIds.has(req.tmdbId)
+      : tvIds.has(req.tmdbId) && !droppedTvIds.has(req.tmdbId) && !sonarrHeld.has(`${req.tmdbId}:${req.arrInstance}`)
   );
 
   // Per-user visibility gate for a RESTRICTED named server (guardrail 35). This run

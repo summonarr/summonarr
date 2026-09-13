@@ -156,7 +156,49 @@ test("the Sonarr download check cross-verifies the payload's tvdbId and tmdbId a
   const fn = source.slice(source.indexOf("export async function isSeriesDownloadedInSonarr"));
   const body = fn.slice(0, fn.indexOf("\n}\n"));
   assert.match(body, /resolved !== tvdbId/, "the two ids must be compared, not just the tvdbId resolved");
-  assert.match(body, /return false;/, "disagreeing ids must return false (skip the flip), not null/true");
+  assert.match(body, /reason: "ids-disagree"/, "disagreeing ids must return the refused verdict (skip the flip), never null/downloaded");
+  assert.doesNotMatch(body, /return false;|return true;|return null;\s*\/\/ disagree/, "the verdict is a discriminated object now — a bare boolean would lose the reason the webhook branches on");
+});
+
+// ---------------------------------------------------------------------------
+// Guardrail 14a — ONE completeness rule, shared by the cache writer and the
+// webhook gate. Both are DB/network-bound, so pin the source: each must call
+// sonarrSeriesCompletion (tests/sonarr-completion.test.mts owns the rule
+// itself), and neither may carry a private threshold. The old writer said a
+// CONTINUING series was available with any single episode file
+// (`status !== "ended"`), so a requester was told "ready to watch" off episode
+// 1 of a season pack; a private copy in either function would reintroduce
+// that on one path and have the other path revert it every tick.
+// ---------------------------------------------------------------------------
+
+test("guardrail 14a: the Sonarr cache writer and the webhook gate share sonarrSeriesCompletion and carry no private threshold", () => {
+  const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
+  for (const name of ["getSonarrWantedTmdbIds", "isSeriesDownloadedInSonarr", "getSonarrSeriesCompletion"]) {
+    const fn = source.slice(source.indexOf(`export async function ${name}`));
+    const body = fn.slice(0, fn.indexOf("\n}\n"));
+    assert.match(body, /sonarrSeriesCompletion\(/, `${name} must derive completeness from the shared helper`);
+    assert.doesNotMatch(body, /!==\s*"ended"|===\s*"ended"/, `${name} must not special-case series status — an ended/continuing split is the any-file shortcut guardrail 14a removed`);
+    assert.doesNotMatch(body, /episodeFileCount\s*>=\s*episodeCount|episodeFileCount\s*>\s*0/, `${name} must not re-derive the threshold inline`);
+    assert.doesNotMatch(body, /totalEpisodeCount/, `${name} must never count unaired/unmonitored episodes`);
+  }
+});
+
+test("pickSeriesByTmdbId REJECTS a lone row that names a DIFFERENT title — a degraded lookup must not become the verdict", () => {
+  // Observed live: `term=tmdb:84503` answered with exactly one row whose tvdbId
+  // was 84503 (a fallback id/text search matched the wrong series). The lone-row
+  // fallback accepted it, the webhook's ids-disagree guard then compared that
+  // wrong tvdbId against the payload's real one, and a genuine Download event
+  // was refused. A row that CARRIES a positive tmdbId has told us which title it
+  // is; when that is not the requested one it is a different show, full stop.
+  const wrongShow = [{ tmdbId: 4321, tvdbId: 84503 }];
+  assert.equal(pickSeriesByTmdbId(wrongShow, 84503), null);
+  // The tmdbId-less lone row (older SkyHook rows) is still accepted — that
+  // heuristic is what makes tvdb-only metadata resolvable at all.
+  assert.equal(pickSeriesByTmdbId([{ tvdbId: 84503 } as { tmdbId?: number; tvdbId: number }], 84503)?.tvdbId, 84503);
+  // Non-positive / non-integer tmdbId values are "no claim", not "a different title".
+  for (const claimed of [0, -1, 2.5, NaN]) {
+    assert.equal(pickSeriesByTmdbId([{ tmdbId: claimed, tvdbId: 777 }], 84503)?.tvdbId, 777, `tmdbId=${claimed} carries no claim`);
+  }
 });
 
 test("the Sonarr download check holds EVERY id to a positive-integer contract, upstream ones included", () => {

@@ -441,7 +441,11 @@ model SonarrWantedItem {
 }
 
 // ─── Sonarr Available Cache ───────────────────────────────────────────────────
-// TV shows in Sonarr that have at least one downloaded episode file (episodeFileCount > 0).
+// TV shows Sonarr reports COMPLETE: every aired, monitored, regular-season episode
+// has a file (specials excluded — src/lib/sonarr-completion.ts, guardrail 14a). A
+// series with any aired episode still missing sits in SonarrWantedItem instead,
+// and that wanted row is what holds a request back from flipping AVAILABLE off
+// mere Plex/Jellyfin presence.
 // Populated atomically with SonarrWantedItem by /api/sync/sonarr.
 // Enables DB-only availability checks — avoids per-series ?tmdbId= API calls.
 

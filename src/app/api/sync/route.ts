@@ -16,12 +16,13 @@ import { getPlexConfig } from "@/lib/plex-config";
 import { buildSeriesItemIdIndex, libraryItemIds, getJellyfinTmdbIds, getJellyfinTVEpisodes, type JellyfinLibraryItemData, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { getMediaInstances, getSyncableMediaInstances } from "@/lib/media-instance-registry";
-import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
+import { DEFAULT_MEDIA_INSTANCE, plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
 import { syncDownloadPolicies } from "@/lib/download-policy";
 import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDownloadPending } from "@/lib/discord-notify";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, replaceEpisodeCacheForSource, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
+import { sonarrIncompleteKeys } from "@/lib/arr-availability";
 import { isFeatureEnabled } from "@/lib/features";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
@@ -31,7 +32,7 @@ import { DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
 import { settleLimit } from "@/lib/concurrency";
 import { effectivePermissions, parseMediaServerGrants } from "@/lib/permissions";
 import { visibleInstancesFor, type VisibleServerInstances } from "@/lib/media-visibility";
-import { warnOnChange } from "@/lib/log-dedup";
+import { deduplicatePlexRowsByRatingKey } from "@/lib/plex-dedupe";
 
 // Advisory-lock id 2000 — distinct from 2001-2011 (cron warm/sync routes) and TRASH_SYNC_LOCK_ID (2010).
 // Held for the entire orchestrator run so a second concurrent invocation (admin "Resync" while
@@ -147,75 +148,6 @@ const sanitizeStr = (s: string | null | undefined, maxLen = 1000): string | null
   if (s == null) return null;
   return s.replace(/[<>]/g, "").replace(/\0/g, "").slice(0, maxLen) || null;
 };
-
-// Plex can conflate two TMDB IDs onto the same ratingKey when metadata bundles merge.
-// Prefer the previously stored mapping so ownership doesn't flip-flop on every sync.
-// Mirrors deduplicateByRatingKey in /api/sync/plex so the two writers agree on the row set.
-// Scoped per instance: ratingKeys are small server-local integers, so the SAME key on two
-// independently-administered servers is routine and legitimate — NOT conflation. Callers run
-// this per instance batch, and the prior-mapping lookup consults only THAT instance's stored
-// rows (an unscoped read could import another server's ratingKey→tmdbId mapping and wrongly
-// drop this server's row).
-type PlexDedupeRow = { tmdbId: number; plexRatingKey: string | null };
-async function deduplicatePlexRowsByRatingKey<T extends PlexDedupeRow>(
-  rows: T[],
-  mediaType: "MOVIE" | "TV",
-  serverInstance: MediaInstanceKey,
-): Promise<T[]> {
-  const ratingKeyCount = new Map<string, number>();
-  for (const r of rows) {
-    if (r.plexRatingKey) ratingKeyCount.set(r.plexRatingKey, (ratingKeyCount.get(r.plexRatingKey) ?? 0) + 1);
-  }
-  const conflatedKeys = new Set([...ratingKeyCount.entries()].filter(([, n]) => n > 1).map(([k]) => k));
-  if (conflatedKeys.size === 0) return rows;
-
-  const conflatedTmdbIds = rows.filter((r) => r.plexRatingKey && conflatedKeys.has(r.plexRatingKey)).map((r) => r.tmdbId);
-  const existing = await prisma.plexLibraryItem.findMany({
-    where: { mediaType, serverInstance, tmdbId: { in: conflatedTmdbIds } },
-    select: { tmdbId: true, plexRatingKey: true },
-  });
-  const fixedIdByRatingKey = new Map<string, number>();
-  for (const e of existing) {
-    if (e.plexRatingKey) fixedIdByRatingKey.set(e.plexRatingKey, e.tmdbId);
-  }
-
-  const seenRatingKeys = new Set<string>();
-  // Collected, not logged per row. The same handful of conflations recurs on
-  // EVERY sync — they describe a stable property of the library, not an event
-  // — so a line per dropped item made the library sync the loudest thing in
-  // the log while saying nothing new each time. One summary per run keeps the
-  // signal (how many, which keys, which instance) without the repetition.
-  const dropped: string[] = [];
-  const kept = rows.filter((r) => {
-    if (!r.plexRatingKey || !conflatedKeys.has(r.plexRatingKey)) return true;
-    const fixed = fixedIdByRatingKey.get(r.plexRatingKey);
-    if (fixed !== undefined) {
-      if (r.tmdbId !== fixed) {
-        dropped.push(`${r.plexRatingKey}→${fixed} (dropped ${r.tmdbId})`);
-        return false;
-      }
-    } else if (seenRatingKeys.has(r.plexRatingKey)) {
-      return false;
-    }
-    seenRatingKeys.add(r.plexRatingKey);
-    return true;
-  });
-
-  if (dropped.length > 0) {
-    // Repeat-suppressed: a conflated ratingKey is a standing property of the
-    // Plex library plus its pinned mappings, so this recomputes to the same
-    // string on every orchestrator run. The signature is the dropped list
-    // itself — not just its length — so a different set of conflicts re-logs
-    // even when the count happens to match.
-    warnOnChange(
-      `sync-conflated:${mediaType}:${serverInstance}`,
-      dropped.join(", "),
-      `[sync] ${dropped.length} conflated ratingKey(s) kept their pinned tmdbId ` +
-        `(${mediaType}, instance="${serverInstance}"): ${dropped.join(", ")}`,
-    );
-  }
-  return kept;
-}
 
 async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Promise<NextResponse> {
   // withAdvisoryLock aborts at DEFAULT_WORK_TIMEOUT_MS (30 min) and RELEASES the
@@ -500,10 +432,17 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
   let sonarrWanted = 0;
   let sonarrSyncSucceeded = false;
   let sonarrSyncedSlugs = new Set<string>();
+  // Every CONFIGURED Sonarr instance this run knows about (not just the ones whose
+  // fetch succeeded) — the completeness gate below holds a TV request only on an
+  // instance Sonarr is actually the oracle for, and a Sonarr outage this run must
+  // still hold (sonarrSyncedSlugs would drop the slug and let an incomplete
+  // series flip off library presence mid-outage).
+  let sonarrConfiguredSlugs = new Set<string>();
   if (sonarrEnabled && !windDownBefore("Sonarr")) {
     try {
       // Fan out over every configured Sonarr instance; same contract as the Radarr block.
       const instances = await getSyncableArrInstances("sonarr");
+      sonarrConfiguredSlugs = new Set(instances.map((i) => i.slug));
       const settled = await settleLimit(instances, CONCURRENCY_LIMIT, async (inst) => ({
         slug: inst.slug,
         result: await getSonarrWantedTmdbIds(inst.slug),
@@ -890,8 +829,8 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
             writable.map(async ({ slug, movieIds, tvIds }) => {
               const movieRows = Array.from(movieIds.entries()).map(([tmdbId, d]) => ({ tmdbId, mediaType: "MOVIE" as const, serverInstance: slug, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
               const tvRows    = Array.from(tvIds.entries()).map(([tmdbId, d])    => ({ tmdbId, mediaType: "TV"    as const, serverInstance: slug, filePath: d.filePath, plexRatingKey: d.ratingKey, title: sanitizeStr(d.title, 500) ?? "", year: d.year, overview: sanitizeStr(d.overview), contentRating: sanitizeStr(d.contentRating, 50), addedAt: d.addedAt }));
-              const finalMovieRows = await deduplicatePlexRowsByRatingKey(movieRows, "MOVIE", slug);
-              const finalTvRows    = await deduplicatePlexRowsByRatingKey(tvRows, "TV", slug);
+              const finalMovieRows = await deduplicatePlexRowsByRatingKey(movieRows, "MOVIE", slug, "sync");
+              const finalTvRows    = await deduplicatePlexRowsByRatingKey(tvRows, "TV", slug, "sync");
               return {
                 slug,
                 finalMovieRows,
@@ -1431,11 +1370,37 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
   // status are coherent.
   const stillPendingAll = await prisma.mediaRequest.findMany({
     where: { status: { in: ["PENDING", "APPROVED"] } },
-    select: { id: true, tmdbId: true, mediaType: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
+    select: { id: true, tmdbId: true, mediaType: true, arrInstance: true, requestedBy: true, title: true, posterPath: true, notifiedAvailable: true },
   });
   const stillPending = revertedIds.size === 0
     ? stillPendingAll
     : stillPendingAll.filter((r) => !revertedIds.has(r.id));
+
+  // ── Sonarr completeness gate for the library passes (guardrail 14a) ────────
+  //
+  // A TV title is in Plex/Jellyfin the moment its FIRST episode imports, but a
+  // TV request is "ready" only once Sonarr reports the series COMPLETE (every
+  // aired, monitored, regular-season episode on disk). The Sonarr cache
+  // refresh above already encodes that verdict: an incomplete series sits in
+  // SonarrWantedItem for its instance. So a still-pending TV request whose
+  // (tmdbId, arrInstance) has a wanted row is held back from BOTH library
+  // marking passes — it stays PENDING/APPROVED, un-notified, and is
+  // re-evaluated next run; the ARR passes flip it once the row moves to
+  // SonarrAvailableItem (or the webhook confirms completion first).
+  //
+  // Read ONCE here, for the union of both passes' TV candidates, so it rides the
+  // single stillPending snapshot rather than re-querying per source (guardrail
+  // 15 constrains the READ; a filter over the snapshot afterwards is fine —
+  // the grants gate below does the same). Pre-CAS by construction: a gated id
+  // never reaches claimAvailableNotifications, so its once-only claim is never
+  // burned (guardrail 14). A title Sonarr does not track at all (no wanted row)
+  // keeps the pre-existing behaviour — library presence alone marks it — which
+  // is the only sensible answer for a deployment with no Sonarr, or a show that
+  // arrived by some other route. sonarrIncompleteKeys is the shared helper the
+  // per-source Resync routes use too; its keys are vkey-shaped.
+  const sonarrIncompleteSet = await sonarrIncompleteKeys(stillPending, { configuredSlugs: sonarrConfiguredSlugs });
+  const heldBySonarr = (req: { tmdbId: number; mediaType: string; arrInstance: string }): boolean =>
+    req.mediaType === "TV" && sonarrIncompleteSet.has(vkey(req.tmdbId, req.arrInstance));
 
   // ── Per-user media-server visibility (multi-server grants) ─────────────────
   //
@@ -1466,8 +1431,10 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
     tvIds: Map<number, unknown>,
     source: "plex" | "jellyfin",
   ): Promise<number> => {
+    // heldBySonarr: an incomplete series (guardrail 14a) is not a candidate at
+    // all, whatever the library holds — see the gate's comment above.
     const candidates = stillPending.filter((req) =>
-      req.mediaType === "MOVIE" ? movieIds.has(req.tmdbId) : tvIds.has(req.tmdbId)
+      (req.mediaType === "MOVIE" ? movieIds.has(req.tmdbId) : tvIds.has(req.tmdbId)) && !heldBySonarr(req)
     );
     if (candidates.length === 0) return 0;
 

@@ -5,6 +5,7 @@ import { safeFetchAdminConfigured, safeFetchTrusted } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
 import { getCache, getCacheMany, setCache, TTL } from "./tmdb-cache";
 import { tmdbAuth } from "./tmdb-auth";
+import { sonarrSeriesCompletion, type SonarrSeriesCompletion, type SonarrSeriesStatsRow } from "./sonarr-completion";
 
 const QUALITY_PROFILE_TTL_MS = 10 * 60 * 1000;
 const QUEUE_STATE_TTL_MS = 15 * 1000;
@@ -555,7 +556,7 @@ export async function getSonarrWantedTmdbIds(variant: ArrVariant = ""): Promise<
   const cfg = await getCfg("sonarr", variant);
   if (!cfg) return { wanted: new Set(), available: new Set() };
   try {
-    const series = await arrFetch<{ tvdbId: number; tmdbId?: number; status: string; statistics: { episodeFileCount: number; episodeCount: number } }[]>(
+    const series = await arrFetch<({ tvdbId: number; tmdbId?: number; status?: string } & SonarrSeriesStatsRow)[]>(
       cfg, "/api/v3/series"
     );
     const wanted = new Set<number>();
@@ -563,26 +564,21 @@ export async function getSonarrWantedTmdbIds(variant: ArrVariant = ""): Promise<
     const wantedNeedsResolve: number[] = [];
     const availableNeedsResolve: number[] = [];
     for (const s of series) {
-      // Guard `statistics` like isSeriesDownloadedInSonarr does: the field is
-      // normally always present on /api/v3/series, but ONE anomalous row without
-      // it would throw here, trip the outer catch, and silently skip the entire
-      // wanted/available cache update run after run — an opaque availability
-      // freeze. A missing statistics block reads as zero files (wanted).
+      // "Available" = COMPLETE: every aired, monitored, regular-season episode
+      // has a file (guardrail 14a). A continuing series with a partial season
+      // is WANTED, not available — the request must not flip AVAILABLE (and
+      // notify "ready to watch") off the first episode of a season pack, and
+      // Plex/Jellyfin presence alone must not flip it either (the library
+      // marking passes defer to this wanted row). The rule lives in ONE place,
+      // sonarrSeriesCompletion, shared with the webhook's authoritative check
+      // below, so the two writers can never disagree and flip-flop a request.
       //
-      // Denominator is `episodeCount` — Sonarr's own 100% notion ((monitored AND
-      // aired) OR has-file; the PercentOfEpisodes denominator) — NOT
-      // `totalEpisodeCount`, which counts unmonitored and unaired episodes
-      // including season-0 specials (which addSeriesToSonarr itself adds
-      // unmonitored). Against totalEpisodeCount, an ended series with any
-      // unmonitored file-less episode could NEVER read fully-downloaded: the
-      // request stayed wanted forever and the webhook confirm below rejected
-      // its genuine Download events.
-      const episodeFileCount = s.statistics?.episodeFileCount ?? 0;
-      const episodeCount = s.statistics?.episodeCount ?? 0;
-      const allDownloaded = episodeFileCount >= episodeCount;
-      // Ongoing series with partial files are "available"; ended series only when fully downloaded
-      const isAvailable = episodeFileCount > 0 &&
-        (s.status !== "ended" || allDownloaded);
+      // The helper also guards a missing/malformed `statistics` block: one
+      // anomalous /api/v3/series row would otherwise throw here, trip the outer
+      // catch, and silently skip the entire wanted/available cache update run
+      // after run — an opaque availability freeze. Missing stats read as zero
+      // files (wanted).
+      const isAvailable = sonarrSeriesCompletion(s).complete;
       const isWanted = !isAvailable;
 
       if (typeof s.tmdbId === "number" && Number.isInteger(s.tmdbId) && s.tmdbId > 0) {
@@ -698,7 +694,19 @@ export async function getMovieReleaseInfo(tmdbId: number): Promise<{
  * Returns null rather than an unverified guess.
  */
 export function pickSeriesByTmdbId<T extends { tmdbId?: number }>(results: readonly T[], tmdbId: number): T | null {
-  return results.find((r) => r.tmdbId === tmdbId) ?? (results.length === 1 ? (results[0] ?? null) : null);
+  const exact = results.find((r) => r.tmdbId === tmdbId);
+  if (exact) return exact;
+  if (results.length !== 1) return null;
+  const lone = results[0]!;
+  // A lone row is trusted only when Sonarr did not SAY which title it is (SkyHook
+  // rows may omit tmdbId). One carrying a DIFFERENT positive tmdbId is a different
+  // show, however many rows came back — observed live: `term=tmdb:84503` answered
+  // with a single row whose tvdbId was 84503, a degraded id/text search that
+  // matched the wrong series, and the webhook's ids-disagree guard then refused
+  // a genuine Download event on the strength of it.
+  const claimed = lone.tmdbId;
+  const claimsAnotherTitle = typeof claimed === "number" && Number.isInteger(claimed) && claimed > 0;
+  return claimsAnotherTitle ? null : lone;
 }
 
 async function lookupSeriesByTmdbId<T extends { tmdbId?: number }>(
@@ -786,24 +794,33 @@ export async function isMovieDownloadedInRadarr(
   }
 }
 
-// Authoritative "does this series have a downloaded file" check for the Sonarr
-// webhook — the series-side counterpart to isMovieDownloadedInRadarr, with the
-// same purpose: confirm against Sonarr's live library so a forged Download event
-// (the secret-only webhook auth means anyone holding the secret can submit an
+// The Sonarr webhook's verdict on a Download event. `null` keeps the same
+// meaning as isMovieDownloadedInRadarr's null: unverifiable (instance not
+// configured, or Sonarr unreachable). The false branch carries WHY, because the
+// webhook treats the reasons differently — "incomplete" is the normal state of
+// an in-progress season import (defer, keep the library scan), while "absent"
+// and "ids-disagree" are the forgery shapes the guard exists to refuse.
+export type SeriesDownloadVerdict =
+  | { downloaded: true; episodeFileCount: number; episodeCount: number }
+  | { downloaded: false; reason: "incomplete"; episodeFileCount: number; episodeCount: number }
+  | { downloaded: false; reason: "absent" | "ids-disagree" };
+
+// Authoritative "is this series COMPLETE" check for the Sonarr webhook — the
+// series-side counterpart to isMovieDownloadedInRadarr, with the same purpose:
+// confirm against Sonarr's live library so a forged Download event (the
+// secret-only webhook auth means anyone holding the secret can submit an
 // arbitrary payload) can't mark a series AVAILABLE that Sonarr never grabbed.
-// Same tri-state contract as isMovieDownloadedInRadarr (true / false / null when
-// unverifiable). Resolves the series by tvdbId (Sonarr's primary key); falls
-// back to a tmdb→tvdb lookup when only tmdbId is present. The "available"
-// threshold MUST match getSonarrWantedTmdbIds (the sync writer): a continuing
-// series is available with any episode file, an *ended* series only once fully
-// downloaded — with `episodeCount` (Sonarr's own completion denominator) as the
-// target, never `totalEpisodeCount` (see the sync writer's comment). Otherwise
-// an ended series at 1/N flips AVAILABLE on the webhook, and the next sync
-// reverts it to APPROVED — a per-tick flip-flop.
+// Resolves the series by tvdbId (Sonarr's primary key); falls back to a
+// tmdb→tvdb lookup when only tmdbId is present. The completeness rule MUST
+// match getSonarrWantedTmdbIds (the sync writer) — both call
+// sonarrSeriesCompletion (guardrail 14a): every aired, monitored,
+// regular-season episode on disk, specials excluded. A divergent threshold
+// here would flip a request AVAILABLE on the webhook and have the next sync
+// revert it to APPROVED — a per-tick flip-flop.
 export async function isSeriesDownloadedInSonarr(
   ids: { tvdbId?: number | null; tmdbId?: number | null },
   variant: ArrVariant = "",
-): Promise<boolean | null> {
+): Promise<SeriesDownloadVerdict | null> {
   const cfg = await getArrCfg("sonarr", variant);
   if (!cfg) return null;
   try {
@@ -841,7 +858,7 @@ export async function isSeriesDownloadedInSonarr(
           "[arr] Sonarr download check: payload ids disagree (tvdbId=%s resolves tmdbId=%s to tvdbId=%s); treating as not downloaded.",
           Number(tvdbId), Number(claimedTmdbId), Number(resolved),
         );
-        return false;
+        return { downloaded: false, reason: "ids-disagree" };
       }
     }
     if (tvdbId === null) return null;
@@ -849,19 +866,41 @@ export async function isSeriesDownloadedInSonarr(
     // attached on the filtered branch in both v3 and v4). This runs on EVERY
     // Sonarr Download webhook, so an unfiltered fetch paid a full-library
     // transfer per episode of a season-pack import.
-    const library = await arrFetch<{ tvdbId: number; status?: string; statistics?: { episodeFileCount: number; episodeCount: number } }[]>(
+    const library = await arrFetch<({ tvdbId: number; status?: string } & SonarrSeriesStatsRow)[]>(
       cfg, `/api/v3/series?tvdbId=${tvdbId}`,
     );
     const match = library.find((s) => s.tvdbId === tvdbId);
-    if (!match) return false;
-    const episodeFileCount = match.statistics?.episodeFileCount ?? 0;
-    const episodeCount = match.statistics?.episodeCount ?? 0;
-    const allDownloaded = episodeFileCount >= episodeCount;
-    return episodeFileCount > 0 && (match.status !== "ended" || allDownloaded);
+    if (!match) return { downloaded: false, reason: "absent" };
+    const { complete, episodeFileCount, episodeCount } = sonarrSeriesCompletion(match);
+    return complete
+      ? { downloaded: true, episodeFileCount, episodeCount }
+      : { downloaded: false, reason: "incomplete", episodeFileCount, episodeCount };
   } catch (err) {
     console.warn("[arr] isSeriesDownloadedInSonarr failed:", arrErrorMessage(err));
     return null;
   }
+}
+
+// Live completeness of a series by tmdbId, for the arr-state diagnostic: the
+// same lookup + filtered library read as the webhook check, reported as counts
+// so an operator can see WHY a request has not flipped (e.g. 59/60 aired
+// episodes on disk). null = instance unconfigured, series not in Sonarr, or
+// Sonarr unreachable — the caller logs the distinction; this is read-only.
+export async function getSonarrSeriesCompletion(
+  tmdbId: number,
+  variant: ArrVariant = "",
+): Promise<(SonarrSeriesCompletion & { tvdbId: number }) | null> {
+  const cfg = await getArrCfg("sonarr", variant);
+  if (!cfg) return null;
+  const looked = await lookupSeriesByTmdbId<{ tmdbId?: number; tvdbId: number }>(cfg, tmdbId);
+  const tvdbId = looked?.tvdbId;
+  if (!Number.isInteger(tvdbId) || (tvdbId as number) <= 0) return null;
+  const library = await arrFetch<({ tvdbId: number } & SonarrSeriesStatsRow)[]>(
+    cfg, `/api/v3/series?tvdbId=${tvdbId}`,
+  );
+  const match = library.find((s) => s.tvdbId === tvdbId);
+  if (!match) return null;
+  return { tvdbId: tvdbId as number, ...sonarrSeriesCompletion(match) };
 }
 
 export async function searchMovieInRadarr(tmdbId: number, variant: ArrVariant = ""): Promise<void> {

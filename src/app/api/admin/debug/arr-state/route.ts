@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { attachArrPending } from "@/lib/arr-availability";
-import { arrFetch, getArrCfg, isArrConfigured, isMovieWantedInRadarr, isSeriesWantedInSonarr } from "@/lib/arr";
+import { arrFetch, getArrCfg, getSonarrSeriesCompletion, isArrConfigured, isMovieWantedInRadarr, isSeriesWantedInSonarr } from "@/lib/arr";
 import { getArrInstances } from "@/lib/arr-instance-registry";
 import { mapLimit } from "@/lib/concurrency";
 import { getCache } from "@/lib/tmdb-cache";
@@ -64,7 +64,27 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
       console.error(`[arr-state] live Arr check failed (instance=${inst.slug}):`, err instanceof Error ? err.message : err);
       liveArrApi = { result: false, error: "live Arr check failed" };
     }
-    return { slug: inst.slug, name: inst.name, cacheRow, hasEntry: !!cacheRow, liveArrApi };
+    // TV only: WHY a request has not flipped. A TV request goes AVAILABLE only
+    // once Sonarr reports the series complete (guardrail 14a), so the aired
+    // counts here — e.g. 59/60 — are the answer to "it's in Plex, why is it
+    // still APPROVED". `basis: "series"` flags a payload with no per-season
+    // stats, where specials could not be excluded from the count.
+    let liveCompletion:
+      | { tvdbId: number; episodeFileCount: number; episodeCount: number; complete: boolean; basis: "seasons" | "series" }
+      | { result: null; error?: string }
+      | undefined;
+    if (type === "tv") {
+      try {
+        liveCompletion = (await getSonarrSeriesCompletion(tmdbId, inst.slug)) ?? { result: null };
+      } catch (err) {
+        console.error(`[arr-state] live Sonarr completion check failed (instance=${inst.slug}):`, err instanceof Error ? err.message : err);
+        liveCompletion = { result: null, error: "live Sonarr completion check failed" };
+      }
+    }
+    return {
+      slug: inst.slug, name: inst.name, cacheRow, hasEntry: !!cacheRow, liveArrApi,
+      ...(liveCompletion !== undefined ? { liveCompletion } : {}),
+    };
   });
 
   // Legacy HD/4K sections, derived from the per-instance results (additive: the

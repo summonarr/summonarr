@@ -395,8 +395,24 @@ async function describeUnconfirmedJellyfinMatch(opts: {
   lastSeenTmdbId: string | null;
   itemLocked: boolean;
   filePath: string | null;
+  readFailures: number;
+  attempts: number;
 }): Promise<string> {
-  const { baseUrl, headers, previousTmdbId, correctTmdbId, lastSeenTmdbId, itemLocked, filePath } = opts;
+  const { baseUrl, headers, previousTmdbId, correctTmdbId, lastSeenTmdbId, itemLocked, filePath, readFailures, attempts } = opts;
+
+  // Never read the item back at all. Every other branch below infers from what
+  // Jellyfin REPORTED, so with no successful read there is nothing to infer
+  // from: lastSeenTmdbId stays null and itemLocked stays false purely because
+  // nothing was observed, and the fall-through message then blamed Jellyfin's
+  // metadata provider for what is really an unreachable (or erroring) Jellyfin.
+  // Seen live: four items, 120/120 reads failed, each reported as "check that
+  // Jellyfin can reach its metadata provider" while the server was returning
+  // nothing for ten minutes. Says nothing about whether the match landed,
+  // because we genuinely do not know — and an immediate retry only queues
+  // another full refresh on a server already failing to answer.
+  if (attempts > 0 && readFailures >= attempts) {
+    return `Could not read the item back from Jellyfin — all ${attempts} confirmation reads failed, so whether TMDB #${correctTmdbId} applied is unknown and the library mapping was left alone. Check that Jellyfin is up and reachable from Summonarr, then run a library re-sync to see where the item landed before retrying.`;
+  }
 
   if (itemLocked) {
     return `Jellyfin did not keep TMDB #${correctTmdbId} — the item is locked in Jellyfin ("Lock this item" in Edit metadata), so refreshes preserve its old data. Unlock it and retry.`;
@@ -644,6 +660,7 @@ async function fixJellyfinMatch(
     }
     throw new Error(await describeUnconfirmedJellyfinMatch({
       baseUrl, headers, previousTmdbId, correctTmdbId, lastSeenTmdbId, itemLocked, filePath,
+      readFailures: progress.readFailures, attempts: confirmAttempts,
     }));
   }
   if (applyTimedOut) {
