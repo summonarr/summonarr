@@ -464,7 +464,30 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Batch result", content: { "application/json": { schema: { type: "object", properties: { updated: { type: "integer" } } } } } },
+          "200": {
+            description:
+              "Batch result. On APPROVED, a request whose Radarr/Sonarr add fails is rolled back to PENDING and " +
+              "reported in `failed` (with `arrError` summarizing, the same field the single-request PATCH returns); " +
+              "both are omitted when every add landed.",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean" },
+                    failed: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: { id: { type: "string" }, title: { type: "string" }, error: { type: "string" } },
+                      },
+                    },
+                    arrError: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
           "429": { description: "Rate limited (10/min per admin)" },
         },
       },

@@ -500,6 +500,34 @@ test("a FAILED ARR push rolls the row back to PENDING", async () => {
   assert.equal(reqRows.find((r) => r.id === "bad")!.pendingNotifyAt, null);
 });
 
+// The batch used to answer a bare { ok: true } even when rows bounced, so the admin
+// saw a clean approve while those requests quietly went back to PENDING — the
+// reason ("Sonarr: no series found for tmdbId 304842") existed only in the log.
+test("a FAILED push is REPORTED: `failed` names each rolled-back row, `arrError` summarizes; a clean batch is unchanged", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  const reason = "Arr server error (500) — check the arr service logs";
+  reqRows = [
+    reqRow({ id: "ok", requestedBy: owner.userId, tmdbId: 100 }),
+    reqRow({ id: "bad", requestedBy: owner.userId, tmdbId: 999, title: "Bad Movie" }),
+  ];
+  arrFailTmdbIds = new Set([999]);
+  const body = await (await doBatch(token, { ids: ["ok", "bad"], status: "APPROVED" })).json();
+  assert.deepEqual(body.failed, [{ id: "bad", title: "Bad Movie", error: reason }]);
+  assert.equal(body.arrError, `1 request couldn't be sent to Radarr/Sonarr and went back to Pending — "Bad Movie": ${reason}`);
+
+  // Five failures: three named, the rest counted, all five listed in `failed`.
+  reqRows = [1, 2, 3, 4, 5].map((n) => reqRow({ id: `f${n}`, requestedBy: owner.userId, tmdbId: 990 + n, title: `Movie ${n}` }));
+  arrFailTmdbIds = new Set([991, 992, 993, 994, 995]);
+  const many = await (await doBatch(token, { ids: reqRows.map((r) => r.id), status: "APPROVED" })).json();
+  assert.equal(many.failed.length, 5);
+  assert.match(many.arrError, /^5 requests couldn't be sent .* "Movie 1": .*"Movie 2": .*"Movie 3": .*; and 2 more$/);
+
+  arrFailTmdbIds = new Set();
+  reqRows = [reqRow({ id: "clean", requestedBy: owner.userId, tmdbId: 101 })];
+  assert.deepEqual(await (await doBatch(token, { ids: ["clean"], status: "APPROVED" })).json(), { ok: true });
+});
+
 // Sonarr has ALREADY accepted the series when the tvdbId write runs, so that write
 // must sit outside the try whose catch rolls APPROVED → PENDING — otherwise a
 // P2025 (row deleted mid-push) or a transient pool error reverts a request Sonarr

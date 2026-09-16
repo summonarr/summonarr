@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
-import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
+import { addMovieToRadarr, addSeriesToSonarr, arrErrorMessage } from "@/lib/arr";
 import { notifyUsersRequestsApproved, notifyUsersRequestsDeclined } from "@/lib/discord-notify";
 import { notifyUsersRequestsApprovedPush, notifyUsersRequestsDeclinedPush } from "@/lib/push";
 import { notifyUserRequestApprovedEmail, notifyUserRequestDeclinedEmail } from "@/lib/email";
@@ -196,6 +196,11 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
   // Hoisted to function scope so the SSE emit below can report the TRUE status of
   // rows whose ARR push failed (rolled back to PENDING), not the batch target.
   const failedIds = new Set<string>();
+  // Why each failed push failed, returned to the caller. The batch used to answer a
+  // bare { ok: true } regardless, so the admin saw a clean approve while the rows
+  // quietly went back to PENDING — the reason existed only in the server log.
+  const failureReasons = new Map<string, string>();
+  let failures: { id: string; title: string; error: string }[] = [];
 
   if (typedStatus === "APPROVED") {
     // Re-fetch from the pre-update PENDING set to avoid acting on requests that were already approved
@@ -220,6 +225,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
       } catch (err) {
         console.error("[arr] Batch approve push failed for", r.id, err);
         failedIds.add(r.id);
+        failureReasons.set(r.id, arrErrorMessage(err));
       }
       // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the
       // series by this point, so a P2025 (row deleted mid-push) or transient DB error
@@ -229,6 +235,11 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
         await prisma.mediaRequest.updateMany({ where: { id: r.id }, data: { tvdbId: pushedTvdbId } });
       }
     });
+
+    // In `approved` order, not completion order, so the reported list is stable.
+    failures = approved
+      .filter((r) => failedIds.has(r.id))
+      .map((r) => ({ id: r.id, title: r.title, error: failureReasons.get(r.id) ?? "Arr request failed" }));
 
     // Roll back rows whose ARR push failed so they aren't stuck APPROVED with no ARR backing.
     if (failedIds.size > 0) {
@@ -322,5 +333,22 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     ...auditContext(req, session),
   });
 
-  return NextResponse.json({ ok: true });
+  // Additive: `failed` lists every row whose push failed and was rolled back to
+  // PENDING; `arrError` is the one-line summary the single-request PATCH already
+  // returns under the same name, which the group Approve button renders as-is.
+  // Both are omitted when every push landed, so a clean batch reads as before.
+  return NextResponse.json({
+    ok: true,
+    ...(failures.length > 0 ? { failed: failures, arrError: summarizeArrFailures(failures) } : {}),
+  });
 });
+
+// Names the first few failures with their reasons and counts the rest, so a
+// 100-row batch can't produce an unbounded message.
+function summarizeArrFailures(failures: { title: string; error: string }[]): string {
+  const SHOWN = 3;
+  const listed = failures.slice(0, SHOWN).map((f) => `"${f.title}": ${f.error}`);
+  const more = failures.length > SHOWN ? `; and ${failures.length - SHOWN} more` : "";
+  const noun = failures.length === 1 ? "1 request" : `${failures.length} requests`;
+  return `${noun} couldn't be sent to Radarr/Sonarr and went back to Pending — ${listed.join("; ")}${more}`;
+}
