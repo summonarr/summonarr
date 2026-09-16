@@ -12,6 +12,7 @@ import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncF
 import { ArrInstancesManager } from "@/components/settings/arr-instances-manager";
 import { MediaInstancesManager } from "@/components/settings/media-instances-manager";
 import { PlayHistorySettingsForm } from "@/components/settings/play-history-settings";
+import { WatchGradeSettingsForm } from "@/components/settings/watch-grade-settings";
 import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
 import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button";
 import { MasterDbFillButton } from "@/components/admin/master-db-fill-button";
@@ -134,6 +135,7 @@ const ALL_KEYS = [
   "playHistoryEnabled", "playHistoryPlexEnabled", "playHistoryJellyfinEnabled",
   "playHistoryWatchedThreshold", "playHistoryCompletionThreshold", "playHistoryArcGapDays",
   "playHistoryPollingInterval", "playHistoryRetentionDays",
+  "watchGradeGraceDays", "watchGradeWindowDays", "watchGradeTvPercent",
   "omdbApiKey", "mdblistApiKey", "traktClientId", "ratingsHiddenSources",
   "ipinfoToken",
   "apnsRelayUrl", "apnsRelayKey", "recommendedIosBuild",
@@ -688,6 +690,20 @@ export default async function SettingsPage({
                 initialArcGapDays={cfg.playHistoryArcGapDays ?? "14"}
                 initialPollingInterval={cfg.playHistoryPollingInterval ?? "5"}
                 initialRetentionDays={cfg.playHistoryRetentionDays ?? "0"}
+              />
+            </div>
+
+            <div id="watch-grades" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+              <div className="mb-5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Watch Grades</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
+                  Grade users on whether they watch what they request, from play history. Shown to admins on the Users page and the request queue; turn it off in Features.
+                </p>
+              </div>
+              <WatchGradeSettingsForm
+                initialGraceDays={cfg.watchGradeGraceDays ?? ""}
+                initialWindowDays={cfg.watchGradeWindowDays ?? ""}
+                initialTvPercent={cfg.watchGradeTvPercent ?? ""}
               />
             </div>
 

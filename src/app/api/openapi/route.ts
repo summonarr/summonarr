@@ -1576,6 +1576,98 @@ const spec = {
       },
     },
 
+    "/admin/users/{id}/watch-grade": {
+      get: {
+        tags: ["Admin – Users"],
+        summary: "A user's request watch grade with its per-request breakdown (MANAGE_USERS or MANAGE_REQUESTS)",
+        description:
+          "Grades A–F on the share of the user's FULFILLED requests they went on to watch, from recorded play " +
+          "history. Display-only: nothing reads the grade to gate requests. A request is scored only after its " +
+          "grace period since fulfilment, and only when play history already covered the user's media servers " +
+          "when it was fulfilled; plays count only from the moment of the request. A movie earns full credit when " +
+          "watched (half when meaningfully started); a show earns episodes watched ÷ the configured share of its " +
+          "regular-season library episodes. `enabled: false` (with `reason`) when the feature flag or play history " +
+          "tracking is off.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": {
+            description: "Watch grade detail",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    enabled: { type: "boolean" },
+                    reason: { type: "string", nullable: true, enum: ["feature-off", "tracking-off"] },
+                    settings: {
+                      type: "object",
+                      nullable: true,
+                      properties: {
+                        graceDays: { type: "integer" },
+                        windowDays: { type: "integer", description: "0 = no limit" },
+                        tvEpisodePercent: { type: "integer" },
+                        minGradedRequests: { type: "integer" },
+                        watchedThresholdPercent: { type: "integer" },
+                      },
+                    },
+                    grade: {
+                      type: "object",
+                      nullable: true,
+                      properties: {
+                        status: { type: "string", enum: ["graded", "insufficient", "unlinked", "untracked"] },
+                        letter: { type: "string", nullable: true, enum: ["A", "B", "C", "D", "F"] },
+                        score: { type: "integer", nullable: true, description: "0–100 watch rate over scored requests" },
+                        graded: { type: "integer" },
+                        watched: { type: "integer" },
+                        partial: { type: "integer" },
+                        unwatched: { type: "integer" },
+                        inGrace: { type: "integer" },
+                        untracked: { type: "integer" },
+                      },
+                    },
+                    requests: {
+                      type: "array",
+                      description: "Newest fulfilment first, capped at 500 rows (the grade itself covers every request)",
+                      items: {
+                        type: "object",
+                        properties: {
+                          requestId: { type: "string" },
+                          tmdbId: { type: "integer" },
+                          mediaType: { $ref: "#/components/schemas/MediaType" },
+                          title: { type: "string" },
+                          releaseYear: { type: "string", nullable: true },
+                          posterPath: { type: "string", nullable: true },
+                          requestedAt: { type: "string", format: "date-time" },
+                          fulfilledAt: { type: "string", format: "date-time" },
+                          watch: { type: "string", nullable: true, enum: ["watched", "partial", "unwatched"] },
+                          credit: { type: "number", description: "0–1" },
+                          scoring: { type: "string", enum: ["scored", "grace", "untracked"] },
+                          graceDaysLeft: { type: "integer", nullable: true },
+                          episodes: {
+                            type: "object",
+                            nullable: true,
+                            properties: {
+                              watched: { type: "integer" },
+                              started: { type: "integer" },
+                              library: { type: "integer", description: "0 = unknown" },
+                              required: { type: "integer" },
+                            },
+                          },
+                        },
+                      },
+                    },
+                    truncated: { type: "boolean" },
+                  },
+                },
+              },
+            },
+          },
+          "403": { description: "Caller holds neither MANAGE_USERS nor MANAGE_REQUESTS" },
+          "404": { description: "No such user" },
+        },
+      },
+    },
+
     "/sync": {
       post: {
         tags: ["Admin – Sync"],

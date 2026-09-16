@@ -17,6 +17,7 @@ import { invalidateApnsRelayCache } from "@/lib/push";
 import { SETTINGS_SENSITIVE_KEYS_SET } from "@/lib/settings-sensitive-keys";
 import { parseIpAllowlist, isValidIpOrCidr } from "@/lib/ip-allowlist";
 import { stripUrlUserinfo, validateServerUrl } from "@/lib/server-url";
+import { watchGradeSettingError } from "@/lib/watch-grade";
 
 const SETTINGS_SCHEMA = [
   ["siteTitle",                     false],
@@ -132,6 +133,11 @@ const SETTINGS_SCHEMA = [
   ["playHistoryArcGapDays",          false],
   ["playHistoryPollingInterval",     false],
   ["playHistoryRetentionDays",       false],
+  // Request watch grades (src/lib/watch-grade.ts). Bounds are validated below
+  // against the same table the read side parses with.
+  ["watchGradeGraceDays",            false],
+  ["watchGradeWindowDays",           false],
+  ["watchGradeTvPercent",            false],
   ["enableMachineSession",           false],
   ["machineSessionAllowedIps",       false],
   ["apnsRelayUrl",                    false],
@@ -161,6 +167,7 @@ const SETTINGS_SCHEMA = [
   ["feature.page.forYou",             false],
   ["feature.behavior.activeSessions", false],
   ["feature.behavior.activityCalendar", false],
+  ["feature.behavior.watchGrades",    false],
   ["feature.integration.plex",        false],
   ["feature.integration.jellyfin",    false],
   ["feature.integration.radarr",      false],
@@ -502,6 +509,13 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       }
     }
 
+    // Watch-grade tuning. The bounds live beside the read-side parser, so a value
+    // accepted here can never be silently replaced by the default on read.
+    const watchGradeError = watchGradeSettingError(key, value);
+    if (watchGradeError) {
+      return NextResponse.json({ error: watchGradeError }, { status: 400 });
+    }
+
     // Discord application/guild IDs are snowflakes: 17–20 digit decimal integers.
     // Persist them validated so downstream consumers (command registration,
     // notifications, link/merge flows) never receive a malformed identifier.
@@ -608,6 +622,10 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     // Blank = fall back to the 90-day default in getAuditPiiRetentionDays,
     // exactly what the form's helper text promises.
     "auditPiiRetentionDays",
+    // Blank = the WATCH_GRADE_DEFAULTS value, as the Watch Grades form says.
+    "watchGradeGraceDays",
+    "watchGradeWindowDays",
+    "watchGradeTvPercent",
     // Optional Discord routing. Blanking the notify channel is the documented
     // way back to DMs ("Leave blank to send DMs"), and a role/invite id can
     // otherwise only be replaced, never removed.

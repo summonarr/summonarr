@@ -12,9 +12,15 @@ import { Chip } from "@/components/ui/design";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { withBasePath } from "@/lib/base-path";
 import { REQUEST_STATUS_TONE } from "@/lib/status-labels";
+import type { WatchGradeSummary } from "@/lib/watch-grade";
+import { WatchGradeChip } from "./watch-grade";
 
 export interface Requester {
   requestId: string;
+  userId: string;
+  // The requester's watch grade (src/lib/watch-grade.ts); null when the feature
+  // or play history tracking is off.
+  userWatchGrade: WatchGradeSummary | null;
   status: string;
   /** Instance slug the request targets: "" = default, "4k", or a named slug. */
   arrInstance: string;
@@ -624,6 +630,12 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                       }}
                     >
                       <span>{formatUserLabel(r)}</span>
+                      <WatchGradeChip
+                        userId={r.userId}
+                        userLabel={r.userName ?? r.userEmail}
+                        summary={r.userWatchGrade}
+                        compact
+                      />
                       {r.userRequestCount > 1 && (
                         <span
                           className="inline-flex items-center font-medium"

@@ -13,6 +13,7 @@ import { getMediaInstances } from "@/lib/media-instance-registry";
 import { FOURK_ARR_INSTANCE } from "@/lib/arr-instances";
 import { isPurgedRow } from "@/lib/account-lifecycle";
 import { deriveUserSource } from "@/lib/user-source";
+import { getWatchGradeSummaries } from "@/lib/watch-grade-data";
 
 export const dynamic = "force-dynamic";
 
@@ -103,6 +104,9 @@ export default async function UsersPage() {
   ]);
   const localAuthIds = new Set(localAuthRows.map((r) => r.id));
   const oidcAuthIds = new Set(oidcAccountRows.map((r) => r.userId));
+  // Request watch grades for every listed account (null when the feature or play
+  // history tracking is off). One batch, independent of the user count.
+  const watchGrades = await getWatchGradeSummaries(users.map((u) => u.id));
 
   const hasPlex = serverUsers.some((u) => u.source === "plex");
   const hasJellyfin = serverUsers.some((u) => u.source === "jellyfin");
@@ -173,6 +177,7 @@ export default async function UsersPage() {
             tvQuotaLimit: u.tvQuotaLimit,
             tvQuotaDays: u.tvQuotaDays,
             _count: u._count,
+            watchGrade: watchGrades?.get(u.id) ?? null,
             notifyOnApproved: u.notifyOnApproved,
             notifyOnAvailable: u.notifyOnAvailable,
             notifyOnDeclined: u.notifyOnDeclined,

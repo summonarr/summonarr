@@ -106,6 +106,13 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
     category: "behaviors",
     defaultEnabled: true,
   },
+  {
+    key: "feature.behavior.watchGrades",
+    label: "Request watch grades",
+    description: "Grade each user A–F on whether they watch what they request, shown to admins on the Users page and the request queue. Display only — never blocks a request. Needs play history tracking; tune it in Media → Watch Grades.",
+    category: "behaviors",
+    defaultEnabled: true,
+  },
 
   // ── Integrations ──────────────────────────────────────────────────────
   // Off-switches that layer on top of config presence. A disabled integration

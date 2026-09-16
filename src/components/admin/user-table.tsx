@@ -24,6 +24,8 @@ import { NotificationsModal } from "./user-modals/notifications-modal";
 import { PermissionsModal } from "./user-modals/permissions-modal";
 import { SessionsModal } from "./user-modals/sessions-modal";
 import { roleLabel, type NamedInstance, type RestrictedMediaInstance, type User } from "./user-modals/shared";
+import { WatchGradeChip } from "./watch-grade";
+import { hasWatchGradeSignal } from "@/lib/watch-grade";
 
 export type { NamedInstance, RestrictedMediaInstance } from "./user-modals/shared";
 
@@ -388,6 +390,12 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                   {u._count.requests} request
                   {u._count.requests !== 1 ? "s" : ""}
                 </span>
+                {hasWatchGradeSignal(u.watchGrade) && (
+                  <>
+                    <span>·</span>
+                    <WatchGradeChip userId={u.id} userLabel={displayName} summary={u.watchGrade} />
+                  </>
+                )}
                 {u.discordId && (
                   <>
                     <span>·</span>
