@@ -79,8 +79,9 @@ export function WatchGradeChip({
   );
 }
 
-type Filter = "all" | "unwatched" | "partial" | "watched" | "grace" | "untracked";
+type Filter = "all" | "unwatched" | "partial" | "others" | "watched" | "grace" | "untracked";
 
+// Mirrors the summary's buckets, so each filter's rows match its count.
 function matchesFilter(v: RequestWatchVerdict, filter: Filter): boolean {
   switch (filter) {
     case "all":
@@ -88,9 +89,17 @@ function matchesFilter(v: RequestWatchVerdict, filter: Filter): boolean {
     case "grace":
     case "untracked":
       return v.scoring === filter;
+    case "others":
+      return v.scoring === "scored" && v.watchedByOthers;
     default:
-      return v.scoring === "scored" && v.watch === filter;
+      return v.scoring === "scored" && !v.watchedByOthers && v.watch === filter;
   }
+}
+
+function othersText(v: RequestWatchVerdict): string {
+  if (!v.otherViewers) return "";
+  const others = `${v.otherViewers} other${v.otherViewers === 1 ? "" : "s"}`;
+  return v.watch === "watched" ? ` · also watched by ${others}` : ` · watched by ${others}`;
 }
 
 function progressText(v: RequestWatchVerdict): string {
@@ -98,12 +107,14 @@ function progressText(v: RequestWatchVerdict): string {
   if (v.episodes) {
     const e = v.episodes;
     const started = e.started > 0 ? `, ${e.started} started` : "";
-    return e.library > 0
-      ? `${e.watched} of ${e.library} episodes watched${started} · ${e.required} needed`
-      : `${e.watched} episode${e.watched === 1 ? "" : "s"} watched${started} · episode count unknown`;
+    return (
+      (e.library > 0
+        ? `${e.watched} of ${e.library} episodes watched${started} · ${e.required} needed`
+        : `${e.watched} episode${e.watched === 1 ? "" : "s"} watched${started} · episode count unknown`) + othersText(v)
+    );
   }
-  if (v.watch === "watched") return "Watched";
-  return v.watch === "partial" ? "Started, not finished" : "Not played since the request";
+  if (v.watch === "watched") return `Watched${othersText(v)}`;
+  return (v.watch === "partial" ? "Started, not finished" : "Not played since the request") + othersText(v);
 }
 
 function StateChip({ v }: { v: RequestWatchVerdict }) {
@@ -122,6 +133,13 @@ function StateChip({ v }: { v: RequestWatchVerdict }) {
     );
   }
   if (v.watch === "watched") return <span className="ds-chip ds-chip-approved">Watched</span>;
+  if (v.watchedByOthers) {
+    return (
+      <span className="ds-chip ds-chip-approved" title="The requester didn't watch it, but enough other people did, so it counts as watched">
+        Others watched
+      </span>
+    );
+  }
   if (v.watch === "partial") {
     return <span className="ds-chip ds-chip-pending">Partly · {Math.round(v.credit * 100)}%</span>;
   }
@@ -176,6 +194,7 @@ export function WatchGradeModal({
         { id: "all", label: "All", count: verdicts.length },
         { id: "unwatched", label: "Not watched", count: grade.unwatched },
         { id: "partial", label: "Partly", count: grade.partial },
+        { id: "others", label: "Others watched", count: grade.byOthers },
         { id: "watched", label: "Watched", count: grade.watched },
         { id: "grace", label: "Grace period", count: grade.inGrace },
         { id: "untracked", label: "Not counted", count: grade.untracked },
@@ -257,7 +276,11 @@ export function WatchGradeModal({
               Requests fulfilled {settings.windowDays > 0 ? `in the last ${settings.windowDays} days` : "at any time"} count{" "}
               {settings.graceDays} days after they became available. A movie counts once it&apos;s{" "}
               {settings.watchedThresholdPercent}% played (half credit if started); a show once{" "}
-              {settings.tvEpisodePercent}% of its episodes are watched. Grades need{" "}
+              {settings.tvEpisodePercent}% of its episodes are watched.{" "}
+              {settings.otherViewers > 0
+                ? `A request also counts as watched once ${settings.otherViewers} other ${settings.otherViewers === 1 ? "person has" : "people have"} watched it. `
+                : ""}
+              Grades need{" "}
               {settings.minGradedRequests}+ counted requests —{" "}
               {WATCH_GRADE_BANDS.filter((b) => b.letter !== "F")
                 .map((b) => `${b.letter} ${b.min}%+`)
@@ -310,7 +333,7 @@ export function WatchGradeModal({
                         {v.title}
                         {v.releaseYear ? <span className="text-zinc-500"> ({v.releaseYear})</span> : null}
                       </p>
-                      <p className="text-[11px] text-zinc-500 truncate">
+                      <p className="text-[11px] text-zinc-500 truncate" title={progressText(v)}>
                         Available {new Date(v.fulfilledAt).toLocaleDateString()} · {progressText(v)}
                       </p>
                     </div>

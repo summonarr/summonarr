@@ -16,6 +16,10 @@
 //      the per-session threshold still earns full credit from the summed plays.
 //   5. TV SHARE. Full credit at the configured share of REGULAR-season library
 //      episodes (specials excluded, integer ceil), partial credit below it.
+//   6. OTHER VIEWERS. A request the requester skipped counts as watched once
+//      enough OTHER people watched it — each to the requester's own full-credit
+//      bar, one person counted once however many units they left. It can only
+//      raise a scored request's credit, and 0 must mean off (every count is >= 0).
 //
 // Zero-import module, so no stubs: every input is constructed here.
 import { test } from "node:test";
@@ -34,6 +38,7 @@ import {
   watchGradeSettingError,
   type GradableRequest,
   type GradeUserInput,
+  type OtherViewerPlayUnit,
   type RequestPlayUnit,
   type WatchGradeIdentity,
 } from "../src/lib/watch-grade.ts";
@@ -75,11 +80,15 @@ function watchedUnit(requestId: string, over: Partial<RequestPlayUnit> = {}): Re
 function episode(requestId: string, season: number, ep: number, over: Partial<RequestPlayUnit> = {}): RequestPlayUnit {
   return watchedUnit(requestId, { seasonNumber: season, episodeNumber: ep, playSeconds: 1400, durationSeconds: 1400, ...over });
 }
+function by(viewer: string, unit: RequestPlayUnit): OtherViewerPlayUnit {
+  return { ...unit, viewer };
+}
 
 function grade(over: Partial<GradeUserInput>) {
   return gradeUser({
     requests: [],
     units: [],
+    otherUnits: [],
     libraryEpisodes: new Map(),
     identity: TRACKED,
     watchedThresholdPercent: 80,
@@ -310,6 +319,123 @@ test("requiredEpisodes: integer ceil — exact multiples don't overshoot, remain
   assert.equal(requiredEpisodes(-5, 50), 1);
 });
 
+// ── other viewers ───────────────────────────────────────────────────────────
+
+test("others: a request the requester skipped counts as watched once 2 other people watched it; 1 is not enough", () => {
+  const two = movie(40);
+  const one = movie(41);
+  const out = grade({
+    requests: [two, one],
+    otherUnits: [
+      by("user:a", watchedUnit(two.id)),
+      by("user:b", watchedUnit(two.id)),
+      // Two units from ONE person (their Plex and their Jellyfin login): one viewer.
+      by("user:a", watchedUnit(one.id)),
+      by("user:a", watchedUnit(one.id)),
+    ],
+  });
+  const vTwo = out.verdicts.find((v) => v.requestId === two.id)!;
+  assert.deepEqual(
+    { watch: vTwo.watch, otherViewers: vTwo.otherViewers, watchedByOthers: vTwo.watchedByOthers, credit: vTwo.credit },
+    { watch: "unwatched", otherViewers: 2, watchedByOthers: true, credit: 1 },
+  );
+  const vOne = out.verdicts.find((v) => v.requestId === one.id)!;
+  assert.deepEqual(
+    { otherViewers: vOne.otherViewers, watchedByOthers: vOne.watchedByOthers, credit: vOne.credit },
+    { otherViewers: 1, watchedByOthers: false, credit: 0 },
+  );
+  assert.equal(out.summary.score, 50);
+  assert.deepEqual(
+    { byOthers: out.summary.byOthers, unwatched: out.summary.unwatched, watched: out.summary.watched },
+    { byOthers: 1, unwatched: 1, watched: 0 },
+  );
+});
+
+test("others: each must clear the requester's own full-credit bar — a start, or a show short of the share, doesn't make a viewer", () => {
+  const film = movie(40);
+  const tv = show(41);
+  const out = grade({
+    requests: [film, tv],
+    libraryEpisodes: new Map([[tv.tmdbId, 10]]), // 5 episodes needed
+    otherUnits: [
+      by("user:a", watchedUnit(film.id)),
+      by("user:b", watchedUnit(film.id, { anyWatched: false, playSeconds: 900 })), // started: half credit, not a viewer
+      ...[1, 2, 3, 4, 5].map((e) => by("user:a", episode(tv.id, 1, e))),
+      ...[1, 2, 3, 4].map((e) => by("user:b", episode(tv.id, 1, e))), // one short of the share
+      by("user:b", episode(tv.id, 0, 1)), // a special never counts
+    ],
+  });
+  for (const v of out.verdicts) {
+    assert.equal(v.otherViewers, 1, v.title);
+    assert.equal(v.watchedByOthers, false, v.title);
+    assert.equal(v.credit, 0, v.title);
+  }
+});
+
+test("others: one person's many units are one viewer; partial credit rises to full; an own full watch stays 'watched'", () => {
+  const partlyWatched = show(40);
+  const watched = movie(41);
+  const out = grade({
+    requests: [partlyWatched, watched],
+    libraryEpisodes: new Map([[partlyWatched.tmdbId, 4]]),
+    units: [episode(partlyWatched.id, 1, 1), watchedUnit(watched.id)],
+    otherUnits: [
+      // Four episodes from ONE person: still a single viewer.
+      ...[1, 2, 3, 4].map((e) => by("identity:m-1", episode(partlyWatched.id, 1, e))),
+      ...[1, 2].map((e) => by("user:z", episode(partlyWatched.id, 1, e))),
+      by("user:a", watchedUnit(watched.id)),
+      by("user:b", watchedUnit(watched.id)),
+      by("user:c", watchedUnit(watched.id)),
+    ],
+  });
+  const vPartly = out.verdicts.find((v) => v.requestId === partlyWatched.id)!;
+  assert.equal(vPartly.watch, "partial");
+  assert.equal(vPartly.otherViewers, 2);
+  assert.equal(vPartly.watchedByOthers, true);
+  assert.equal(vPartly.credit, 1);
+  assert.deepEqual(vPartly.episodes, { watched: 1, started: 0, library: 4, required: 2 }, "episodes stay the requester's own");
+  const vWatched = out.verdicts.find((v) => v.requestId === watched.id)!;
+  assert.equal(vWatched.watch, "watched");
+  assert.equal(vWatched.otherViewers, 3, "still reported");
+  assert.equal(vWatched.watchedByOthers, false, "the requester watched it themselves");
+  assert.deepEqual({ watched: out.summary.watched, byOthers: out.summary.byOthers, partial: out.summary.partial }, { watched: 1, byOthers: 1, partial: 0 });
+});
+
+test("others: 0 turns the rule off; the threshold is configurable; grace and unobservable requesters are untouched", () => {
+  const r = movie(40);
+  const units = [by("user:a", watchedUnit(r.id)), by("user:b", watchedUnit(r.id)), by("user:c", watchedUnit(r.id))];
+
+  const off = grade({ requests: [r], otherUnits: units, settings: { ...WATCH_GRADE_DEFAULTS, otherViewers: 0 } }).verdicts[0];
+  assert.deepEqual({ otherViewers: off.otherViewers, watchedByOthers: off.watchedByOthers, credit: off.credit }, { otherViewers: null, watchedByOthers: false, credit: 0 });
+
+  const needFour = grade({ requests: [r], otherUnits: units, settings: { ...WATCH_GRADE_DEFAULTS, otherViewers: 4 } }).verdicts[0];
+  assert.equal(needFour.watchedByOthers, false);
+  const needThree = grade({ requests: [r], otherUnits: units, settings: { ...WATCH_GRADE_DEFAULTS, otherViewers: 3 } }).verdicts[0];
+  assert.equal(needThree.watchedByOthers, true);
+
+  const fresh = movie(5); // inside grace
+  const graceOut = grade({ requests: [fresh], otherUnits: units.map((u) => ({ ...u, requestId: fresh.id })) });
+  assert.equal(graceOut.verdicts[0].scoring, "grace");
+  assert.equal(graceOut.summary.graded, 0, "others don't score a request early");
+
+  const unlinked = grade({ requests: [r], otherUnits: units, identity: { kind: "unlinked" } });
+  assert.deepEqual({ otherViewers: unlinked.verdicts[0].otherViewers, credit: unlinked.verdicts[0].credit }, { otherViewers: null, credit: 0 });
+  assert.equal(unlinked.summary.letter, null);
+});
+
+test("others: summary buckets still add up to the scored count", () => {
+  const reqs = [movie(40), movie(41), movie(42), movie(43)];
+  const out = grade({
+    requests: reqs,
+    units: [watchedUnit(reqs[0].id), watchedUnit(reqs[1].id, { anyWatched: false, playSeconds: 900 })],
+    otherUnits: [by("user:a", watchedUnit(reqs[2].id)), by("user:b", watchedUnit(reqs[2].id))],
+  });
+  const s = out.summary;
+  assert.deepEqual({ watched: s.watched, byOthers: s.byOthers, partial: s.partial, unwatched: s.unwatched }, { watched: 1, byOthers: 1, partial: 1, unwatched: 1 });
+  assert.equal(s.watched + s.byOthers + s.partial + s.unwatched, s.graded);
+  assert.equal(s.score, 63); // (1 + 1 + 0.5 + 0) / 4
+});
+
 // ── output shape ────────────────────────────────────────────────────────────
 
 test("verdicts are newest fulfilment first, credit rounded to two decimals", () => {
@@ -338,13 +464,14 @@ test("score averages raw credits before rounding (no per-request rounding drift)
 
 // ── settings ────────────────────────────────────────────────────────────────
 
-test("parseWatchGradeSettings: defaults for missing/garbage/out-of-range rows; windowDays accepts 0", () => {
+test("parseWatchGradeSettings: defaults for missing/garbage/out-of-range rows; windowDays and otherViewers accept 0", () => {
   assert.deepEqual(parseWatchGradeSettings({}), WATCH_GRADE_DEFAULTS);
   assert.deepEqual(
     parseWatchGradeSettings({
       [WATCH_GRADE_SETTING_KEYS.graceDays]: "abc",
       [WATCH_GRADE_SETTING_KEYS.windowDays]: "29",
       [WATCH_GRADE_SETTING_KEYS.tvEpisodePercent]: "101",
+      [WATCH_GRADE_SETTING_KEYS.otherViewers]: "101",
     }),
     WATCH_GRADE_DEFAULTS,
   );
@@ -353,8 +480,9 @@ test("parseWatchGradeSettings: defaults for missing/garbage/out-of-range rows; w
       [WATCH_GRADE_SETTING_KEYS.graceDays]: "14",
       [WATCH_GRADE_SETTING_KEYS.windowDays]: "0",
       [WATCH_GRADE_SETTING_KEYS.tvEpisodePercent]: "100",
+      [WATCH_GRADE_SETTING_KEYS.otherViewers]: "0",
     }),
-    { graceDays: 14, windowDays: 0, tvEpisodePercent: 100 },
+    { graceDays: 14, windowDays: 0, tvEpisodePercent: 100, otherViewers: 0 },
   );
   // Grace 0 would score every request the moment it lands — rejected.
   assert.equal(parseWatchGradeSettings({ [WATCH_GRADE_SETTING_KEYS.graceDays]: "0" }).graceDays, 30);
@@ -376,6 +504,11 @@ test("watchGradeSettingError: the write-side validator agrees with the parser on
     ["watchGradeTvPercent", "100", true],
     ["watchGradeTvPercent", "-1", false],
     ["watchGradeTvPercent", "50%", false],
+    ["watchGradeOtherViewers", "0", true],
+    ["watchGradeOtherViewers", "1", true],
+    ["watchGradeOtherViewers", "100", true],
+    ["watchGradeOtherViewers", "101", false],
+    ["watchGradeOtherViewers", "two", false],
   ];
   for (const [key, value, ok] of cases) {
     assert.equal(watchGradeSettingError(key, value) === null, ok, `${key}=${value}`);
@@ -385,6 +518,10 @@ test("watchGradeSettingError: the write-side validator agrees with the parser on
     const parsed = parseWatchGradeSettings({ [key]: value })[field];
     assert.equal(ok ? parsed === Number(value) : parsed === WATCH_GRADE_DEFAULTS[field], true, `parse ${key}=${value}`);
   }
+  // What 0 means is spelled out per field.
+  assert.match(watchGradeSettingError("watchGradeWindowDays", "1")!, /between 30 and 3650, or 0 for no limit$/);
+  assert.match(watchGradeSettingError("watchGradeOtherViewers", "101")!, /between 1 and 100, or 0 to turn it off$/);
+  assert.match(watchGradeSettingError("watchGradeGraceDays", "0")!, /between 1 and 365$/);
   // Any other key is not this validator's business.
   assert.equal(watchGradeSettingError("quotaLimit", "not a number"), null);
 });
@@ -402,6 +539,12 @@ test("describeWatchGrade: every status explains itself", () => {
   const reqs = [movie(40), movie(50), movie(60)];
   const graded = grade({ requests: reqs, units: [watchedUnit(reqs[0].id)] }).summary;
   assert.match(describeWatchGrade(graded), /^Watch grade D — 33% across 3 fulfilled requests \(1 watched, 0 partly, 2 not watched\)$/);
+  const withOthers = grade({
+    requests: reqs,
+    units: [watchedUnit(reqs[0].id)],
+    otherUnits: [by("user:a", watchedUnit(reqs[1].id)), by("user:b", watchedUnit(reqs[1].id))],
+  }).summary;
+  assert.match(describeWatchGrade(withOthers), /\(1 watched, 1 watched by others, 0 partly, 1 not watched\)$/);
   assert.match(
     describeWatchGrade({ ...emptyWatchGradeSummary(), inGrace: 2 }, WATCH_GRADE_DEFAULTS),
     /2 fulfilled requests still inside the 30-day grace period/,

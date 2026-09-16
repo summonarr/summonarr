@@ -2,7 +2,11 @@ import { Prisma } from "@/generated/prisma";
 import { prisma } from "@/lib/prisma";
 import { isFeatureEnabled } from "@/lib/features";
 import { getWatchedThreshold, isPlayHistoryEnabled, isSourceEnabled } from "@/lib/play-history";
-import { resolveAccountMediaIdentities, type AccountMediaIdentity } from "@/lib/my-watch-history";
+import {
+  resolveAccountMediaIdentities,
+  resolveMediaServerUserOwners,
+  type AccountMediaIdentity,
+} from "@/lib/my-watch-history";
 import {
   emptyWatchGradeSummary,
   gradeUser,
@@ -10,6 +14,7 @@ import {
   MIN_GRADED_REQUESTS,
   WATCH_GRADE_SETTING_KEYS,
   type GradableRequest,
+  type OtherViewerPlayUnit,
   type RequestPlayUnit,
   type UserWatchGrade,
   type WatchGradeDetail,
@@ -29,6 +34,8 @@ import {
 //   2 identity reads (resolveAccountMediaIdentities — the shared linkage rule)
 //   ≤2 point reads for when each tracked source's history begins
 //   1 play aggregate + 1 episode-count aggregate per REQUEST_CHUNK requests
+//   other viewers (unless turned off): 1 audience aggregate per REQUEST_CHUNK
+//   requests + 2 owner reads (resolveMediaServerUserOwners)
 
 export const WATCH_GRADE_FEATURE_KEY = "feature.behavior.watchGrades";
 
@@ -159,6 +166,48 @@ async function loadPlayUnits(
   return units;
 }
 
+interface AudienceUnitRow extends PlayUnitRow {
+  msuId: string;
+}
+
+// EVERYONE's plays of each requested title since the request, per identity and
+// episode — the other-viewers rule. The requester's own identities are dropped
+// by the caller, which already holds them, and identities are mapped to people
+// there too, so the linkage rule stays out of SQL here as well.
+async function loadAudienceUnits(requestIds: string[]): Promise<(RequestPlayUnit & { msuId: string })[]> {
+  const units: (RequestPlayUnit & { msuId: string })[] = [];
+  for (const ids of chunk(requestIds, REQUEST_CHUNK)) {
+    const rows = await prisma.$queryRaw<AudienceUnitRow[]>(Prisma.sql`
+      SELECT r."id" AS "requestId",
+             h."mediaServerUserId" AS "msuId",
+             h."seasonNumber" AS "seasonNumber",
+             h."episodeNumber" AS "episodeNumber",
+             bool_or(h."watched" OR h."completed") AS "anyWatched",
+             COALESCE(SUM(h."playDuration"), 0)::int AS "playSeconds",
+             COALESCE(MAX(h."duration"), 0)::int AS "durationSeconds"
+      FROM "MediaRequest" r
+      JOIN "PlayHistory" h
+        ON h."tmdbId" = r."tmdbId"
+       AND h."mediaType" = r."mediaType"
+       AND h."startedAt" >= r."createdAt"
+      WHERE r."id" IN (${Prisma.join(ids)})
+      GROUP BY r."id", h."mediaServerUserId", h."seasonNumber", h."episodeNumber"
+    `);
+    for (const row of rows) {
+      units.push({
+        requestId: row.requestId,
+        msuId: row.msuId,
+        seasonNumber: row.seasonNumber,
+        episodeNumber: row.episodeNumber,
+        anyWatched: row.anyWatched === true,
+        playSeconds: Number(row.playSeconds) || 0,
+        durationSeconds: Number(row.durationSeconds) || 0,
+      });
+    }
+  }
+  return units;
+}
+
 // Regular-season episodes held in the library per show, deduplicated across
 // sources and servers (TVEpisodeCache accumulates every server's episodes into
 // one namespace per source).
@@ -276,11 +325,10 @@ export async function computeWatchGrades(
   }
 
   const observableRequests = requestRows.filter((r) => identityByUser.get(r.requestedBy)?.kind === "tracked");
-  const [units, libraryEpisodes] = await Promise.all([
-    loadPlayUnits(
-      observableRequests.map((r) => r.id),
-      links,
-    ),
+  const observableIds = observableRequests.map((r) => r.id);
+  const [units, audience, libraryEpisodes] = await Promise.all([
+    loadPlayUnits(observableIds, links),
+    settings.otherViewers > 0 && observableIds.length > 0 ? loadAudienceUnits(observableIds) : [],
     loadLibraryEpisodes(observableRequests.filter((r) => r.mediaType === "TV").map((r) => r.tmdbId)),
   ]);
   const unitsByUser = new Map<string, RequestPlayUnit[]>();
@@ -291,6 +339,26 @@ export async function computeWatchGrades(
     const list = unitsByUser.get(owner) ?? [];
     list.push(u);
     unitsByUser.set(owner, list);
+  }
+
+  // Other viewers: drop the requester's own identities (the same linked set their
+  // own plays were read through), then key each remaining identity by the account
+  // that owns it, so one person's Plex and Jellyfin logins count once.
+  const ownIdentities = new Map(
+    identityUserIds.map((userId) => [userId, new Set((identities.get(userId)?.linked ?? []).map((l) => l.id))]),
+  );
+  const others = audience.filter((a) => {
+    const requester = ownerOfRequest.get(a.requestId);
+    return requester !== undefined && !ownIdentities.get(requester)?.has(a.msuId);
+  });
+  const accountOf = await resolveMediaServerUserOwners(others.map((a) => a.msuId));
+  const otherUnitsByUser = new Map<string, OtherViewerPlayUnit[]>();
+  for (const { msuId, ...unit } of others) {
+    const requester = ownerOfRequest.get(unit.requestId)!;
+    const account = accountOf.get(msuId) ?? null;
+    const list = otherUnitsByUser.get(requester) ?? [];
+    list.push({ ...unit, viewer: account ? `user:${account}` : `identity:${msuId}` });
+    otherUnitsByUser.set(requester, list);
   }
 
   for (const userId of ids) {
@@ -306,6 +374,7 @@ export async function computeWatchGrades(
       gradeUser({
         requests: requestsByUser.get(userId) ?? [],
         units: unitsByUser.get(userId) ?? [],
+        otherUnits: otherUnitsByUser.get(userId) ?? [],
         libraryEpisodes,
         identity,
         watchedThresholdPercent,

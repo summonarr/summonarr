@@ -17,14 +17,17 @@ export function WatchGradeSettingsForm({
   initialGraceDays,
   initialWindowDays,
   initialTvPercent,
+  initialOtherViewers,
 }: {
   initialGraceDays: string;
   initialWindowDays: string;
   initialTvPercent: string;
+  initialOtherViewers: string;
 }) {
   const [graceDays, setGraceDays] = useState(initialGraceDays);
   const [windowDays, setWindowDays] = useState(initialWindowDays);
   const [tvPercent, setTvPercent] = useState(initialTvPercent);
+  const [otherViewers, setOtherViewers] = useState(initialOtherViewers);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState<string | null>(null);
 
@@ -40,6 +43,7 @@ export function WatchGradeSettingsForm({
           [WATCH_GRADE_SETTING_KEYS.graceDays]: graceDays.trim(),
           [WATCH_GRADE_SETTING_KEYS.windowDays]: windowDays.trim(),
           [WATCH_GRADE_SETTING_KEYS.tvEpisodePercent]: tvPercent.trim(),
+          [WATCH_GRADE_SETTING_KEYS.otherViewers]: otherViewers.trim(),
         }),
       });
       const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
@@ -109,10 +113,27 @@ export function WatchGradeSettingsForm({
         </p>
       </div>
 
+      <div className="space-y-1.5">
+        <Label htmlFor="watch-grade-others">Other viewers for credit</Label>
+        <Input
+          id="watch-grade-others"
+          type="number"
+          min={0}
+          max={100}
+          placeholder={String(WATCH_GRADE_DEFAULTS.otherViewers)}
+          value={otherViewers}
+          onChange={(e) => { setOtherViewers(e.target.value); setStatus("idle"); }}
+          className="bg-zinc-800 border-zinc-700 text-sm w-32"
+        />
+        <p className="text-xs text-zinc-500">
+          A request the requester didn&apos;t watch still counts as watched once this many other people have watched it since it was requested. Each must meet the same bar as the requester (the Watched threshold for a movie, the episode share above for a show), and someone with both a Plex and a Jellyfin login counts once. 1–100, or 0 to turn it off. Default {WATCH_GRADE_DEFAULTS.otherViewers}.
+        </p>
+      </div>
+
       <div className="space-y-2 pt-2 border-t border-zinc-800">
         <h3 className="text-sm font-medium text-zinc-300 pt-2">How grades work</h3>
         <p className="text-xs text-zinc-500">
-          Each user is graded A–F on the share of their fulfilled requests they went on to watch: A 80%+, B 60%+, C 40%+, D 20%+, otherwise F, once at least three requests count. A movie counts when it reaches the play history Watched threshold (half credit if started). Only plays after the request count, and requests fulfilled before play history began recording aren&apos;t graded. Grades are shown to admins only and never block a request.
+          Each user is graded A–F on the share of their fulfilled requests they went on to watch: A 80%+, B 60%+, C 40%+, D 20%+, otherwise F, once at least three requests count. A movie counts when it reaches the play history Watched threshold (half credit if started), and any request counts once enough other people have watched it. Only plays after the request count, and requests fulfilled before play history began recording aren&apos;t graded. Grades are shown to admins only and never block a request.
         </p>
       </div>
 

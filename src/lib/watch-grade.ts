@@ -29,6 +29,12 @@
 //   - TV: credit = episodes watched ÷ the required share of the show's REGULAR-
 //     season episodes in the library (specials excluded, as guardrail 14a does),
 //     capped at 1. A started-but-unfinished episode counts as half an episode.
+//   - A request the requester didn't watch still counts as WATCHED once enough
+//     OTHER people watched it since the request (otherViewers, default 2; 0 turns
+//     it off). Each of them must clear the same full-credit bar the requester
+//     would, a person with several media-server logins counts once, and the
+//     requester's own logins never count. It only ever raises the credit of a
+//     request: grace and coverage still decide whether a request is scored.
 //   - A user with no linked media-server identity cannot be graded, and neither
 //     can one whose media servers are not being tracked — both say so explicitly
 //     rather than rendering an F for data that was never collected.
@@ -65,27 +71,33 @@ export interface WatchGradeSettings {
   windowDays: number;
   // Share of a show's library episodes that must be watched for full credit.
   tvEpisodePercent: number;
+  // Other people who must have watched a request since it was made for it to
+  // count as watched when the requester didn't. 0 = off.
+  otherViewers: number;
 }
 
 export const WATCH_GRADE_DEFAULTS: WatchGradeSettings = {
   graceDays: 30,
   windowDays: 365,
   tvEpisodePercent: 50,
+  otherViewers: 2,
 };
 
 export const WATCH_GRADE_SETTING_KEYS = {
   graceDays: "watchGradeGraceDays",
   windowDays: "watchGradeWindowDays",
   tvEpisodePercent: "watchGradeTvPercent",
+  otherViewers: "watchGradeOtherViewers",
 } as const;
 
 // One table serves the write-side validator (/api/settings) and the read-side
 // parser, so a value the settings route accepts can never be clamped into
-// something else on read. windowDays additionally accepts 0 ("no limit").
-const SETTING_BOUNDS: Record<keyof WatchGradeSettings, { min: number; max: number; allowZero: boolean }> = {
-  graceDays: { min: 1, max: 365, allowZero: false },
-  windowDays: { min: 30, max: 3650, allowZero: true },
-  tvEpisodePercent: { min: 1, max: 100, allowZero: false },
+// something else on read. `zero` names what 0 means for the fields that accept it.
+const SETTING_BOUNDS: Record<keyof WatchGradeSettings, { min: number; max: number; zero: string | null }> = {
+  graceDays: { min: 1, max: 365, zero: null },
+  windowDays: { min: 30, max: 3650, zero: "for no limit" },
+  tvEpisodePercent: { min: 1, max: 100, zero: null },
+  otherViewers: { min: 1, max: 100, zero: "to turn it off" },
 };
 
 function fieldForKey(key: string): keyof WatchGradeSettings | null {
@@ -99,7 +111,7 @@ function parseBounded(value: string | null | undefined, field: keyof WatchGradeS
   if (typeof value !== "string" || !/^\d+$/.test(value.trim())) return null;
   const n = Number.parseInt(value.trim(), 10);
   const b = SETTING_BOUNDS[field];
-  if (n === 0 && b.allowZero) return 0;
+  if (n === 0 && b.zero !== null) return 0;
   return n >= b.min && n <= b.max ? n : null;
 }
 
@@ -110,7 +122,7 @@ export function watchGradeSettingError(key: string, value: string): string | nul
   if (!field) return null;
   if (parseBounded(value, field) !== null) return null;
   const b = SETTING_BOUNDS[field];
-  return `"${key}" must be an integer between ${b.min} and ${b.max}${b.allowZero ? ", or 0 for no limit" : ""}`;
+  return `"${key}" must be an integer between ${b.min} and ${b.max}${b.zero ? `, or 0 ${b.zero}` : ""}`;
 }
 
 // Read-side parse: a missing or out-of-range row falls back to the default rather
@@ -154,6 +166,15 @@ export interface RequestPlayUnit {
   durationSeconds: number;
 }
 
+// Another person's plays of a requested title since the request, per (season,
+// episode) exactly like RequestPlayUnit. Never the requester's own plays.
+export interface OtherViewerPlayUnit extends RequestPlayUnit {
+  // One key per PERSON: the account the media-server identity belongs to, or the
+  // identity itself when it belongs to no account. An account's several logins
+  // share one key, so they count once.
+  viewer: string;
+}
+
 export type WatchGradeIdentity =
   // No media-server identity links to the account: nothing it watches is visible.
   | { kind: "unlinked" }
@@ -166,6 +187,8 @@ export type WatchGradeIdentity =
 export interface GradeUserInput {
   requests: GradableRequest[];
   units: RequestPlayUnit[];
+  // Everyone else's plays of the same requests. Empty when the rule is off.
+  otherUnits: OtherViewerPlayUnit[];
   // tmdbId → regular-season episodes in the library, for the TV requests.
   libraryEpisodes: ReadonlyMap<number, number>;
   identity: WatchGradeIdentity;
@@ -196,9 +219,16 @@ export interface RequestWatchVerdict {
   posterPath: string | null;
   requestedAt: string;
   fulfilledAt: string;
-  // null when the user's watches can't be observed at all (unlinked/untracked).
+  // The requester's OWN watch state; null when their watches can't be observed
+  // at all (unlinked/untracked).
   watch: WatchState | null;
-  // 0–1, two decimals.
+  // Other people who watched it to the full-credit bar since the request. null
+  // when the rule is off or the requester's watches can't be observed.
+  otherViewers: number | null;
+  // Counts as watched because enough other people watched it, although the
+  // requester didn't.
+  watchedByOthers: boolean;
+  // 0–1, two decimals. 1 when watchedByOthers.
   credit: number;
   scoring: ScoringState;
   // Whole days until a grace-period request starts counting; null otherwise.
@@ -216,6 +246,9 @@ export interface WatchGradeSummary {
   // Scored requests, and how they split.
   graded: number;
   watched: number;
+  // Not watched (or only partly) by the requester, but counted as watched
+  // because enough other people watched it.
+  byOthers: number;
   partial: number;
   unwatched: number;
   // Fulfilled requests that aren't scored (yet).
@@ -243,7 +276,7 @@ export interface WatchGradeDetail {
 }
 
 export function emptyWatchGradeSummary(status: WatchGradeStatus = "insufficient"): WatchGradeSummary {
-  return { status, letter: null, score: null, graded: 0, watched: 0, partial: 0, unwatched: 0, inGrace: 0, untracked: 0 };
+  return { status, letter: null, score: null, graded: 0, watched: 0, byOthers: 0, partial: 0, unwatched: 0, inGrace: 0, untracked: 0 };
 }
 
 export function letterForScore(score: number): WatchGradeLetter {
@@ -299,6 +332,22 @@ function creditFor(
   return { credit, episodes: { watched, started, library, required } };
 }
 
+// How many OTHER people watched a request to the same full-credit bar the
+// requester is held to — creditFor itself, run over each person's plays.
+function viewersWhoWatched(request: GradableRequest, units: OtherViewerPlayUnit[], input: GradeUserInput): number {
+  const byViewer = new Map<string, OtherViewerPlayUnit[]>();
+  for (const u of units) {
+    const list = byViewer.get(u.viewer);
+    if (list) list.push(u);
+    else byViewer.set(u.viewer, [u]);
+  }
+  let watched = 0;
+  for (const viewerUnits of byViewer.values()) {
+    if (creditFor(request, viewerUnits, input).credit >= 1) watched++;
+  }
+  return watched;
+}
+
 function watchStateFor(credit: number): WatchState {
   if (credit >= 1) return "watched";
   return credit > 0 ? "partial" : "unwatched";
@@ -318,6 +367,12 @@ export function gradeUser(input: GradeUserInput): UserWatchGrade {
     if (list) list.push(u);
     else unitsByRequest.set(u.requestId, [u]);
   }
+  const otherUnitsByRequest = new Map<string, OtherViewerPlayUnit[]>();
+  for (const u of input.otherUnits) {
+    const list = otherUnitsByRequest.get(u.requestId);
+    if (list) list.push(u);
+    else otherUnitsByRequest.set(u.requestId, [u]);
+  }
 
   const requests = input.requests
     .filter((r) => windowStartMs === null || r.fulfilledAt.getTime() >= windowStartMs)
@@ -328,10 +383,15 @@ export function gradeUser(input: GradeUserInput): UserWatchGrade {
 
   const verdicts = requests.map((r): RequestWatchVerdict => {
     const fulfilledMs = r.fulfilledAt.getTime();
-    const { credit, episodes } = observable
+    const own = observable
       ? creditFor(r, unitsByRequest.get(r.id) ?? [], input)
       : { credit: 0, episodes: null };
-    const watch = observable ? watchStateFor(credit) : null;
+    const watch = observable ? watchStateFor(own.credit) : null;
+    // The `> 0` guard is what makes 0 mean off: every count is >= 0.
+    const otherViewers =
+      observable && settings.otherViewers > 0 ? viewersWhoWatched(r, otherUnitsByRequest.get(r.id) ?? [], input) : null;
+    const watchedByOthers = watch !== "watched" && otherViewers !== null && otherViewers >= settings.otherViewers;
+    const credit = watchedByOthers ? 1 : own.credit;
 
     let scoring: ScoringState;
     let graceDaysLeft: number | null = null;
@@ -349,6 +409,7 @@ export function gradeUser(input: GradeUserInput): UserWatchGrade {
         summary.graded++;
         creditSum += credit;
         if (watch === "watched") summary.watched++;
+        else if (watchedByOthers) summary.byOthers++;
         else if (watch === "partial") summary.partial++;
         else summary.unwatched++;
       }
@@ -364,10 +425,12 @@ export function gradeUser(input: GradeUserInput): UserWatchGrade {
       requestedAt: r.createdAt.toISOString(),
       fulfilledAt: r.fulfilledAt.toISOString(),
       watch,
+      otherViewers,
+      watchedByOthers,
       credit: Math.round(credit * 100) / 100,
       scoring,
       graceDaysLeft,
-      episodes,
+      episodes: own.episodes,
     };
   });
 
@@ -398,11 +461,13 @@ export function hasWatchGradeSignal(summary: WatchGradeSummary | null | undefine
 export function describeWatchGrade(summary: WatchGradeSummary, settings?: WatchGradeSettings): string {
   const fulfilled = (n: number) => `${n} fulfilled request${n === 1 ? "" : "s"}`;
   switch (summary.status) {
-    case "graded":
+    case "graded": {
+      const byOthers = summary.byOthers > 0 ? `, ${summary.byOthers} watched by others` : "";
       return (
         `Watch grade ${summary.letter} — ${summary.score}% across ${fulfilled(summary.graded)} ` +
-        `(${summary.watched} watched, ${summary.partial} partly, ${summary.unwatched} not watched)`
+        `(${summary.watched} watched${byOthers}, ${summary.partial} partly, ${summary.unwatched} not watched)`
       );
+    }
     case "insufficient":
       if (summary.graded === 0 && summary.inGrace > 0) {
         const grace = settings ? `the ${settings.graceDays}-day grace period` : "the grace period";

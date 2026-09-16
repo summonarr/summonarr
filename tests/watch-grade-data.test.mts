@@ -23,6 +23,11 @@
 //      query; a failing aggregate on a list page degrades to "no grades" instead
 //      of breaking the Users page or the request queue.
 //   5. THE ROUTE is MANAGE_USERS or MANAGE_REQUESTS, 404s an unknown user.
+//   6. OTHER VIEWERS ARE PEOPLE. Everyone else's plays are read without the
+//      requester's own identities, and each identity is keyed by the account
+//      that owns it (resolveMediaServerUserOwners — the same branches), so one
+//      person's Plex and Jellyfin logins count once and a login an admin pinned
+//      away from the requester counts as someone else.
 //
 // Harness: in-memory prisma stubs (shadowPrismaModel) with an op log, a real
 // signed session JWT over the bearer transport for the route (the
@@ -58,7 +63,7 @@ const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
-const { resolveAccountMediaIdentities, resolveLinkedMediaServerUserIds } = await import(
+const { resolveAccountMediaIdentities, resolveLinkedMediaServerUserIds, resolveMediaServerUserOwners } = await import(
   "../src/lib/my-watch-history.ts"
 );
 const {
@@ -271,9 +276,24 @@ shadowPrismaModel(prisma, "user", {
     const u = users.find((x) => x.id === args.where.id);
     return u ? { ...u } : null;
   },
-  findMany: async (args: { where: { id: { in: string[] } } }) => {
+  // Two shapes: the identity read (id in) and the owner read (an OR of id /
+  // plexUserId / jellyfinUserId `in` lists).
+  findMany: async (args: { where: { id?: { in: string[] }; OR?: Record<string, { in: string[] }>[] } }) => {
     ops.push({ op: "user.findMany", args });
-    return users.filter((u) => args.where.id.in.includes(u.id)).map((u) => ({ ...u }));
+    const { where } = args;
+    if (where.id) return users.filter((u) => where.id!.in.includes(u.id)).map((u) => ({ ...u }));
+    if (!where.OR) throw new Error("unexpected User filter");
+    return users
+      .filter((u) =>
+        where.OR!.some((branch) =>
+          Object.entries(branch).every(([k, v]) => {
+            if (!["id", "plexUserId", "jellyfinUserId"].includes(k)) throw new Error(`unexpected User OR key ${k}`);
+            const value = u[k as "id" | "plexUserId" | "jellyfinUserId"];
+            return value !== null && v.in.includes(value);
+          }),
+        ),
+      )
+      .map((u) => ({ ...u }));
   },
   update: async () => ({}),
 });
@@ -284,10 +304,13 @@ shadowPrismaModel(prisma, "authSession", {
 });
 
 shadowPrismaModel(prisma, "mediaServerUser", {
-  findMany: async (args: { where: { OR: Record<string, unknown>[] }; select?: Record<string, boolean> }) => {
+  // Two shapes: the linkage branches (OR) and the owner read (id in).
+  findMany: async (args: { where: { OR?: Record<string, unknown>[]; id?: { in: string[] } }; select?: Record<string, boolean> }) => {
     ops.push({ op: "mediaServerUser.findMany", args });
+    const { where } = args;
+    if (where.id) return msus.filter((m) => where.id!.in.includes(m.id)).map((m) => ({ ...m }));
     return msus
-      .filter((m) => args.where.OR.some((b) => eqBranch(m as unknown as Record<string, unknown>, b)))
+      .filter((m) => where.OR!.some((b) => eqBranch(m as unknown as Record<string, unknown>, b)))
       .map((m) => ({ ...m }));
   },
 });
@@ -322,7 +345,26 @@ shadowPrismaClientMethod(prisma, "$queryRaw", async (sql: SqlArg) => {
     }
     return out;
   }
-  if (sql.text.includes(`JOIN "PlayHistory" h`)) {
+  if (sql.text.includes(`AS "msuId"`)) {
+    // The audience aggregate: every identity's plays of each request, since the request.
+    const groups = new Map<string, { requestId: string; msuId: string; seasonNumber: number | null; episodeNumber: number | null; anyWatched: boolean; playSeconds: number; durationSeconds: number }>();
+    for (const id of sql.values as string[]) {
+      const r = requests.find((x) => x.id === id);
+      if (!r) continue;
+      for (const p of plays) {
+        if (p.tmdbId !== r.tmdbId || p.mediaType !== r.mediaType) continue;
+        if (p.startedAt.getTime() < r.createdAt.getTime()) continue;
+        const key = `${r.id}|${p.mediaServerUserId}|${p.seasonNumber}|${p.episodeNumber}`;
+        const g = groups.get(key) ?? { requestId: r.id, msuId: p.mediaServerUserId, seasonNumber: p.seasonNumber, episodeNumber: p.episodeNumber, anyWatched: false, playSeconds: 0, durationSeconds: 0 };
+        g.anyWatched ||= p.watched || p.completed;
+        g.playSeconds += p.playDuration;
+        g.durationSeconds = Math.max(g.durationSeconds, p.duration);
+        groups.set(key, g);
+      }
+    }
+    return [...groups.values()];
+  }
+  if (sql.text.includes(`JOIN (VALUES`)) {
     if (failPlayAggregate) throw new Error("simulated aggregate failure");
     // (VALUES ($1::text, $2::text), …) — two bound values per link, then the request ids.
     const linkValueCount = (sql.text.match(/::text/g) ?? []).length;
@@ -387,7 +429,7 @@ test("availability carries parsed settings, the tracked sources and the watched 
   });
   assert.deepEqual(await getWatchGradeAvailability(), {
     enabled: true,
-    settings: { graceDays: 14, windowDays: 365, tvEpisodePercent: 50 },
+    settings: { graceDays: 14, windowDays: 365, tvEpisodePercent: 50, otherViewers: 2 },
     trackedSources: ["jellyfin"],
     watchedThresholdPercent: 70,
   });
@@ -435,6 +477,11 @@ test("parity: the batch resolver attributes exactly the rows the per-user resolv
   user("emailLinkedElsewhere", { plexUserId: "p-Z" });
   msu("m-Z1", { source: "plex", sourceUserId: "p-Z", userId: "pinTarget", manualUserLink: false });
   user("nothing");
+  // Claimed twice again, but the subject claimant is created FIRST, so "first
+  // match" and "FK first" give different owners.
+  user("subjectClaimant", { jellyfinUserId: "j-C" });
+  user("fkClaimant");
+  msu("m-C1", { source: "jellyfin", sourceUserId: "j-C", userId: "fkClaimant", manualUserLink: false });
 
   const ids = users.map((u) => u.id);
   ops = [];
@@ -457,6 +504,22 @@ test("parity: the batch resolver attributes exactly the rows the per-user resolv
   assert.deepEqual(batch.get("manualUnlink")!.subjects, []);
   assert.deepEqual(batch.get("emailLinkedElsewhere")!.subjects, ["plex"]);
   assert.deepEqual(batch.get("nothing"), { linked: [], subjects: [] });
+
+  // The reverse lookup agrees: an identity's owner is an account whose linked set
+  // holds it, the FK account when several do, and nobody when none does.
+  msu("m-orphan", { source: "plex", sourceUserId: "p-nobody" });
+  const owners = await resolveMediaServerUserOwners(msus.map((m) => m.id));
+  for (const row of msus) {
+    const claimants = ids.filter((id) => batch.get(id)!.linked.some((l) => l.id === row.id));
+    const owner = owners.get(row.id);
+    if (claimants.length === 0) assert.equal(owner, null, `${row.id} belongs to nobody`);
+    else if (row.userId && claimants.includes(row.userId)) assert.equal(owner, row.userId, `${row.id} → its FK account`);
+    else assert.ok(owner && claimants.includes(owner), `${row.id} → one of ${claimants.join(",")}`);
+  }
+  // m-Z1 and m-C1 are each claimed twice (an FK and an unpinned subject): the FK wins.
+  assert.equal(owners.get("m-Z1"), "pinTarget");
+  assert.equal(owners.get("m-C1"), "fkClaimant");
+  assert.equal(owners.get("m-U1"), null, "an admin unlink belongs to nobody");
 });
 
 // ═══ plays ═══════════════════════════════════════════════════════════════════
@@ -479,7 +542,7 @@ test("plays count through every linked identity; only plays since the request co
   assert.equal(verdict(viaJellyfin.id).watch, "watched");
   assert.equal(verdict(watchedBeforeRequest.id).watch, "unwatched");
 
-  const sql = (opsOf("$queryRaw").map((o) => o.args as SqlArg)).find((s) => s.text.includes(`JOIN "PlayHistory" h`))!;
+  const sql = (opsOf("$queryRaw").map((o) => o.args as SqlArg)).find((s) => s.text.includes(`JOIN (VALUES`))!;
   assert.match(sql.text, /h\."startedAt" >= r\."createdAt"/);
   assert.match(sql.text, /h\."mediaType" = r\."mediaType"/);
   // Both identities bound as links for this user; the linkage rule is never restated in SQL.
@@ -547,6 +610,108 @@ test("TV: library episodes are deduplicated across sources with specials exclude
   const sql = opsOf("$queryRaw").map((o) => o.args as SqlArg).find((s) => s.text.includes(`FROM "TVEpisodeCache"`))!;
   assert.match(sql.text, /COUNT\(DISTINCT \("seasonNumber", "episodeNumber"\)\)/);
   assert.match(sql.text, /"seasonNumber" > 0/);
+});
+
+// ═══ other viewers ═══════════════════════════════════════════════════════════
+
+test("other viewers are PEOPLE: one account's two logins count once, a login with no account counts alone, the requester's logins never count", async () => {
+  historySince("plex", 400);
+  user("u", { plexUserId: "p-u" });
+  msu("m-u", { source: "plex", sourceUserId: "p-u" }); // subject link
+  msu("m-u2", { source: "jellyfin", sourceUserId: "j-u", userId: "u" }); // FK link
+  user("a", { plexUserId: "p-a" });
+  msu("m-a1", { source: "plex", sourceUserId: "p-a" }); // a, by subject only
+  msu("m-a2", { source: "jellyfin", sourceUserId: "j-a", userId: "a" }); // a, by FK
+  user("b");
+  msu("m-b", { source: "jellyfin", sourceUserId: "j-b", userId: "b" });
+  msu("m-x", { source: "plex", sourceUserId: "p-x" }); // no account at all
+
+  const oneAccountTwice = request("u", 60);
+  play("m-a1", oneAccountTwice, 50);
+  play("m-a2", oneAccountTwice, 49);
+  const accountAndStranger = request("u", 70);
+  play("m-a1", accountAndStranger, 65);
+  play("m-x", accountAndStranger, 64);
+  const ownWatch = request("u", 80);
+  play("m-u", ownWatch, 75);
+  play("m-u2", ownWatch, 74);
+  play("m-b", ownWatch, 73);
+
+  const { grades } = await computeWatchGrades(["u"]);
+  const verdict = (id: string) => grades.get("u")!.verdicts.find((v) => v.requestId === id)!;
+  assert.deepEqual(
+    { others: verdict(oneAccountTwice.id).otherViewers, byOthers: verdict(oneAccountTwice.id).watchedByOthers, credit: verdict(oneAccountTwice.id).credit },
+    { others: 1, byOthers: false, credit: 0 },
+  );
+  assert.deepEqual(
+    { others: verdict(accountAndStranger.id).otherViewers, byOthers: verdict(accountAndStranger.id).watchedByOthers, credit: verdict(accountAndStranger.id).credit },
+    { others: 2, byOthers: true, credit: 1 },
+  );
+  assert.equal(verdict(ownWatch.id).watch, "watched");
+  assert.equal(verdict(ownWatch.id).otherViewers, 1, "only b — u's own two logins are not other viewers");
+  assert.equal(grades.get("u")!.summary.byOthers, 1);
+});
+
+test("other viewers: plays before the request don't count, and the audience SQL never restates the linkage rule", async () => {
+  historySince("plex", 400);
+  user("u", { plexUserId: "p-u" });
+  msu("m-a", { source: "plex", sourceUserId: "p-a" });
+  msu("m-b", { source: "plex", sourceUserId: "p-b" });
+  const r = request("u", 60);
+  play("m-a", r, 200); // long before the request
+  play("m-b", r, 55);
+
+  const v = (await computeWatchGrades(["u"])).grades.get("u")!.verdicts[0];
+  assert.equal(v.otherViewers, 1);
+  assert.equal(v.watchedByOthers, false);
+
+  const sql = opsOf("$queryRaw").map((o) => o.args as SqlArg).find((s) => s.text.includes(`AS "msuId"`))!;
+  assert.match(sql.text, /h\."startedAt" >= r\."createdAt"/);
+  assert.match(sql.text, /h\."mediaType" = r\."mediaType"/);
+  assert.match(sql.text, /GROUP BY r\."id", h\."mediaServerUserId", h\."seasonNumber", h\."episodeNumber"/);
+  assert.doesNotMatch(sql.text, /manualUserLink|plexUserId|jellyfinUserId|"userId"/);
+});
+
+test("other viewers: a login an admin pinned AWAY from the requester is someone else; one pinned TO them is theirs", async () => {
+  historySince("plex", 400);
+  user("u", { plexUserId: "p-u" });
+  user("a", { plexUserId: "p-a" });
+  // An admin unlinked u's own Plex subject row: it is not u's any more.
+  msu("m-away", { source: "plex", sourceUserId: "p-u", userId: null, manualUserLink: true });
+  // An admin pinned a's Plex subject row to u: it is u's, not a's.
+  msu("m-to-u", { source: "plex", sourceUserId: "p-a", userId: "u", manualUserLink: true });
+  msu("m-x", { source: "jellyfin", sourceUserId: "j-x" });
+
+  const r = request("u", 60);
+  play("m-away", r, 55);
+  play("m-x", r, 54);
+  play("m-to-u", r, 53, { watched: false, completed: false, playDuration: 900 }); // u's own: a start
+
+  const v = (await computeWatchGrades(["u"])).grades.get("u")!.verdicts[0];
+  assert.equal(v.watch, "partial", "the pinned-to-u login is u's own watch");
+  assert.equal(v.otherViewers, 2, "the pinned-away login and the stranger");
+  assert.equal(v.watchedByOthers, true);
+  assert.equal(v.credit, 1);
+});
+
+test("watchGradeOtherViewers 0 turns other viewers off: no audience query, no owner reads, no credit", async () => {
+  setSettings({ ...TRACKING_ON, watchGradeOtherViewers: "0" });
+  historySince("plex", 400);
+  user("u", { plexUserId: "p-u" });
+  msu("m-a", { source: "plex", sourceUserId: "p-a" });
+  msu("m-b", { source: "plex", sourceUserId: "p-b" });
+  const r = request("u", 60);
+  play("m-a", r, 55);
+  play("m-b", r, 54);
+
+  ops = [];
+  const v = (await computeWatchGrades(["u"])).grades.get("u")!.verdicts[0];
+  assert.deepEqual({ others: v.otherViewers, byOthers: v.watchedByOthers, credit: v.credit }, { others: null, byOthers: false, credit: 0 });
+  assert.ok(!opsOf("$queryRaw").some((o) => (o.args as SqlArg).text.includes(`AS "msuId"`)), "no audience query");
+  assert.ok(
+    !opsOf("mediaServerUser.findMany").some((o) => "id" in (o.args as { where: object }).where),
+    "no owner read",
+  );
 });
 
 // ═══ request selection ═══════════════════════════════════════════════════════

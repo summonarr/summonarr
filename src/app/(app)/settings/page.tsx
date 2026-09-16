@@ -135,7 +135,7 @@ const ALL_KEYS = [
   "playHistoryEnabled", "playHistoryPlexEnabled", "playHistoryJellyfinEnabled",
   "playHistoryWatchedThreshold", "playHistoryCompletionThreshold", "playHistoryArcGapDays",
   "playHistoryPollingInterval", "playHistoryRetentionDays",
-  "watchGradeGraceDays", "watchGradeWindowDays", "watchGradeTvPercent",
+  "watchGradeGraceDays", "watchGradeWindowDays", "watchGradeTvPercent", "watchGradeOtherViewers",
   "omdbApiKey", "mdblistApiKey", "traktClientId", "ratingsHiddenSources",
   "ipinfoToken",
   "apnsRelayUrl", "apnsRelayKey", "recommendedIosBuild",
@@ -704,6 +704,7 @@ export default async function SettingsPage({
                 initialGraceDays={cfg.watchGradeGraceDays ?? ""}
                 initialWindowDays={cfg.watchGradeWindowDays ?? ""}
                 initialTvPercent={cfg.watchGradeTvPercent ?? ""}
+                initialOtherViewers={cfg.watchGradeOtherViewers ?? ""}
               />
             </div>
 

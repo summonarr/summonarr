@@ -1609,8 +1609,10 @@ const spec = {
           "grace period since fulfilment, and only when play history already covered the user's media servers " +
           "when it was fulfilled; plays count only from the moment of the request. A movie earns full credit when " +
           "watched (half when meaningfully started); a show earns episodes watched ÷ the configured share of its " +
-          "regular-season library episodes. `enabled: false` (with `reason`) when the feature flag or play history " +
-          "tracking is off.",
+          "regular-season library episodes. A request the user didn't watch still earns full credit once " +
+          "`settings.otherViewers` other people watched it to that same bar since the request (0 = off; one " +
+          "account's several media-server logins count once). `enabled: false` (with `reason`) when the feature " +
+          "flag or play history tracking is off.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: {
           "200": {
@@ -1629,6 +1631,7 @@ const spec = {
                         graceDays: { type: "integer" },
                         windowDays: { type: "integer", description: "0 = no limit" },
                         tvEpisodePercent: { type: "integer" },
+                        otherViewers: { type: "integer", description: "0 = off" },
                         minGradedRequests: { type: "integer" },
                         watchedThresholdPercent: { type: "integer" },
                       },
@@ -1642,6 +1645,7 @@ const spec = {
                         score: { type: "integer", nullable: true, description: "0–100 watch rate over scored requests" },
                         graded: { type: "integer" },
                         watched: { type: "integer" },
+                        byOthers: { type: "integer", description: "Counted as watched because enough other people watched it" },
                         partial: { type: "integer" },
                         unwatched: { type: "integer" },
                         inGrace: { type: "integer" },
@@ -1662,8 +1666,10 @@ const spec = {
                           posterPath: { type: "string", nullable: true },
                           requestedAt: { type: "string", format: "date-time" },
                           fulfilledAt: { type: "string", format: "date-time" },
-                          watch: { type: "string", nullable: true, enum: ["watched", "partial", "unwatched"] },
-                          credit: { type: "number", description: "0–1" },
+                          watch: { type: "string", nullable: true, enum: ["watched", "partial", "unwatched"], description: "The requester's own watch state" },
+                          otherViewers: { type: "integer", nullable: true, description: "Other people who watched it since the request; null when the rule is off or the requester can't be observed" },
+                          watchedByOthers: { type: "boolean" },
+                          credit: { type: "number", description: "0–1; 1 when watchedByOthers" },
                           scoring: { type: "string", enum: ["scored", "grace", "untracked"] },
                           graceDaysLeft: { type: "integer", nullable: true },
                           episodes: {

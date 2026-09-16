@@ -242,6 +242,44 @@ export async function resolveAccountMediaIdentities(
   return out;
 }
 
+// The reverse lookup: which account owns each media-server identity, by the same
+// linkedIdentityBranches — for surfaces that count PEOPLE in someone else's
+// audience (the watch grade's other viewers), where an account's Plex and
+// Jellyfin logins must count once. null = the identity belongs to no account.
+//
+// When two accounts' branches match one row (an FK link to one, an unpinned
+// subject match to another), the FK owner wins: the link on the row is what the
+// poller or an admin last decided.
+export async function resolveMediaServerUserOwners(msuIds: string[]): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>();
+  const ids = [...new Set(msuIds)];
+  if (ids.length === 0) return out;
+
+  const rows = await prisma.mediaServerUser.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, source: true, sourceUserId: true, userId: true, manualUserLink: true },
+  });
+  if (rows.length === 0) return out;
+
+  const users = await prisma.user.findMany({
+    where: {
+      OR: [
+        { id: { in: rows.flatMap((r) => (r.userId ? [r.userId] : [])) } },
+        { plexUserId: { in: rows.filter((r) => r.source === "plex").map((r) => r.sourceUserId) } },
+        { jellyfinUserId: { in: rows.filter((r) => r.source === "jellyfin").map((r) => r.sourceUserId) } },
+      ],
+    },
+    select: { id: true, plexUserId: true, jellyfinUserId: true },
+  });
+
+  for (const row of rows) {
+    const owners = users.filter((u) => linkedIdentityBranches(u).some((b) => branchMatches(row, b)));
+    const owner = owners.find((u) => u.id === row.userId) ?? owners[0];
+    out.set(row.id, owner?.id ?? null);
+  }
+  return out;
+}
+
 export async function getMyWatchHistory(
   summonarrUserId: string,
   opts: { cursor?: string | null; mediaType?: string | null; search?: string | null } = {},

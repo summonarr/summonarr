@@ -138,6 +138,7 @@ const SETTINGS_SCHEMA = [
   ["watchGradeGraceDays",            false],
   ["watchGradeWindowDays",           false],
   ["watchGradeTvPercent",            false],
+  ["watchGradeOtherViewers",         false],
   ["enableMachineSession",           false],
   ["machineSessionAllowedIps",       false],
   ["apnsRelayUrl",                    false],
@@ -626,6 +627,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     "watchGradeGraceDays",
     "watchGradeWindowDays",
     "watchGradeTvPercent",
+    "watchGradeOtherViewers",
     // Optional Discord routing. Blanking the notify channel is the documented
     // way back to DMs ("Leave blank to send DMs"), and a role/invite id can
     // otherwise only be replaced, never removed.
