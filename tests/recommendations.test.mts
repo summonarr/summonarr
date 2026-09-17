@@ -2885,6 +2885,43 @@ test("prewarmSuggestionEdges reaches sources a required set never can — an INA
   assert.deepEqual(edgeRows.map((e) => [e.sourceTmdbId, e.tmdbId]), [[42, 777]]);
 });
 
+// ── the verdict pass refreshes inside the run ───────────────────────────────
+
+test("the verdict pass refreshes stale ratings INSIDE the run — nothing is handed to after()", async () => {
+  // blocking:true alone still defers every stale row's refresh to after(), and
+  // Next starts all of a request's after() callbacks together once the response
+  // closes. One callback per 200-title batch let a run release ~50 batches of
+  // MDBList POSTs and OMDB/TMDB refreshes at once (observed live as MDBList 503s
+  // and a wall of TMDB 429s). This file calls the pass outside any request
+  // scope, where after() throws — so a regression surfaces here as a failed
+  // batch instead of a quietly deferred one.
+  nodeRows.push({
+    tmdbId: 600,
+    mediaType: "MOVIE",
+    releaseDate: null,
+    suggestionsRefreshedAt: null,
+    suggestionCount: 0,
+    quality: null,
+    evidence: 0,
+    qualityRatedAt: null,
+  });
+  // Stale, so the pass has a refresh to schedule. No MDBList key is configured,
+  // so that refresh returns without touching the network once it runs.
+  ratingRows.push({
+    key: "mdblist:tmdb:movie:600",
+    data: JSON.stringify({ imdbRating: "8.1", imdbVotes: "250,000", rottenTomatoes: "91" }),
+    expiresAt: new Date(T0 - DAY_MS),
+  });
+
+  const result = await refreshRecommendationGraph();
+
+  assert.equal(result.ratingsFailed, 0, "the batch did not fail on an after() outside a request scope");
+  assert.equal(result.titlesRated, 1);
+  const node = nodeRows.find((n) => n.tmdbId === 600);
+  assert.ok(node?.qualityRatedAt, "the verdict was written from the stale-served row");
+  assert.notEqual(node?.quality, null);
+});
+
 // ── a failed ratings lookup is not a verdict ────────────────────────────────
 // ORDER-DEPENDENT and deliberately LAST in the file: it trips omdb.ts's
 // module-global lockout, which has no reset export and holds for an hour of

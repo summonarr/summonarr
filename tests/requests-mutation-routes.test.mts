@@ -163,7 +163,7 @@ type ReqRow = {
   requestedBy: string; title: string; posterPath: string | null; releaseYear: string | null;
   status: ReqStatus; permanentlyDeclined: boolean; adminNote: string | null;
   pendingNotifyAt: Date | null; availableAt: Date | null; qualityProfileId: number | null;
-  tvdbId: number | null; createdAt: Date;
+  tvdbId: number | null; createdAt: Date; approvedAt: Date | null;
 };
 let reqRows: ReqRow[] = [];
 // Makes ONLY the post-Sonarr tvdbId bookkeeping write fail (the CAS transitions
@@ -357,7 +357,7 @@ function reqRow(over: Partial<ReqRow> & { id: string; requestedBy: string }): Re
     tmdbId: 603, mediaType: "MOVIE", arrInstance: "", title: "The Matrix",
     posterPath: null, releaseYear: "1999", status: "PENDING", permanentlyDeclined: false,
     adminNote: null, pendingNotifyAt: null, availableAt: null, qualityProfileId: null,
-    tvdbId: null, createdAt: new Date(), ...over,
+    tvdbId: null, createdAt: new Date(), approvedAt: null, ...over,
   };
 }
 async function drainAfter(): Promise<void> {
@@ -498,6 +498,34 @@ test("a FAILED ARR push rolls the row back to PENDING", async () => {
   assert.equal(reqRows.find((r) => r.id === "ok")!.status, "APPROVED");
   assert.equal(reqRows.find((r) => r.id === "bad")!.status, "PENDING", "a failed push must not leave the row APPROVED");
   assert.equal(reqRows.find((r) => r.id === "bad")!.pendingNotifyAt, null);
+});
+
+// The batch used to answer a bare { ok: true } even when rows bounced, so the admin
+// saw a clean approve while those requests quietly went back to PENDING — the
+// reason ("Sonarr: no series found for tmdbId 304842") existed only in the log.
+test("a FAILED push is REPORTED: `failed` names each rolled-back row, `arrError` summarizes; a clean batch is unchanged", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  const reason = "Arr server error (500) — check the arr service logs";
+  reqRows = [
+    reqRow({ id: "ok", requestedBy: owner.userId, tmdbId: 100 }),
+    reqRow({ id: "bad", requestedBy: owner.userId, tmdbId: 999, title: "Bad Movie" }),
+  ];
+  arrFailTmdbIds = new Set([999]);
+  const body = await (await doBatch(token, { ids: ["ok", "bad"], status: "APPROVED" })).json();
+  assert.deepEqual(body.failed, [{ id: "bad", title: "Bad Movie", error: reason }]);
+  assert.equal(body.arrError, `1 request couldn't be sent to Radarr/Sonarr and went back to Pending — "Bad Movie": ${reason}`);
+
+  // Five failures: three named, the rest counted, all five listed in `failed`.
+  reqRows = [1, 2, 3, 4, 5].map((n) => reqRow({ id: `f${n}`, requestedBy: owner.userId, tmdbId: 990 + n, title: `Movie ${n}` }));
+  arrFailTmdbIds = new Set([991, 992, 993, 994, 995]);
+  const many = await (await doBatch(token, { ids: reqRows.map((r) => r.id), status: "APPROVED" })).json();
+  assert.equal(many.failed.length, 5);
+  assert.match(many.arrError, /^5 requests couldn't be sent .* "Movie 1": .*"Movie 2": .*"Movie 3": .*; and 2 more$/);
+
+  arrFailTmdbIds = new Set();
+  reqRows = [reqRow({ id: "clean", requestedBy: owner.userId, tmdbId: 101 })];
+  assert.deepEqual(await (await doBatch(token, { ids: ["clean"], status: "APPROVED" })).json(), { ok: true });
 });
 
 // Sonarr has ALREADY accepted the series when the tvdbId write runs, so that write
@@ -661,6 +689,82 @@ test("`permanent` is ignored on an APPROVE — it only qualifies a decline", asy
   reqRows = [reqRow({ id: "r1", requestedBy: owner.userId })];
   await doBatch(token, { ids: ["r1"], status: "APPROVED", permanent: true });
   assert.equal(reqRows[0].permanentlyDeclined, false);
+});
+
+// ── 3a: approvedAt — what the watch grade reads to skip unapproved requests ──
+// A library sync marks a PENDING request AVAILABLE when its title arrives, so only
+// these decision routes can say a request was approved (guardrail 34a).
+
+test("single approve stamps approvedAt, and a push that fails and rolls back to PENDING keeps it", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "ok", requestedBy: owner.userId, tmdbId: 100 }), reqRow({ id: "bad", requestedBy: owner.userId, tmdbId: 999 })];
+  arrFailTmdbIds = new Set([999]);
+  await doPatch(token, "ok", { status: "APPROVED" });
+  await doPatch(token, "bad", { status: "APPROVED" });
+  const ok = reqRows.find((r) => r.id === "ok")!;
+  const bad = reqRows.find((r) => r.id === "bad")!;
+  assert.equal(ok.status, "APPROVED");
+  assert.ok(ok.approvedAt instanceof Date);
+  assert.equal(bad.status, "PENDING", "the push failed and rolled back");
+  assert.ok(bad.approvedAt instanceof Date, "the approval was made; only the push failed");
+});
+
+test("single decline withdraws an approval, even one a failed push rolled back to PENDING", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, approvedAt: new Date() })];
+  await doPatch(token, "r1", { status: "DECLINED" });
+  assert.equal(reqRows[0].status, "DECLINED");
+  assert.equal(reqRows[0].approvedAt, null);
+});
+
+// The single PATCH is the one route that reaches APPROVED and DECLINED from more
+// than PENDING, so the stamp and the clear are pinned from those states too.
+test("single PATCH: approving a DECLINED request stamps approvedAt; declining an APPROVED one clears it", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [
+    reqRow({ id: "was-declined", requestedBy: owner.userId, tmdbId: 100, status: "DECLINED" }),
+    reqRow({ id: "was-approved", requestedBy: owner.userId, tmdbId: 101, status: "APPROVED", approvedAt: new Date("2026-01-02T03:04:05Z") }),
+  ];
+  assert.equal((await doPatch(token, "was-declined", { status: "APPROVED" })).status, 200);
+  assert.equal((await doPatch(token, "was-approved", { status: "DECLINED" })).status, 200);
+  const wasDeclined = reqRows.find((r) => r.id === "was-declined")!;
+  const wasApproved = reqRows.find((r) => r.id === "was-approved")!;
+  assert.equal(wasDeclined.status, "APPROVED");
+  assert.ok(wasDeclined.approvedAt instanceof Date);
+  assert.equal(wasApproved.status, "DECLINED");
+  assert.equal(wasApproved.approvedAt, null);
+});
+
+test("marking an approved request AVAILABLE keeps its approval", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  const approvedAt = new Date("2026-01-02T03:04:05Z");
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, status: "APPROVED", approvedAt })];
+  await doPatch(token, "r1", { status: "AVAILABLE" });
+  assert.equal(reqRows[0].status, "AVAILABLE");
+  assert.equal(reqRows[0].approvedAt, approvedAt);
+});
+
+test("batch approve stamps approvedAt (a rolled-back push keeps it); batch decline withdraws it", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [
+    reqRow({ id: "ok", requestedBy: owner.userId, tmdbId: 100 }),
+    reqRow({ id: "bad", requestedBy: owner.userId, tmdbId: 999 }),
+  ];
+  arrFailTmdbIds = new Set([999]);
+  await doBatch(token, { ids: ["ok", "bad"], status: "APPROVED" });
+  assert.ok(reqRows.find((r) => r.id === "ok")!.approvedAt instanceof Date);
+  const bad = reqRows.find((r) => r.id === "bad")!;
+  assert.equal(bad.status, "PENDING");
+  assert.ok(bad.approvedAt instanceof Date, "the approval was made; only the push failed");
+
+  await doBatch(token, { ids: ["bad"], status: "DECLINED" });
+  assert.equal(bad.status, "DECLINED");
+  assert.equal(bad.approvedAt, null);
 });
 
 // ── 6: batch validation and caps ─────────────────────────────────────────────

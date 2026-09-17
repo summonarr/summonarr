@@ -1,6 +1,6 @@
 {
   "name": "summonarr",
-  "version": "0.25.2",
+  "version": "0.26.0",
   "private": true,
   "license": "AGPL-3.0-only",
   "engines": {
@@ -26,14 +26,14 @@
     "postinstall": "node scripts/patch-eslint-plugin-react.mjs"
   },
   "dependencies": {
-    "@base-ui/react": "^1.7.0",
-    "@prisma/adapter-pg": "^7.9.1",
-    "@prisma/client": "^7.9.1",
+    "@base-ui/react": "^1.8.0",
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
     "jose": "^6.2.12",
-    "next": "16.3.4",
+    "next": "16.3.5",
     "openid-client": "^6.8.8",
     "pg": "^8.23.0",
-    "prisma": "^7.9.1",
+    "prisma": "^7.10.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
@@ -59,14 +59,14 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
-    "@types/node": "^26.4.1",
+    "@types/node": "^26.5.0",
     "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "eslint": "^10.9.1",
-    "eslint-config-next": "16.3.4",
+    "eslint": "^10.10.0",
+    "eslint-config-next": "16.3.5",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "playwright": "^1.62.1",
+    "playwright": "^1.63.0",
     "tailwindcss": "^4.3.1",
     "tsgo": "npm:typescript@^7.0.2",
     "tsx": "^4.23.13",

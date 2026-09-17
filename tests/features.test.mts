@@ -181,7 +181,7 @@ test("every registered flag is writable through /api/settings — an unlisted ke
 test("group sizes are exact (pins accidental category reassignment)", () => {
   const groups = groupFeaturesByCategory();
   assert.equal(groups.pages.length, 7);
-  assert.equal(groups.behaviors.length, 4);
+  assert.equal(groups.behaviors.length, 5);
   assert.equal(groups.integrations.length, 7);
   assert.equal(groups.admin.length, 6);
 });

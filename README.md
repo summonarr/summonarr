@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.25.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.26.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,25 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.26.0
+
+**Added**
+
+- **Request watch grades.** Each user is graded A–F on how much of what they request they go on to watch, from play history. Admins see the grade beside each user on Admin → Users and beside each requester in the request queue; clicking it opens the per-request breakdown. The grade is display-only — nothing reads it to block a request or shrink a quota. Only approved requests count: approving a title counts for everyone who requested it, while pending and declined requests never count, nor does a request whose title nobody approved (a pending request that a library sync marked available when the title turned up).
+- A request is scored only after a grace period (30 days by default), and only when play history was already tracking the user's media servers when it was fulfilled, so nobody gets an F for watches that were never recorded. A movie counts once watched (half credit once a quarter of it was played); a show is scored per season and the best season counts; a request the requester skipped still counts once enough other people watched it (two by default); the same title requested on two instances counts once.
+- Settings → Media → **Watch Grades** tunes the grace period, the grade window, the share of a season's episodes needed, how many other viewers count, the letter cutoffs and the number of scored requests a letter needs — with a preview of how many users would land on each letter before saving. The feature can be switched off under Features → "Request watch grades", and is hidden while play history tracking is off. On the first start after upgrading, requests that were already approved or available are marked as approved once, so they count.
+
+**Changed**
+
+- Runtime image moved to Node 26.8.2 (Alpine 3.23). Bundled dependencies updated (Next.js 16.3.5, Prisma 7.10.0, Base UI 1.8.0).
+
+**Fixed**
+
+- Approving a brand-new show no longer fails with "no series found" while Sonarr's metadata still can't resolve it by TMDB id (observed a week after a premiere). The add now falls back to TMDB's own TVDB id for the show, and the download check, the issue flow and the arr-state debug endpoint find such a series the same way.
+- Batch approve now reports each request whose Radarr/Sonarr add failed and went back to Pending, with the reason, and keeps those requests selected so they can be retried or declined. It used to answer with a clean success while the rows quietly returned to Pending, leaving the reason only in the server log.
+- The recommendations job no longer releases every batch's rating refreshes at once when it finishes, which came back as a wall of TMDB rate-limit errors right after each run. Refreshes now run inline, one batch at a time, within the run's own lock.
+- The settings side navigation now lists every card in its tab: Radarr 4K, Sonarr 4K and IP Geolocation were missing.
 
 ### v0.25.2
 
@@ -683,7 +702,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.25.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.26.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

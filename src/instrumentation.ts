@@ -214,6 +214,17 @@ export async function register() {
       console.error("[startup] Discord public-key prewarm failed:", err instanceof Error ? err.message : err);
     }
 
+    // Stamp MediaRequest.approvedAt on requests that were approved or available
+    // before the column existed. Once ever (request-approval.ts): afterwards a
+    // null approvedAt on an AVAILABLE row means nobody approved its title, and the
+    // watch grade skips it. Awaited because register() finishes before the server
+    // takes requests, so no sync can mark a pending request available first. It
+    // runs before the fire-and-forget work below so its transaction isn't left
+    // waiting on a pool that work has filled.
+    await import("@/lib/request-approval")
+      .then(({ backfillRequestApprovals }) => backfillRequestApprovals())
+      .catch((err) => console.error("[request-approval] startup error:", err));
+
     import("@/lib/tmdb-prewarm")
       .then(({ prewarmLibraryCache }) => prewarmLibraryCache())
       .catch((err) => console.error("[prewarm] Library cache pre-warm error:", err));

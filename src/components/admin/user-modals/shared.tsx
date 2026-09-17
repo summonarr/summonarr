@@ -2,6 +2,7 @@
 
 import type { MediaServerGrants } from "@/lib/permissions";
 import type { UserSource } from "@/lib/user-source";
+import type { WatchGradeSummary } from "@/lib/watch-grade";
 
 // A named (non-default, non-4K) Radarr/Sonarr instance eligible for per-user
 // grants. Mirrors the registry's ArrInstanceConfig access fields.
@@ -73,6 +74,9 @@ export interface User {
   pushOnDeclined: boolean;
   notifyOnIssue: boolean;
   _count: { requests: number };
+  // Request watch grade (src/lib/watch-grade.ts). null when the feature or play
+  // history tracking is off — the table then shows no grade at all.
+  watchGrade: WatchGradeSummary | null;
 }
 
 export const roleLabel: Record<User["role"], string> = {

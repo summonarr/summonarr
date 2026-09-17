@@ -12,9 +12,15 @@ import { Chip } from "@/components/ui/design";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { withBasePath } from "@/lib/base-path";
 import { REQUEST_STATUS_TONE } from "@/lib/status-labels";
+import type { WatchGradeSummary } from "@/lib/watch-grade";
+import { WatchGradeChip } from "./watch-grade";
 
 export interface Requester {
   requestId: string;
+  userId: string;
+  // The requester's watch grade (src/lib/watch-grade.ts); null when the feature
+  // or play history tracking is off.
+  userWatchGrade: WatchGradeSummary | null;
   status: string;
   /** Instance slug the request targets: "" = default, "4k", or a named slug. */
   arrInstance: string;
@@ -196,7 +202,15 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
         setBatchError(data?.error ?? `Request failed (${res.status})`);
         return;
       }
-      setSelected(new Set());
+      // A 200 can still carry rows whose Radarr/Sonarr push failed and were rolled
+      // back to PENDING. Keep exactly those selected, so the bar (and the reason in
+      // it) stays up and they can be retried or declined without re-picking them.
+      const data = (await res.json().catch(() => null)) as { arrError?: string; failed?: { id?: unknown }[] } | null;
+      const stillPending = (data?.failed ?? [])
+        .map((f) => f.id)
+        .filter((id): id is string => typeof id === "string");
+      setSelected(new Set(stillPending));
+      if (data?.arrError) setBatchError(data.arrError);
       setShowBatchNote(null);
       setBatchNote("");
       setConfirmingApprove(false);
@@ -624,6 +638,12 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                       }}
                     >
                       <span>{formatUserLabel(r)}</span>
+                      <WatchGradeChip
+                        userId={r.userId}
+                        userLabel={r.userName ?? r.userEmail}
+                        summary={r.userWatchGrade}
+                        compact
+                      />
                       {r.userRequestCount > 1 && (
                         <span
                           className="inline-flex items-center font-medium"

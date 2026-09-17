@@ -11,6 +11,7 @@ import { SyncButton } from "@/components/admin/request-actions";
 import { AdminRequestList, type GroupedRequestRow, type Requester, type MediaRatings } from "@/components/admin/admin-request-list";
 import { AdminFilterBar } from "@/components/admin/admin-filter-bar";
 import { PageHeader, StatCard } from "@/components/ui/design";
+import { getWatchGradeSummaries } from "@/lib/watch-grade-data";
 
 export const dynamic = "force-dynamic";
 
@@ -188,9 +189,12 @@ export default async function AdminPage({
   // of both services' registries; a slug defined on both keeps the Radarr name
   // (sonarr is applied first, radarr second, so radarr overwrites).
   const instanceNames: Record<string, string> = {};
-  const [sonarrInstances, radarrInstances] = await Promise.all([
+  const [sonarrInstances, radarrInstances, watchGrades] = await Promise.all([
     getArrInstances("sonarr"),
     getArrInstances("radarr"),
+    // Watch grade of every requester on this page, in one batch (null when the
+    // feature or play history tracking is off).
+    getWatchGradeSummaries(requests.map((r) => r.requestedBy)),
   ]);
   for (const instances of [sonarrInstances, radarrInstances]) {
     for (const inst of instances) {
@@ -205,6 +209,8 @@ export default async function AdminPage({
       const primary = bucket[0];
       const requesters: Requester[] = bucket.map((r) => ({
         requestId: r.id,
+        userId: r.requestedBy,
+        userWatchGrade: watchGrades?.get(r.requestedBy) ?? null,
         status: r.status,
         arrInstance: r.arrInstance,
         note: r.note,

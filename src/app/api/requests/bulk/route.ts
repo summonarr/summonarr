@@ -569,7 +569,10 @@ export const POST = withPermission([
                   requestedBy: targetUserId,
                   status,
                   ...(mirror === "AVAILABLE" ? { availableAt: now } : {}),
-                  ...(isAutoApproved ? { pendingNotifyAt: new Date(now.getTime() + 90_000) } : {}),
+                  // Auto-approve is an approval (MediaRequest.approvedAt). A mirrored
+                  // row gets none of its own: the watch grade counts it through the
+                  // approval of the request it copied.
+                  ...(isAutoApproved ? { approvedAt: now, pendingNotifyAt: new Date(now.getTime() + 90_000) } : {}),
                 };
               }),
               skipDuplicates: true,

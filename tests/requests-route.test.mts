@@ -926,6 +926,7 @@ test("auto-approve creates APPROVED with the 90s pendingNotifyAt backstop; a fai
 
   const data = createdData();
   assert.equal(data.status, "APPROVED");
+  assert.ok(data.approvedAt instanceof Date, "auto-approve is an approval — the watch grade reads approvedAt");
   const pendingNotifyAt = data.pendingNotifyAt as Date;
   assert.ok(pendingNotifyAt instanceof Date);
   const offset = pendingNotifyAt.getTime() - before;
@@ -935,6 +936,7 @@ test("auto-approve creates APPROVED with the 90s pendingNotifyAt backstop; a fai
   // never be clobbered back to PENDING.
   const rollback = opsOf("mediaRequest.updateMany")[0].args as { where: Record<string, unknown>; data: unknown };
   assert.equal(rollback.where.status, "APPROVED");
+  // approvedAt is left alone: the approval was made, only the push failed.
   assert.deepEqual(rollback.data, { status: "PENDING", pendingNotifyAt: null });
 
   const body = (await res.json()) as Record<string, unknown>;
@@ -962,6 +964,8 @@ test("a greenlit peer is mirrored: APPROVED copies the status, AVAILABLE also st
   assert.equal(approved.status, 201);
   assert.equal(createdData().status, "APPROVED");
   assert.equal(createdData().availableAt, undefined);
+  // The copy made no decision; the watch grade counts it through the peer's approval.
+  assert.equal(createdData().approvedAt, undefined, "a copy records no approval of its own");
   assert.equal(afterTasks.length, 0, "nothing to review ⇒ no admin alert");
   assert.deepEqual(sseEvents.map((e) => e.type), ["request:new"]);
 
@@ -973,6 +977,7 @@ test("a greenlit peer is mirrored: APPROVED copies the status, AVAILABLE also st
   assert.equal(available.status, 201);
   assert.equal(createdData().status, "AVAILABLE");
   assert.ok(createdData().availableAt instanceof Date, "mirroring AVAILABLE must stamp availableAt");
+  assert.equal(createdData().approvedAt, undefined, "a copy records no approval of its own");
 });
 
 test("the pending branch: first pending request emits SSE, clears the caller's contradictory deletion vote, and enqueues ONE admin notify fan-out that completes offline; an earlier pending peer suppresses it", async () => {
@@ -982,6 +987,7 @@ test("the pending branch: first pending request emits SSE, clears the caller's c
   const body = (await res.json()) as Record<string, unknown>;
   assert.equal(body.status, "PENDING");
   assert.equal(body.note, "please and thank you");
+  assert.equal(createdData().approvedAt, undefined, "a pending request isn't approved");
   assert.deepEqual(sseEvents.map((e) => e.type), ["request:new"]);
 
   // A request and a deletion vote for the same title are contradictory.

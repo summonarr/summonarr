@@ -624,9 +624,16 @@ async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefre
     const slice = stale.slice(i, i + QUALITY_BATCH);
     let rated: TmdbMedia[];
     try {
-      // blocking:true keeps the work inline. The non-blocking path defers to
-      // Next's after(), and this runs inside a cron request whose response must
-      // not be sent before the verdicts are written.
+      // blocking:true fetches the misses inline; this runs inside a cron request
+      // whose response must not be sent before the verdicts are written.
+      //
+      // deferToAfter:false keeps the rest inline too. blocking:true alone still
+      // hands every stale row's refresh to after(), and Next starts all of a
+      // request's after() callbacks at once when the response closes. At one
+      // callback per QUALITY_BATCH that is up to 50 batches of MDBList POSTs and
+      // OMDB/TMDB refreshes landing together, on top of whichever cron runs next.
+      // Inline, each batch's refresh finishes before the next batch begins, and
+      // it stays inside the advisory lock this run holds.
       rated = await attachRatingsUnified(
         slice.map((c) => ({
           id: c.tmdbId,
@@ -649,7 +656,7 @@ async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefre
           voteAverage: 0,
           voteCount: 0,
         })),
-        { blocking: true },
+        { blocking: true, deferToAfter: false },
       );
     } catch (err) {
       stats.ratingsFailed += slice.length;

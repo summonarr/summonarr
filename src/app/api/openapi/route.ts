@@ -40,6 +40,19 @@ const spec = {
         enum: ["PENDING", "APPROVED", "DECLINED", "AVAILABLE"],
       },
       UserRole: { type: "string", enum: ["USER", "ADMIN", "ISSUE_ADMIN"] },
+      WatchGradeSpread: {
+        type: "object",
+        nullable: true,
+        description: "Users per letter; notGraded = approved, fulfilled requests but no letter yet",
+        properties: {
+          A: { type: "integer" },
+          B: { type: "integer" },
+          C: { type: "integer" },
+          D: { type: "integer" },
+          F: { type: "integer" },
+          notGraded: { type: "integer" },
+        },
+      },
       IssueType: {
         type: "string",
         enum: ["BAD_VIDEO", "WRONG_AUDIO", "MISSING_SUBTITLES", "WRONG_MATCH", "OTHER"],
@@ -64,6 +77,15 @@ const spec = {
           status: { $ref: "#/components/schemas/RequestStatus" },
           note: { type: "string", nullable: true },
           adminNote: { type: "string", nullable: true },
+          approvedAt: {
+            type: "string",
+            format: "date-time",
+            nullable: true,
+            description:
+              "When this request was approved by a decision: an admin, or auto-approve at creation. Cleared on " +
+              "decline. null if it never was itself — a copy of an already-approved request, or a PENDING request a " +
+              "library sync marked AVAILABLE when its title arrived. Present on responses that return the whole row.",
+          },
           createdAt: { type: "string", format: "date-time" },
           updatedAt: { type: "string", format: "date-time" },
         },
@@ -464,7 +486,30 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Batch result", content: { "application/json": { schema: { type: "object", properties: { updated: { type: "integer" } } } } } },
+          "200": {
+            description:
+              "Batch result. On APPROVED, a request whose Radarr/Sonarr add fails is rolled back to PENDING and " +
+              "reported in `failed` (with `arrError` summarizing, the same field the single-request PATCH returns); " +
+              "both are omitted when every add landed.",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean" },
+                    failed: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: { id: { type: "string" }, title: { type: "string" }, error: { type: "string" } },
+                      },
+                    },
+                    arrError: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
           "429": { description: "Rate limited (10/min per admin)" },
         },
       },
@@ -1573,6 +1618,171 @@ const spec = {
           { name: "sessionId", in: "query", required: true, schema: { type: "string" } },
         ],
         responses: { "200": { description: "Session revoked" } },
+      },
+    },
+
+    "/admin/users/{id}/watch-grade": {
+      get: {
+        tags: ["Admin – Users"],
+        summary: "A user's request watch grade with its per-request breakdown (MANAGE_USERS or MANAGE_REQUESTS)",
+        description:
+          "Grades A–F on the share of the user's APPROVED requests that became available that they went on to " +
+          "watch, from recorded play history. Approval counts per title on an instance: a request counts when it, " +
+          "or any request for the same title on the same instance, was approved (`approvedAt`). Pending and " +
+          "declined requests never count, and neither does a request whose title nobody approved. " +
+          "Display-only: nothing reads the grade to gate requests. A request is scored only after its " +
+          "grace period since fulfilment, and only when play history already covered the user's media servers " +
+          "when it was fulfilled; plays count only from the moment of the request. A movie earns full credit when " +
+          "watched (half once a quarter of it was played); a show is scored per season — episodes watched ÷ the " +
+          "configured share of that season's regular-season library episodes — and the best season counts. The " +
+          "same title requested on several *arr instances is folded into one unit (`duplicates`). A request the " +
+          "user didn't watch still earns full credit once `settings.otherViewers` other people watched it since " +
+          "the request, as play history recorded them (0 = off; one account's several media-server logins count " +
+          "once). `enabled: false` (with `reason`) when the feature flag or play history tracking is off.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": {
+            description: "Watch grade detail",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    enabled: { type: "boolean" },
+                    reason: { type: "string", nullable: true, enum: ["feature-off", "tracking-off"] },
+                    settings: {
+                      type: "object",
+                      nullable: true,
+                      properties: {
+                        graceDays: { type: "integer" },
+                        windowDays: { type: "integer", description: "0 = no limit" },
+                        tvEpisodePercent: { type: "integer", description: "Share of a season's library episodes for full credit" },
+                        otherViewers: { type: "integer", description: "0 = off" },
+                        bandA: { type: "integer", description: "Minimum watch rate for an A" },
+                        bandB: { type: "integer", description: "Minimum watch rate for a B" },
+                        bandC: { type: "integer", description: "Minimum watch rate for a C" },
+                        bandD: { type: "integer", description: "Minimum watch rate for a D; below it is an F" },
+                        minGradedRequests: { type: "integer", description: "Scored requests needed before a letter" },
+                        watchedThresholdPercent: { type: "integer" },
+                      },
+                    },
+                    grade: {
+                      type: "object",
+                      nullable: true,
+                      properties: {
+                        status: { type: "string", enum: ["graded", "insufficient", "unlinked", "untracked"] },
+                        letter: { type: "string", nullable: true, enum: ["A", "B", "C", "D", "F"] },
+                        minGradedRequests: { type: "integer", description: "Scored requests a letter needs (the setting in force)" },
+                        score: { type: "integer", nullable: true, description: "0–100 watch rate over scored requests" },
+                        graded: { type: "integer" },
+                        watched: { type: "integer" },
+                        byOthers: { type: "integer", description: "Counted as watched because enough other people watched it" },
+                        partial: { type: "integer" },
+                        unwatched: { type: "integer" },
+                        inGrace: { type: "integer" },
+                        untracked: { type: "integer" },
+                      },
+                    },
+                    requests: {
+                      type: "array",
+                      description: "Newest fulfilment first, capped at 500 rows (the grade itself covers every request)",
+                      items: {
+                        type: "object",
+                        properties: {
+                          requestId: { type: "string" },
+                          tmdbId: { type: "integer" },
+                          mediaType: { $ref: "#/components/schemas/MediaType" },
+                          title: { type: "string" },
+                          releaseYear: { type: "string", nullable: true },
+                          posterPath: { type: "string", nullable: true },
+                          requestedAt: { type: "string", format: "date-time" },
+                          fulfilledAt: { type: "string", format: "date-time" },
+                          duplicates: { type: "integer", description: "Further requests for the same title (other instances) folded into this one" },
+                          watch: { type: "string", nullable: true, enum: ["watched", "partial", "unwatched"], description: "The requester's own watch state" },
+                          otherViewers: { type: "integer", nullable: true, description: "Other people who watched it since the request; counted only for a scored request the requester didn't fully watch, null otherwise" },
+                          watchedByOthers: { type: "boolean" },
+                          credit: { type: "number", description: "0–1; 1 when watchedByOthers" },
+                          scoring: { type: "string", enum: ["scored", "grace", "untracked"] },
+                          graceDaysLeft: { type: "integer", nullable: true },
+                          episodes: {
+                            type: "object",
+                            nullable: true,
+                            description: "The best season — the one the credit comes from",
+                            properties: {
+                              season: { type: "integer", nullable: true },
+                              watched: { type: "integer" },
+                              started: { type: "integer" },
+                              library: { type: "integer", description: "Episodes of that season in the library; 0 = unknown" },
+                              required: { type: "integer" },
+                            },
+                          },
+                        },
+                      },
+                    },
+                    truncated: { type: "boolean" },
+                  },
+                },
+              },
+            },
+          },
+          "403": { description: "Caller holds neither MANAGE_USERS nor MANAGE_REQUESTS" },
+          "404": { description: "No such user" },
+        },
+      },
+    },
+
+    "/admin/watch-grade/preview": {
+      post: {
+        tags: ["Admin – Users"],
+        summary: "Preview how the watch grade spread would change with other settings (ADMIN)",
+        description:
+          "Grades every requester with the watch-grade settings in the body and with the ones in force, and " +
+          "returns how many land on each letter. Nothing is written. The body is judged exactly as a " +
+          "`PATCH /settings` of the same keys would be: the same per-key bounds and cross-field rules (window " +
+          "longer than grace, cutoffs strictly descending), a key left out keeps its stored value, and a blank " +
+          "one means the default.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  watchGradeGraceDays: { type: "string" },
+                  watchGradeWindowDays: { type: "string" },
+                  watchGradeTvPercent: { type: "string" },
+                  watchGradeOtherViewers: { type: "string" },
+                  watchGradeBandA: { type: "string" },
+                  watchGradeBandB: { type: "string" },
+                  watchGradeBandC: { type: "string" },
+                  watchGradeBandD: { type: "string" },
+                  watchGradeMinRequests: { type: "string" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Spread with the settings in force and with the proposed ones",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    enabled: { type: "boolean" },
+                    reason: { type: "string", nullable: true, enum: ["feature-off", "tracking-off"] },
+                    requesters: { type: "integer", description: "Accounts with at least one approved, fulfilled request" },
+                    current: { $ref: "#/components/schemas/WatchGradeSpread" },
+                    proposed: { $ref: "#/components/schemas/WatchGradeSpread" },
+                  },
+                },
+              },
+            },
+          },
+          "400": { description: "A value out of bounds, or a combination the settings save would refuse" },
+          "403": { description: "Caller is not an ADMIN" },
+        },
       },
     },
 

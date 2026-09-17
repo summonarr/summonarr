@@ -126,6 +126,31 @@ export async function resolveLinkedMediaServerUserIds(summonarrUserId: string): 
     where: { id: summonarrUserId },
     select: { plexUserId: true, jellyfinUserId: true },
   });
+  const identityOr: Prisma.MediaServerUserWhereInput[] = linkedIdentityBranches({
+    id: summonarrUserId,
+    plexUserId: me?.plexUserId ?? null,
+    jellyfinUserId: me?.jellyfinUserId ?? null,
+  });
+  const linked = await prisma.mediaServerUser.findMany({
+    where: { OR: identityOr },
+    select: { id: true },
+  });
+  return linked.map((r) => r.id);
+}
+
+// One equality-only branch of the linkage rule. Plain data rather than an opaque
+// Prisma filter so the batch resolver below can evaluate the SAME branches in
+// memory — there is exactly one definition of which media-server identities an
+// account owns.
+export type LinkedIdentityBranch =
+  | { userId: string }
+  | { source: "plex" | "jellyfin"; sourceUserId: string; manualUserLink: false };
+
+export function linkedIdentityBranches(user: {
+  id: string;
+  plexUserId: string | null;
+  jellyfinUserId: string | null;
+}): LinkedIdentityBranch[] {
   // The FK branch is unconditional — a MANUAL LINK an admin pinned to this user must
   // still be honored, which is the whole point of pinning.
   //
@@ -136,18 +161,132 @@ export async function resolveLinkedMediaServerUserIds(summonarrUserId: string): 
   // and handed the history straight back, so the detach did nothing the user could
   // see. The same slip re-surfaced a row an admin had deliberately re-assigned to a
   // DIFFERENT account.
-  const identityOr: Prisma.MediaServerUserWhereInput[] = [{ userId: summonarrUserId }];
-  if (me?.plexUserId) {
-    identityOr.push({ source: "plex", sourceUserId: me.plexUserId, manualUserLink: false });
+  const branches: LinkedIdentityBranch[] = [{ userId: user.id }];
+  if (user.plexUserId) {
+    branches.push({ source: "plex", sourceUserId: user.plexUserId, manualUserLink: false });
   }
-  if (me?.jellyfinUserId) {
-    identityOr.push({ source: "jellyfin", sourceUserId: me.jellyfinUserId, manualUserLink: false });
+  if (user.jellyfinUserId) {
+    branches.push({ source: "jellyfin", sourceUserId: user.jellyfinUserId, manualUserLink: false });
   }
-  const linked = await prisma.mediaServerUser.findMany({
-    where: { OR: identityOr },
-    select: { id: true },
+  return branches;
+}
+
+function branchMatches(row: Record<string, unknown>, branch: LinkedIdentityBranch): boolean {
+  return Object.entries(branch).every(([key, value]) => row[key] === value);
+}
+
+export interface AccountMediaIdentity {
+  // Every MediaServerUser row the account owns under linkedIdentityBranches —
+  // exactly the set resolveLinkedMediaServerUserIds returns, plus each row's source.
+  linked: { id: string; source: string }[];
+  // Media servers the account holds a provider SUBJECT for (User.plexUserId /
+  // jellyfinUserId) that an admin has not pinned to a different account. A
+  // subject makes the account's watches observable before any MediaServerUser row
+  // exists: the Plex row is only created at the first recorded play, so an account
+  // that has never played anything has no row at all — and that account is not
+  // "unlinked", it is someone who has watched nothing.
+  subjects: ("plex" | "jellyfin")[];
+}
+
+// Batch form of the linkage rule for surfaces that read OTHER users' history
+// (the admin watch grade). Two queries for any number of accounts; rows are
+// attributed by evaluating linkedIdentityBranches in memory, so a batch answer
+// can never drift from the per-user resolver above.
+export async function resolveAccountMediaIdentities(
+  userIds: string[],
+): Promise<Map<string, AccountMediaIdentity>> {
+  const out = new Map<string, AccountMediaIdentity>();
+  const ids = [...new Set(userIds)];
+  if (ids.length === 0) return out;
+
+  const users = await prisma.user.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, plexUserId: true, jellyfinUserId: true },
   });
-  return linked.map((r) => r.id);
+  if (users.length === 0) return out;
+
+  const branchesByUser = new Map(users.map((u) => [u.id, linkedIdentityBranches(u)]));
+  // Every linkage branch, plus a probe for subject rows an admin PINNED elsewhere
+  // (manualUserLink: true) — the linkage branches exclude those by design, but the
+  // pinned-away check below has to see them.
+  const where: Prisma.MediaServerUserWhereInput[] = [];
+  for (const u of users) {
+    where.push(...branchesByUser.get(u.id)!);
+    if (u.plexUserId) where.push({ source: "plex", sourceUserId: u.plexUserId, manualUserLink: true });
+    if (u.jellyfinUserId) where.push({ source: "jellyfin", sourceUserId: u.jellyfinUserId, manualUserLink: true });
+  }
+  const rows = await prisma.mediaServerUser.findMany({
+    where: { OR: where },
+    select: { id: true, source: true, sourceUserId: true, userId: true, manualUserLink: true },
+  });
+
+  for (const u of users) {
+    const branches = branchesByUser.get(u.id)!;
+    const linked = rows
+      .filter((r) => branches.some((b) => branchMatches(r, b)))
+      .map((r) => ({ id: r.id, source: r.source }));
+    const subjects: ("plex" | "jellyfin")[] = [];
+    const subjectPairs: ["plex" | "jellyfin", string | null][] = [
+      ["plex", u.plexUserId],
+      ["jellyfin", u.jellyfinUserId],
+    ];
+    for (const [source, subject] of subjectPairs) {
+      if (!subject) continue;
+      const pinnedAway = rows.some(
+        (r) => r.source === source && r.sourceUserId === subject && r.manualUserLink && r.userId !== u.id,
+      );
+      if (!pinnedAway) subjects.push(source);
+    }
+    out.set(u.id, { linked, subjects });
+  }
+  return out;
+}
+
+export interface MediaServerUserOwner {
+  // The account the identity belongs to; null when none does.
+  userId: string | null;
+  // The provider ids ride along so an unowned identity can still be keyed as a
+  // PERSON: one Plex account seen on two servers is two rows with one sourceUserId.
+  source: string;
+  sourceUserId: string;
+}
+
+// The reverse lookup: which account owns each media-server identity, by the same
+// linkedIdentityBranches — for surfaces that count PEOPLE in someone else's
+// audience (the watch grade's other viewers), where an account's Plex and
+// Jellyfin logins must count once.
+//
+// When two accounts' branches match one row (an FK link to one, an unpinned
+// subject match to another), the FK owner wins: the link on the row is what the
+// poller or an admin last decided.
+export async function resolveMediaServerUserOwners(msuIds: string[]): Promise<Map<string, MediaServerUserOwner>> {
+  const out = new Map<string, MediaServerUserOwner>();
+  const ids = [...new Set(msuIds)];
+  if (ids.length === 0) return out;
+
+  const rows = await prisma.mediaServerUser.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, source: true, sourceUserId: true, userId: true, manualUserLink: true },
+  });
+  if (rows.length === 0) return out;
+
+  const users = await prisma.user.findMany({
+    where: {
+      OR: [
+        { id: { in: rows.flatMap((r) => (r.userId ? [r.userId] : [])) } },
+        { plexUserId: { in: rows.filter((r) => r.source === "plex").map((r) => r.sourceUserId) } },
+        { jellyfinUserId: { in: rows.filter((r) => r.source === "jellyfin").map((r) => r.sourceUserId) } },
+      ],
+    },
+    select: { id: true, plexUserId: true, jellyfinUserId: true },
+  });
+
+  for (const row of rows) {
+    const owners = users.filter((u) => linkedIdentityBranches(u).some((b) => branchMatches(row, b)));
+    const owner = owners.find((u) => u.id === row.userId) ?? owners[0];
+    out.set(row.id, { userId: owner?.id ?? null, source: row.source, sourceUserId: row.sourceUserId });
+  }
+  return out;
 }
 
 export async function getMyWatchHistory(

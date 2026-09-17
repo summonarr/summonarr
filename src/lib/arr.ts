@@ -17,6 +17,13 @@ const TVDB_TO_TMDB_TTL_RESOLVED   = 365 * 24 * 60 * 60;
 const TVDB_TO_TMDB_TTL_UNRESOLVED =        24 * 60 * 60;
 type TvdbToTmdbCache = { tmdbId: number | null };
 
+// The reverse direction (TMDB's own TVDB cross-reference) is only a fallback for
+// shows Sonarr's metadata can't resolve by tmdb id yet — overwhelmingly brand-new
+// ones — so an unresolved answer re-tries within hours, not a day.
+const TMDB_TO_TVDB_TTL_RESOLVED   = 30 * 24 * 60 * 60;
+const TMDB_TO_TVDB_TTL_UNRESOLVED =       6 * 60 * 60;
+type TmdbToTvdbCache = { tvdbId: number | null };
+
 // `hadErrors` is true when a lookup could not be completed this run (TMDB auth missing,
 // or a TMDB request threw / returned non-2xx). It lets callers that wholesale-replace a
 // cache from the result distinguish "series genuinely has no tmdb mapping" (safe to omit)
@@ -116,6 +123,48 @@ export async function resolveSingleTvdbToTmdb(tvdbId: number): Promise<number | 
   if (!Number.isInteger(tvdbId) || tvdbId <= 0) return null;
   const { map } = await resolveTvdbToTmdb([tvdbId]);
   return map.get(tvdbId) ?? null;
+}
+
+/**
+ * TMDB's own TVDB id for a show (`/tv/{id}/external_ids` → `tvdb_id`), cached.
+ * The fallback identity for a series Sonarr can't find by tmdb id: Sonarr's
+ * metadata service (SkyHook) evidently answers id lookups from an index that
+ * lags its series records by days for a new show. Observed live on
+ * TMDB 304842, a week after its premiere: `term=tmdb:304842` answered [] while
+ * TVDB 478738 already carried tmdbId 304842, so every approve failed with
+ * "no series found" although a `tvdb:` lookup would have added it.
+ *
+ * Never throws — null means "no cross-reference available right now", and the
+ * caller reports its original not-found. Only a definitive TMDB answer (a 200,
+ * or a 404 for an id TMDB doesn't have) is cached; transient failures re-try.
+ */
+export async function resolveTmdbToTvdb(tmdbId: number): Promise<number | null> {
+  if (!Number.isInteger(tmdbId) || tmdbId <= 0) return null;
+  const key = `tmdb-to-tvdb:${tmdbId}`;
+  try {
+    const cached = await getCache<TmdbToTvdbCache>(key);
+    if (cached) return cached.tvdbId;
+    const auth = tmdbAuth();
+    if (!auth) return null;
+    const url = new URL(`https://api.themoviedb.org/3/tv/${tmdbId}/external_ids`);
+    for (const [k, v] of Object.entries(auth.query)) url.searchParams.set(k, v);
+    const res = await safeFetchTrusted(url.toString(), {
+      allowedHosts: ["api.themoviedb.org"],
+      headers: auth.headers,
+      timeoutMs: 10_000,
+    });
+    if (!res.ok && res.status !== 404) {
+      console.warn("[arr] tmdb-to-tvdb TMDB lookup returned %s for tmdbId %s", sanitizeForLog(res.status), sanitizeForLog(tmdbId));
+      return null;
+    }
+    const raw = res.ok ? ((await res.json()) as { tvdb_id?: unknown }).tvdb_id : null;
+    const tvdbId = typeof raw === "number" && Number.isInteger(raw) && raw > 0 ? raw : null;
+    await setCache(key, { tvdbId } satisfies TmdbToTvdbCache, tvdbId !== null ? TMDB_TO_TVDB_TTL_RESOLVED : TMDB_TO_TVDB_TTL_UNRESOLVED);
+    return tvdbId;
+  } catch (err) {
+    console.warn("[arr] tmdb-to-tvdb lookup failed for tmdbId %s:", sanitizeForLog(tmdbId), sanitizeForLog(err instanceof Error ? err.message : err));
+    return null;
+  }
 }
 
 export type ArrCfg = { url: string; apiKey: string };
@@ -709,11 +758,49 @@ export function pickSeriesByTmdbId<T extends { tmdbId?: number }>(results: reado
   return claimsAnotherTitle ? null : lone;
 }
 
-async function lookupSeriesByTmdbId<T extends { tmdbId?: number }>(
+/**
+ * Pick the series a `/series/lookup?term=tvdb:<id>` answered for the TVDB id TMDB
+ * gave us. Sonarr resolves a `tvdb:` term to exactly that series (its library row,
+ * else SkyHook's record), so the row must carry the requested tvdbId. It is refused
+ * when TVDB's own record names a DIFFERENT TMDB title: the two databases then
+ * disagree about which show this is, and adding either would be a guess. A row with
+ * no TMDB id of its own (Sonarr v3 never sends one) trusts TMDB's cross-reference.
+ */
+export function pickSeriesByTvdbCrossRef<T extends { tmdbId?: number; tvdbId?: number }>(
+  results: readonly T[],
+  tvdbId: number,
+  tmdbId: number,
+): T | null {
+  const row = results.find((r) => r.tvdbId === tvdbId);
+  if (!row) return null;
+  const claimed = row.tmdbId;
+  const claimsAnotherTitle = typeof claimed === "number" && Number.isInteger(claimed) && claimed > 0 && claimed !== tmdbId;
+  return claimsAnotherTitle ? null : row;
+}
+
+// The fallback half of every tmdb-keyed Sonarr series resolution: TMDB's TVDB
+// cross-reference, then a `tvdb:` lookup verified by pickSeriesByTvdbCrossRef.
+// `tvdbId` is what TMDB reported (null: nothing to try), whether or not it matched.
+async function lookupSeriesByTvdbCrossRef<T extends { tmdbId?: number; tvdbId?: number }>(
   cfg: ArrCfg,
   tmdbId: number,
+): Promise<{ series: T | null; tvdbId: number | null }> {
+  const tvdbId = await resolveTmdbToTvdb(tmdbId);
+  if (tvdbId === null) return { series: null, tvdbId };
+  const rows = await arrFetch<T[]>(cfg, `/api/v3/series/lookup?term=tvdb:${tvdbId}`);
+  return { series: pickSeriesByTvdbCrossRef(rows, tvdbId, tmdbId), tvdbId };
+}
+
+// `tvdbCrossRef: false` keeps a resolution Sonarr-sourced only — see the webhook's
+// download verify, the one caller that must not let TMDB data decide.
+async function lookupSeriesByTmdbId<T extends { tmdbId?: number; tvdbId?: number }>(
+  cfg: ArrCfg,
+  tmdbId: number,
+  opts: { tvdbCrossRef?: boolean } = {},
 ): Promise<T | null> {
-  return pickSeriesByTmdbId(await arrFetch<T[]>(cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`), tmdbId);
+  const direct = pickSeriesByTmdbId(await arrFetch<T[]>(cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`), tmdbId);
+  if (direct || opts.tvdbCrossRef === false) return direct;
+  return (await lookupSeriesByTvdbCrossRef<T>(cfg, tmdbId)).series;
 }
 
 export async function getSeriesFirstAired(tmdbId: number, variant: ArrVariant = ""): Promise<string | null> {
@@ -829,7 +916,12 @@ export async function isSeriesDownloadedInSonarr(
     const claimedTmdbId =
       Number.isInteger(ids.tmdbId) && (ids.tmdbId as number) > 0 ? (ids.tmdbId as number) : null;
     if (claimedTmdbId !== null) {
-      const looked = await lookupSeriesByTmdbId<{ tmdbId?: number; tvdbId: number }>(cfg, claimedTmdbId);
+      // Sonarr-sourced only. This resolution decides whether a payload is FORGED, and
+      // TMDB's TVDB cross-reference is third-party, user-edited data: one wrong edit
+      // would have Sonarr's genuine events refused as ids-disagree. Nothing is lost
+      // without it — when Sonarr can't resolve the tmdb id, `resolved` stays null and
+      // the verify proceeds on the payload's own tvdbId, which Sonarr always sends.
+      const looked = await lookupSeriesByTmdbId<{ tmdbId?: number; tvdbId: number }>(cfg, claimedTmdbId, { tvdbCrossRef: false });
       // Sonarr's lookup response is typed but never schema-checked, so hold it to the
       // same positive-integer contract as the payload ids above. Unguarded, a
       // malformed upstream value could become `tvdbId` below, where the `===` against
@@ -1162,17 +1254,31 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = ""
       : Promise.resolve<{ id: number }[]>([]),
   ]);
 
-  if (!results.length) throw new Error(`Sonarr: no series found for tmdbId ${tmdbId}`);
-  if (!cfg.rootFolder && !rootFolders.length) throw new Error("Sonarr: no root folders configured");
-  if (needProfiles && !profiles.length) throw new Error("Sonarr: no quality profiles configured");
-
   // Same fuzzy-title-search hazard as the Radarr add: an unmapped tmdb id makes
   // Sonarr fall back to a SkyHook title search, so results[0] can be an unrelated
   // show — which would be added to the library AND returned as this request's
   // tvdbId, so the webhook later marks the wrong download AVAILABLE. Shared with
   // every read path via pickSeriesByTmdbId so the two cannot drift apart.
-  const series = pickSeriesByTmdbId(results, tmdbId);
-  if (!series) throw new Error(`Sonarr: lookup for tmdbId ${tmdbId} returned no matching series`);
+  //
+  // No verified match ⇒ try TMDB's own TVDB cross-reference before giving up (a
+  // new show Sonarr can't resolve by tmdb id yet — see resolveTmdbToTvdb). The
+  // same fallback the read paths use, so a series added this way is also found
+  // by the download check, the issue flow and the arr-state diagnostic.
+  const direct = pickSeriesByTmdbId(results, tmdbId);
+  const crossRef = direct ? null : await lookupSeriesByTvdbCrossRef<(typeof results)[number]>(cfg, tmdbId);
+  const series = direct ?? crossRef?.series ?? null;
+  if (!series) {
+    const tried = crossRef?.tvdbId != null
+      ? `; TMDB's TVDB id ${crossRef.tvdbId} didn't match a Sonarr series either`
+      : "; no TVDB id available from TMDB to fall back on";
+    throw new Error(
+      results.length
+        ? `Sonarr: lookup for tmdbId ${tmdbId} returned no matching series${tried}`
+        : `Sonarr: no series found for tmdbId ${tmdbId}${tried}`,
+    );
+  }
+  if (!cfg.rootFolder && !rootFolders.length) throw new Error("Sonarr: no root folders configured");
+  if (needProfiles && !profiles.length) throw new Error("Sonarr: no quality profiles configured");
   // firstAired is authoritative; without it, Sonarr's own status ("upcoming"
   // vs continuing/ended) beats the year heuristic, which read every
   // current-year show as unaired and skipped the add-time search.

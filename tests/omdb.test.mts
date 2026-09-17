@@ -26,7 +26,9 @@
 //     with zero fetches, a cached sentinel reads as found:false, concurrent
 //     cold misses coalesce into ONE upstream chain (inflightCold), and a stale
 //     row is served immediately while exactly one background revalidation
-//     (revalidating-set dedup) refreshes it.
+//     (revalidating-set dedup) refreshes it. revalidateOmdbForTmdb is the same
+//     read with the refresh AWAITED, so a caller's mapLimit bounds the upstream
+//     calls; under the same limit the getter's detached refreshes all overlap.
 //   - testOmdbConnection: fixed tt0133093 probe, Title/"OK" fallback, HTTP and
 //     Response=False throw shapes, no-key throw with zero fetches — and (LAST,
 //     after deliberately tripping the module-global lockout) that the
@@ -80,10 +82,12 @@ const { shadowPrismaModel } = await import("./_helpers.mts");
 const {
   getOmdbRatings,
   getOmdbRatingsForTmdb,
+  revalidateOmdbForTmdb,
   fetchAndCacheOmdbForTmdb,
   testOmdbConnection,
   isOmdbQuotaLocked,
 } = await import("../src/lib/omdb.ts");
+const { mapLimit } = await import("../src/lib/concurrency.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
 const DEFAULT_KEY = "test-omdb-key";
@@ -125,7 +129,7 @@ shadowPrismaModel(prisma, "tmdbCache", {
 // ── scripted fetch ──────────────────────────────────────────────────────────
 type FetchCall = { url: URL; method: string; headers: Headers };
 const fetchCalls: FetchCall[] = [];
-let respond: (url: URL) => Response = () => {
+let respond: (url: URL) => Response | Promise<Response> = () => {
   throw new Error("unexpected fetch — script a responder for this test");
 };
 
@@ -144,7 +148,10 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 // Route by upstream host: fetchAndCacheOmdbForTmdb talks to BOTH
 // api.themoviedb.org (external_ids resolve) and www.omdbapi.com.
-function route(handlers: { tmdb?: (url: URL) => Response; omdb?: (url: URL) => Response }): void {
+function route(handlers: {
+  tmdb?: (url: URL) => Response | Promise<Response>;
+  omdb?: (url: URL) => Response | Promise<Response>;
+}): void {
   respond = (url) => {
     const handler =
       url.hostname === "api.themoviedb.org" ? handlers.tmdb :
@@ -484,6 +491,59 @@ test("a stale row is served to every concurrent reader immediately while exactly
     data: { imdbId: "tt0000500", imdbRating: "9.9", imdbVotes: null, rottenTomatoes: null, metacritic: null },
   });
   assert.equal(fetchCalls.length, 1);
+});
+
+test("revalidateOmdbForTmdb AWAITS each refresh, so a caller's limit bounds the upstream calls — the getter's detached refresh escapes any limit", async () => {
+  // Eight stale not-found sentinels. Each refresh is exactly one TMDB
+  // external_ids call (answered with no imdb_id, so no OMDB call follows),
+  // held open for a moment so overlapping calls are observable.
+  const ids = [800, 801, 802, 803, 804, 805, 806, 807];
+  const seedStaleSentinels = () => {
+    for (const id of ids) {
+      cacheRows.set(`omdb:tmdb:movie:${id}`, {
+        key: `omdb:tmdb:movie:${id}`,
+        data: JSON.stringify({ _notFound: true }),
+        cachedAt: new Date(Date.now() - DAY_MS),
+        expiresAt: new Date(Date.now() - 1_000),
+      });
+    }
+  };
+  let inFlight = 0;
+  let peak = 0;
+  route({
+    tmdb: async () => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 10));
+      inFlight--;
+      return jsonResponse({ imdb_id: null });
+    },
+  });
+
+  // Awaited: the limit holds, and every refresh has landed by the time the
+  // batch resolves. No settling needed.
+  seedStaleSentinels();
+  await mapLimit(ids, 2, (id) => revalidateOmdbForTmdb(id, "movie", "2000-01-01"));
+  assert.equal(peak, 2, "never more upstream calls than the caller's limit");
+  assert.equal(fetchCalls.length, ids.length, "one refresh per stale row");
+  assert.equal(inFlight, 0, "every refresh finished before the batch resolved");
+  for (const id of ids) {
+    const row = cacheRows.get(`omdb:tmdb:movie:${id}`);
+    assert.ok(row && row.expiresAt.getTime() > Date.now(), `row ${id} was re-stamped before the batch resolved`);
+  }
+
+  // The getter under the SAME limit serves each stale row and detaches its
+  // refresh, so all eight start together. That is why a batch caller must not
+  // use it, and it shows the harness can see an unbounded fan-out at all.
+  fetchCalls.length = 0;
+  peak = 0;
+  seedStaleSentinels();
+  await mapLimit(ids, 2, (id) => getOmdbRatingsForTmdb(id, "movie", "2000-01-01"));
+  for (let i = 0; i < 200 && !(fetchCalls.length === ids.length && inFlight === 0); i++) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.equal(fetchCalls.length, ids.length);
+  assert.equal(peak, ids.length, "the detached refreshes all overlapped");
 });
 
 test("a stale hinted imdbId that OMDB no longer knows re-resolves live ONCE and heals to the remapped id", async () => {

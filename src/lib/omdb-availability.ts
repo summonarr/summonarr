@@ -3,7 +3,7 @@ import { after } from "next/server";
 import { getCacheStale, getCacheStaleMany } from "@/lib/tmdb-cache";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import type { OmdbRatings } from "@/lib/omdb";
-import { getOmdbRatingsForTmdb } from "@/lib/omdb";
+import { getOmdbRatingsForTmdb, revalidateOmdbForTmdb } from "@/lib/omdb";
 import type { MdblistRatings, MdblistResult } from "@/lib/mdblist";
 import { getMdblistRatingsForTmdb, fetchMdblistBatch, isMdblistQuotaLocked } from "@/lib/mdblist";
 import { mapLimit } from "@/lib/concurrency";
@@ -158,12 +158,24 @@ export async function fetchUnifiedRatings(
 // items with no cached row at all are misses (blocking mode fetches those inline;
 // non-blocking mode defers them to after()). Matches the single-item getters'
 // stale-while-revalidate behaviour.
+//
+// `deferToAfter: false` runs that post-response work before returning instead.
+// It is for callers with no response to protect: a cron batching titles through
+// here. Next queues every after() callback of a request and starts them ALL at
+// once when the response closes (AfterContext's p-queue has no concurrency
+// limit), so a caller that makes one call per batch releases every batch's
+// refreshes together. The recommendation verdict pass did exactly that, one
+// callback per 200 titles, and the burst came back as a wall of TMDB 429s.
 export async function attachRatingsUnified(
   items: TmdbMedia[],
-  opts: { blocking?: boolean } = {},
+  opts: { blocking?: boolean; deferToAfter?: boolean } = {},
 ): Promise<TmdbMedia[]> {
   if (items.length === 0) return items;
   const blocking = opts.blocking ?? false;
+  const runDeferred = async (work: () => Promise<void>): Promise<void> => {
+    if (opts.deferToAfter === false) await work();
+    else after(work);
+  };
 
   const warm = await readCachedRatings(items);
 
@@ -198,7 +210,7 @@ export async function attachRatingsUnified(
       // Non-blocking path: fire background fetches after the response is sent so the user isn't
       // held waiting; the next page load will hit the warm cache. Stale-served entries
       // revalidate here too — never before the response.
-      after(async () => {
+      await runDeferred(async () => {
         if (!isMdblistQuotaLocked()) {
           // Stale MDBList revalidations ride the same batch POSTs as the genuine
           // misses — one request per 200 ids instead of N singles.
@@ -228,7 +240,7 @@ export async function attachRatingsUnified(
             const probe = await getMdblistRatingsForTmdb(stillMissing[0].id, stillMissing[0].mediaType, stillMissing[0].releaseDate).catch(() => null);
             // `found` alone is not a usable signal — see the blocking path's note.
             if (!probe || !probe.found || !hasAnyMdblistRating(probe.data)) {
-              await mapLimit(stillMissing, OMDB_FALLBACK_CONCURRENCY, (item) =>
+              await mapLimit(stillMissing.filter((item) => lacksOmdbRow(item, warm)), OMDB_FALLBACK_CONCURRENCY, (item) =>
                 getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
             }
           }
@@ -237,14 +249,14 @@ export async function attachRatingsUnified(
           // Stale MDBList entries are NOT rerouted to OMDB — their data is stale-but-present,
           // and burning OMDB quota to refresh it is a bad trade; they revalidate once the
           // MDBList lock lifts.
-          await mapLimit(uncached, OMDB_FALLBACK_CONCURRENCY, (item) =>
+          await mapLimit(uncached.filter((item) => lacksOmdbRow(item, warm)), OMDB_FALLBACK_CONCURRENCY, (item) =>
             getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
         }
         if (staleOmdb.length > 0) {
-          // Items whose warm data came from an expired OMDB row: the single-item getter
-          // serves the stale row and runs its own deduplicated background revalidation.
+          // Items whose warm data came from an expired OMDB row. Awaited refresh, not the
+          // getter: see revalidateOmdbForTmdb for why the getter's limit is illusory.
           await mapLimit(staleOmdb, OMDB_FALLBACK_CONCURRENCY, (item) =>
-            getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
+            revalidateOmdbForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
         }
       });
     }
@@ -309,16 +321,18 @@ export async function attachRatingsUnified(
         // whole page, which is exactly what the hasAnyMdblistRating gate above prevents.
         const useFallback = !probe || !probe.found || !hasAnyMdblistRating(probe.data);
         if (useFallback) {
-          deferredOmdb = mdbMisses.slice(MAX_BLOCKING_OMDB_MISSES);
-          await mapLimit(mdbMisses.slice(0, MAX_BLOCKING_OMDB_MISSES), OMDB_FALLBACK_CONCURRENCY, async (item) => {
+          const omdbMisses = mdbMisses.filter((item) => lacksOmdbRow(item, warm));
+          deferredOmdb = omdbMisses.slice(MAX_BLOCKING_OMDB_MISSES);
+          await mapLimit(omdbMisses.slice(0, MAX_BLOCKING_OMDB_MISSES), OMDB_FALLBACK_CONCURRENCY, async (item) => {
             const omdb = await getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => null);
             if (omdb && omdb.found) fetched.set(fetchedKey(item), { source: "omdb", data: omdb.data });
           });
         }
       }
     } else {
-      deferredOmdb = misses.slice(MAX_BLOCKING_OMDB_MISSES);
-      await mapLimit(misses.slice(0, MAX_BLOCKING_OMDB_MISSES), OMDB_FALLBACK_CONCURRENCY, async (item) => {
+      const omdbMisses = misses.filter((item) => lacksOmdbRow(item, warm));
+      deferredOmdb = omdbMisses.slice(MAX_BLOCKING_OMDB_MISSES);
+      await mapLimit(omdbMisses.slice(0, MAX_BLOCKING_OMDB_MISSES), OMDB_FALLBACK_CONCURRENCY, async (item) => {
         const omdb = await getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => null);
         if (omdb && omdb.found) fetched.set(fetchedKey(item), { source: "omdb", data: omdb.data });
       });
@@ -329,7 +343,7 @@ export async function attachRatingsUnified(
   // inline above (capped at MAX_BLOCKING_OMDB_MISSES); entries served stale, and the
   // capped-out misses, refresh after the response, same as the non-blocking path.
   if (staleMdblist.length > 0 || staleOmdb.length > 0 || deferredOmdb.length > 0) {
-    after(async () => {
+    await runDeferred(async () => {
       if (staleMdblist.length > 0 && !isMdblistQuotaLocked()) {
         // Same quota-efficient shape as the non-blocking path: one batch POST per media
         // type. An item absent from a full response gets its _notFound sentinel refreshed
@@ -350,10 +364,10 @@ export async function attachRatingsUnified(
           getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
       }
       if (staleOmdb.length > 0) {
-        // Items whose warm data came from an expired OMDB row: the single-item getter
-        // serves the stale row and runs its own deduplicated background revalidation.
+        // Items whose warm data came from an expired OMDB row. Awaited refresh, not the
+        // getter: see revalidateOmdbForTmdb for why the getter's limit is illusory.
         await mapLimit(staleOmdb, OMDB_FALLBACK_CONCURRENCY, (item) =>
-          getOmdbRatingsForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
+          revalidateOmdbForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {}));
       }
     });
   }
@@ -368,6 +382,17 @@ export async function attachRatingsUnified(
 function mdblistKey(item: TmdbMedia): string { return `mdblist:tmdb:${item.mediaType}:${item.id}`; }
 function omdbKey(item: TmdbMedia): string    { return `omdb:tmdb:${item.mediaType}:${item.id}`; }
 function fetchedKey(item: TmdbMedia): string { return `${item.mediaType}:${item.id}`; }
+
+// Whether the OMDB fallback should fetch this title at all. A title with ANY OMDB
+// row (a value or a not-found sentinel, fresh or stale) gets nothing new from the
+// getter: it hands back the row mergeWarm already serves. For a stale row the
+// getter would also detach a refresh that no concurrency limit reaches, once per
+// title per call on an MDBList-less instance, where every title is a miss. The
+// staleOmdb pass refreshes those rows instead, awaited.
+function lacksOmdbRow(item: TmdbMedia, warm: WarmCache): boolean {
+  const key = omdbKey(item);
+  return !warm.byOmdb.has(key) && !warm.negativeKeys.has(key);
+}
 
 type WarmCache = {
   byMdblist: Map<string, MdblistRatings>;

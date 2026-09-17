@@ -399,11 +399,40 @@ const inflightCold = new Map<string, Promise<OmdbResult>>();
 // e.g. the detail pages already hold external_ids from their append_to_response) spares
 // the cold path its TMDB resolve; the SWR path prefers the STALE ROW's own stored id,
 // which is fresher than any caller hint.
-export async function getOmdbRatingsForTmdb(
+export function getOmdbRatingsForTmdb(
   tmdbId: number,
   mediaType: "movie" | "tv",
   releaseDate?: string | null,
   knownImdbId?: string | null,
+): Promise<OmdbResult> {
+  return readOmdbForTmdb(tmdbId, mediaType, releaseDate, knownImdbId, false);
+}
+
+// The batch counterpart: the same read, except that a stale row's refresh is AWAITED.
+//
+// getOmdbRatingsForTmdb serves a stale row immediately and DETACHES its refresh, so
+// wrapping it in mapLimit bounds only the cache read — the upstream calls all start
+// together no matter what limit the caller picked. A stale sentinel's refresh starts
+// with a TMDB external_ids lookup, and a few hundred of those at once is how the
+// ratings refresh after a recommendations run got answered with a wall of TMDB 429s.
+// A caller that refreshes a LIST must use this, so its concurrency limit covers the
+// upstream work too.
+//
+// A refresh already in flight is not waited on: whoever started it owns it.
+export async function revalidateOmdbForTmdb(
+  tmdbId: number,
+  mediaType: "movie" | "tv",
+  releaseDate?: string | null,
+): Promise<void> {
+  await readOmdbForTmdb(tmdbId, mediaType, releaseDate, null, true);
+}
+
+async function readOmdbForTmdb(
+  tmdbId: number,
+  mediaType: "movie" | "tv",
+  releaseDate: string | null | undefined,
+  knownImdbId: string | null | undefined,
+  awaitRefresh: boolean,
 ): Promise<OmdbResult> {
   const cacheKey = `omdb:tmdb:${mediaType}:${tmdbId}`;
   const { value: cached, isStale } = await getCacheStale<OmdbRatings | typeof NOT_FOUND_SENTINEL>(cacheKey);
@@ -417,9 +446,10 @@ export async function getOmdbRatingsForTmdb(
         // it so the background refresh skips the TMDB external_ids round-trip
         // (the remap self-heal in fetchAndCacheOmdbForTmdb covers a stale id).
         const storedImdbId = "_notFound" in cached ? null : cached.imdbId;
-        fetchAndCacheOmdbForTmdb(tmdbId, mediaType, cacheKey, releaseDate, storedImdbId).catch(() => {}).finally(() => {
+        const refresh = fetchAndCacheOmdbForTmdb(tmdbId, mediaType, cacheKey, releaseDate, storedImdbId).catch(() => {}).finally(() => {
           revalidating.delete(revalKey);
         });
+        if (awaitRefresh) await refresh;
       }
     }
     if ("_notFound" in cached) return { found: false, keyConfigured: true };
