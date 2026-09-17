@@ -178,6 +178,10 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     where: { id: { in: typedIds }, status: "PENDING" },
     data: {
       status: typedStatus,
+      // The approval the watch grade reads (MediaRequest.approvedAt): stamped on
+      // approve, withdrawn on decline — a PENDING row can carry one from an
+      // approval whose push failed and rolled back.
+      approvedAt: typedStatus === "APPROVED" ? new Date() : null,
       pendingNotifyAt,
       // Guard on the RAW body field: sanitizeOptional never returns undefined
       // (it maps undefined → null), so guarding on typedAdminNote would always

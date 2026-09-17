@@ -39,6 +39,14 @@
 //      own watched/completed flags, never per episode. That is what keeps the
 //      Users page (a thousand accounts, a year of requests) from pulling every
 //      viewer × every episode of every popular show on each render.
+//   9. ONLY APPROVED REQUESTS, PER TITLE. A library sync marks a PENDING request
+//      AVAILABLE when its title arrives, so AVAILABLE isn't enough: a request
+//      counts when it, or any request for the same title on the same instance,
+//      carries approvedAt — a Discord/iOS duplicate or a copied request counts
+//      through the approved one; another instance's approval, a declined request
+//      or a title nobody approved doesn't. The preview's requester list follows
+//      the same rule. Who writes approvedAt is pinned in
+//      tests/request-approval.test.mts.
 //
 // Harness: in-memory prisma stubs (shadowPrismaModel) with an op log, a real
 // signed session JWT over the bearer transport for the route (the
@@ -116,11 +124,13 @@ type DbRequest = {
   requestedBy: string;
   tmdbId: number;
   mediaType: "MOVIE" | "TV";
+  arrInstance: string;
   title: string;
   releaseYear: string | null;
   posterPath: string | null;
   status: string;
   createdAt: Date;
+  approvedAt: Date | null;
   availableAt: Date | null;
   updatedAt: Date;
 };
@@ -189,11 +199,13 @@ function request(requestedBy: string, fulfilledDaysAgo: number, over: Partial<Db
     requestedBy,
     tmdbId: 5000 + reqSeq,
     mediaType: "MOVIE",
+    arrInstance: "",
     title: `Title ${reqSeq}`,
     releaseYear: "2025",
     posterPath: null,
     status: "AVAILABLE",
     createdAt: daysAgo(fulfilledDaysAgo + 3),
+    approvedAt: daysAgo(fulfilledDaysAgo + 3),
     availableAt: daysAgo(fulfilledDaysAgo),
     updatedAt: daysAgo(fulfilledDaysAgo),
     ...over,
@@ -254,9 +266,24 @@ function requestMatches(r: DbRequest, where: Record<string, unknown>): boolean {
       if (!(v as { in: string[] }).in.includes(r.requestedBy)) return false;
     } else if (k === "status") {
       if (r.status !== v) return false;
+    } else if (k === "approvedAt") {
+      if (v === null) {
+        if (r.approvedAt !== null) return false;
+      } else {
+        const shape = v as { not?: unknown };
+        if (typeof shape !== "object" || Object.keys(shape).length !== 1 || shape.not !== null) {
+          throw new Error("unexpected MediaRequest approvedAt filter");
+        }
+        if (r.approvedAt === null) return false;
+      }
     } else if (k === "OR") {
       const ok = (v as Record<string, unknown>[]).some((branch) =>
         Object.entries(branch).every(([bk, bv]) => {
+          // A title branch of the approval lookup: plain equality.
+          if (bk === "tmdbId" || bk === "mediaType" || bk === "arrInstance") {
+            if (bv === null || typeof bv === "object") throw new Error(`unexpected MediaRequest OR filter on ${bk}`);
+            return r[bk] === bv;
+          }
           const value = r[bk as keyof DbRequest] as Date | null;
           if (bv === null) return value === null;
           const gte = (bv as { gte: Date }).gte;
@@ -871,6 +898,68 @@ test("only AVAILABLE requests inside the window are read; legacy rows fall back 
   assert.ok(!("OR" in (opsOf("mediaRequest.findMany")[0].args as { where: object }).where));
 });
 
+test("only APPROVED requests are graded — a request whose title nobody approved never counts, watched or not", async () => {
+  historySince("plex", 900);
+  user("u", { plexUserId: "p-u" });
+  msu("m", { source: "plex", sourceUserId: "p-u" });
+  const approved = request("u", 60);
+  // The sync marks a PENDING request AVAILABLE when its title arrives; nobody approved it.
+  const unapproved = request("u", 60, { approvedAt: null });
+  play("m", unapproved, 50);
+  request("u", 60, { status: "PENDING", approvedAt: null, availableAt: null });
+  request("u", 60, { status: "DECLINED", approvedAt: null, availableAt: null });
+  // Approved, but the Radarr push failed and rolled it back to PENDING: not available.
+  request("u", 60, { status: "PENDING", availableAt: null });
+
+  const g = (await computeWatchGrades(["u"])).grades.get("u")!;
+  assert.deepEqual(g.verdicts.map((v) => v.requestId), [approved.id]);
+  const reads = opsOf("mediaRequest.findMany").map((o) => (o.args as { where: Record<string, unknown> }).where);
+  assert.equal(reads[0].status, "AVAILABLE");
+  assert.ok(!("approvedAt" in reads[0]), "every AVAILABLE request is read; approval is resolved per title afterwards");
+  assert.deepEqual(
+    reads[1],
+    { approvedAt: { not: null }, OR: [{ tmdbId: unapproved.tmdbId, mediaType: "MOVIE", arrInstance: "" }] },
+    "one lookup, for the title that carries no approval of its own, on its instance",
+  );
+});
+
+test("approval is per title on an instance — a duplicate or a copy counts through another request's approval, but not another instance's, a declined request's, or none", async () => {
+  historySince("plex", 900);
+  user("u", { plexUserId: "p-u" });
+  // x's request was approved (say from Discord); u's duplicate stayed PENDING until the title arrived.
+  const duplicate = request("u", 60, { approvedAt: null });
+  request("x", 61, { tmdbId: duplicate.tmdbId, approvedAt: daysAgo(70) });
+  // The same title approved on the 4K instance doesn't cover the default instance.
+  const otherInstance = request("u", 60, { approvedAt: null });
+  request("x", 61, { tmdbId: otherInstance.tmdbId, arrInstance: "4k", approvedAt: daysAgo(70) });
+  // An approval whose push failed and rolled back to PENDING still approved the title.
+  const rolledBack = request("u", 60, { approvedAt: null });
+  request("y", 0, { tmdbId: rolledBack.tmdbId, status: "PENDING", availableAt: null, approvedAt: daysAgo(70) });
+  // A declined request carries no approval.
+  const declinedPeer = request("u", 60, { approvedAt: null });
+  request("z", 0, { tmdbId: declinedPeer.tmdbId, status: "DECLINED", availableAt: null, approvedAt: null });
+  // Nobody approved this title.
+  request("u", 60, { approvedAt: null });
+
+  const g = (await computeWatchGrades(["u"])).grades.get("u")!;
+  assert.deepEqual(g.verdicts.map((v) => v.requestId).sort(), [duplicate.id, rolledBack.id].sort());
+});
+
+test("the approval lookup is chunked, and a title past the first chunk still counts", async () => {
+  historySince("plex", 900);
+  user("u", { plexUserId: "p-u" });
+  for (let i = 0; i < 1001; i++) {
+    const mine = request("u", 60, { approvedAt: null });
+    request(`x${i}`, 61, { tmdbId: mine.tmdbId, approvedAt: daysAgo(70) });
+  }
+  const g = (await computeWatchGrades(["u"])).grades.get("u")!;
+  assert.equal(g.verdicts.length, 1001);
+  const lookups = opsOf("mediaRequest.findMany")
+    .map((o) => (o.args as { where: { approvedAt?: unknown; OR?: unknown[] } }).where)
+    .filter((w) => "approvedAt" in w);
+  assert.deepEqual(lookups.map((w) => w.OR!.length), [1000, 1]);
+});
+
 // ═══ tuning ══════════════════════════════════════════════════════════════════
 
 test("computeWatchGrades grades with a settings override — window, cutoffs, requests needed — leaving the stored ones alone", async () => {
@@ -919,17 +1008,26 @@ test("previewWatchGradeSpread: every requester graded under the stored and the p
   play("m-mixed", mixed[1], 35);
   for (let i = 0; i < 3; i++) request("never", 40 + i);
   user("idle"); // no requests at all — not a requester
+  // Fulfilled but never approved (a library sync marked them AVAILABLE): not a requester either.
+  user("unapproved", { plexUserId: "p-unapproved" });
+  for (let i = 0; i < 3; i++) request("unapproved", 40 + i, { approvedAt: null });
+  // A duplicate of mixed's approved title with no approval of its own: covered, so a requester.
+  user("duplicate", { plexUserId: "p-duplicate" });
+  request("duplicate", 40, { tmdbId: mixed[0].tmdbId, approvedAt: null });
 
   const preview = await previewWatchGradeSpread({ ...WATCH_GRADE_DEFAULTS, bandA: 95, bandB: 70, bandC: 50, bandD: 30 });
   assert.equal(preview.enabled, true);
-  assert.equal(preview.requesters, 3);
-  // Stored: keen 100 → A, mixed 67 → B, never 0 → F.
-  assert.deepEqual(preview.current, { A: 1, B: 1, C: 0, D: 0, F: 1, notGraded: 0 });
+  assert.equal(preview.requesters, 4);
+  const reads = opsOf("mediaRequest.findMany").map((o) => (o.args as { where: object }).where);
+  assert.deepEqual(reads[0], { status: "AVAILABLE", approvedAt: { not: null } });
+  assert.deepEqual(reads[1], { status: "AVAILABLE", approvedAt: null });
+  // Stored: keen 100 → A, mixed 67 → B, never 0 → F; duplicate has one scored request, no letter.
+  assert.deepEqual(preview.current, { A: 1, B: 1, C: 0, D: 0, F: 1, notGraded: 1 });
   // Proposed: keen 100 → A, mixed 67 → C (B now needs 70), never 0 → F.
-  assert.deepEqual(preview.proposed, { A: 1, B: 0, C: 1, D: 0, F: 1, notGraded: 0 });
+  assert.deepEqual(preview.proposed, { A: 1, B: 0, C: 1, D: 0, F: 1, notGraded: 1 });
 
   const stricter = await previewWatchGradeSpread({ ...WATCH_GRADE_DEFAULTS, bandB: 70, minGradedRequests: 4 });
-  assert.deepEqual(stricter.proposed, { A: 0, B: 0, C: 0, D: 0, F: 0, notGraded: 3 }, "4 requests needed — nobody has them");
+  assert.deepEqual(stricter.proposed, { A: 0, B: 0, C: 0, D: 0, F: 0, notGraded: 4 }, "4 requests needed — nobody has them");
 
   setSettings({ ...TRACKING_ON, "feature.behavior.watchGrades": "false" });
   assert.deepEqual(await previewWatchGradeSpread(WATCH_GRADE_DEFAULTS), { enabled: false, reason: "feature-off", requesters: 0, current: null, proposed: null });

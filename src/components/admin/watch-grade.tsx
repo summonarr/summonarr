@@ -285,8 +285,8 @@ export function WatchGradeModal({
             </div>
 
             <p className="text-[11px] leading-relaxed text-zinc-500 mb-3">
-              Requests fulfilled {settings.windowDays > 0 ? `in the last ${settings.windowDays} days` : "at any time"} count{" "}
-              {settings.graceDays} days after they became available. A movie counts once it&apos;s{" "}
+              Approved requests fulfilled {settings.windowDays > 0 ? `in the last ${settings.windowDays} days` : "at any time"} count{" "}
+              {settings.graceDays} days after they became available — approving a title counts for everyone who requested it; pending, declined and never-approved requests don&apos;t. A movie counts once it&apos;s{" "}
               {settings.watchedThresholdPercent}% played (half credit once a quarter of it is played); a show once{" "}
               {settings.tvEpisodePercent}% of one season&apos;s episodes are watched — the best season counts.{" "}
               {settings.otherViewers > 0
@@ -325,7 +325,7 @@ export function WatchGradeModal({
             <div className="overflow-y-auto -mx-1 px-1 flex flex-col gap-1.5">
               {verdicts.length === 0 ? (
                 <p className="text-xs text-zinc-500 py-4 text-center">
-                  No fulfilled requests {settings.windowDays > 0 ? `in the last ${settings.windowDays} days` : "yet"}.
+                  No approved requests fulfilled {settings.windowDays > 0 ? `in the last ${settings.windowDays} days` : "yet"}.
                 </p>
               ) : shown.length === 0 ? (
                 <p className="text-xs text-zinc-500 py-4 text-center">Nothing in this filter.</p>

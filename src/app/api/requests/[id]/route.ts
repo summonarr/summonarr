@@ -203,6 +203,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       where: { id, status: existing.status },
       data: {
         status: "APPROVED",
+        // The approval the watch grade reads (MediaRequest.approvedAt). Re-stamped
+        // when an approval whose push failed and rolled back is approved again.
+        approvedAt: new Date(),
         // Approving clears a prior decline; otherwise an APPROVED row keeps
         // permanentlyDeclined=true and re-requests stay blocked (see the
         // permanentlyDeclined gate in requests/route.ts).
@@ -224,6 +227,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       where: { id, status: existing.status },
       data: {
         status: "DECLINED",
+        // A decline withdraws any approval — including one whose push failed and
+        // rolled back to PENDING — so it can't count if the title arrives anyway.
+        approvedAt: null,
         permanentlyDeclined: permanent === true,
         // Guard on the RAW body field: sanitizeOptional never returns undefined
         // (it maps undefined → null), so guarding on sanitizedAdminNote would

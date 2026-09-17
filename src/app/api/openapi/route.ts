@@ -43,7 +43,7 @@ const spec = {
       WatchGradeSpread: {
         type: "object",
         nullable: true,
-        description: "Users per letter; notGraded = fulfilled requests but no letter yet",
+        description: "Users per letter; notGraded = approved, fulfilled requests but no letter yet",
         properties: {
           A: { type: "integer" },
           B: { type: "integer" },
@@ -77,6 +77,15 @@ const spec = {
           status: { $ref: "#/components/schemas/RequestStatus" },
           note: { type: "string", nullable: true },
           adminNote: { type: "string", nullable: true },
+          approvedAt: {
+            type: "string",
+            format: "date-time",
+            nullable: true,
+            description:
+              "When this request was approved by a decision: an admin, or auto-approve at creation. Cleared on " +
+              "decline. null if it never was itself — a copy of an already-approved request, or a PENDING request a " +
+              "library sync marked AVAILABLE when its title arrived. Present on responses that return the whole row.",
+          },
           createdAt: { type: "string", format: "date-time" },
           updatedAt: { type: "string", format: "date-time" },
         },
@@ -1617,8 +1626,11 @@ const spec = {
         tags: ["Admin – Users"],
         summary: "A user's request watch grade with its per-request breakdown (MANAGE_USERS or MANAGE_REQUESTS)",
         description:
-          "Grades A–F on the share of the user's FULFILLED requests they went on to watch, from recorded play " +
-          "history. Display-only: nothing reads the grade to gate requests. A request is scored only after its " +
+          "Grades A–F on the share of the user's APPROVED requests that became available that they went on to " +
+          "watch, from recorded play history. Approval counts per title on an instance: a request counts when it, " +
+          "or any request for the same title on the same instance, was approved (`approvedAt`). Pending and " +
+          "declined requests never count, and neither does a request whose title nobody approved. " +
+          "Display-only: nothing reads the grade to gate requests. A request is scored only after its " +
           "grace period since fulfilment, and only when play history already covered the user's media servers " +
           "when it was fulfilled; plays count only from the moment of the request. A movie earns full credit when " +
           "watched (half once a quarter of it was played); a show is scored per season — episodes watched ÷ the " +
@@ -1760,7 +1772,7 @@ const spec = {
                   properties: {
                     enabled: { type: "boolean" },
                     reason: { type: "string", nullable: true, enum: ["feature-off", "tracking-off"] },
-                    requesters: { type: "integer", description: "Accounts with at least one fulfilled request" },
+                    requesters: { type: "integer", description: "Accounts with at least one approved, fulfilled request" },
                     current: { $ref: "#/components/schemas/WatchGradeSpread" },
                     proposed: { $ref: "#/components/schemas/WatchGradeSpread" },
                   },

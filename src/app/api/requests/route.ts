@@ -485,7 +485,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
           // release" backstop (sync/route.ts overdue scan only looks at rows with it set).
           // Web auto-approve previously had no backstop — unlike admin PATCH approve
           // (requests/[id]/route.ts) — so a stuck request never got a follow-up notification.
-          data: { ...baseData, status: "APPROVED", pendingNotifyAt: new Date(Date.now() + 90_000) },
+          // approvedAt: auto-approve is an approval (MediaRequest.approvedAt).
+          data: { ...baseData, status: "APPROVED", approvedAt: new Date(), pendingNotifyAt: new Date(Date.now() + 90_000) },
         });
         createdBranch = "auto-approve";
         return;
@@ -497,6 +498,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
       // tracked and still receives the "now available" notification (the sync
       // notifies every APPROVED row's requester), while skipping the admin
       // "new request" alert.
+      //
+      // No approvedAt: the copy made no decision of its own. The watch grade
+      // counts it through the approval of the request it copied (per title).
       const greenlit = await tx.mediaRequest.findFirst({
         where: { tmdbId, mediaType, arrInstance: instanceSlug, status: { in: ["APPROVED", "AVAILABLE"] } },
         select: { status: true },

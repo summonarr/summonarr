@@ -184,7 +184,7 @@ export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, str
       <div className="space-y-2 pt-2 border-t border-zinc-800">
         <h3 className="text-sm font-medium text-zinc-300 pt-2">How grades work</h3>
         <p className="text-xs text-zinc-500">
-          Each user is graded A–F on the share of their fulfilled requests they went on to watch, by the cutoffs above, once enough requests count. A movie counts when it reaches the play history Watched threshold (half credit once a quarter of it is played), a show when the share of one season&apos;s episodes is watched, and any request counts once enough other people have watched it. The same title requested on two instances counts once. Only plays after the request count, and requests fulfilled before play history began recording aren&apos;t graded. Grades are shown to admins only and never block a request.
+          Each user is graded A–F on the share of their approved requests they went on to watch once those became available, by the cutoffs above, once enough requests count. Approving a title counts for everyone who requested it. Pending and declined requests never count, and neither does a request whose title nobody approved. A movie counts when it reaches the play history Watched threshold (half credit once a quarter of it is played), a show when the share of one season&apos;s episodes is watched, and any request counts once enough other people have watched it. The same title requested on two instances counts once. Only plays after the request count, and requests fulfilled before play history began recording aren&apos;t graded. Grades are shown to admins only and never block a request.
         </p>
       </div>
 
@@ -241,7 +241,7 @@ export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, str
               </table>
             </div>
             <p className="text-xs text-zinc-500 mt-1">
-              {preview.result.requesters} requester{preview.result.requesters === 1 ? "" : "s"} with fulfilled requests.
+              {preview.result.requesters} requester{preview.result.requesters === 1 ? "" : "s"} with approved, fulfilled requests.
               {stale ? " The values changed since this preview — preview again to update it." : ""}
             </p>
           </div>

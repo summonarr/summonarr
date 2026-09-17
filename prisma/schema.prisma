@@ -272,6 +272,19 @@ model MediaRequest {
   qualityProfileId Int?
 
   lastArrPushAt     DateTime? // last Radarr/Sonarr add attempt (success or fail); gates the sync re-push backoff for APPROVED items never accepted upstream
+  // When this request was approved by a decision: an admin (web, batch or Discord)
+  // or auto-approve at creation. Written only by the /api/requests routes and
+  // Discord interactions. Cleared on decline. Kept when a failed Radarr/Sonarr
+  // push rolls the approval back to PENDING: the approval was made, only the push
+  // failed. null means this request was never approved itself — a copy of an
+  // already-approved request, or a PENDING request a library sync marked
+  // AVAILABLE when its title arrived. Sync and webhooks never write this column.
+  // The request watch grade treats approval per title on an instance: a request
+  // counts when it or any request for the same title carries one (guardrail 34a).
+  // Rows APPROVED or AVAILABLE before the column existed carry their createdAt,
+  // stamped once at boot (request-approval.ts), because nothing recorded whether
+  // they were approved.
+  approvedAt        DateTime?
   availableAt       DateTime? // set once when status transitions to AVAILABLE; used for fulfillment-time stats
   pendingNotifyAt   DateTime? // set to approvedAt+90s; cleared once the pending/awaiting notification fires
   notifiedAvailable Boolean   @default(false) // set when the "ready to watch" notification is sent; never reset on status revert

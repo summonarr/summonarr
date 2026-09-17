@@ -32,7 +32,8 @@ import {
 //
 // Per call, independent of how many users are graded:
 //   settings + feature flag (both memoized upstream)
-//   1 MediaRequest read (the fulfilled requests in the window)
+//   1 MediaRequest read (the fulfilled requests in the window) + 1 approval
+//   lookup per APPROVAL_TITLE_CHUNK titles among them with no approval of their own
 //   2 identity reads (resolveAccountMediaIdentities — the shared linkage rule)
 //   ≤2 point reads for when each tracked source's history begins
 //   1 play aggregate + 1 episode-count aggregate per REQUEST_CHUNK requests
@@ -49,6 +50,50 @@ const REQUEST_CHUNK = 5_000;
 // The detail endpoint's row cap. The summary is computed over EVERY request —
 // only the listing is trimmed.
 export const MAX_VERDICT_ROWS = 500;
+
+// Only APPROVED requests that became AVAILABLE are graded. AVAILABLE alone isn't
+// enough: a library sync marks a PENDING request AVAILABLE when its title
+// arrives, and nobody approved that request.
+//
+// Approval is a decision about a TITLE on an instance, so a request counts when
+// it, or ANY request for the same title on the same instance, carries an
+// approval (MediaRequest.approvedAt). The web queue approves every pending
+// duplicate together, but Discord only offers the earliest one, the iOS app
+// approves one request at a time, an auto-approved request leaves other people's
+// pending duplicates alone, and a request made while its title is already
+// approved copies that status without a decision of its own. All of those become
+// AVAILABLE through the approved request, and its approval covers them. A
+// declined request carries no approval, so it covers nothing.
+//
+// The grade and the preview's requester list both go through here, so they
+// can't disagree about who has anything to grade.
+type RequestTitle = { tmdbId: number; mediaType: "MOVIE" | "TV"; arrInstance: string };
+
+// Bounds the OR list of one approval lookup.
+const APPROVAL_TITLE_CHUNK = 1_000;
+
+function titleKey(t: RequestTitle): string {
+  return `${t.mediaType}:${t.tmdbId}:${t.arrInstance}`;
+}
+
+async function keepApprovedRequests<T extends RequestTitle & { approvedAt: Date | null }>(rows: T[]): Promise<T[]> {
+  const lacking = new Map<string, RequestTitle>();
+  for (const r of rows) {
+    if (r.approvedAt === null) lacking.set(titleKey(r), { tmdbId: r.tmdbId, mediaType: r.mediaType, arrInstance: r.arrInstance });
+  }
+  if (lacking.size === 0) return rows;
+  const titles = [...lacking.values()];
+  const approved = new Set<string>();
+  for (let i = 0; i < titles.length; i += APPROVAL_TITLE_CHUNK) {
+    const found = await prisma.mediaRequest.findMany({
+      where: { approvedAt: { not: null }, OR: titles.slice(i, i + APPROVAL_TITLE_CHUNK) },
+      select: { tmdbId: true, mediaType: true, arrInstance: true },
+      distinct: ["tmdbId", "mediaType", "arrInstance"],
+    });
+    for (const f of found) approved.add(titleKey(f));
+  }
+  return rows.filter((r) => r.approvedAt !== null || approved.has(titleKey(r)));
+}
 
 type MediaSource = "plex" | "jellyfin";
 const MEDIA_SOURCES: MediaSource[] = ["plex", "jellyfin"];
@@ -311,7 +356,7 @@ export async function computeWatchGrades(
   const now = opts.now ?? new Date();
   const windowStart = settings.windowDays > 0 ? new Date(now.getTime() - settings.windowDays * 86_400_000) : null;
 
-  const requestRows = await prisma.mediaRequest.findMany({
+  const fulfilled = await prisma.mediaRequest.findMany({
     where: {
       requestedBy: { in: ids },
       status: "AVAILABLE",
@@ -325,14 +370,17 @@ export async function computeWatchGrades(
       requestedBy: true,
       tmdbId: true,
       mediaType: true,
+      arrInstance: true,
       title: true,
       releaseYear: true,
       posterPath: true,
       createdAt: true,
+      approvedAt: true,
       availableAt: true,
       updatedAt: true,
     },
   });
+  const requestRows = await keepApprovedRequests(fulfilled);
 
   const requestsByUser = new Map<string, GradableRequest[]>();
   for (const r of requestRows) {
@@ -487,19 +535,26 @@ export async function mergedWatchGradeSettings(incoming: Record<string, unknown>
 }
 
 // How many users land on each letter today, and how many would with `proposed`.
-// Everyone who has ever had a request fulfilled is graded, so a wider proposed
-// window is judged against the same people as the current one.
+// Everyone who has ever had an approved request fulfilled is graded, so a wider
+// proposed window is judged against the same people as the current one.
 export async function previewWatchGradeSpread(proposed: WatchGradeSettings): Promise<WatchGradePreview> {
   const availability = await getWatchGradeAvailability();
   if (!availability.enabled) {
     return { enabled: false, reason: availability.reason, requesters: 0, current: null, proposed: null };
   }
-  const rows = await prisma.mediaRequest.findMany({
-    where: { status: "AVAILABLE" },
+  // Requesters with an approved request of their own, then those whose only
+  // fulfilled requests are covered by another request's approval of the title.
+  const approvedOwn = await prisma.mediaRequest.findMany({
+    where: { status: "AVAILABLE", approvedAt: { not: null } },
     distinct: ["requestedBy"],
     select: { requestedBy: true },
   });
-  const ids = [...new Set(rows.map((r) => r.requestedBy))];
+  const unapproved = await prisma.mediaRequest.findMany({
+    where: { status: "AVAILABLE", approvedAt: null },
+    select: { requestedBy: true, tmdbId: true, mediaType: true, arrInstance: true, approvedAt: true },
+  });
+  const covered = await keepApprovedRequests(unapproved);
+  const ids = [...new Set([...approvedOwn, ...covered].map((r) => r.requestedBy))];
   const now = new Date();
   // Sequential on purpose: two full grade runs at once would double the load on
   // the five-connection pool, for an answer nobody is waiting on mid-render.

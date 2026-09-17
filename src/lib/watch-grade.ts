@@ -1,10 +1,10 @@
 // Request watch grades — do the people who request media actually watch it?
 //
-// Each user gets an A–F letter from the share of their FULFILLED requests they
-// went on to watch. The grade is DISPLAY-ONLY by product decision: it is shown to
-// admins (Users page, request queue) and nothing reads it to gate a request, a
-// quota or auto-approve. Wiring it into enforcement is a separate decision, not
-// a refactor.
+// Each user gets an A–F letter from the share of their APPROVED, FULFILLED
+// requests they went on to watch. The grade is DISPLAY-ONLY by product decision:
+// it is shown to admins (Users page, request queue) and nothing reads it to gate
+// a request, a quota or auto-approve. Wiring it into enforcement is a separate
+// decision, not a refactor.
 //
 // Pure, ZERO-import leaf (the sonarr-completion.ts / permissions.ts shape): the
 // admin client components import the types and labels from here, and the whole
@@ -12,11 +12,17 @@
 // half — which requests, whose plays, how many episodes — is watch-grade-data.ts.
 //
 // The rules, in one place:
-//   - Only AVAILABLE requests are graded, and a request is SCORED only once its
-//     grace period since fulfilment has elapsed. Requests inside the grace period
-//     are listed but never scored — not even the ones already watched. Counting a
-//     prompt watch early while an unwatched sibling waits would bias every
-//     recent requester upward; the score only ever averages matured requests.
+//   - Only APPROVED requests that became AVAILABLE are graded, and approval is
+//     per title on an instance: a request counts when it, or any request for the
+//     same title on the same instance, was approved (watch-grade-data.ts reads
+//     MediaRequest.approvedAt). Pending and declined requests never count, and
+//     neither does a request whose title nobody approved — a pending request a
+//     library sync marked available when the title arrived.
+//   - A request is SCORED only once its grace period since fulfilment has
+//     elapsed. Requests inside the grace period are listed but never scored —
+//     not even the ones already watched. Counting a prompt watch early while an
+//     unwatched sibling waits would bias every recent requester upward; the
+//     score only ever averages matured requests.
 //   - A request fulfilled before play history covered the user's media servers
 //     is "untracked" and never scored: a watch from before tracking began is
 //     invisible, and reading that silence as "never watched" is a false F.
@@ -392,7 +398,7 @@ export function emptyWatchGradeSummary(
 
 // How many users land on each letter — the settings preview's before/after.
 // Counts only summaries a user would show a chip for; "notGraded" is everyone
-// with fulfilled requests but no letter yet.
+// with approved, fulfilled requests but no letter yet.
 export interface WatchGradeSpread {
   A: number;
   B: number;
@@ -406,7 +412,7 @@ export interface WatchGradeSpread {
 export interface WatchGradePreview {
   enabled: boolean;
   reason: "feature-off" | "tracking-off" | null;
-  // Accounts with at least one fulfilled request — everyone who could show a grade.
+  // Accounts with at least one approved, fulfilled request — everyone who could show a grade.
   requesters: number;
   current: WatchGradeSpread | null;
   proposed: WatchGradeSpread | null;

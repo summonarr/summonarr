@@ -887,7 +887,8 @@ async function handleComponent(interaction: any): Promise<void> {
               if (staleDeclinedId) {
                 await tx.mediaRequest.deleteMany({ where: { id: staleDeclinedId, status: "DECLINED", permanentlyDeclined: false } });
               }
-              return tx.mediaRequest.create({ data: { ...baseData, status: "APPROVED", pendingNotifyAt: new Date(Date.now() + 90_000) } });
+              // approvedAt: auto-approve is an approval (MediaRequest.approvedAt).
+              return tx.mediaRequest.create({ data: { ...baseData, status: "APPROVED", approvedAt: new Date(), pendingNotifyAt: new Date(Date.now() + 90_000) } });
             }, { isolationLevel: "Serializable" })
           );
           // Keep the admin request list live (every other creation path emits).
@@ -964,6 +965,8 @@ async function handleComponent(interaction: any): Promise<void> {
               if (staleDeclinedId) {
                 await tx.mediaRequest.deleteMany({ where: { id: staleDeclinedId, status: "DECLINED", permanentlyDeclined: false } });
               }
+              // No approvedAt on the copy, as in the web route: the watch grade
+              // counts it through the approval of the request it copied.
               const alreadyGreenlit = await tx.mediaRequest.findFirst({
                 where: { tmdbId: selected.id, mediaType, arrInstance: routedSlug, status: { in: ["APPROVED", "AVAILABLE"] } },
                 select: { status: true },
@@ -1119,7 +1122,7 @@ async function handleComponent(interaction: any): Promise<void> {
         // orchestrator sweep is the backstop for when this job is dropped or fails.
         const claimed = await prisma.mediaRequest.updateMany({
           where: { id: requestId, status: "PENDING" },
-          data: { status: "APPROVED", pendingNotifyAt: new Date(Date.now() + 90_000) },
+          data: { status: "APPROVED", approvedAt: new Date(), pendingNotifyAt: new Date(Date.now() + 90_000) },
         });
         if (claimed.count === 0) {
           const embed: Record<string, unknown> = {
@@ -1197,9 +1200,11 @@ async function handleComponent(interaction: any): Promise<void> {
         if (request.posterPath) embed.thumbnail = { url: `${TMDB_POSTER_BASE}${request.posterPath}` };
         await editOriginal(appId, token, { embeds: [embed], components: [] });
       } else {
+        // approvedAt: null — a decline withdraws any approval, including one whose
+        // push failed and rolled back to PENDING (MediaRequest.approvedAt).
         const claimed = await prisma.mediaRequest.updateMany({
           where: { id: requestId, status: "PENDING" },
-          data: { status: "DECLINED" },
+          data: { status: "DECLINED", approvedAt: null },
         });
         if (claimed.count === 0) {
           const embed: Record<string, unknown> = {
