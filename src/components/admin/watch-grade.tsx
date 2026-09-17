@@ -8,8 +8,8 @@ import { useModalA11y } from "@/hooks/use-modal-a11y";
 import {
   describeWatchGrade,
   hasWatchGradeSignal,
+  watchGradeBands,
   watchGradeVolume,
-  WATCH_GRADE_BANDS,
   type RequestWatchVerdict,
   type WatchGradeDetail,
   type WatchGradeLetter,
@@ -294,7 +294,7 @@ export function WatchGradeModal({
                 : ""}
               Grades need{" "}
               {settings.minGradedRequests}+ counted requests —{" "}
-              {WATCH_GRADE_BANDS.filter((b) => b.letter !== "F")
+              {watchGradeBands(settings).filter((b) => b.letter !== "F")
                 .map((b) => `${b.letter} ${b.min}%+`)
                 .join(", ")}
               , otherwise F.

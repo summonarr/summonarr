@@ -40,6 +40,19 @@ const spec = {
         enum: ["PENDING", "APPROVED", "DECLINED", "AVAILABLE"],
       },
       UserRole: { type: "string", enum: ["USER", "ADMIN", "ISSUE_ADMIN"] },
+      WatchGradeSpread: {
+        type: "object",
+        nullable: true,
+        description: "Users per letter; notGraded = fulfilled requests but no letter yet",
+        properties: {
+          A: { type: "integer" },
+          B: { type: "integer" },
+          C: { type: "integer" },
+          D: { type: "integer" },
+          F: { type: "integer" },
+          notGraded: { type: "integer" },
+        },
+      },
       IssueType: {
         type: "string",
         enum: ["BAD_VIDEO", "WRONG_AUDIO", "MISSING_SUBTITLES", "WRONG_MATCH", "OTHER"],
@@ -1633,7 +1646,11 @@ const spec = {
                         windowDays: { type: "integer", description: "0 = no limit" },
                         tvEpisodePercent: { type: "integer", description: "Share of a season's library episodes for full credit" },
                         otherViewers: { type: "integer", description: "0 = off" },
-                        minGradedRequests: { type: "integer" },
+                        bandA: { type: "integer", description: "Minimum watch rate for an A" },
+                        bandB: { type: "integer", description: "Minimum watch rate for a B" },
+                        bandC: { type: "integer", description: "Minimum watch rate for a C" },
+                        bandD: { type: "integer", description: "Minimum watch rate for a D; below it is an F" },
+                        minGradedRequests: { type: "integer", description: "Scored requests needed before a letter" },
                         watchedThresholdPercent: { type: "integer" },
                       },
                     },
@@ -1643,6 +1660,7 @@ const spec = {
                       properties: {
                         status: { type: "string", enum: ["graded", "insufficient", "unlinked", "untracked"] },
                         letter: { type: "string", nullable: true, enum: ["A", "B", "C", "D", "F"] },
+                        minGradedRequests: { type: "integer", description: "Scored requests a letter needs (the setting in force)" },
                         score: { type: "integer", nullable: true, description: "0–100 watch rate over scored requests" },
                         graded: { type: "integer" },
                         watched: { type: "integer" },
@@ -1697,6 +1715,61 @@ const spec = {
           },
           "403": { description: "Caller holds neither MANAGE_USERS nor MANAGE_REQUESTS" },
           "404": { description: "No such user" },
+        },
+      },
+    },
+
+    "/admin/watch-grade/preview": {
+      post: {
+        tags: ["Admin – Users"],
+        summary: "Preview how the watch grade spread would change with other settings (ADMIN)",
+        description:
+          "Grades every requester with the watch-grade settings in the body and with the ones in force, and " +
+          "returns how many land on each letter. Nothing is written. The body is judged exactly as a " +
+          "`PATCH /settings` of the same keys would be: the same per-key bounds and cross-field rules (window " +
+          "longer than grace, cutoffs strictly descending), a key left out keeps its stored value, and a blank " +
+          "one means the default.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  watchGradeGraceDays: { type: "string" },
+                  watchGradeWindowDays: { type: "string" },
+                  watchGradeTvPercent: { type: "string" },
+                  watchGradeOtherViewers: { type: "string" },
+                  watchGradeBandA: { type: "string" },
+                  watchGradeBandB: { type: "string" },
+                  watchGradeBandC: { type: "string" },
+                  watchGradeBandD: { type: "string" },
+                  watchGradeMinRequests: { type: "string" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Spread with the settings in force and with the proposed ones",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    enabled: { type: "boolean" },
+                    reason: { type: "string", nullable: true, enum: ["feature-off", "tracking-off"] },
+                    requesters: { type: "integer", description: "Accounts with at least one fulfilled request" },
+                    current: { $ref: "#/components/schemas/WatchGradeSpread" },
+                    proposed: { $ref: "#/components/schemas/WatchGradeSpread" },
+                  },
+                },
+              },
+            },
+          },
+          "400": { description: "A value out of bounds, or a combination the settings save would refuse" },
+          "403": { description: "Caller is not an ADMIN" },
         },
       },
     },

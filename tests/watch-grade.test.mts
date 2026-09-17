@@ -27,6 +27,10 @@
 //      enough OTHER people watched it — a movie play flagged watched, or a season
 //      to the same share — one person counted once however many rows they left.
 //      It can only raise a scored request's credit, and 0 must mean off.
+//   9. CUTOFFS ARE SETTINGS, AND ALWAYS DESCENDING. The letter follows the
+//      admin's cutoffs and "requests needed" count; an out-of-order set is
+//      refused on write (validated RAW, so the read-side repair can't hide it)
+//      and falls back to the defaults — all four together — on read.
 //
 // Zero-import module, so no stubs: every input is constructed here.
 import { test } from "node:test";
@@ -37,14 +41,16 @@ import {
   gradeUser,
   hasWatchGradeSignal,
   letterForScore,
-  MIN_GRADED_REQUESTS,
+  parseWatchGradeFields,
   parseWatchGradeSettings,
   requiredEpisodes,
   startedFloorSeconds,
   WATCH_GRADE_DEFAULTS,
   WATCH_GRADE_SETTING_KEYS,
-  watchGradePairError,
+  watchGradeBands,
+  watchGradeCrossFieldError,
   watchGradeSettingError,
+  watchGradeSpread,
   watchGradeVolume,
   type GradableRequest,
   type GradeUserInput,
@@ -128,7 +134,7 @@ test("letter bands: A 80+, B 60+, C 40+, D 20+, F below — boundaries land on t
   assert.equal(letterForScore(0), "F");
 });
 
-test(`a letter needs ${MIN_GRADED_REQUESTS} scored requests; below it the rate is reported without one`, () => {
+test(`by default a letter needs ${WATCH_GRADE_DEFAULTS.minGradedRequests} scored requests; below it the rate is reported without one`, () => {
   const two = [movie(60), movie(61)];
   const below = grade({ requests: two, units: [watchedUnit(two[0].id)] });
   assert.equal(below.summary.status, "insufficient");
@@ -145,6 +151,36 @@ test(`a letter needs ${MIN_GRADED_REQUESTS} scored requests; below it the rate i
     { watched: at.summary.watched, partial: at.summary.partial, unwatched: at.summary.unwatched },
     { watched: 2, partial: 0, unwatched: 1 },
   );
+});
+
+test("letter cutoffs are settings: the letter follows them, boundaries landing on the higher letter", () => {
+  const strict = { ...WATCH_GRADE_DEFAULTS, bandA: 95, bandB: 85, bandC: 70, bandD: 50 };
+  assert.equal(letterForScore(95, strict), "A");
+  assert.equal(letterForScore(94, strict), "B");
+  assert.equal(letterForScore(85, strict), "B");
+  assert.equal(letterForScore(84, strict), "C");
+  assert.equal(letterForScore(70, strict), "C");
+  assert.equal(letterForScore(69, strict), "D");
+  assert.equal(letterForScore(50, strict), "D");
+  assert.equal(letterForScore(49, strict), "F");
+  assert.deepEqual(watchGradeBands(strict).map((b) => `${b.letter}${b.min}`), ["A95", "B85", "C70", "D50", "F0"]);
+
+  // Through gradeUser: 4 of 5 watched is 80% — an A by default, a C under the strict cutoffs.
+  const reqs = [movie(40), movie(41), movie(42), movie(43), movie(44)];
+  const units = reqs.slice(0, 4).map((r) => watchedUnit(r.id));
+  assert.equal(grade({ requests: reqs, units }).summary.letter, "A");
+  assert.equal(grade({ requests: reqs, units, settings: strict }).summary.letter, "C");
+});
+
+test("requests needed for a letter is a setting, carried on the summary for list surfaces", () => {
+  const two = [movie(40), movie(41)];
+  const one = grade({ requests: two, units: [watchedUnit(two[0].id)], settings: { ...WATCH_GRADE_DEFAULTS, minGradedRequests: 1 } }).summary;
+  assert.deepEqual({ status: one.status, letter: one.letter, min: one.minGradedRequests }, { status: "graded", letter: "C", min: 1 });
+
+  const four = [movie(40), movie(41), movie(42), movie(43)];
+  const five = grade({ requests: four, units: four.map((r) => watchedUnit(r.id)), settings: { ...WATCH_GRADE_DEFAULTS, minGradedRequests: 5 } }).summary;
+  assert.deepEqual({ status: five.status, letter: five.letter, score: five.score, min: five.minGradedRequests }, { status: "insufficient", letter: null, score: 100, min: 5 });
+  assert.match(describeWatchGrade(five), /needs 5 scored requests, has 4/);
 });
 
 // ── scoring eligibility ─────────────────────────────────────────────────────
@@ -571,6 +607,8 @@ test("parseWatchGradeSettings: defaults for missing/garbage/out-of-range rows; w
       [WATCH_GRADE_SETTING_KEYS.windowDays]: "29",
       [WATCH_GRADE_SETTING_KEYS.tvEpisodePercent]: "101",
       [WATCH_GRADE_SETTING_KEYS.otherViewers]: "101",
+      [WATCH_GRADE_SETTING_KEYS.bandA]: "0",
+      [WATCH_GRADE_SETTING_KEYS.minGradedRequests]: "0",
     }),
     WATCH_GRADE_DEFAULTS,
   );
@@ -580,13 +618,43 @@ test("parseWatchGradeSettings: defaults for missing/garbage/out-of-range rows; w
       [WATCH_GRADE_SETTING_KEYS.windowDays]: "0",
       [WATCH_GRADE_SETTING_KEYS.tvEpisodePercent]: "100",
       [WATCH_GRADE_SETTING_KEYS.otherViewers]: "0",
+      [WATCH_GRADE_SETTING_KEYS.bandA]: "90",
+      [WATCH_GRADE_SETTING_KEYS.bandB]: "75",
+      [WATCH_GRADE_SETTING_KEYS.bandC]: "50",
+      [WATCH_GRADE_SETTING_KEYS.bandD]: "25",
+      [WATCH_GRADE_SETTING_KEYS.minGradedRequests]: "5",
     }),
-    { graceDays: 14, windowDays: 0, tvEpisodePercent: 100, otherViewers: 0 },
+    { graceDays: 14, windowDays: 0, tvEpisodePercent: 100, otherViewers: 0, bandA: 90, bandB: 75, bandC: 50, bandD: 25, minGradedRequests: 5 },
   );
   // Grace 0 would score every request the moment it lands — rejected.
   assert.equal(parseWatchGradeSettings({ [WATCH_GRADE_SETTING_KEYS.graceDays]: "0" }).graceDays, 30);
   // Non-integers never partially parse ("7.5" is not 7).
   assert.equal(parseWatchGradeSettings({ [WATCH_GRADE_SETTING_KEYS.graceDays]: "7.5" }).graceDays, 30);
+});
+
+test("out-of-order cutoffs: the read side falls back to ALL FOUR defaults; the field parse the write path uses does not", () => {
+  const raw = {
+    [WATCH_GRADE_SETTING_KEYS.bandA]: "90",
+    [WATCH_GRADE_SETTING_KEYS.bandB]: "95", // above A
+    [WATCH_GRADE_SETTING_KEYS.bandC]: "50",
+    [WATCH_GRADE_SETTING_KEYS.bandD]: "25",
+  };
+  const read = parseWatchGradeSettings(raw);
+  assert.deepEqual(
+    [read.bandA, read.bandB, read.bandC, read.bandD],
+    [WATCH_GRADE_DEFAULTS.bandA, WATCH_GRADE_DEFAULTS.bandB, WATCH_GRADE_DEFAULTS.bandC, WATCH_GRADE_DEFAULTS.bandD],
+    "restoring only B (to 60) would leave 90/60/50/25 — fine here, but not in general; all four go back together",
+  );
+  const fields = parseWatchGradeFields(raw);
+  assert.deepEqual([fields.bandA, fields.bandB, fields.bandC, fields.bandD], [90, 95, 50, 25], "the write path must see the raw values");
+  // Equal cutoffs are out of order too — a tie would make one letter unreachable.
+  const tie = parseWatchGradeSettings({ ...raw, [WATCH_GRADE_SETTING_KEYS.bandB]: "50" });
+  assert.equal(tie.bandB, WATCH_GRADE_DEFAULTS.bandB);
+  // A descending set is kept as is, and other fields are untouched by the repair.
+  const kept = parseWatchGradeSettings({ ...raw, [WATCH_GRADE_SETTING_KEYS.bandB]: "70", [WATCH_GRADE_SETTING_KEYS.graceDays]: "10" });
+  assert.deepEqual([kept.bandA, kept.bandB, kept.bandC, kept.bandD, kept.graceDays], [90, 70, 50, 25, 10]);
+  const repaired = parseWatchGradeSettings({ ...raw, [WATCH_GRADE_SETTING_KEYS.graceDays]: "10" });
+  assert.equal(repaired.graceDays, 10);
 });
 
 test("watchGradeSettingError: the write-side validator agrees with the parser on every bound", () => {
@@ -608,13 +676,23 @@ test("watchGradeSettingError: the write-side validator agrees with the parser on
     ["watchGradeOtherViewers", "100", true],
     ["watchGradeOtherViewers", "101", false],
     ["watchGradeOtherViewers", "two", false],
+    ["watchGradeBandA", "100", true],
+    ["watchGradeBandA", "101", false],
+    ["watchGradeBandB", "1", true],
+    ["watchGradeBandC", "0", false],
+    ["watchGradeBandD", "0", false],
+    ["watchGradeBandD", "1", true],
+    ["watchGradeMinRequests", "1", true],
+    ["watchGradeMinRequests", "100", true],
+    ["watchGradeMinRequests", "0", false],
+    ["watchGradeMinRequests", "101", false],
   ];
   for (const [key, value, ok] of cases) {
     assert.equal(watchGradeSettingError(key, value) === null, ok, `${key}=${value}`);
     const field = (Object.keys(WATCH_GRADE_SETTING_KEYS) as (keyof typeof WATCH_GRADE_SETTING_KEYS)[]).find(
       (f) => WATCH_GRADE_SETTING_KEYS[f] === key,
     )!;
-    const parsed = parseWatchGradeSettings({ [key]: value })[field];
+    const parsed = parseWatchGradeFields({ [key]: value })[field];
     assert.equal(ok ? parsed === Number(value) : parsed === WATCH_GRADE_DEFAULTS[field], true, `parse ${key}=${value}`);
   }
   // What 0 means is spelled out per field.
@@ -625,12 +703,22 @@ test("watchGradeSettingError: the write-side validator agrees with the parser on
   assert.equal(watchGradeSettingError("quotaLimit", "not a number"), null);
 });
 
-test("watchGradePairError: a window no longer than the grace period is refused; 0 (no limit) never is", () => {
-  assert.match(watchGradePairError({ graceDays: 30, windowDays: 30 })!, /must be longer than the grace period/);
-  assert.match(watchGradePairError({ graceDays: 365, windowDays: 90 })!, /\(90 days\) must be longer than the grace period \(365 days\)/);
-  assert.equal(watchGradePairError({ graceDays: 30, windowDays: 31 }), null);
-  assert.equal(watchGradePairError({ graceDays: 365, windowDays: 0 }), null);
-  assert.equal(watchGradePairError(WATCH_GRADE_DEFAULTS), null);
+test("watchGradeCrossFieldError: a window no longer than the grace period is refused; 0 (no limit) never is", () => {
+  const at = (over: Partial<typeof WATCH_GRADE_DEFAULTS>) => watchGradeCrossFieldError({ ...WATCH_GRADE_DEFAULTS, ...over });
+  assert.match(at({ graceDays: 30, windowDays: 30 })!, /must be longer than the grace period/);
+  assert.match(at({ graceDays: 365, windowDays: 90 })!, /\(90 days\) must be longer than the grace period \(365 days\)/);
+  assert.equal(at({ graceDays: 30, windowDays: 31 }), null);
+  assert.equal(at({ graceDays: 365, windowDays: 0 }), null);
+  assert.equal(watchGradeCrossFieldError(WATCH_GRADE_DEFAULTS), null);
+});
+
+test("watchGradeCrossFieldError: cutoffs must be strictly descending, and the message names the pair", () => {
+  const at = (over: Partial<typeof WATCH_GRADE_DEFAULTS>) => watchGradeCrossFieldError({ ...WATCH_GRADE_DEFAULTS, ...over });
+  assert.equal(at({ bandA: 99, bandB: 98, bandC: 97, bandD: 96 }), null);
+  assert.equal(at({ bandA: 4, bandB: 3, bandC: 2, bandD: 1 }), null);
+  assert.match(at({ bandA: 60, bandB: 60 })!, /^The A cutoff \(60%\) must be higher than the B cutoff \(60%\)$/);
+  assert.match(at({ bandB: 30 })!, /^The B cutoff \(30%\) must be higher than the C cutoff \(40%\)$/);
+  assert.match(at({ bandD: 45 })!, /^The C cutoff \(40%\) must be higher than the D cutoff \(45%\)$/);
 });
 
 // ── display helpers ─────────────────────────────────────────────────────────
@@ -640,6 +728,17 @@ test("hasWatchGradeSignal: nothing to show for null or an all-zero summary", () 
   assert.equal(hasWatchGradeSignal(emptyWatchGradeSummary()), false);
   assert.equal(hasWatchGradeSignal({ ...emptyWatchGradeSummary("unlinked"), untracked: 1 }), true);
   assert.equal(hasWatchGradeSignal({ ...emptyWatchGradeSummary(), inGrace: 2 }), true);
+});
+
+test("watchGradeSpread: users per letter, the not-yet-graded counted apart, empty summaries ignored", () => {
+  const graded = (letter: "A" | "B" | "C" | "D" | "F") => ({ ...emptyWatchGradeSummary("graded"), letter, graded: 3 });
+  const spread = watchGradeSpread([
+    graded("A"), graded("A"), graded("C"), graded("F"),
+    { ...emptyWatchGradeSummary(), graded: 2 }, // not enough for a letter
+    { ...emptyWatchGradeSummary("unlinked"), untracked: 1 },
+    emptyWatchGradeSummary(), // nothing fulfilled — no chip, not counted
+  ]);
+  assert.deepEqual(spread, { A: 2, B: 0, C: 1, D: 0, F: 1, notGraded: 2 });
 });
 
 test("watchGradeVolume: full-credit requests over scored ones — own watches plus those others watched", () => {

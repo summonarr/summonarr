@@ -140,6 +140,7 @@ const ALL_KEYS = [
   "playHistoryWatchedThreshold", "playHistoryCompletionThreshold", "playHistoryArcGapDays",
   "playHistoryPollingInterval", "playHistoryRetentionDays",
   "watchGradeGraceDays", "watchGradeWindowDays", "watchGradeTvPercent", "watchGradeOtherViewers",
+  "watchGradeBandA", "watchGradeBandB", "watchGradeBandC", "watchGradeBandD", "watchGradeMinRequests",
   "omdbApiKey", "mdblistApiKey", "traktClientId", "ratingsHiddenSources",
   "ipinfoToken",
   "apnsRelayUrl", "apnsRelayKey", "recommendedIosBuild",
@@ -705,10 +706,17 @@ export default async function SettingsPage({
                 </p>
               </div>
               <WatchGradeSettingsForm
-                initialGraceDays={cfg.watchGradeGraceDays ?? ""}
-                initialWindowDays={cfg.watchGradeWindowDays ?? ""}
-                initialTvPercent={cfg.watchGradeTvPercent ?? ""}
-                initialOtherViewers={cfg.watchGradeOtherViewers ?? ""}
+                initial={{
+                  graceDays: cfg.watchGradeGraceDays ?? "",
+                  windowDays: cfg.watchGradeWindowDays ?? "",
+                  tvEpisodePercent: cfg.watchGradeTvPercent ?? "",
+                  otherViewers: cfg.watchGradeOtherViewers ?? "",
+                  bandA: cfg.watchGradeBandA ?? "",
+                  bandB: cfg.watchGradeBandB ?? "",
+                  bandC: cfg.watchGradeBandC ?? "",
+                  bandD: cfg.watchGradeBandD ?? "",
+                  minGradedRequests: cfg.watchGradeMinRequests ?? "",
+                }}
               />
             </div>
 

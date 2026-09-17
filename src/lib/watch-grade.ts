@@ -45,21 +45,12 @@
 //   - A user with no linked media-server identity cannot be graded, and neither
 //     can one whose media servers are not being tracked — both say so explicitly
 //     rather than rendering an F for data that was never collected.
+//   - The letter comes from admin-set cutoffs (default A 80, B 60, C 40, D 20;
+//     below D is an F), shown only once enough requests are scored (default 3).
+//     Cutoffs must be strictly descending: the settings route refuses anything
+//     else, and a stored set that isn't falls back to the defaults on read.
 
 export type WatchGradeLetter = "A" | "B" | "C" | "D" | "F";
-
-// Minimum score (0–100, rounded) for each letter, best first.
-export const WATCH_GRADE_BANDS: ReadonlyArray<{ letter: WatchGradeLetter; min: number }> = [
-  { letter: "A", min: 80 },
-  { letter: "B", min: 60 },
-  { letter: "C", min: 40 },
-  { letter: "D", min: 20 },
-  { letter: "F", min: 0 },
-];
-
-// Scored requests needed before a letter is assigned. Below it the watch rate is
-// still reported, but one unwatched film must not stamp a new requester an F.
-export const MIN_GRADED_REQUESTS = 3;
 
 // A play below the watched threshold earns half credit once it was a real
 // attempt: a quarter of the runtime, and never under 15 minutes — half the
@@ -84,6 +75,15 @@ export interface WatchGradeSettings {
   // Other people who must have watched a request since it was made for it to
   // count as watched when the requester didn't. 0 = off.
   otherViewers: number;
+  // Minimum watch rate (0–100) for each letter; below bandD is an F. Strictly
+  // descending — see watchGradeCrossFieldError.
+  bandA: number;
+  bandB: number;
+  bandC: number;
+  bandD: number;
+  // Scored requests needed before a letter is shown. Below it the watch rate is
+  // still reported, but one unwatched film must not stamp a new requester an F.
+  minGradedRequests: number;
 }
 
 export const WATCH_GRADE_DEFAULTS: WatchGradeSettings = {
@@ -91,6 +91,11 @@ export const WATCH_GRADE_DEFAULTS: WatchGradeSettings = {
   windowDays: 365,
   tvEpisodePercent: 50,
   otherViewers: 2,
+  bandA: 80,
+  bandB: 60,
+  bandC: 40,
+  bandD: 20,
+  minGradedRequests: 3,
 };
 
 export const WATCH_GRADE_SETTING_KEYS = {
@@ -98,7 +103,25 @@ export const WATCH_GRADE_SETTING_KEYS = {
   windowDays: "watchGradeWindowDays",
   tvEpisodePercent: "watchGradeTvPercent",
   otherViewers: "watchGradeOtherViewers",
+  bandA: "watchGradeBandA",
+  bandB: "watchGradeBandB",
+  bandC: "watchGradeBandC",
+  bandD: "watchGradeBandD",
+  minGradedRequests: "watchGradeMinRequests",
 } as const;
+
+type BandSettings = Pick<WatchGradeSettings, "bandA" | "bandB" | "bandC" | "bandD">;
+
+// Minimum score for each letter, best first. F is everything below D.
+export function watchGradeBands(settings: BandSettings): { letter: WatchGradeLetter; min: number }[] {
+  return [
+    { letter: "A", min: settings.bandA },
+    { letter: "B", min: settings.bandB },
+    { letter: "C", min: settings.bandC },
+    { letter: "D", min: settings.bandD },
+    { letter: "F", min: 0 },
+  ];
+}
 
 // One table serves the write-side validator (/api/settings) and the read-side
 // parser, so a value the settings route accepts can never be clamped into
@@ -108,6 +131,12 @@ const SETTING_BOUNDS: Record<keyof WatchGradeSettings, { min: number; max: numbe
   windowDays: { min: 30, max: 3650, zero: "for no limit" },
   tvEpisodePercent: { min: 1, max: 100, zero: null },
   otherViewers: { min: 1, max: 100, zero: "to turn it off" },
+  // No 0: a D cutoff of 0 would make an F impossible.
+  bandA: { min: 1, max: 100, zero: null },
+  bandB: { min: 1, max: 100, zero: null },
+  bandC: { min: 1, max: 100, zero: null },
+  bandD: { min: 1, max: 100, zero: null },
+  minGradedRequests: { min: 1, max: 100, zero: null },
 };
 
 function fieldForKey(key: string): keyof WatchGradeSettings | null {
@@ -135,26 +164,62 @@ export function watchGradeSettingError(key: string, value: string): string | nul
   return `"${key}" must be an integer between ${b.min} and ${b.max}${b.zero ? `, or 0 ${b.zero}` : ""}`;
 }
 
-// The one cross-field rule. A window no longer than the grace period scores
-// nothing, ever: every request is still inside its grace period when it leaves
-// the window. Checked on write against the merged (stored + incoming) values.
-export function watchGradePairError(settings: Pick<WatchGradeSettings, "graceDays" | "windowDays">): string | null {
+// The rules that span fields, checked on write against the MERGED values (stored
+// plus incoming), so a change to one field that breaks another is caught too.
+//   - A window no longer than the grace period scores nothing, ever: every
+//     request is still inside its grace period when it leaves the window.
+//   - Cutoffs must be strictly descending. Out of order, letterForScore hands
+//     out the first letter whose cutoff a score clears, so an A below a B would
+//     turn every B into an A.
+export function watchGradeCrossFieldError(
+  settings: Pick<WatchGradeSettings, "graceDays" | "windowDays"> & BandSettings,
+): string | null {
   if (settings.windowDays > 0 && settings.windowDays <= settings.graceDays) {
     return (
       `The grade window (${settings.windowDays} days) must be longer than the grace period ` +
       `(${settings.graceDays} days), or 0 for no limit — otherwise no request can ever be scored`
     );
   }
+  const bands = watchGradeBands(settings);
+  for (let i = 0; i < 3; i++) {
+    if (bands[i].min <= bands[i + 1].min) {
+      return (
+        `The ${bands[i].letter} cutoff (${bands[i].min}%) must be higher than the ` +
+        `${bands[i + 1].letter} cutoff (${bands[i + 1].min}%)`
+      );
+    }
+  }
   return null;
 }
 
-// Read-side parse: a missing or out-of-range row falls back to the default rather
-// than to NaN or an unbounded window.
-export function parseWatchGradeSettings(raw: Record<string, string | null | undefined>): WatchGradeSettings {
+function bandsDescending(settings: BandSettings): boolean {
+  return settings.bandA > settings.bandB && settings.bandB > settings.bandC && settings.bandC > settings.bandD;
+}
+
+// Per-field parse: each value inside its own bounds, else its default. No
+// cross-field repair — the write path validates these merged values with
+// watchGradeCrossFieldError, and a repair here would hide a bad combination.
+export function parseWatchGradeFields(raw: Record<string, string | null | undefined>): WatchGradeSettings {
   const out = { ...WATCH_GRADE_DEFAULTS };
   for (const field of Object.keys(WATCH_GRADE_SETTING_KEYS) as (keyof WatchGradeSettings)[]) {
     const parsed = parseBounded(raw[WATCH_GRADE_SETTING_KEYS[field]], field);
     if (parsed !== null) out[field] = parsed;
+  }
+  return out;
+}
+
+// Read-side parse: a missing or out-of-range row falls back to its default rather
+// than to NaN or an unbounded window, and cutoffs that aren't strictly
+// descending fall back to the defaults ALL FOUR together — restoring only the
+// offending one could still leave them out of order. The route refuses such a
+// set; this covers rows written any other way.
+export function parseWatchGradeSettings(raw: Record<string, string | null | undefined>): WatchGradeSettings {
+  const out = parseWatchGradeFields(raw);
+  if (!bandsDescending(out)) {
+    out.bandA = WATCH_GRADE_DEFAULTS.bandA;
+    out.bandB = WATCH_GRADE_DEFAULTS.bandB;
+    out.bandC = WATCH_GRADE_DEFAULTS.bandC;
+    out.bandD = WATCH_GRADE_DEFAULTS.bandD;
   }
   return out;
 }
@@ -278,6 +343,9 @@ export type WatchGradeStatus = "graded" | "insufficient" | "unlinked" | "untrack
 export interface WatchGradeSummary {
   status: WatchGradeStatus;
   letter: WatchGradeLetter | null;
+  // The scored requests a letter needs (the setting in force), so list surfaces
+  // can explain a missing letter without carrying the settings.
+  minGradedRequests: number;
   // 0–100 watch rate over the scored requests; null when nothing was scored.
   score: number | null;
   // Scored requests, and how they split.
@@ -305,19 +373,47 @@ export interface UserWatchGrade {
 export interface WatchGradeDetail {
   enabled: boolean;
   reason: "feature-off" | "tracking-off" | null;
-  settings: (WatchGradeSettings & { minGradedRequests: number; watchedThresholdPercent: number }) | null;
+  settings: (WatchGradeSettings & { watchedThresholdPercent: number }) | null;
   grade: WatchGradeSummary | null;
   requests: RequestWatchVerdict[];
   // True when `requests` was cut at the row cap (the grade still covers every request).
   truncated: boolean;
 }
 
-export function emptyWatchGradeSummary(status: WatchGradeStatus = "insufficient"): WatchGradeSummary {
-  return { status, letter: null, score: null, graded: 0, watched: 0, byOthers: 0, partial: 0, unwatched: 0, inGrace: 0, untracked: 0 };
+export function emptyWatchGradeSummary(
+  status: WatchGradeStatus = "insufficient",
+  minGradedRequests: number = WATCH_GRADE_DEFAULTS.minGradedRequests,
+): WatchGradeSummary {
+  return {
+    status, letter: null, minGradedRequests, score: null,
+    graded: 0, watched: 0, byOthers: 0, partial: 0, unwatched: 0, inGrace: 0, untracked: 0,
+  };
 }
 
-export function letterForScore(score: number): WatchGradeLetter {
-  for (const band of WATCH_GRADE_BANDS) {
+// How many users land on each letter — the settings preview's before/after.
+// Counts only summaries a user would show a chip for; "notGraded" is everyone
+// with fulfilled requests but no letter yet.
+export interface WatchGradeSpread {
+  A: number;
+  B: number;
+  C: number;
+  D: number;
+  F: number;
+  notGraded: number;
+}
+
+// Wire shape of POST /api/admin/watch-grade/preview.
+export interface WatchGradePreview {
+  enabled: boolean;
+  reason: "feature-off" | "tracking-off" | null;
+  // Accounts with at least one fulfilled request — everyone who could show a grade.
+  requesters: number;
+  current: WatchGradeSpread | null;
+  proposed: WatchGradeSpread | null;
+}
+
+export function letterForScore(score: number, settings: BandSettings = WATCH_GRADE_DEFAULTS): WatchGradeLetter {
+  for (const band of watchGradeBands(settings)) {
     if (score >= band.min) return band.letter;
   }
   return "F";
@@ -475,7 +571,7 @@ export function gradeUser(input: GradeUserInput): UserWatchGrade {
     input.requests.filter((r) => windowStartMs === null || r.fulfilledAt.getTime() >= windowStartMs),
   ).sort((a, b) => b.fulfilledAt.getTime() - a.fulfilledAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
-  const summary = emptyWatchGradeSummary();
+  const summary = emptyWatchGradeSummary("insufficient", settings.minGradedRequests);
   let creditSum = 0;
 
   const verdicts = requests.map((r): RequestWatchVerdict => {
@@ -546,9 +642,9 @@ export function gradeUser(input: GradeUserInput): UserWatchGrade {
     summary.status = "untracked";
   } else {
     if (summary.graded > 0) summary.score = Math.round((creditSum / summary.graded) * 100);
-    if (summary.graded >= MIN_GRADED_REQUESTS && summary.score !== null) {
+    if (summary.graded >= settings.minGradedRequests && summary.score !== null) {
       summary.status = "graded";
-      summary.letter = letterForScore(summary.score);
+      summary.letter = letterForScore(summary.score, settings);
     }
   }
 
@@ -560,6 +656,16 @@ export function gradeUser(input: GradeUserInput): UserWatchGrade {
 export function hasWatchGradeSignal(summary: WatchGradeSummary | null | undefined): summary is WatchGradeSummary {
   if (!summary) return false;
   return summary.letter !== null || summary.graded + summary.inGrace + summary.untracked > 0;
+}
+
+export function watchGradeSpread(summaries: Iterable<WatchGradeSummary>): WatchGradeSpread {
+  const spread: WatchGradeSpread = { A: 0, B: 0, C: 0, D: 0, F: 0, notGraded: 0 };
+  for (const summary of summaries) {
+    if (!hasWatchGradeSignal(summary)) continue;
+    if (summary.letter) spread[summary.letter]++;
+    else spread.notGraded++;
+  }
+  return spread;
 }
 
 // "watched/scored" for the chip — the requests that earned full credit: the
@@ -589,7 +695,7 @@ export function describeWatchGrade(summary: WatchGradeSummary, settings?: WatchG
       if (summary.graded === 0 && summary.untracked > 0) {
         return `Not graded yet — ${fulfilled(summary.untracked)} predate${summary.untracked === 1 ? "s" : ""} play history tracking`;
       }
-      return `Not graded yet — needs ${MIN_GRADED_REQUESTS} scored requests, has ${summary.graded}`;
+      return `Not graded yet — needs ${summary.minGradedRequests} scored requests, has ${summary.graded}`;
     case "unlinked":
       return "Not graded — no Plex or Jellyfin account is linked, so watches can't be tracked";
     case "untracked":

@@ -602,6 +602,25 @@ test("PATCH: the watch-grade window and grace are validated as a PAIR, against t
   assert.equal(upsertFor("watchGradeWindowDays").length, 1);
 });
 
+test("PATCH: letter cutoffs must stay strictly descending against the STORED values, and a refused save writes nothing", async () => {
+  const { header } = await mintSession("ADMIN");
+  settings.set("watchGradeBandA", "70");
+  // B alone, at the stored A: refused, nothing written.
+  let res = await PATCH(patchReq(JSON.stringify({ watchGradeBandB: "70" }), header), undefined);
+  assert.equal(res.status, 400);
+  assert.equal(((await res.json()) as { error: string }).error, "The A cutoff (70%) must be higher than the B cutoff (70%)");
+  assert.equal(upsertFor("watchGradeBandB").length, 0);
+  // Out of bounds is caught per key, before the merge.
+  res = await PATCH(patchReq(JSON.stringify({ watchGradeMinRequests: "0" }), header), undefined);
+  assert.equal(res.status, 400);
+  // A consistent set in one PATCH is written.
+  res = await PATCH(patchReq(JSON.stringify({ watchGradeBandA: "90", watchGradeBandB: "70", watchGradeBandC: "50", watchGradeBandD: "30", watchGradeMinRequests: "5" }), header), undefined);
+  assert.equal(res.status, 200);
+  for (const key of ["watchGradeBandA", "watchGradeBandB", "watchGradeBandC", "watchGradeBandD", "watchGradeMinRequests"]) {
+    assert.equal(upsertFor(key).length, 1, key);
+  }
+});
+
 test("machine-session: enabling with an empty allowlist is refused", async () => {
   const admin = await mintSession("ADMIN");
   const res = await PATCH(

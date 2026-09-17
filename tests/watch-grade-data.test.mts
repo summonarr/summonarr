@@ -30,6 +30,10 @@
 //      requester counts as someone else. The requester's own logins never make
 //      a viewer — by construction, not by a filter: flagged plays of theirs give
 //      the request full credit, and (pin 7) full-credit requests are never read.
+//   8. THE PREVIEW judges what a save would: stored values for keys the body
+//      leaves out, defaults for blank ones, the same bounds and cross-field
+//      rules — and grades every requester under both the stored and the proposed
+//      settings. ADMIN only, like the settings route it sits beside.
 //   7. THE AUDIENCE IS READ ONLY WHERE IT CAN MATTER — scored requests short of
 //      full credit — as ONE ROW PER IDENTITY AND SEASON built from play history's
 //      own watched/completed flags, never per episode. That is what keeps the
@@ -78,8 +82,11 @@ const {
   getWatchGradeAvailability,
   getWatchGradeSummaries,
   getUserWatchGradeDetail,
+  mergedWatchGradeSettings,
+  previewWatchGradeSpread,
   MAX_VERDICT_ROWS,
 } = await import("../src/lib/watch-grade-data.ts");
+const { WATCH_GRADE_DEFAULTS } = await import("../src/lib/watch-grade.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
 
 const DAY = 86_400_000;
@@ -413,8 +420,9 @@ shadowPrismaClientMethod(prisma, "$queryRaw", async (sql: SqlArg) => {
   throw new Error(`unexpected $queryRaw: ${sql.text.slice(0, 80)}`);
 });
 
-// Route handler, imported after every stub is in place.
+// Route handlers, imported after every stub is in place.
 const { GET: getWatchGrade } = await import("../src/app/api/admin/users/[id]/watch-grade/route.ts");
+const { POST: postPreview } = await import("../src/app/api/admin/watch-grade/preview/route.ts");
 
 // ═══ availability ════════════════════════════════════════════════════════════
 
@@ -447,7 +455,7 @@ test("availability carries parsed settings, the tracked sources and the watched 
   });
   assert.deepEqual(await getWatchGradeAvailability(), {
     enabled: true,
-    settings: { graceDays: 14, windowDays: 365, tvEpisodePercent: 50, otherViewers: 2 },
+    settings: { ...WATCH_GRADE_DEFAULTS, graceDays: 14 },
     trackedSources: ["jellyfin"],
     watchedThresholdPercent: 70,
   });
@@ -863,6 +871,70 @@ test("only AVAILABLE requests inside the window are read; legacy rows fall back 
   assert.ok(!("OR" in (opsOf("mediaRequest.findMany")[0].args as { where: object }).where));
 });
 
+// ═══ tuning ══════════════════════════════════════════════════════════════════
+
+test("computeWatchGrades grades with a settings override — window, cutoffs, requests needed — leaving the stored ones alone", async () => {
+  historySince("plex", 900);
+  user("u", { plexUserId: "p-u" });
+  msu("m", { source: "plex", sourceUserId: "p-u" });
+  const recent = [request("u", 40), request("u", 41), request("u", 42)];
+  const old = request("u", 500); // outside the stored 365-day window
+  play("m", recent[0], 35);
+  play("m", recent[1], 35);
+  play("m", old, 400);
+
+  const stored = (await computeWatchGrades(["u"])).grades.get("u")!.summary;
+  assert.deepEqual({ graded: stored.graded, score: stored.score, letter: stored.letter }, { graded: 3, score: 67, letter: "B" });
+
+  const override = { ...WATCH_GRADE_DEFAULTS, windowDays: 0, bandA: 70, bandB: 60, bandC: 50, bandD: 40, minGradedRequests: 4 };
+  ops = [];
+  const tuned = (await computeWatchGrades(["u"], { settings: override })).grades.get("u")!.summary;
+  assert.deepEqual(
+    { graded: tuned.graded, score: tuned.score, letter: tuned.letter, min: tuned.minGradedRequests },
+    { graded: 4, score: 75, letter: "A", min: 4 },
+  );
+  assert.ok(!("OR" in (opsOf("mediaRequest.findMany")[0].args as { where: object }).where), "the override's window drives the request read");
+  assert.equal(opsOf("setting.findMany").length, 1, "availability still reads what is stored, once");
+});
+
+test("mergedWatchGradeSettings: body keys win, a blank one means the default, a missing one keeps the stored value — unrepaired", async () => {
+  setSettings({ ...TRACKING_ON, watchGradeGraceDays: "45", watchGradeBandA: "90", watchGradeBandB: "70" });
+  const merged = await mergedWatchGradeSettings({ watchGradeBandA: " 65 ", watchGradeGraceDays: "", watchGradeTvPercent: 75 });
+  assert.equal(merged.graceDays, WATCH_GRADE_DEFAULTS.graceDays, "blank → default");
+  assert.equal(merged.bandB, 70, "missing → stored");
+  assert.equal(merged.bandA, 65, "body wins, trimmed");
+  assert.equal(merged.tvEpisodePercent, WATCH_GRADE_DEFAULTS.tvEpisodePercent, "a non-string is not a value");
+  // A (65) below B (70): returned as is, so the cross-field check can refuse it.
+  assert.ok(merged.bandA < merged.bandB);
+});
+
+test("previewWatchGradeSpread: every requester graded under the stored and the proposed settings", async () => {
+  historySince("plex", 900);
+  for (const id of ["keen", "mixed", "never"]) user(id, { plexUserId: `p-${id}` });
+  msu("m-keen", { source: "plex", sourceUserId: "p-keen" });
+  msu("m-mixed", { source: "plex", sourceUserId: "p-mixed" });
+  for (let i = 0; i < 3; i++) play("m-keen", request("keen", 40 + i), 35);
+  const mixed = [request("mixed", 40), request("mixed", 41), request("mixed", 42)];
+  play("m-mixed", mixed[0], 35);
+  play("m-mixed", mixed[1], 35);
+  for (let i = 0; i < 3; i++) request("never", 40 + i);
+  user("idle"); // no requests at all — not a requester
+
+  const preview = await previewWatchGradeSpread({ ...WATCH_GRADE_DEFAULTS, bandA: 95, bandB: 70, bandC: 50, bandD: 30 });
+  assert.equal(preview.enabled, true);
+  assert.equal(preview.requesters, 3);
+  // Stored: keen 100 → A, mixed 67 → B, never 0 → F.
+  assert.deepEqual(preview.current, { A: 1, B: 1, C: 0, D: 0, F: 1, notGraded: 0 });
+  // Proposed: keen 100 → A, mixed 67 → C (B now needs 70), never 0 → F.
+  assert.deepEqual(preview.proposed, { A: 1, B: 0, C: 1, D: 0, F: 1, notGraded: 0 });
+
+  const stricter = await previewWatchGradeSpread({ ...WATCH_GRADE_DEFAULTS, bandB: 70, minGradedRequests: 4 });
+  assert.deepEqual(stricter.proposed, { A: 0, B: 0, C: 0, D: 0, F: 0, notGraded: 3 }, "4 requests needed — nobody has them");
+
+  setSettings({ ...TRACKING_ON, "feature.behavior.watchGrades": "false" });
+  assert.deepEqual(await previewWatchGradeSpread(WATCH_GRADE_DEFAULTS), { enabled: false, reason: "feature-off", requesters: 0, current: null, proposed: null });
+});
+
 // ═══ list vs detail ══════════════════════════════════════════════════════════
 
 test("list mode resolves identity for requesters only; everyone else gets an empty summary", async () => {
@@ -961,4 +1033,48 @@ test("route: an unknown user is 404 before any grade work", async () => {
   const res = await callRoute(token, "nobody");
   assert.equal(res.status, 404);
   assert.equal(opsOf("mediaRequest.findMany").length, 0);
+});
+
+async function callPreview(token: string | null, body: unknown) {
+  const req = new NextRequest("http://localhost:3000/api/admin/watch-grade/preview", {
+    method: "POST",
+    headers: {
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      "content-type": "application/json",
+      "x-forwarded-for": "203.0.113.7",
+    },
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  });
+  return postPreview(req, undefined);
+}
+
+test("preview route: ADMIN only — a MANAGE_USERS delegate may read grades but not preview settings", async () => {
+  assert.equal((await callPreview(null, {})).status, 401);
+  const delegate = await tokenFor("usersAdmin3", Permission.MANAGE_USERS);
+  assert.equal((await callPreview(delegate, {})).status, 403);
+  const admin = await tokenFor("admin1", 0n, "ADMIN");
+  const res = await callPreview(admin, {});
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { enabled: boolean; requesters: number };
+  assert.deepEqual({ enabled: body.enabled, requesters: body.requesters }, { enabled: true, requesters: 0 });
+});
+
+test("preview route: refuses exactly what a save would — bounds, types, cutoffs out of order against the STORED values", async () => {
+  const admin = await tokenFor("admin2", 0n, "ADMIN");
+  const error = async (body: unknown) => {
+    const res = await callPreview(admin, body);
+    return { status: res.status, error: ((await res.json()) as { error?: string }).error };
+  };
+  assert.deepEqual(await error({ watchGradeBandA: "101" }), { status: 400, error: `"watchGradeBandA" must be an integer between 1 and 100` });
+  assert.deepEqual(await error({ watchGradeMinRequests: 3 }), { status: 400, error: `Setting "watchGradeMinRequests" must be a string` });
+  assert.equal((await callPreview(admin, "[1]")).status, 400);
+  // B alone, above the stored-default A.
+  assert.deepEqual(await error({ watchGradeBandB: "85" }), { status: 400, error: "The A cutoff (80%) must be higher than the B cutoff (85%)" });
+  // With A raised in the stored settings, the same B is fine.
+  setSettings({ ...TRACKING_ON, watchGradeBandA: "90" });
+  assert.equal((await callPreview(admin, { watchGradeBandB: "85" })).status, 200);
+  // A blank value is the default, and is judged as one: grace back to 30 against a stored 30-day window.
+  setSettings({ ...TRACKING_ON, watchGradeWindowDays: "30", watchGradeGraceDays: "10" });
+  assert.equal((await callPreview(admin, {})).status, 200);
+  assert.match((await error({ watchGradeGraceDays: "" })).error!, /must be longer than the grace period \(30 days\)/);
 });

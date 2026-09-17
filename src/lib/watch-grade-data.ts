@@ -10,8 +10,9 @@ import {
 import {
   emptyWatchGradeSummary,
   gradeUser,
+  parseWatchGradeFields,
   parseWatchGradeSettings,
-  MIN_GRADED_REQUESTS,
+  watchGradeSpread,
   WATCH_GRADE_SETTING_KEYS,
   type GradableRequest,
   type OtherViewerWatch,
@@ -19,6 +20,7 @@ import {
   type UserWatchGrade,
   type WatchGradeDetail,
   type WatchGradeIdentity,
+  type WatchGradePreview,
   type WatchGradeSettings,
   type WatchGradeSummary,
 } from "@/lib/watch-grade";
@@ -292,16 +294,20 @@ export interface WatchGradeComputation {
 // for accounts with nothing fulfilled in the window — the detail view wants
 // "not linked" vs "nothing to grade yet"; list surfaces skip that work, since an
 // account with no fulfilled requests shows no chip either way.
+// `settings` grades with values other than the stored ones — the settings
+// preview. Availability (feature flag, tracking, watched threshold) still comes
+// from what is in force.
 export async function computeWatchGrades(
   userIds: string[],
-  opts: { resolveIdentityForAll?: boolean; now?: Date } = {},
+  opts: { resolveIdentityForAll?: boolean; now?: Date; settings?: WatchGradeSettings } = {},
 ): Promise<WatchGradeComputation> {
   const grades = new Map<string, UserWatchGrade>();
   const availability = await getWatchGradeAvailability();
   const ids = [...new Set(userIds)];
   if (!availability.enabled || ids.length === 0) return { availability, grades };
 
-  const { settings, trackedSources, watchedThresholdPercent } = availability;
+  const { trackedSources, watchedThresholdPercent } = availability;
+  const settings = opts.settings ?? availability.settings;
   const now = opts.now ?? new Date();
   const windowStart = settings.windowDays > 0 ? new Date(now.getTime() - settings.windowDays * 86_400_000) : null;
 
@@ -405,7 +411,7 @@ export async function computeWatchGrades(
     if (!identity) {
       // List mode, nothing fulfilled in the window: nothing to grade, and the
       // linkage answer couldn't change an empty summary.
-      grades.set(userId, { summary: emptyWatchGradeSummary(), verdicts: [] });
+      grades.set(userId, { summary: emptyWatchGradeSummary("insufficient", settings.minGradedRequests), verdicts: [] });
       continue;
     }
     grades.set(userId, gradeWith(userId, identity, []));
@@ -456,13 +462,54 @@ export async function getUserWatchGradeDetail(userId: string): Promise<WatchGrad
   return {
     enabled: true,
     reason: null,
-    settings: {
-      ...availability.settings,
-      minGradedRequests: MIN_GRADED_REQUESTS,
-      watchedThresholdPercent: availability.watchedThresholdPercent,
-    },
+    settings: { ...availability.settings, watchedThresholdPercent: availability.watchedThresholdPercent },
     grade: grade?.summary ?? null,
     requests: verdicts.slice(0, MAX_VERDICT_ROWS),
     truncated: verdicts.length > MAX_VERDICT_ROWS,
+  };
+}
+
+// The settings a write of `incoming` would leave in force: each watch-grade key
+// the body carries (blank = back to the default, as the form promises), the
+// stored value for every key it doesn't. Per-field bounds only — callers run
+// watchGradeCrossFieldError on the result, and the read-side repair in
+// parseWatchGradeSettings would otherwise hide an out-of-order set of cutoffs.
+// Shared by the settings save and the preview so both judge the same values.
+export async function mergedWatchGradeSettings(incoming: Record<string, unknown>): Promise<WatchGradeSettings> {
+  const keys = Object.values(WATCH_GRADE_SETTING_KEYS);
+  const stored = await prisma.setting.findMany({ where: { key: { in: keys } }, select: { key: true, value: true } });
+  const raw: Record<string, string | undefined> = Object.fromEntries(stored.map((r) => [r.key, r.value]));
+  for (const key of keys) {
+    const value = incoming[key];
+    if (typeof value === "string") raw[key] = value.trim() === "" ? undefined : value.trim();
+  }
+  return parseWatchGradeFields(raw);
+}
+
+// How many users land on each letter today, and how many would with `proposed`.
+// Everyone who has ever had a request fulfilled is graded, so a wider proposed
+// window is judged against the same people as the current one.
+export async function previewWatchGradeSpread(proposed: WatchGradeSettings): Promise<WatchGradePreview> {
+  const availability = await getWatchGradeAvailability();
+  if (!availability.enabled) {
+    return { enabled: false, reason: availability.reason, requesters: 0, current: null, proposed: null };
+  }
+  const rows = await prisma.mediaRequest.findMany({
+    where: { status: "AVAILABLE" },
+    distinct: ["requestedBy"],
+    select: { requestedBy: true },
+  });
+  const ids = [...new Set(rows.map((r) => r.requestedBy))];
+  const now = new Date();
+  // Sequential on purpose: two full grade runs at once would double the load on
+  // the five-connection pool, for an answer nobody is waiting on mid-render.
+  const current = await computeWatchGrades(ids, { now });
+  const next = await computeWatchGrades(ids, { now, settings: proposed });
+  return {
+    enabled: true,
+    reason: null,
+    requesters: ids.length,
+    current: watchGradeSpread([...current.grades.values()].map((g) => g.summary)),
+    proposed: watchGradeSpread([...next.grades.values()].map((g) => g.summary)),
   };
 }

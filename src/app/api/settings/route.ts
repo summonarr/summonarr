@@ -17,7 +17,8 @@ import { invalidateApnsRelayCache } from "@/lib/push";
 import { SETTINGS_SENSITIVE_KEYS_SET } from "@/lib/settings-sensitive-keys";
 import { parseIpAllowlist, isValidIpOrCidr } from "@/lib/ip-allowlist";
 import { stripUrlUserinfo, validateServerUrl } from "@/lib/server-url";
-import { parseWatchGradeSettings, watchGradePairError, watchGradeSettingError } from "@/lib/watch-grade";
+import { WATCH_GRADE_SETTING_KEYS, watchGradeCrossFieldError, watchGradeSettingError } from "@/lib/watch-grade";
+import { mergedWatchGradeSettings } from "@/lib/watch-grade-data";
 
 const SETTINGS_SCHEMA = [
   ["siteTitle",                     false],
@@ -139,6 +140,11 @@ const SETTINGS_SCHEMA = [
   ["watchGradeWindowDays",           false],
   ["watchGradeTvPercent",            false],
   ["watchGradeOtherViewers",         false],
+  ["watchGradeBandA",                false],
+  ["watchGradeBandB",                false],
+  ["watchGradeBandC",                false],
+  ["watchGradeBandD",                false],
+  ["watchGradeMinRequests",          false],
   ["enableMachineSession",           false],
   ["machineSessionAllowedIps",       false],
   ["apnsRelayUrl",                    false],
@@ -590,21 +596,15 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     }
   }
 
-  // Watch-grade window vs grace. The per-key bounds above can't see the pair, and
-  // a window no longer than the grace period scores nothing, silently: every
-  // request is still inside its grace period when it leaves the window. Checked
-  // against the merged values, so a PATCH of either key alone is caught too. A
-  // blank incoming value means "back to the default", as the form promises.
-  const touchesWatchGradePair = body.watchGradeGraceDays !== undefined || body.watchGradeWindowDays !== undefined;
-  if (touchesWatchGradePair) {
-    const effective = async (key: "watchGradeGraceDays" | "watchGradeWindowDays") =>
-      typeof body[key] === "string" ? body[key] : (await prisma.setting.findUnique({ where: { key } }))?.value;
-    const merged = parseWatchGradeSettings({
-      watchGradeGraceDays: await effective("watchGradeGraceDays"),
-      watchGradeWindowDays: await effective("watchGradeWindowDays"),
-    });
-    const pairError = watchGradePairError(merged);
-    if (pairError) return NextResponse.json({ error: pairError }, { status: 400 });
+  // Watch-grade rules that span fields (window vs grace, cutoffs in descending
+  // order). The per-key bounds above can't see them, and a broken combination
+  // doesn't fail loudly: a window inside the grace period scores nothing, and
+  // out-of-order cutoffs hand out the wrong letters. Checked against the merged
+  // stored + incoming values, so a PATCH of one key that breaks another is caught.
+  const touchesWatchGrade = Object.values(WATCH_GRADE_SETTING_KEYS).some((key) => body[key] !== undefined);
+  if (touchesWatchGrade) {
+    const conflict = watchGradeCrossFieldError(await mergedWatchGradeSettings(body));
+    if (conflict) return NextResponse.json({ error: conflict }, { status: 400 });
   }
 
   // Keys that may be written empty to clear them. Most keys skip empty writes so
@@ -645,6 +645,11 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     "watchGradeWindowDays",
     "watchGradeTvPercent",
     "watchGradeOtherViewers",
+    "watchGradeBandA",
+    "watchGradeBandB",
+    "watchGradeBandC",
+    "watchGradeBandD",
+    "watchGradeMinRequests",
     // Optional Discord routing. Blanking the notify channel is the documented
     // way back to DMs ("Leave blank to send DMs"), and a role/invite id can
     // otherwise only be replaced, never removed.
