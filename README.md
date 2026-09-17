@@ -178,6 +178,10 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 - A request is scored only after a grace period (30 days by default), and only when play history was already tracking the user's media servers when it was fulfilled, so nobody gets an F for watches that were never recorded. A movie counts once watched (half credit once a quarter of it was played); a show is scored per season and the best season counts; a request the requester skipped still counts once enough other people watched it (two by default); the same title requested on two instances counts once.
 - Settings → Media → **Watch Grades** tunes the grace period, the grade window, the share of a season's episodes needed, how many other viewers count, the letter cutoffs and the number of scored requests a letter needs — with a preview of how many users would land on each letter before saving. The feature can be switched off under Features → "Request watch grades", and is hidden while play history tracking is off. On the first start after upgrading, requests that were already approved or available are marked as approved once, so they count.
 
+**Changed**
+
+- Runtime image moved to Node 26.8.2 (Alpine 3.23). Bundled dependencies updated (Next.js 16.3.5, Prisma 7.10.0, Base UI 1.8.0).
+
 **Fixed**
 
 - Approving a brand-new show no longer fails with "no series found" while Sonarr's metadata still can't resolve it by TMDB id (observed a week after a premiere). The add now falls back to TMDB's own TVDB id for the show, and the download check, the issue flow and the arr-state debug endpoint find such a series the same way.
