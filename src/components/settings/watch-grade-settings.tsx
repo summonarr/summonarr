@@ -97,7 +97,7 @@ export function WatchGradeSettingsForm({
       </div>
 
       <div className="space-y-1.5">
-        <Label htmlFor="watch-grade-tv">TV episodes needed (%)</Label>
+        <Label htmlFor="watch-grade-tv">Episodes of a season needed (%)</Label>
         <Input
           id="watch-grade-tv"
           type="number"
@@ -109,7 +109,7 @@ export function WatchGradeSettingsForm({
           className="bg-zinc-800 border-zinc-700 text-sm w-32"
         />
         <p className="text-xs text-zinc-500">
-          Share of a show&apos;s regular-season episodes in the library that must be watched for full credit; fewer earns partial credit. Default {WATCH_GRADE_DEFAULTS.tvEpisodePercent}.
+          Share of a season&apos;s regular-season episodes in the library that must be watched for full credit; fewer earns partial credit. Each season is scored on its own and the best one counts, so a finished season keeps its credit as later seasons arrive. Default {WATCH_GRADE_DEFAULTS.tvEpisodePercent}.
         </p>
       </div>
 
@@ -126,14 +126,14 @@ export function WatchGradeSettingsForm({
           className="bg-zinc-800 border-zinc-700 text-sm w-32"
         />
         <p className="text-xs text-zinc-500">
-          A request the requester didn&apos;t watch still counts as watched once this many other people have watched it since it was requested. Each must meet the same bar as the requester (the Watched threshold for a movie, the episode share above for a show), and someone with both a Plex and a Jellyfin login counts once. 1–100, or 0 to turn it off. Default {WATCH_GRADE_DEFAULTS.otherViewers}.
+          A request the requester didn&apos;t watch still counts as watched once this many other people have watched it since it was requested. Each counts as play history recorded them — a movie marked Watched, or a season&apos;s episodes to the share above — and someone with both a Plex and a Jellyfin login counts once. 1–100, or 0 to turn it off. Default {WATCH_GRADE_DEFAULTS.otherViewers}.
         </p>
       </div>
 
       <div className="space-y-2 pt-2 border-t border-zinc-800">
         <h3 className="text-sm font-medium text-zinc-300 pt-2">How grades work</h3>
         <p className="text-xs text-zinc-500">
-          Each user is graded A–F on the share of their fulfilled requests they went on to watch: A 80%+, B 60%+, C 40%+, D 20%+, otherwise F, once at least three requests count. A movie counts when it reaches the play history Watched threshold (half credit if started), and any request counts once enough other people have watched it. Only plays after the request count, and requests fulfilled before play history began recording aren&apos;t graded. Grades are shown to admins only and never block a request.
+          Each user is graded A–F on the share of their fulfilled requests they went on to watch: A 80%+, B 60%+, C 40%+, D 20%+, otherwise F, once at least three requests count. A movie counts when it reaches the play history Watched threshold (half credit once a quarter of it is played), a show when the share of one season&apos;s episodes is watched, and any request counts once enough other people have watched it. The same title requested on two instances counts once. Only plays after the request count, and requests fulfilled before play history began recording aren&apos;t graded. Grades are shown to admins only and never block a request.
         </p>
       </div>
 

@@ -23,11 +23,18 @@
 //      query; a failing aggregate on a list page degrades to "no grades" instead
 //      of breaking the Users page or the request queue.
 //   5. THE ROUTE is MANAGE_USERS or MANAGE_REQUESTS, 404s an unknown user.
-//   6. OTHER VIEWERS ARE PEOPLE. Everyone else's plays are read without the
-//      requester's own identities, and each identity is keyed by the account
+//   6. OTHER VIEWERS ARE PEOPLE. Each audience identity is keyed by the account
 //      that owns it (resolveMediaServerUserOwners — the same branches), so one
-//      person's Plex and Jellyfin logins count once and a login an admin pinned
-//      away from the requester counts as someone else.
+//      person's Plex and Jellyfin logins count once, one Plex account seen on
+//      two servers counts once, and a login an admin pinned away from the
+//      requester counts as someone else. The requester's own logins never make
+//      a viewer — by construction, not by a filter: flagged plays of theirs give
+//      the request full credit, and (pin 7) full-credit requests are never read.
+//   7. THE AUDIENCE IS READ ONLY WHERE IT CAN MATTER — scored requests short of
+//      full credit — as ONE ROW PER IDENTITY AND SEASON built from play history's
+//      own watched/completed flags, never per episode. That is what keeps the
+//      Users page (a thousand accounts, a year of requests) from pulling every
+//      viewer × every episode of every popular show on each render.
 //
 // Harness: in-memory prisma stubs (shadowPrismaModel) with an op log, a real
 // signed session JWT over the bearer transport for the route (the
@@ -336,33 +343,44 @@ shadowPrismaClientMethod(prisma, "$queryRaw", async (sql: SqlArg) => {
   ops.push({ op: "$queryRaw", args: sql });
   if (sql.text.includes(`FROM "TVEpisodeCache"`)) {
     const ids = sql.values as number[];
-    const out: { tmdbId: number; episodes: number }[] = [];
+    const out: { tmdbId: number; seasonNumber: number; episodes: number }[] = [];
     for (const tmdbId of new Set(ids)) {
-      const distinct = new Set(
-        episodes.filter((e) => e.tmdbId === tmdbId && e.seasonNumber > 0).map((e) => `${e.seasonNumber}:${e.episodeNumber}`),
-      );
-      if (distinct.size > 0) out.push({ tmdbId, episodes: distinct.size });
+      const perSeason = new Map<number, Set<number>>();
+      for (const e of episodes) {
+        if (e.tmdbId !== tmdbId || e.seasonNumber <= 0) continue;
+        const set = perSeason.get(e.seasonNumber) ?? new Set<number>();
+        set.add(e.episodeNumber);
+        perSeason.set(e.seasonNumber, set);
+      }
+      for (const [seasonNumber, set] of perSeason) out.push({ tmdbId, seasonNumber, episodes: set.size });
     }
     return out;
   }
   if (sql.text.includes(`AS "msuId"`)) {
-    // The audience aggregate: every identity's plays of each request, since the request.
-    const groups = new Map<string, { requestId: string; msuId: string; seasonNumber: number | null; episodeNumber: number | null; anyWatched: boolean; playSeconds: number; durationSeconds: number }>();
+    // The audience aggregate: per (request, identity, season), from the stored
+    // watched/completed flags only — a movie's any-watched bit, a season's
+    // distinct watched episodes. Rows with nothing watched are returned as 0.
+    const groups = new Map<string, { requestId: string; msuId: string; seasonNumber: number | null; movie: boolean; anyWatched: boolean; episodes: Set<number> }>();
     for (const id of sql.values as string[]) {
       const r = requests.find((x) => x.id === id);
       if (!r) continue;
       for (const p of plays) {
         if (p.tmdbId !== r.tmdbId || p.mediaType !== r.mediaType) continue;
         if (p.startedAt.getTime() < r.createdAt.getTime()) continue;
-        const key = `${r.id}|${p.mediaServerUserId}|${p.seasonNumber}|${p.episodeNumber}`;
-        const g = groups.get(key) ?? { requestId: r.id, msuId: p.mediaServerUserId, seasonNumber: p.seasonNumber, episodeNumber: p.episodeNumber, anyWatched: false, playSeconds: 0, durationSeconds: 0 };
-        g.anyWatched ||= p.watched || p.completed;
-        g.playSeconds += p.playDuration;
-        g.durationSeconds = Math.max(g.durationSeconds, p.duration);
+        const key = `${r.id}|${p.mediaServerUserId}|${p.seasonNumber}`;
+        const g = groups.get(key) ?? { requestId: r.id, msuId: p.mediaServerUserId, seasonNumber: p.seasonNumber, movie: r.mediaType === "MOVIE", anyWatched: false, episodes: new Set<number>() };
+        const flagged = p.watched || p.completed;
+        g.anyWatched ||= flagged;
+        if (flagged && p.episodeNumber != null) g.episodes.add(p.episodeNumber);
         groups.set(key, g);
       }
     }
-    return [...groups.values()];
+    return [...groups.values()].map((g) => ({
+      requestId: g.requestId,
+      msuId: g.msuId,
+      seasonNumber: g.seasonNumber,
+      watched: g.movie ? (g.anyWatched ? 1 : 0) : g.episodes.size,
+    }));
   }
   if (sql.text.includes(`JOIN (VALUES`)) {
     if (failPlayAggregate) throw new Error("simulated aggregate failure");
@@ -511,15 +529,16 @@ test("parity: the batch resolver attributes exactly the rows the per-user resolv
   const owners = await resolveMediaServerUserOwners(msus.map((m) => m.id));
   for (const row of msus) {
     const claimants = ids.filter((id) => batch.get(id)!.linked.some((l) => l.id === row.id));
-    const owner = owners.get(row.id);
-    if (claimants.length === 0) assert.equal(owner, null, `${row.id} belongs to nobody`);
-    else if (row.userId && claimants.includes(row.userId)) assert.equal(owner, row.userId, `${row.id} → its FK account`);
-    else assert.ok(owner && claimants.includes(owner), `${row.id} → one of ${claimants.join(",")}`);
+    const owner = owners.get(row.id)!;
+    assert.deepEqual({ source: owner.source, sourceUserId: owner.sourceUserId }, { source: row.source, sourceUserId: row.sourceUserId });
+    if (claimants.length === 0) assert.equal(owner.userId, null, `${row.id} belongs to nobody`);
+    else if (row.userId && claimants.includes(row.userId)) assert.equal(owner.userId, row.userId, `${row.id} → its FK account`);
+    else assert.ok(owner.userId && claimants.includes(owner.userId), `${row.id} → one of ${claimants.join(",")}`);
   }
   // m-Z1 and m-C1 are each claimed twice (an FK and an unpinned subject): the FK wins.
-  assert.equal(owners.get("m-Z1"), "pinTarget");
-  assert.equal(owners.get("m-C1"), "fkClaimant");
-  assert.equal(owners.get("m-U1"), null, "an admin unlink belongs to nobody");
+  assert.equal(owners.get("m-Z1")!.userId, "pinTarget");
+  assert.equal(owners.get("m-C1")!.userId, "fkClaimant");
+  assert.equal(owners.get("m-U1")!.userId, null, "an admin unlink belongs to nobody");
 });
 
 // ═══ plays ═══════════════════════════════════════════════════════════════════
@@ -605,11 +624,12 @@ test("TV: library episodes are deduplicated across sources with specials exclude
   for (const e of [1, 2, 3]) play("m", tv, 50, { seasonNumber: 1, episodeNumber: e, playDuration: 1400, duration: 1400 });
 
   const v = (await computeWatchGrades(["u"])).grades.get("u")!.verdicts[0];
-  assert.deepEqual(v.episodes, { watched: 3, started: 0, library: 8, required: 4 });
+  assert.deepEqual(v.episodes, { season: 1, watched: 3, started: 0, library: 8, required: 4 });
   assert.equal(v.credit, 0.75);
   const sql = opsOf("$queryRaw").map((o) => o.args as SqlArg).find((s) => s.text.includes(`FROM "TVEpisodeCache"`))!;
-  assert.match(sql.text, /COUNT\(DISTINCT \("seasonNumber", "episodeNumber"\)\)/);
+  assert.match(sql.text, /COUNT\(DISTINCT "episodeNumber"\)/);
   assert.match(sql.text, /"seasonNumber" > 0/);
+  assert.match(sql.text, /GROUP BY "tmdbId", "seasonNumber"/);
 });
 
 // ═══ other viewers ═══════════════════════════════════════════════════════════
@@ -648,7 +668,7 @@ test("other viewers are PEOPLE: one account's two logins count once, a login wit
     { others: 2, byOthers: true, credit: 1 },
   );
   assert.equal(verdict(ownWatch.id).watch, "watched");
-  assert.equal(verdict(ownWatch.id).otherViewers, 1, "only b — u's own two logins are not other viewers");
+  assert.equal(verdict(ownWatch.id).otherViewers, null, "a watched request never has its audience read");
   assert.equal(grades.get("u")!.summary.byOthers, 1);
 });
 
@@ -668,7 +688,11 @@ test("other viewers: plays before the request don't count, and the audience SQL 
   const sql = opsOf("$queryRaw").map((o) => o.args as SqlArg).find((s) => s.text.includes(`AS "msuId"`))!;
   assert.match(sql.text, /h\."startedAt" >= r\."createdAt"/);
   assert.match(sql.text, /h\."mediaType" = r\."mediaType"/);
-  assert.match(sql.text, /GROUP BY r\."id", h\."mediaServerUserId", h\."seasonNumber", h\."episodeNumber"/);
+  // One row per identity and season, from the stored flags — never per episode,
+  // never from summed play time.
+  assert.match(sql.text, /GROUP BY r\."id", r\."mediaType", h\."mediaServerUserId", h\."seasonNumber"$/m);
+  assert.match(sql.text, /COUNT\(DISTINCT h\."episodeNumber"\) FILTER \(WHERE \(h\."watched" OR h\."completed"\)/);
+  assert.doesNotMatch(sql.text, /playDuration|h\."duration"|h\."episodeNumber" AS/);
   assert.doesNotMatch(sql.text, /manualUserLink|plexUserId|jellyfinUserId|"userId"/);
 });
 
@@ -685,13 +709,114 @@ test("other viewers: a login an admin pinned AWAY from the requester is someone 
   const r = request("u", 60);
   play("m-away", r, 55);
   play("m-x", r, 54);
-  play("m-to-u", r, 53, { watched: false, completed: false, playDuration: 900 }); // u's own: a start
+  play("m-to-u", r, 53, { watched: false, completed: false, playDuration: 1500 }); // u's own: a quarter of it
 
   const v = (await computeWatchGrades(["u"])).grades.get("u")!.verdicts[0];
   assert.equal(v.watch, "partial", "the pinned-to-u login is u's own watch");
   assert.equal(v.otherViewers, 2, "the pinned-away login and the stranger");
   assert.equal(v.watchedByOthers, true);
   assert.equal(v.credit, 1);
+});
+
+test("other viewers: one Plex account seen on two servers is ONE person, even with no Summonarr account", async () => {
+  historySince("plex", 400);
+  user("u", { plexUserId: "p-u" });
+  // The same plex.tv account has a row per server (unique on source+serverInstance+sourceUserId).
+  msu("m-x-home", { source: "plex", sourceUserId: "p-x" });
+  msu("m-x-remote", { source: "plex", sourceUserId: "p-x" });
+  msu("m-y", { source: "plex", sourceUserId: "p-y" });
+  const twoRowsOnePerson = request("u", 60);
+  play("m-x-home", twoRowsOnePerson, 55);
+  play("m-x-remote", twoRowsOnePerson, 54);
+  const twoPeople = request("u", 61);
+  play("m-x-home", twoPeople, 55);
+  play("m-y", twoPeople, 54);
+
+  const { grades } = await computeWatchGrades(["u"]);
+  const verdict = (id: string) => grades.get("u")!.verdicts.find((v) => v.requestId === id)!;
+  assert.deepEqual({ others: verdict(twoRowsOnePerson.id).otherViewers, byOthers: verdict(twoRowsOnePerson.id).watchedByOthers }, { others: 1, byOthers: false });
+  assert.deepEqual({ others: verdict(twoPeople.id).otherViewers, byOthers: verdict(twoPeople.id).watchedByOthers }, { others: 2, byOthers: true });
+});
+
+test("other viewers: a person's logins merge per season by MAX — the same episode twice is one, different episodes are not summed", async () => {
+  historySince("plex", 400);
+  user("u", { plexUserId: "p-u" });
+  user("a", { plexUserId: "p-a" });
+  msu("m-a-plex", { source: "plex", sourceUserId: "p-a" });
+  msu("m-a-jf", { source: "jellyfin", sourceUserId: "j-a", userId: "a" });
+  const ep = (e: number) => ({ seasonNumber: 1, episodeNumber: e, playDuration: 1400, duration: 1400 });
+  const seed = (tv: { tmdbId: number }) => {
+    for (let e = 1; e <= 8; e++) episodes.push({ source: "plex", tmdbId: tv.tmdbId, seasonNumber: 1, episodeNumber: e });
+  };
+
+  // 4 needed. Episodes 1–3 on Plex and 1–4 on Jellyfin: the overlap is one set of four.
+  const overlap = request("u", 60, { mediaType: "TV" });
+  seed(overlap);
+  for (const e of [1, 2, 3]) play("m-a-plex", overlap, 55, ep(e));
+  for (const e of [1, 2, 3, 4]) play("m-a-jf", overlap, 54, ep(e));
+  // Episodes 1–2 on Plex and 3–4 on Jellyfin: four distinct episodes, read as two —
+  // the conservative approximation, pinned so it is a choice and not a surprise.
+  const split = request("u", 61, { mediaType: "TV" });
+  seed(split);
+  for (const e of [1, 2]) play("m-a-plex", split, 55, ep(e));
+  for (const e of [3, 4]) play("m-a-jf", split, 54, ep(e));
+
+  setSettings({ ...TRACKING_ON, watchGradeOtherViewers: "1" });
+  const { grades } = await computeWatchGrades(["u"]);
+  const verdict = (id: string) => grades.get("u")!.verdicts.find((v) => v.requestId === id)!;
+  assert.equal(verdict(overlap.id).otherViewers, 1);
+  assert.equal(verdict(split.id).otherViewers, 0);
+});
+
+test("other viewers are read ONLY for scored requests short of full credit — never for grace, untracked or watched ones", async () => {
+  historySince("plex", 60);
+  user("u", { plexUserId: "p-u" });
+  msu("m-u", { source: "plex", sourceUserId: "p-u" });
+  msu("m-a", { source: "plex", sourceUserId: "p-a" });
+  msu("m-b", { source: "plex", sourceUserId: "p-b" });
+  const unwatched = request("u", 40);
+  const started = request("u", 41);
+  const watched = request("u", 42);
+  const inGrace = request("u", 5);
+  const untracked = request("u", 100); // fulfilled before Plex history began
+  play("m-u", started, 39, { watched: false, completed: false, playDuration: 1800, duration: 7200 });
+  play("m-u", watched, 39);
+  for (const r of [unwatched, started, watched, inGrace, untracked]) {
+    play("m-a", r, 4);
+    play("m-b", r, 3);
+  }
+
+  ops = [];
+  const { grades } = await computeWatchGrades(["u"]);
+  const audience = opsOf("$queryRaw").map((o) => o.args as SqlArg).filter((q) => q.text.includes(`AS "msuId"`));
+  assert.equal(audience.length, 1);
+  assert.deepEqual([...(audience[0].values as string[])].sort(), [started.id, unwatched.id].sort());
+  const verdict = (id: string) => grades.get("u")!.verdicts.find((v) => v.requestId === id)!;
+  assert.equal(verdict(unwatched.id).watchedByOthers, true);
+  assert.equal(verdict(started.id).watchedByOthers, true);
+  assert.equal(verdict(watched.id).otherViewers, null, "not read, so not counted — the request already has full credit");
+  assert.equal(verdict(inGrace.id).scoring, "grace");
+  assert.equal(verdict(untracked.id).scoring, "untracked");
+  // Owners are resolved only for identities with something watched on those requests —
+  // the requester's own login (a start on one, nothing on the other) isn't among them.
+  const ownerRead = opsOf("mediaServerUser.findMany").find((o) => "id" in (o.args as { where: object }).where)!;
+  assert.deepEqual([...new Set((ownerRead.args as { where: { id: { in: string[] } } }).where.id.in)].sort(), ["m-a", "m-b"]);
+});
+
+test("a title requested on two instances is graded once, from the earlier request", async () => {
+  historySince("plex", 400);
+  user("u", { plexUserId: "p-u" });
+  msu("m-u", { source: "plex", sourceUserId: "p-u" });
+  const hd = request("u", 60, { tmdbId: 777 });
+  const fourK = request("u", 20, { tmdbId: 777, createdAt: daysAgo(30) }); // later request, inside grace on its own
+  play("m-u", hd, 50);
+  const g = (await computeWatchGrades(["u"])).grades.get("u")!;
+  assert.equal(g.verdicts.length, 1);
+  assert.equal(g.verdicts[0].requestId, hd.id);
+  assert.equal(g.verdicts[0].duplicates, 1);
+  assert.equal(g.verdicts[0].watch, "watched");
+  assert.equal(g.summary.graded, 1);
+  void fourK;
 });
 
 test("watchGradeOtherViewers 0 turns other viewers off: no audience query, no owner reads, no credit", async () => {

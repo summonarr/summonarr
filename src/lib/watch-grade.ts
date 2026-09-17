@@ -20,21 +20,28 @@
 //   - A request fulfilled before play history covered the user's media servers
 //     is "untracked" and never scored: a watch from before tracking began is
 //     invisible, and reading that silence as "never watched" is a false F.
+//   - One title, one unit. The same title requested on more than one *arr
+//     instance (an HD and a 4K request) is folded into one, dated from the
+//     earliest request, so one watch or one miss is never counted twice.
 //   - Only plays that started at or after the request count. A title watched
 //     before it was requested (a re-request after removal, an HD copy watched
 //     before asking for 4K) is not evidence the REQUEST was used.
 //   - Movie: full credit when watched (a play flagged watched/completed, or the
 //     plays since the request adding up to the watched threshold — chunked
-//     viewing counts); half credit when meaningfully started; else zero.
-//   - TV: credit = episodes watched ÷ the required share of the show's REGULAR-
-//     season episodes in the library (specials excluded, as guardrail 14a does),
-//     capped at 1. A started-but-unfinished episode counts as half an episode.
+//     viewing counts); half credit once a quarter of it was played; else zero.
+//   - TV: scored per SEASON, and the best season counts. A season earns
+//     episodes watched ÷ the required share of that season's REGULAR-season
+//     episodes in the library (specials excluded, as guardrail 14a does), capped
+//     at 1; a started-but-unfinished episode counts as half an episode. Watching
+//     half of one season means the request was used, and a finished season's
+//     credit never decays as later seasons land.
 //   - A request the requester didn't watch still counts as WATCHED once enough
 //     OTHER people watched it since the request (otherViewers, default 2; 0 turns
-//     it off). Each of them must clear the same full-credit bar the requester
-//     would, a person with several media-server logins counts once, and the
-//     requester's own logins never count. It only ever raises the credit of a
-//     request: grace and coverage still decide whether a request is scored.
+//     it off). Others count as play history recorded them: a movie play flagged
+//     watched/completed, or watched episodes reaching the same season share. A
+//     person with several media-server logins counts once, and the requester's
+//     own logins never count. It only ever raises the credit of a request:
+//     grace and coverage still decide whether a request is scored.
 //   - A user with no linked media-server identity cannot be graded, and neither
 //     can one whose media servers are not being tracked — both say so explicitly
 //     rather than rendering an F for data that was never collected.
@@ -54,11 +61,14 @@ export const WATCH_GRADE_BANDS: ReadonlyArray<{ letter: WatchGradeLetter; min: n
 // still reported, but one unwatched film must not stamp a new requester an F.
 export const MIN_GRADED_REQUESTS = 3;
 
-// A play below the watched threshold still earns partial credit once it ran long
-// enough to be a real attempt rather than a mis-click: 5 minutes, or a quarter of
-// the runtime for anything shorter than 20 minutes.
-export const STARTED_MIN_SECONDS = 300;
+// A play below the watched threshold earns half credit once it was a real
+// attempt: a quarter of the runtime, and never under 15 minutes — half the
+// runtime for anything shorter than 30 minutes. A five-minute look at a feature
+// earns nothing; with a five-minute floor a requester who sampled every request
+// could never score below a C.
+export const STARTED_MIN_SECONDS = 900;
 export const STARTED_MIN_FRACTION = 0.25;
+export const STARTED_SHORT_FRACTION = 0.5;
 
 const DAY_MS = 86_400_000;
 
@@ -69,7 +79,7 @@ export interface WatchGradeSettings {
   graceDays: number;
   // Only requests fulfilled within this many days are graded. 0 = no limit.
   windowDays: number;
-  // Share of a show's library episodes that must be watched for full credit.
+  // Share of a season's library episodes that must be watched for full credit.
   tvEpisodePercent: number;
   // Other people who must have watched a request since it was made for it to
   // count as watched when the requester didn't. 0 = off.
@@ -125,6 +135,19 @@ export function watchGradeSettingError(key: string, value: string): string | nul
   return `"${key}" must be an integer between ${b.min} and ${b.max}${b.zero ? `, or 0 ${b.zero}` : ""}`;
 }
 
+// The one cross-field rule. A window no longer than the grace period scores
+// nothing, ever: every request is still inside its grace period when it leaves
+// the window. Checked on write against the merged (stored + incoming) values.
+export function watchGradePairError(settings: Pick<WatchGradeSettings, "graceDays" | "windowDays">): string | null {
+  if (settings.windowDays > 0 && settings.windowDays <= settings.graceDays) {
+    return (
+      `The grade window (${settings.windowDays} days) must be longer than the grace period ` +
+      `(${settings.graceDays} days), or 0 for no limit — otherwise no request can ever be scored`
+    );
+  }
+  return null;
+}
+
 // Read-side parse: a missing or out-of-range row falls back to the default rather
 // than to NaN or an unbounded window.
 export function parseWatchGradeSettings(raw: Record<string, string | null | undefined>): WatchGradeSettings {
@@ -153,7 +176,9 @@ export interface GradableRequest {
 }
 
 // The requester's plays of one requested title since the request, aggregated per
-// (season, episode) — movies arrive as a single (null, null) unit.
+// (season, episode) — movies arrive as a single (null, null) unit. Keyed by the
+// request that is graded: when a title was requested on several instances, the
+// earliest request's plays are the superset and are the ones read.
 export interface RequestPlayUnit {
   requestId: string;
   seasonNumber: number | null;
@@ -166,13 +191,19 @@ export interface RequestPlayUnit {
   durationSeconds: number;
 }
 
-// Another person's plays of a requested title since the request, per (season,
-// episode) exactly like RequestPlayUnit. Never the requester's own plays.
-export interface OtherViewerPlayUnit extends RequestPlayUnit {
+// What ONE other person watched of a requested title since the request, as play
+// history recorded it. Never the requester's own plays.
+export interface OtherViewerWatch {
+  requestId: string;
   // One key per PERSON: the account the media-server identity belongs to, or the
   // identity itself when it belongs to no account. An account's several logins
   // share one key, so they count once.
   viewer: string;
+  // null for a movie; the season for a show.
+  seasonNumber: number | null;
+  // Movie: 1 when any play was flagged watched/completed. TV: distinct episodes
+  // of this season flagged watched/completed.
+  watched: number;
 }
 
 export type WatchGradeIdentity =
@@ -187,10 +218,10 @@ export type WatchGradeIdentity =
 export interface GradeUserInput {
   requests: GradableRequest[];
   units: RequestPlayUnit[];
-  // Everyone else's plays of the same requests. Empty when the rule is off.
-  otherUnits: OtherViewerPlayUnit[];
-  // tmdbId → regular-season episodes in the library, for the TV requests.
-  libraryEpisodes: ReadonlyMap<number, number>;
+  // Everyone else's watches of the same requests. Empty when the rule is off.
+  otherWatches: OtherViewerWatch[];
+  // tmdbId → season → regular-season episodes in the library, for the TV requests.
+  libraryEpisodes: ReadonlyMap<number, ReadonlyMap<number, number>>;
   identity: WatchGradeIdentity;
   // Play-history "watched" threshold (percent), reused for summed plays.
   watchedThresholdPercent: number;
@@ -201,11 +232,14 @@ export interface GradeUserInput {
 export type WatchState = "watched" | "partial" | "unwatched";
 export type ScoringState = "scored" | "grace" | "untracked";
 
+// The season a show's credit comes from — the best one — and how far it got.
 export interface EpisodeProgress {
+  // null only when the show has no plays and no known library episodes.
+  season: number | null;
   watched: number;
   started: number;
-  // Regular-season episodes in the library. 0 = unknown, in which case one
-  // watched episode is enough.
+  // Regular-season episodes of that season in the library. 0 = unknown, in
+  // which case one watched episode is enough.
   library: number;
   required: number;
 }
@@ -219,11 +253,14 @@ export interface RequestWatchVerdict {
   posterPath: string | null;
   requestedAt: string;
   fulfilledAt: string;
+  // Further requests for the same title (other *arr instances) folded into this one.
+  duplicates: number;
   // The requester's OWN watch state; null when their watches can't be observed
   // at all (unlinked/untracked).
   watch: WatchState | null;
-  // Other people who watched it to the full-credit bar since the request. null
-  // when the rule is off or the requester's watches can't be observed.
+  // Other people who watched it since the request. Counted only where it can
+  // change the verdict — a scored request the requester didn't fully watch —
+  // and null everywhere else (rule off, unobservable, grace, untracked, watched).
   otherViewers: number | null;
   // Counts as watched because enough other people watched it, although the
   // requester didn't.
@@ -291,12 +328,19 @@ function unitWatched(u: RequestPlayUnit, watchedThresholdPercent: number): boole
   return u.durationSeconds > 0 && u.playSeconds * 100 >= u.durationSeconds * watchedThresholdPercent;
 }
 
+// Seconds of play before a unit counts as started (half credit). A quarter of the
+// runtime, but never under 15 minutes — or half the runtime, for anything shorter
+// than 30 minutes. 15 minutes flat when the runtime is unknown.
+export function startedFloorSeconds(durationSeconds: number): number {
+  if (durationSeconds <= 0) return STARTED_MIN_SECONDS;
+  return Math.max(
+    durationSeconds * STARTED_MIN_FRACTION,
+    Math.min(STARTED_MIN_SECONDS, durationSeconds * STARTED_SHORT_FRACTION),
+  );
+}
+
 function unitStarted(u: RequestPlayUnit): boolean {
-  const floor =
-    u.durationSeconds > 0
-      ? Math.min(STARTED_MIN_SECONDS, u.durationSeconds * STARTED_MIN_FRACTION)
-      : STARTED_MIN_SECONDS;
-  return u.playSeconds > 0 && u.playSeconds >= floor;
+  return u.playSeconds > 0 && u.playSeconds >= startedFloorSeconds(u.durationSeconds);
 }
 
 // Episodes needed for full credit. Integer ceil — a float `ceil(n * p / 100)`
@@ -304,6 +348,10 @@ function unitStarted(u: RequestPlayUnit): boolean {
 export function requiredEpisodes(libraryEpisodes: number, tvEpisodePercent: number): number {
   if (libraryEpisodes <= 0) return 1;
   return Math.max(1, Math.floor((libraryEpisodes * tvEpisodePercent + 99) / 100));
+}
+
+function librarySeason(input: GradeUserInput, tmdbId: number, season: number): number {
+  return Math.max(0, input.libraryEpisodes.get(tmdbId)?.get(season) ?? 0);
 }
 
 function creditFor(
@@ -318,39 +366,88 @@ function creditFor(
     return { credit: 0, episodes: null };
   }
 
-  let watched = 0;
-  let started = 0;
+  // Per season; the best one is the show's credit. Specials and plays with no
+  // episode identity don't count toward any season.
+  const played = new Map<number, { watched: number; started: number }>();
   for (const u of units) {
-    // Specials and plays with no episode identity don't count toward the show.
     if (u.seasonNumber == null || u.seasonNumber <= 0 || u.episodeNumber == null) continue;
-    if (unitWatched(u, threshold)) watched++;
-    else if (unitStarted(u)) started++;
+    const s = played.get(u.seasonNumber) ?? { watched: 0, started: 0 };
+    if (unitWatched(u, threshold)) s.watched++;
+    else if (unitStarted(u)) s.started++;
+    played.set(u.seasonNumber, s);
   }
-  const library = Math.max(0, input.libraryEpisodes.get(request.tmdbId) ?? 0);
-  const required = requiredEpisodes(library, input.settings.tvEpisodePercent);
-  const credit = Math.min(1, (watched + started / 2) / required);
-  return { credit, episodes: { watched, started, library, required } };
+  const seasons = new Set<number>([...played.keys(), ...(input.libraryEpisodes.get(request.tmdbId)?.keys() ?? [])]);
+  let best: EpisodeProgress | null = null;
+  let bestCredit = -1;
+  // Ascending, so an exact tie reports the earliest season.
+  for (const season of [...seasons].sort((a, b) => a - b)) {
+    const { watched, started } = played.get(season) ?? { watched: 0, started: 0 };
+    const library = librarySeason(input, request.tmdbId, season);
+    const required = requiredEpisodes(library, input.settings.tvEpisodePercent);
+    const credit = Math.min(1, (watched + started / 2) / required);
+    if (credit > bestCredit) {
+      bestCredit = credit;
+      best = { season, watched, started, library, required };
+    }
+  }
+  if (!best) return { credit: 0, episodes: { season: null, watched: 0, started: 0, library: 0, required: 1 } };
+  return { credit: bestCredit, episodes: best };
 }
 
-// How many OTHER people watched a request to the same full-credit bar the
-// requester is held to — creditFor itself, run over each person's plays.
-function viewersWhoWatched(request: GradableRequest, units: OtherViewerPlayUnit[], input: GradeUserInput): number {
-  const byViewer = new Map<string, OtherViewerPlayUnit[]>();
-  for (const u of units) {
-    const list = byViewer.get(u.viewer);
-    if (list) list.push(u);
-    else byViewer.set(u.viewer, [u]);
+// How many OTHER people watched a request: a movie play flagged watched, or a
+// season whose watched episodes reach the same share the requester needs. A
+// person's rows for one season are merged by max — the data layer already
+// merges across logins; this keeps the rule honest if it ever doesn't.
+function viewersWhoWatched(request: GradableRequest, watches: OtherViewerWatch[], input: GradeUserInput): number {
+  const byViewer = new Map<string, Map<number | null, number>>();
+  for (const w of watches) {
+    const seasons = byViewer.get(w.viewer) ?? new Map<number | null, number>();
+    seasons.set(w.seasonNumber, Math.max(seasons.get(w.seasonNumber) ?? 0, w.watched));
+    byViewer.set(w.viewer, seasons);
   }
-  let watched = 0;
-  for (const viewerUnits of byViewer.values()) {
-    if (creditFor(request, viewerUnits, input).credit >= 1) watched++;
+  let count = 0;
+  for (const seasons of byViewer.values()) {
+    let watched = false;
+    for (const [season, n] of seasons) {
+      if (request.mediaType === "MOVIE") {
+        if (n > 0) watched = true;
+      } else if (season != null && season > 0) {
+        const required = requiredEpisodes(librarySeason(input, request.tmdbId, season), input.settings.tvEpisodePercent);
+        if (n >= required) watched = true;
+      }
+    }
+    if (watched) count++;
   }
-  return watched;
+  return count;
 }
 
 function watchStateFor(credit: number): WatchState {
   if (credit >= 1) return "watched";
   return credit > 0 ? "partial" : "unwatched";
+}
+
+type FoldedRequest = GradableRequest & { duplicates: number };
+
+// One unit per title. The earliest request is kept (its plays-since-request set
+// is the superset), fulfilment is the FIRST time the title became available, and
+// the fold is counted so the breakdown can say so.
+function foldByTitle(requests: GradableRequest[]): FoldedRequest[] {
+  const byTitle = new Map<string, GradableRequest[]>();
+  for (const r of requests) {
+    const key = `${r.mediaType}:${r.tmdbId}`;
+    const list = byTitle.get(key);
+    if (list) list.push(r);
+    else byTitle.set(key, [r]);
+  }
+  const out: FoldedRequest[] = [];
+  for (const group of byTitle.values()) {
+    group.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const primary = group[0];
+    let fulfilledAt = primary.fulfilledAt;
+    for (const r of group) if (r.fulfilledAt < fulfilledAt) fulfilledAt = r.fulfilledAt;
+    out.push({ ...primary, fulfilledAt, duplicates: group.length - 1 });
+  }
+  return out;
 }
 
 export function gradeUser(input: GradeUserInput): UserWatchGrade {
@@ -367,52 +464,60 @@ export function gradeUser(input: GradeUserInput): UserWatchGrade {
     if (list) list.push(u);
     else unitsByRequest.set(u.requestId, [u]);
   }
-  const otherUnitsByRequest = new Map<string, OtherViewerPlayUnit[]>();
-  for (const u of input.otherUnits) {
-    const list = otherUnitsByRequest.get(u.requestId);
-    if (list) list.push(u);
-    else otherUnitsByRequest.set(u.requestId, [u]);
+  const otherWatchesByRequest = new Map<string, OtherViewerWatch[]>();
+  for (const w of input.otherWatches) {
+    const list = otherWatchesByRequest.get(w.requestId);
+    if (list) list.push(w);
+    else otherWatchesByRequest.set(w.requestId, [w]);
   }
 
-  const requests = input.requests
-    .filter((r) => windowStartMs === null || r.fulfilledAt.getTime() >= windowStartMs)
-    .sort((a, b) => b.fulfilledAt.getTime() - a.fulfilledAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const requests = foldByTitle(
+    input.requests.filter((r) => windowStartMs === null || r.fulfilledAt.getTime() >= windowStartMs),
+  ).sort((a, b) => b.fulfilledAt.getTime() - a.fulfilledAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
   const summary = emptyWatchGradeSummary();
   let creditSum = 0;
 
   const verdicts = requests.map((r): RequestWatchVerdict => {
     const fulfilledMs = r.fulfilledAt.getTime();
-    const own = observable
-      ? creditFor(r, unitsByRequest.get(r.id) ?? [], input)
-      : { credit: 0, episodes: null };
-    const watch = observable ? watchStateFor(own.credit) : null;
-    // The `> 0` guard is what makes 0 mean off: every count is >= 0.
-    const otherViewers =
-      observable && settings.otherViewers > 0 ? viewersWhoWatched(r, otherUnitsByRequest.get(r.id) ?? [], input) : null;
-    const watchedByOthers = watch !== "watched" && otherViewers !== null && otherViewers >= settings.otherViewers;
-    const credit = watchedByOthers ? 1 : own.credit;
-
     let scoring: ScoringState;
     let graceDaysLeft: number | null = null;
     if (!observable || coverageStartMs === null || fulfilledMs < coverageStartMs) {
       scoring = "untracked";
-      summary.untracked++;
     } else {
       const graceEndsMs = fulfilledMs + settings.graceDays * DAY_MS;
       if (nowMs < graceEndsMs) {
         scoring = "grace";
         graceDaysLeft = Math.ceil((graceEndsMs - nowMs) / DAY_MS);
-        summary.inGrace++;
       } else {
         scoring = "scored";
-        summary.graded++;
-        creditSum += credit;
-        if (watch === "watched") summary.watched++;
-        else if (watchedByOthers) summary.byOthers++;
-        else if (watch === "partial") summary.partial++;
-        else summary.unwatched++;
       }
+    }
+
+    const own = observable
+      ? creditFor(r, unitsByRequest.get(r.id) ?? [], input)
+      : { credit: 0, episodes: null };
+    const watch = observable ? watchStateFor(own.credit) : null;
+    // Other viewers are counted only where they can change the verdict: a scored
+    // request the requester didn't fully watch. The `> 0` guard is what makes 0
+    // mean off — every count is >= 0. (The data layer reads the audience for
+    // exactly this set, so anywhere else the count would be an artefact.)
+    const otherViewers =
+      observable && settings.otherViewers > 0 && scoring === "scored" && own.credit < 1
+        ? viewersWhoWatched(r, otherWatchesByRequest.get(r.id) ?? [], input)
+        : null;
+    const watchedByOthers = otherViewers !== null && otherViewers >= settings.otherViewers;
+    const credit = watchedByOthers ? 1 : own.credit;
+
+    if (scoring === "untracked") summary.untracked++;
+    else if (scoring === "grace") summary.inGrace++;
+    else {
+      summary.graded++;
+      creditSum += credit;
+      if (watch === "watched") summary.watched++;
+      else if (watchedByOthers) summary.byOthers++;
+      else if (watch === "partial") summary.partial++;
+      else summary.unwatched++;
     }
 
     return {
@@ -424,6 +529,7 @@ export function gradeUser(input: GradeUserInput): UserWatchGrade {
       posterPath: r.posterPath,
       requestedAt: r.createdAt.toISOString(),
       fulfilledAt: r.fulfilledAt.toISOString(),
+      duplicates: r.duplicates,
       watch,
       otherViewers,
       watchedByOthers,
@@ -454,6 +560,13 @@ export function gradeUser(input: GradeUserInput): UserWatchGrade {
 export function hasWatchGradeSignal(summary: WatchGradeSummary | null | undefined): summary is WatchGradeSummary {
   if (!summary) return false;
   return summary.letter !== null || summary.graded + summary.inGrace + summary.untracked > 0;
+}
+
+// "watched/scored" for the chip — the requests that earned full credit: the
+// requester's own watches plus the ones enough other people watched. Partial
+// credit moves the score, not this count; the tooltip has the split.
+export function watchGradeVolume(summary: WatchGradeSummary): string {
+  return `${summary.watched + summary.byOthers}/${summary.graded}`;
 }
 
 // One-line explanation for tooltips and the detail header. List surfaces don't

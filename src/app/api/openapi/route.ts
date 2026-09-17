@@ -1608,11 +1608,12 @@ const spec = {
           "history. Display-only: nothing reads the grade to gate requests. A request is scored only after its " +
           "grace period since fulfilment, and only when play history already covered the user's media servers " +
           "when it was fulfilled; plays count only from the moment of the request. A movie earns full credit when " +
-          "watched (half when meaningfully started); a show earns episodes watched ÷ the configured share of its " +
-          "regular-season library episodes. A request the user didn't watch still earns full credit once " +
-          "`settings.otherViewers` other people watched it to that same bar since the request (0 = off; one " +
-          "account's several media-server logins count once). `enabled: false` (with `reason`) when the feature " +
-          "flag or play history tracking is off.",
+          "watched (half once a quarter of it was played); a show is scored per season — episodes watched ÷ the " +
+          "configured share of that season's regular-season library episodes — and the best season counts. The " +
+          "same title requested on several *arr instances is folded into one unit (`duplicates`). A request the " +
+          "user didn't watch still earns full credit once `settings.otherViewers` other people watched it since " +
+          "the request, as play history recorded them (0 = off; one account's several media-server logins count " +
+          "once). `enabled: false` (with `reason`) when the feature flag or play history tracking is off.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         responses: {
           "200": {
@@ -1630,7 +1631,7 @@ const spec = {
                       properties: {
                         graceDays: { type: "integer" },
                         windowDays: { type: "integer", description: "0 = no limit" },
-                        tvEpisodePercent: { type: "integer" },
+                        tvEpisodePercent: { type: "integer", description: "Share of a season's library episodes for full credit" },
                         otherViewers: { type: "integer", description: "0 = off" },
                         minGradedRequests: { type: "integer" },
                         watchedThresholdPercent: { type: "integer" },
@@ -1666,8 +1667,9 @@ const spec = {
                           posterPath: { type: "string", nullable: true },
                           requestedAt: { type: "string", format: "date-time" },
                           fulfilledAt: { type: "string", format: "date-time" },
+                          duplicates: { type: "integer", description: "Further requests for the same title (other instances) folded into this one" },
                           watch: { type: "string", nullable: true, enum: ["watched", "partial", "unwatched"], description: "The requester's own watch state" },
-                          otherViewers: { type: "integer", nullable: true, description: "Other people who watched it since the request; null when the rule is off or the requester can't be observed" },
+                          otherViewers: { type: "integer", nullable: true, description: "Other people who watched it since the request; counted only for a scored request the requester didn't fully watch, null otherwise" },
                           watchedByOthers: { type: "boolean" },
                           credit: { type: "number", description: "0–1; 1 when watchedByOthers" },
                           scoring: { type: "string", enum: ["scored", "grace", "untracked"] },
@@ -1675,10 +1677,12 @@ const spec = {
                           episodes: {
                             type: "object",
                             nullable: true,
+                            description: "The best season — the one the credit comes from",
                             properties: {
+                              season: { type: "integer", nullable: true },
                               watched: { type: "integer" },
                               started: { type: "integer" },
-                              library: { type: "integer", description: "0 = unknown" },
+                              library: { type: "integer", description: "Episodes of that season in the library; 0 = unknown" },
                               required: { type: "integer" },
                             },
                           },

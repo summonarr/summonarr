@@ -8,6 +8,7 @@ import { useModalA11y } from "@/hooks/use-modal-a11y";
 import {
   describeWatchGrade,
   hasWatchGradeSignal,
+  watchGradeVolume,
   WATCH_GRADE_BANDS,
   type RequestWatchVerdict,
   type WatchGradeDetail,
@@ -44,7 +45,7 @@ export function WatchGradeChip({
   userId: string;
   userLabel: string;
   summary: WatchGradeSummary | null | undefined;
-  // Letter only (the request queue); the Users page also shows the score.
+  // Letter and volume (the request queue); the Users page also shows the score.
   compact?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -52,13 +53,16 @@ export function WatchGradeChip({
   if (!hasWatchGradeSignal(summary)) return null;
 
   const letter = summary.letter;
+  // "watched/scored" rides along whenever anything was scored, so a letter from
+  // three requests and one from sixty read differently at a glance.
+  const volume = summary.graded > 0 ? ` · ${watchGradeVolume(summary)}` : "";
   const text = letter
     ? compact
-      ? `Watch ${letter}`
-      : `Watch grade ${letter} · ${summary.score}%`
+      ? `Watch ${letter}${volume}`
+      : `Watch grade ${letter} · ${summary.score}%${volume}`
     : compact
-      ? "Watch —"
-      : "Watch grade —";
+      ? `Watch —${volume}`
+      : `Watch grade —${volume}`;
   const description = describeWatchGrade(summary);
 
   return (
@@ -96,25 +100,33 @@ function matchesFilter(v: RequestWatchVerdict, filter: Filter): boolean {
   }
 }
 
+// Only ever set on a scored request the requester didn't fully watch.
 function othersText(v: RequestWatchVerdict): string {
   if (!v.otherViewers) return "";
-  const others = `${v.otherViewers} other${v.otherViewers === 1 ? "" : "s"}`;
-  return v.watch === "watched" ? ` · also watched by ${others}` : ` · watched by ${others}`;
+  return ` · watched by ${v.otherViewers} other${v.otherViewers === 1 ? "" : "s"}`;
+}
+
+function duplicatesText(v: RequestWatchVerdict): string {
+  if (v.duplicates <= 0) return "";
+  return ` · also requested on ${v.duplicates} other instance${v.duplicates === 1 ? "" : "s"}`;
 }
 
 function progressText(v: RequestWatchVerdict): string {
   if (v.watch === null) return "Watches can't be tracked";
+  const tail = othersText(v) + duplicatesText(v);
   if (v.episodes) {
     const e = v.episodes;
     const started = e.started > 0 ? `, ${e.started} started` : "";
+    // The best season is what the credit comes from.
+    const season = e.season !== null ? `S${e.season}: ` : "";
     return (
       (e.library > 0
-        ? `${e.watched} of ${e.library} episodes watched${started} · ${e.required} needed`
-        : `${e.watched} episode${e.watched === 1 ? "" : "s"} watched${started} · episode count unknown`) + othersText(v)
+        ? `${season}${e.watched} of ${e.library} episodes watched${started} · ${e.required} needed`
+        : `${season}${e.watched} episode${e.watched === 1 ? "" : "s"} watched${started} · episode count unknown`) + tail
     );
   }
-  if (v.watch === "watched") return `Watched${othersText(v)}`;
-  return (v.watch === "partial" ? "Started, not finished" : "Not played since the request") + othersText(v);
+  if (v.watch === "watched") return `Watched${tail}`;
+  return (v.watch === "partial" ? "Started, not finished" : "Not played since the request") + tail;
 }
 
 function StateChip({ v }: { v: RequestWatchVerdict }) {
@@ -275,10 +287,10 @@ export function WatchGradeModal({
             <p className="text-[11px] leading-relaxed text-zinc-500 mb-3">
               Requests fulfilled {settings.windowDays > 0 ? `in the last ${settings.windowDays} days` : "at any time"} count{" "}
               {settings.graceDays} days after they became available. A movie counts once it&apos;s{" "}
-              {settings.watchedThresholdPercent}% played (half credit if started); a show once{" "}
-              {settings.tvEpisodePercent}% of its episodes are watched.{" "}
+              {settings.watchedThresholdPercent}% played (half credit once a quarter of it is played); a show once{" "}
+              {settings.tvEpisodePercent}% of one season&apos;s episodes are watched — the best season counts.{" "}
               {settings.otherViewers > 0
-                ? `A request also counts as watched once ${settings.otherViewers} other ${settings.otherViewers === 1 ? "person has" : "people have"} watched it. `
+                ? `A request the requester skipped also counts once ${settings.otherViewers} other ${settings.otherViewers === 1 ? "person has" : "people have"} watched it. `
                 : ""}
               Grades need{" "}
               {settings.minGradedRequests}+ counted requests —{" "}

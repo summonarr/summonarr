@@ -242,16 +242,25 @@ export async function resolveAccountMediaIdentities(
   return out;
 }
 
+export interface MediaServerUserOwner {
+  // The account the identity belongs to; null when none does.
+  userId: string | null;
+  // The provider ids ride along so an unowned identity can still be keyed as a
+  // PERSON: one Plex account seen on two servers is two rows with one sourceUserId.
+  source: string;
+  sourceUserId: string;
+}
+
 // The reverse lookup: which account owns each media-server identity, by the same
 // linkedIdentityBranches — for surfaces that count PEOPLE in someone else's
 // audience (the watch grade's other viewers), where an account's Plex and
-// Jellyfin logins must count once. null = the identity belongs to no account.
+// Jellyfin logins must count once.
 //
 // When two accounts' branches match one row (an FK link to one, an unpinned
 // subject match to another), the FK owner wins: the link on the row is what the
 // poller or an admin last decided.
-export async function resolveMediaServerUserOwners(msuIds: string[]): Promise<Map<string, string | null>> {
-  const out = new Map<string, string | null>();
+export async function resolveMediaServerUserOwners(msuIds: string[]): Promise<Map<string, MediaServerUserOwner>> {
+  const out = new Map<string, MediaServerUserOwner>();
   const ids = [...new Set(msuIds)];
   if (ids.length === 0) return out;
 
@@ -275,7 +284,7 @@ export async function resolveMediaServerUserOwners(msuIds: string[]): Promise<Ma
   for (const row of rows) {
     const owners = users.filter((u) => linkedIdentityBranches(u).some((b) => branchMatches(row, b)));
     const owner = owners.find((u) => u.id === row.userId) ?? owners[0];
-    out.set(row.id, owner?.id ?? null);
+    out.set(row.id, { userId: owner?.id ?? null, source: row.source, sourceUserId: row.sourceUserId });
   }
   return out;
 }
