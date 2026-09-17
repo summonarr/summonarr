@@ -287,7 +287,10 @@ test("with MDBList quota-locked, both miss branches still leave stale OMDB rows 
   const blockingItems = staleOmdbTitles(1200);
   await attachRatingsUnified(blockingItems, { blocking: true, deferToAfter: false });
   assertBoundedRefresh("locked, blocking");
-  assert.ok(!fetchHosts.includes("api.mdblist.com"), "a locked MDBList is not called");
+  // Equality via some(): fetchHosts holds hostnames, so includes() was already an
+  // exact match, but CodeQL reads `.includes("api.mdblist.com")` as a substring
+  // host check (js/incomplete-url-substring-sanitization) and fails the gate.
+  assert.ok(!fetchHosts.some((h) => h === "api.mdblist.com"), "a locked MDBList is not called");
 
   cacheRows.clear();
   fetchHosts.length = 0;
