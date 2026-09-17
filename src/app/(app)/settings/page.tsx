@@ -40,9 +40,12 @@ const TAB_SECTIONS: Record<TabId, SettingsNavItem[]> = {
     { id: "jellyfin",         label: "Jellyfin",           group: "Media Servers" },
     { id: "media-instances",  label: "Extra Servers",      group: "Media Servers" },
     { id: "play-history",     label: "Play History",       group: "Media Servers" },
+    { id: "watch-grades",     label: "Watch Grades",       group: "Media Servers" },
     { id: "library-matching", label: "Library Matching",   group: "Media Servers" },
     { id: "radarr",           label: "Radarr",             group: "Automation" },
+    { id: "radarr4k",         label: "Radarr 4K",          group: "Automation" },
     { id: "sonarr",           label: "Sonarr",             group: "Automation" },
+    { id: "sonarr4k",         label: "Sonarr 4K",          group: "Automation" },
     { id: "arr-instances",    label: "Extra Instances",    group: "Automation" },
   ],
   notifications: [
@@ -52,6 +55,7 @@ const TAB_SECTIONS: Record<TabId, SettingsNavItem[]> = {
   ],
   integrations: [
     { id: "external-ratings", label: "External Ratings",   group: "Integrations" },
+    { id: "ip-geolocation",   label: "IP Geolocation",     group: "Integrations" },
     { id: "webhooks",         label: "Webhooks",           group: "Integrations" },
   ],
   features: [],
