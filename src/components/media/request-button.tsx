@@ -17,6 +17,12 @@ import {
 } from "@/components/icons";
 import Link from "next/link";
 import { withBasePath } from "@/lib/base-path";
+import {
+  DetailActionButton,
+  DetailActionStatus,
+  DETAIL_ACTION_CLASS,
+  detailActionStyle,
+} from "./detail-action-button";
 
 type State =
   | "idle"
@@ -84,42 +90,6 @@ export function onBehalfMessage(result: string | undefined, created: number | un
   }
   return created ? ON_BEHALF_MESSAGES.created : "Already requested or available for that user";
 }
-
-const btnBase: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  gap: 6,
-  padding: "6px 14px",
-  height: 34,
-  borderRadius: 6,
-  fontSize: 13,
-  fontWeight: 500,
-  transition: "background 120ms var(--ds-ease), border-color 120ms var(--ds-ease)",
-  cursor: "pointer",
-  whiteSpace: "nowrap",
-};
-
-const primaryStyle: React.CSSProperties = {
-  ...btnBase,
-  background: "var(--ds-accent)",
-  color: "var(--ds-accent-fg)",
-  border: "1px solid transparent",
-};
-
-const secondaryStyle: React.CSSProperties = {
-  ...btnBase,
-  background: "var(--ds-bg-2)",
-  color: "var(--ds-fg)",
-  border: "1px solid var(--ds-border)",
-};
-
-const ghostStyle: React.CSSProperties = {
-  ...btnBase,
-  background: "transparent",
-  color: "var(--ds-fg-muted)",
-  border: "1px solid var(--ds-border)",
-};
 
 // Primary HD request CTA on movie/TV detail + cards: handles the confirm/note/
 // on-behalf flows and reflects availability, pending, and already-requested states.
@@ -240,7 +210,7 @@ export function RequestButton({
   // Only the viewer's OWN request replaces the CTA. A title queued by someone
   // else (arrPending) stays requestable: the server mirrors the approved status
   // so this user is tracked for the "now available" notification. The queue
-  // state is still shown by the "Approved — In Queue" indicator above.
+  // state is still shown by the "Queued" indicator above.
   const showViewRequest = isDone;
   const label = mediaType === "MOVIE" ? "Movie" : "TV Show";
 
@@ -297,20 +267,15 @@ export function RequestButton({
           style={{ gap: 6, fontSize: 13, color: "var(--ds-warning)" }}
         >
           <Clock style={{ width: 14, height: 14 }} />
-          Approved — In Queue
+          Queued
         </div>
       )}
 
       {showViewRequest && (
         <Link
           href="/requests"
-          style={{
-            ...btnBase,
-            background: "var(--ds-accent-soft)",
-            color: "var(--ds-accent)",
-            border: "1px solid var(--ds-accent-ring)",
-            width: "fit-content",
-          }}
+          className={DETAIL_ACTION_CLASS}
+          style={{ ...detailActionStyle("accent-soft"), width: "fit-content" }}
         >
           <Check style={{ width: 14, height: 14 }} />
           View Request
@@ -319,22 +284,10 @@ export function RequestButton({
       )}
 
       {!isAvailable && !showViewRequest && blacklisted && (
-        <div
-          className="flex items-center"
-          style={{
-            gap: 6,
-            padding: "8px 12px",
-            borderRadius: 8,
-            border: "1px solid var(--ds-border)",
-            background: "var(--ds-bg-2)",
-            color: "var(--ds-fg-muted)",
-            fontSize: 13,
-            width: "fit-content",
-          }}
-        >
+        <DetailActionStatus variant="muted" style={{ width: "fit-content" }}>
           <Ban style={{ width: 14, height: 14 }} />
           Not available to request
-        </div>
+        </DetailActionStatus>
       )}
 
       {!isAvailable && !showViewRequest && !blacklisted && (
@@ -362,18 +315,14 @@ export function RequestButton({
               </div>
               {profileSelect}
               <div className="flex items-center gap-2">
-                <button type="button" onClick={submitRequest} style={primaryStyle}>
+                <DetailActionButton variant="primary" onClick={submitRequest}>
                   <Check style={{ width: 14, height: 14 }} />
                   Confirm
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setState("idle")}
-                  style={ghostStyle}
-                >
+                </DetailActionButton>
+                <DetailActionButton variant="ghost" onClick={() => setState("idle")}>
                   <X style={{ width: 14, height: 14 }} />
                   Cancel
-                </button>
+                </DetailActionButton>
               </div>
             </div>
           )}
@@ -399,21 +348,20 @@ export function RequestButton({
               />
               {profileSelect}
               <div className="flex items-center gap-2">
-                <button type="button" onClick={submitRequest} style={primaryStyle}>
+                <DetailActionButton variant="primary" onClick={submitRequest}>
                   <Plus style={{ width: 14, height: 14 }} />
                   Request {label}
-                </button>
-                <button
-                  type="button"
+                </DetailActionButton>
+                <DetailActionButton
+                  variant="ghost"
                   onClick={() => {
                     setState("idle");
                     setNote("");
                   }}
-                  style={ghostStyle}
                 >
                   <X style={{ width: 14, height: 14 }} />
                   Cancel
-                </button>
+                </DetailActionButton>
               </div>
               <p
                 className="ds-mono"
@@ -452,31 +400,30 @@ export function RequestButton({
                 ))}
               </select>
               <div className="flex items-center gap-2">
-                <button
-                  type="button"
+                <DetailActionButton
+                  variant="primary"
                   onClick={submitOnBehalf}
                   disabled={!obUserId || obSubmitting}
-                  style={{ ...primaryStyle, opacity: !obUserId || obSubmitting ? 0.7 : 1 }}
+                  busy={obSubmitting}
                 >
                   {obSubmitting ? (
                     <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
                   ) : (
                     <Plus style={{ width: 14, height: 14 }} />
                   )}
-                  Request for user
-                </button>
-                <button
-                  type="button"
+                  Request for User
+                </DetailActionButton>
+                <DetailActionButton
+                  variant="ghost"
                   onClick={() => {
                     setState("idle");
                     setObUserId("");
                     setObMsg("");
                   }}
-                  style={ghostStyle}
                 >
                   <X style={{ width: 14, height: 14 }} />
                   Cancel
-                </button>
+                </DetailActionButton>
               </div>
               {obMsg && (
                 <p className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", margin: 0 }}>
@@ -488,15 +435,11 @@ export function RequestButton({
 
           {state !== "note" && state !== "confirm" && state !== "onbehalf" && (
             <div className="flex items-center gap-2 flex-wrap">
-              <button
-                type="button"
+              <DetailActionButton
+                variant="primary"
                 onClick={() => { loadProfiles(); setState("confirm"); }}
                 disabled={state === "loading"}
-                style={{
-                  ...primaryStyle,
-                  opacity: state === "loading" ? 0.7 : 1,
-                  cursor: state === "loading" ? "progress" : "pointer",
-                }}
+                busy={state === "loading"}
               >
                 {state === "loading" ? (
                   <Loader2
@@ -506,30 +449,28 @@ export function RequestButton({
                 ) : (
                   <Plus style={{ width: 14, height: 14 }} />
                 )}
-                {state === "loading" ? "Submitting..." : `Request ${label}`}
-              </button>
+                {state === "loading" ? "Submitting…" : `Request ${label}`}
+              </DetailActionButton>
 
               {(state === "idle" || state === "error") && (
                 <>
-                  <button
-                    type="button"
+                  <DetailActionButton
+                    variant="secondary"
                     onClick={() => { loadProfiles(); setState("note"); }}
                     title="Add a note to your request"
-                    style={secondaryStyle}
                   >
                     <MessageSquare style={{ width: 14, height: 14 }} />
-                    Add note
-                  </button>
+                    Add Note
+                  </DetailActionButton>
                   {canRequestOnBehalf && (
-                    <button
-                      type="button"
+                    <DetailActionButton
+                      variant="ghost"
                       onClick={openOnBehalf}
                       title="Request for another user"
-                      style={ghostStyle}
                     >
                       <Plus style={{ width: 14, height: 14 }} />
-                      Request for user…
-                    </button>
+                      Request for User…
+                    </DetailActionButton>
                   )}
                 </>
               )}

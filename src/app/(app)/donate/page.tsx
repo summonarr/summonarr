@@ -110,78 +110,24 @@ export default async function DonatePage() {
             Support Us
           </span>
         }
-        subtitle="If you enjoy using this service, consider leaving a donation. Contributions help cover ongoing hosting costs and development time."
+        subtitle="If you enjoy using this service, consider leaving a donation — it helps cover hosting costs and development time"
       />
 
-      {methods.length === 0 ? (
-        <p
-          className="ds-mono"
-          style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
-        >
-          No donation methods have been configured yet.
-        </p>
-      ) : (
-        <div className="flex flex-col" style={{ gap: 10 }}>
-          {methods.map((m) => {
-            const resolved = m.href(m.value);
-            if (m.noLink || !resolved) {
-              return (
-                <div
-                  key={m.key}
-                  style={{
-                    padding: 18,
-                    background: "var(--ds-bg-2)",
-                    border: "1px solid var(--ds-border)",
-                    borderRadius: 10,
-                  }}
-                >
-                  <div className="flex items-center" style={{ marginBottom: 10 }}>
-                    <span
-                      className="font-semibold inline-flex"
-                      style={{
-                        padding: "3px 12px",
-                        borderRadius: 999,
-                        fontSize: 12,
-                        background: m.pillBg,
-                        color: m.pillColor,
-                      }}
-                    >
-                      {m.label}
-                    </span>
-                  </div>
-                  <p
-                    className="ds-mono"
-                    style={{
-                      fontSize: 10.5,
-                      color: "var(--ds-fg-subtle)",
-                      margin: "0 0 4px",
-                    }}
-                  >
-                    {m.hint}
-                  </p>
-                  <p
-                    className="ds-mono"
-                    style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0 }}
-                  >
-                    {m.value}
-                  </p>
-                </div>
-              );
-            }
+      <div className="flex flex-col" style={{ gap: 10 }}>
+        {methods.map((m) => {
+          const resolved = m.href(m.value);
+          if (m.noLink || !resolved) {
             return (
-              <a
+              <div
                 key={m.key}
-                href={resolved}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="group flex items-center justify-between transition-colors bg-[var(--ds-bg-2)] border border-[var(--ds-border)] hover:bg-[var(--ds-bg-3)] hover:border-[var(--ds-border-strong)]"
                 style={{
                   padding: 18,
+                  background: "var(--ds-bg-2)",
+                  border: "1px solid var(--ds-border)",
                   borderRadius: 10,
-                  color: "var(--ds-fg)",
                 }}
               >
-                <div>
+                <div className="flex items-center" style={{ marginBottom: 10 }}>
                   <span
                     className="font-semibold inline-flex"
                     style={{
@@ -194,30 +140,74 @@ export default async function DonatePage() {
                   >
                     {m.label}
                   </span>
-                  <p
-                    className="ds-mono"
-                    style={{
-                      fontSize: 10.5,
-                      color: "var(--ds-fg-subtle)",
-                      margin: "12px 0 0",
-                    }}
-                  >
-                    {m.hint}
-                  </p>
                 </div>
-                <ExternalLink
-                  className="shrink-0 transition-colors"
+                <p
+                  className="ds-mono"
                   style={{
-                    width: 14,
-                    height: 14,
+                    fontSize: 10.5,
                     color: "var(--ds-fg-subtle)",
+                    margin: "0 0 4px",
                   }}
-                />
-              </a>
+                >
+                  {m.hint}
+                </p>
+                <p
+                  className="ds-mono"
+                  style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0 }}
+                >
+                  {m.value}
+                </p>
+              </div>
             );
-          })}
-        </div>
-      )}
+          }
+          return (
+            <a
+              key={m.key}
+              href={resolved}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="group flex items-center justify-between transition-colors bg-[var(--ds-bg-2)] border border-[var(--ds-border)] hover:bg-[var(--ds-bg-3)] hover:border-[var(--ds-border-strong)]"
+              style={{
+                padding: 18,
+                borderRadius: 10,
+                color: "var(--ds-fg)",
+              }}
+            >
+              <div>
+                <span
+                  className="font-semibold inline-flex"
+                  style={{
+                    padding: "3px 12px",
+                    borderRadius: 999,
+                    fontSize: 12,
+                    background: m.pillBg,
+                    color: m.pillColor,
+                  }}
+                >
+                  {m.label}
+                </span>
+                <p
+                  className="ds-mono"
+                  style={{
+                    fontSize: 10.5,
+                    color: "var(--ds-fg-subtle)",
+                    margin: "12px 0 0",
+                  }}
+                >
+                  {m.hint}
+                </p>
+              </div>
+              <ExternalLink
+                className="shrink-0 transition-colors text-[var(--ds-fg-subtle)] group-hover:text-[var(--ds-fg)]"
+                style={{
+                  width: 14,
+                  height: 14,
+                }}
+              />
+            </a>
+          );
+        })}
+      </div>
     </div>
   );
 }

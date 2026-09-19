@@ -21,7 +21,8 @@ import { getUserRecommendations } from "@/lib/recommendations";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
-import { PageHeader } from "@/components/ui/design";
+import { PageHeader, EmptyState } from "@/components/ui/design";
+import { AlertTriangle } from "@/components/icons";
 
 const RAIL_SIZE = 14;
 const RAIL_OVERFETCH = 20;
@@ -183,7 +184,7 @@ export default async function DiscoverPage({
 
       <PageHeader
         title="Discover"
-        subtitle="Trending this week"
+        subtitle="What’s popular on TMDB right now"
         right={
           <Suspense>
             <HideAvailableToggle active={hideAvailable} />
@@ -191,39 +192,47 @@ export default async function DiscoverPage({
         }
       />
 
-      {trendingItems.length === 0 ? (
-        <div
-          className="ds-mono"
-          style={{ color: "var(--ds-fg-subtle)", fontSize: 12, marginBottom: 40 }}
-        >
-          No results — set TMDB_READ_TOKEN in .env.local to see trending content.
+      {/* Gated on the RAW trending list, not the projected one: with Hide
+          Available on, an all-available week projects to nothing and must read
+          as that (the row below says so), not as a missing token. getTrending
+          swallows an outage into [] as well, so the two are one message here. */}
+      {trending.length === 0 ? (
+        <div style={{ marginBottom: 36 }}>
+          <EmptyState
+            icon={AlertTriangle}
+            title="TMDB token not configured"
+            description="Set TMDB_READ_TOKEN in your environment to enable discovery."
+          />
         </div>
       ) : (
         <>
-          <div className="ds-discover-hero-pair">
-            {featuredMovie && (
-              <DiscoverHero
-                media={featuredMovie}
-                label="TRENDING MOVIE"
-                showPlex={showPlex}
-                showJellyfin={showJellyfin}
-              />
-            )}
-            {featuredTV && (
-              <DiscoverHero
-                media={featuredTV}
-                label="TRENDING TV"
-                showPlex={showPlex}
-                showJellyfin={showJellyfin}
-              />
-            )}
-          </div>
+          {(featuredMovie || featuredTV) && (
+            <div className="ds-discover-hero-pair">
+              {featuredMovie && (
+                <DiscoverHero
+                  media={featuredMovie}
+                  label="Trending movie"
+                  showPlex={showPlex}
+                  showJellyfin={showJellyfin}
+                />
+              )}
+              {featuredTV && (
+                <DiscoverHero
+                  media={featuredTV}
+                  label="Trending TV"
+                  showPlex={showPlex}
+                  showJellyfin={showJellyfin}
+                />
+              )}
+            </div>
+          )}
           <DiscoverRow
             title="Trending this week"
             subtitle={`${trendingRest.length} results`}
             items={trendingRest}
             showPlex={showPlex}
             showJellyfin={showJellyfin}
+            hideAvailable={hideAvailable}
           />
         </>
       )}
@@ -237,6 +246,7 @@ export default async function DiscoverPage({
           items={rail.items}
           showPlex={showPlex}
           showJellyfin={showJellyfin}
+          hideAvailable={hideAvailable}
         />
       ))}
     </div>

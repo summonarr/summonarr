@@ -462,7 +462,7 @@ export function ActivityRecentPlays({
                                   fontSize: 9.5,
                                   padding: "1px 5px",
                                   borderRadius: 999,
-                                  background: "oklch(1 0 0 / 0.06)",
+                                  background: "color-mix(in oklab, var(--ds-fg) 6%, transparent)",
                                   color: sourceDotColor(p.source),
                                   letterSpacing: "0.04em",
                                   flexShrink: 0,

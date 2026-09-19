@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Plus, Check, Loader2 } from "@/components/icons";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
+import { DetailActionButton } from "./detail-action-button";
 
 // Mirrors MAX_ITEMS in src/app/api/requests/bulk/route.ts. The route answers
 // 400 "Too many items" to an oversized batch BEFORE parsing a single item, so
@@ -79,27 +80,23 @@ export function CollectionRequestAllButton({
 
   return (
     <div className="flex items-center gap-2">
-      <button
-        type="button"
+      {/* sm (32px): it sits in the collection heading row, not the action row. */}
+      <DetailActionButton
+        variant={state === "done" ? "accent-soft" : "primary"}
+        size="sm"
         onClick={requestAll}
         disabled={state === "loading" || state === "done"}
-        className="inline-flex items-center gap-1.5 rounded-md px-3 h-8 text-xs font-medium transition-colors disabled:opacity-70"
-        style={{
-          background: state === "done" ? "var(--ds-accent-soft)" : "var(--ds-accent)",
-          color: state === "done" ? "var(--ds-accent)" : "var(--ds-accent-fg)",
-          border: "1px solid transparent",
-          cursor: state === "loading" ? "progress" : state === "done" ? "default" : "pointer",
-        }}
+        busy={state === "loading"}
       >
         {state === "loading" ? (
-          <Loader2 className="animate-spin" style={{ width: 13, height: 13 }} />
+          <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
         ) : state === "done" ? (
-          <Check style={{ width: 13, height: 13 }} />
+          <Check style={{ width: 14, height: 14 }} />
         ) : (
-          <Plus style={{ width: 13, height: 13 }} />
+          <Plus style={{ width: 14, height: 14 }} />
         )}
-        {state === "done" ? "Requested" : `Request all (${missing.length})`}
-      </button>
+        {state === "done" ? "Requested" : `Request All (${missing.length})`}
+      </DetailActionButton>
       {(state === "done" || state === "error") && msg && (
         <span
           className="ds-mono"

@@ -243,7 +243,7 @@ export function SpecSection({
       <Card className="bg-zinc-900 border-zinc-800 p-6">
         <div className="flex items-start justify-between gap-4 mb-4 flex-wrap">
           <div>
-            <h2 className="font-semibold text-white text-lg">{title}</h2>
+            <h2 className="font-semibold text-zinc-100 text-lg">{title}</h2>
             <p className="text-sm text-zinc-500 mt-0.5">{description}</p>
           </div>
           <div className="flex items-center gap-3 text-xs text-zinc-500">
@@ -264,8 +264,8 @@ export function SpecSection({
               onClick={() => setFilter(f)}
               className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
                 filter === f
-                  ? "bg-indigo-600 text-white"
-                  : "bg-zinc-800 text-zinc-400 hover:text-white"
+                  ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+                  : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
               }`}
             >
               {f}
@@ -339,7 +339,7 @@ export function SpecSection({
                         <td className="py-2.5 pr-2">
                           <button
                             onClick={() => toggleRow(spec)}
-                            className="text-zinc-500 hover:text-white"
+                            className="text-zinc-500 hover:text-zinc-100"
                             aria-label={isOpen ? "Collapse" : "Expand"}
                           >
                             {isOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
@@ -391,7 +391,7 @@ export function SpecSection({
                                   type="button"
                                   aria-label="Cancel forget"
                                   onClick={() => setConfirmingForget(null)}
-                                  className="text-xs px-2 py-0.5 text-zinc-400 hover:text-white"
+                                  className="text-xs px-2 py-0.5 text-zinc-400 hover:text-zinc-100"
                                 >
                                   Cancel
                                 </button>
@@ -400,7 +400,7 @@ export function SpecSection({
                               <div className="flex items-center gap-2 justify-end">
                                 <button
                                   onClick={() => toggleManagement(spec.application!.id, !spec.application!.enabled)}
-                                  className="text-xs text-zinc-400 hover:text-white inline-flex items-center gap-1"
+                                  className="text-xs text-zinc-400 hover:text-zinc-100 inline-flex items-center gap-1"
                                   title={spec.application.enabled ? "Pause sync for this spec" : "Resume sync"}
                                 >
                                   {spec.application.enabled
@@ -440,7 +440,7 @@ export function SpecSection({
             type="button"
             onClick={applySelected}
             disabled={disabled || visibleSelected.length === 0 || applyState === "running"}
-            className="bg-indigo-600 hover:bg-indigo-500 text-white"
+            className="bg-indigo-600 hover:bg-indigo-500 text-[var(--ds-accent-fg)]"
           >
             {applyState === "running"
               ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Applying…</>
@@ -471,8 +471,8 @@ function BulkButton({
       onClick={onClick}
       className={
         tone === "ghost"
-          ? "px-2 py-0.5 text-xs text-zinc-400 hover:text-white rounded"
-          : "px-2 py-0.5 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white rounded"
+          ? "px-2 py-0.5 text-xs text-zinc-400 hover:text-zinc-100 rounded"
+          : "px-2 py-0.5 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-zinc-100 rounded"
       }
     >
       {children}

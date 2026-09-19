@@ -22,10 +22,10 @@ export function CollectionRow({
   const others = items.filter((m) => m.id !== currentId);
   if (others.length === 0) return null;
   return (
-    <section style={{ padding: "0 16px 32px" }}>
+    <section className="ds-detail-section">
       <div className="flex items-center justify-between gap-3" style={{ margin: "0 0 12px" }}>
         <h2
-          className="section-title font-semibold"
+          className="font-semibold"
           style={{
             fontSize: 15,
             letterSpacing: "-0.01em",

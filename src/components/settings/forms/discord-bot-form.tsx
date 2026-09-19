@@ -271,7 +271,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
             onClick={() => setTab(t)}
             className={`px-4 py-2 text-sm font-medium capitalize transition-colors border-b-2 -mb-px ${
               tab === t
-                ? "border-indigo-500 text-white"
+                ? "border-indigo-500 text-zinc-100"
                 : "border-transparent text-zinc-500 hover:text-zinc-300"
             }`}
           >

@@ -93,7 +93,7 @@ export function MotdModal({ title, body }: MotdModalProps) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
       onClick={dismiss}
     >
       <div
@@ -102,12 +102,14 @@ export function MotdModal({ title, body }: MotdModalProps) {
         aria-modal="true"
         aria-labelledby={title ? titleId : undefined}
         aria-label={title ? undefined : "Announcement"}
-        className="relative w-full max-w-md rounded-2xl bg-zinc-900 border border-zinc-700 shadow-2xl p-6"
+        className="relative w-full max-w-md rounded-xl bg-zinc-900 border border-zinc-700 shadow-[var(--ds-shadow-lg)] p-6"
         onClick={(e) => e.stopPropagation()}
       >
         <button
+          type="button"
           onClick={dismiss}
-          className="absolute top-4 right-4 text-zinc-500 hover:text-white transition-colors"
+          className="ds-hover-tint absolute top-3 right-3 inline-flex items-center justify-center rounded-md text-zinc-500 hover:text-zinc-100 transition-colors"
+          style={{ width: 32, height: 32 }}
           aria-label="Dismiss"
         >
           <X className="w-5 h-5" />
@@ -116,7 +118,7 @@ export function MotdModal({ title, body }: MotdModalProps) {
         {title && (
           <h2
             id={titleId}
-            className="text-lg font-bold text-white mb-3 pr-8"
+            className="text-lg font-bold text-zinc-100 mb-3 pr-8"
           >
             {title}
           </h2>

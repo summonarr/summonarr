@@ -78,13 +78,13 @@ export function AvailabilityBadges({
       {showQueueBadge && (
         <span className="ds-chip ds-chip-pending">
           <Clock style={{ width: 10, height: 10 }} />
-          Approved in Queue
+          Queued
         </span>
       )}
       {show4kQueueBadge && (
         <span className="ds-chip ds-chip-pending">
           <Clock style={{ width: 10, height: 10 }} />
-          4K in Queue
+          4K Queued
         </span>
       )}
       {showRequestedBadge && (

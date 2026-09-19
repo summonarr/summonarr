@@ -3,21 +3,43 @@
 import { Wrench, X } from "@/components/icons";
 import { useState } from "react";
 
+// Admin-only strip shown while maintenance mode is on (non-admins get
+// MaintenancePage instead). Same warning pattern as the login page's
+// maintenance notice: a warning-tinted surface, ordinary --ds-fg text, and the
+// warning colour reserved for the icon — the old yellow-on-yellow text was a
+// raw palette shade the token sweep never mapped.
 export function MaintenanceBanner({ message }: { message?: string }) {
   const [dismissed, setDismissed] = useState(false);
   if (dismissed) return null;
 
   return (
-    <div className="bg-yellow-900/30 border-b border-yellow-800/30 px-4 py-2.5 flex items-center gap-3">
-      <Wrench className="w-4 h-4 text-yellow-400 shrink-0" />
-      <p className="text-sm text-yellow-300 flex-1">
+    <div
+      role="status"
+      className="flex items-center gap-3 px-4"
+      style={{
+        paddingTop: 6,
+        paddingBottom: 6,
+        background: "color-mix(in oklab, var(--ds-warning) 12%, transparent)",
+        borderBottom: "1px solid color-mix(in oklab, var(--ds-warning) 28%, transparent)",
+      }}
+    >
+      <Wrench className="shrink-0" style={{ width: 14, height: 14, color: "var(--ds-warning)" }} />
+      <p className="text-sm flex-1 m-0" style={{ color: "var(--ds-fg)" }}>
         <span className="font-medium">Maintenance mode is active.</span>
-        {message && <span className="text-yellow-400/80 ml-1">{message}</span>}
-        <span className="text-yellow-400/60 ml-1">Non-admin users are blocked.</span>
+        {message && (
+          <span className="ml-1" style={{ color: "var(--ds-fg-muted)" }}>
+            {message}
+          </span>
+        )}
+        <span className="ml-1" style={{ color: "var(--ds-fg-muted)" }}>
+          Non-admin users are blocked.
+        </span>
       </p>
       <button
+        type="button"
         onClick={() => setDismissed(true)}
-        className="text-yellow-500 hover:text-yellow-300 transition-colors"
+        className="ds-hover-tint shrink-0 inline-flex items-center justify-center rounded-md transition-colors"
+        style={{ width: 32, height: 32, color: "var(--ds-fg-muted)" }}
         aria-label="Dismiss maintenance banner"
       >
         <X className="w-4 h-4" />

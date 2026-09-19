@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Bell, BellOff, Send, X } from "@/components/icons";
+import { Bell, BellOff, Send } from "@/components/icons";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { withBasePath } from "@/lib/base-path";
 
@@ -206,8 +208,10 @@ export function PushNotifications() {
         disabled
         aria-label="Push notifications not supported"
         title="Push notifications are not supported in this browser"
-        className="ds-tap inline-flex items-center justify-center text-zinc-700 cursor-not-allowed shrink-0"
-        style={{ width: 32, height: 32, borderRadius: 6 }}
+        className="ds-tap inline-flex items-center justify-center cursor-not-allowed shrink-0"
+        // fg-disabled, not zinc-700: that shade is a SURFACE token (--ds-bg-3)
+        // after the palette remap, so the icon vanished into the header.
+        style={{ width: 32, height: 32, borderRadius: 6, color: "var(--ds-fg-disabled)" }}
       >
         <BellOff className="w-4 h-4" />
       </button>
@@ -237,32 +241,32 @@ export function PushNotifications() {
           subscribe(deviceName);
         }}
       >
-        <input
+        <Input
           ref={inputRef}
           type="text"
           value={deviceName}
           onChange={(e) => setDeviceName(e.target.value)}
           placeholder="Device name (e.g. Work Mac)"
           maxLength={100}
-          className="h-6 w-40 rounded border border-zinc-700 bg-zinc-800 px-2 text-xs text-zinc-200 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+          aria-label="Device name"
+          className="h-7 w-40 text-xs md:text-xs"
         />
-        <button
+        <Button
           type="submit"
+          size="sm"
           disabled={busy}
           aria-label="Enable push notifications for this device"
-          className="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50 transition-colors"
         >
           Enable
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
+          size="sm"
+          variant="ghost"
           onClick={() => { setState("unsubscribed"); setDeviceName(""); }}
-          aria-label="Cancel"
-          className="ds-tap inline-flex items-center justify-center text-zinc-500 hover:text-zinc-300 transition-colors shrink-0"
-          style={{ width: 28, height: 28 }}
         >
-          <X className="w-3.5 h-3.5" />
-        </button>
+          Cancel
+        </Button>
       </form>
     );
   }

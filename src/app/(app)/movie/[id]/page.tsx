@@ -246,6 +246,9 @@ export default async function MovieDetailPage({
                 media.releaseYear,
                 media.certification,
                 media.runtime ? `${media.runtime}m` : null,
+                media.releasedDigital
+                  ? `Digital ${new Date(media.releasedDigital).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`
+                  : null,
                 media.productionCountries?.[0],
                 languageName(media.originalLanguage),
                 media.status && media.status !== "Released" ? media.status : null,
@@ -314,8 +317,12 @@ export default async function MovieDetailPage({
               </p>
             )}
 
+            {/* items-end, not items-center: RequestButton is a flex-col block
+                (availability/queue status line above its CTA), so centering
+                floated the sibling buttons above the CTA whenever a status
+                line rendered. */}
             <div
-              className="flex items-center flex-wrap"
+              className="flex items-end flex-wrap"
               style={{ gap: 10, marginTop: 6 }}
             >
               <RequestButton
@@ -360,10 +367,10 @@ export default async function MovieDetailPage({
               ))}
               <WatchlistButton tmdbId={media.id} mediaType="MOVIE" initialOnWatchlist={onWatchlist} />
               <HideButton
-                  tmdbId={media.id}
-                  mediaType="MOVIE"
-                  title={media.title}
-                  posterPath={media.posterPath}
+                tmdbId={media.id}
+                mediaType="MOVIE"
+                title={media.title}
+                posterPath={media.posterPath}
                 initialHidden={onHidden}
               />
               {issuesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
@@ -384,19 +391,6 @@ export default async function MovieDetailPage({
               )}
               {(media.trailerKey || media.trailerUrl) && (
                 <TrailerButton trailerKey={media.trailerKey} trailerUrl={media.trailerUrl} />
-              )}
-              {media.releasedDigital && (
-                <span
-                  className="ds-mono"
-                  style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
-                >
-                  Digital{" "}
-                  {new Date(media.releasedDigital).toLocaleDateString("en-US", {
-                    month: "short",
-                    day: "numeric",
-                    year: "numeric",
-                  })}
-                </span>
               )}
             </div>
           </div>

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Plus, Check, Loader2, Ban } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useToast } from "@/components/ui/toast";
+import { DetailActionButton, DetailActionStatus } from "./detail-action-button";
 
 // Secondary "Request in 4K" action shown on movie/TV detail pages when a 4K
 // Radarr/Sonarr instance is configured and the viewer holds REQUEST_4K. Posts to
@@ -60,49 +61,22 @@ export function Request4kButton({
     }
   }
 
-  const base: React.CSSProperties = {
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-    padding: "6px 14px",
-    height: 34,
-    borderRadius: 6,
-    fontSize: 13,
-    fontWeight: 500,
-    whiteSpace: "nowrap",
-  };
-
   // Availability wins over request state — once the 4K copy is fetched there's nothing to request.
   if (available) {
     return (
-      <span
-        style={{
-          ...base,
-          background: "var(--ds-accent-soft)",
-          color: "var(--ds-accent)",
-          border: "1px solid var(--ds-accent-ring)",
-        }}
-      >
+      <DetailActionStatus variant="accent-soft">
         <Check style={{ width: 14, height: 14 }} />
         Available in 4K
-      </span>
+      </DetailActionStatus>
     );
   }
 
   if (state === "requested") {
     return (
-      <span
-        style={{
-          ...base,
-          background: "var(--ds-accent-soft)",
-          color: "var(--ds-accent)",
-          border: "1px solid var(--ds-accent-ring)",
-        }}
-      >
+      <DetailActionStatus variant="accent-soft">
         <Check style={{ width: 14, height: 14 }} />
         4K Requested
-      </span>
+      </DetailActionStatus>
     );
   }
 
@@ -113,33 +87,20 @@ export function Request4kButton({
   // Blacklisted blocks all requests (per tmdbId+mediaType, both tiers).
   if (blacklisted) {
     return (
-      <span
-        style={{
-          ...base,
-          background: "var(--ds-bg-2)",
-          color: "var(--ds-fg-muted)",
-          border: "1px solid var(--ds-border)",
-        }}
-      >
+      <DetailActionStatus variant="muted">
         <Ban style={{ width: 14, height: 14 }} />
         Not available to request
-      </span>
+      </DetailActionStatus>
     );
   }
 
   return (
     <div className="flex items-center gap-2">
-      <button
-        type="button"
+      <DetailActionButton
+        variant="secondary"
         onClick={submit}
         disabled={state === "loading"}
-        style={{
-          ...base,
-          background: "var(--ds-bg-2)",
-          color: "var(--ds-fg)",
-          border: "1px solid var(--ds-border)",
-          cursor: state === "loading" ? "progress" : "pointer",
-        }}
+        busy={state === "loading"}
       >
         {state === "loading" ? (
           <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
@@ -147,7 +108,7 @@ export function Request4kButton({
           <Plus style={{ width: 14, height: 14 }} />
         )}
         Request in 4K
-      </button>
+      </DetailActionButton>
       {state === "error" && msg && (
         <span className="ds-mono" style={{ fontSize: 11, color: "var(--ds-danger)" }}>
           {msg}

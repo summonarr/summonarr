@@ -45,5 +45,8 @@ test("requests page: a past-the-end page offers a link back to page 1", () => {
 
 test("requests page: the original no-requests copy is retained for total === 0", () => {
   assert.match(src, /No requests match these filters\./);
-  assert.match(src, /No requests yet\. Find something on Discover/);
+  // The design EmptyState splits the sentence into a title ("No requests yet")
+  // and a description, so the two halves are pinned separately.
+  assert.match(src, /No requests yet/);
+  assert.match(src, /Find something on Discover/);
 });

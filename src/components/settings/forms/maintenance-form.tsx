@@ -60,7 +60,7 @@ export function MaintenanceForm({ initialEnabled, initialMessage }: MaintenanceF
           onChange={(e) => { setMessage(e.target.value); setStatus("idle"); }}
           placeholder="We're performing some maintenance. Please check back shortly."
           rows={3}
-          className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+          className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
         />
       </div>
       <div className="flex items-center gap-3">

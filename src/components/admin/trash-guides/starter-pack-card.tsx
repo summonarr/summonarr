@@ -202,7 +202,7 @@ export function StarterPackCard({
               <Sparkles className="w-5 h-5 text-indigo-300" />
             </div>
             <div>
-              <h2 className="font-semibold text-white text-lg">Profile Library</h2>
+              <h2 className="font-semibold text-zinc-100 text-lg">Profile Library</h2>
               <p className="text-sm text-zinc-400 mt-0.5 max-w-2xl">
                 Every TRaSH quality profile, naming scheme, and quality-size template in the catalog. The{" "}
                 <span className="text-indigo-300">Recommended</span> baseline for 1080p movies and TV is pre-selected;
@@ -215,7 +215,7 @@ export function StarterPackCard({
               type="button"
               onClick={handleRefresh}
               disabled={refreshState === "running"}
-              className="bg-zinc-800 hover:bg-zinc-700 text-white"
+              className="bg-zinc-800 hover:bg-zinc-700 text-zinc-100"
               title="Pull the latest catalog from TRaSH"
             >
               {refreshState === "running"
@@ -226,7 +226,7 @@ export function StarterPackCard({
               type="button"
               onClick={handleApply}
               disabled={!canApply || applyState === "running"}
-              className="bg-indigo-600 hover:bg-indigo-500 text-white"
+              className="bg-indigo-600 hover:bg-indigo-500 text-[var(--ds-accent-fg)]"
             >
               {applyState === "running"
                 ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Applying…</>
@@ -275,7 +275,7 @@ export function StarterPackCard({
                 <button
                   type="button"
                   onClick={clearAll}
-                  className="px-2 py-0.5 text-zinc-400 hover:text-white"
+                  className="px-2 py-0.5 text-zinc-400 hover:text-zinc-100"
                 >
                   Clear ({selected.size})
                 </button>

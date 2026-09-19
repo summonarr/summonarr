@@ -21,11 +21,12 @@ export default async function HiddenPage() {
     : [];
 
   return (
-    <div>
-      <PageHeader title="Hidden" subtitle="Titles you've marked “not interested.” These are kept out of your discovery." />
-      <div style={{ marginTop: 16 }}>
-        <HiddenGrid initialItems={items} />
-      </div>
+    <div className="ds-page-enter">
+      <PageHeader
+        title="Hidden"
+        subtitle="Titles you've marked “Not interested” — these stay out of your discovery"
+      />
+      <HiddenGrid initialItems={items} />
     </div>
   );
 }

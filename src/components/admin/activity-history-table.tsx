@@ -457,7 +457,7 @@ export function ActivityHistoryTable({
                           background: isExpanded
                             ? "var(--ds-bg-3)"
                             : i % 2 === 1
-                              ? "oklch(1 0 0 / 0.012)"
+                              ? "color-mix(in oklab, var(--ds-fg) 1.2%, transparent)"
                               : "transparent",
                           borderBottom: "1px solid var(--ds-border)",
                           cursor: "pointer",
@@ -518,7 +518,7 @@ export function ActivityHistoryTable({
                                   fontSize: 9.5,
                                   padding: "1px 5px",
                                   borderRadius: 999,
-                                  background: "oklch(1 0 0 / 0.06)",
+                                  background: "color-mix(in oklab, var(--ds-fg) 6%, transparent)",
                                   color:
                                     r.source === "plex"
                                       ? "var(--ds-plex)"
@@ -580,7 +580,7 @@ export function ActivityHistoryTable({
                                       fontSize: 9.5,
                                       padding: "2px 6px",
                                       borderRadius: 999,
-                                      background: "oklch(1 0 0 / 0.06)",
+                                      background: "color-mix(in oklab, var(--ds-fg) 6%, transparent)",
                                       color: "var(--ds-fg-subtle)",
                                       letterSpacing: "0.04em",
                                       whiteSpace: "nowrap",
@@ -659,7 +659,7 @@ export function ActivityHistoryTable({
                               style={{
                                 flex: 1,
                                 height: 3,
-                                background: "oklch(1 0 0 / 0.06)",
+                                background: "color-mix(in oklab, var(--ds-fg) 6%, transparent)",
                                 borderRadius: 999,
                                 overflow: "hidden",
                               }}

@@ -10,7 +10,7 @@ export const StyledSelect = forwardRef<HTMLSelectElement, React.SelectHTMLAttrib
         ref={ref}
         {...props}
         className={cn(
-          "rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2.5 min-h-11 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500",
+          "rounded-lg border border-[var(--ds-border)] bg-[var(--ds-bg-2)] px-3 py-2.5 min-h-11 text-sm text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500",
           className,
         )}
       >

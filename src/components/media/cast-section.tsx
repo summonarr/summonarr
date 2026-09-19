@@ -15,9 +15,9 @@ interface CastSectionProps {
 // (Next's configured basePath auto-prefixes the Link href, so no withBasePath here.)
 export function CastSection({ cast }: CastSectionProps) {
   return (
-    <section style={{ padding: "0 16px 32px" }}>
+    <section className="ds-detail-section">
       <h2
-        className="section-title font-semibold"
+        className="font-semibold"
         style={{ fontSize: 15, letterSpacing: "-0.01em", color: "var(--ds-fg)", margin: "0 0 12px" }}
       >
         Cast
@@ -27,11 +27,11 @@ export function CastSection({ cast }: CastSectionProps) {
           <Link
             key={member.id}
             href={`/person/${member.id}`}
-            className="flex flex-col items-center text-center group rounded-lg focus-visible:outline-none focus-visible:ring-2"
+            className="flex flex-col items-center text-center group rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
             style={{ gap: 6, padding: 4, color: "var(--ds-fg)", textDecoration: "none" }}
           >
             <div
-              className="relative shrink-0 overflow-hidden rounded-full transition-all"
+              className="relative shrink-0 overflow-hidden rounded-full transition-shadow group-hover:ring-2 group-hover:ring-[var(--ds-accent-ring)]"
               style={{ width: 56, height: 56, background: "var(--ds-bg-3)" }}
             >
               {member.profilePath ? (

@@ -2,6 +2,7 @@
 
 import { Play } from "@/components/icons";
 import { safeExternalHref } from "@/lib/safe-url";
+import { DETAIL_ACTION_CLASS, detailActionStyle } from "./detail-action-button";
 
 interface TrailerButtonProps {
   trailerKey?: string | null;
@@ -20,16 +21,8 @@ export function TrailerButton({ trailerKey, trailerUrl }: TrailerButtonProps) {
       href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className="ds-tap inline-flex items-center gap-2 font-medium transition-colors"
-      style={{
-        padding: "6px 12px",
-        height: 32,
-        borderRadius: 6,
-        background: "var(--ds-bg-2)",
-        color: "var(--ds-fg)",
-        border: "1px solid var(--ds-border)",
-        fontSize: 13,
-      }}
+      className={DETAIL_ACTION_CLASS}
+      style={detailActionStyle("secondary")}
     >
       <Play style={{ width: 14, height: 14 }} />
       Watch Trailer

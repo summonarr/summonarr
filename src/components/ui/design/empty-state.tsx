@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { IconComponent } from "@/components/icons";
 import type { ComponentType, SVGProps } from "react";
+import { cn } from "@/lib/utils";
 
 type IconLike =
   | IconComponent
@@ -18,9 +19,11 @@ export function EmptyState({
   subtitle,
   cta,
   action,
+  className,
 }: {
   icon?: IconLike;
-  title: React.ReactNode;
+  /** Optional — when omitted the description renders on its own. */
+  title?: React.ReactNode;
   /** Friendly copy under the title. Preferred over `subtitle`. */
   description?: React.ReactNode;
   /** Legacy slot — rendered identically to `description`. */
@@ -29,16 +32,17 @@ export function EmptyState({
   cta?: { href: string; label: string };
   /** Legacy slot for arbitrary actions (buttons, links, etc.). */
   action?: React.ReactNode;
+  className?: string;
 }) {
   const desc = description ?? subtitle;
 
   return (
     <div
-      className="text-center"
+      className={cn("text-center", className)}
       style={{
         background: "var(--ds-bg-1)",
         border: "1px dashed var(--ds-border)",
-        borderRadius: 10,
+        borderRadius: "var(--ds-r-lg)",
         padding: "40px 20px",
         display: "flex",
         flexDirection: "column",
@@ -74,16 +78,18 @@ export function EmptyState({
             {icon as React.ReactNode}
           </div>
         ))}
-      <div
-        className="font-semibold"
-        style={{
-          fontSize: 14,
-          marginBottom: 4,
-          color: "var(--ds-fg-muted)",
-        }}
-      >
-        {title}
-      </div>
+      {title && (
+        <div
+          className="font-semibold"
+          style={{
+            fontSize: 14,
+            marginBottom: 4,
+            color: "var(--ds-fg-muted)",
+          }}
+        >
+          {title}
+        </div>
+      )}
       {desc && (
         <div
           style={{
@@ -100,6 +106,7 @@ export function EmptyState({
         <div style={{ marginTop: 14 }}>
           <Link
             href={cta.href}
+            className="hover:underline"
             style={{
               fontSize: 13,
               color: "var(--ds-accent)",

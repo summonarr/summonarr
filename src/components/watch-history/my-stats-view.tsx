@@ -23,6 +23,8 @@ import {
   fmtDuration,
 } from "@/components/admin/activity-ui";
 import { ActivityCalendar } from "@/components/admin/activity-calendar";
+import { BarChart3 } from "@/components/icons";
+import { EmptyState } from "@/components/ui/design";
 
 export interface MyStatsData {
   totalPlays: number;
@@ -82,25 +84,16 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
   // Linked, but nothing recorded yet — a media-server user with no plays.
   if (s.totalPlays === 0 && s.topMedia.length === 0) {
     return (
-      <ActivityCard>
-        <div
-          style={{
-            padding: "24px 8px",
-            textAlign: "center",
-            color: "var(--ds-fg-subtle)",
-            fontSize: 13,
-            lineHeight: 1.6,
-          }}
-        >
-          No watch activity has been recorded yet. Once you play something on the
-          server, your stats will appear here.
-        </div>
-      </ActivityCard>
+      <EmptyState
+        icon={BarChart3}
+        title="No watch activity yet"
+        description="Once you play something on the server, your stats will appear here."
+      />
     );
   }
 
   return (
-    <div className="ds-page-enter" style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
       <div
         style={{
           display: "grid",
@@ -151,7 +144,7 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
           <SectionHeader label="Devices" sub={`${s.deviceList.length} known`} />
           <HorizontalBars
             items={s.deviceList.slice(0, 6).map((d) => ({ label: d.device, count: d.count }))}
-            color="oklch(0.62 0.14 295)"
+            color="var(--ds-info)"
             labelWidth={100}
           />
         </ActivityCard>

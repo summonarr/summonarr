@@ -263,7 +263,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             placeholder="Admin reply (visible to user)"
             rows={2}
             autoFocus
-            className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
+            className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
           />
           <div className="flex items-center gap-1.5">
             <Button
@@ -271,7 +271,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
               variant="outline"
               onClick={() => setShowReply(false)}
               disabled={loading === "NOTE"}
-              className="h-6 px-2 text-[11px] border-zinc-700 text-zinc-500 hover:text-white"
+              className="h-6 px-2 text-[11px] border-zinc-700 text-zinc-500 hover:text-zinc-100"
             >
               Cancel
             </Button>
@@ -306,7 +306,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
               variant="outline"
               onClick={() => setShowDeleteConfirm(false)}
               disabled={loading === "DELETE"}
-              className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white"
+              className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100"
             >
               Cancel
             </Button>
@@ -332,7 +332,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             variant="outline"
             onClick={triggerSearch}
             disabled={loading !== null}
-            className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white gap-1"
+            className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1"
           >
             {loading === "SEARCH" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Search className="w-3 h-3" />}
             Search
@@ -342,7 +342,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             variant="outline"
             onClick={retryPush}
             disabled={loading !== null}
-            className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white gap-1"
+            className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1"
           >
             {loading === "RETRY" ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
             Re-push
@@ -381,7 +381,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           variant="outline"
           onClick={() => updateStatus("APPROVED")}
           disabled={loading !== null}
-          className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white gap-1"
+          className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1"
         >
           {loading === "APPROVED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
           Re-approve
@@ -429,7 +429,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           onChange={(e) => setDeclineNote(e.target.value)}
           placeholder="Reason (optional)"
           rows={2}
-          className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
+          className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
         />
         <div className="flex items-center gap-2">
           <Button
@@ -437,7 +437,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             variant="outline"
             onClick={() => { setShowDeclineNote(false); setDeclineNote(""); }}
             disabled={loading !== null}
-            className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white"
+            className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100"
           >
             Cancel
           </Button>
@@ -512,7 +512,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           variant="outline"
           onClick={() => { setShowProfilePicker(false); setArrError(null); }}
           disabled={loading !== null}
-          className="h-6 px-2 text-[11px] border-zinc-700 text-zinc-500 hover:text-white"
+          className="h-6 px-2 text-[11px] border-zinc-700 text-zinc-500 hover:text-zinc-100"
         >
           Cancel
         </Button>
@@ -647,7 +647,7 @@ export function SyncButton() {
         size="sm"
         onClick={handleSync}
         disabled={loading}
-        className="border-zinc-700 text-zinc-300 hover:text-white gap-2"
+        className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
       >
         <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
         {loading ? "Syncing…" : "Sync now"}
@@ -692,7 +692,7 @@ export function SyncRolesButton() {
         size="sm"
         onClick={handleSync}
         disabled={loading}
-        className="border-zinc-700 text-zinc-300 hover:text-white gap-2"
+        className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
       >
         <Users className={`w-4 h-4 ${loading ? "animate-pulse" : ""}`} />
         {loading ? "Syncing…" : "Sync Discord Roles"}

@@ -155,6 +155,28 @@ function MediaCardImpl({
     setReqState("idle");
   }
 
+  // Accessible names for the overlay controls: each card's buttons read as
+  // "Request <title>" rather than a page full of identical "Request"s.
+  const bubbleLabel = () => {
+    if (isAvailable || isRequested) return `View ${media.title}`;
+    if (blacklisted) return `${media.title} is blocked`;
+    if (reqState === "loading") return `Requesting ${media.title}`;
+    if (reqState === "error") return `Retry request for ${media.title}`;
+    return `Request ${media.title}`;
+  };
+
+  // Over a poster the scrim is black and the overlay text white — an image is
+  // always dark-compatible. With no poster the placeholder is a flat surface
+  // that is near-white in light mode, so the gradient (a black smear there) is
+  // dropped and the translucent-white ghost button reads off the theme instead.
+  const onPoster = !!poster;
+  const overlayFg = onPoster ? "#fff" : "var(--ds-fg)";
+  const overlayGhostBg = onPoster ? "rgba(255,255,255,0.14)" : "var(--ds-bg-2)";
+  const overlayCancelBg = onPoster ? "rgba(255,255,255,0.12)" : "var(--ds-bg-2)";
+  const overlayGhostBorder = onPoster
+    ? "1px solid rgba(255,255,255,0.28)"
+    : "1px solid var(--ds-border)";
+
   const bubbleContent = () => {
     if (isAvailable) return <span>View</span>;
     if (isRequested) return <span>View</span>;
@@ -240,11 +262,12 @@ function MediaCardImpl({
             "absolute inset-0 flex items-end justify-center pointer-events-none transition-opacity",
             reqState === "confirm"
               ? "opacity-100"
-              : "opacity-0 group-hover:opacity-100",
+              : "opacity-0 group-hover:opacity-100 focus-within:opacity-100",
           )}
           style={{
-            background:
-              "linear-gradient(180deg, transparent 40%, rgba(0,0,0,0.72) 100%)",
+            background: onPoster
+              ? "linear-gradient(180deg, transparent 40%, rgba(0,0,0,0.72) 100%)"
+              : "none",
             padding: 10,
           }}
         >
@@ -252,7 +275,7 @@ function MediaCardImpl({
             <div className="pointer-events-auto flex flex-col items-center gap-2 px-3 pb-2">
               <span
                 className="text-center leading-tight font-semibold"
-                style={{ fontSize: 11, color: "#fff" }}
+                style={{ fontSize: 11, color: overlayFg }}
               >
                 Request this?
               </span>
@@ -260,6 +283,7 @@ function MediaCardImpl({
                 <button
                   onClick={handleBubbleClick}
                   type="button"
+                  aria-label={`Confirm request for ${media.title}`}
                   className="ds-tap inline-flex items-center gap-1 font-semibold transition-colors"
                   style={{
                     padding: "4px 10px",
@@ -276,14 +300,15 @@ function MediaCardImpl({
                 <button
                   onClick={cancelConfirm}
                   type="button"
+                  aria-label={`Cancel request for ${media.title}`}
                   className="ds-tap inline-flex items-center gap-1 font-semibold transition-colors"
                   style={{
                     padding: "4px 10px",
                     borderRadius: 999,
-                    background: "rgba(255,255,255,0.12)",
-                    color: "#fff",
+                    background: overlayCancelBg,
+                    color: overlayFg,
                     fontSize: 11,
-                    border: "1px solid rgba(255,255,255,0.28)",
+                    border: overlayGhostBorder,
                   }}
                 >
                   <X className="w-3 h-3" />
@@ -295,21 +320,22 @@ function MediaCardImpl({
             <button
               onClick={handleBubbleClick}
               type="button"
+              aria-label={bubbleLabel()}
               className="ds-tap pointer-events-auto inline-flex items-center gap-1.5 font-semibold transition-colors"
               style={{
                 padding: "5px 12px",
                 borderRadius: 999,
                 background:
                   isAvailable || isRequested || blacklisted
-                    ? "rgba(255,255,255,0.14)"
+                    ? overlayGhostBg
                     : "var(--ds-accent)",
                 color:
                   isAvailable || isRequested || blacklisted
-                    ? "#fff"
+                    ? overlayFg
                     : "var(--ds-accent-fg)",
                 border:
                   isAvailable || isRequested || blacklisted
-                    ? "1px solid rgba(255,255,255,0.28)"
+                    ? overlayGhostBorder
                     : "0",
                 fontSize: 12,
               }}

@@ -13,6 +13,7 @@ import {
   ActivityCard,
   AreaChart,
   Avatar,
+  DetailHeader,
   HorizontalBars,
   HourHeatmap,
   Poster,
@@ -108,74 +109,22 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
 
   return (
     <div className="ds-page-enter">
-      <Link
-        href="/admin/activity/users"
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          marginBottom: 18,
-          fontSize: 12.5,
-          color: "var(--ds-fg-muted)",
-          textDecoration: "none",
-        }}
-      >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-          <path
-            d="M7 3l-3 3 3 3"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
+      <DetailHeader
+        back={{ href: "/admin/activity/users", label: "Back to users" }}
+        leading={
+          <Avatar
+            letter={(s.username[0] ?? "?").toUpperCase()}
+            accent="oklch(0.42 0.10 275)"
+            size={48}
           />
-        </svg>
-        Back to users
-      </Link>
-
-      <header
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 16,
-          marginBottom: 22,
-        }}
-      >
-        <Avatar
-          letter={(s.username[0] ?? "?").toUpperCase()}
-          accent="oklch(0.42 0.10 275)"
-          size={56}
-        />
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              marginBottom: 4,
-            }}
-          >
-            <h1
-              style={{
-                margin: 0,
-                fontSize: 26,
-                fontWeight: 600,
-                letterSpacing: "-0.025em",
-                color: "var(--ds-fg)",
-              }}
-            >
-              {s.username}
-            </h1>
-            <SourceTag source={s.source} />
-          </div>
-          <div
-            className="ds-mono"
-            style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
-          >
-            {[s.email, s.linkedLabel].filter(Boolean).join(" · ") ||
-              `${s.source} account`}
-          </div>
-        </div>
-      </header>
+        }
+        title={s.username}
+        meta={<SourceTag source={s.source} />}
+        subtitle={
+          [s.email, s.linkedLabel].filter(Boolean).join(" · ") ||
+          `${s.source} account`
+        }
+      />
 
       <div
         className="resp-grid-3"
@@ -414,7 +363,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
                     <div
                       style={{
                         height: 4,
-                        background: "oklch(1 0 0 / 0.05)",
+                        background: "color-mix(in oklab, var(--ds-fg) 5%, transparent)",
                         borderRadius: 999,
                         overflow: "hidden",
                       }}

@@ -47,7 +47,7 @@ export function GithubTokenCard() {
   return (
     <Card className="bg-zinc-900 border-zinc-800 p-6">
       <div className="mb-3">
-        <h2 className="font-semibold text-white text-lg">GitHub Token <span className="text-xs font-normal text-zinc-500">(optional)</span></h2>
+        <h2 className="font-semibold text-zinc-100 text-lg">GitHub Token <span className="text-xs font-normal text-zinc-500">(optional)</span></h2>
         <p className="text-sm text-zinc-500 mt-0.5">
           GitHub limits unauthenticated API calls to 60/hour — enough for a few refreshes. Paste any{" "}
           <a href="https://github.com/settings/tokens?type=beta" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline">fine-grained personal access token</a>{" "}
@@ -68,7 +68,7 @@ export function GithubTokenCard() {
           type="button"
           onClick={save}
           disabled={!value || state === "running"}
-          className="bg-indigo-600 hover:bg-indigo-500 text-white"
+          className="bg-indigo-600 hover:bg-indigo-500 text-[var(--ds-accent-fg)]"
         >
           {state === "running" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save"}
         </Button>

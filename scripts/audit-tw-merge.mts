@@ -79,6 +79,7 @@ const OVER_MERGE_ALLOWLIST: Array<{ group: string; reason: string }> = [
   { group: "transition", reason: "transition-none sets only transition-property; it is the reset for the same shorthand" },
   { group: "outline-style", reason: "outline-hidden also zeroes outline/outline-offset but is still one of the mutually exclusive outline styles (as in real tailwind-merge)" },
   { group: "via", reason: "via-none drops the via stop that via-<color> sets" },
+  { group: "drop-shadow", reason: "drop-shadow-none sets only `filter`; it is the reset for the same drop-shadow the sized utilities set" },
 ];
 
 /**

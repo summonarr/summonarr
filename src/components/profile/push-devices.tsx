@@ -65,7 +65,7 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
         return (
           <div
             key={device.id}
-            className="flex items-center justify-between gap-4 rounded-md border border-zinc-800 bg-zinc-800/50 px-3 py-2"
+            className="flex items-center justify-between gap-4 rounded-md border border-[var(--ds-border)] bg-[var(--ds-bg-1)] px-3 py-2"
           >
             <div className="flex items-center gap-2.5 min-w-0">
               <Smartphone className="w-4 h-4 shrink-0 text-zinc-400" />

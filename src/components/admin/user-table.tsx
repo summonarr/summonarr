@@ -148,7 +148,7 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, name
         aria-label="User actions"
         aria-haspopup="true"
         aria-expanded={open}
-        className="h-7 w-7 flex items-center justify-center rounded-md border border-zinc-700 text-zinc-400 hover:text-white hover:border-zinc-500 transition-colors"
+        className="h-7 w-7 flex items-center justify-center rounded-md border border-zinc-700 text-zinc-400 hover:text-zinc-100 hover:border-zinc-500 transition-colors"
       >
         <MoreHorizontal className="w-4 h-4" />
       </button>
@@ -337,7 +337,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
             }}
           >
             <div
-              className={`${avatarColors[u.source]} flex items-center justify-center font-bold text-white shrink-0`}
+              className={`${avatarColors[u.source]} flex items-center justify-center font-bold text-zinc-100 shrink-0`}
               style={{
                 width: 34,
                 height: 34,
@@ -497,7 +497,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                   type="button"
                   aria-label="Cancel"
                   onClick={() => setConfirming(null)}
-                  className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+                  className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
                 >
                   Cancel
                 </button>

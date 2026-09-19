@@ -127,8 +127,10 @@ function PagerButton({
     "inline-flex items-center justify-center font-medium";
 
   if (href) {
+    // Only the navigable variant gets hover feedback — the active page and the
+    // disabled ends are inert spans.
     return (
-      <Link href={href} className={className} style={style} aria-label={ariaLabel}>
+      <Link href={href} className={`${className} ds-hover-tint`} style={style} aria-label={ariaLabel}>
         {children}
       </Link>
     );

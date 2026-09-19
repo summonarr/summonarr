@@ -3,12 +3,12 @@
 import { useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
-import { Film, Tv2, Check, X } from "@/components/icons";
+import { Film, Tv2, Check, X, Bell, Trash2 } from "@/components/icons";
 import { posterUrl } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { notificationHref, timeAgo } from "@/lib/notification-links";
-import { EmptyState } from "@/components/ui/empty-state";
+import { EmptyState } from "@/components/ui/design";
 
 export interface NotificationListItem {
   id: string;
@@ -30,6 +30,9 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
   const [hasMore, setHasMore] = useState(initialItems.length < initialTotal);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Two-step "Clear all": the first click swaps the link for a confirm + Cancel
+  // pair (mirrors vote-actions' dismiss) — it deletes every notification.
+  const [confirmingClear, setConfirmingClear] = useState(false);
   const mounted = useHasMounted();
   // Bumped by any list-wiping op (clearAll). An in-flight removeOne records the
   // generation at start and skips its whole-list rollback if it changed — else a
@@ -73,6 +76,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     }
   }
   async function clearAll() {
+    setConfirmingClear(false);
     listGen.current += 1;
     const prevItems = items;
     const prevTotal = total;
@@ -105,33 +109,61 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
         setTotal(data.total);
         setHasMore(data.nextCursor != null);
       } else {
-        setError("Couldn't load more. Tap to retry.");
+        setError("Couldn't load more. Tap Load more to retry.");
       }
     } catch {
       // `if (res.ok)` with no else meant a failed page load did nothing at all:
       // the spinner stopped, the list was unchanged, and "Load more" sat there
       // looking like it had simply reached the end.
-      setError("Couldn't load more. Tap to retry.");
+      setError("Couldn't load more. Tap Load more to retry.");
     } finally {
       setLoading(false);
     }
   }
 
   if (items.length === 0) {
-    return <EmptyState>No notifications yet. Request updates (approved / available / declined) will show up here.</EmptyState>;
+    return (
+      <EmptyState
+        icon={Bell}
+        title="No notifications yet"
+        description="Request updates (approved, available, declined) and replies will show up here."
+        cta={{ href: "/requests", label: "View your requests" }}
+      />
+    );
   }
 
   return (
     <div>
-      <div className="flex items-center justify-end gap-3" style={{ marginBottom: 10 }}>
+      <div className="flex items-center justify-end gap-3 flex-wrap" style={{ marginBottom: 10 }}>
         {anyUnread && (
           <button type="button" onClick={markAllRead} className="text-xs text-zinc-400 hover:text-zinc-200 underline">
             Mark all read
           </button>
         )}
-        <button type="button" onClick={clearAll} className="text-xs text-zinc-500 hover:text-zinc-300 underline">
-          Clear all
-        </button>
+        {confirmingClear ? (
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={clearAll}
+              autoFocus
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-500 transition-colors"
+            >
+              <Trash2 className="w-3 h-3" />
+              Clear all?
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmingClear(false)}
+              className="text-xs px-2 py-1.5 text-zinc-400 hover:text-zinc-100 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button type="button" onClick={() => setConfirmingClear(true)} className="text-xs text-zinc-500 hover:text-zinc-300 underline">
+            Clear all
+          </button>
+        )}
       </div>
 
       <div className="flex flex-col" style={{ gap: 8 }}>
@@ -140,35 +172,56 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
           return (
             <div
               key={n.id}
-              className="flex gap-3 items-start"
-              style={{
-                padding: "10px 12px",
-                borderRadius: 8,
-                background: n.readAt ? "var(--ds-bg-1)" : "var(--ds-bg-2)",
-                border: "1px solid var(--ds-border)",
-              }}
+              className={`flex items-start transition-colors border border-[var(--ds-border)] hover:bg-[var(--ds-bg-3)] ${
+                n.readAt ? "bg-[var(--ds-bg-1)]" : "bg-[var(--ds-bg-2)]"
+              }`}
+              style={{ gap: 14, padding: 14, borderRadius: 8 }}
             >
-              <Link href={notificationHref(n)} className="relative shrink-0 overflow-hidden" style={{ width: 40, height: 60, borderRadius: 4, background: "var(--ds-bg-3)", border: "1px solid var(--ds-border)" }}>
-                {poster ? (
-                  <Image src={poster} alt="" fill className="object-cover" sizes="40px" />
-                ) : (
-                  <span className="flex items-center justify-center h-full" style={{ color: "var(--ds-fg-subtle)" }}>
-                    {n.mediaType === "TV" ? <Tv2 style={{ width: 16, height: 16 }} /> : <Film style={{ width: 16, height: 16 }} />}
+              <Link href={notificationHref(n)} className="flex items-start flex-1 min-w-0 group" style={{ gap: 14 }}>
+                <span
+                  className="relative shrink-0 overflow-hidden"
+                  style={{ width: 44, height: 66, borderRadius: 4, background: "var(--ds-bg-3)", border: "1px solid var(--ds-border)" }}
+                >
+                  {poster ? (
+                    <Image src={poster} alt="" fill className="object-cover" sizes="44px" />
+                  ) : (
+                    <span className="flex items-center justify-center h-full" style={{ color: "var(--ds-fg-subtle)" }}>
+                      {n.mediaType === "TV" ? <Tv2 style={{ width: 16, height: 16 }} /> : <Film style={{ width: 16, height: 16 }} />}
+                    </span>
+                  )}
+                </span>
+                <span className="block min-w-0 flex-1">
+                  <span
+                    className="block font-medium transition-colors group-hover:text-[var(--ds-accent)]"
+                    style={{ fontSize: 14, color: "var(--ds-fg)" }}
+                  >
+                    {n.title}
                   </span>
-                )}
+                  <span className="block" style={{ fontSize: 12, color: "var(--ds-fg-muted)", lineHeight: 1.4, marginTop: 2 }}>{n.body}</span>
+                  <span className="ds-mono block" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", marginTop: 3 }}>{mounted ? timeAgo(n.createdAt) : ""}</span>
+                </span>
               </Link>
-              <Link href={notificationHref(n)} className="min-w-0 flex-1">
-                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ds-fg)" }}>{n.title}</div>
-                <div style={{ fontSize: 12, color: "var(--ds-fg-muted)", lineHeight: 1.4, marginTop: 1 }}>{n.body}</div>
-                <div className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", marginTop: 3 }}>{mounted ? timeAgo(n.createdAt) : ""}</div>
-              </Link>
-              <div className="flex flex-col items-center gap-1.5 shrink-0">
+              <div className="flex flex-col items-center shrink-0" style={{ gap: 2, margin: "-6px -6px 0 0" }}>
                 {!n.readAt && (
-                  <button type="button" onClick={() => markOneRead(n.id)} aria-label="Mark read" title="Mark read" style={{ color: "var(--ds-accent)", cursor: "pointer" }}>
+                  <button
+                    type="button"
+                    onClick={() => markOneRead(n.id)}
+                    aria-label="Mark read"
+                    title="Mark read"
+                    className="ds-hover-tint inline-flex items-center justify-center"
+                    style={{ width: 32, height: 32, borderRadius: 6, color: "var(--ds-accent)" }}
+                  >
                     <Check style={{ width: 15, height: 15 }} />
                   </button>
                 )}
-                <button type="button" onClick={() => removeOne(n.id)} aria-label="Remove notification" title="Remove" style={{ color: "var(--ds-fg-subtle)", cursor: "pointer" }}>
+                <button
+                  type="button"
+                  onClick={() => removeOne(n.id)}
+                  aria-label="Remove notification"
+                  title="Remove"
+                  className="ds-hover-tint inline-flex items-center justify-center"
+                  style={{ width: 32, height: 32, borderRadius: 6, color: "var(--ds-fg-subtle)" }}
+                >
                   <X style={{ width: 15, height: 15 }} />
                 </button>
               </div>

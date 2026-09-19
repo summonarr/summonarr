@@ -61,9 +61,24 @@ export function SearchBar({
   // state so the highlight visual has a single source of truth.
   const [activeIndex, setActiveIndex] = useState(-1);
   // Per-instance option-id base — the SearchBar mounts twice (desktop header
-  // + mobile sheet), so ids must not collide for aria-activedescendant.
+  // + mobile sheet), so ids must not collide for aria-activedescendant. The
+  // listbox id derives from the same base for the same reason: a fixed
+  // "header-search-results" was duplicated in the DOM by the second mount.
   const optionIdBase = useId();
+  const listboxId = `${optionIdBase}-listbox`;
   const containerRef = useRef<HTMLDivElement>(null);
+  // The shortcut hint reads "⌘K" on the server and on the first client render;
+  // the platform is only known after mount (guardrail 16 — no navigator read
+  // in the render path). Non-Mac users see it flip to "Ctrl K" post-hydration.
+  const [isMac, setIsMac] = useState(true);
+  useEffect(() => {
+    const platform =
+      (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData
+        ?.platform ??
+      navigator.platform ??
+      "";
+    setIsMac(/mac|iphone|ipad|ipod/i.test(platform));
+  }, []);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -214,7 +229,7 @@ export function SearchBar({
           aria-label="Search"
           role="combobox"
           aria-expanded={open && (Boolean(query.trim()) || results.length > 0)}
-          aria-controls="header-search-results"
+          aria-controls={listboxId}
           aria-autocomplete="list"
           aria-activedescendant={
             open && activeIndex >= 0 && activeIndex < results.length
@@ -245,13 +260,13 @@ export function SearchBar({
             className="animate-spin"
           />
         ) : variant === "inline" ? (
-          <kbd className="ds-kbd">⌘K</kbd>
+          <kbd className="ds-kbd">{isMac ? "⌘K" : "Ctrl K"}</kbd>
         ) : null}
       </div>
 
       {open && (query.trim() || results.length > 0) && (
         <div
-          id="header-search-results"
+          id={listboxId}
           role="listbox"
           aria-label="Search results"
           style={{
@@ -448,47 +463,50 @@ export function Header() {
       }}
     >
       {/* Breadcrumb */}
-      <div className="flex items-center min-w-0" style={{ gap: 6 }}>
-        {crumbs.map((c, i) => {
-          const last = i === crumbs.length - 1;
-          const content = (
-            <span
-              className="font-medium"
-              style={{
-                fontSize: 13,
-                fontWeight: last ? 500 : 400,
-                color: last ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-              }}
-            >
-              {c.label}
-            </span>
-          );
-          return (
-            // biome-ignore lint/suspicious/noArrayIndexKey: crumbs are positional
-            <span key={i} className="flex items-center" style={{ gap: 6 }}>
-              {i > 0 && (
-                <ChevronRight
-                  style={{
-                    width: 12,
-                    height: 12,
-                    color: "var(--ds-fg-subtle)",
-                  }}
-                />
-              )}
-              {c.href && !last ? (
-                <Link
-                  href={c.href}
-                  className="hover:text-[var(--ds-fg)] transition-colors"
-                >
-                  {content}
-                </Link>
-              ) : (
-                content
-              )}
-            </span>
-          );
-        })}
-      </div>
+      <nav aria-label="Breadcrumb" className="min-w-0">
+        <ol className="flex items-center min-w-0 m-0 p-0 list-none" style={{ gap: 6 }}>
+          {crumbs.map((c, i) => {
+            const last = i === crumbs.length - 1;
+            const content = (
+              <span
+                aria-current={last ? "page" : undefined}
+                style={{
+                  fontSize: 13,
+                  fontWeight: last ? 500 : 400,
+                  color: last ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+                }}
+              >
+                {c.label}
+              </span>
+            );
+            return (
+              // biome-ignore lint/suspicious/noArrayIndexKey: crumbs are positional
+              <li key={i} className="flex items-center min-w-0" style={{ gap: 6 }}>
+                {i > 0 && (
+                  <ChevronRight
+                    aria-hidden
+                    style={{
+                      width: 12,
+                      height: 12,
+                      color: "var(--ds-fg-subtle)",
+                    }}
+                  />
+                )}
+                {c.href && !last ? (
+                  <Link
+                    href={c.href}
+                    className="hover:text-[var(--ds-fg)] transition-colors"
+                  >
+                    {content}
+                  </Link>
+                ) : (
+                  content
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      </nav>
 
       {/* Search */}
       <div className="flex-1 min-w-0 flex justify-center">
@@ -501,9 +519,14 @@ export function Header() {
         {session && <PushNotifications />}
 
         <DropdownMenu>
-          <DropdownMenuTrigger aria-label="Account menu" className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]">
+          {/* 36px hit box around a 28px avatar — the visual stays small, the
+              target clears the 32–36px minimum the other header controls use. */}
+          <DropdownMenuTrigger
+            aria-label="Account menu"
+            className="inline-flex items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+            style={{ width: 36, height: 36 }}
+          >
             <Avatar
-              className="cursor-pointer"
               style={{
                 width: 28,
                 height: 28,
@@ -556,7 +579,7 @@ export function Header() {
             <AppearanceMenu />
             <DropdownMenuSeparator />
             <DropdownMenuItem
-              className="text-red-400"
+              variant="destructive"
               onClick={() => signOutAndRedirect("/login")}
             >
               Sign out

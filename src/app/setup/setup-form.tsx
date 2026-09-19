@@ -74,7 +74,6 @@ export function SetupForm() {
           value={form.name}
           onChange={(e) => set("name", e.target.value)}
           placeholder="Your name"
-          className="bg-zinc-800 border-zinc-700"
         />
       </div>
 
@@ -86,7 +85,6 @@ export function SetupForm() {
           value={form.email}
           onChange={(e) => set("email", e.target.value)}
           placeholder="admin@example.com"
-          className="bg-zinc-800 border-zinc-700"
           required
         />
       </div>
@@ -99,7 +97,6 @@ export function SetupForm() {
           value={form.password}
           onChange={(e) => set("password", e.target.value)}
           placeholder="Min. 8 characters"
-          className="bg-zinc-800 border-zinc-700"
           minLength={8}
           required
         />
@@ -113,7 +110,6 @@ export function SetupForm() {
           value={form.confirm}
           onChange={(e) => set("confirm", e.target.value)}
           placeholder="Repeat your password"
-          className="bg-zinc-800 border-zinc-700"
           required
         />
       </div>
@@ -123,9 +119,9 @@ export function SetupForm() {
       <Button
         type="submit"
         disabled={loading}
-        className="w-full bg-indigo-600 hover:bg-indigo-500 mt-2"
+        className="w-full min-h-11 mt-2"
       >
-        {loading ? "Creating account..." : "Create admin account"}
+        {loading ? "Creating account…" : "Create admin account"}
       </Button>
     </form>
   );

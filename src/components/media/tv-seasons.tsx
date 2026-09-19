@@ -7,6 +7,7 @@ import { ChevronDown, CheckCircle, Circle, Loader2, Tv2, Calendar } from "@/comp
 import { cn } from "@/lib/utils";
 import { posterUrl, stillUrl, type TmdbSeason, type TmdbEpisode } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
+import { DetailActionButton } from "./detail-action-button";
 
 interface TVSeasonsProps {
   tmdbId: number;
@@ -110,9 +111,9 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
   if (seasons.length === 0) return null;
 
   return (
-    <section style={{ padding: "0 16px 32px" }}>
+    <section className="ds-detail-section">
       <h2
-        className="section-title font-semibold"
+        className="font-semibold"
         style={{
           fontSize: 15,
           letterSpacing: "-0.01em",
@@ -144,10 +145,14 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                 borderRadius: 8,
               }}
             >
+              {/* Hover is the shared inset tint (the old onMouseEnter/onMouseLeave
+                  repaint stuck after a tap on touch). The focus ring is drawn
+                  inset because the row sits inside an overflow-hidden rounded
+                  card that would clip an outer one. */}
               <button
                 type="button"
                 onClick={() => toggleSeason(season.seasonNumber)}
-                className="w-full flex items-center text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+                className="ds-hover-tint w-full flex items-center text-left"
                 aria-expanded={s?.expanded ?? false}
                 aria-controls={`season-${season.seasonNumber}-panel`}
                 style={{
@@ -156,12 +161,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                   background: "transparent",
                   border: 0,
                   color: "var(--ds-fg)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "var(--ds-bg-3)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "transparent";
+                  outlineOffset: -2,
                 }}
               >
                 <div
@@ -192,8 +192,11 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center flex-wrap" style={{ gap: 8 }}>
+                    {/* min-w-0 lets a flex child shrink below its nowrap content
+                        so `truncate` can act; flex-1 would push the meta spans
+                        to the far right of the row. */}
                     <h3
-                      className="font-semibold truncate"
+                      className="font-semibold truncate min-w-0"
                       style={{
                         fontSize: 14,
                         color: "var(--ds-fg)",
@@ -232,7 +235,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                       style={{ marginTop: 6 }}
                     >
                       <CheckCircle style={{ width: 10, height: 10 }} />
-                      {ownershipLabel} owned
+                      {fullyOwned ? ownershipLabel : `${ownershipLabel} owned`}
                     </span>
                   )}
                 </div>
@@ -281,27 +284,19 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
 
                   {s.loadState === "error" && (
                     <div
-                      className="text-center ds-mono"
-                      style={{
-                        fontSize: 12,
-                        color: "var(--ds-danger)",
-                        padding: "16px 0",
-                      }}
+                      className="flex flex-col items-center"
+                      style={{ gap: 10, padding: "16px 0" }}
                     >
-                      Failed to load episodes.{" "}
-                      <button
-                        type="button"
+                      <span className="ds-mono" style={{ fontSize: 12, color: "var(--ds-danger)" }}>
+                        Failed to load episodes.
+                      </span>
+                      <DetailActionButton
+                        variant="secondary"
+                        size="sm"
                         onClick={() => toggleSeason(season.seasonNumber, true)}
-                        className="underline transition-colors"
-                        style={{
-                          background: "transparent",
-                          border: 0,
-                          color: "inherit",
-                          cursor: "pointer",
-                        }}
                       >
                         Retry
-                      </button>
+                      </DetailActionButton>
                     </div>
                   )}
 
@@ -328,7 +323,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                         return (
                           <div
                             key={ep.episodeNumber}
-                            className="group relative flex transition-colors"
+                            className="group relative flex"
                             style={{
                               gap: 12,
                               padding: 8,
@@ -396,6 +391,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                                       marginTop: 2,
                                     }}
                                     aria-label="In library"
+                                    role="img"
                                   />
                                 ) : (
                                   <Circle
@@ -406,6 +402,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                                       marginTop: 2,
                                     }}
                                     aria-label="Not in library"
+                                    role="img"
                                   />
                                 )}
                               </div>

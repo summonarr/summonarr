@@ -1,6 +1,12 @@
 "use client";
 
 import { useEffect } from "react";
+import { AlertTriangle, Home, RefreshCw } from "@/components/icons";
+import {
+  StatePage,
+  STATE_PAGE_CTA_CLASS,
+  statePageCtaStyle,
+} from "@/components/layout/state-page";
 
 // Section-scoped error boundary for the admin subtree. Without it, a render
 // error in any admin page bubbles to the (app)-root boundary and unmounts the
@@ -19,17 +25,22 @@ export default function AdminError({
   }, [error]);
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-4 text-center p-8">
-      <h2 className="text-xl font-semibold text-white">Admin panel error</h2>
-      <p className="text-zinc-400 text-sm max-w-sm">
-        Something went wrong loading this admin section. The rest of the app is unaffected.
-      </p>
-      <button
-        onClick={() => retry()}
-        className="px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
-      >
-        Try again
-      </button>
-    </div>
+    <StatePage
+      glyph={<AlertTriangle style={{ width: 56, height: 56 }} />}
+      title="Admin panel error"
+      description="Something went wrong loading this admin section. The rest of the app is unaffected."
+      primary={
+        <button
+          type="button"
+          onClick={() => retry()}
+          className={STATE_PAGE_CTA_CLASS}
+          style={statePageCtaStyle("primary")}
+        >
+          <RefreshCw className="w-4 h-4" />
+          Try again
+        </button>
+      }
+      secondary={[{ label: "Go home", href: "/", icon: <Home className="w-4 h-4" /> }]}
+    />
   );
 }

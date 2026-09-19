@@ -39,6 +39,12 @@ export default async function LoginPage() {
   const siteTitle = siteTitleRow?.value || "Summonarr";
   const siteUrl = siteUrlRow?.value || process.env.AUTH_URL || "";
   const maintenance = await getMaintenanceStatus();
+  // The Playfair wordmark above the icon already says "Summonarr"; repeating it
+  // as the h1 read as a stutter on every default install. When the title IS the
+  // default, the wordmark becomes the page's h1 instead so the heading outline
+  // never loses its top level.
+  const isDefaultTitle = siteTitle.trim().toLowerCase() === "summonarr";
+  const WordmarkTag = isDefaultTitle ? "h1" : "p";
 
   return (
     <div
@@ -73,18 +79,19 @@ export default async function LoginPage() {
         )}
 
         <div className="flex flex-col items-center" style={{ marginBottom: 24 }}>
-          <p
+          <WordmarkTag
             className="m-0"
             style={{
               fontFamily: "var(--font-playfair)",
               fontSize: 28,
+              fontWeight: 400,
               color: "var(--ds-fg)",
               letterSpacing: "0.02em",
               marginBottom: 14,
             }}
           >
             Summonarr
-          </p>
+          </WordmarkTag>
           <div
             className="flex items-center justify-center"
             style={{
@@ -100,12 +107,14 @@ export default async function LoginPage() {
           >
             <Film style={{ width: 22, height: 22 }} />
           </div>
-          <h1
-            className="m-0 font-semibold"
-            style={{ fontSize: 18, color: "var(--ds-fg)", letterSpacing: "-0.01em" }}
-          >
-            {siteTitle}
-          </h1>
+          {!isDefaultTitle && (
+            <h1
+              className="m-0 font-semibold"
+              style={{ fontSize: 18, color: "var(--ds-fg)", letterSpacing: "-0.01em" }}
+            >
+              {siteTitle}
+            </h1>
+          )}
           <p
             className="ds-mono m-0"
             style={{ fontSize: 12, color: "var(--ds-fg-subtle)", marginTop: 4 }}

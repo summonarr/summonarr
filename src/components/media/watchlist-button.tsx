@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Bookmark, BookmarkCheck, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useToast } from "@/components/ui/toast";
+import { DetailActionButton } from "./detail-action-button";
 
 // "Add to Watchlist" toggle for movie/TV detail pages. Personal save-for-later,
 // independent of availability or request permissions. Optimistic with rollback
@@ -54,33 +55,15 @@ export function WatchlistButton({
     }
   }
 
-  const base: React.CSSProperties = {
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-    padding: "6px 14px",
-    height: 34,
-    borderRadius: 6,
-    fontSize: 13,
-    fontWeight: 500,
-    whiteSpace: "nowrap",
-    cursor: loading ? "progress" : "pointer",
-  };
-
   return (
     <div className="flex items-center gap-2">
-      <button
-        type="button"
+      <DetailActionButton
+        variant={on ? "accent-soft" : "secondary"}
         onClick={toggle}
         disabled={loading}
+        busy={loading}
         aria-pressed={on}
         aria-label={on ? "Remove from watchlist" : "Add to watchlist"}
-        style={
-          on
-            ? { ...base, background: "var(--ds-accent-soft)", color: "var(--ds-accent)", border: "1px solid var(--ds-accent-ring)" }
-            : { ...base, background: "var(--ds-bg-2)", color: "var(--ds-fg)", border: "1px solid var(--ds-border)" }
-        }
       >
         {loading ? (
           <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
@@ -89,8 +72,8 @@ export function WatchlistButton({
         ) : (
           <Bookmark style={{ width: 14, height: 14 }} />
         )}
-        {on ? "On Watchlist" : "Watchlist"}
-      </button>
+        {on ? "On Watchlist" : "Add to Watchlist"}
+      </DetailActionButton>
       {msg && (
         <span className="ds-mono" style={{ fontSize: 11, color: "var(--ds-danger)" }}>
           {msg}

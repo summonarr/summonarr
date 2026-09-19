@@ -6,8 +6,9 @@ import Link from "next/link";
 import Image from "next/image";
 import { Card } from "@/components/ui/card";
 import { posterUrl } from "@/lib/tmdb-types";
+import { PageHeader } from "@/components/ui/design";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
-import { Clock, Film, Tv2 } from "@/components/icons";
+import { Film, Tv2 } from "@/components/icons";
 import { formatRelativeTimeWithDateFallback } from "@/lib/relative-time";
 
 export const dynamic = "force-dynamic";
@@ -119,20 +120,13 @@ export default async function RecentlyAddedPage() {
   }
 
   return (
-    <div>
-      <ActivityFilterBar />
+    <div className="ds-page-enter">
+      <PageHeader
+        title="Recently Added"
+        subtitle="Items recently added to your media server"
+      />
 
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold mb-1 flex items-center gap-2">
-          <Clock className="w-6 h-6 text-zinc-400" />
-          Recently Added
-        </h1>
-        <p className="text-zinc-400 text-sm">
-          {items.length > 0
-            ? `${items.length} items recently added to your media server`
-            : "Items recently added to your media server"}
-        </p>
-      </div>
+      <ActivityFilterBar />
 
       {items.length === 0 ? (
         <Card className="bg-zinc-900 border-zinc-800 p-8 text-center">
@@ -182,7 +176,7 @@ export default async function RecentlyAddedPage() {
                   {}
                 </div>
                 <div className="min-w-0">
-                  <Link href={activityHref} className="text-xs font-medium text-white hover:text-indigo-400 transition-colors truncate block">
+                  <Link href={activityHref} className="text-xs font-medium text-zinc-100 hover:text-indigo-400 transition-colors truncate block">
                     {item.title}
                   </Link>
                   <p className="text-[10px] text-zinc-500">

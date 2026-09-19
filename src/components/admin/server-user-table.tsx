@@ -215,7 +215,7 @@ function DownloadToggle({
       className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors disabled:opacity-50 ${on ? "bg-green-600" : "bg-zinc-700"}`}
     >
       {loading ? (
-        <Loader2 className="w-3 h-3 text-white absolute left-1 animate-spin" />
+        <Loader2 className="w-3 h-3 text-zinc-100 absolute left-1 animate-spin" />
       ) : (
         <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${on ? "translate-x-4" : "translate-x-0.5"}`} />
       )}
@@ -250,7 +250,7 @@ function SyncUsersButton() {
       <button
         onClick={sync}
         disabled={loading}
-        className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-zinc-700 bg-zinc-800/60 text-zinc-300 hover:bg-zinc-700/60 hover:text-white transition-colors disabled:opacity-50"
+        className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-zinc-700 bg-zinc-800/60 text-zinc-300 hover:bg-zinc-700/60 hover:text-zinc-100 transition-colors disabled:opacity-50"
       >
         {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
         {loading ? "Syncing…" : "Sync users from server"}
@@ -359,7 +359,7 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
         className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors disabled:opacity-50 ${on ? "bg-indigo-600" : "bg-zinc-700"}`}
       >
         {loading
-          ? <Loader2 className="w-3 h-3 text-white absolute left-1 animate-spin" />
+          ? <Loader2 className="w-3 h-3 text-zinc-100 absolute left-1 animate-spin" />
           : <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${on ? "translate-x-4" : "translate-x-0.5"}`} />
         }
       </button>
@@ -399,13 +399,13 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
                   to initials when the thumb is missing or fails to load. */}
               <Avatar className={`size-7 shrink-0 ${avatarColors[source] ?? "bg-zinc-700"}`}>
                 {u.thumbUrl ? <AvatarImage src={u.thumbUrl} alt={u.username} /> : null}
-                <AvatarFallback className="bg-transparent text-[10px] font-bold text-white">
+                <AvatarFallback className="bg-transparent text-[10px] font-bold text-zinc-100">
                   {initials}
                 </AvatarFallback>
               </Avatar>
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
-                  <span className="text-sm font-medium text-white truncate">{u.username}</span>
+                  <span className="text-sm font-medium text-zinc-100 truncate">{u.username}</span>
                   {u.isServerAdmin && (
                     <ShieldCheck className="w-3 h-3 text-indigo-400 shrink-0" aria-label="Server admin" />
                   )}
@@ -485,7 +485,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
         placeholder="Filter by username or email…"
         value={search}
         onChange={(e) => setSearch(e.target.value)}
-        className="w-full sm:w-72 rounded-lg border border-zinc-700 bg-zinc-800/60 px-3 py-1.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+        className="w-full sm:w-72 rounded-lg border border-zinc-700 bg-zinc-800/60 px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
       />
 
       <div className="rounded-xl border border-zinc-800 overflow-hidden">

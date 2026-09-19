@@ -115,10 +115,10 @@ export function ActivityFilterBar() {
               <button
                 key={page.label}
                 onClick={() => router.push(`/admin/activity?tab=${page.tab}`)}
-                className={`px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors ${
+                className={`inline-flex items-center min-h-8 px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                   active
-                    ? "bg-zinc-800 text-white"
-                    : "text-zinc-500 hover:text-zinc-300"
+                    ? "bg-zinc-800 text-zinc-100"
+                    : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60"
                 }`}
               >
                 {page.label}
@@ -130,10 +130,10 @@ export function ActivityFilterBar() {
               <button
                 key={page.label}
                 onClick={() => router.push("/admin/activity")}
-                className={`px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors ${
+                className={`inline-flex items-center min-h-8 px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                   active
-                    ? "bg-zinc-800 text-white"
-                    : "text-zinc-500 hover:text-zinc-300"
+                    ? "bg-zinc-800 text-zinc-100"
+                    : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60"
                 }`}
               >
                 {page.label}
@@ -144,10 +144,10 @@ export function ActivityFilterBar() {
             <Link
               key={page.label}
               href={page.href}
-              className={`px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors ${
+              className={`inline-flex items-center min-h-8 px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                 active
-                  ? "bg-zinc-800 text-white"
-                  : "text-zinc-500 hover:text-zinc-300"
+                  ? "bg-zinc-800 text-zinc-100"
+                  : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60"
               }`}
             >
               {page.label}
@@ -169,10 +169,10 @@ export function ActivityFilterBar() {
                     setShowCustom(false);
                     setParam("days", r.value === "30" ? "" : r.value);
                   }}
-                  className={`px-2.5 py-1 text-xs font-medium transition-colors ${
+                  className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                     !showCustom && (currentDays === r.value || (r.value === "30" && !searchParams.has("days")))
-                      ? "bg-indigo-600 text-white"
-                      : "bg-zinc-800 text-zinc-400 hover:text-white"
+                      ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+                      : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
                   }`}
                 >
                   {r.label}
@@ -180,10 +180,10 @@ export function ActivityFilterBar() {
               ))}
               <button
                 onClick={() => setShowCustom(true)}
-                className={`px-2.5 py-1 text-xs font-medium transition-colors ${
+                className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                   showCustom
-                    ? "bg-indigo-600 text-white"
-                    : "bg-zinc-800 text-zinc-400 hover:text-white"
+                    ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+                    : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
                 }`}
               >
                 Custom
@@ -206,7 +206,7 @@ export function ActivityFilterBar() {
                   aria-label="Custom range in days"
                   aria-invalid={customError ? true : undefined}
                   aria-describedby={customError ? "activity-custom-days-error" : undefined}
-                  className={`w-16 px-2 py-1 text-xs bg-zinc-800 border rounded-lg text-white placeholder:text-zinc-500 focus:outline-none tabular-nums ${
+                  className={`w-16 min-h-8 px-2 py-1 text-xs bg-zinc-800 border rounded-lg text-zinc-100 placeholder:text-zinc-500 focus:outline-none tabular-nums ${
                     customError
                       ? "border-red-500 focus:border-red-400"
                       : "border-zinc-700 focus:border-indigo-500"
@@ -214,7 +214,7 @@ export function ActivityFilterBar() {
                 />
                 <button
                   onClick={applyCustomDays}
-                  className="px-2 py-1 text-xs font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-500 transition-colors"
+                  className="inline-flex items-center min-h-8 px-2 py-1 text-xs font-medium bg-indigo-600 text-[var(--ds-accent-fg)] rounded-lg hover:bg-indigo-500 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
                 >
                   Go
                 </button>
@@ -238,10 +238,10 @@ export function ActivityFilterBar() {
                 <button
                   key={s.value}
                   onClick={() => setParam("source", s.value)}
-                  className={`px-2.5 py-1 text-xs font-medium transition-colors ${
+                  className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                     currentSource === s.value
-                      ? "bg-indigo-600 text-white"
-                      : "bg-zinc-800 text-zinc-400 hover:text-white"
+                      ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+                      : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
                   }`}
                 >
                   {s.label}
@@ -257,10 +257,10 @@ export function ActivityFilterBar() {
                 <button
                   key={t.value}
                   onClick={() => setParam("mediaType", t.value)}
-                  className={`px-2.5 py-1 text-xs font-medium transition-colors ${
+                  className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                     currentMediaType === t.value
-                      ? "bg-indigo-600 text-white"
-                      : "bg-zinc-800 text-zinc-400 hover:text-white"
+                      ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+                      : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
                   }`}
                 >
                   {t.label}

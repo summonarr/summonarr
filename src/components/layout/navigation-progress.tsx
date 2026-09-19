@@ -164,7 +164,8 @@ export function NavigationProgress() {
       className="fixed top-0 left-0 z-[200] h-0.5 bg-indigo-500 transition-[width] duration-200 ease-out pointer-events-none"
       style={{
         width: `${width}%`,
-        boxShadow: "0 0 8px 0 rgba(99,102,241,0.6)",
+        // Glow follows the accent (bg-indigo-500 is token-mapped to it).
+        boxShadow: "0 0 8px 0 color-mix(in oklab, var(--ds-accent) 60%, transparent)",
       }}
     />
   );

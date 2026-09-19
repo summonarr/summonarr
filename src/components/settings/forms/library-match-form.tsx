@@ -194,7 +194,7 @@ export function LibraryMatchForm({
           variant="outline"
           onClick={loadSamples}
           disabled={loading}
-          className="border-zinc-700 text-zinc-400 hover:text-white gap-2 shrink-0"
+          className="border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-2 shrink-0"
         >
           {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
           Load examples

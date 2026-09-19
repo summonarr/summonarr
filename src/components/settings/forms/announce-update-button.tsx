@@ -57,7 +57,7 @@ export function AnnounceUpdateButton() {
             size="sm"
             variant="outline"
             onClick={() => setPhase("idle")}
-            className="border-zinc-600 text-zinc-400 hover:text-white h-7 px-3 text-xs"
+            className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-7 px-3 text-xs"
           >
             Cancel
           </Button>
@@ -74,7 +74,7 @@ export function AnnounceUpdateButton() {
           variant="outline"
           onClick={() => setPhase("confirm")}
           disabled={phase === "sending"}
-          className="border-zinc-700 text-zinc-300 hover:text-white gap-2"
+          className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
         >
           {phase === "sending" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
           {phase === "sending" ? "Sending…" : "Send update notice to all iOS devices"}

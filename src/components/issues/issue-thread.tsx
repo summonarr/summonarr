@@ -170,7 +170,7 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
           return (
             <div key={msg.id} className={`flex gap-2.5 ${isAdmin ? "flex-row-reverse" : "flex-row"}`}>
               <div className={`w-6 h-6 rounded-full shrink-0 flex items-center justify-center text-[10px] font-bold mt-0.5 ${
-                isAdmin ? "bg-indigo-700 text-white" : "bg-zinc-700 text-zinc-300"
+                isAdmin ? "bg-indigo-700 text-[var(--ds-accent-fg)]" : "bg-zinc-700 text-zinc-300"
               }`}>
                 {isAdmin ? <ShieldCheck className="w-3.5 h-3.5" /> : (authorName[0] ?? "?").toUpperCase()}
               </div>
@@ -178,7 +178,7 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
               <div className={`flex flex-col gap-0.5 max-w-[75%] ${isAdmin ? "items-end" : "items-start"}`}>
                 <div className={`px-3 py-2 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${
                   isAdmin
-                    ? "bg-indigo-600 text-white rounded-tr-sm"
+                    ? "bg-indigo-600 text-[var(--ds-accent-fg)] rounded-tr-sm"
                     : "bg-zinc-800 text-zinc-200 rounded-tl-sm"
                 }`}>
                   {msg.body}
@@ -204,7 +204,7 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
           maxLength={2000}
           rows={2}
           disabled={sending || loadState !== "ready"}
-          className="flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+          className="flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         />
         <Button
           type="submit"

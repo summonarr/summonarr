@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Loader2 } from "@/components/icons";
+import { AlertTriangle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 
 interface LoginAuth {
@@ -55,7 +56,16 @@ async function describePlexSignInFailure(res: Response): Promise<string> {
 // Landing page for the Plex PIN-based OAuth redirect; polls plex.tv until the PIN is claimed
 export default function PlexDonePage() {
   const [message, setMessage] = useState("Completing Plex sign-in…");
+  // Every failure branch below used to swap the message and leave the spinner
+  // running with no way out but the browser's Back button. `failed` stops the
+  // spinner and surfaces a link back to /login; the success path is untouched.
+  const [failed, setFailed] = useState(false);
   const searchParams = useSearchParams();
+
+  function fail(text: string) {
+    setMessage(text);
+    setFailed(true);
+  }
 
   async function completeLogin(auth: LoginAuth) {
     // Poll plex.tv directly (up to 120s) until the user approves the PIN in the Plex UI
@@ -81,7 +91,7 @@ export default function PlexDonePage() {
     }
 
     if (!authToken) {
-      setMessage("Sign-in timed out. Please go back and try again.");
+      fail("Sign-in timed out. Please go back and try again.");
       return;
     }
 
@@ -102,12 +112,12 @@ export default function PlexDonePage() {
     } catch {
       // The request never reached the server (offline, DNS/TLS, proxy down).
       // Without this the thrown fetch would leave the user on the spinner forever.
-      setMessage("Couldn't reach the server to finish sign-in. Check your connection and try again.");
+      fail("Couldn't reach the server to finish sign-in. Check your connection and try again.");
       return;
     }
 
     if (!result.ok) {
-      setMessage(await describePlexSignInFailure(result));
+      fail(await describePlexSignInFailure(result));
       return;
     }
 
@@ -158,7 +168,7 @@ export default function PlexDonePage() {
     }
 
     if (!authToken) {
-      setMessage("Connection timed out. Please go back and try again.");
+      fail("Connection timed out. Please go back and try again.");
       return;
     }
 
@@ -171,7 +181,7 @@ export default function PlexDonePage() {
       });
       if (!res.ok) throw new Error();
     } catch {
-      setMessage("Failed to save Plex connection. Please try again.");
+      fail("Failed to save Plex connection. Please try again.");
       return;
     }
 
@@ -203,7 +213,7 @@ export default function PlexDonePage() {
     // session was tampered with; an absent URL state means the redirect was forged.
     const urlState = searchParams.get("state");
     if (!auth.state || !urlState || urlState !== auth.state) {
-      setMessage("Sign-in failed: state mismatch. Please try again.");
+      fail("Sign-in failed: state mismatch. Please try again.");
       return;
     }
 
@@ -216,9 +226,39 @@ export default function PlexDonePage() {
   }, []);
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center bg-zinc-950 gap-3">
-      <Loader2 className="w-6 h-6 text-indigo-400 animate-spin" />
-      <p className="text-zinc-400 text-sm">{message}</p>
+    <div
+      className="min-h-screen flex flex-col items-center justify-center gap-3 px-6 text-center"
+      style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}
+    >
+      {failed ? (
+        <AlertTriangle style={{ width: 24, height: 24, color: "var(--ds-danger)" }} aria-hidden />
+      ) : (
+        <Loader2 className="w-6 h-6 animate-spin" style={{ color: "var(--ds-accent)" }} />
+      )}
+      <p
+        role={failed ? "alert" : "status"}
+        className="text-sm m-0"
+        style={{ color: "var(--ds-fg-muted)", maxWidth: 360, lineHeight: 1.5 }}
+      >
+        {message}
+      </p>
+      {failed && (
+        <Link
+          href="/login"
+          className="ds-tap ds-hover-tint inline-flex items-center justify-center font-medium mt-3"
+          style={{
+            background: "var(--ds-bg-2)",
+            color: "var(--ds-fg)",
+            border: "1px solid var(--ds-border)",
+            borderRadius: 10,
+            minHeight: 44,
+            fontSize: 14,
+            padding: "0 20px",
+          }}
+        >
+          Back to sign in
+        </Link>
+      )}
     </div>
   );
 }

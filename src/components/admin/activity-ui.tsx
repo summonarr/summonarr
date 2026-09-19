@@ -2,10 +2,12 @@
 
 // Shared presentational primitives for the refined Activity dashboard.
 // Ported from the Claude Design "Activity Page" handoff — DS-token styled.
-// Consumed only by the Activity dashboard's "use client" section components
-// (activity-sections, -now-playing, -recent-plays, and other activity-* views);
-// page.tsx never imports this module directly. Sparkline/AreaChart carry hover state, so this is a
-// client module. Tooltip date labels are precomputed server-side and passed
+// Consumed by the Activity dashboard's "use client" section components
+// (activity-sections, -now-playing, -recent-plays, and other activity-* views)
+// and by the server-rendered play detail page (admin/activity/play/[id]),
+// which reuses ActivityCard/SectionHeader/DetailHeader so every Activity
+// detail view shares one card and header composition. Sparkline/AreaChart
+// carry hover state, so this is a client module. Tooltip date labels are precomputed server-side and passed
 // down as `labels` — never derived from Date here (CLAUDE.md guardrail 16).
 
 import {
@@ -18,6 +20,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import Image from "next/image";
+import Link from "next/link";
 import { bitrateToKbps } from "@/lib/bitrate";
 import {
   HeatmapCellPopover,
@@ -179,7 +182,7 @@ export function Poster({
         overflow: "hidden",
         flexShrink: 0,
         position: "relative",
-        boxShadow: "inset 0 0 0 1px oklch(1 0 0 / 0.04)",
+        boxShadow: "inset 0 0 0 1px color-mix(in oklab, var(--ds-fg) 4%, transparent)",
       }}
     >
       <span
@@ -786,6 +789,15 @@ export function HourHeatmap({
 
   return (
     <>
+    {/* The grid is a fixed ~364px (28px gutter + 24 × 12px cells + gaps), so
+        inside an 18px-padded card it overruns a 375px viewport. Same fix as
+        the 365-day calendar (activity-calendar.tsx): scroll the grid inside
+        its own container instead of clipping it. `contain: inline-size` is
+        load-bearing: every caller places this card in a `1fr` grid column
+        (minmax(auto, 1fr)), and without containment the wrapper's min-content
+        width sizes the column, so the card grows past the viewport and the
+        scroll container never engages. */}
+    <div className="overflow-x-auto" style={{ contain: "inline-size" }}>
     <div
       style={{
         display: "grid",
@@ -855,7 +867,7 @@ export function HourHeatmap({
                   cursor: clickable ? "pointer" : "default",
                   background:
                     v === 0
-                      ? "oklch(1 0 0 / 0.025)"
+                      ? "color-mix(in oklab, var(--ds-fg) 2.5%, transparent)"
                       : `oklch(0.58 0.21 275 / ${(0.1 + (v / max) * 0.76).toFixed(3)})`,
                 }}
               />
@@ -863,6 +875,7 @@ export function HourHeatmap({
           })}
         </Fragment>
       ))}
+    </div>
     </div>
     {selected && (
       <HeatmapCellPopover
@@ -894,7 +907,7 @@ export function ProgressTrack({
       style={{
         position: "relative",
         height,
-        background: "oklch(1 0 0 / 0.06)",
+        background: "color-mix(in oklab, var(--ds-fg) 6%, transparent)",
         borderRadius: 999,
         overflow: "hidden",
       }}
@@ -948,7 +961,7 @@ export function DistributionList({
           <div
             style={{
               height: 4,
-              background: "oklch(1 0 0 / 0.05)",
+              background: "color-mix(in oklab, var(--ds-fg) 5%, transparent)",
               borderRadius: 999,
               overflow: "hidden",
             }}
@@ -1054,6 +1067,111 @@ export function SectionHeader({
       </div>
       {right && <div style={{ flexShrink: 0 }}>{right}</div>}
     </div>
+  );
+}
+
+// The one header composition every Activity DETAIL view uses (user, title,
+// play): a back-link line, then the exact type scale of the shared PageHeader
+// (22px / 600 / -0.02em title, 12px ds-mono subtitle) so a detail page reads
+// as the same section as the tabbed list pages above it. `leading` is the
+// avatar/poster, `meta` sits beside the title (source tag, year), `children`
+// is an optional chip row under the subtitle, and `right` mirrors PageHeader's
+// action slot (it stacks below on mobile via .ds-page-header).
+export function DetailHeader({
+  back,
+  leading,
+  title,
+  meta,
+  subtitle,
+  right,
+  children,
+}: {
+  back: { href: string; label: string };
+  leading?: ReactNode;
+  title: ReactNode;
+  meta?: ReactNode;
+  subtitle?: ReactNode;
+  right?: ReactNode;
+  children?: ReactNode;
+}) {
+  return (
+    <>
+      <Link
+        href={back.href}
+        className="ds-hover-tint"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          marginBottom: 14,
+          marginLeft: -4,
+          padding: "4px 8px 4px 4px",
+          borderRadius: 6,
+          fontSize: 12.5,
+          color: "var(--ds-fg-muted)",
+          textDecoration: "none",
+        }}
+      >
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+          <path
+            d="M7 3l-3 3 3 3"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+        {back.label}
+      </Link>
+
+      <header className="ds-page-header" style={{ marginBottom: 22 }}>
+        <div
+          className="flex-1 min-w-0"
+          style={{ display: "flex", alignItems: "center", gap: 14 }}
+        >
+          {leading && <div style={{ flexShrink: 0 }}>{leading}</div>}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                flexWrap: "wrap",
+              }}
+            >
+              <h1
+                className="m-0 font-semibold"
+                style={{
+                  fontSize: 22,
+                  letterSpacing: "-0.02em",
+                  lineHeight: 1.2,
+                  color: "var(--ds-fg)",
+                  minWidth: 0,
+                  overflowWrap: "anywhere",
+                }}
+              >
+                {title}
+              </h1>
+              {meta}
+            </div>
+            {subtitle && (
+              <p
+                className="ds-mono m-0 mt-1"
+                style={{ color: "var(--ds-fg-subtle)", fontSize: 12 }}
+              >
+                {subtitle}
+              </p>
+            )}
+            {children && <div style={{ marginTop: 10 }}>{children}</div>}
+          </div>
+        </div>
+        {right && (
+          <div className="ds-page-header-actions flex gap-1.5 flex-wrap">
+            {right}
+          </div>
+        )}
+      </header>
+    </>
   );
 }
 
@@ -1186,7 +1304,7 @@ export function HorizontalBars({
             style={{
               flex: 1,
               height: 6,
-              background: "oklch(1 0 0 / 0.05)",
+              background: "color-mix(in oklab, var(--ds-fg) 5%, transparent)",
               borderRadius: 999,
               overflow: "hidden",
               minWidth: 30,
@@ -1234,7 +1352,7 @@ export function StreamTypeBars({
           height: 8,
           borderRadius: 999,
           overflow: "hidden",
-          background: "oklch(1 0 0 / 0.04)",
+          background: "color-mix(in oklab, var(--ds-fg) 4%, transparent)",
         }}
       >
         {data.map(
@@ -1441,10 +1559,10 @@ export function HeaderStat({
       </span>
       <span
         style={{
-          fontSize: 26,
+          fontSize: 20,
           fontWeight: 600,
           color,
-          letterSpacing: "-0.025em",
+          letterSpacing: "-0.02em",
           fontVariantNumeric: "tabular-nums",
           lineHeight: 1,
         }}

@@ -70,7 +70,7 @@ export function SettingsNav({ items }: { items: NavItem[] }) {
                 aria-current={activeId === id ? "true" : undefined}
                 className={`block w-full text-left text-sm px-3 py-1.5 rounded-md transition-colors ${
                   activeId === id
-                    ? "bg-zinc-800 text-white font-medium"
+                    ? "bg-zinc-800 text-zinc-100 font-medium"
                     : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/50"
                 }`}
               >

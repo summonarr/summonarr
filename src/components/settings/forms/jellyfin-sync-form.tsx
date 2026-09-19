@@ -81,7 +81,7 @@ function JellyfinLibraryPicker({ initialSelected, folders, loadStatus, errorMess
                     onChange={() => toggle(f.id)}
                     className="w-4 h-4 rounded border-zinc-600 bg-zinc-800 accent-indigo-500"
                   />
-                  <span className="text-sm text-zinc-200 group-hover:text-white transition-colors">
+                  <span className="text-sm text-zinc-200 group-hover:text-zinc-100 transition-colors">
                     {f.name}
                   </span>
                   <span className="text-xs px-1.5 py-0.5 rounded bg-zinc-700 text-zinc-400">
@@ -291,7 +291,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
               onClick={handleSync}
               disabled={syncStatus === "running"}
               variant="outline"
-              className="border-zinc-700 text-zinc-300 hover:text-white"
+              className="border-zinc-700 text-zinc-300 hover:text-zinc-100"
             >
               {syncStatus === "running" ? (
                 <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Syncing…</>

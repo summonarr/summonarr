@@ -55,10 +55,14 @@ function ToggleRow({
         aria-checked={checked}
         disabled={disabled}
         onClick={onChange}
-        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-zinc-900 disabled:opacity-50 ${checked ? "bg-indigo-600" : "bg-zinc-700"}`}
+        className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-zinc-900 disabled:opacity-50 ${checked ? "bg-indigo-600" : "bg-zinc-700"}`}
       >
         <span
-          className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${checked ? "translate-x-4" : "translate-x-0.5"}`}
+          className={`inline-block h-4 w-4 transform rounded-full shadow transition-transform ${checked ? "translate-x-4" : "translate-x-0.5"}`}
+          // Theme-relative knob: the hard-coded white one vanished against the
+          // off-state track in light mode. The 1px outline keeps it legible on
+          // either track colour.
+          style={{ background: "var(--ds-bg-2)", outline: "1px solid var(--ds-border)", outlineOffset: -1 }}
         />
       </button>
     </div>
@@ -327,7 +331,7 @@ export function NotificationPrefs({
                   type="button"
                   onClick={sendVerification}
                   disabled={emailSavingState === "saving" || emailInput.trim() === ""}
-                  className="rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed px-3 py-1.5 text-sm font-medium text-white transition-colors whitespace-nowrap"
+                  className="rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed px-3 py-1.5 text-sm font-medium text-[var(--ds-accent-fg)] transition-colors whitespace-nowrap"
                 >
                   {emailSavingState === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Send verification"}
                 </button>

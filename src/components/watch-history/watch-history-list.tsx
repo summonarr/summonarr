@@ -9,11 +9,11 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
-import { Check, Film, Tv2 } from "@/components/icons";
+import { Check, Clock, Film, Tv2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTime } from "@/lib/relative-time";
-import { EmptyState } from "@/components/ui/empty-state";
+import { EmptyState, FilterBar, type FilterSegment } from "@/components/ui/design";
 import { ReportIssueButton } from "@/components/media/report-issue-button";
 import type { MyWatchHistoryItem, MyWatchHistoryPage } from "@/lib/my-watch-history";
 
@@ -40,6 +40,12 @@ function mediaHref(item: MyWatchHistoryItem): string | null {
 }
 
 type TypeFilter = "" | "MOVIE" | "TV";
+
+const TYPE_SEGMENTS: readonly FilterSegment<TypeFilter>[] = [
+  { value: "", label: "All" },
+  { value: "MOVIE", label: "Movies" },
+  { value: "TV", label: "TV" },
+];
 
 export function WatchHistoryList({
   initial,
@@ -151,13 +157,13 @@ export function WatchHistoryList({
         setTotal(data.total);
         setNextCursor(data.nextCursor);
       } else if (filterGen.current === myGen) {
-        setLoadError("Couldn't load more. Tap to retry.");
+        setLoadError("Couldn't load more. Tap Load more to retry.");
       }
     } catch {
       // `if (res.ok)` with no else and no catch meant a failed page silently did
       // nothing — same generation guard as the success path, so a superseded
       // request cannot report its failure over the current one.
-      if (filterGen.current === myGen) setLoadError("Couldn't load more. Tap to retry.");
+      if (filterGen.current === myGen) setLoadError("Couldn't load more. Tap Load more to retry.");
     } finally {
       setLoadingMore(false);
     }
@@ -165,11 +171,15 @@ export function WatchHistoryList({
 
   if (!initial.linked) {
     return (
-      <EmptyState>
-        {serverProvider
-          ? "No watch history yet — what you watch on the server will show up here."
-          : "No watch history yet. Activity appears here once your account is linked to a Plex or Jellyfin user — linking happens automatically when the media-server account uses the same email address, or an admin can link it manually."}
-      </EmptyState>
+      <EmptyState
+        icon={Clock}
+        title="No watch history yet"
+        description={
+          serverProvider
+            ? "What you watch on the server will show up here."
+            : "Activity appears here once your account is linked to a Plex or Jellyfin user — linking happens automatically when the media-server account uses the same email address, or an admin can link it manually."
+        }
+      />
     );
   }
 
@@ -177,66 +187,36 @@ export function WatchHistoryList({
 
   return (
     <div>
-      <div
-        className="flex flex-wrap items-center justify-between"
-        style={{ gap: 10, marginBottom: 12 }}
-      >
-        <span className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
-          {initial.stats.plays} {initial.stats.plays === 1 ? "play" : "plays"} ·{" "}
-          {fmtDuration(initial.stats.playSeconds)} watched
-        </span>
-        <div className="flex items-center" style={{ gap: 8 }}>
-          <div
-            className="flex items-center"
-            style={{
-              gap: 2,
-              padding: 2,
-              background: "var(--ds-bg-2)",
-              border: "1px solid var(--ds-border)",
-              borderRadius: 7,
-            }}
-          >
-            {([
-              ["", "All"],
-              ["MOVIE", "Movies"],
-              ["TV", "TV"],
-            ] as const).map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                onClick={() => setTypeFilter(value)}
-                style={{
-                  fontSize: 11.5,
-                  padding: "4px 10px",
-                  borderRadius: 5,
-                  cursor: "pointer",
-                  background: typeFilter === value ? "var(--ds-bg-3)" : "transparent",
-                  color: typeFilter === value ? "var(--ds-fg)" : "var(--ds-fg-subtle)",
-                }}
-              >
-                {label}
-              </button>
-            ))}
+      <FilterBar
+        segments={TYPE_SEGMENTS}
+        active={typeFilter}
+        onChange={setTypeFilter}
+        right={
+          <div className="flex items-center flex-wrap" style={{ gap: 10 }}>
+            <span className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
+              {initial.stats.plays} {initial.stats.plays === 1 ? "play" : "plays"} ·{" "}
+              {fmtDuration(initial.stats.playSeconds)} watched
+            </span>
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search titles…"
+              aria-label="Search watch history"
+              className="outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              style={{
+                fontSize: 12,
+                padding: "6px 10px",
+                width: 170,
+                background: "var(--ds-bg-1)",
+                border: "1px solid var(--ds-border)",
+                borderRadius: 6,
+                color: "var(--ds-fg)",
+              }}
+            />
           </div>
-          <input
-            type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search titles…"
-            aria-label="Search watch history"
-            style={{
-              fontSize: 12,
-              padding: "6px 10px",
-              width: 170,
-              background: "var(--ds-bg-2)",
-              border: "1px solid var(--ds-border)",
-              borderRadius: 7,
-              color: "var(--ds-fg)",
-              outline: "none",
-            }}
-          />
-        </div>
-      </div>
+        }
+      />
 
       {error && (
         <p className="ds-mono" style={{ fontSize: 11, color: "var(--ds-danger)", margin: "0 0 10px" }}>
@@ -245,11 +225,15 @@ export function WatchHistoryList({
       )}
 
       {items.length === 0 ? (
-        <EmptyState>
-          {filtersActive
-            ? "No plays match your filters."
-            : "No watch history yet — plays on the media server will show up here."}
-        </EmptyState>
+        <EmptyState
+          icon={Clock}
+          title={filtersActive ? "No matching plays" : "No watch history yet"}
+          description={
+            filtersActive
+              ? "No plays match your filters."
+              : "Plays on the media server will show up here."
+          }
+        />
       ) : (
         <div
           className="flex flex-col"
@@ -271,15 +255,15 @@ export function WatchHistoryList({
                 <span
                   className="relative shrink-0 overflow-hidden"
                   style={{
-                    width: 40,
-                    height: 60,
+                    width: 44,
+                    height: 66,
                     borderRadius: 4,
                     background: "var(--ds-bg-3)",
                     border: "1px solid var(--ds-border)",
                   }}
                 >
                   {item.posterUrl ? (
-                    <Image src={item.posterUrl} alt="" fill className="object-cover" sizes="40px" />
+                    <Image src={item.posterUrl} alt="" fill className="object-cover" sizes="44px" />
                   ) : (
                     <span
                       className="flex items-center justify-center h-full"
@@ -299,6 +283,7 @@ export function WatchHistoryList({
                     style={{ gap: 6, fontSize: 13, fontWeight: 600, color: "var(--ds-fg)" }}
                   >
                     <span
+                      className="transition-colors group-hover:text-[var(--ds-accent)]"
                       style={{
                         overflow: "hidden",
                         textOverflow: "ellipsis",
@@ -322,7 +307,7 @@ export function WatchHistoryList({
                           fontWeight: 400,
                           padding: "2px 6px",
                           borderRadius: 999,
-                          background: "oklch(1 0 0 / 0.06)",
+                          background: "color-mix(in oklab, var(--ds-fg) 6%, transparent)",
                           color: "var(--ds-fg-subtle)",
                           letterSpacing: "0.04em",
                           whiteSpace: "nowrap",
@@ -396,12 +381,6 @@ export function WatchHistoryList({
                 </span>
               </>
             );
-            const rowStyle = {
-              padding: "10px 12px",
-              borderRadius: 8,
-              background: "var(--ds-bg-1)",
-              border: "1px solid var(--ds-border)",
-            } as const;
             // Report button sits OUTSIDE the row link (a button inside an
             // anchor would navigate on click). Prefilled to the exact episode
             // for TV entries; unmatched rows (no tmdbId) can't be reported.
@@ -421,17 +400,23 @@ export function WatchHistoryList({
                 />
               ) : null;
             return (
-              <div key={item.id} className="flex gap-3 items-center" style={rowStyle}>
+              <div
+                key={item.id}
+                className="flex items-center transition-colors bg-[var(--ds-bg-2)] hover:bg-[var(--ds-bg-3)] border border-[var(--ds-border)]"
+                style={{ gap: 14, padding: 14, borderRadius: 8 }}
+              >
                 {href ? (
                   <Link
                     href={href}
-                    className="flex gap-3 items-center min-w-0 flex-1"
-                    style={{ textDecoration: "none" }}
+                    className="flex items-center min-w-0 flex-1 group"
+                    style={{ gap: 14, textDecoration: "none" }}
                   >
                     {row}
                   </Link>
                 ) : (
-                  <span className="flex gap-3 items-center min-w-0 flex-1">{row}</span>
+                  <span className="flex items-center min-w-0 flex-1" style={{ gap: 14 }}>
+                    {row}
+                  </span>
                 )}
                 {report}
               </div>

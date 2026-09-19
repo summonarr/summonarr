@@ -26,7 +26,7 @@ export function SetupShell({ importAvailable }: { importAvailable: boolean }) {
 
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
-      <div className="grid grid-cols-2 border-b border-zinc-800">
+      <div role="tablist" aria-label="Setup mode" className="grid grid-cols-2 border-b border-zinc-800">
         <TabButton active={tab === "create"} onClick={() => setTab("create")}>
           <UserPlus className="w-3.5 h-3.5" />
           Create account
@@ -36,7 +36,7 @@ export function SetupShell({ importAvailable }: { importAvailable: boolean }) {
           Restore backup
         </TabButton>
       </div>
-      <div className="p-8">
+      <div role="tabpanel" className="p-8">
         {tab === "create" ? (
           <>
             <div className="flex items-center gap-2 mb-6 px-3 py-2.5 rounded-lg bg-indigo-600/10 border border-indigo-500/20">
@@ -66,10 +66,12 @@ function TabButton({
   return (
     <button
       type="button"
+      role="tab"
+      aria-selected={active}
       onClick={onClick}
-      className={`flex items-center justify-center gap-1.5 py-3 text-xs font-medium transition-colors ${
+      className={`ds-hover-tint flex items-center justify-center gap-1.5 py-3 text-xs font-medium transition-colors ${
         active
-          ? "text-white bg-zinc-900"
+          ? "text-[var(--ds-fg)] bg-zinc-900"
           : "text-zinc-400 bg-zinc-950 hover:text-zinc-200"
       }`}
     >

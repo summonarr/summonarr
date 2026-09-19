@@ -132,7 +132,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
         <div className="flex items-center justify-between mb-1">
           <h3
             id={titleId}
-            className="text-sm font-semibold text-white flex items-center gap-2"
+            className="text-sm font-semibold text-zinc-100 flex items-center gap-2"
           >
             <KeyRound className="w-4 h-4 text-zinc-400" />
             Active Sessions
@@ -142,7 +142,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
             type="button"
             aria-label="Close"
             onClick={onClose}
-            className="text-zinc-500 hover:text-white transition-colors"
+            className="text-zinc-500 hover:text-zinc-100 transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
@@ -217,7 +217,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                     aria-label="Cancel revoke this session"
                     disabled={revoking === s.sessionId || revokingAll}
                     onClick={() => setConfirmingRevoke(null)}
-                    className="rounded-md px-2 py-1 text-[10px] text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors disabled:opacity-40"
+                    className="rounded-md px-2 py-1 text-[10px] text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors disabled:opacity-40"
                   >
                     Cancel
                   </button>
@@ -271,7 +271,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                   aria-label="Cancel revoke all"
                   disabled={revokingAll}
                   onClick={() => setConfirmingRevokeAll(false)}
-                  className="rounded-md px-3 py-2 text-xs text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors disabled:opacity-40"
+                  className="rounded-md px-3 py-2 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors disabled:opacity-40"
                 >
                   Cancel
                 </button>

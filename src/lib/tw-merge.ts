@@ -305,6 +305,23 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["backdrop-saturate", /^backdrop-saturate-/],
   ["backdrop-sepia", /^backdrop-sepia(?:-|$)/],
 
+  // The plain `filter` functions compose the same way (one --tw-* var each
+  // into a single `filter` value), so they get one group per function too.
+  // Listed AFTER the backdrop-* groups and anchored at ^ so `blur-sm` and
+  // `backdrop-blur-sm` never share a group.
+  ["blur", /^blur(?:-|$)/],
+  ["brightness", /^brightness-/],
+  ["contrast", /^contrast-/],
+  // drop-shadow-<colour> sets --tw-drop-shadow-color, not the filter itself —
+  // same split as shadow-color / shadow above.
+  ["drop-shadow-color", /^drop-shadow-(?!xs|sm|md|lg|xl|2xl|none)/],
+  ["drop-shadow", /^drop-shadow(?:-|$)/],
+  ["grayscale", /^grayscale(?:-|$)/],
+  ["hue-rotate", /^-?hue-rotate-/],
+  ["invert", /^invert(?:-|$)/],
+  ["saturate", /^saturate-/],
+  ["sepia", /^sepia(?:-|$)/],
+
   ["transition-behavior", /^transition-(?:discrete|normal)$/],
   ["transition", /^transition(?:-|$)/],
   ["duration", /^duration-/],

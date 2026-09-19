@@ -400,7 +400,7 @@ export function Leaderboards({
                   <div
                     style={{
                       height: 4,
-                      background: "oklch(1 0 0 / 0.05)",
+                      background: "color-mix(in oklab, var(--ds-fg) 5%, transparent)",
                       borderRadius: 999,
                       overflow: "hidden",
                     }}
@@ -522,7 +522,7 @@ export function Leaderboards({
                   <div
                     style={{
                       height: 4,
-                      background: "oklch(1 0 0 / 0.05)",
+                      background: "color-mix(in oklab, var(--ds-fg) 5%, transparent)",
                       borderRadius: 999,
                       overflow: "hidden",
                     }}

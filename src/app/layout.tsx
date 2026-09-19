@@ -32,7 +32,14 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
-  themeColor: "#09090b",
+  // Browser chrome colour per OS scheme (generate-viewport.md, "With media
+  // attribute"). Hex forms of --ds-bg in globals.css: light oklch(0.99 0.002
+  // 275) ≈ #fbfcfd, dark oklch(0.145 0.004 275) ≈ #09090b. Keyed on the OS
+  // preference, not the in-app toggle — a <meta> cannot read localStorage.
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#fbfcfd" },
+    { media: "(prefers-color-scheme: dark)", color: "#09090b" },
+  ],
 };
 
 export const metadata: Metadata = {

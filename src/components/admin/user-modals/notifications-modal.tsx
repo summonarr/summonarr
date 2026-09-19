@@ -90,7 +90,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
         <div className="flex items-center justify-between mb-1">
           <h3
             id={titleId}
-            className="text-sm font-semibold text-white flex items-center gap-2"
+            className="text-sm font-semibold text-zinc-100 flex items-center gap-2"
           >
             <Bell className="w-4 h-4 text-zinc-400" />
             Notification Settings
@@ -100,7 +100,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
             type="button"
             aria-label="Close"
             onClick={onClose}
-            className="text-zinc-500 hover:text-white transition-colors"
+            className="text-zinc-500 hover:text-zinc-100 transition-colors"
           >
             <X className="w-4 h-4" />
           </button>

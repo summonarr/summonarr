@@ -53,7 +53,7 @@ function RankList({
               {r.count.toLocaleString("en-US")}
             </span>
           </div>
-          <div style={{ height: 3, background: "oklch(1 0 0 / 0.06)", borderRadius: 999, overflow: "hidden" }}>
+          <div style={{ height: 3, background: "color-mix(in oklab, var(--ds-fg) 6%, transparent)", borderRadius: 999, overflow: "hidden" }}>
             <div
               style={{
                 width: `${(r.count / max) * 100}%`,

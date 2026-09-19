@@ -93,7 +93,7 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
   return (
     <Card className="bg-zinc-900 border-zinc-800 p-6">
       <div className="mb-5">
-        <h2 className="font-semibold text-white text-lg">Sync Settings</h2>
+        <h2 className="font-semibold text-zinc-100 text-lg">Sync Settings</h2>
         <p className="text-sm text-zinc-500 mt-0.5">
           Enable the master toggle, then pick which kinds of specs the cron job re-applies each run.
         </p>
@@ -153,7 +153,7 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
           type="button"
           onClick={handleRefresh}
           disabled={refreshState === "running"}
-          className="bg-zinc-800 hover:bg-zinc-700 text-white"
+          className="bg-zinc-800 hover:bg-zinc-700 text-zinc-100"
         >
           {refreshState === "running"
             ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Refreshing…</>
@@ -163,7 +163,7 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
           type="button"
           onClick={handleSyncNow}
           disabled={syncState === "running" || !settings.enabled}
-          className="bg-indigo-600 hover:bg-indigo-500 text-white"
+          className="bg-indigo-600 hover:bg-indigo-500 text-[var(--ds-accent-fg)]"
         >
           {syncState === "running"
             ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Syncing…</>
@@ -209,7 +209,7 @@ function ToggleRow({
         className="mt-0.5 w-4 h-4 rounded border-zinc-600 bg-zinc-800 accent-indigo-500"
       />
       <div>
-        <p className="text-sm text-zinc-200 font-medium group-hover:text-white transition-colors">{label}</p>
+        <p className="text-sm text-zinc-200 font-medium group-hover:text-zinc-100 transition-colors">{label}</p>
         <p className="text-xs text-zinc-500">{description}</p>
       </div>
     </label>

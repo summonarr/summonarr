@@ -280,7 +280,7 @@ export function PermissionsModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-1">
-          <h3 id={titleId} className="text-sm font-semibold text-white flex items-center gap-2">
+          <h3 id={titleId} className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
             <ShieldCheck className="w-4 h-4 text-zinc-400" />
             Permissions &amp; Quota
           </h3>
@@ -289,7 +289,7 @@ export function PermissionsModal({
             type="button"
             aria-label="Close"
             onClick={onClose}
-            className="text-zinc-500 hover:text-white transition-colors"
+            className="text-zinc-500 hover:text-zinc-100 transition-colors"
           >
             <X className="w-4 h-4" />
           </button>

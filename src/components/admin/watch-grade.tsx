@@ -229,7 +229,7 @@ export function WatchGradeModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-1">
-          <h3 id={titleId} className="text-sm font-semibold text-white">
+          <h3 id={titleId} className="text-sm font-semibold text-zinc-100">
             Request watch grade
           </h3>
           <button
@@ -237,7 +237,7 @@ export function WatchGradeModal({
             type="button"
             aria-label="Close"
             onClick={onClose}
-            className="text-zinc-500 hover:text-white transition-colors"
+            className="text-zinc-500 hover:text-zinc-100 transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
@@ -313,7 +313,7 @@ export function WatchGradeModal({
                       className={`rounded-md px-2 py-0.5 text-[11px] border transition-colors ${
                         filter === f.id
                           ? "border-indigo-500/60 bg-indigo-500/15 text-indigo-300"
-                          : "border-zinc-800 text-zinc-400 hover:text-white"
+                          : "border-zinc-800 text-zinc-400 hover:text-zinc-100"
                       }`}
                     >
                       {f.label} {f.count}

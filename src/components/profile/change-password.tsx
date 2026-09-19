@@ -84,7 +84,6 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
             autoComplete="current-password"
             value={currentPassword}
             onChange={(e) => setCurrentPassword(e.target.value)}
-            className="bg-zinc-800 border-zinc-700"
             required
           />
         </div>
@@ -100,7 +99,6 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
           autoComplete="new-password"
           value={newPassword}
           onChange={(e) => setNewPassword(e.target.value)}
-          className="bg-zinc-800 border-zinc-700"
           placeholder="Min. 12 characters"
           minLength={12}
           required
@@ -117,7 +115,6 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
           autoComplete="new-password"
           value={confirmPassword}
           onChange={(e) => setConfirmPassword(e.target.value)}
-          className="bg-zinc-800 border-zinc-700"
           minLength={12}
           required
         />

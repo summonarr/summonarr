@@ -52,7 +52,6 @@ export function Sidebar({
       {/* Brand */}
       <Link
         href="/"
-        aria-label="Home"
         className="flex items-center gap-2.5"
         style={{
           padding: "16px 16px 14px",
@@ -193,8 +192,12 @@ function NavLink({ item, active }: { item: NavItem; active: boolean }) {
   return (
     <Link
       href={item.href}
+      aria-current={active ? "page" : undefined}
+      // ds-hover-tint paints the hover over the inline background (the active
+      // accent-soft stays underneath), replacing the onMouseEnter/Leave
+      // inline-style mutation this used to carry — and gives a focus ring.
       className={cn(
-        "flex items-center gap-2.5 relative text-left w-full font-medium transition-colors",
+        "ds-hover-tint flex items-center gap-2.5 relative text-left w-full font-medium transition-colors",
         !active && "hover:text-[var(--ds-fg)]",
       )}
       style={{
@@ -203,16 +206,6 @@ function NavLink({ item, active }: { item: NavItem; active: boolean }) {
         background: active ? "var(--ds-accent-soft)" : "transparent",
         color: active ? "var(--ds-accent)" : "var(--ds-fg-muted)",
         fontSize: 13,
-      }}
-      onMouseEnter={(e) => {
-        if (!active) {
-          e.currentTarget.style.background = "var(--ds-bg-3)";
-        }
-      }}
-      onMouseLeave={(e) => {
-        if (!active) {
-          e.currentTarget.style.background = "transparent";
-        }
       }}
     >
       {active && (

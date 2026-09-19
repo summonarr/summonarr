@@ -14,8 +14,8 @@ import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { prisma } from "@/lib/prisma";
 import { requireFeature } from "@/lib/features";
-import { PageHeader, EmptyState } from "@/components/ui/design";
-import { Filter, Film, Tv } from "@/components/icons";
+import { PageHeader, EmptyState, SectionHeader } from "@/components/ui/design";
+import { Filter, Film, Tv, type IconComponent } from "@/components/icons";
 
 const PER_PAGE = 36;
 
@@ -248,6 +248,11 @@ export default async function TopRatedPage({
     `${allMovies.length + allTV.length} titles`,
   ].filter(Boolean) as string[];
 
+  // When nothing survived in EITHER visible section, one empty state for the
+  // page — not the same card once under each section heading.
+  const bothEmpty =
+    (!showMovies || movies.length === 0) && (!showTV || tv.length === 0);
+
   return (
     <div className="ds-page-enter">
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
@@ -266,92 +271,72 @@ export default async function TopRatedPage({
         />
       </Suspense>
 
-      {showMovies && (
-        <section style={{ marginBottom: 40 }}>
-          <SectionHeader
-            title="Movies"
-            range={
-              totalMovieCount > 0
-                ? `${offset + 1}–${Math.min(offset + movies.length, totalMovieCount)} of ${totalMovieCount}`
-                : undefined
-            }
-          />
-          {movies.length === 0 ? (
-            page > 1 ? (
-              <EmptyState
-                icon={Film}
-                title="No more results on this page"
-                description="Try going back to the first page."
-                cta={{ href: "/top", label: "Back to page 1" }}
+      {bothEmpty ? (
+        sectionEmptyState(Film, page, hasFilters)
+      ) : (
+        <>
+          {showMovies && (
+            // The LAST rendered section carries no bottom margin: the pager's
+            // own mt-8 puts it 32px below the grid, like every other page.
+            <section style={{ marginBottom: showTV ? 40 : 0 }}>
+              <SectionHeader
+                title="Movies"
+                right={
+                  totalMovieCount > 0 ? (
+                    <RangeLabel>
+                      {`${offset + 1}–${Math.min(offset + movies.length, totalMovieCount)} of ${totalMovieCount}`}
+                    </RangeLabel>
+                  ) : undefined
+                }
               />
-            ) : (
-              <EmptyState
-                icon={Filter}
-                title="No results match these filters"
-                description="Try removing one or two filters to see more."
-                {...(hasFilters
-                  ? { cta: { href: "/top", label: "Clear filters" } }
-                  : {})}
-              />
-            )
-          ) : (
-            <div className="ds-media-grid">
-              {movies.map((media) => (
-                <MediaCard
-                  key={`movie-${media.id}`}
-                  media={media}
-                  showPlex={showPlex}
-                  showJellyfin={showJellyfin}
-                  size="md"
-                />
-              ))}
-            </div>
+              {movies.length === 0 ? (
+                sectionEmptyState(Film, page, hasFilters)
+              ) : (
+                <div className="ds-media-grid">
+                  {movies.map((media) => (
+                    <MediaCard
+                      key={`movie-${media.id}`}
+                      media={media}
+                      showPlex={showPlex}
+                      showJellyfin={showJellyfin}
+                      size="md"
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
           )}
-        </section>
-      )}
 
-      {showTV && (
-        <section style={{ marginBottom: 40 }}>
-          <SectionHeader
-            title="TV Shows"
-            range={
-              totalTvCount > 0
-                ? `${offset + 1}–${Math.min(offset + tv.length, totalTvCount)} of ${totalTvCount}`
-                : undefined
-            }
-          />
-          {tv.length === 0 ? (
-            page > 1 ? (
-              <EmptyState
-                icon={Tv}
-                title="No more results on this page"
-                description="Try going back to the first page."
-                cta={{ href: "/top", label: "Back to page 1" }}
+          {showTV && (
+            <section>
+              <SectionHeader
+                title="TV Shows"
+                right={
+                  totalTvCount > 0 ? (
+                    <RangeLabel>
+                      {`${offset + 1}–${Math.min(offset + tv.length, totalTvCount)} of ${totalTvCount}`}
+                    </RangeLabel>
+                  ) : undefined
+                }
               />
-            ) : (
-              <EmptyState
-                icon={Filter}
-                title="No results match these filters"
-                description="Try removing one or two filters to see more."
-                {...(hasFilters
-                  ? { cta: { href: "/top", label: "Clear filters" } }
-                  : {})}
-              />
-            )
-          ) : (
-            <div className="ds-media-grid">
-              {tv.map((media) => (
-                <MediaCard
-                  key={`tv-${media.id}`}
-                  media={media}
-                  showPlex={showPlex}
-                  showJellyfin={showJellyfin}
-                  size="md"
-                />
-              ))}
-            </div>
+              {tv.length === 0 ? (
+                sectionEmptyState(Tv, page, hasFilters)
+              ) : (
+                <div className="ds-media-grid">
+                  {tv.map((media) => (
+                    <MediaCard
+                      key={`tv-${media.id}`}
+                      media={media}
+                      showPlex={showPlex}
+                      showJellyfin={showJellyfin}
+                      size="md"
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
           )}
-        </section>
+        </>
       )}
 
       <Suspense>
@@ -361,31 +346,34 @@ export default async function TopRatedPage({
   );
 }
 
-function SectionHeader({ title, range }: { title: string; range?: string }) {
+// "1–36 of 200" beside a section title. Same label /popular uses.
+function RangeLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex items-end mb-3">
-      <h2
-        className="section-title m-0 font-semibold"
-        style={{
-          fontSize: 15,
-          letterSpacing: "-0.01em",
-          color: "var(--ds-fg)",
-        }}
-      >
-        {title}
-      </h2>
-      {range && (
-        <span
-          className="ds-mono ml-auto uppercase"
-          style={{
-            fontSize: 10.5,
-            color: "var(--ds-fg-subtle)",
-            letterSpacing: "0.06em",
-          }}
-        >
-          {range}
-        </span>
-      )}
-    </div>
+    <span
+      className="ds-mono uppercase"
+      style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", letterSpacing: "0.06em" }}
+    >
+      {children}
+    </span>
+  );
+}
+
+// The per-section (and, when both are empty, per-page) empty state. `icon`
+// only matters past page 1 — the filters case always shows the filter glyph.
+function sectionEmptyState(icon: IconComponent, page: number, hasFilters: boolean) {
+  return page > 1 ? (
+    <EmptyState
+      icon={icon}
+      title="No more results on this page"
+      description="Try going back to the first page."
+      cta={{ href: "/top", label: "Back to page 1" }}
+    />
+  ) : (
+    <EmptyState
+      icon={Filter}
+      title="No results match these filters"
+      description="Try removing one or two filters to see more."
+      {...(hasFilters ? { cta: { href: "/top", label: "Clear filters" } } : {})}
+    />
   );
 }

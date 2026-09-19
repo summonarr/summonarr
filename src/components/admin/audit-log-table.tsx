@@ -231,7 +231,7 @@ function AuditLogFilters({
           <button
             onClick={() => navigate({ action: "" })}
             className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-              !currentAction ? "bg-indigo-600 text-white" : "bg-zinc-800 text-zinc-400 hover:text-white"
+              !currentAction ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-[var(--ds-accent-fg)]"
             }`}
           >
             All
@@ -241,7 +241,7 @@ function AuditLogFilters({
               key={a}
               onClick={() => navigate({ action: a })}
               className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                currentAction === a ? "bg-indigo-600 text-white" : "bg-zinc-800 text-zinc-400 hover:text-white"
+                currentAction === a ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-[var(--ds-accent-fg)]"
               }`}
             >
               {ACTION_LABELS[a as AuditAction].label}
@@ -254,8 +254,8 @@ function AuditLogFilters({
             onClick={() => navigate({ hideCron: currentHideCron ? "" : "1" })}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
               currentHideCron
-                ? "bg-indigo-600 text-white"
-                : "bg-zinc-800 text-zinc-400 hover:text-white"
+                ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+                : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
             }`}
             title={currentHideCron ? "Showing only real users — click to include cron jobs" : "Hide system cron job entries"}
           >
@@ -265,14 +265,14 @@ function AuditLogFilters({
           <div className="flex rounded-md border border-zinc-700 overflow-hidden">
             <button
               onClick={() => onViewModeChange("table")}
-              className={`p-1.5 transition-colors ${viewMode === "table" ? "bg-indigo-600 text-white" : "bg-zinc-800 text-zinc-400 hover:text-white"}`}
+              className={`p-1.5 transition-colors ${viewMode === "table" ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-[var(--ds-accent-fg)]"}`}
               title="Table view"
             >
               <List size={16} />
             </button>
             <button
               onClick={() => onViewModeChange("timeline")}
-              className={`p-1.5 transition-colors ${viewMode === "timeline" ? "bg-indigo-600 text-white" : "bg-zinc-800 text-zinc-400 hover:text-white"}`}
+              className={`p-1.5 transition-colors ${viewMode === "timeline" ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-[var(--ds-accent-fg)]"}`}
               title="Timeline view"
             >
               <Activity size={16} />
@@ -335,7 +335,7 @@ function AuditLogFilters({
               setTargetInput("");
               navigate({ action: "", group: "", dateFrom: "", dateTo: "", user: "", target: "", hideCron: "" });
             }}
-            className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors"
+            className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs text-zinc-400 hover:text-zinc-100 bg-zinc-800 hover:bg-zinc-700 transition-colors"
           >
             <X size={12} /> Clear
           </button>
@@ -382,7 +382,7 @@ function ExportButton({
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-800 text-zinc-400 hover:text-white transition-colors"
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-800 text-zinc-400 hover:text-zinc-100 transition-colors"
       >
         <Download size={14} /> Export
       </button>
@@ -448,7 +448,7 @@ function ScrubPiiButton() {
         </button>
         <button
           onClick={() => setConfirming(false)}
-          className="px-2 py-1.5 rounded-md text-xs text-zinc-400 hover:text-white bg-zinc-800 transition-colors"
+          className="px-2 py-1.5 rounded-md text-xs text-zinc-400 hover:text-zinc-100 bg-zinc-800 transition-colors"
         >
           Cancel
         </button>
@@ -461,7 +461,7 @@ function ScrubPiiButton() {
       <button
         onClick={() => setConfirming(true)}
         disabled={busy}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-800 text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-800 text-zinc-400 hover:text-zinc-100 transition-colors disabled:opacity-50"
         title="Immediately redact IP addresses, devices, and user names from rows past the retention window (normally done by the daily cron)"
       >
         <Shield size={14} /> {busy ? "Scrubbing…" : "Scrub PII"}
@@ -799,7 +799,7 @@ function AuditLogTable({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }
                   <td className="px-4 py-3 text-zinc-400 whitespace-nowrap text-xs" title={mounted ? new Date(log.createdAt).toLocaleString("en-US") : undefined}>
                     {mounted ? relativeTime(log.createdAt) : ""}
                   </td>
-                  <td className="px-4 py-3 text-white text-sm">{log.userName}</td>
+                  <td className="px-4 py-3 text-zinc-100 text-sm">{log.userName}</td>
                   <td className="px-4 py-3">
                     <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${actionInfo.color}`}>
                       {actionInfo.label}
@@ -877,7 +877,7 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
                     <Card className="bg-zinc-900 border-zinc-800 p-3">
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-sm font-medium text-white">{log.userName}</span>
+                          <span className="text-sm font-medium text-zinc-100">{log.userName}</span>
                           <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${actionInfo.color}`}>
                             {actionInfo.label}
                           </span>

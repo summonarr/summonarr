@@ -1,49 +1,69 @@
 // Root (app) loading boundary — primarily for the home/discover page, the
-// heaviest route (7 TMDB rail fetches + availability enrichment) and previously
-// the only major one with NO loading state: on a cold TMDB cache, navigating to
-// "/" blocked with zero feedback. Shaped like Discover: header + hero pair +
-// three horizontal poster rails, using the house animate-pulse + var(--ds-bg-*)
-// skeleton conventions (see components/loading/poster-grid-skeleton.tsx).
+// heaviest route (7 TMDB rail fetches + availability enrichment): on a cold
+// TMDB cache, navigating to "/" used to block with zero feedback. Shaped like
+// Discover: PageHeader (+ the hide-available toggle), the trending hero pair
+// (.ds-discover-hero-pair, stacks below 900px; each hero is the real 20px-
+// padded .ds-discover-hero poster+content grid, so ≈310px tall on desktop),
+// then wrapping .ds-media-grid sections of MediaCard tiles under a section
+// title — NOT horizontal rails, which is what the old skeleton drew and what
+// made the real page reflow on swap.
 //
-// NOTE: this also covers every child segment without its own loading.tsx —
-// currently the fast DB-backed pages (donate, hidden, notifications, profile,
-// watchlist), which now get a brief skeleton flash on cold navigations. Every
-// heavy segment (movies, tv, detail pages, browse lists, requests, issues,
-// votes, settings, the admin subtree) has its own boundary and is unaffected.
+// NOTE: this also covers every child segment without its own loading.tsx.
+// After the per-route skeletons landed that is only "/" itself and /donate (a
+// static page; the flash there is negligible). Every other segment — the
+// browse grids, both detail pages, for-you, watchlist, hidden, notifications,
+// watch-history, my-stats + wrapped, profile, person, requests, issues, votes,
+// settings and the admin subtree — has its own boundary and never falls
+// through to this one.
+import {
+  Bar,
+  MediaCardTile,
+  SKELETON_CARD,
+  SKELETON_FILL,
+  SkeletonHeader,
+} from "@/components/loading/poster-grid-skeleton";
+
 export default function Loading() {
   return (
     <div className="animate-pulse">
-      {/* Page header */}
-      <div className="flex flex-col gap-2" style={{ marginBottom: 24 }}>
-        <div className="rounded" style={{ width: 200, height: 24, background: "var(--ds-bg-3)" }} />
-        <div className="rounded" style={{ width: 320, height: 14, background: "var(--ds-bg-2)" }} />
-      </div>
+      <SkeletonHeader subtitle right />
 
       {/* Trending hero pair */}
-      <div className="grid gap-3 md:grid-cols-2" style={{ marginBottom: 32 }}>
+      <div className="ds-discover-hero-pair">
         {Array.from({ length: 2 }).map((_, i) => (
-          <div
-            key={i}
-            className="rounded-lg"
-            style={{ height: 220, background: "var(--ds-bg-1)", border: "1px solid var(--ds-border)" }}
-          />
+          <div key={i} className="ds-discover-hero" style={{ ...SKELETON_CARD, borderRadius: 12, padding: 20 }}>
+            <div className="rounded-lg" style={{ aspectRatio: "2 / 3", background: SKELETON_FILL }} />
+            <div className="flex flex-col justify-center" style={{ gap: 10 }}>
+              <Bar w={110} h={10} />
+              <Bar w="70%" h={24} />
+              <Bar w="45%" h={12} />
+              <div className="flex flex-col" style={{ gap: 6, marginTop: 6 }}>
+                <Bar w="95%" h={12} />
+                <Bar w="88%" h={12} />
+                <Bar w="60%" h={12} />
+              </div>
+              <div className="flex" style={{ gap: 8, marginTop: 8 }}>
+                <Bar w={110} h={32} r={8} />
+                <Bar w={90} h={32} r={8} />
+              </div>
+            </div>
+          </div>
         ))}
       </div>
 
-      {/* Poster rails */}
-      {Array.from({ length: 3 }).map((_, rail) => (
-        <div key={rail} style={{ marginBottom: 28 }}>
-          <div className="rounded" style={{ width: 160, height: 18, background: "var(--ds-bg-3)", marginBottom: 12 }} />
-          <div className="flex gap-3 overflow-hidden">
-            {Array.from({ length: 8 }).map((_, i) => (
-              <div
-                key={i}
-                className="rounded shrink-0"
-                style={{ width: 140, aspectRatio: "2 / 3", background: "var(--ds-bg-2)" }}
-              />
+      {/* Sections: DiscoverRow = title row (mb-3) + a wrapping card grid, 36px apart */}
+      {Array.from({ length: 2 }).map((_, s) => (
+        <section key={s} style={{ marginBottom: 36 }}>
+          <div className="flex flex-col mb-3" style={{ gap: 4 }}>
+            <Bar w={180} h={18} />
+            <Bar w={90} h={11} />
+          </div>
+          <div className="ds-media-grid">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <MediaCardTile key={i} />
             ))}
           </div>
-        </div>
+        </section>
       ))}
     </div>
   );

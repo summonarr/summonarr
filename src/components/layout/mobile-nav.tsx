@@ -89,8 +89,8 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
               className="ds-tap inline-flex items-center justify-center shrink-0"
               aria-label="Close search"
               style={{
-                width: 32,
-                height: 32,
+                width: 36,
+                height: 36,
                 borderRadius: 6,
                 background: "transparent",
                 color: "var(--ds-fg-muted)",
@@ -115,8 +115,8 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
               aria-label="Open menu"
               className="ds-tap inline-flex items-center justify-center shrink-0"
               style={{
-                width: 32,
-                height: 32,
+                width: 36,
+                height: 36,
                 borderRadius: 6,
                 background: "transparent",
                 color: "var(--ds-fg-muted)",
@@ -163,8 +163,8 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
               aria-label="Search"
               className="ds-tap inline-flex items-center justify-center shrink-0"
               style={{
-                width: 32,
-                height: 32,
+                width: 36,
+                height: 36,
                 borderRadius: 6,
                 background: "transparent",
                 color: "var(--ds-fg-muted)",
@@ -205,17 +205,17 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
                 key={t.href}
                 href={t.href}
                 onClick={() => setSearchOpen(false)}
+                aria-current={active ? "page" : undefined}
                 className="ds-tap flex flex-col items-center justify-center"
                 style={{
                   gap: 3,
                   padding: "6px 4px",
                   borderRadius: 8,
                   minHeight: 48,
-                  color: active ? "var(--ds-accent)" : "var(--ds-fg-subtle)",
+                  color: active ? "var(--ds-accent)" : "var(--ds-fg-muted)",
                   transition:
                     "color 140ms var(--ds-ease), background 140ms var(--ds-ease)",
                 }}
-                aria-label={t.label}
               >
                 <t.icon style={{ width: 18, height: 18 }} />
                 <span
@@ -246,7 +246,7 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
               color:
                 drawerOpen || !someTabActive
                   ? "var(--ds-accent)"
-                  : "var(--ds-fg-subtle)",
+                  : "var(--ds-fg-muted)",
               transition:
                 "color 140ms var(--ds-ease), background 140ms var(--ds-ease)",
             }}
@@ -289,8 +289,8 @@ function NotificationsLink() {
       aria-label={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}
       className="ds-tap inline-flex items-center justify-center shrink-0 relative"
       style={{
-        width: 32,
-        height: 32,
+        width: 36,
+        height: 36,
         borderRadius: 6,
         background: "transparent",
         color: "var(--ds-fg-muted)",

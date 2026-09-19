@@ -135,7 +135,7 @@ export default async function ForYouPage({
       />
 
       {enriched.length > 0 && (
-        <div className="flex items-center gap-x-5 gap-y-3 flex-wrap mb-5">
+        <div className="flex items-center gap-x-5 gap-y-3 flex-wrap mb-6">
           <Suspense>
             <PillFilter
               label="Type"
@@ -144,7 +144,7 @@ export default async function ForYouPage({
               options={[
                 { value: undefined, label: "All" },
                 { value: "movie", label: "Movies" },
-                { value: "tv", label: "TV" },
+                { value: "tv", label: "TV Shows" },
               ]}
             />
           </Suspense>
@@ -155,8 +155,8 @@ export default async function ForYouPage({
               active={availability}
               options={[
                 { value: undefined, label: "All" },
-                { value: "available", label: "On your server" },
-                { value: "missing", label: "Not on server" },
+                { value: "available", label: "On Your Server" },
+                { value: "missing", label: "Not on Server" },
               ]}
             />
           </Suspense>
@@ -168,9 +168,9 @@ export default async function ForYouPage({
               // so it maps to undefined rather than to its own literal.
               active={sort === "match" ? undefined : sort}
               options={[
-                { value: undefined, label: "Best match" },
+                { value: undefined, label: "Best Match" },
                 { value: "newest", label: "Newest" },
-                { value: "rating", label: "Highest rated" },
+                { value: "rating", label: "Highest Rated" },
               ]}
             />
           </Suspense>
@@ -302,7 +302,7 @@ function RecommendationReason({ media }: { media: TmdbMedia }) {
         style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", lineHeight: 1.4 }}
         title={
           others > 0
-            ? `${lead} ${why.title}, plus ${others} other title${others === 1 ? "" : "s"} you've seen`
+            ? `${lead} ${why.title}, plus ${others} other title${others === 1 ? "" : "s"} you’ve seen`
             : `${lead} ${why.title}`
         }
       >

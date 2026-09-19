@@ -122,7 +122,7 @@ export function ApiKeySettingForm({
         <Button type="submit" disabled={busy} className="bg-indigo-600 hover:bg-indigo-500">
           {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
         </Button>
-        <Button type="button" variant="outline" onClick={handleTest} disabled={busy} className="border-zinc-700 text-zinc-400 hover:text-white gap-2">
+        <Button type="button" variant="outline" onClick={handleTest} disabled={busy} className="border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-2">
           {testStatus === "testing" ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
           {dirty ? "Save & Test" : "Test API"}
         </Button>

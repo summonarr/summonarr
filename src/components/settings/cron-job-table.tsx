@@ -113,7 +113,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
             return (
               <tr key={job.name} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
                 <td className="py-3 pr-4">
-                  <div className="text-white font-medium text-xs">{job.name}</div>
+                  <div className="text-zinc-100 font-medium text-xs">{job.name}</div>
                   <div className="text-zinc-500 text-[11px] mt-0.5">{job.description}</div>
                 </td>
                 <td className="py-3 pr-4 text-zinc-400 text-xs tabular-nums whitespace-nowrap">{job.interval}</td>
@@ -170,7 +170,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                     variant="outline"
                     disabled={isRunning}
                     onClick={() => triggerJob(job.endpoint, job.name)}
-                    className="h-9 px-2.5 text-xs border-zinc-700 text-zinc-400 hover:text-white gap-1.5"
+                    className="h-9 px-2.5 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1.5"
                   >
                     {isRunning ? (
                       <><Loader2 className="w-3 h-3 animate-spin" /> Running</>

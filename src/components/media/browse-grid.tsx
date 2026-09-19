@@ -84,23 +84,13 @@ export function BrowseGrid({
   const totalPages = initialTotalPages;
   const currentPage = initialPage;
 
+  // The "N results" / "Popular right now" line is the page's PageHeader
+  // subtitle now (movies/page.tsx, tv/page.tsx compute it from the same params
+  // and items) — it used to be a <p> here pulled up with a negative margin.
   const hasFilters = !!(genreId || keywordId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider || hideAvailable);
-  const subtitle = hasFilters ? `${items.length} results` : "Popular right now";
 
   return (
     <>
-      <p
-        className="ds-mono"
-        style={{
-          fontSize: 12,
-          color: "var(--ds-fg-subtle)",
-          marginTop: -12,
-          marginBottom: 16,
-        }}
-      >
-        {subtitle}
-      </p>
-
       <FilterBar
         genres={genres}
         watchProviders={watchProviders}

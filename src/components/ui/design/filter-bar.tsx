@@ -44,9 +44,11 @@ export function FilterBar<V extends string = string>({
               key={s.value}
               type="button"
               onClick={() => onChange(s.value)}
-              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 font-medium cursor-pointer border-0"
+              aria-pressed={isActive}
+              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 font-medium border-0"
               style={{
                 padding: "5px 12px",
+                minHeight: 30,
                 borderRadius: 6,
                 background: isActive ? "var(--ds-bg-3)" : "transparent",
                 color: isActive ? "var(--ds-fg)" : "var(--ds-fg-muted)",

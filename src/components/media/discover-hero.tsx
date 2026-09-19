@@ -11,7 +11,6 @@ import {
   Clock,
   CheckCircle,
   Play,
-  ChevronRight,
 } from "@/components/icons";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
 import { safeExternalHref } from "@/lib/safe-url";
@@ -33,7 +32,7 @@ export function DiscoverHero({
   media,
   showPlex = true,
   showJellyfin = true,
-  label = "TRENDING #1",
+  label = "Trending #1",
 }: DiscoverHeroProps) {
   const poster = posterUrl(media.posterPath, "w500");
   const [liveRatings, setLiveRatings] = useState<RatingsPayload | null>(null);
@@ -78,7 +77,6 @@ export function DiscoverHero({
         border: "1px solid var(--ds-border)",
         borderRadius: 12,
         padding: 20,
-        marginBottom: 28,
         position: "relative",
         overflow: "hidden",
       }}
@@ -203,14 +201,18 @@ export function DiscoverHero({
             )}
         </div>
 
+        {/* 24px (20px on phones) — under the 22px page h1, which this used to
+            outrank at 28px. overflowWrap keeps an unbroken title inside the
+            column instead of pushing the poster/content grid wider. */}
         <h2
+          className="text-[20px] sm:text-[24px]"
           style={{
-            fontSize: 28,
             fontWeight: 600,
             margin: 0,
             letterSpacing: "-0.025em",
             color: "var(--ds-fg)",
             lineHeight: 1.15,
+            overflowWrap: "anywhere",
           }}
         >
           {media.title}
@@ -277,7 +279,7 @@ export function DiscoverHero({
         <div className="flex flex-wrap" style={{ gap: 8, marginTop: 6 }}>
           <Link
             href={detailPath}
-            className="ds-tap inline-flex items-center justify-center gap-1.5 font-medium transition-colors"
+            className="ds-tap ds-hover-tint inline-flex items-center justify-center gap-1.5 font-medium"
             style={{
               height: 32,
               padding: "0 14px",
@@ -296,7 +298,7 @@ export function DiscoverHero({
               href={trailerHref}
               target="_blank"
               rel="noopener noreferrer"
-              className="ds-tap inline-flex items-center justify-center gap-1.5 font-medium transition-colors"
+              className="ds-tap ds-hover-tint inline-flex items-center justify-center gap-1.5 font-medium"
               style={{
                 height: 32,
                 padding: "0 14px",
@@ -309,16 +311,9 @@ export function DiscoverHero({
             >
               <Play style={{ width: 14, height: 14 }} />
               Trailer
+              <span className="sr-only"> (opens in new tab)</span>
             </a>
           )}
-          <Link
-            href={detailPath}
-            className="ds-tap ml-auto inline-flex items-center gap-1 font-medium transition-colors self-center"
-            style={{ fontSize: 12, color: "var(--ds-fg-muted)" }}
-          >
-            More info
-            <ChevronRight style={{ width: 12, height: 12 }} />
-          </Link>
         </div>
       </div>
     </section>

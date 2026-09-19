@@ -3,14 +3,18 @@ import { prisma } from "@/lib/prisma";
 import { redirect, notFound } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import Link from "next/link";
-import Image from "next/image";
-import { Card } from "@/components/ui/card";
 import { posterUrl } from "@/lib/tmdb-types";
 import { bitrateToKbps } from "@/lib/bitrate";
+import { User, CheckCircle2, Circle } from "@/components/icons";
+// Same card + section-title + detail-header primitives the user/title detail
+// views use, so the three Activity detail pages share one composition.
 import {
-  ArrowLeft, Film, Tv2, User, Monitor, Zap,
-  Clock, CheckCircle2, Circle,
-} from "@/components/icons";
+  ActivityCard,
+  DetailHeader,
+  Poster,
+  SectionHeader,
+  SourceTag,
+} from "@/components/admin/activity-ui";
 import { DeletePlayButton } from "@/components/admin/delete-play-button";
 import { IpInfo } from "@/components/admin/ip-info";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
@@ -133,69 +137,70 @@ export default async function PlayDetailPage({
   const durationS = play.duration;
   const pct = durationS > 0 ? Math.min(Math.round((playDurationS / durationS) * 100), 100) : 0;
 
-  return (
-    <div className="max-w-4xl">
-      <Link
-        href="/admin/activity?tab=history"
-        className="flex items-center gap-1.5 text-sm text-zinc-400 hover:text-white mb-4 transition-colors"
-      >
-        <ArrowLeft className="w-4 h-4" />
-        Back to History
-      </Link>
+  // Mono subtitle line: the episode for a TV play, otherwise the format, then
+  // the title's year — the same "<kind> · <year>" shape the title detail uses.
+  const subtitle = [
+    episodeStr
+      ? `${episodeStr}${play.episodeTitle ? ` — ${play.episodeTitle}` : ""}`
+      : isTV
+        ? "Television series"
+        : "Feature film",
+    play.year,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const poster = (
+    <Poster
+      src={posterPath}
+      letter={(play.title[0] ?? "?").toUpperCase()}
+      w={56}
+      h={84}
+      radius={5}
+    />
+  );
 
-      <div className="flex items-start gap-4 mb-8">
-        {posterPath && (
-          <div className="shrink-0 w-16 sm:w-20 rounded-lg overflow-hidden shadow-lg">
-            {mediaHref ? (
-              <Link href={mediaHref}>
-                <Image src={posterPath} alt={play.title} width={154} height={231} className="w-full h-auto" sizes="(min-width: 640px) 80px, 64px" />
-              </Link>
-            ) : (
-              <Image src={posterPath} alt={play.title} width={154} height={231} className="w-full h-auto" sizes="(min-width: 640px) 80px, 64px" />
-            )}
-          </div>
-        )}
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 mb-1">
-            {isTV ? <Tv2 className="w-5 h-5 text-zinc-400 shrink-0" /> : <Film className="w-5 h-5 text-zinc-400 shrink-0" />}
-            <h1 className="text-2xl font-bold text-white">
-              {mediaHref ? (
-                <Link href={mediaHref} className="hover:text-indigo-400 transition-colors">{play.title}</Link>
-              ) : play.title}
-            </h1>
-            {play.year && <span className="text-zinc-500 text-lg">({play.year})</span>}
-          </div>
-          {episodeStr && (
-            <p className="text-zinc-400 text-sm mb-1">
-              <span className="font-medium">{episodeStr}</span>
-              {play.episodeTitle && <span className="text-zinc-500"> — {play.episodeTitle}</span>}
-            </p>
-          )}
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
-              play.source === "plex" ? "bg-amber-500/15 text-amber-400" : "bg-purple-500/15 text-purple-400"
-            }`}>
-              {play.source === "plex" ? "Plex" : "Jellyfin"}
+  return (
+    <div className="ds-page-enter max-w-4xl">
+      <DetailHeader
+        back={{ href: "/admin/activity?tab=history", label: "Back to history" }}
+        leading={
+          mediaHref ? (
+            <Link href={mediaHref} className="block" aria-label={play.title}>
+              {poster}
+            </Link>
+          ) : (
+            poster
+          )
+        }
+        title={
+          mediaHref ? (
+            <Link href={mediaHref} className="hover:text-indigo-400 transition-colors">
+              {play.title}
+            </Link>
+          ) : (
+            play.title
+          )
+        }
+        meta={<SourceTag source={play.source} />}
+        subtitle={subtitle}
+      >
+        <div className="flex items-center gap-3 flex-wrap">
+          {play.watched ? (
+            <span className="flex items-center gap-1 text-xs text-green-400">
+              <CheckCircle2 className="w-3.5 h-3.5" /> Watched
             </span>
-            {play.watched ? (
-              <span className="flex items-center gap-1 text-xs text-green-400">
-                <CheckCircle2 className="w-3.5 h-3.5" /> Watched
-              </span>
-            ) : (
-              <span className="flex items-center gap-1 text-xs text-zinc-500">
-                <Circle className="w-3.5 h-3.5" /> Not watched
-              </span>
-            )}
-            <span className="text-xs text-zinc-500">{pct}% complete</span>
-          </div>
+          ) : (
+            <span className="flex items-center gap-1 text-xs text-zinc-500">
+              <Circle className="w-3.5 h-3.5" /> Not watched
+            </span>
+          )}
+          <span className="text-xs text-zinc-500">{pct}% complete</span>
         </div>
-      </div>
+      </DetailHeader>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <Card className="bg-zinc-900 border-zinc-800 p-5 md:col-span-1">
-          <h2 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
-            <Clock className="w-4 h-4 text-zinc-400" /> Playback
-          </h2>
+        <ActivityCard>
+          <SectionHeader label="Playback" />
           <div className="space-y-3">
             <LabeledValue label="Started" value={formatTs(play.startedAt)} />
             <LabeledValue label="Stopped" value={formatTs(play.stoppedAt)} />
@@ -217,12 +222,10 @@ export default async function PlayDetailPage({
               <LabeledValue label="Paused" value={formatDuration(play.pausedDuration)} />
             )}
           </div>
-        </Card>
+        </ActivityCard>
 
-        <Card className="bg-zinc-900 border-zinc-800 p-5 md:col-span-1">
-          <h2 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
-            <Zap className="w-4 h-4 text-zinc-400" /> Stream Quality
-          </h2>
+        <ActivityCard>
+          <SectionHeader label="Stream quality" />
           <div className="space-y-3">
             <div>
               <p className="text-xs text-zinc-500 uppercase tracking-wide mb-0.5">Play Method</p>
@@ -246,12 +249,10 @@ export default async function PlayDetailPage({
             <LabeledValue label="Container" value={play.container?.toUpperCase() ?? "—"} />
             <LabeledValue label="Bitrate" value={formatBitrate(play.bitrate, play.source)} />
           </div>
-        </Card>
+        </ActivityCard>
 
-        <Card className="bg-zinc-900 border-zinc-800 p-5 md:col-span-1">
-          <h2 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
-            <Monitor className="w-4 h-4 text-zinc-400" /> Device
-          </h2>
+        <ActivityCard>
+          <SectionHeader label="Device" />
           <div className="space-y-3">
             <div>
               <p className="text-xs text-zinc-500 uppercase tracking-wide mb-0.5">User</p>
@@ -284,7 +285,7 @@ export default async function PlayDetailPage({
                 : <p className="text-sm text-zinc-200">—</p>}
             </div>
           </div>
-        </Card>
+        </ActivityCard>
       </div>
 
       <div className="flex justify-end">

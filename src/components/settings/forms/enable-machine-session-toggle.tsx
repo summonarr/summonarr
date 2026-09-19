@@ -126,7 +126,7 @@ export function EnableMachineSessionToggle({
               type="button"
               onClick={saveAllowedIps}
               disabled={!ipsDirty || ipStatus === "saving"}
-              className="rounded-md bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-indigo-500"
+              className="rounded-md bg-indigo-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-accent-fg)] disabled:opacity-40 disabled:cursor-not-allowed hover:bg-indigo-500"
             >
               Save IPs
             </button>

@@ -358,7 +358,7 @@ export function IssueActions({
               variant="outline"
               onClick={() => updateStatus("OPEN")}
               disabled={loading !== null}
-              className="h-7 px-3 text-xs border-zinc-700 text-zinc-500 hover:text-white gap-1"
+              className="h-7 px-3 text-xs border-zinc-700 text-zinc-500 hover:text-zinc-100 gap-1"
             >
               Reopen
             </Button>
@@ -386,7 +386,7 @@ export function IssueActions({
             onChange={(e) => setResolution(e.target.value)}
             placeholder="Resolution note (optional)"
             aria-label="Resolution note"
-            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring w-44"
+            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring w-44"
           />
           <Button
             size="sm"
@@ -519,7 +519,7 @@ export function IssueActions({
                         </span>
 
                         <div className="flex-1 min-w-0">
-                          <p className={`text-sm truncate ${isSelected ? "text-white" : "text-zinc-300"}`} title={rel.title}>
+                          <p className={`text-sm truncate ${isSelected ? "text-zinc-100" : "text-zinc-300"}`} title={rel.title}>
                             {rel.title}
                           </p>
                           <div className="flex items-center gap-3 mt-1 flex-wrap">

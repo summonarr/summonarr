@@ -97,7 +97,7 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
               variant="outline"
               size="sm"
               onClick={() => { setRelayKey(""); setStatus("idle"); }}
-              className="border-zinc-700 text-zinc-400 hover:text-white shrink-0 gap-1.5"
+              className="border-zinc-700 text-zinc-400 hover:text-zinc-100 shrink-0 gap-1.5"
             >
               <Trash2 className="w-3.5 h-3.5" />
               Remove

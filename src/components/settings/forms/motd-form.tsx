@@ -73,7 +73,7 @@ export function MotdForm({ initialEnabled, initialTitle, initialBody }: MotdForm
           onChange={(e) => { setBody(e.target.value); setMotdStatus("idle"); }}
           placeholder="Enter your message here."
           rows={4}
-          className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+          className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
         />
       </div>
       <div className="flex items-center gap-3">

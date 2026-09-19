@@ -81,7 +81,7 @@ function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage
                     onChange={() => toggle(s.key)}
                     className="w-4 h-4 rounded border-zinc-600 bg-zinc-800 accent-indigo-500"
                   />
-                  <span className="text-sm text-zinc-200 group-hover:text-white transition-colors">
+                  <span className="text-sm text-zinc-200 group-hover:text-zinc-100 transition-colors">
                     {s.title}
                   </span>
                   <span className="text-xs px-1.5 py-0.5 rounded bg-zinc-700 text-zinc-400">
@@ -287,7 +287,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
         <div className="flex items-center justify-between rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-3">
           <div className="flex items-center gap-2 text-sm">
             <CheckCircle className="w-4 h-4 text-green-400 shrink-0" />
-            <span className="text-zinc-300">Connected as <span className="text-white font-medium">{connectedEmail}</span></span>
+            <span className="text-zinc-300">Connected as <span className="text-zinc-100 font-medium">{connectedEmail}</span></span>
           </div>
           <button
             onClick={handleDisconnect}
@@ -383,7 +383,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
                   onClick={handleImport}
                   disabled={importStatus === "running"}
                   variant="outline"
-                  className="border-zinc-700 text-zinc-300 hover:text-white"
+                  className="border-zinc-700 text-zinc-300 hover:text-zinc-100"
                 >
                   {importStatus === "running" ? (
                     <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Importing…</>

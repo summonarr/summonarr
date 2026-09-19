@@ -134,7 +134,7 @@ export default async function ProfilePage() {
 
           <ProfileCard
             title="Active Sessions"
-            description="Devices currently signed in. Revoke any session you don't recognise."
+            description="Devices currently signed in. Revoke any session you don't recognize."
           >
             <AuthSessions
               sessions={authSessions.map((s) => ({

@@ -219,7 +219,7 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
       {groups.map((group) => (
         <div key={group.category} className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
           <div className="mb-5">
-            <h2 className="font-semibold text-white text-lg">{group.title}</h2>
+            <h2 className="font-semibold text-zinc-100 text-lg">{group.title}</h2>
             <p className="text-sm text-zinc-500 mt-0.5">{group.description}</p>
           </div>
           <div className="divide-y divide-zinc-800">

@@ -95,7 +95,7 @@ export function EmailForm({
               className={
                 "px-3 py-1.5 rounded-md transition-colors " +
                 (backend === b
-                  ? "bg-zinc-700 text-white"
+                  ? "bg-zinc-700 text-zinc-100"
                   : "text-zinc-400 hover:text-zinc-200")
               }
             >

@@ -166,7 +166,7 @@ export function MasterDbFillButton({
             size="sm"
             variant="outline"
             onClick={() => setPhase("idle")}
-            className="border-zinc-600 text-zinc-400 hover:text-white h-7 px-3 text-xs"
+            className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-7 px-3 text-xs"
           >
             Cancel
           </Button>
@@ -189,7 +189,7 @@ export function MasterDbFillButton({
           size="sm"
           onClick={() => { clearTimeout(resetTimer.current); setPhase("confirm"); }}
           disabled={loading}
-          className="border-zinc-700 text-zinc-300 hover:text-white gap-2"
+          className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
         >
           {loading
             ? <Loader2 className="w-4 h-4 animate-spin" />

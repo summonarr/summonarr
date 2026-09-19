@@ -214,13 +214,14 @@ export function SearchBox({
             aria-label="Clear search"
             className="inline-flex items-center justify-center transition-colors"
             style={{
-              width: 20,
-              height: 20,
+              width: 28,
+              height: 28,
               borderRadius: 4,
               background: "transparent",
               color: "var(--ds-fg-subtle)",
               border: 0,
               marginLeft: 4,
+              marginRight: -4,
             }}
             onMouseEnter={(e) => {
               e.currentTarget.style.background = "var(--ds-bg-3)";

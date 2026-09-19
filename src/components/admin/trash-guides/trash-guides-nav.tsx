@@ -124,7 +124,7 @@ export function TrashGuidesNav({
               href={`${page.href}${queryWithParams}`}
               className={`px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors ${
                 active
-                  ? "bg-zinc-800 text-white"
+                  ? "bg-zinc-800 text-zinc-100"
                   : "text-zinc-500 hover:text-zinc-300"
               }`}
             >
@@ -148,8 +148,8 @@ export function TrashGuidesNav({
                     onClick={() => setService(s.value)}
                     className={`px-2.5 py-1 text-xs font-medium transition-colors inline-flex items-center gap-1.5 ${
                       active
-                        ? "bg-indigo-600 text-white"
-                        : "bg-zinc-800 text-zinc-400 hover:text-white"
+                        ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+                        : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
                     }`}
                   >
                     <span>
@@ -177,8 +177,8 @@ export function TrashGuidesNav({
                       onClick={() => setVariant(v.slug)}
                       className={`px-2.5 py-1 text-xs font-medium transition-colors ${
                         active
-                          ? "bg-indigo-600 text-white"
-                          : "bg-zinc-800 text-zinc-400 hover:text-white"
+                          ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+                          : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
                       }`}
                     >
                       {v.name}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
@@ -37,6 +37,7 @@ export function SetupImportPanel() {
   const [importing, setImporting] = useState(false);
   const [progress, setProgress] = useState<ChunkedUploadProgress | null>(null);
   const [result, setResult] = useState<ImportResult>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   async function handleFileChange(f: File | null) {
     setFile(f);
@@ -94,6 +95,8 @@ export function SetupImportPanel() {
     setSize(null);
     setResult(null);
     setProgress(null);
+    // Reset the native input too, or re-choosing the same file fires no change event.
+    if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
   const dropBorder =
@@ -155,23 +158,29 @@ export function SetupImportPanel() {
       </div>
 
       <div className="flex items-center gap-2 flex-wrap">
-        <label className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 hover:bg-zinc-700 cursor-pointer transition-colors">
+        {/* The native file input stays in the DOM (visually hidden) and is
+            opened programmatically so the visible control is a real <Button>. */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".enc"
+          aria-label="Backup file"
+          onChange={(e) => handleFileChange(e.target.files?.[0] ?? null)}
+          className="sr-only"
+          tabIndex={-1}
+        />
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => fileInputRef.current?.click()}
+        >
           Choose file
-          <input
-            type="file"
-            accept=".enc"
-            onChange={(e) => handleFileChange(e.target.files?.[0] ?? null)}
-            className="hidden"
-          />
-        </label>
+        </Button>
         {file && (
-          <button
-            type="button"
-            onClick={clearFile}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 transition-colors"
-          >
+          <Button type="button" size="sm" variant="outline" onClick={clearFile}>
             Clear
-          </button>
+          </Button>
         )}
       </div>
 
@@ -180,7 +189,7 @@ export function SetupImportPanel() {
           type="button"
           onClick={handleImport}
           disabled={!file || !encrypted || importing}
-          className="w-full bg-indigo-600 hover:bg-indigo-500"
+          className="w-full min-h-11"
         >
           {importing ? (
             <>
@@ -246,7 +255,7 @@ export function SetupImportPanel() {
             ))}
           </div>
           {result.warning && (
-            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300 leading-relaxed">
+            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-400 leading-relaxed">
               {result.warning}
             </div>
           )}
@@ -266,7 +275,7 @@ export function SetupImportPanel() {
       )}
 
       {result?.error && (
-        <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+        <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400">
           <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
           <span>{result.error}</span>
         </div>

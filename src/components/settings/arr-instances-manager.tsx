@@ -359,7 +359,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                 <div className="flex items-center justify-between">
                   <Label htmlFor={`${service}-${idx}-folder`}>Root Folder <span className="text-zinc-500">(optional)</span></Label>
                   {optsReady && (
-                    <button type="button" onClick={() => fetchOptions(d.slug)} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-white">
+                    <button type="button" onClick={() => fetchOptions(d.slug)} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-100">
                       <RefreshCw className="w-3 h-3" />Refresh
                     </button>
                   )}
@@ -369,7 +369,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                     id={`${service}-${idx}-folder`}
                     value={d.rootFolder}
                     onChange={(e) => update(idx, { rootFolder: e.target.value })}
-                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">— {label}&apos;s default —</option>
                     {/* A saved folder the server no longer lists would otherwise
@@ -394,7 +394,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                     id={`${service}-${idx}-profile`}
                     value={d.qualityProfileId}
                     onChange={(e) => update(idx, { qualityProfileId: e.target.value })}
-                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">— {label}&apos;s default —</option>
                     {d.qualityProfileId && !(opts as ArrOptions).qualityProfiles.some((p) => String(p.id) === d.qualityProfileId) && (
@@ -421,7 +421,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                     id={`${service}-${idx}-min-availability`}
                     value={d.minimumAvailability}
                     onChange={(e) => update(idx, { minimumAvailability: e.target.value })}
-                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">— {label}&apos;s default —</option>
                     {MINIMUM_AVAILABILITY_OPTIONS.map((o) => (
@@ -441,7 +441,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                     id={`${service}-${idx}-language-profile`}
                     value={d.languageProfileId}
                     onChange={(e) => update(idx, { languageProfileId: e.target.value })}
-                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">— {label}&apos;s default —</option>
                     {d.languageProfileId && !(opts as ArrOptions).languageProfiles!.some((p) => String(p.id) === d.languageProfileId) && (
@@ -470,7 +470,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                 <Button
                   type="button"
                   variant="outline"
-                  className="shrink-0 border-zinc-700 text-zinc-300 hover:text-white"
+                  className="shrink-0 border-zinc-700 text-zinc-300 hover:text-zinc-100"
                   onClick={() => update(idx, { webhookSecret: generateSecret() })}
                 >
                   Generate
@@ -480,7 +480,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                 <div className="space-y-1">
                   <div className="flex items-center gap-2 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2">
                     <span className="flex-1 font-mono text-xs text-zinc-300 truncate">{webhookUrl(d.webhookSecret)}</span>
-                    <button type="button" onClick={() => copyHook(idx, d.webhookSecret)} className="shrink-0 text-zinc-500 hover:text-white transition-colors" aria-label="Copy webhook URL">
+                    <button type="button" onClick={() => copyHook(idx, d.webhookSecret)} className="shrink-0 text-zinc-500 hover:text-zinc-100 transition-colors" aria-label="Copy webhook URL">
                       {copiedHook === idx ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
                     </button>
                   </div>
@@ -554,7 +554,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                   <button
                     type="button"
                     onClick={() => setConfirmRemove(null)}
-                    className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+                    className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
                   >
                     Cancel
                   </button>
@@ -566,13 +566,13 @@ function ServiceInstances({ service }: { service: ArrService }) {
       })}
 
       <div className="flex items-center gap-3">
-        <Button type="button" variant="outline" onClick={addInstance} className="border-zinc-600 text-zinc-300 hover:text-white h-8 px-3 text-xs">
+        <Button type="button" variant="outline" onClick={addInstance} className="border-zinc-600 text-zinc-300 hover:text-zinc-100 h-8 px-3 text-xs">
           + Add {label} instance
         </Button>
         <Button type="button" onClick={save} disabled={status === "saving" || loadFailed} className="bg-indigo-600 hover:bg-indigo-500 h-8 px-3 text-xs">
           {status === "saving" ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Saving…</> : "Save & Test"}
         </Button>
-        <button type="button" onClick={load} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-white"><RefreshCw className="w-3 h-3" />Refresh</button>
+        <button type="button" onClick={load} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-100"><RefreshCw className="w-3 h-3" />Refresh</button>
         {status === "ok" && <span className="text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4" />{message}</span>}
         {status === "error" && <span className="text-sm text-red-400 flex items-center gap-1.5"><XCircle className="w-4 h-4" />{message}</span>}
       </div>

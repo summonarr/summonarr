@@ -3,6 +3,7 @@ import { requireAppSession } from "@/lib/require-app-session";
 import { getEnrichedPerson } from "@/lib/person";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { PersonView } from "@/components/media/person-view";
+import { DetailTitle } from "@/components/layout/detail-title";
 
 export const dynamic = "force-dynamic";
 
@@ -28,5 +29,12 @@ export default async function PersonPage({
   });
 
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
-  return <PersonView person={person} showPlex={showPlex} showJellyfin={showJellyfin} />;
+  return (
+    <>
+      {/* Renders nothing — publishes the name so the header breadcrumb can
+          read it, the same way the movie/tv pages publish their title. */}
+      <DetailTitle title={person.name} />
+      <PersonView person={person} showPlex={showPlex} showJellyfin={showJellyfin} />
+    </>
+  );
 }

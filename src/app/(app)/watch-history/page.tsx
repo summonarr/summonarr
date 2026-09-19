@@ -26,18 +26,16 @@ export default async function WatchHistoryPage() {
     provider === "plex" || provider === "jellyfin" || provider === "jellyfin-quickconnect";
 
   return (
-    <div>
+    <div className="ds-page-enter">
       <PageHeader
         title="Watch History"
         subtitle="What you've watched on the server"
       />
-      <div style={{ marginTop: 16 }}>
-        <WatchHistoryList
-          initial={initial}
-          serverProvider={serverProvider}
-          issuesEnabled={issuesEnabled}
-        />
-      </div>
+      <WatchHistoryList
+        initial={initial}
+        serverProvider={serverProvider}
+        issuesEnabled={issuesEnabled}
+      />
     </div>
   );
 }

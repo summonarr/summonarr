@@ -1041,7 +1041,7 @@ export default async function SettingsPage({
                   ].map(({ label, value }) => (
                     <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-white tabular-nums">{value.toLocaleString()}</p>
+                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString()}</p>
                     </div>
                   ))}
                 </div>
@@ -1058,7 +1058,7 @@ export default async function SettingsPage({
                   ].map(({ label, value }) => (
                     <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-white tabular-nums">{value.toLocaleString()}</p>
+                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString()}</p>
                     </div>
                   ))}
                 </div>
@@ -1075,7 +1075,7 @@ export default async function SettingsPage({
                   ].map(({ label, value }) => (
                     <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-white tabular-nums">{value.toLocaleString()}</p>
+                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString()}</p>
                     </div>
                   ))}
                 </div>
@@ -1109,7 +1109,7 @@ export default async function SettingsPage({
                   ].map(({ label, value }) => (
                     <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-white tabular-nums">{value}</p>
+                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value}</p>
                     </div>
                   ))}
                 </div>
@@ -1135,7 +1135,7 @@ export default async function SettingsPage({
                     ].map(({ label, value, dim }) => (
                       <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
                         <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                        <p className={`text-xl font-semibold tabular-nums ${dim ? "text-zinc-500" : "text-white"}`}>{value}</p>
+                        <p className={`text-xl font-semibold tabular-nums ${dim ? "text-zinc-500" : "text-zinc-100"}`}>{value}</p>
                       </div>
                     ));
                   })()}
@@ -1154,7 +1154,7 @@ export default async function SettingsPage({
                   ].map(({ label, value }) => (
                     <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-white tabular-nums">{value}</p>
+                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value}</p>
                     </div>
                   ))}
                 </div>

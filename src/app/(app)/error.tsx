@@ -1,6 +1,12 @@
 "use client";
 
 import { useEffect } from "react";
+import { Home, RefreshCw } from "@/components/icons";
+import {
+  StatePage,
+  STATE_PAGE_CTA_CLASS,
+  statePageCtaStyle,
+} from "@/components/layout/state-page";
 
 export default function AppError({
   error,
@@ -14,17 +20,24 @@ export default function AppError({
   }, [error]);
 
   return (
-    <div className="flex flex-col items-center justify-center h-full gap-4 text-center p-8">
-      <h2 className="text-xl font-semibold text-white">Something went wrong</h2>
-      <p className="text-zinc-400 text-sm max-w-sm">
-        An unexpected error occurred. Try refreshing the page.
-      </p>
-      <button
-        onClick={() => retry()}
-        className="px-4 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors"
-      >
-        Try again
-      </button>
-    </div>
+    <StatePage
+      glyph="500"
+      title="Something went wrong"
+      description="An unexpected error occurred. Trying again re-renders this page; if it keeps failing, head home."
+      primary={
+        // The retry callback is client-only, so the shell takes this ready-made
+        // button in its primary slot rather than a link config.
+        <button
+          type="button"
+          onClick={() => retry()}
+          className={STATE_PAGE_CTA_CLASS}
+          style={statePageCtaStyle("primary")}
+        >
+          <RefreshCw className="w-4 h-4" />
+          Try again
+        </button>
+      }
+      secondary={[{ label: "Go home", href: "/", icon: <Home className="w-4 h-4" /> }]}
+    />
   );
 }

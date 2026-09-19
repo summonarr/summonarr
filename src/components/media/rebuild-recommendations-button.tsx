@@ -85,27 +85,32 @@ export function RebuildRecommendationsButton() {
     }
   }
 
+  const busy = loading || cooldown > 0;
+
   return (
     <div className="flex items-center gap-2">
       <button
         type="button"
         onClick={handleRebuild}
-        disabled={loading || cooldown > 0}
+        disabled={busy}
         aria-label={cooldown > 0 ? `Rebuild picks — wait ${cooldown}s` : "Rebuild picks"}
         title={
           cooldown > 0
             ? `Wait ${cooldown}s`
-            : "Re-run the recommendation build now. Rebuilds every active user's shelf, not just yours, and can take a few minutes on a cold graph."
+            : "Re-run the recommendation build now. Rebuilds every active user’s shelf, not just yours, and can take a few minutes on a cold graph."
         }
-        className="ds-tap inline-flex items-center gap-1.5 font-medium transition-colors"
+        // No hover tint while disabled — a dimmed control that still lights up
+        // under the cursor reads as clickable.
+        className={`ds-tap inline-flex items-center gap-1.5 font-medium${busy ? "" : " ds-hover-tint"}`}
         style={{
           padding: "5px 12px",
+          minHeight: 32,
           borderRadius: 6,
           fontSize: 12,
           background: "var(--ds-bg-2)",
           color: "var(--ds-fg-muted)",
           border: "1px solid var(--ds-border)",
-          opacity: loading || cooldown > 0 ? 0.5 : 1,
+          opacity: busy ? 0.5 : 1,
           whiteSpace: "nowrap",
         }}
       >

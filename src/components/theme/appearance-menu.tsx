@@ -22,7 +22,9 @@ const ACCENT_SWATCH: Record<Accent, string> = {
   emerald: "oklch(0.68 0.16 158)",
   cyan: "oklch(0.72 0.13 220)",
   rose: "oklch(0.66 0.21 15)",
-  mono: "oklch(0.85 0 0)",
+  // The dark-theme value ([data-accent="mono"] in globals.css); the picker
+  // sits in both themes' header and a mid-grey read as neither.
+  mono: "oklch(0.97 0 0)",
 };
 
 const ACCENT_LABEL: Record<Accent, string> = {

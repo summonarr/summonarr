@@ -79,7 +79,6 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
         placeholder="DELETE"
         autoComplete="off"
         aria-label="Type DELETE to confirm account deletion"
-        className="bg-zinc-800 border-zinc-700"
       />
       {requiresPassword && (
         <Input
@@ -89,7 +88,6 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
           placeholder="Current password"
           autoComplete="current-password"
           aria-label="Current password"
-          className="bg-zinc-800 border-zinc-700"
         />
       )}
       {error && <p className="text-sm text-red-400">{error}</p>}

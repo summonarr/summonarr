@@ -1,6 +1,8 @@
-// Skeleton for the Top grid while TMDB + rating-source lookups run.
+// Skeleton for the Top Rated grid while TMDB + rating-source lookups run.
+// Shape: PageHeader with subtitle, the TopFilterBar (type segments + sort
+// segments + a row of selects = 3 control rows), then the .ds-media-grid.
 import { PosterGridSkeleton } from "@/components/loading/poster-grid-skeleton";
 
 export default function Loading() {
-  return <PosterGridSkeleton title="Top rated" subtitle="Highest-rated picks from your enabled sources" />;
+  return <PosterGridSkeleton subtitle controls={3} />;
 }

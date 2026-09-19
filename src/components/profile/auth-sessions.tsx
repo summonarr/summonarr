@@ -98,10 +98,10 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
       {sessions.map((s) => (
         <div
           key={s.id}
-          className={`flex items-start justify-between gap-4 rounded-md border px-3 py-2.5 ${
+          className={`flex flex-wrap items-start justify-between gap-4 rounded-md border px-3 py-2.5 ${
             s.isCurrent
               ? "border-indigo-500/40 bg-indigo-500/5"
-              : "border-zinc-800 bg-zinc-800/50"
+              : "border-[var(--ds-border)] bg-[var(--ds-bg-1)]"
           }`}
         >
           <div className="flex items-start gap-2.5 min-w-0">
@@ -112,7 +112,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                   {s.deviceLabel ?? `${s.deviceType.charAt(0).toUpperCase() + s.deviceType.slice(1)} device`}
                 </p>
                 {s.isCurrent && (
-                  <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-indigo-600 text-white font-semibold shrink-0">
+                  <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-indigo-600 text-[var(--ds-accent-fg)] font-semibold shrink-0">
                     <Check className="w-3 h-3" />
                     This device
                   </span>
@@ -183,7 +183,9 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
           )}
           {!s.isCurrent && passwordFor === s.sessionId && (
             <form
-              className="flex items-center gap-1.5 shrink-0 mt-0.5"
+              // Full row under the device details below `sm` (the row is
+              // flex-wrap) — beside the min-w-0 column it crushed the label.
+              className="flex items-center gap-1.5 basis-full sm:basis-auto sm:shrink-0 mt-0.5"
               onSubmit={(e) => { e.preventDefault(); if (password) revoke(s.sessionId, password); }}
             >
               <input
@@ -194,7 +196,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                 placeholder="Your password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="h-9 w-40 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="h-9 flex-1 min-w-0 sm:flex-none sm:w-40 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500"
               />
               <Button
                 type="submit"

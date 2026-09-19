@@ -192,7 +192,7 @@ export function ArrForm({
               type="button"
               onClick={fetchOptions}
               disabled={optionsStatus === "loading"}
-              className="flex items-center gap-1 text-xs text-zinc-500 hover:text-white transition-colors disabled:opacity-50"
+              className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-100 transition-colors disabled:opacity-50"
             >
               <RefreshCw className={`w-3 h-3 ${optionsStatus === "loading" ? "animate-spin" : ""}`} />
               Refresh
@@ -212,7 +212,7 @@ export function ArrForm({
                     id={`${idPrefix}-folder`}
                     value={rootFolder}
                     onChange={(e) => setRootFolder(e.target.value)}
-                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">— select a root folder —</option>
                     {/* A saved folder the server no longer lists would otherwise
@@ -234,7 +234,7 @@ export function ArrForm({
                     id={`${idPrefix}-profile`}
                     value={qualityProfileId}
                     onChange={(e) => setQualityProfileId(e.target.value)}
-                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">— select a quality profile —</option>
                     {qualityProfileId && !options.qualityProfiles.some((p) => String(p.id) === qualityProfileId) && (
@@ -253,7 +253,7 @@ export function ArrForm({
                       id={`${idPrefix}-min-availability`}
                       value={minimumAvailability}
                       onChange={(e) => setMinimumAvailability(e.target.value)}
-                      className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     >
                       <option value="">— {label}&apos;s default —</option>
                       {MINIMUM_AVAILABILITY_OPTIONS.map((o) => (
@@ -277,7 +277,7 @@ export function ArrForm({
                       id={`${idPrefix}-language-profile`}
                       value={languageProfileId}
                       onChange={(e) => setLanguageProfileId(e.target.value)}
-                      className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     >
                       <option value="">— {label}&apos;s default —</option>
                       {languageProfileId && !options.languageProfiles!.some((p) => String(p.id) === languageProfileId) && (
@@ -351,7 +351,7 @@ function ArrImportSection({ service }: { service: "radarr" | "sonarr" }) {
           onClick={handleImport}
           disabled={importStatus === "importing"}
           variant="outline"
-          className="border-zinc-700 text-zinc-300 hover:text-white hover:border-zinc-500"
+          className="border-zinc-700 text-zinc-300 hover:text-zinc-100 hover:border-zinc-500"
         >
           {importStatus === "importing"
             ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Importing…</>

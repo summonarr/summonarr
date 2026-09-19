@@ -37,7 +37,7 @@ export function ActivityWarmButton() {
         size="sm"
         onClick={handleWarm}
         disabled={status === "loading"}
-        className="border-zinc-700 text-zinc-300 hover:text-white gap-2"
+        className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
       >
         {status === "loading"
           ? <><Loader2 className="w-4 h-4 animate-spin" />Warming…</>

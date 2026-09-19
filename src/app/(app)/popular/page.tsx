@@ -14,9 +14,8 @@ import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { requireFeature } from "@/lib/features";
 import Link from "next/link";
-import { cn } from "@/lib/utils";
 import { Suspense } from "react";
-import { PageHeader, EmptyState } from "@/components/ui/design";
+import { PageHeader, EmptyState, SectionHeader } from "@/components/ui/design";
 import { TrendingUp, Film } from "@/components/icons";
 
 type EnrichedMedia = TmdbMedia & {
@@ -221,7 +220,8 @@ export default async function PopularOnServerPage({
               <Link
                 key={value}
                 href={buildHref({ sort: value === "trending" ? undefined : value })}
-                className="inline-flex items-center whitespace-nowrap font-medium transition-colors"
+                aria-current={isActive ? "page" : undefined}
+                className="ds-hover-tint inline-flex items-center whitespace-nowrap font-medium"
                 style={{
                   padding: "5px 12px",
                   borderRadius: 6,
@@ -256,9 +256,8 @@ export default async function PopularOnServerPage({
               <Link
                 key={label}
                 href={buildHref({ mediaType: value })}
-                className={cn(
-                  "inline-flex items-center whitespace-nowrap font-medium transition-colors",
-                )}
+                aria-current={isActive ? "page" : undefined}
+                className="ds-hover-tint inline-flex items-center whitespace-nowrap font-medium"
                 style={{
                   padding: "5px 12px",
                   borderRadius: 6,
@@ -279,7 +278,7 @@ export default async function PopularOnServerPage({
           <EmptyState
             icon={TrendingUp}
             title="No plays in the last 30 days"
-            description="Try switching to Most Played for all-time data."
+            description="Nothing was played in this window."
             cta={{ href: buildHref({ sort: "plays" }), label: "Switch to Most Played" }}
           />
         ) : page > 1 ? (
@@ -300,9 +299,9 @@ export default async function PopularOnServerPage({
         <div style={{ display: "flex", flexDirection: "column", gap: 40 }}>
           {showMovies && movies.length > 0 && (
             <section>
-              <PopularSectionHeader
+              <SectionHeader
                 title="Movies"
-                range={rankRange(movies, totalMovies)}
+                right={<RangeLabel>{rankRange(movies, totalMovies)}</RangeLabel>}
               />
               <MediaGrid
                 items={movies}
@@ -315,9 +314,9 @@ export default async function PopularOnServerPage({
 
           {showTV && tv.length > 0 && (
             <section>
-              <PopularSectionHeader
+              <SectionHeader
                 title="TV Shows"
-                range={rankRange(tv, totalTv)}
+                right={<RangeLabel>{rankRange(tv, totalTv)}</RangeLabel>}
               />
               <MediaGrid
                 items={tv}
@@ -337,32 +336,15 @@ export default async function PopularOnServerPage({
   );
 }
 
-function PopularSectionHeader({
-  title,
-  range,
-}: {
-  title: string;
-  range: string;
-}) {
+// "1–40 of 200 titles" beside a section title. Same label /top uses.
+function RangeLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex items-end mb-3">
-      <h2
-        className="section-title m-0 font-semibold"
-        style={{ fontSize: 15, letterSpacing: "-0.01em", color: "var(--ds-fg)" }}
-      >
-        {title}
-      </h2>
-      <span
-        className="ds-mono ml-auto uppercase"
-        style={{
-          fontSize: 10.5,
-          color: "var(--ds-fg-subtle)",
-          letterSpacing: "0.06em",
-        }}
-      >
-        {range}
-      </span>
-    </div>
+    <span
+      className="ds-mono uppercase"
+      style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", letterSpacing: "0.06em" }}
+    >
+      {children}
+    </span>
   );
 }
 

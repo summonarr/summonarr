@@ -20,11 +20,9 @@ export default async function WatchlistPage() {
     : [];
 
   return (
-    <div>
-      <PageHeader title="Watchlist" />
-      <div style={{ marginTop: 16 }}>
-        <WatchlistGrid initialItems={items} />
-      </div>
+    <div className="ds-page-enter">
+      <PageHeader title="Watchlist" subtitle="Titles you saved for later" />
+      <WatchlistGrid initialItems={items} />
     </div>
   );
 }
