@@ -35,7 +35,7 @@
     "pg": "^8.23.0",
     "prisma": "^7.10.0",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.3.0"
   },
   "overrides": {
     "@babel/core": "^7.29.6",
