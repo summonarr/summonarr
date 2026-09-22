@@ -400,7 +400,7 @@ function MediaGrid({
                 whiteSpace: "nowrap",
                 color:
                   sort === "plays" || sort === "trending"
-                    ? "var(--ds-accent)"
+                    ? "var(--ds-accent-text)"
                     : "var(--ds-fg-subtle)",
                 fontWeight: sort === "plays" || sort === "trending" ? 500 : 400,
               }}
@@ -417,7 +417,7 @@ function MediaGrid({
               style={{
                 whiteSpace: "nowrap",
                 color:
-                  sort === "viewers" ? "var(--ds-accent)" : "var(--ds-fg-subtle)",
+                  sort === "viewers" ? "var(--ds-accent-text)" : "var(--ds-fg-subtle)",
                 fontWeight: sort === "viewers" ? 500 : 400,
               }}
             >

@@ -106,7 +106,7 @@ export function DetailExtras({ media, mediaType }: { media: TmdbMedia; mediaType
           target="_blank"
           rel="noopener noreferrer"
           className="ds-mono no-underline hover:underline"
-          style={{ fontSize: 11.5, color: "var(--ds-accent)", width: "fit-content" }}
+          style={{ fontSize: 11.5, color: "var(--ds-accent-text)", width: "fit-content" }}
         >
           Official site ↗
         </a>

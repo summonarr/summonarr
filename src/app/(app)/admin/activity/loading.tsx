@@ -1,89 +1,57 @@
-// Loading skeleton for the admin Activity section — every route under it is
+// Loading skeleton for the admin Activity OVERVIEW — the route is
 // force-dynamic with several play-history aggregation queries before render,
-// so a fallback keeps navigation feeling immediate. It mirrors the shared
-// composition every Activity page renders: PageHeader → tab strip (+ the
-// period/source/type segments) → content blocks.
+// so a fallback keeps navigation feeling immediate. users/, recent/ and stats/
+// have their own loading.tsx (their bodies differ), and the detail routes use
+// activity-detail-skeleton.tsx. Shape mirrors admin/activity/page.tsx:
+// PageHeader (subtitle + the Warm-cache button) → ActivityFilterBar (tabs +
+// period/source/type segments) → ActivityNowPlaying (SectionHeader, the
+// ~78px "No active streams" card, mb 28) → the 6-cell resp-kpi strip →
+// AnalyticsRow (`resp-analytics`, 1.5fr 1.2fr 1fr, gap 10, ~250px cards,
+// stacking at ≤1180px) → the resp-grid-2 leaderboards → recent-plays rows.
+import { Bar, SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+import {
+  ActivityCardSkeleton,
+  ActivityTabsSkeleton,
+  KpiStripSkeleton,
+} from "@/components/loading/activity-section-skeleton";
+
 export default function Loading() {
   return (
     <div className="animate-pulse">
-      {/* Page header: 22px title + 12px mono subtitle (PageHeader, mb-5) */}
-      <div className="flex flex-col gap-2" style={{ marginBottom: 20 }}>
-        <div
-          className="rounded"
-          style={{ width: 180, height: 24, background: "var(--ds-bg-3)" }}
-        />
-        <div
-          className="rounded"
-          style={{ width: 320, height: 14, background: "var(--ds-bg-2)" }}
-        />
+      <SkeletonHeader subtitle right />
+      <ActivityTabsSkeleton filters />
+
+      {/* ActivityNowPlaying: SectionHeader (~20px line, mb 12) + empty card */}
+      <div style={{ marginBottom: 28 }}>
+        <div className="flex items-center justify-between" style={{ height: 20, marginBottom: 12 }}>
+          <Bar w={180} h={12} />
+          <Bar w={48} h={10} />
+        </div>
+        <Bar w="100%" h={78} r={10} style={SKELETON_CARD} />
       </div>
 
-      {/* Tab strip — below the header on every Activity route */}
+      <KpiStripSkeleton />
+
       <div
-        className="flex items-center gap-1 pb-3 overflow-hidden"
-        style={{ marginBottom: 12, borderBottom: "1px solid var(--ds-border)" }}
+        className="resp-analytics"
+        style={{ display: "grid", gridTemplateColumns: "1.5fr 1.2fr 1fr", gap: 10, marginBottom: 22 }}
       >
-        {[80, 66, 56, 52, 116].map((w, i) => (
-          <div
-            key={i}
-            className="rounded-md shrink-0"
-            style={{
-              width: w,
-              height: 32,
-              background: i === 0 ? "var(--ds-bg-3)" : "var(--ds-bg-2)",
-            }}
-          />
+        {Array.from({ length: 3 }).map((_, i) => (
+          <ActivityCardSkeleton key={i} h={250} />
         ))}
       </div>
 
-      {/* Period / source / type segments */}
-      <div className="flex flex-wrap items-center gap-4" style={{ marginBottom: 24 }}>
-        {[210, 150, 150].map((w, i) => (
-          <div
-            key={i}
-            className="rounded-lg"
-            style={{ width: w, height: 34, background: "var(--ds-bg-2)" }}
-          />
-        ))}
-      </div>
-
-      {/* KPI strip */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3" style={{ marginBottom: 24 }}>
-        {Array.from({ length: 4 }).map((_, i) => (
-          <div
-            key={i}
-            className="rounded-lg"
-            style={{ height: 84, background: "var(--ds-bg-2)" }}
-          />
-        ))}
-      </div>
-
-      {/* Analytics row */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4" style={{ marginBottom: 24 }}>
-        <div
-          className="rounded-lg"
-          style={{ height: 220, background: "var(--ds-bg-2)" }}
-        />
-        <div
-          className="rounded-lg"
-          style={{ height: 220, background: "var(--ds-bg-2)" }}
-        />
-      </div>
-
-      {/* Calendar heatmap */}
       <div
-        className="rounded-lg"
-        style={{ height: 160, background: "var(--ds-bg-2)" }}
-      />
+        className="resp-grid-2"
+        style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 22 }}
+      >
+        <ActivityCardSkeleton h={300} />
+        <ActivityCardSkeleton h={300} />
+      </div>
 
-      {/* Recent plays list */}
-      <div className="flex flex-col gap-2" style={{ marginTop: 24 }}>
+      <div className="flex flex-col gap-2">
         {Array.from({ length: 6 }).map((_, i) => (
-          <div
-            key={i}
-            className="rounded-lg"
-            style={{ height: 48, background: "var(--ds-bg-2)" }}
-          />
+          <Bar key={i} w="100%" h={48} r={8} style={SKELETON_CARD} />
         ))}
       </div>
     </div>

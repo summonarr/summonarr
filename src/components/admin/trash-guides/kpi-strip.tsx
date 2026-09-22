@@ -26,7 +26,7 @@ export function KpiStrip({
       label: "Applied to instance",
       value: loading ? "…" : String(profilesApplied),
       hint: `of ${profilesAvailable}`,
-      tint: profilesApplied > 0 ? "var(--ds-accent)" : "var(--ds-fg)",
+      tint: profilesApplied > 0 ? "var(--ds-accent-text)" : "var(--ds-fg)",
     },
     {
       label: "Custom formats",

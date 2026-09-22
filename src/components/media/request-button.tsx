@@ -246,7 +246,7 @@ export function RequestButton({
       {showPlex && plexAvailable && (
         <div
           className="flex items-center font-medium"
-          style={{ gap: 6, fontSize: 13, color: "var(--ds-plex)" }}
+          style={{ gap: 6, fontSize: 13, color: "var(--ds-plex-text)" }}
         >
           <PlayCircle style={{ width: 14, height: 14 }} />
           Available on Plex
@@ -255,7 +255,7 @@ export function RequestButton({
       {showJellyfin && jellyfinAvailable && (
         <div
           className="flex items-center font-medium"
-          style={{ gap: 6, fontSize: 13, color: "var(--ds-jellyfin)" }}
+          style={{ gap: 6, fontSize: 13, color: "var(--ds-jellyfin-text)" }}
         >
           <Tv2 style={{ width: 14, height: 14 }} />
           Available on Jellyfin
@@ -306,7 +306,7 @@ export function RequestButton({
               >
                 <AlertCircle
                   className="shrink-0"
-                  style={{ width: 14, height: 14, color: "var(--ds-accent)" }}
+                  style={{ width: 14, height: 14, color: "var(--ds-accent-text)" }}
                 />
                 <p style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0 }}>
                   Request{" "}

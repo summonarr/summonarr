@@ -310,7 +310,7 @@ export function FilterBar({
               ? "var(--ds-accent-soft)"
               : "var(--ds-bg-2)",
             color: activeHideAvailable
-              ? "var(--ds-accent)"
+              ? "var(--ds-accent-text)"
               : "var(--ds-fg-muted)",
             border: `1px solid ${activeHideAvailable ? "var(--ds-accent-ring)" : "var(--ds-border)"}`,
           }}

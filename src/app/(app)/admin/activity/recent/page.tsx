@@ -123,7 +123,12 @@ export default async function RecentlyAddedPage() {
     <div className="ds-page-enter">
       <PageHeader
         title="Recently Added"
-        subtitle="Items recently added to your media server"
+        subtitle={
+          // items is capped (slice above), so this is "the latest N", not a total.
+          items.length > 0
+            ? `The latest ${items.length} ${items.length === 1 ? "item" : "items"} added to your media server`
+            : "Items recently added to your media server"
+        }
       />
 
       <ActivityFilterBar />
@@ -163,12 +168,12 @@ export default async function RecentlyAddedPage() {
                   {}
                   <div className="absolute top-1.5 right-1.5 flex gap-1">
                     {item.sources.plex && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-amber-500/90 text-black">
+                      <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-[var(--ds-plex)] text-black">
                         Plex
                       </span>
                     )}
                     {item.sources.jellyfin && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-purple-500/90 text-white">
+                      <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-purple-700 text-white">
                         JF
                       </span>
                     )}

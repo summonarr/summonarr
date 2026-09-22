@@ -708,8 +708,8 @@ export default async function LibraryDiffPage({
   // makes one row exactly one title. (The type tabs below stay row-based on
   // purpose — they label the cards actually rendered, one per server.)
   const stats = [
-    { label: "Plex Library",     value: plexSet.size,     color: "var(--ds-plex)" },
-    { label: "Jellyfin Library", value: jellyfinSet.size, color: "var(--ds-jellyfin)" },
+    { label: "Plex Library",     value: plexSet.size,     color: "var(--ds-plex-text)" },
+    { label: "Jellyfin Library", value: jellyfinSet.size, color: "var(--ds-jellyfin-text)" },
     { label: "In Sync",          value: inSyncCount,      color: "var(--ds-success)"  },
     { label: "Differences",      value: (plexSet.size - inSyncCount) + (jellyfinSet.size - inSyncCount), color: "var(--ds-danger)" },
     { label: "Bad Matches",      value: allRawBadMatches.length, color: "var(--ds-warning)" },
@@ -806,7 +806,7 @@ export default async function LibraryDiffPage({
           <Link
             href="/admin"
             className="hover:underline"
-            style={{ color: "var(--ds-accent)" }}
+            style={{ color: "var(--ds-accent-text)" }}
           >
             Run a sync
           </Link>{" "}

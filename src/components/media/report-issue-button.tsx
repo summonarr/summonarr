@@ -358,7 +358,7 @@ export function ReportIssueButton({
                   style={{
                     width: 14,
                     height: 14,
-                    color: "var(--ds-accent)",
+                    color: "var(--ds-accent-text)",
                   }}
                 />
                 Loading library info…
@@ -418,7 +418,7 @@ export function ReportIssueButton({
                   </p>
                 )}
                 {isTV && availabilityFailed && (
-                  <p className="text-[11px] text-amber-500/80">
+                  <p className="text-[11px] text-amber-400">
                     Could not load library data — enter season/episode manually
                   </p>
                 )}

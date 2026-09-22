@@ -254,7 +254,7 @@ export default async function VotesPage({
                       style={{ gap: 6 }}
                     >
                       <h3
-                        className="font-medium truncate transition-colors group-hover:text-[var(--ds-accent)]"
+                        className="font-medium truncate transition-colors group-hover:text-[var(--ds-accent-text)]"
                         style={{ fontSize: 14, margin: 0, color: "var(--ds-fg)" }}
                       >
                         {item.title}
@@ -267,7 +267,7 @@ export default async function VotesPage({
                       style={{
                         marginTop: 6,
                         fontSize: 12,
-                        color: "var(--ds-accent)",
+                        color: "var(--ds-accent-text)",
                         fontWeight: 600,
                       }}
                     >

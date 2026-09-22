@@ -61,7 +61,7 @@ function PlayMethodBadge({ method }: { method: string | null }) {
   if (!method) return <span className="text-zinc-500">—</span>;
   const colors: Record<string, string> = {
     DirectPlay: "bg-green-500/15 text-green-400",
-    DirectStream: "bg-blue-500/15 text-blue-400",
+    DirectStream: "bg-sky-500/15 text-sky-400",
     Transcode: "bg-orange-500/15 text-orange-400",
   };
   const labels: Record<string, string> = {

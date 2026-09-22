@@ -329,7 +329,7 @@ export default async function IssuesPage({
                               marginTop: 6,
                               fontSize: 10.5,
                               color:
-                                "color-mix(in oklab, var(--ds-accent) 80%, var(--ds-fg))",
+                                "color-mix(in oklab, var(--ds-accent-text) 80%, var(--ds-fg))",
                             }}
                           >
                             {issue._count.messages} message

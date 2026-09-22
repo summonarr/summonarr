@@ -171,7 +171,7 @@ export function DiscoverHero({
                 paddingLeft: 5,
                 paddingRight: 6,
                 background: "var(--ds-accent-soft)",
-                color: "var(--ds-accent)",
+                color: "var(--ds-accent-text)",
                 border: "1px solid var(--ds-accent-ring)",
               }}
             >

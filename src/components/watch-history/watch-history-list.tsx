@@ -283,7 +283,7 @@ export function WatchHistoryList({
                     style={{ gap: 6, fontSize: 13, fontWeight: 600, color: "var(--ds-fg)" }}
                   >
                     <span
-                      className="transition-colors group-hover:text-[var(--ds-accent)]"
+                      className="transition-colors group-hover:text-[var(--ds-accent-text)]"
                       style={{
                         overflow: "hidden",
                         textOverflow: "ellipsis",

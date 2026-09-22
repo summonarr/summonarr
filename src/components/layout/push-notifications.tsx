@@ -313,7 +313,7 @@ export function PushNotifications() {
       aria-label={error ?? "Enable desktop notifications"}
       title={error ?? "Enable desktop notifications"}
       className={`ds-tap inline-flex items-center justify-center transition-colors disabled:opacity-50 shrink-0 ${
-        error ? "text-red-400 hover:text-red-300" : "text-zinc-500 hover:text-zinc-300"
+        error ? "text-red-400 hover:text-[var(--ds-danger-hover)]" : "text-zinc-500 hover:text-zinc-300"
       }`}
       style={{ width: 32, height: 32, borderRadius: 6 }}
     >

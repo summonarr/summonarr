@@ -42,6 +42,15 @@ function dedupeUnion(lists: TmdbMedia[][]): TmdbMedia[] {
   return out;
 }
 
+type ServerVisibility = { showPlex: boolean; showJellyfin: boolean };
+
+// The one "Hide Available drops this" rule, shared by project() and
+// emptiedByHideAvailable() so the rail and its empty-state message can't
+// disagree about which titles count as available.
+function availableToViewer(e: TmdbMedia, vis: ServerVisibility): boolean {
+  return (vis.showPlex && !!e.plexAvailable) || (vis.showJellyfin && !!e.jellyfinAvailable);
+}
+
 // Maps raw items to their enriched versions, dropping available titles when
 // hideAvailable is set, capped at limit.
 function project(
@@ -54,7 +63,7 @@ function project(
   // (/api/top-rated, /api/upcoming, browse-query) already gates this way, and
   // the rails here linking to those pages showed a different set than the page
   // they led to.
-  vis: { showPlex: boolean; showJellyfin: boolean },
+  vis: ServerVisibility,
 ): TmdbMedia[] {
   const out: TmdbMedia[] = [];
   for (const m of raw) {
@@ -63,11 +72,33 @@ function project(
     // (the user hid it). Drop it — do NOT fall back to the raw item, which would
     // resurrect the hidden title onto the rail.
     if (!e) continue;
-    if (hideAvailable && ((vis.showPlex && e.plexAvailable) || (vis.showJellyfin && e.jellyfinAvailable))) continue;
+    if (hideAvailable && availableToViewer(e, vis)) continue;
     out.push(e);
     if (out.length >= limit) break;
   }
   return out;
+}
+
+// True when Hide Available is what emptied a rail: at least one of its titles
+// survived the hidden-title filter and every such title was dropped as
+// available. A rail that is empty for any OTHER reason — a failed TMDB call
+// (settled() → []), a new user with no For You shelf, titles the user hid —
+// must not claim "everything here is already on your server".
+function emptiedByHideAvailable(
+  raw: TmdbMedia[],
+  enriched: Map<string, TmdbMedia>,
+  hideAvailable: boolean,
+  vis: ServerVisibility,
+): boolean {
+  if (!hideAvailable) return false;
+  let seen = false;
+  for (const m of raw) {
+    const e = enriched.get(`${m.mediaType}-${m.id}`);
+    if (!e) continue;
+    if (!availableToViewer(e, vis)) return false;
+    seen = true;
+  }
+  return seen;
 }
 
 function settled<T>(r: PromiseSettledResult<T[]>): T[] {
@@ -158,25 +189,40 @@ export default async function DiscoverPage({
   const trendingRest = trendingItems.filter(
     (m) => !featuredKeys.has(`${m.mediaType}-${m.id}`),
   );
-  const rails: { title: string; subtitle: string; href?: string; items: TmdbMedia[] }[] = [
+  const railsBase: { title: string; subtitle: string; href?: string; raw: TmdbMedia[]; items: TmdbMedia[] }[] = [
     ...(forYouEnabled
-      ? [{ title: "For You", subtitle: "Picked based on what you watch", href: "/for-you", items: project(forYou, emap, hideAvailable, RAIL_SIZE, vis) }]
+      ? [{ title: "For You", subtitle: "Picked based on what you watch", href: "/for-you", raw: forYou, items: project(forYou, emap, hideAvailable, RAIL_SIZE, vis) }]
       : []),
-    { title: "Popular Movies",   subtitle: "Most popular on TMDB",                  href: "/movies",   items: project(popMovies, emap, hideAvailable, RAIL_SIZE, vis) },
-    { title: "Popular TV",       subtitle: "Most popular TV shows",                 href: "/tv",       items: project(popTV,     emap, hideAvailable, RAIL_SIZE, vis) },
+    { title: "Popular Movies",   subtitle: "Most popular on TMDB",                  href: "/movies",   raw: popMovies, items: project(popMovies, emap, hideAvailable, RAIL_SIZE, vis) },
+    { title: "Popular TV",       subtitle: "Most popular TV shows",                 href: "/tv",       raw: popTV, items: project(popTV,     emap, hideAvailable, RAIL_SIZE, vis) },
     ...(upcomingEnabled
       ? [
-          { title: "Upcoming Movies", subtitle: "Hitting theaters soon",  href: "/upcoming", items: project(upMovies, emap, hideAvailable, RAIL_SIZE, vis) },
-          { title: "On The Air TV",   subtitle: "New episodes this week", href: "/upcoming", items: project(upTV,     emap, hideAvailable, RAIL_SIZE, vis) },
+          { title: "Upcoming Movies", subtitle: "Hitting theaters soon",  href: "/upcoming", raw: upMovies, items: project(upMovies, emap, hideAvailable, RAIL_SIZE, vis) },
+          { title: "On The Air TV",   subtitle: "New episodes this week", href: "/upcoming", raw: upTV, items: project(upTV,     emap, hideAvailable, RAIL_SIZE, vis) },
         ]
       : []),
     ...(topEnabled
       ? [
-          { title: "Top Rated Movies", subtitle: "Highest-rated films of all time", href: "/top", items: project(topMovies, emap, hideAvailable, RAIL_SIZE, vis) },
-          { title: "Top Rated TV",     subtitle: "Highest-rated shows of all time", href: "/top", items: project(topTV,     emap, hideAvailable, RAIL_SIZE, vis) },
+          { title: "Top Rated Movies", subtitle: "Highest-rated films of all time", href: "/top", raw: topMovies, items: project(topMovies, emap, hideAvailable, RAIL_SIZE, vis) },
+          { title: "Top Rated TV",     subtitle: "Highest-rated shows of all time", href: "/top", raw: topTV, items: project(topTV,     emap, hideAvailable, RAIL_SIZE, vis) },
         ]
       : []),
   ];
+  const rails = railsBase.map((r) => ({
+    ...r,
+    allAvailable: r.items.length === 0 && emptiedByHideAvailable(r.raw, emap, hideAvailable, vis),
+  }));
+  // Judged over the titles the ROW could show: the two heroes take the only
+  // unavailable titles in an otherwise all-available week, and counting them
+  // made the row vanish instead of saying everything else is on the server.
+  const trendingAllAvailable =
+    trendingRest.length === 0 &&
+    emptiedByHideAvailable(
+      trending.filter((m) => !featuredKeys.has(`${m.mediaType}-${m.id}`)),
+      emap,
+      hideAvailable,
+      vis,
+    );
 
   return (
     <div className="ds-page-enter">
@@ -200,8 +246,8 @@ export default async function DiscoverPage({
         <div style={{ marginBottom: 36 }}>
           <EmptyState
             icon={AlertTriangle}
-            title="TMDB token not configured"
-            description="Set TMDB_READ_TOKEN in your environment to enable discovery."
+            title="Trending unavailable"
+            description="TMDB returned nothing. Check that TMDB_READ_TOKEN is set in your environment; if it is, TMDB may be unreachable right now."
           />
         </div>
       ) : (
@@ -232,7 +278,7 @@ export default async function DiscoverPage({
             items={trendingRest}
             showPlex={showPlex}
             showJellyfin={showJellyfin}
-            hideAvailable={hideAvailable}
+            allAvailable={trendingAllAvailable}
           />
         </>
       )}
@@ -246,7 +292,7 @@ export default async function DiscoverPage({
           items={rail.items}
           showPlex={showPlex}
           showJellyfin={showJellyfin}
-          hideAvailable={hideAvailable}
+          allAvailable={rail.allAvailable}
         />
       ))}
     </div>

@@ -304,7 +304,7 @@ export function SearchBar({
                     borderRadius: 4,
                     fontSize: 11,
                     background: isActive ? "var(--ds-accent-soft)" : "transparent",
-                    color: isActive ? "var(--ds-accent)" : "var(--ds-fg-muted)",
+                    color: isActive ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
                   }}
                 >
                   {value === "movie" && <Film style={{ width: 12, height: 12 }} />}
@@ -389,13 +389,13 @@ export function SearchBar({
                       {media.releaseYear && `${media.releaseYear} · `}
                       {media.mediaType === "movie" ? "MOVIE" : "TV"}
                       {showPlex && media.plexAvailable && (
-                        <span style={{ color: "var(--ds-plex)", marginLeft: 6 }}>
+                        <span style={{ color: "var(--ds-plex-text)", marginLeft: 6 }}>
                           · plex
                         </span>
                       )}
                       {showJellyfin && media.jellyfinAvailable && (
                         <span
-                          style={{ color: "var(--ds-jellyfin)", marginLeft: 6 }}
+                          style={{ color: "var(--ds-jellyfin-text)", marginLeft: 6 }}
                         >
                           · jellyfin
                         </span>

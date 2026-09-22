@@ -7,6 +7,7 @@ import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
+import { Switch } from "@/components/ui/switch";
 
 interface MaintenanceFormProps {
   initialEnabled: boolean;
@@ -41,15 +42,7 @@ export function MaintenanceForm({ initialEnabled, initialMessage }: MaintenanceF
   return (
     <form onSubmit={handleSave} className="space-y-4">
       <div className="flex items-center gap-3">
-        <button
-          type="button"
-          role="switch"
-          aria-checked={enabled}
-          onClick={() => { setEnabled(!enabled); setStatus("idle"); }}
-          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${enabled ? "bg-yellow-600" : "bg-zinc-700"}`}
-        >
-          <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${enabled ? "translate-x-6" : "translate-x-1"}`} />
-        </button>
+        <Switch size="lg" variant="warning" checked={enabled} onCheckedChange={() => { setEnabled(!enabled); setStatus("idle"); }} />
         <span className="text-sm text-zinc-300">{enabled ? "Maintenance mode is ON" : "Maintenance mode is OFF"}</span>
       </div>
       <div className="space-y-1.5">

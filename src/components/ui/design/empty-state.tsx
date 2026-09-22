@@ -109,7 +109,7 @@ export function EmptyState({
             className="hover:underline"
             style={{
               fontSize: 13,
-              color: "var(--ds-accent)",
+              color: "var(--ds-accent-text)",
               fontWeight: 500,
             }}
           >

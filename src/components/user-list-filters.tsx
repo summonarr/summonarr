@@ -88,7 +88,7 @@ export function FilterPills({
                     ? "var(--ds-accent-soft)"
                     : "var(--ds-bg-3)",
                   color: isActive
-                    ? "var(--ds-accent)"
+                    ? "var(--ds-accent-text)"
                     : "var(--ds-fg-subtle)",
                 }}
               >

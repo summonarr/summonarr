@@ -23,7 +23,7 @@ export function ApplyLog({
       {failures.length > 0 && (
         <ul className="space-y-1 mt-2 max-h-40 overflow-y-auto">
           {failures.map((f) => (
-            <li key={f.specId} className="text-xs text-red-300">
+            <li key={f.specId} className="text-xs text-red-400">
               <span className="font-medium">{f.name}</span>: {f.error}
             </li>
           ))}

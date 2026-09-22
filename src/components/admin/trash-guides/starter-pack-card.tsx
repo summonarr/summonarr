@@ -236,11 +236,11 @@ export function StarterPackCard({
         </div>
 
         {catalogEmpty && (
-          <div className="mb-4 p-3 rounded-md bg-amber-500/10 border border-amber-500/30 flex items-start gap-2 text-xs text-amber-200">
+          <div className="mb-4 p-3 rounded-md bg-amber-500/10 border border-amber-500/30 flex items-start gap-2 text-xs text-amber-400">
             <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
             <div>
               <p className="font-medium">Catalog is empty</p>
-              <p className="mt-0.5 text-amber-300/80">
+              <p className="mt-0.5 text-zinc-400">
                 Click <span className="font-semibold">Refresh Catalog</span> above to pull the TRaSH catalog into the database. This takes ~20 s the first time; subsequent refreshes only fetch changed specs.
               </p>
             </div>
@@ -259,7 +259,7 @@ export function StarterPackCard({
                 type="button"
                 onClick={selectRecommended}
                 disabled={recommendedIds.length === 0 || recommendedSelected}
-                className="px-2 py-0.5 rounded bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="px-2 py-0.5 rounded bg-indigo-600/30 hover:bg-indigo-600/20 text-zinc-100 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Recommended ({recommendedIds.length})
               </button>

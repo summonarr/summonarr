@@ -206,7 +206,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                     disabled={revoking === s.sessionId || revokingAll}
                     onClick={() => revoke(s.sessionId)}
                     autoFocus
-                    className="rounded-md px-2 py-1 text-[10px] font-medium bg-red-600 text-white hover:bg-red-500 transition-colors disabled:opacity-40"
+                    className="rounded-md px-2 py-1 text-[10px] font-medium bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-40"
                   >
                     {revoking === s.sessionId
                       ? <Loader2 className="w-3 h-3 animate-spin" />
@@ -260,7 +260,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                   disabled={revokingAll}
                   onClick={revokeAll}
                   autoFocus
-                  className="flex-1 flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium bg-red-600 text-white hover:bg-red-500 transition-colors disabled:opacity-40"
+                  className="flex-1 flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-40"
                 >
                   {revokingAll
                     ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Revoking…</>

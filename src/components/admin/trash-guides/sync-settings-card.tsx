@@ -209,7 +209,7 @@ function ToggleRow({
         className="mt-0.5 w-4 h-4 rounded border-zinc-600 bg-zinc-800 accent-indigo-500"
       />
       <div>
-        <p className="text-sm text-zinc-200 font-medium group-hover:text-zinc-100 transition-colors">{label}</p>
+        <p className="text-sm text-zinc-300 font-medium group-hover:text-zinc-100 transition-colors">{label}</p>
         <p className="text-xs text-zinc-500">{description}</p>
       </div>
     </label>

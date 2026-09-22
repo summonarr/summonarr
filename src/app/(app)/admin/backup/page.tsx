@@ -35,7 +35,7 @@ export default async function BackupPage() {
           style={{
             width: 18,
             height: 18,
-            color: "var(--ds-accent)",
+            color: "var(--ds-accent-text)",
             flexShrink: 0,
             marginTop: 2,
           }}

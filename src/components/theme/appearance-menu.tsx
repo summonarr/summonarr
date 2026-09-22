@@ -85,7 +85,7 @@ function StandaloneRadioGroup<T extends string>({
               minHeight: 36,
               cursor: "pointer",
               background: selected ? "var(--ds-accent-soft)" : "transparent",
-              color: selected ? "var(--ds-accent)" : "var(--ds-fg)",
+              color: selected ? "var(--ds-accent-text)" : "var(--ds-fg)",
               border: `1px solid ${selected ? "var(--ds-accent)" : "var(--ds-border)"}`,
             }}
           >

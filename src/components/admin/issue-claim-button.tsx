@@ -89,7 +89,7 @@ export function IssueClaimButton({ issueId, claimedBy, claimerName, currentUserI
             type="button"
             size="sm"
             aria-label={`Confirm take over from ${claimerName ?? "another admin"}`}
-            className="h-7 px-2.5 text-xs gap-1.5 bg-red-600 text-white hover:bg-red-500"
+            className="h-7 px-2.5 text-xs gap-1.5 bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]"
             onClick={performToggle}
             disabled={busy}
             autoFocus

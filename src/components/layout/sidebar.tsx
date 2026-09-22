@@ -204,7 +204,7 @@ function NavLink({ item, active }: { item: NavItem; active: boolean }) {
         padding: "6px 10px",
         borderRadius: 6,
         background: active ? "var(--ds-accent-soft)" : "transparent",
-        color: active ? "var(--ds-accent)" : "var(--ds-fg-muted)",
+        color: active ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
         fontSize: 13,
       }}
     >
@@ -227,7 +227,7 @@ function NavLink({ item, active }: { item: NavItem; active: boolean }) {
         style={{
           width: 16,
           height: 16,
-          color: active ? "var(--ds-accent)" : "inherit",
+          color: active ? "var(--ds-accent-text)" : "inherit",
         }}
       />
       <span>{item.label}</span>

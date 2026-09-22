@@ -184,22 +184,35 @@
   --ds-fast: 120ms;
   --ds-med: 220ms;
 
-  /* Accent (indigo default) — overridden per [data-accent] below */
-  --ds-accent:        oklch(0.58 0.21 275);
-  --ds-accent-hover:  oklch(0.62 0.21 275);
+  /* Accent (indigo default) — overridden per [data-accent] below.
+     --ds-accent is the FILL (behind --ds-accent-fg); --ds-accent-text is the
+     accent as TEXT or an ICON on a surface. One value cannot do both: indigo
+     needs L <= ~.57 under a white label and L >= ~.65 as text on --ds-bg-3. */
+  --ds-accent:        oklch(0.555 0.21 275);
+  --ds-accent-hover:  oklch(0.515 0.21 275);
   --ds-accent-fg:     oklch(0.99 0 0);
-  --ds-accent-soft:   oklch(0.58 0.21 275 / 0.12);
-  --ds-accent-ring:   oklch(0.58 0.21 275 / 0.35);
+  --ds-accent-text:   oklch(0.76 0.12 275);
+  --ds-accent-soft:   oklch(0.555 0.21 275 / 0.14);
+  --ds-accent-ring:   oklch(0.555 0.21 275 / 0.35);
 
   /* Functional accents */
   --ds-success: oklch(0.72 0.18 150);
   --ds-warning: oklch(0.78 0.16 85);
-  --ds-danger:  oklch(0.65 0.22 25);
+  /* Danger sits at .73 (was .65): as TEXT on its own 20% tint chip
+     (`text-red-400` on `bg-red-500/20`, ~20 sites) .65 was 3.99:1. */
+  --ds-danger:  oklch(0.73 0.22 25);
   --ds-info:    oklch(0.70 0.14 225);
+  --ds-on-status: oklch(0.16 0 0); /* re-tuned per theme below */
+  --ds-danger-hover: oklch(0.78 0.20 25);
 
-  /* Provider brand */
+  /* Provider brand. The raw brand colours are for FILLS and dots only; as
+     text on the light surfaces they are 2.0:1 (plex) and 2.5:1 (jellyfin).
+     TEXT takes the -text variants, which equal the brand in dark (7.2 / 5.7:1
+     on --ds-bg-3, 6.1 / 4.8 on a 6% fg tint) and are re-tuned below for light. */
   --ds-plex: #e5a00d;
   --ds-jellyfin: #00a4dc;
+  --ds-plex-text: var(--ds-plex);
+  --ds-jellyfin-text: var(--ds-jellyfin);
 }
 
 /* Dark (primary). The existing `html.dark` continues to drive shadcn tokens;
@@ -219,6 +232,13 @@
      used for). 0.64 clears 4.5:1 on --ds-bg while staying below --ds-fg-muted. */
   --ds-fg-subtle:   oklch(0.64 0 0);
   --ds-fg-disabled: oklch(0.38 0 0);
+  /* Text ON a solid success/warning/danger/info fill. The dark-theme tokens
+     sit at L .70–.78, where white text is 2.0–3.0:1 (fails AA for the 11–13px
+     labels these fills carry) and this dark foreground is 6.5–9.6:1. */
+  --ds-on-status: oklch(0.16 0 0);
+  /* Hover shade for a solid danger fill: it must move AWAY from the text
+     colour (--ds-on-status is dark here, so lighter; 7.7:1). */
+  --ds-danger-hover: oklch(0.78 0.20 25);
   --ds-shadow-sm: 0 1px 2px rgba(0,0,0,.4);
   --ds-shadow-md: 0 4px 12px rgba(0,0,0,.45), 0 1px 2px rgba(0,0,0,.4);
   --ds-shadow-lg: 0 18px 48px rgba(0,0,0,.55), 0 4px 12px rgba(0,0,0,.4);
@@ -243,17 +263,25 @@
   --ds-shadow-md: 0 2px 8px rgba(15,23,42,.06), 0 1px 2px rgba(15,23,42,.04);
   --ds-shadow-lg: 0 16px 40px rgba(15,23,42,.10), 0 2px 8px rgba(15,23,42,.06);
 
-  /* Functional accents, re-tuned for a light ground. The :root values above are
-     dark-tuned (L .65–.78): as TEXT on the near-white light surfaces they sat
-     at ~1.7–3:1, which is what made every rating badge, status chip and
-     warning line in the legacy remap (amber/green/red/sky-* → these tokens)
-     fail contrast in light mode. Darkening them here keeps the hue while
-     clearing 4.5:1 for small text; the solid chips that put black/white text
-     on them (ds-chip-pending/-approved/-declined) stay legible either way. */
-  --ds-success: oklch(0.55 0.16 150);
-  --ds-warning: oklch(0.62 0.15 80);
-  --ds-danger:  oklch(0.55 0.21 25);
-  --ds-info:    oklch(0.55 0.13 225);
+  /* Functional accents, re-tuned for a light ground. The :root values are
+     dark-tuned (L .70–.78) and read ~1.7–3:1 as text on these near-white
+     surfaces. Each value below is the LIGHTEST that clears 4.5:1 as small
+     text on EVERY surface it actually sits on — --ds-bg…bg-3 AND its own
+     5–20% tint chip (`text-green-400` on `bg-green-500/20`), which is the
+     binding case — computed with real oklch → sRGB → WCAG maths, not L³
+     (worst case: success 4.59, warning 4.76, danger 4.60, info 4.66; under
+     white --ds-on-status as a solid fill 6.4–7.0). Black text fails on all
+     of them, hence --ds-on-status for every status fill. */
+  --ds-success: oklch(0.46 0.16 150);
+  --ds-warning: oklch(0.48 0.14 80);
+  --ds-danger:  oklch(0.48 0.21 25);
+  --ds-info:    oklch(0.46 0.13 225);
+  --ds-on-status: oklch(1 0 0);
+  --ds-danger-hover: oklch(0.42 0.20 25); /* darker: the text here is white (8.6:1) */
+  /* Brand-as-text (see :root): worst case on --ds-bg…bg-3 5.35 (plex) /
+     5.61 (jellyfin), and 4.73 / 4.97 on a 6% --ds-fg tint pill. */
+  --ds-plex-text:     oklch(0.50 0.10 77);
+  --ds-jellyfin-text: oklch(0.48 0.095 232);
 }
 
 /* ────────────────────────────────────────────────────────────────────
@@ -285,8 +313,8 @@
      accent token, so role-preview / theme tweaks propagate automatically.
      indigo-500 is the HOVER shade: the legacy `bg-indigo-600 hover:bg-indigo-500`
      pairing (44 sites) was a no-op while both resolved to the same token. */
-  --color-indigo-300:  color-mix(in oklab, var(--ds-accent) 80%, var(--ds-fg));
-  --color-indigo-400:  var(--ds-accent);
+  --color-indigo-300:  color-mix(in oklab, var(--ds-accent-text) 80%, var(--ds-fg));
+  --color-indigo-400:  var(--ds-accent-text); /* the TEXT shade — no bg-indigo-400 exists */
   --color-indigo-500:  var(--ds-accent-hover);
   --color-indigo-600:  var(--ds-accent);
   --color-indigo-700:  var(--ds-accent-hover);
@@ -338,6 +366,13 @@
 [data-theme="dark"]  { --color-zinc-600: oklch(0.36 0.006 275); }
 [data-theme="light"] { --color-zinc-600: oklch(0.68 0.006 275); }
 
+/* purple-400 is the Jellyfin identity colour as TEXT (source tags, user
+   chips, audit pills). Tailwind's stock value (L .71) is 4.7:1 on the dark
+   surfaces and its own purple-500/10–20 chips, but ~2.7:1 on the light ones,
+   so only the light theme is retargeted: worst case 4.95:1 across
+   --ds-bg…bg-3 and purple-500/10–20 tints. */
+[data-theme="light"] { --color-purple-400: oklch(0.48 0.19 305); }
+
 /* zinc-700/800 are SURFACE tokens above (--ds-bg-3 / --ds-bg-2), which is
    right for `bg-zinc-800` cards but wrong for the ~300 legacy `border-zinc-700`
    / `border-zinc-800` utilities: a bg-2 row divider on a bg-2 card is
@@ -345,22 +380,72 @@
    dialog edge and card border drawn with them vanished. The variable can't
    serve both roles, so retarget the border utilities themselves. These are
    unlayered rules, so they win over Tailwind's `@layer utilities` output
-   regardless of order. */
-[data-theme] :is(.border-zinc-800, .border-zinc-800\/50, .border-zinc-700, .border-zinc-700\/60) {
+   regardless of order — which also means they would beat a state VARIANT on
+   the same element (`focus:border-indigo-500`, `hover:border-red-500/50`,
+   `aria-invalid:border-destructive`). So the retarget steps aside while the
+   element is in a state it carries its own border variant for.
+   Specificity is load-bearing here — every rule below is (0,4,0) and the
+   later one wins the tie:
+   1. the retarget, minus focus/invalid states (they have no media gate);
+   2. hover hands back to the utilities layer via `revert-layer` — ONLY under
+      (hover: hover), because Tailwind 4 gates every `hover:` variant on that
+      query. Ungated, a touch device's sticky :hover dropped the retarget with
+      no variant to replace it and the border fell back to the bg-3 surface;
+   3. the legacy zinc-500…800 hover shades, which ARE retargeted (to
+      --ds-border-strong — as raw utilities they would resolve to a SURFACE
+      token and fade the border on hover), must still beat rule 2's hand-back;
+      they step aside for focus so a focus border keeps Tailwind's precedence.
+   Variant detection is ANCHORED to a class boundary (`^=` or a leading
+   space): a bare `*="hover:border-"` also matched `group-hover:`, `peer-hover:`,
+   `dark:hover:` and `sm:hover:`, handing back to the bare surface-coloured
+   utility whenever that PREFIXED variant was inactive. */
+[data-theme] :is(.border-zinc-800, .border-zinc-800\/50, .border-zinc-700, .border-zinc-700\/60):not(
+  :is([class^="focus:border-"], [class*=" focus:border-"]):focus,
+  :is([class^="focus-visible:border-"], [class*=" focus-visible:border-"]):focus-visible,
+  :is([class^="focus-within:border-"], [class*=" focus-within:border-"]):focus-within,
+  :is([class^="aria-invalid:border-"], [class*=" aria-invalid:border-"])[aria-invalid="true"]
+) {
   border-color: var(--ds-border);
 }
-[data-theme] :is(.hover\:border-zinc-500:hover, .hover\:border-zinc-600:hover) {
-  border-color: var(--ds-border-strong);
+@media (hover: hover) {
+  [data-theme] :is(.border-zinc-800, .border-zinc-800\/50, .border-zinc-700, .border-zinc-700\/60):is([class^="hover:border-"], [class*=" hover:border-"]):hover {
+    border-color: revert-layer;
+  }
+  [data-theme] [class]:is(.hover\:border-zinc-500, .hover\:border-zinc-600, .hover\:border-zinc-700, .hover\:border-zinc-800):hover:not(:focus, :focus-visible) {
+    border-color: var(--ds-border-strong);
+  }
+}
+/* divide-zinc-800 is the same surface-token-as-border bug, one level down:
+   the divider between a bg-2 dialog's rows is drawn in bg-2. */
+[data-theme] :is(.divide-zinc-800, .divide-zinc-800\/60, .divide-zinc-700) > :not(:last-child) {
+  border-color: var(--ds-border);
 }
 
-/* Accent variants — pick via [data-accent="..."] on <html>. */
-[data-accent="indigo"]  { --ds-accent: oklch(0.58 0.21 275); --ds-accent-hover: oklch(0.64 0.21 275); --ds-accent-soft: oklch(0.58 0.21 275 / 0.14); --ds-accent-ring: oklch(0.58 0.21 275 / 0.35); }
-[data-accent="amber"]   { --ds-accent: oklch(0.78 0.16 75);  --ds-accent-hover: oklch(0.82 0.16 75);  --ds-accent-soft: oklch(0.78 0.16 75  / 0.14); --ds-accent-ring: oklch(0.78 0.16 75  / 0.35); --ds-accent-fg: oklch(0.18 0 0); }
-[data-accent="emerald"] { --ds-accent: oklch(0.68 0.16 158); --ds-accent-hover: oklch(0.72 0.16 158); --ds-accent-soft: oklch(0.68 0.16 158 / 0.14); --ds-accent-ring: oklch(0.68 0.16 158 / 0.35); --ds-accent-fg: oklch(0.14 0 0); }
-[data-accent="cyan"]    { --ds-accent: oklch(0.72 0.13 220); --ds-accent-hover: oklch(0.76 0.13 220); --ds-accent-soft: oklch(0.72 0.13 220 / 0.14); --ds-accent-ring: oklch(0.72 0.13 220 / 0.35); --ds-accent-fg: oklch(0.14 0 0); }
-[data-accent="rose"]    { --ds-accent: oklch(0.66 0.21 15);  --ds-accent-hover: oklch(0.70 0.21 15);  --ds-accent-soft: oklch(0.66 0.21 15  / 0.14); --ds-accent-ring: oklch(0.66 0.21 15  / 0.35); }
-[data-accent="mono"]    { --ds-accent: oklch(0.97 0 0);      --ds-accent-hover: oklch(1 0 0);         --ds-accent-soft: oklch(1 0 0 / 0.10);         --ds-accent-ring: oklch(1 0 0 / 0.25); --ds-accent-fg: oklch(0.14 0 0); }
-[data-theme="light"][data-accent="mono"] { --ds-accent: oklch(0.18 0 0); --ds-accent-hover: oklch(0.05 0 0); --ds-accent-fg: oklch(1 0 0); --ds-accent-soft: oklch(0.18 0 0 / 0.08); --ds-accent-ring: oklch(0.18 0 0 / 0.28); }
+/* Accent variants — pick via [data-accent="..."] on <html>.
+   Every value is in sRGB gamut and measured with real oklch→sRGB→WCAG maths
+   (tints composited in sRGB), worst case over --ds-bg/bg-2/bg-3:
+     label = --ds-accent-fg on --ds-accent AND on --ds-accent-hover  (>= 4.5)
+     text  = --ds-accent-text on the surfaces AND on its own 14% soft / 20%
+             hover tint chip (`text-indigo-400` on `bg-indigo-500/20`)  (>= 4.5)
+   dark:  label indigo 4.9 · amber 9.2 · emerald 7.4 · cyan 8.3 · rose 4.6 · mono 18
+          text  indigo 6.4 · amber 5.1 · emerald 5.2 · cyan 4.6 · rose 5.8 · mono 7.8
+   light: text  indigo 4.7 · amber 5.6 · emerald 4.9 · cyan 5.2 · rose 4.7 · mono 10
+   The hover moves AWAY from the label (guardrail 42): darker under the white
+   labels (indigo, rose), lighter under the dark ones. Light mode keeps the
+   bright amber/emerald/cyan fills and darkens only --ds-accent-text — as text
+   on white those fills were 1.8–2.4:1. */
+[data-accent="indigo"]  { --ds-accent: oklch(0.555 0.21 275); --ds-accent-hover: oklch(0.515 0.21 275); --ds-accent-fg: oklch(0.99 0 0); --ds-accent-text: oklch(0.76 0.12 275);  --ds-accent-soft: oklch(0.555 0.21 275 / 0.14); --ds-accent-ring: oklch(0.555 0.21 275 / 0.35); }
+[data-accent="amber"]   { --ds-accent: oklch(0.78 0.16 75);   --ds-accent-hover: oklch(0.82 0.155 75);  --ds-accent-fg: oklch(0.18 0 0); --ds-accent-text: var(--ds-accent);      --ds-accent-soft: oklch(0.78 0.16 75  / 0.14);  --ds-accent-ring: oklch(0.78 0.16 75  / 0.35); }
+[data-accent="emerald"] { --ds-accent: oklch(0.68 0.155 158); --ds-accent-hover: oklch(0.72 0.155 158); --ds-accent-fg: oklch(0.14 0 0); --ds-accent-text: oklch(0.74 0.15 158);  --ds-accent-soft: oklch(0.68 0.155 158 / 0.14); --ds-accent-ring: oklch(0.68 0.155 158 / 0.35); }
+[data-accent="cyan"]    { --ds-accent: oklch(0.72 0.13 220);  --ds-accent-hover: oklch(0.76 0.13 220);  --ds-accent-fg: oklch(0.14 0 0); --ds-accent-text: var(--ds-accent);      --ds-accent-soft: oklch(0.72 0.13 220 / 0.14);  --ds-accent-ring: oklch(0.72 0.13 220 / 0.35); }
+[data-accent="rose"]    { --ds-accent: oklch(0.585 0.21 15);  --ds-accent-hover: oklch(0.545 0.20 15);  --ds-accent-fg: oklch(0.99 0 0); --ds-accent-text: oklch(0.74 0.15 15);   --ds-accent-soft: oklch(0.585 0.21 15 / 0.14);  --ds-accent-ring: oklch(0.585 0.21 15 / 0.35); }
+[data-accent="mono"]    { --ds-accent: oklch(0.97 0 0);       --ds-accent-hover: oklch(1 0 0);          --ds-accent-fg: oklch(0.14 0 0); --ds-accent-text: var(--ds-accent);      --ds-accent-soft: oklch(1 0 0 / 0.10);          --ds-accent-ring: oklch(1 0 0 / 0.25); }
+[data-theme="light"][data-accent="indigo"]  { --ds-accent-text: oklch(0.48 0.21 275); }
+[data-theme="light"][data-accent="amber"]   { --ds-accent-text: oklch(0.46 0.10 65); }
+[data-theme="light"][data-accent="emerald"] { --ds-accent-text: oklch(0.45 0.105 158); }
+[data-theme="light"][data-accent="cyan"]    { --ds-accent-text: oklch(0.45 0.085 225); }
+[data-theme="light"][data-accent="rose"]    { --ds-accent-text: oklch(0.48 0.19 15); }
+[data-theme="light"][data-accent="mono"]    { --ds-accent: oklch(0.18 0 0); --ds-accent-hover: oklch(0.05 0 0); --ds-accent-fg: oklch(1 0 0); --ds-accent-text: var(--ds-accent); --ds-accent-soft: oklch(0.18 0 0 / 0.08); --ds-accent-ring: oklch(0.18 0 0 / 0.28); }
 
 /* ───── Design-system utility classes ───── */
 
@@ -384,10 +469,10 @@
   letter-spacing: 0.02em;
 }
 .ds-chip-plex     { background: var(--ds-plex);     color: #000; border-color: transparent; font-weight: 600; }
-.ds-chip-jellyfin { background: var(--ds-jellyfin); color: #fff; border-color: transparent; font-weight: 600; }
-.ds-chip-pending  { background: var(--ds-warning);  color: #000; border-color: transparent; font-weight: 600; }
-.ds-chip-approved { background: var(--ds-success);  color: #000; border-color: transparent; font-weight: 600; }
-.ds-chip-declined { background: var(--ds-danger);   color: #fff; border-color: transparent; font-weight: 600; }
+.ds-chip-jellyfin { background: var(--ds-jellyfin); color: #000; /* white is 2.86:1, black 7.34:1 */ border-color: transparent; font-weight: 600; }
+.ds-chip-pending  { background: var(--ds-warning);  color: var(--ds-on-status); border-color: transparent; font-weight: 600; }
+.ds-chip-approved { background: var(--ds-success);  color: var(--ds-on-status); border-color: transparent; font-weight: 600; }
+.ds-chip-declined { background: var(--ds-danger);   color: var(--ds-on-status); border-color: transparent; font-weight: 600; }
 .ds-chip-accent   { background: var(--ds-accent);   color: var(--ds-accent-fg); border-color: transparent; font-weight: 600; }
 .ds-chip-link     { cursor: pointer; text-decoration: none; transition: color 0.12s, border-color 0.12s, background 0.12s; }
 .ds-chip-link:hover { color: var(--ds-fg); border-color: var(--ds-accent-ring); background: var(--ds-accent-soft); }
@@ -432,7 +517,7 @@ a:focus-visible > .ds-chip-link { color: var(--ds-fg); border-color: var(--ds-ac
 /* Superset of .ds-tap's transition list so an element carrying both still
    eases its :active scale (the later declaration wins wholesale). */
 .ds-hover-tint { transition: box-shadow var(--ds-fast) var(--ds-ease), border-color var(--ds-fast) var(--ds-ease), color var(--ds-fast) var(--ds-ease), transform 120ms var(--ds-ease), background 140ms var(--ds-ease); }
-.ds-hover-tint:hover { box-shadow: inset 0 0 0 999px color-mix(in oklab, var(--ds-fg) 6%, transparent); }
+.ds-hover-tint:not(:disabled, [aria-disabled="true"]):hover { box-shadow: inset 0 0 0 999px color-mix(in oklab, var(--ds-fg) 6%, transparent); }
 .ds-hover-tint:focus-visible { outline: 2px solid var(--ds-accent-ring); outline-offset: 2px; }
 
 @keyframes ds-page-in {

@@ -50,7 +50,7 @@ export function SourceTag({ source, instance }: { source: string; instance?: str
         padding: "1px 5px",
         borderRadius: 3,
         background: isPlex ? "var(--ds-plex)" : "var(--ds-jellyfin)",
-        color: isPlex ? "#000" : "#fff",
+        color: "#000",
         fontWeight: 700,
         letterSpacing: "0.04em",
         textTransform: "uppercase",
@@ -1629,7 +1629,7 @@ export function SortIcon({
       width="10"
       height="10"
       viewBox="0 0 12 12"
-      style={{ color: "var(--ds-accent)" }}
+      style={{ color: "var(--ds-accent-text)" }}
     >
       {dir === "asc" ? (
         <path

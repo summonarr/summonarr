@@ -275,7 +275,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                         style={{
                           width: 14,
                           height: 14,
-                          color: "var(--ds-accent)",
+                          color: "var(--ds-accent-text)",
                         }}
                       />
                       Loading episodes…

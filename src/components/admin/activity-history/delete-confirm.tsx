@@ -100,6 +100,7 @@ export function DeleteConfirm({
         )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button
+            className="ds-hover-tint"
             onClick={onCancel}
             disabled={deleting}
             style={{
@@ -115,6 +116,7 @@ export function DeleteConfirm({
             Cancel
           </button>
           <button
+            className="ds-hover-tint"
             onClick={onConfirm}
             disabled={deleting}
             style={{
@@ -123,7 +125,7 @@ export function DeleteConfirm({
               borderRadius: 6,
               background: "var(--ds-danger)",
               border: "1px solid transparent",
-              color: "white",
+              color: "var(--ds-on-status)",
               cursor: deleting ? "default" : "pointer",
               fontWeight: 500,
               opacity: deleting ? 0.7 : 1,

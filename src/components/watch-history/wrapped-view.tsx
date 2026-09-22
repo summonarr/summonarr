@@ -73,13 +73,15 @@ function mediaHref(tmdbId: number | null, mediaType: string | null): string | nu
 }
 
 // Gradient palette cycled across the stat cards for the "wrapped" vibrancy.
+// Every stop sits at L ≤ .54 so the tile's white 10px kicker (opacity .85)
+// clears 4.5:1 on each end of the gradient (worst stop 4.52:1).
 const GRADS = [
-  "linear-gradient(135deg, oklch(0.55 0.2 275) 0%, oklch(0.5 0.22 320) 100%)",
-  "linear-gradient(135deg, oklch(0.6 0.17 200) 0%, oklch(0.55 0.19 250) 100%)",
-  "linear-gradient(135deg, oklch(0.62 0.19 150) 0%, oklch(0.58 0.17 195) 100%)",
-  "linear-gradient(135deg, oklch(0.68 0.18 60) 0%, oklch(0.62 0.2 35) 100%)",
-  "linear-gradient(135deg, oklch(0.62 0.2 350) 0%, oklch(0.55 0.21 300) 100%)",
-  "linear-gradient(135deg, oklch(0.6 0.16 240) 0%, oklch(0.56 0.18 285) 100%)",
+  "linear-gradient(135deg, oklch(0.53 0.2 275) 0%, oklch(0.5 0.22 320) 100%)",
+  "linear-gradient(135deg, oklch(0.47 0.11 200) 0%, oklch(0.5 0.15 250) 100%)",
+  "linear-gradient(135deg, oklch(0.48 0.14 150) 0%, oklch(0.46 0.1 195) 100%)",
+  "linear-gradient(135deg, oklch(0.52 0.12 60) 0%, oklch(0.53 0.18 35) 100%)",
+  "linear-gradient(135deg, oklch(0.53 0.2 350) 0%, oklch(0.54 0.21 300) 100%)",
+  "linear-gradient(135deg, oklch(0.5 0.14 240) 0%, oklch(0.53 0.18 285) 100%)",
 ];
 
 // Named WrappedStat (not StatCard) so it can't be confused with the design
@@ -153,7 +155,7 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
       {/* Hero */}
       <div
         style={{
-          background: "linear-gradient(135deg, oklch(0.5 0.22 285) 0%, oklch(0.52 0.22 330) 55%, oklch(0.6 0.2 25) 100%)",
+          background: "linear-gradient(135deg, oklch(0.5 0.22 285) 0%, oklch(0.52 0.22 330) 55%, oklch(0.53 0.2 25) 100%)",
           borderRadius: 18,
           padding: "30px 26px",
           color: "#fff",
@@ -185,7 +187,7 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
         <div style={{ display: "flex", gap: 18, alignItems: "center", background: "var(--ds-bg-2)", border: "1px solid var(--ds-border)", borderRadius: 14, padding: 18 }}>
           <Poster src={top.posterSrc} letter={(top.title[0] ?? "?").toUpperCase()} w={70} h={104} radius={6} />
           <div style={{ minWidth: 0 }}>
-            <div className="ds-mono uppercase" style={{ fontSize: 10.5, letterSpacing: "0.12em", color: "var(--ds-accent)" }}>Your #1 this year</div>
+            <div className="ds-mono uppercase" style={{ fontSize: 10.5, letterSpacing: "0.12em", color: "var(--ds-accent-text)" }}>Your #1 this year</div>
             <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.02em", color: "var(--ds-fg)", margin: "4px 0 6px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {heroHref ? (
                 <Link href={heroHref} className="hover:underline" style={{ color: "inherit", textDecoration: "none" }}>{top.title}</Link>
@@ -218,7 +220,7 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
               const href = mediaHref(t.tmdbId, t.mediaType);
               return (
                 <div key={`${t.title}-${i}`} style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <span className="ds-mono" style={{ width: 20, textAlign: "right", fontSize: 15, fontWeight: 700, color: "var(--ds-accent)" }}>{i + 1}</span>
+                  <span className="ds-mono" style={{ width: 20, textAlign: "right", fontSize: 15, fontWeight: 700, color: "var(--ds-accent-text)" }}>{i + 1}</span>
                   <Poster src={t.posterSrc} letter={(t.title[0] ?? "?").toUpperCase()} w={32} h={46} radius={4} />
                   <div style={{ flex: 1, minWidth: 0, display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
                     {href ? (

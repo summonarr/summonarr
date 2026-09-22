@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { Switch } from "@/components/ui/switch";
 
 type SaveStatus = "idle" | "saving" | "ok" | "error";
 
@@ -69,19 +70,7 @@ export function PlayHistorySettingsForm({
   return (
     <form onSubmit={handleSave} className="space-y-5">
       <div className="flex items-center gap-3">
-        <button
-          type="button"
-          role="switch"
-          aria-checked={enabled}
-          onClick={() => setEnabled(!enabled)}
-          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-            enabled ? "bg-indigo-600" : "bg-zinc-700"
-          }`}
-        >
-          <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
-            enabled ? "translate-x-6" : "translate-x-1"
-          }`} />
-        </button>
+        <Switch size="lg" checked={enabled} onCheckedChange={() => setEnabled(!enabled)} />
         <Label className="cursor-pointer" onClick={() => setEnabled(!enabled)}>
           Enable play history tracking
         </Label>
@@ -91,35 +80,11 @@ export function PlayHistorySettingsForm({
         <>
           <div className="space-y-3 pl-1">
             <div className="flex items-center gap-3">
-              <button
-                type="button"
-                role="switch"
-                aria-checked={plexEnabled}
-                onClick={() => setPlexEnabled(!plexEnabled)}
-                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                  plexEnabled ? "bg-indigo-600" : "bg-zinc-700"
-                }`}
-              >
-                <span className={`inline-block h-3 w-3 rounded-full bg-white transition-transform ${
-                  plexEnabled ? "translate-x-5" : "translate-x-1"
-                }`} />
-              </button>
+              <Switch checked={plexEnabled} onCheckedChange={() => setPlexEnabled(!plexEnabled)} />
               <span className="text-sm text-zinc-300">Plex</span>
             </div>
             <div className="flex items-center gap-3">
-              <button
-                type="button"
-                role="switch"
-                aria-checked={jellyfinEnabled}
-                onClick={() => setJellyfinEnabled(!jellyfinEnabled)}
-                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
-                  jellyfinEnabled ? "bg-indigo-600" : "bg-zinc-700"
-                }`}
-              >
-                <span className={`inline-block h-3 w-3 rounded-full bg-white transition-transform ${
-                  jellyfinEnabled ? "translate-x-5" : "translate-x-1"
-                }`} />
-              </button>
+              <Switch checked={jellyfinEnabled} onCheckedChange={() => setJellyfinEnabled(!jellyfinEnabled)} />
               <span className="text-sm text-zinc-300">Jellyfin</span>
             </div>
           </div>

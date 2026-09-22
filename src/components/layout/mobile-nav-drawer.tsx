@@ -265,7 +265,7 @@ function NavLink({
         background: active ? "var(--ds-accent-soft)" : "transparent",
         // Inactive text is fg-muted here, in the sidebar and in the bottom
         // tabs — the three nav implementations used to disagree.
-        color: active ? "var(--ds-accent)" : "var(--ds-fg-muted)",
+        color: active ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
         fontSize: 13,
       }}
     >
@@ -288,7 +288,7 @@ function NavLink({
         style={{
           width: 16,
           height: 16,
-          color: active ? "var(--ds-accent)" : "var(--ds-fg-muted)",
+          color: active ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
         }}
       />
       {item.label}

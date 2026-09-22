@@ -49,7 +49,7 @@ export default async function DonatePage() {
       label: "Venmo",
       value: cfg.donationVenmo ?? "",
       pillBg: "#3d95ce",
-      pillColor: "#ffffff",
+      pillColor: "#000000",
       href: (v: string) =>
         safeUrl(`https://venmo.com/${v.replace(/^@/, "")}`),
       hint: "Click to pay via Venmo",
@@ -69,7 +69,7 @@ export default async function DonatePage() {
       label: "Amazon Wishlist",
       value: cfg.donationAmazon ?? "",
       pillBg: "#ff9900",
-      pillColor: "#ffffff",
+      pillColor: "#000000",
       href: (v: string) => safeUrl(v),
       hint: "View my Amazon Wishlist",
     },
@@ -78,7 +78,7 @@ export default async function DonatePage() {
       label: "Patreon",
       value: cfg.donationPatreon ?? "",
       pillBg: "#f96854",
-      pillColor: "#ffffff",
+      pillColor: "#000000",
       href: (v: string) =>
         v.startsWith("http")
           ? safeUrl(v)

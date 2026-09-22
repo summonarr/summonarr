@@ -36,9 +36,18 @@ export function Bar({
 }
 
 // PageHeader stand-in: the 22px title's 33px line box, the optional 12px
-// subtitle (18px line box, mt-1), an optional right-aligned action, mb-5.
+// subtitle (18px line box per line, mt-1), an optional right-aligned action,
+// mb-5. `subtitleLines` covers pages whose long subtitle wraps (issues, votes).
 // Booleans only — never literal text that could drift from the page.
-export function SkeletonHeader({ subtitle = false, right = false }: { subtitle?: boolean; right?: boolean }) {
+export function SkeletonHeader({
+  subtitle = false,
+  subtitleLines = 1,
+  right = false,
+}: {
+  subtitle?: boolean;
+  subtitleLines?: number;
+  right?: boolean;
+}) {
   return (
     <div className="ds-page-header mb-5">
       <div className="flex-1 min-w-0">
@@ -46,8 +55,16 @@ export function SkeletonHeader({ subtitle = false, right = false }: { subtitle?:
           <Bar w={200} h={24} />
         </div>
         {subtitle && (
-          <div className="flex items-center mt-1" style={{ height: 18 }}>
-            <Bar w={320} h={12} />
+          <div className="mt-1">
+            {Array.from({ length: subtitleLines }).map((_, i) => (
+              <div key={i} className="flex items-center" style={{ height: 18 }}>
+                <Bar
+                  w={subtitleLines > 1 && i === subtitleLines - 1 ? 220 : 320}
+                  h={12}
+                  style={{ maxWidth: "100%" }}
+                />
+              </div>
+            ))}
           </div>
         )}
       </div>

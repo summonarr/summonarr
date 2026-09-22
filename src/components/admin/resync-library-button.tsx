@@ -108,7 +108,7 @@ export function ResyncLibraryButton({
         <Button
           size="sm"
           onClick={handleResync}
-          className="bg-amber-600 hover:bg-amber-500 h-7 px-3 text-xs"
+          className="bg-amber-600 text-black hover:bg-amber-600/90 h-7 px-3 text-xs"
         >
           Re-sync
         </Button>

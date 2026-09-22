@@ -3,6 +3,31 @@
 // variant prefixes (hover:, dark:, sm:, focus-visible:, group/foo:, …) form
 // independent class spaces.
 
+// ── Arbitrary-value shapes ─────────────────────────────────────────────────
+// Tailwind decides what `border-[…]` / `shadow-(--x)` IS from the value text —
+// a length is a width, a colour literal a colour, a bare var() whatever that
+// family defaults to — and this table has to guess the same way, or one class
+// silently deletes another. These fragments are the ONE definition of each
+// shape. `npm run audit:tw-merge` compiles a matrix of arbitrary values through
+// Tailwind itself and fails on any value a group files differently (check 4,
+// MISFILED), so a wrong guess here is a CI failure, not a silent bug.
+//
+// One CSS length WITH a unit. No `%`: Tailwind types `border-[50%]` as a colour
+// (text sizes accept `%` separately below).
+const LEN = String.raw`-?\d*\.?\d+(?:px|r?em|r?lh|ch|ex|cap|ic|[sld]?v(?:w|h|i|b|min|max)|cq(?:w|h|i|b|min|max)|pt|pc|in|cm|mm|q)`;
+// A bracket/paren value Tailwind types as a WIDTH or SIZE: a length, a
+// length-valued function, or an explicit `length:` hint.
+const WIDTH_ARB = String.raw`\[(?:length:|-?(?:calc|clamp|min|max)\(|${LEN}\])|\(length:`;
+// A colour literal: hex, a `color:` hint, a colour function, or a bare keyword
+// (`red`, `currentColor`, `transparent`) that isn't a CSS-wide, shadow or
+// line-width keyword (Tailwind types `shadow-[thin]` as the shadow, not a colour).
+const COLOR_LIT = String.raw`(?:#|color:|(?:rgba?|hsla?|hwb|oklch|oklab|lab|lch|color-mix|light-dark|color)\(|(?!(?:none|inherit|initial|unset|revert|thin|medium|thick)\])[a-zA-Z]+\])`;
+// Shadow families invert the default: a bracket is the COLOUR only as a colour
+// literal, a paren only with a `color:` hint. Everything else — a var(), a full
+// shadow — is the shadow itself.
+const SHADOW_ARB = String.raw`\[(?!${COLOR_LIT})|\((?!color:)`;
+const rx = (source: string) => new RegExp(source);
+
 const GROUPS: Array<readonly [string, RegExp]> = [
   ["display", /^(flex|grid|block|inline|inline-flex|inline-grid|inline-block|inline-table|list-item|hidden|contents|flow-root|table|table-(?:row|cell|caption|column|row-group|column-group|header-group|footer-group))$/],
   ["position", /^(static|relative|absolute|fixed|sticky)$/],
@@ -20,9 +45,9 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   // regex below only excludes x-/y-, so it would otherwise swallow them
   // (groupOf returns the FIRST match). Both are real Tailwind v4 utilities and
   // carry the same size/width-vs-color split as `shadow` and `ring`.
-  ["inset-shadow-size", /^inset-shadow-(?:2xs|xs|sm|md|lg|xl|2xl|none)$/],
+  ["inset-shadow-size", rx(String.raw`^inset-shadow-(?:(?:2xs|xs|sm|md|lg|xl|2xl|none)$|${SHADOW_ARB})`)],
   ["inset-shadow-color", /^inset-shadow-/],
-  ["inset-ring-w", /^inset-ring(?:-\d|-\[|$)/],
+  ["inset-ring-w", rx(String.raw`^inset-ring(?:-\d|-(?:${WIDTH_ARB})|$)`)],
   ["inset-ring-color", /^inset-ring-/],
   // Logical inset sides, modelled alongside the physical ones exactly as the
   // logical border sides are. The positional catch-all below excludes only
@@ -131,9 +156,15 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   // properties, so merging them would invent a new collision.
   ["text-overflow", /^text-(?:ellipsis|clip)$/],
   ["text-wrap", /^text-(?:wrap|nowrap|balance|pretty)$/],
-  ["text-shadow-size", /^text-shadow-(?:2xs|xs|sm|md|lg|xl|none)$/],
+  ["text-shadow-size", rx(String.raw`^text-shadow-(?:(?:2xs|xs|sm|md|lg|xl|none)$|${SHADOW_ARB})`)],
   ["text-shadow-color", /^text-shadow-/],
-  ["text-size", /^text-(?:xs|sm|base|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|8xl|9xl|\[[^\]]+\])$/],
+  // An arbitrary value is a SIZE only when it is length-shaped, exactly as
+  // Tailwind infers it: text-[10px], text-[0.8rem], text-[length:…],
+  // text-[clamp(…)]. Tailwind compiles a bare text-[var(--x)] (and any colour
+  // literal) to color, so filing those as sizes made a colour and a text-xs
+  // delete each other inside cn() — the theme sweep's text-[var(--ds-accent-fg)]
+  // hit that on accent Buttons that also carry a text size.
+  ["text-size", rx(String.raw`^text-(?:(?:xs|sm|base|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|8xl|9xl)(?:\/[^/\s]+)?$|${WIDTH_ARB}|\[(?:-?\d*\.?\d+%|(?:xx?x?-|x-)?(?:small|large)|medium|larger|smaller)\])`)],
   ["text-color", /^text-/],
   ["placeholder", /^placeholder-/],
   ["accent", /^accent-/],
@@ -173,15 +204,15 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["decoration-style", /^decoration-(?:solid|double|dotted|dashed|wavy|none)$/],
   // text-decoration-thickness vs text-decoration-color — the same size-vs-color
   // overload border, shadow and text-shadow already model.
-  ["decoration-w", /^decoration-(?:\d|from-font|auto|\[)/],
+  ["decoration-w", rx(String.raw`^decoration-(?:\d|from-font|auto|${WIDTH_ARB}|\[\d*\.?\d+%\])`)],
   ["decoration", /^decoration-/],
   ["underline", /^(?:underline|overline|line-through|no-underline)$/],
   ["underline-offset", /^-?underline-offset-/],
 
   ["bg-attachment", /^bg-(?:fixed|local|scroll)$/],
   ["bg-repeat", /^bg-(?:repeat|no-repeat|repeat-x|repeat-y|repeat-round|repeat-space)$/],
-  ["bg-size", /^bg-(?:auto|cover|contain)$/],
-  ["bg-position", /^bg-(?:top|right|bottom|left|center|top-left|top-right|bottom-left|bottom-right|right-top|right-bottom|left-top|left-bottom)$/],
+  ["bg-size", rx(String.raw`^bg-(?:(?:auto|cover|contain)$|\[length:|\(length:|\[size:|\(size:)`)],
+  ["bg-position", rx(String.raw`^bg-(?:(?:top|right|bottom|left|center|top-left|top-right|bottom-left|bottom-right|right-top|right-bottom|left-top|left-bottom)$|\[(?:position:|-?(?:calc|clamp|min|max)\(|${LEN}\]|-?\d*\.?\d+%\])|\(position:)`)],
   // Tailwind v4 renamed bg-gradient-* to bg-linear-* and added bg-radial /
   // bg-conic; unrecognised, the new spellings fell into the bg colour catch-all.
   // radial/conic need no trailing dash — both are valid bare utilities.
@@ -212,17 +243,17 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   // it fell through to `border-color` and a colour class silently deleted it.
   // Logical sides (s/e/bs/be) are distinct utilities from the physical ones and
   // never collide with them: `border-b` cannot match `border-bs`, and vice versa.
-  ["border-w-x", /^border-x(?:-\d|-\[|$)/],
-  ["border-w-y", /^border-y(?:-\d|-\[|$)/],
-  ["border-w-t", /^border-t(?:-\d|-\[|$)/],
-  ["border-w-r", /^border-r(?:-\d|-\[|$)/],
-  ["border-w-b", /^border-b(?:-\d|-\[|$)/],
-  ["border-w-l", /^border-l(?:-\d|-\[|$)/],
-  ["border-w-s", /^border-s(?:-\d|-\[|$)/],
-  ["border-w-e", /^border-e(?:-\d|-\[|$)/],
-  ["border-w-bs", /^border-bs(?:-\d|-\[|$)/],
-  ["border-w-be", /^border-be(?:-\d|-\[|$)/],
-  ["border-w", /^border(?:-\d|-\[|$)/],
+  ["border-w-x", rx(String.raw`^border-x(?:-\d|-(?:${WIDTH_ARB})|-\[(?:\d*\.?\d+|thin|medium|thick)\]|$)`)],
+  ["border-w-y", rx(String.raw`^border-y(?:-\d|-(?:${WIDTH_ARB})|-\[(?:\d*\.?\d+|thin|medium|thick)\]|$)`)],
+  ["border-w-t", rx(String.raw`^border-t(?:-\d|-(?:${WIDTH_ARB})|-\[(?:\d*\.?\d+|thin|medium|thick)\]|$)`)],
+  ["border-w-r", rx(String.raw`^border-r(?:-\d|-(?:${WIDTH_ARB})|-\[(?:\d*\.?\d+|thin|medium|thick)\]|$)`)],
+  ["border-w-b", rx(String.raw`^border-b(?:-\d|-(?:${WIDTH_ARB})|-\[(?:\d*\.?\d+|thin|medium|thick)\]|$)`)],
+  ["border-w-l", rx(String.raw`^border-l(?:-\d|-(?:${WIDTH_ARB})|-\[(?:\d*\.?\d+|thin|medium|thick)\]|$)`)],
+  ["border-w-s", rx(String.raw`^border-s(?:-\d|-(?:${WIDTH_ARB})|-\[(?:\d*\.?\d+|thin|medium|thick)\]|$)`)],
+  ["border-w-e", rx(String.raw`^border-e(?:-\d|-(?:${WIDTH_ARB})|-\[(?:\d*\.?\d+|thin|medium|thick)\]|$)`)],
+  ["border-w-bs", rx(String.raw`^border-bs(?:-\d|-(?:${WIDTH_ARB})|-\[(?:\d*\.?\d+|thin|medium|thick)\]|$)`)],
+  ["border-w-be", rx(String.raw`^border-be(?:-\d|-(?:${WIDTH_ARB})|-\[(?:\d*\.?\d+|thin|medium|thick)\]|$)`)],
+  ["border-w", rx(String.raw`^border(?:-\d|-(?:${WIDTH_ARB})|-\[(?:\d*\.?\d+|thin|medium|thick)\]|$)`)],
   ["border-color-x", /^border-x-/],
   ["border-color-y", /^border-y-/],
   ["border-color-t", /^border-t-/],
@@ -243,8 +274,8 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["divide-style", /^divide-(?:solid|dashed|dotted|double|hidden|none)$/],
   ["divide-x-reverse", /^divide-x-reverse$/],
   ["divide-y-reverse", /^divide-y-reverse$/],
-  ["divide-w-x", /^divide-x(?:-\d|-\[|$)/],
-  ["divide-w-y", /^divide-y(?:-\d|-\[|$)/],
+  ["divide-w-x", /^divide-x(?:-\d|-[[(]|$)/], // Tailwind types EVERY divide-x value as the width
+  ["divide-w-y", /^divide-y(?:-\d|-[[(]|$)/],
   ["divide-color", /^divide-/],
 
   ["rounded-t", /^rounded-t(?:-|$)/],
@@ -267,7 +298,7 @@ const GROUPS: Array<readonly [string, RegExp]> = [
 
   ["outline-style", /^outline-(?:solid|dashed|dotted|double|none|hidden)$/],
   ["outline-offset", /^-?outline-offset-/],
-  ["outline-w", /^outline(?:-\d|-\[|$)/],
+  ["outline-w", rx(String.raw`^outline(?:-\d|-(?:${WIDTH_ARB})|-\[\d*\.?\d+%?\]|$)`)],
   ["outline-color", /^outline-/],
 
   // ring-inset toggles the inset flag rather than setting a width, so it gets
@@ -277,8 +308,8 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   // equal the catch-all group's NAME. Renaming that group to ring-color is safe
   // now, and nothing depends on the coincidence any more.
   ["ring-inset", /^ring-inset$/],
-  ["ring-w", /^ring(?:-\d|-\[|$)/],
-  ["ring-offset-w", /^ring-offset-(?:\d|\[)/],
+  ["ring-w", rx(String.raw`^ring(?:-\d|-(?:${WIDTH_ARB})|$)`)],
+  ["ring-offset-w", rx(String.raw`^ring-offset-(?:\d|${WIDTH_ARB})`)],
   ["ring-offset", /^ring-offset-/],
   ["ring-color", /^ring-/],
 
@@ -288,7 +319,9 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   // The excluded list must carry the WHOLE v4 size scale: 2xs and xs were
   // missing, so those two sizes landed in the colour group and a colour class
   // deleted them. (`inner` is v3-only; kept as harmless back-compat.)
-  ["shadow-color", /^shadow-(?!2xs|xs|sm|md|lg|xl|2xl|inner|none)/],
+  // A bracket value is a colour only as a colour literal: Tailwind compiles
+  // shadow-[var(--x)] / shadow-[0_0_0_1px_red] to box-shadow itself.
+  ["shadow-color", rx(String.raw`^shadow-(?!2xs|xs|sm|md|lg|xl|2xl|inner|none|${SHADOW_ARB})`)],
   ["shadow", /^shadow(?:-|$)/],
   ["opacity", /^opacity-/],
 
@@ -314,7 +347,7 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["contrast", /^contrast-/],
   // drop-shadow-<colour> sets --tw-drop-shadow-color, not the filter itself —
   // same split as shadow-color / shadow above.
-  ["drop-shadow-color", /^drop-shadow-(?!xs|sm|md|lg|xl|2xl|none)/],
+  ["drop-shadow-color", rx(String.raw`^drop-shadow-(?!xs|sm|md|lg|xl|2xl|none|${SHADOW_ARB})`)],
   ["drop-shadow", /^drop-shadow(?:-|$)/],
   ["grayscale", /^grayscale(?:-|$)/],
   ["hue-rotate", /^-?hue-rotate-/],
@@ -358,7 +391,7 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["object-position", /^object-/],
 
   ["fill", /^fill-/],
-  ["stroke-w", /^stroke-(?:\d|\[)/],
+  ["stroke-w", rx(String.raw`^stroke-(?:\d|${WIDTH_ARB}|\[\d*\.?\d+%?\])`)],
   ["stroke", /^stroke-/],
 ];
 

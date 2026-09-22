@@ -221,7 +221,7 @@ export default async function AdminIssuesPage({
                   background: active
                     ? "var(--ds-accent-soft)"
                     : "var(--ds-bg-3)",
-                  color: active ? "var(--ds-accent)" : "var(--ds-fg-subtle)",
+                  color: active ? "var(--ds-accent-text)" : "var(--ds-fg-subtle)",
                 }}
               >
                 {tab.count}
@@ -512,7 +512,7 @@ export default async function AdminIssuesPage({
                           style={{
                             marginTop: 2,
                             fontSize: 10.5,
-                            color: "var(--ds-accent)",
+                            color: "var(--ds-accent-text)",
                           }}
                         >
                           Claimed by{" "}

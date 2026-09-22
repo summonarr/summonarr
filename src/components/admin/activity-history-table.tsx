@@ -521,8 +521,8 @@ export function ActivityHistoryTable({
                                   background: "color-mix(in oklab, var(--ds-fg) 6%, transparent)",
                                   color:
                                     r.source === "plex"
-                                      ? "var(--ds-plex)"
-                                      : "var(--ds-jellyfin)",
+                                      ? "var(--ds-plex-text)"
+                                      : "var(--ds-jellyfin-text)",
                                   letterSpacing: "0.04em",
                                   flexShrink: 0,
                                 }}

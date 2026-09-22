@@ -126,7 +126,7 @@ export function ActivityStatsRedesign({
     {
       label: "Plays per day",
       data: stats.playsByDay.map((d) => d.count),
-      color: "var(--ds-accent)",
+      color: "var(--ds-accent-text)",
       unit: "",
       days: stats.playsByDay.map((d) => d.day),
     },

@@ -1,18 +1,20 @@
 // Skeleton for the Issues list while Prisma loads thread metadata + counts.
-// Shape: PageHeader with subtitle, the status FilterPills row with the sort
-// pills + SearchBox on the right (mb-6), then the xl two-pane layout — rows
-// with a 44px poster thumb inside 14px padding (~96px each) on the left and
-// the sticky 480px detail pane on the right (xl only, like the page).
+// Shape: PageHeader with a two-line subtitle (the long "to report a new
+// issue…" hint wraps), the status FilterPills row with the type pills (six
+// options, ~450px) + SearchBox on the right (mb-5), then the xl two-pane
+// layout — rows with a 44px poster thumb inside 14px padding (~96px each) on
+// the left and the sticky 480px detail pane on the right (xl only, like the
+// page).
 import { Bar, ControlRow, SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
 
 export default function Loading() {
   return (
     <div className="animate-pulse">
-      <SkeletonHeader subtitle />
-      <div className="flex flex-col gap-3 mb-6 lg:flex-row lg:items-center lg:justify-between">
+      <SkeletonHeader subtitle subtitleLines={2} />
+      <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:items-center sm:justify-between">
         <ControlRow w={340} />
         <div className="flex items-center gap-3">
-          <ControlRow w={130} />
+          <ControlRow w={450} />
           <Bar w={192} h={32} r={6} style={{ ...SKELETON_CARD, maxWidth: "100%" }} />
         </div>
       </div>

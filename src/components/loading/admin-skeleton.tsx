@@ -1,21 +1,18 @@
 // Generic shimmer skeleton for admin pages (tables, dashboards, stats). Neutral
 // enough to sit under the whole admin subtree via a single loading.tsx, so slow
 // admin routes (library diff, audit log, stats, users, backup) show feedback
-// instead of blocking on the server render.
+// instead of blocking on the server render. Every admin page opens with the
+// shared PageHeader + subtitle, so the header is the kit's SkeletonHeader (33px
+// title line box, 18px subtitle line box, mb-5); the body is neutral 44px rows.
+import { SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+
 export function AdminSkeleton({ rows = 8 }: { rows?: number }) {
   return (
     <div className="animate-pulse">
-      <div className="flex flex-col gap-2" style={{ marginBottom: 24 }}>
-        <div className="rounded" style={{ width: 220, height: 22, background: "var(--ds-bg-3)" }} />
-        <div className="rounded" style={{ width: 340, height: 13, background: "var(--ds-bg-2)" }} />
-      </div>
+      <SkeletonHeader subtitle />
       <div className="flex flex-col gap-2">
         {Array.from({ length: rows }).map((_, i) => (
-          <div
-            key={i}
-            className="rounded"
-            style={{ height: 44, background: "var(--ds-bg-1)", border: "1px solid var(--ds-border)" }}
-          />
+          <div key={i} className="rounded" style={{ ...SKELETON_CARD, height: 44 }} />
         ))}
       </div>
     </div>

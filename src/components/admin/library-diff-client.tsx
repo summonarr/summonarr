@@ -62,6 +62,13 @@ type RequestFilter = "all" | "has_requests";
 
 const PLEX_TINT     = "var(--ds-plex)";
 const JELLYFIN_TINT = "oklch(0.72 0.16 305)";
+// The tints above are fills and borders; as TEXT on the light theme they are
+// ~2:1. Text on a tint chip takes the per-theme text colour instead (worst
+// case 4.6:1 on a 14% chip in either theme).
+const TEXT_FOR_TINT: Record<string, string> = {
+  [PLEX_TINT]:     "var(--ds-plex-text)",
+  [JELLYFIN_TINT]: "var(--color-purple-400, oklch(0.714 0.203 305.504))",
+};
 
 function statusChip(status: string) {
   switch (status) {
@@ -178,7 +185,7 @@ function MediaCard({
               style={{
                 background: `color-mix(in oklab, ${server === "plex" ? PLEX_TINT : JELLYFIN_TINT} 14%, transparent)`,
                 borderColor: `color-mix(in oklab, ${server === "plex" ? PLEX_TINT : JELLYFIN_TINT} 35%, var(--ds-border))`,
-                color: server === "plex" ? PLEX_TINT : JELLYFIN_TINT,
+                color: TEXT_FOR_TINT[server === "plex" ? PLEX_TINT : JELLYFIN_TINT],
                 fontSize: 9.5,
                 padding: "1px 6px",
               }}
@@ -349,7 +356,7 @@ function BadMatchSide({
           style={{
             background: `color-mix(in oklab, ${tint} 14%, transparent)`,
             borderColor: `color-mix(in oklab, ${tint} 35%, var(--ds-border))`,
-            color: tint,
+            color: TEXT_FOR_TINT[tint] ?? tint,
             fontSize: 9.5,
             padding: "1px 7px",
             fontWeight: 600,
@@ -670,7 +677,7 @@ function DiffColumn({
           style={{
             background: `color-mix(in oklab, ${tint} 14%, transparent)`,
             borderColor: `color-mix(in oklab, ${tint} 35%, var(--ds-border))`,
-            color: tint,
+            color: TEXT_FOR_TINT[tint] ?? tint,
             fontSize: 10,
             letterSpacing: "0.06em",
             textTransform: "uppercase",

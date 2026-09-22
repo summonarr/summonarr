@@ -354,7 +354,7 @@ export function SpecSection({
                             <StatusBadge spec={spec} />
                             {spec.application && spec.application.errorCount > 1 && (
                               <span
-                                className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 font-mono"
+                                className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 font-mono"
                                 title={
                                   spec.application.lastErrorAt
                                     ? `${spec.application.errorCount} failures, last ${spec.application.lastErrorAt}`
@@ -382,7 +382,7 @@ export function SpecSection({
                                   type="button"
                                   aria-label="Confirm forget spec"
                                   onClick={() => deleteApplication(spec.application!.id)}
-                                  className="text-xs px-2 py-0.5 rounded bg-red-600 text-white hover:bg-red-500 inline-flex items-center gap-1"
+                                  className="text-xs px-2 py-0.5 rounded bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] inline-flex items-center gap-1"
                                   autoFocus
                                 >
                                   Confirm forget
@@ -486,15 +486,15 @@ function StatusBadge({ spec }: { spec: SpecStatus }) {
     return <span className="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-500 font-medium">Unmanaged</span>;
   }
   if (app.lastError) {
-    return <span className="text-xs px-2 py-0.5 rounded bg-red-500/20 text-red-300 font-medium">Error</span>;
+    return <span className="text-xs px-2 py-0.5 rounded bg-red-500/20 text-red-400 font-medium">Error</span>;
   }
   if (!app.enabled) {
     return <span className="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 font-medium">Paused</span>;
   }
   if (app.appliedAt) {
-    return <span className="text-xs px-2 py-0.5 rounded bg-green-500/20 text-green-300 font-medium">Managed</span>;
+    return <span className="text-xs px-2 py-0.5 rounded bg-green-500/20 text-green-400 font-medium">Managed</span>;
   }
-  return <span className="text-xs px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-medium">Pending</span>;
+  return <span className="text-xs px-2 py-0.5 rounded bg-amber-500/20 text-amber-400 font-medium">Pending</span>;
 }
 
 function SpecDetailView({ detail, kind }: { detail: SpecDetail | null; kind: TrashSpecKind }) {
@@ -544,7 +544,7 @@ function CustomFormatGroupDetail({ detail }: { detail: SpecDetail }) {
               <div key={m.trash_id} className="flex items-center gap-2 min-w-0">
                 <span className="font-mono text-[11px] text-zinc-500 shrink-0" title={m.trash_id}>{m.trash_id.slice(0, 10)}…</span>
                 <span className="text-zinc-300 truncate">{m.name}</span>
-                {m.required && <span className="text-blue-400 text-[10px] uppercase shrink-0">required</span>}
+                {m.required && <span className="text-sky-400 text-[10px] uppercase shrink-0">required</span>}
               </div>
             ))}
           </div>
@@ -661,7 +661,7 @@ function CustomFormatDetail({ detail }: { detail: SpecDetail }) {
                   <span className="font-medium text-zinc-200 min-w-0 truncate">{s.name}</span>
                   <span className="text-zinc-500">({s.implementation})</span>
                   {s.negate && <span className="text-amber-400 text-[10px] uppercase">negated</span>}
-                  {s.required && <span className="text-blue-400 text-[10px] uppercase">required</span>}
+                  {s.required && <span className="text-sky-400 text-[10px] uppercase">required</span>}
                   {value != null && (
                     <span className="font-mono text-zinc-400 truncate text-[11px]">{String(value).slice(0, 60)}</span>
                   )}

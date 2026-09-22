@@ -64,7 +64,7 @@ export function PillFilter<V extends string>({
                 borderRadius: 6,
                 fontSize: 12,
                 background: isActive ? "var(--ds-accent-soft)" : "var(--ds-bg-2)",
-                color: isActive ? "var(--ds-accent)" : "var(--ds-fg-muted)",
+                color: isActive ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
                 border: `1px solid ${isActive ? "var(--ds-accent-ring)" : "var(--ds-border)"}`,
                 whiteSpace: "nowrap",
               }}

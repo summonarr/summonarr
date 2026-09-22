@@ -29,11 +29,12 @@ const VARIANT_STYLE: Record<DetailActionVariant, CSSProperties> = {
   primary: { background: "var(--ds-accent)", color: "var(--ds-accent-fg)", border: "1px solid transparent" },
   secondary: { background: "var(--ds-bg-2)", color: "var(--ds-fg)", border: "1px solid var(--ds-border)" },
   ghost: { background: "transparent", color: "var(--ds-fg-muted)", border: "1px solid var(--ds-border)" },
-  // #fff on the danger token, as .ds-chip-declined paints it.
-  danger: { background: "var(--ds-danger)", color: "#fff", border: "1px solid transparent" },
+  // --ds-on-status flips per theme: white on the L .55 light-theme danger
+  // fill, dark on the L .65 dark-theme one (where white is ~3.3:1).
+  danger: { background: "var(--ds-danger)", color: "var(--ds-on-status)", border: "1px solid transparent" },
   "accent-soft": {
     background: "var(--ds-accent-soft)",
-    color: "var(--ds-accent)",
+    color: "var(--ds-accent-text)",
     border: "1px solid var(--ds-accent-ring)",
   },
   "danger-soft": {

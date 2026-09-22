@@ -181,7 +181,7 @@ export default async function RequestsPage({
                 <Link
                   href={pageHref(1)}
                   className="hover:underline"
-                  style={{ color: "var(--ds-accent)", fontWeight: 500 }}
+                  style={{ color: "var(--ds-accent-text)", fontWeight: 500 }}
                 >
                   Back to page 1
                 </Link>
@@ -258,7 +258,7 @@ export default async function RequestsPage({
 
                     <div className="flex-1 min-w-0">
                       <p
-                        className="font-medium truncate transition-colors group-hover:text-[var(--ds-accent)]"
+                        className="font-medium truncate transition-colors group-hover:text-[var(--ds-accent-text)]"
                         style={{ fontSize: 14, color: "var(--ds-fg)" }}
                       >
                         {r.title}

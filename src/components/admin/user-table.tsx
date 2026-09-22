@@ -57,12 +57,17 @@ const roleStyles: Record<User["role"], string> = {
   USER:        "border-zinc-700 bg-zinc-800 text-zinc-500",
 };
 
+// Fill + initials colour together. yellow/purple/sky-700 are fixed fills the
+// theme remap doesn’t touch, so their text is fixed too: black on the light
+// yellow-600 (white there is ~2.9:1), white on the dark purple and sky.
+// indigo-600/700 ARE the accent, so they take the accent foreground (dark on
+// the amber/emerald/cyan/mono accents).
 const avatarColors: Record<User["source"], string> = {
-  plex:     "bg-yellow-600",
-  jellyfin: "bg-purple-700",
-  oidc:     "bg-sky-700",
-  local:    "bg-indigo-700",
-  discord:  "bg-indigo-600",
+  plex:     "bg-yellow-600 text-black",
+  jellyfin: "bg-purple-700 text-white",
+  oidc:     "bg-sky-700 text-white",
+  local:    "bg-indigo-700 text-[var(--ds-accent-fg)]",
+  discord:  "bg-indigo-600 text-[var(--ds-accent-fg)]",
 };
 
 // A Plex/Jellyfin sign-in pins User.mediaServer to the provider it came from;
@@ -337,7 +342,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
             }}
           >
             <div
-              className={`${avatarColors[u.source]} flex items-center justify-center font-bold text-zinc-100 shrink-0`}
+              className={`${avatarColors[u.source]} flex items-center justify-center font-bold shrink-0`}
               style={{
                 width: 34,
                 height: 34,
@@ -367,7 +372,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                 {isSelf && (
                   <span
                     className="font-medium"
-                    style={{ fontSize: 10, color: "var(--ds-accent)" }}
+                    style={{ fontSize: 10, color: "var(--ds-accent-text)" }}
                   >
                     (you)
                   </span>
@@ -399,7 +404,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                 {u.discordId && (
                   <>
                     <span>·</span>
-                    <span style={{ color: "var(--ds-accent)" }}>
+                    <span style={{ color: "var(--ds-accent-text)" }}>
                       Discord linked
                     </span>
                   </>
@@ -421,13 +426,13 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                 {u.mediaServer === "plex" && adminAssignsServer(u.source) && (
                   <>
                     <span>·</span>
-                    <span style={{ color: "var(--ds-plex)" }}>Plex access</span>
+                    <span style={{ color: "var(--ds-plex-text)" }}>Plex access</span>
                   </>
                 )}
                 {u.mediaServer === "jellyfin" && adminAssignsServer(u.source) && (
                   <>
                     <span>·</span>
-                    <span style={{ color: "var(--ds-jellyfin)" }}>
+                    <span style={{ color: "var(--ds-jellyfin-text)" }}>
                       Jellyfin access
                     </span>
                   </>
@@ -485,7 +490,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                   }
                   onClick={() => lifecycle(u.id, confirming.kind)}
                   autoFocus
-                  className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-500 transition-colors"
+                  className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
                 >
                   {confirming.kind === "disable" ? (
                     <><UserX className="w-3.5 h-3.5" />Disable</>

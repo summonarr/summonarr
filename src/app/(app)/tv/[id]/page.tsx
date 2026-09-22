@@ -24,6 +24,7 @@ import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName } from "@/lib/tmdb-types";
+import { formatDigitalRelease } from "@/lib/format-release-date";
 import { Chip } from "@/components/ui/design";
 import { canRequest, hasPermission, Permission } from "@/lib/permissions";
 import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
@@ -276,6 +277,7 @@ export default async function TVDetailPage({
                 media.numberOfSeasons
                   ? `${media.numberOfSeasons} season${media.numberOfSeasons === 1 ? "" : "s"}`
                   : null,
+                formatDigitalRelease(media.releasedDigital),
                 media.productionCountries?.[0],
                 languageName(media.originalLanguage),
                 media.status,

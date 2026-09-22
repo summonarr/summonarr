@@ -133,7 +133,7 @@ export function PersonView({
                   type="button"
                   onClick={() => setBioExpanded((v) => !v)}
                   className="hover:underline"
-                  style={{ background: "none", border: 0, color: "var(--ds-accent)", fontSize: 13, padding: "4px 0" }}
+                  style={{ background: "none", border: 0, color: "var(--ds-accent-text)", fontSize: 13, padding: "4px 0" }}
                 >
                   {bioExpanded ? "Show less" : "Show more"}
                 </button>

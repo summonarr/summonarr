@@ -56,7 +56,7 @@ export function DeletePlayButton({ id }: { id: string }) {
       <button
         onClick={handleDelete}
         disabled={deleting}
-        className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-red-600 text-white hover:bg-red-500 transition-colors disabled:opacity-50"
+        className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-50"
       >
         {deleting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
         Delete

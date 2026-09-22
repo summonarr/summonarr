@@ -50,7 +50,7 @@ export function CastSection({ cast }: CastSectionProps) {
             </div>
             <div>
               <p
-                className="font-medium leading-tight line-clamp-2 transition-colors group-hover:text-[var(--ds-accent)]"
+                className="font-medium leading-tight line-clamp-2 transition-colors group-hover:text-[var(--ds-accent-text)]"
                 style={{ fontSize: 12, color: "var(--ds-fg)" }}
               >
                 {member.name}

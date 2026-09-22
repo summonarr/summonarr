@@ -11,10 +11,12 @@ interface DiscoverRowProps {
   showJellyfin?: boolean;
   subtitle?: string;
   seeAllHref?: string;
-  /** True while the page's "Hide Available" toggle is on. An empty rail then
-      keeps its header and says why it is empty instead of vanishing — with the
-      toggle on, the home page could otherwise collapse to a lone header. */
-  hideAvailable?: boolean;
+  /** True when the page's "Hide Available" toggle is what emptied this rail
+      (every title it had is already available). The rail then keeps its header
+      and says so instead of vanishing — with the toggle on, the home page could
+      otherwise collapse to a lone header. Any OTHER empty rail (a failed TMDB
+      call, no For You shelf yet) still disappears: the message would be false. */
+  allAvailable?: boolean;
 }
 
 export function DiscoverRow({
@@ -24,9 +26,9 @@ export function DiscoverRow({
   showJellyfin,
   subtitle,
   seeAllHref,
-  hideAvailable,
+  allAvailable,
 }: DiscoverRowProps) {
-  if (items.length === 0 && !hideAvailable) return null;
+  if (items.length === 0 && !allAvailable) return null;
   return (
     <section style={{ marginBottom: 36 }}>
       <SectionHeader

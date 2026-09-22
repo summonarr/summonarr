@@ -87,7 +87,7 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentT
                   background: active
                     ? "var(--ds-accent-soft)"
                     : "var(--ds-bg-3)",
-                  color: active ? "var(--ds-accent)" : "var(--ds-fg-subtle)",
+                  color: active ? "var(--ds-accent-text)" : "var(--ds-fg-subtle)",
                 }}
               >
                 {count}

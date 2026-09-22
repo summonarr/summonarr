@@ -261,7 +261,7 @@ export function DiscordLinkSection({ linkedDiscordId, discordInviteUrl }: { link
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 text-sm font-medium hover:underline"
-            style={{ color: "var(--ds-accent)" }}
+            style={{ color: "var(--ds-accent-text)" }}
           >
             Join Discord <ExternalLink className="w-3.5 h-3.5" />
           </a>

@@ -154,10 +154,10 @@ export function TrashGuidesNav({
                   >
                     <span>
                       {s.label}
-                      <span className={active ? "text-indigo-100/80 ml-1" : "text-zinc-500 ml-1"}>· {s.suffix}</span>
+                      <span className={active ? "text-[var(--ds-accent-fg)] ml-1" : "text-zinc-500 ml-1"}>· {s.suffix}</span>
                     </span>
                     {!cfg && (
-                      <span className="text-[10px] text-amber-300/80">(not configured)</span>
+                      <span className="text-[10px] text-amber-400">(not configured)</span>
                     )}
                   </button>
                 );

@@ -476,13 +476,13 @@ export function IssueFixMatchButton({
                 <span className="text-xs font-mono text-zinc-500 shrink-0">#{tmdbId}</span>
               </div>
               {fileInfoError && (
-                <p className="text-xs text-orange-400/80">
+                <p className="text-xs text-orange-400">
                   Couldn&apos;t load file details. Match info may be incomplete.
                 </p>
               )}
               {plexPath && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold text-yellow-500/70 w-16 shrink-0">
+                  <span className="text-xs font-semibold text-yellow-400 w-16 shrink-0">
                     {plexInstanceLabel || "Plex"}
                   </span>
                   <p className="text-xs font-mono text-zinc-500 truncate" title={plexPath}>
@@ -492,7 +492,7 @@ export function IssueFixMatchButton({
               )}
               {jellyfinPath && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold text-purple-500/70 w-16 shrink-0">
+                  <span className="text-xs font-semibold text-purple-400 w-16 shrink-0">
                     {jellyfinInstanceLabel || "Jellyfin"}
                   </span>
                   <p className="text-xs font-mono text-zinc-500 truncate" title={jellyfinPath}>
@@ -508,7 +508,7 @@ export function IssueFixMatchButton({
                   <div className="flex items-center gap-2 min-w-0">
                     <span className="text-xs text-orange-400 font-mono shrink-0">→ TMDB #{fileInfo.arrTmdbId}</span>
                     {fileInfo.arrTitle && (
-                      <span className="text-xs text-orange-300 truncate">{fileInfo.arrTitle}</span>
+                      <span className="text-xs text-orange-400 truncate">{fileInfo.arrTitle}</span>
                     )}
                     <button
                       onClick={() => {

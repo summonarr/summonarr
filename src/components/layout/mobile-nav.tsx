@@ -212,7 +212,7 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
                   padding: "6px 4px",
                   borderRadius: 8,
                   minHeight: 48,
-                  color: active ? "var(--ds-accent)" : "var(--ds-fg-muted)",
+                  color: active ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
                   transition:
                     "color 140ms var(--ds-ease), background 140ms var(--ds-ease)",
                 }}
@@ -245,7 +245,7 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
               minHeight: 48,
               color:
                 drawerOpen || !someTabActive
-                  ? "var(--ds-accent)"
+                  ? "var(--ds-accent-text)"
                   : "var(--ds-fg-muted)",
               transition:
                 "color 140ms var(--ds-ease), background 140ms var(--ds-ease)",

@@ -146,7 +146,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
               type="button"
               onClick={clearAll}
               autoFocus
-              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-500 transition-colors"
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
             >
               <Trash2 className="w-3 h-3" />
               Clear all?
@@ -192,7 +192,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
                 </span>
                 <span className="block min-w-0 flex-1">
                   <span
-                    className="block font-medium transition-colors group-hover:text-[var(--ds-accent)]"
+                    className="block font-medium transition-colors group-hover:text-[var(--ds-accent-text)]"
                     style={{ fontSize: 14, color: "var(--ds-fg)" }}
                   >
                     {n.title}
@@ -209,7 +209,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
                     aria-label="Mark read"
                     title="Mark read"
                     className="ds-hover-tint inline-flex items-center justify-center"
-                    style={{ width: 32, height: 32, borderRadius: 6, color: "var(--ds-accent)" }}
+                    style={{ width: 32, height: 32, borderRadius: 6, color: "var(--ds-accent-text)" }}
                   >
                     <Check style={{ width: 15, height: 15 }} />
                   </button>

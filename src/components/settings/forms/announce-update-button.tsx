@@ -49,7 +49,7 @@ export function AnnounceUpdateButton() {
           <Button
             size="sm"
             onClick={handleSend}
-            className="bg-amber-600 hover:bg-amber-500 h-7 px-4 text-xs"
+            className="bg-amber-600 text-black hover:bg-amber-600/90 h-7 px-4 text-xs"
           >
             Send to all devices
           </Button>

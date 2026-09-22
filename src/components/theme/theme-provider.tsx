@@ -45,10 +45,23 @@ type ThemeContextValue = {
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
+// Browser-chrome colour (mobile toolbar / PWA status bar) — the hex forms of
+// --ds-bg. layout.tsx's static viewport.themeColor is the dark one because the
+// app defaults to dark; a <meta> can't read the stored choice, so the client
+// rewrites it whenever the theme is known.
+const THEME_CHROME: Record<Theme, string> = { dark: "#09090b", light: "#fbfcfd" };
+
+function applyChromeColor(theme: Theme) {
+  for (const meta of document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')) {
+    meta.content = THEME_CHROME[theme];
+  }
+}
+
 function applyTheme(theme: Theme) {
   const el = document.documentElement;
   el.setAttribute("data-theme", theme);
   el.classList.toggle("dark", theme === "dark");
+  applyChromeColor(theme);
 }
 
 function applyAccent(accent: Accent) {
@@ -71,7 +84,10 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const t = document.documentElement.getAttribute("data-theme");
     const a = document.documentElement.getAttribute("data-accent");
-    if (t === "light" || t === "dark") setThemeState(t);
+    if (t === "light" || t === "dark") {
+      setThemeState(t);
+      applyChromeColor(t);
+    }
     if (a && (ACCENTS as readonly string[]).includes(a)) {
       setAccentState(a as Accent);
     }

@@ -7,6 +7,7 @@ import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Download, Ban, ShieldCheck, Link, Loader2, RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { mediaInstanceLabel } from "@/lib/media-instances";
+import { Switch } from "@/components/ui/switch";
 
 interface ServerUser {
   id: string;
@@ -55,9 +56,15 @@ const sourceStyles: Record<string, string> = {
   jellyfin: "border-purple-600/30 bg-purple-500/10 text-purple-400",
 };
 
+// Fixed (non-theme) fills, so the initials colour is fixed too: black on the
+// light yellow-600 (white there is ~2.9:1), white on the dark purple-700.
 const avatarColors: Record<string, string> = {
   plex:     "bg-yellow-600",
   jellyfin: "bg-purple-700",
+};
+const avatarText: Record<string, string> = {
+  plex:     "text-black",
+  jellyfin: "text-white",
 };
 
 // Manual account binding for one media-server identity. Automatic resolution
@@ -129,7 +136,7 @@ function LinkPicker({
         </select>
       </div>
       {row.manualUserLink && !error && (
-        <span className="text-[10px] text-amber-500/80">pinned by admin</span>
+        <span className="text-[10px] text-amber-400">pinned by admin</span>
       )}
       {error && <span className="text-[10px] text-red-400">{error}</span>}
     </div>
@@ -204,22 +211,15 @@ function DownloadToggle({
   const on = optimistic;
 
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
+    <Switch
+      variant="success"
+      checked={on}
       aria-label="Toggle downloads for this user"
       disabled={loading}
-      onClick={toggle}
+      loading={loading}
+      onCheckedChange={toggle}
       title={on ? "Downloads enabled — click to disable" : "Downloads disabled — click to enable"}
-      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors disabled:opacity-50 ${on ? "bg-green-600" : "bg-zinc-700"}`}
-    >
-      {loading ? (
-        <Loader2 className="w-3 h-3 text-zinc-100 absolute left-1 animate-spin" />
-      ) : (
-        <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${on ? "translate-x-4" : "translate-x-0.5"}`} />
-      )}
-    </button>
+    />
   );
 }
 
@@ -349,20 +349,13 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
           New Jellyfin accounts discovered on sync have downloads disabled. Manually re-enabled users are left alone.
         </p>
       </div>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={on}
+      <Switch
+        checked={on}
         aria-label="Auto-disable downloads for new Jellyfin users"
         disabled={loading}
-        onClick={toggle}
-        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors disabled:opacity-50 ${on ? "bg-indigo-600" : "bg-zinc-700"}`}
-      >
-        {loading
-          ? <Loader2 className="w-3 h-3 text-zinc-100 absolute left-1 animate-spin" />
-          : <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${on ? "translate-x-4" : "translate-x-0.5"}`} />
-        }
-      </button>
+        loading={loading}
+        onCheckedChange={toggle}
+      />
     </div>
   );
 }
@@ -399,7 +392,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
                   to initials when the thumb is missing or fails to load. */}
               <Avatar className={`size-7 shrink-0 ${avatarColors[source] ?? "bg-zinc-700"}`}>
                 {u.thumbUrl ? <AvatarImage src={u.thumbUrl} alt={u.username} /> : null}
-                <AvatarFallback className="bg-transparent text-[10px] font-bold text-zinc-100">
+                <AvatarFallback className={`bg-transparent text-[10px] font-bold ${avatarText[source] ?? "text-zinc-100"}`}>
                   {initials}
                 </AvatarFallback>
               </Avatar>

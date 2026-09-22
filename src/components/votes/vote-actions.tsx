@@ -66,6 +66,9 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
   }
 
   if (dismissed) return null;
+  // Nothing to render: an empty basis-full wrapper would still claim its own
+  // flex-wrap line (plus the row gap) under every non-admin, unvoted row.
+  if (!voted && !isAdmin) return null;
 
   // Below `sm` the actions take a full row under the text column (the row is
   // flex-wrap) — at 375px the confirm state (~180px) otherwise crushed the title.
@@ -96,7 +99,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
           <button
             onClick={handleDismiss}
             disabled={loading}
-            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-500 transition-colors disabled:opacity-50"
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-50"
             autoFocus
           >
             {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}

@@ -89,7 +89,7 @@ export default async function MyStatsPage() {
                 textDecoration: "none",
                 color: "#fff",
                 background:
-                  "linear-gradient(135deg, oklch(0.5 0.22 285) 0%, oklch(0.52 0.22 330) 55%, oklch(0.6 0.2 25) 100%)",
+                  "linear-gradient(135deg, oklch(0.5 0.22 285) 0%, oklch(0.52 0.22 330) 55%, oklch(0.53 0.2 25) 100%)",
                 boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
               }}
             >

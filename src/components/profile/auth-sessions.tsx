@@ -162,7 +162,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                 type="button"
                 size="sm"
                 aria-label="Confirm revoke session"
-                className="h-9 px-2.5 bg-red-600 text-white hover:bg-red-500 gap-1"
+                className="h-9 px-2.5 bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
                 onClick={() => revoke(s.sessionId)}
                 autoFocus
               >
@@ -202,7 +202,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                 type="submit"
                 size="sm"
                 aria-label="Confirm revoke session"
-                className="h-9 px-2.5 bg-red-600 text-white hover:bg-red-500 gap-1"
+                className="h-9 px-2.5 bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
                 disabled={!password || revoking === s.sessionId}
               >
                 {revoking === s.sessionId

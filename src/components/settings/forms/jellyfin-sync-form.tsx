@@ -81,7 +81,7 @@ function JellyfinLibraryPicker({ initialSelected, folders, loadStatus, errorMess
                     onChange={() => toggle(f.id)}
                     className="w-4 h-4 rounded border-zinc-600 bg-zinc-800 accent-indigo-500"
                   />
-                  <span className="text-sm text-zinc-200 group-hover:text-zinc-100 transition-colors">
+                  <span className="text-sm text-zinc-300 group-hover:text-zinc-100 transition-colors">
                     {f.name}
                   </span>
                   <span className="text-xs px-1.5 py-0.5 rounded bg-zinc-700 text-zinc-400">

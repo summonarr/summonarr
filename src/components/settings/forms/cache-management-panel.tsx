@@ -118,7 +118,7 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
       {confirmClear ? (
         <div className="flex items-center gap-2">
           <span className="text-xs text-zinc-300">Clear {source.label}?</span>
-          <Button type="button" size="sm" onClick={doClear} className="bg-red-600 hover:bg-red-500 h-8 px-3 text-xs">Clear</Button>
+          <Button type="button" size="sm" onClick={doClear} className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] h-8 px-3 text-xs">Clear</Button>
           <Button type="button" size="sm" variant="outline" onClick={() => setConfirmClear(false)} className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-8 px-3 text-xs">Cancel</Button>
         </div>
       ) : (
@@ -225,7 +225,7 @@ export function CacheManagementPanel() {
           <div className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/60 px-3 py-2.5 w-fit">
             <XCircle className="w-4 h-4 text-amber-400 shrink-0" />
             <p className="text-sm text-zinc-200">Clear and refetch all sources?</p>
-            <Button type="button" size="sm" onClick={runAll} className="bg-amber-600 hover:bg-amber-500 h-8 px-3 text-xs">Run</Button>
+            <Button type="button" size="sm" onClick={runAll} className="bg-amber-600 text-black hover:bg-amber-600/90 h-8 px-3 text-xs">Run</Button>
             <Button type="button" size="sm" variant="outline" onClick={() => setConfirmAll(false)} className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-8 px-3 text-xs">Cancel</Button>
           </div>
         ) : (
@@ -234,7 +234,7 @@ export function CacheManagementPanel() {
             variant="outline"
             onClick={() => setConfirmAll(true)}
             disabled={status === "running"}
-            className="border-zinc-700 text-zinc-200 hover:text-zinc-100 gap-2"
+            className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
           >
             {status === "running" ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCcw className="w-4 h-4" />}
             {status === "running" ? "Running…" : "Clear & Refetch All"}

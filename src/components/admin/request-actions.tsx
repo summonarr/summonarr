@@ -314,7 +314,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
               size="sm"
               onClick={deleteRequest}
               disabled={loading === "DELETE"}
-              className="h-7 px-3 text-xs bg-red-800 hover:bg-red-700 gap-1"
+              className="h-7 px-3 text-xs bg-red-800 text-white hover:bg-red-700 gap-1"
             >
               {loading === "DELETE" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
               Delete
@@ -352,7 +352,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             variant="outline"
             onClick={() => setShowDeleteConfirm(true)}
             disabled={loading !== null}
-            className="h-7 px-3 text-xs border-red-800/50 text-red-500 hover:bg-red-950 gap-1"
+            className="h-7 px-3 text-xs border-red-800/50 text-red-500 hover:bg-red-500/10 hover:text-red-400 gap-1"
           >
             <Trash2 className="w-3 h-3" />
             Delete
@@ -445,7 +445,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             size="sm"
             onClick={() => updateStatus("DECLINED", declineNote.trim() || undefined, false)}
             disabled={loading !== null}
-            className="h-7 px-3 text-xs bg-red-800 hover:bg-red-700 gap-1"
+            className="h-7 px-3 text-xs bg-red-800 text-white hover:bg-red-700 gap-1"
             title="User can re-request this title later"
           >
             {loading === "DECLINED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3" />}
@@ -455,7 +455,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             size="sm"
             onClick={() => updateStatus("DECLINED", declineNote.trim() || undefined, true)}
             disabled={loading !== null}
-            className="h-7 px-3 text-xs bg-red-950 hover:bg-red-900 border border-red-700 gap-1"
+            className="h-7 px-3 text-xs bg-red-950 text-white hover:bg-red-900 border border-red-700 gap-1"
             title="User cannot re-request this title"
           >
             {loading === "DECLINED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3" />}
@@ -534,7 +534,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           size="sm"
           onClick={() => updateStatus("APPROVED")}
           disabled={loading !== null}
-          className="h-7 px-3 text-xs bg-green-700 hover:bg-green-600 gap-1"
+          className="h-7 px-3 text-xs bg-green-700 text-white hover:bg-green-800 gap-1"
         >
           {loading === "APPROVED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
           Approve
@@ -557,7 +557,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           variant="outline"
           onClick={() => setShowDeclineNote(true)}
           disabled={loading !== null}
-          className="h-7 px-3 text-xs border-red-800 text-red-400 hover:bg-red-950 gap-1"
+          className="h-7 px-3 text-xs border-red-800 text-red-400 hover:bg-red-500/10 hover:text-red-400 gap-1"
         >
           <X className="w-3 h-3" />
           Decline

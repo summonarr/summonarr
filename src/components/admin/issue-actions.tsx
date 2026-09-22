@@ -291,7 +291,7 @@ export function IssueActions({
         <span className="text-[10px] text-zinc-500 font-mono">{scopeDetail}</span>
       )}
       {libraryConfirmed && scope === "EPISODE" && !isResolved && (
-        <span className="text-[10px] text-blue-500/70">library match confirmed</span>
+        <span className="text-[10px] text-sky-400">library match confirmed</span>
       )}
 
       {panel === null && (
@@ -317,8 +317,8 @@ export function IssueActions({
               disabled={loading !== null}
               className={`h-7 px-3 text-xs gap-1 ${
                 libraryConfirmed && scope === "EPISODE"
-                  ? "border-blue-600/50 text-blue-400 hover:text-blue-300 hover:border-blue-500"
-                  : "border-zinc-700 text-zinc-400 hover:text-blue-400 hover:border-blue-500/50"
+                  ? "border-sky-500/50 text-sky-400 hover:text-zinc-100 hover:border-sky-500"
+                  : "border-zinc-700 text-zinc-400 hover:text-sky-400 hover:border-sky-500/50"
               }`}
             >
               <Download className="w-3 h-3" />
@@ -392,7 +392,7 @@ export function IssueActions({
             size="sm"
             onClick={() => updateStatus("RESOLVED", resolution || undefined)}
             disabled={loading !== null}
-            className="h-6 px-2 text-xs bg-green-700 hover:bg-green-600 gap-1"
+            className="h-6 px-2 text-xs bg-green-700 text-white hover:bg-green-800 gap-1"
           >
             {loading === "status" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
             Done
@@ -408,7 +408,7 @@ export function IssueActions({
             size="sm"
             onClick={deleteIssue}
             disabled={loading !== null}
-            className="h-6 px-2 text-xs bg-red-800 hover:bg-red-700 gap-1"
+            className="h-6 px-2 text-xs bg-red-800 text-white hover:bg-red-700 gap-1"
           >
             {loading === "delete" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
             Delete
@@ -466,8 +466,8 @@ export function IssueActions({
             ) : (
               <>
                 {libraryConfirmed && scope === "EPISODE" && (
-                  <div className="px-6 py-2.5 bg-blue-950/30 border-b border-blue-900/30 flex items-center gap-2 flex-shrink-0">
-                    <span className="text-xs text-blue-400/80">
+                  <div className="px-6 py-2.5 bg-sky-500/10 border-b border-sky-500/30 flex items-center gap-2 flex-shrink-0">
+                    <span className="text-xs text-sky-400">
                       Library match confirmed — filter below to find the right episode release
                     </span>
                   </div>
@@ -514,7 +514,7 @@ export function IssueActions({
                         onClick={() => setSelectedGuid(rel.guid)}
                         className={`w-full text-left px-6 py-3.5 flex items-start gap-4 hover:bg-zinc-800/60 transition-colors ${isSelected ? "bg-zinc-800" : ""}`}
                       >
-                        <span className={`mt-0.5 shrink-0 ${rel.protocol === "torrent" ? "text-green-500" : "text-blue-400"}`}>
+                        <span className={`mt-0.5 shrink-0 ${rel.protocol === "torrent" ? "text-green-500" : "text-sky-400"}`}>
                           {rel.protocol === "torrent" ? <Magnet className="w-4 h-4" /> : <Radio className="w-4 h-4" />}
                         </span>
 
@@ -523,25 +523,25 @@ export function IssueActions({
                             {rel.title}
                           </p>
                           <div className="flex items-center gap-3 mt-1 flex-wrap">
-                            <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${profileMatch ? "bg-blue-500/10 text-blue-400" : "bg-zinc-800 text-zinc-500"}`}>
+                            <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${profileMatch ? "bg-sky-500/10 text-sky-400" : "bg-zinc-800 text-zinc-500"}`}>
                               {rel.quality.quality.name}
                               {rel.quality.revision.version > 1 && " v2"}
                             </span>
                             <span className="text-xs text-zinc-500">{formatSize(rel.size)}</span>
                             <span className="text-xs text-zinc-500">{rel.indexer}</span>
                             {rel.protocol === "torrent" && rel.seeders != null && (
-                              <span className={`text-xs ${rel.seeders > 5 ? "text-green-500/70" : rel.seeders > 0 ? "text-yellow-500/70" : "text-red-500/70"}`}>
+                              <span className={`text-xs ${rel.seeders > 5 ? "text-green-400" : rel.seeders > 0 ? "text-yellow-400" : "text-red-400"}`}>
                                 {rel.seeders}S
                               </span>
                             )}
                             <span className="text-xs text-zinc-700">{formatAge(rel.age * 24)}</span>
                           </div>
                           {rel.rejected && rel.rejections.length > 0 && (
-                            <p className="text-xs text-amber-500/70 mt-0.5 truncate">{rel.rejections[0]}</p>
+                            <p className="text-xs text-amber-400 mt-0.5 truncate">{rel.rejections[0]}</p>
                           )}
                         </div>
 
-                        {isSelected && <Check className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />}
+                        {isSelected && <Check className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />}
                       </button>
                     );
                   })}
@@ -563,7 +563,7 @@ export function IssueActions({
                     size="sm"
                     onClick={grabRelease}
                     disabled={!selectedGuid || loading === "grab"}
-                    className="h-8 px-4 text-sm bg-blue-700 hover:bg-blue-600 gap-2"
+                    className="h-8 px-4 text-sm bg-blue-700 text-white hover:bg-blue-600 gap-2"
                   >
                     {loading === "grab" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
                     Grab release

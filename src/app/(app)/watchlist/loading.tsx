@@ -6,8 +6,8 @@ import { Bar, SKELETON_FILL, SkeletonHeader } from "@/components/loading/poster-
 export default function Loading() {
   return (
     <div className="animate-pulse">
-      <SkeletonHeader />
-      <div style={{ marginTop: 16 }}>
+      <SkeletonHeader subtitle />
+      <div>
         <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))" }}>
           {Array.from({ length: 12 }).map((_, i) => (
             <div key={i}>

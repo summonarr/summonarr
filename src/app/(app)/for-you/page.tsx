@@ -249,7 +249,7 @@ function MatchTierChip({ tier }: { tier: NonNullable<TmdbMedia["matchTier"]> }) 
         paddingRight: 7,
         ...(isTop
           ? {}
-          : { background: "var(--ds-accent-soft)", color: "var(--ds-accent)", border: "1px solid var(--ds-accent-ring)" }),
+          : { background: "var(--ds-accent-soft)", color: "var(--ds-accent-text)", border: "1px solid var(--ds-accent-ring)" }),
       }}
       title={
         isTop

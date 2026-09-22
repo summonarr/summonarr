@@ -49,15 +49,16 @@ function rtIcon(score: string): string {
   return n >= 60 ? "🍅" : "🫙";
 }
 
-// Filled badges: the success/warning/danger tokens sit at L .55–.78, so the
-// text on them is dark (as .ds-chip-pending/-approved paint it); only the
-// neutral fallback keeps foreground-coloured text on a surface tone.
+// Filled badges: yellow/orange/green/red all remap to a status token, so the
+// text is --ds-on-status (dark on the dark theme’s L .65–.78 fills, white on
+// the light theme’s L .53–.55 ones — black fails 4.5:1 there).
+// Only the neutral fallback keeps foreground-coloured text on a surface.
 function metacriticBadge(score: string): string {
   const n = parseInt(score, 10);
   if (isNaN(n)) return "bg-zinc-700 text-zinc-100";
-  if (n >= 61) return "bg-green-600 text-black";
-  if (n >= 40) return "bg-yellow-500 text-black";
-  return "bg-red-600 text-black";
+  if (n >= 61) return "bg-green-600 text-[var(--ds-on-status)]";
+  if (n >= 40) return "bg-yellow-500 text-[var(--ds-on-status)]";
+  return "bg-red-600 text-[var(--ds-on-status)]";
 }
 
 function rtAudienceColor(score: string): string {
@@ -70,8 +71,8 @@ function rtAudienceColor(score: string): string {
 function traktBadge(score: string): string {
   const n = parseInt(score, 10);
   if (isNaN(n)) return "bg-zinc-700 text-zinc-100";
-  if (n >= 70) return "bg-red-500 text-black";
-  if (n >= 50) return "bg-orange-500 text-black";
+  if (n >= 70) return "bg-red-500 text-[var(--ds-on-status)]";
+  if (n >= 50) return "bg-orange-500 text-[var(--ds-on-status)]";
   return "bg-zinc-700 text-zinc-100";
 }
 
@@ -230,7 +231,7 @@ export function RatingsBar({
 
       {showJellyfin && jellyfinRating && (
         <div className="flex items-center gap-0.5" title="Jellyfin community rating">
-          <span className={`font-semibold ${textXs}`} style={{ color: "var(--ds-jellyfin)" }}>JF</span>
+          <span className={`font-semibold ${textXs}`} style={{ color: "var(--ds-jellyfin-text)" }}>JF</span>
           <span className={`font-semibold text-zinc-100 ${textSm}`}>{jellyfinRating}</span>
           {!compact && <span className={`text-zinc-500 ${textXs}`}>/10</span>}
         </div>

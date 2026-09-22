@@ -146,7 +146,7 @@ export function BrowseGrid({
               style={{
                 width: 28,
                 height: 28,
-                color: "var(--ds-accent)",
+                color: "var(--ds-accent-text)",
               }}
             />
           </div>

@@ -231,7 +231,7 @@ function AuditLogFilters({
           <button
             onClick={() => navigate({ action: "" })}
             className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-              !currentAction ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-[var(--ds-accent-fg)]"
+              !currentAction ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
             }`}
           >
             All
@@ -241,7 +241,7 @@ function AuditLogFilters({
               key={a}
               onClick={() => navigate({ action: a })}
               className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                currentAction === a ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-[var(--ds-accent-fg)]"
+                currentAction === a ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
               }`}
             >
               {ACTION_LABELS[a as AuditAction].label}
@@ -265,14 +265,14 @@ function AuditLogFilters({
           <div className="flex rounded-md border border-zinc-700 overflow-hidden">
             <button
               onClick={() => onViewModeChange("table")}
-              className={`p-1.5 transition-colors ${viewMode === "table" ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-[var(--ds-accent-fg)]"}`}
+              className={`p-1.5 transition-colors ${viewMode === "table" ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"}`}
               title="Table view"
             >
               <List size={16} />
             </button>
             <button
               onClick={() => onViewModeChange("timeline")}
-              className={`p-1.5 transition-colors ${viewMode === "timeline" ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-[var(--ds-accent-fg)]"}`}
+              className={`p-1.5 transition-colors ${viewMode === "timeline" ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"}`}
               title="Timeline view"
             >
               <Activity size={16} />
@@ -442,7 +442,7 @@ function ScrubPiiButton() {
         <span className="text-xs text-zinc-300">Redact IP, device & names on old rows?</span>
         <button
           onClick={runScrub}
-          className="px-2.5 py-1.5 rounded-md text-xs font-medium bg-red-600 text-white hover:bg-red-500 transition-colors"
+          className="px-2.5 py-1.5 rounded-md text-xs font-medium bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
         >
           Scrub
         </button>
@@ -756,14 +756,14 @@ function DetailSection({ details, action, expanded }: { details: string | null; 
         <div className="mt-2 pl-4 space-y-1.5 border-l-2 border-zinc-700/60">
           {before && Object.keys(before).length > 0 && (
             <div className="flex items-start gap-2">
-              <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-900/40 text-red-400">BEFORE</span>
-              <span className="text-red-400/70">{Object.entries(before).map(([k, v]) => `${k}: ${v}`).join(", ")}</span>
+              <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-500/15 text-red-400">BEFORE</span>
+              <span className="text-red-400">{Object.entries(before).map(([k, v]) => `${k}: ${v}`).join(", ")}</span>
             </div>
           )}
           {after && Object.keys(after).length > 0 && (
             <div className="flex items-start gap-2">
-              <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-900/40 text-green-400">AFTER</span>
-              <span className="text-green-400/70">{Object.entries(after).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join(", ")}</span>
+              <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-500/15 text-green-400">AFTER</span>
+              <span className="text-green-400">{Object.entries(after).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join(", ")}</span>
             </div>
           )}
         </div>

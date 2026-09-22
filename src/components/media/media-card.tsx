@@ -159,7 +159,8 @@ function MediaCardImpl({
   // "Request <title>" rather than a page full of identical "Request"s.
   const bubbleLabel = () => {
     if (isAvailable || isRequested) return `View ${media.title}`;
-    if (blacklisted) return `${media.title} is blocked`;
+    // The button navigates (router.push), so name the action, not a status.
+    if (blacklisted) return `View ${media.title} (not available to request)`;
     if (reqState === "loading") return `Requesting ${media.title}`;
     if (reqState === "error") return `Retry request for ${media.title}`;
     return `Request ${media.title}`;
@@ -377,7 +378,7 @@ function MediaCardImpl({
                 paddingLeft: 5,
                 paddingRight: 6,
                 background: "var(--ds-accent-soft)",
-                color: "var(--ds-accent)",
+                color: "var(--ds-accent-text)",
                 border: "1px solid var(--ds-accent-ring)",
               }}
             >

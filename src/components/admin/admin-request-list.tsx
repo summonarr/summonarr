@@ -79,7 +79,7 @@ function formatUserLabel(r: Requester) {
   if (r.userEmail.endsWith("@discord.local")) {
     return (
       <>
-        <span style={{ color: "var(--ds-accent)" }}>Discord</span>
+        <span style={{ color: "var(--ds-accent-text)" }}>Discord</span>
         {r.userName ? `: ${r.userName}` : ""}
       </>
     );
@@ -90,7 +90,7 @@ function formatUserLabel(r: Requester) {
         {r.userName ?? r.userEmail}{" "}
         <span
           style={{
-            color: "color-mix(in oklab, var(--ds-accent) 60%, transparent)",
+            color: "color-mix(in oklab, var(--ds-accent-text) 60%, transparent)",
           }}
         >
           (Discord linked)
@@ -271,7 +271,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
         >
           <span
             className="font-medium"
-            style={{ fontSize: 13, color: "var(--ds-accent)" }}
+            style={{ fontSize: 13, color: "var(--ds-accent-text)" }}
           >
             {selected.size} selected
           </span>
@@ -293,7 +293,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                   border: "1px solid var(--ds-border)",
                 }}
               />
-              <button
+              <button className="ds-hover-tint"
                 type="button"
                 onClick={() => {
                   setShowBatchNote(null);
@@ -309,14 +309,14 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
               >
                 Cancel
               </button>
-              <button
+              <button className="ds-hover-tint"
                 type="button"
                 onClick={() => batchAction("DECLINED", batchNote)}
                 disabled={batchLoading}
                 style={{
                   ...actionBtn,
                   background: "var(--ds-danger)",
-                  color: "#fff",
+                  color: "var(--ds-on-status)",
                 }}
               >
                 {batchLoading ? (
@@ -335,7 +335,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
               <span style={{ fontSize: 12, color: "var(--ds-fg-muted)" }}>
                 Approve {selected.size} request{selected.size === 1 ? "" : "s"}?
               </span>
-              <button
+              <button className="ds-hover-tint"
                 type="button"
                 onClick={() => setConfirmingApprove(false)}
                 disabled={batchLoading}
@@ -348,14 +348,14 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
               >
                 Cancel
               </button>
-              <button
+              <button className="ds-hover-tint"
                 type="button"
                 onClick={() => batchAction("APPROVED")}
                 disabled={batchLoading}
                 style={{
                   ...actionBtn,
                   background: "var(--ds-success)",
-                  color: "oklch(0.14 0 0)",
+                  color: "var(--ds-on-status)",
                 }}
               >
                 {batchLoading ? (
@@ -371,14 +371,14 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
             </>
           ) : (
             <>
-              <button
+              <button className="ds-hover-tint"
                 type="button"
                 onClick={() => setConfirmingApprove(true)}
                 disabled={batchLoading}
                 style={{
                   ...actionBtn,
                   background: "var(--ds-success)",
-                  color: "oklch(0.14 0 0)",
+                  color: "var(--ds-on-status)",
                 }}
               >
                 {batchLoading ? (
@@ -391,7 +391,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 )}
                 Approve {selected.size}
               </button>
-              <button
+              <button className="ds-hover-tint"
                 type="button"
                 onClick={() => setShowBatchNote("DECLINED")}
                 disabled={batchLoading}
@@ -406,7 +406,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 <X style={{ width: 12, height: 12 }} />
                 Decline {selected.size}
               </button>
-              <button
+              <button className="ds-hover-tint"
                 type="button"
                 onClick={() => setSelected(new Set())}
                 disabled={batchLoading}
@@ -671,7 +671,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                             textTransform: "uppercase",
                             letterSpacing: 0.4,
                             background: "color-mix(in oklab, var(--ds-accent) 14%, transparent)",
-                            color: "var(--ds-accent)",
+                            color: "var(--ds-accent-text)",
                           }}
                         >
                           {instanceLabel(r.arrInstance)}
@@ -728,7 +728,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                         title="Radarr/Sonarr instance this title was requested on"
                         style={{
                           background: "color-mix(in oklab, var(--ds-accent) 14%, transparent)",
-                          color: "var(--ds-accent)",
+                          color: "var(--ds-accent-text)",
                         }}
                       >
                         {instanceLabel(slug)}
@@ -782,7 +782,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
             {total} total · page {page} of {totalPages}
           </p>
           <div className="flex items-center gap-2">
-            <button
+            <button className="ds-hover-tint"
               type="button"
               disabled={page <= 1}
               onClick={() => router.push(pageUrl(page - 1))}
@@ -797,7 +797,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
             >
               Previous
             </button>
-            <button
+            <button className="ds-hover-tint"
               type="button"
               disabled={page >= totalPages}
               onClick={() => router.push(pageUrl(page + 1))}

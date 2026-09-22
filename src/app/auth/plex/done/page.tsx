@@ -233,7 +233,7 @@ export default function PlexDonePage() {
       {failed ? (
         <AlertTriangle style={{ width: 24, height: 24, color: "var(--ds-danger)" }} aria-hidden />
       ) : (
-        <Loader2 className="w-6 h-6 animate-spin" style={{ color: "var(--ds-accent)" }} />
+        <Loader2 className="w-6 h-6 animate-spin" style={{ color: "var(--ds-accent-text)" }} />
       )}
       <p
         role={failed ? "alert" : "status"}

@@ -272,7 +272,7 @@ export default async function TopRatedPage({
       </Suspense>
 
       {bothEmpty ? (
-        sectionEmptyState(Film, page, hasFilters)
+        sectionEmptyState(showMovies ? Film : Tv, page, hasFilters)
       ) : (
         <>
           {showMovies && (

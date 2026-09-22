@@ -138,13 +138,13 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
           <div className="mx-6 mt-3 flex-shrink-0 space-y-1.5">
             {plexFileName && (
               <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold text-yellow-500/70 w-16 shrink-0">Plex</span>
+                <span className="text-xs font-semibold text-yellow-400 w-16 shrink-0">Plex</span>
                 <p className="text-xs font-mono text-zinc-500 truncate" title={plexFilePath ?? undefined}>{plexFileName}</p>
               </div>
             )}
             {jellyfinFileName && (
               <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold text-purple-500/70 w-16 shrink-0">Jellyfin</span>
+                <span className="text-xs font-semibold text-purple-400 w-16 shrink-0">Jellyfin</span>
                 <p className="text-xs font-mono text-zinc-500 truncate" title={jellyfinFilePath ?? undefined}>{jellyfinFileName}</p>
               </div>
             )}
@@ -152,7 +152,7 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
         )}
 
         {resolvedArrTmdbId !== null && resolvedArrTmdbId !== correctTmdbId && (
-          <div className="mx-6 mt-3 flex-shrink-0 px-4 py-3 rounded border bg-yellow-500/8 border-yellow-500/25 text-yellow-300 space-y-2">
+          <div className="mx-6 mt-3 flex-shrink-0 px-4 py-3 rounded border bg-yellow-500/8 border-yellow-500/25 text-yellow-400 space-y-2">
             <div className="flex items-center gap-2 text-xs">
               <span>⚠</span>
               <span className="font-semibold">Radarr/Sonarr recommends a different match:</span>
@@ -160,15 +160,15 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
             <div className="flex items-center justify-between gap-2">
               <div>
                 {arrConfirmedTitle && (
-                  <p className="text-sm font-semibold text-yellow-200 leading-tight">{arrConfirmedTitle}</p>
+                  <p className="text-sm font-semibold text-zinc-100 leading-tight">{arrConfirmedTitle}</p>
                 )}
-                <p className="text-xs font-mono text-yellow-400/70">TMDB #{resolvedArrTmdbId}</p>
+                <p className="text-xs font-mono text-yellow-400">TMDB #{resolvedArrTmdbId}</p>
               </div>
             </div>
           </div>
         )}
         {resolvedArrTmdbId !== null && resolvedArrTmdbId === correctTmdbId && (
-          <div className="mx-6 mt-3 flex-shrink-0 px-4 py-3 rounded border bg-emerald-500/8 border-emerald-500/25 text-xs text-emerald-300 flex items-center gap-2">
+          <div className="mx-6 mt-3 flex-shrink-0 px-4 py-3 rounded border bg-emerald-500/8 border-emerald-500/25 text-xs text-emerald-400 flex items-center gap-2">
             <span>✓</span>
             <span><span className="font-semibold">Radarr/Sonarr</span> confirms TMDB #{resolvedArrTmdbId} — matching candidates highlighted below.</span>
           </div>
@@ -224,7 +224,7 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
               Summonarr keeps tracking it and records the match the moment the server confirms it.
             </p>
             {(progress?.readFailures ?? 0) > 0 && (
-              <p className="text-yellow-400/80">The server isn&apos;t answering status reads right now (busy refreshing) — still waiting.</p>
+              <p className="text-yellow-400">The server isn&apos;t answering status reads right now (busy refreshing) — still waiting.</p>
             )}
           </div>
         )}
@@ -308,7 +308,7 @@ function CandidateRow({
             <span className="text-sm text-zinc-500">({candidate.year})</span>
           )}
           {arrMatch ? (
-            <span className="text-xs px-1.5 py-0.5 rounded border font-semibold bg-emerald-500/20 text-emerald-300 border-emerald-500/40">
+            <span className="text-xs px-1.5 py-0.5 rounded border font-semibold bg-emerald-500/20 text-emerald-400 border-emerald-500/40">
               Radarr/Sonarr ✓
             </span>
           ) : (

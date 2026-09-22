@@ -98,7 +98,7 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
                   type="button"
                   size="sm"
                   aria-label={`Confirm remove ${deviceLabel}`}
-                  className="h-9 px-2.5 bg-red-600 text-white hover:bg-red-500 gap-1"
+                  className="h-9 px-2.5 bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
                   onClick={() => remove(device.id)}
                   autoFocus
                 >

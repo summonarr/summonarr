@@ -553,7 +553,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                   // server-side to destroy — discard it straight away and only
                   // ask for confirmation on a persisted instance.
                   onClick={() => (d.isNew ? removeInstance(idx) : setConfirmRemove(idx))}
-                  className="flex items-center gap-1 text-xs text-red-400/80 hover:text-red-400"
+                  className="flex items-center gap-1 text-xs text-red-400 hover:text-[var(--ds-danger-hover)]"
                 >
                   <Trash2 className="w-3.5 h-3.5" />Remove
                 </button>
@@ -568,8 +568,8 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                 server. Play history deliberately survives (guardrail 28 — its
                 MediaServerUser rows are soft-deleted, never hard-deleted). */}
             {confirmRemove === idx && (
-              <div className="rounded-md border border-red-900/60 bg-red-950/30 p-3 space-y-2">
-                <p className="text-xs text-red-200">
+              <div className="rounded-md border border-red-500/40 bg-red-500/10 p-3 space-y-2">
+                <p className="text-xs text-red-400">
                   Remove <strong>{d.name.trim() || d.slug || "this server"}</strong>? On <strong>Save</strong> this deletes
                   its cached library items, its active sessions, and its stored URL + {tokenLabel} (encrypted —
                   not recoverable), and marks its media-server users departed. <strong>Play history is preserved.</strong>
@@ -579,7 +579,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                     type="button"
                     onClick={() => removeInstance(idx)}
                     autoFocus
-                    className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-500 transition-colors"
+                    className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
                   >
                     <Trash2 className="w-3.5 h-3.5" />Remove server
                   </button>

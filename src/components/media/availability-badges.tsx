@@ -67,7 +67,7 @@ export function AvailabilityBadges({
           className="ds-chip"
           style={{
             background: "var(--ds-accent-soft)",
-            color: "var(--ds-accent)",
+            color: "var(--ds-accent-text)",
             border: "1px solid var(--ds-accent-ring)",
           }}
         >

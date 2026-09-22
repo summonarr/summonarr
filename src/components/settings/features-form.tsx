@@ -8,6 +8,7 @@ import {
   type FeatureDefinition,
   type FeatureFlags,
 } from "@/lib/features";
+import { Switch } from "@/components/ui/switch";
 
 type SaveStatus = "idle" | "saving" | "ok" | "error";
 
@@ -235,7 +236,7 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
                     <p className="text-sm font-medium text-zinc-200">{feature.label}</p>
                     <p className="text-xs text-zinc-500 mt-0.5">{feature.description}</p>
                     {feature.note && (
-                      <p className="text-xs text-amber-500/80 mt-1">{feature.note}</p>
+                      <p className="text-xs text-amber-400 mt-1">{feature.note}</p>
                     )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0 pt-0.5">
@@ -247,22 +248,11 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
                         aria-label={errorByKey[feature.key] ?? "Save failed"}
                       />
                     )}
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={enabled}
+                    <Switch
+                      checked={enabled}
                       aria-label={`Toggle ${feature.label}`}
-                      onClick={() => toggle(feature.key)}
-                      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-zinc-900 ${
-                        enabled ? "bg-indigo-600" : "bg-zinc-700"
-                      }`}
-                    >
-                      <span
-                        className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
-                          enabled ? "translate-x-4" : "translate-x-0.5"
-                        }`}
-                      />
-                    </button>
+                      onCheckedChange={() => toggle(feature.key)}
+                    />
                   </div>
                 </div>
               );

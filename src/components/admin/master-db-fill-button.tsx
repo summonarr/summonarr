@@ -149,7 +149,7 @@ export function MasterDbFillButton({
               <li>Phase 1 — full library scan (fills contentRating, addedAt, communityRating)</li>
               <li>Phase 2 — TMDB metadata warm (populates TmdbMediaCore table)</li>
             </ul>
-            <p className="text-xs text-amber-400/80">
+            <p className="text-xs text-amber-400">
               Large libraries may take several minutes. Intended for initial setup — routine syncs handle this automatically going forward.
             </p>
           </div>
@@ -158,7 +158,7 @@ export function MasterDbFillButton({
           <Button
             size="sm"
             onClick={handleFill}
-            className="bg-amber-600 hover:bg-amber-500 h-7 px-4 text-xs"
+            className="bg-amber-600 text-black hover:bg-amber-600/90 h-7 px-4 text-xs"
           >
             Run Full Fill
           </Button>
