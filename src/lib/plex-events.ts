@@ -14,9 +14,9 @@
 // The 5s poller in /api/sync/play-history is kept as a metadata-enrichment +
 // discovery layer and as a fallback if SSE drops.
 //
-// The `recentlyFinalizedPlexSessions` ledger that the poller relies on for
-// re-create gating now lives here so both subsystems share one source of
-// truth.
+// The `recentlyFinalizedPlexSessions` ledger (below) also lives here: the
+// poller reads it to avoid re-creating a session this module just finalized,
+// so both subsystems share one source of truth.
 
 import { prisma } from "./prisma";
 import { safeFetchAdminConfigured } from "./safe-fetch";
@@ -25,6 +25,7 @@ import { getPlexSessions } from "./plex";
 import { triggerFullSync } from "./internal-trigger";
 import { DEFAULT_MEDIA_INSTANCE, activeSessionId, mediaInstanceLabel, parseActiveSessionId, plexSettingKey, type MediaInstanceKey } from "./media-instances";
 import { getMediaInstances } from "./media-instance-registry";
+import { processSingleton } from "./process-singleton";
 
 // Plex sometimes keeps a quit session in /status/sessions for up to 30 min
 // (mobile/TV clients that close without a clean Stop). When the playhead has
@@ -37,13 +38,21 @@ export const PLEX_STALL_THRESHOLD_MS = 60_000;
 // "plex:<sessionKey>" for the default instance, "plex:<instance>:<sessionKey>"
 // for named ones — so two servers reusing the same sessionKey can never
 // collide here. Subsequent polls skip re-creating the row while that server's
-// /status/sessions still includes the ghost. Deliberately module-scope rather
-// than per-manager state: the 5s poller writes this ledger too, so moving it
-// onto the class would force exported accessors routed by slug — strictly more
-// plumbing for the same no-bleed property the instance-qualified ids already
-// give. In-memory: persists across polls inside the same Node process; a
-// restart loses the ledger but Plex has usually dropped the session by then.
-const recentlyFinalizedPlexSessions = new Map<string, number>();
+// /status/sessions still includes the ghost (a "ghost" is a session Plex keeps
+// listing after the user actually quit). Deliberately shared rather than
+// per-manager state: the 5s poller writes this ledger too, and the
+// instance-qualified ids already keep servers apart. In-memory only: a restart
+// loses the ledger, but Plex has usually dropped the session by then.
+//
+// Process-wide, not just module-level (see process-singleton.ts): this module is
+// compiled into BOTH the instrumentation chunk (the boot-time reconcile) and the
+// 5s poller's route chunk, each with its own module instance. A plain Map gave
+// the SSE managers started at boot a ledger the poller never read, so a stop
+// they finalized left the poller free to re-create the ghost row.
+const recentlyFinalizedPlexSessions = processSingleton(
+  "plex-events:recentlyFinalized",
+  () => new Map<string, number>(),
+);
 const RECENTLY_FINALIZED_TTL_MS = 60 * 60 * 1000;
 
 export function markPlexSessionFinalized(id: string, nowMs: number = Date.now()): void {
@@ -197,6 +206,11 @@ class PlexEventStreamManager {
   // in-flight call re-runs once after it finishes to pick up the latest state.
   private reconciling = false;
   private reconcilePending = false;
+  // Bumped by every stop(). A runLoop exits once this no longer matches the
+  // value it started with. Without it, a loop sleeping in its backoff when
+  // stop() ran could wake after a restart with the SAME url/token, pass the
+  // url/token check, and keep running beside the new loop (two SSE streams).
+  private loopGeneration = 0;
 
   constructor(instance: MediaInstanceKey) {
     this.instance = instance;
@@ -279,6 +293,7 @@ class PlexEventStreamManager {
   // manager's slug leaves the instance registry.
   stop(): void {
     this.running = false;
+    this.loopGeneration++;
     this.abortController?.abort();
     this.abortController = null;
     // Cancel any pending debounced resync so a stop() (token/URL change) doesn't
@@ -296,8 +311,14 @@ class PlexEventStreamManager {
   private async runLoop(): Promise<void> {
     const startedUrl = this.currentUrl;
     const startedToken = this.currentToken;
+    const startedGeneration = this.loopGeneration;
 
-    while (this.running && this.currentUrl === startedUrl && this.currentToken === startedToken) {
+    while (
+      this.running &&
+      this.loopGeneration === startedGeneration &&
+      this.currentUrl === startedUrl &&
+      this.currentToken === startedToken
+    ) {
       try {
         await this.connectAndConsume();
       } catch (err) {
@@ -493,10 +514,11 @@ class PlexEventStreamManager {
     // card disappears forever from the user's perspective. lastSeenAt is the
     // wall-clock anchor for "we know it was active recently"; a sub-60s gap
     // means trust the cached state and let the next snapshot confirm.
+    //
     // A failed re-anchor leaves every lastSeenAt stale by the whole downtime, so
-    // the grace below would be trivially true for rows that are still playing.
-    // Skip the sweep entirely rather than finalize on anchors we know are wrong;
-    // the poller retries the re-anchor on its next tick.
+    // the grace would be trivially true for rows that are still playing. Skip the
+    // sweep entirely rather than finalize on anchors we know are wrong; the
+    // poller retries the re-anchor on its next tick (guardrail 21).
     if (!reanchored) {
       console.warn("[plex-events] skipping bootstrap absence sweep — boot re-anchor did not run");
       return;
@@ -512,7 +534,7 @@ class PlexEventStreamManager {
       stale.map(async (session) => {
         try {
           await recordCompletedSession(applyFinalTick(session, now), { stoppedAt: now });
-          // Ledger AFTER the PlayHistory write commits (GR27): a failed record must
+          // Ledger AFTER the PlayHistory write commits (guardrail 27): a failed record must
           // not ledger-lock the sessionKey for an hour with no history row — leave
           // it un-finalized so the next poll re-creates the row and retries.
           markPlexSessionFinalized(session.id, nowMs);
@@ -711,8 +733,8 @@ class PlexEventStreamManager {
 
   private async triggerLibrarySync(previousFiredAt: number): Promise<void> {
     // Uses the single allowed internal loopback trigger (see src/lib/internal-trigger.ts
-    // and Claude.md guardrail 5a). This ensures the full public /api/sync path
-    // (auth, advisory lock, orchestrator, audit recording) is exercised.
+    // and CLAUDE.md guardrail 5b), so the run goes through the same /api/sync path
+    // as the external cron: auth, advisory lock, orchestrator, audit recording.
     try {
       const result = await triggerFullSync();
       // Only a trigger that RAN starts a cooldown. A "skipped" (advisory lock
@@ -753,12 +775,9 @@ class PlexEventStreamManager {
   // that signal is intentionally ignored (irrelevant for a self-hosted server
   // reached over LAN/VPN). Exposed to the poller via setPlexReachable().
   async persistReachability(reachable: boolean): Promise<void> {
-    // Each manager owns its OWN server's status. The Phase-2 scoping that made
-    // this default-only existed because the Setting key and SSE event were
-    // single-server plumbing, so a named manager writing them would clobber the
-    // default's status — the cost being that a named server going down was
-    // invisible. Both are now instance-qualified, so every manager writes its
-    // own key and nobody can clobber anybody. The default's key is still exactly
+    // Each manager owns its OWN server's status: the Setting key and the SSE
+    // event are both instance-qualified, so one server's manager can never
+    // overwrite another's. The default's key is still exactly
     // "plexServerReachable", so a single-server deployment is unchanged.
     // No-op when the value is unchanged since this process last persisted it.
     if (this.lastReachable === reachable) return;
@@ -913,12 +932,8 @@ class PlexEventStreamManager {
       // any state (playing, paused, buffering), treat the SSE as advisory and
       // let the 5s poller drive state going forward. The poller's stall
       // detector + grace window catch true stops within 60s as the backstop.
-      // Plex Web and several cast/mobile clients emit a spurious state="stopped"
-      // on pause, app-background, or player navigation. Confirm against
-      // /status/sessions: if Plex still reports the session in any state, treat
-      // the SSE as advisory and let the poller drive. A network blip falls
-      // through and finalizes — real stops win over transient errors, and the
-      // ledger entry below closes the re-create race.
+      // A network blip ("unknown") falls through and finalizes — real stops win
+      // over transient errors, and the ledger entry below closes the re-create race.
       if ((await this.stillReportedByPlex(sessionKey)) === "present") return;
 
       const now = new Date();
@@ -930,7 +945,7 @@ class PlexEventStreamManager {
 
       await recordCompletedSession(finalized, { stoppedAt: now });
 
-      // Ledger AFTER the PlayHistory write commits (GR27): if recordCompletedSession
+      // Ledger AFTER the PlayHistory write commits (guardrail 27): if recordCompletedSession
       // throws, the outer catch logs and we leave the session un-finalized so the
       // poller retries — rather than ledger-locking the sessionKey for an hour with
       // no history row. Still set before the deleteMany below so the re-create race
@@ -954,7 +969,17 @@ class PlexEventStreamManager {
 // Created lazily by the map reconcile below; removed ONLY when the slug
 // leaves the registry — a manager whose slug remains but whose connection
 // Settings were cleared stops itself via its own doReconcile shouldRun check.
-const managers = new Map<MediaInstanceKey, PlexEventStreamManager>();
+//
+// Process-wide for the same reason as the ledger above. With a per-chunk map the
+// boot reconcile (instrumentation chunk) and the poller (route chunk) each ran
+// their OWN manager per instance: two SSE streams per server, and the boot set
+// was never reconciled again — it kept streaming against the boot-time URL/token
+// after a settings change and kept writing play history after tracking was
+// switched off, because stopAllPlexEventStreams only reached the poller's map.
+const managers = processSingleton(
+  "plex-events:managers",
+  () => new Map<MediaInstanceKey, PlexEventStreamManager>(),
+);
 
 // Module-level mirror of the per-manager reconcile coalescing (same do-while
 // shape): the boot hook (instrumentation.ts) and the 5s poller both call
@@ -962,8 +987,9 @@ const managers = new Map<MediaInstanceKey, PlexEventStreamManager>();
 // otherwise race the create/stop decision for a slug. Per-manager reconciles
 // WITHIN one pass still run concurrently — this guard is only about map
 // passes.
-let mapReconciling = false;
-let mapReconcilePending = false;
+// Process-wide alongside `managers` — a per-chunk guard could not coalesce a
+// boot pass with a poller pass over the one shared map.
+const mapReconcile = processSingleton("plex-events:mapReconcile", () => ({ running: false, pending: false }));
 
 async function reconcileManagerMap(): Promise<void> {
   // Registry read: exactly one setting.findUnique (key "plexInstances"); the
@@ -1000,10 +1026,6 @@ async function reconcileManagerMap(): Promise<void> {
   );
 }
 
-// Idempotent: reads the instance registry plus each instance's Settings and
-// starts/stops/restarts SSE connections as needed. Cheap to call repeatedly —
-// the sync route invokes this every 5s so settings edits via the admin UI
-// propagate within one tick.
 // Stop every Plex SSE stream and drop its manager. Called when play-history tracking is
 // turned OFF: the 5s poller returns early in that case and so never reaches
 // reconcilePlexEventStream, and reconcileManagerMap tears down only managers whose slug
@@ -1018,28 +1040,31 @@ export function stopAllPlexEventStreams(): void {
   }
 }
 
+// Idempotent: reads the instance registry plus each instance's Settings and
+// starts/stops/restarts SSE connections as needed. Cheap to call repeatedly —
+// the play-history poller invokes this every 5s so settings edits via the admin
+// UI propagate within one tick.
 export async function reconcilePlexEventStream(): Promise<void> {
-  if (mapReconciling) {
-    mapReconcilePending = true;
+  if (mapReconcile.running) {
+    mapReconcile.pending = true;
     return;
   }
-  mapReconciling = true;
+  mapReconcile.running = true;
   try {
     do {
-      mapReconcilePending = false;
+      mapReconcile.pending = false;
       await reconcileManagerMap();
-    } while (mapReconcilePending);
+    } while (mapReconcile.pending);
   } finally {
-    mapReconciling = false;
+    mapReconcile.running = false;
   }
 }
 
-// Report whether the local DEFAULT Plex server is reachable. Called by the 5s
-// poller: true after a successful getPlexSessions(), false when it throws.
+// Report whether a local Plex server is reachable. Called by the 5s poller:
+// true after a successful getPlexSessions(), false when it throws.
 // Deduped + SSE-broadcast inside the manager so the UI's reachability badge
 // tracks actual local connectivity rather than plex.tv remote-access status.
-// Reachability is default-instance-only in Phase 2 (see persistReachability).
-// Before the first reconcile creates the default manager this is a no-op —
+// Before the first reconcile creates that instance's manager this is a no-op —
 // the next 5s tick reports again, so nothing is lost.
 export function setPlexReachable(
   reachable: boolean,

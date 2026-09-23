@@ -153,7 +153,8 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
   }
 
   useEffect(() => {
-    // Sync client ID with the server-assigned value so SSR and client stay in agreement
+    // Adopt the server-assigned Plex client ID (if any) so the browser and the
+    // server identify this device to Plex with the same ID.
     let cancelled = false;
     fetch(withBasePath("/api/auth/plex/client-id"), { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
@@ -432,7 +433,6 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
             }}
             disabled={loading}
             className="w-full min-h-11"
-            style={{ background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}
           >
             {loading ? (
               <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Redirecting…</>
@@ -450,7 +450,10 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
           <Button
             onClick={handlePlexSignIn}
             disabled={loading}
-            className="w-full min-h-11 bg-[#e5a00d] hover:bg-[#f0ac14] text-black font-semibold"
+            // hover:bg is restated, not just brightness: the default variant's
+            // hover:bg-primary/90 would otherwise turn the Plex button accent-
+            // coloured on hover (different variant prefix, so it isn't merged away).
+            className="w-full min-h-11 bg-[var(--ds-plex)] hover:bg-[var(--ds-plex)] hover:brightness-110 text-black font-semibold"
           >
             {loading ? (
               <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Waiting for Plex…</>
@@ -507,7 +510,6 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
               onClick={handleQuickConnect}
               disabled={loading}
               className="w-full min-h-11"
-            style={{ background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}
             >
               {loading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Starting…</> : "Generate QuickConnect Code"}
             </Button>
@@ -516,7 +518,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
           <button
             type="button"
             onClick={() => { cancelQuickConnect(); setJellyfinMode("password"); setError(""); setQcCode(null); setLoading(false); }}
-            className="w-full text-sm text-zinc-400 hover:text-zinc-200 transition-colors"
+            className="ds-hover-tint w-full min-h-9 rounded-md text-sm text-zinc-400 hover:text-zinc-200 transition-colors"
           >
             Use password instead
           </button>
@@ -534,7 +536,6 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
                   value={fields.email}
                   onChange={(e) => setField("email", e.target.value)}
                   placeholder="you@example.com"
-                  className="bg-zinc-800 border-zinc-700"
                   autoComplete="email"
                   required
                 />
@@ -546,7 +547,6 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
                   value={fields.password}
                   onChange={(e) => setField("password", e.target.value)}
                   placeholder="••••••••"
-                  className="bg-zinc-800 border-zinc-700"
                   autoComplete="current-password"
                   required
                 />
@@ -563,7 +563,6 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
                   value={fields.username}
                   onChange={(e) => setField("username", e.target.value)}
                   placeholder="username"
-                  className="bg-zinc-800 border-zinc-700"
                   autoComplete="username"
                   required
                 />
@@ -575,7 +574,6 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
                   value={fields.password}
                   onChange={(e) => setField("password", e.target.value)}
                   placeholder="••••••••"
-                  className="bg-zinc-800 border-zinc-700"
                   autoComplete="current-password"
                   required
                 />
@@ -590,7 +588,6 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
           <Button
             type="submit"
             className="w-full min-h-11"
-            style={{ background: "var(--ds-accent)", color: "var(--ds-accent-fg)" }}
             disabled={loading}
           >
             {loading ? "Signing in…" : "Sign in"}
@@ -600,7 +597,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
             <button
               type="button"
               onClick={() => { setJellyfinMode("quickconnect"); setError(""); }}
-              className="w-full text-sm text-zinc-400 hover:text-zinc-200 transition-colors"
+              className="ds-hover-tint w-full min-h-9 rounded-md text-sm text-zinc-400 hover:text-zinc-200 transition-colors"
             >
               Use QuickConnect instead
             </button>

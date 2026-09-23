@@ -1,9 +1,9 @@
-
+import { processSingleton } from "./process-singleton";
 
 if (process.env.TRUST_PROXY !== "true") {
   console.warn(
-    "[rate-limit] TRUST_PROXY is not set to 'true' — all requests share a single rate-limit " +
-    "bucket. Set TRUST_PROXY=true when running behind a trusted reverse proxy (Nginx, Traefik, etc.) " +
+    "[rate-limit] TRUST_PROXY is not set to 'true' — clients are rate-limited by User-Agent " +
+    "instead of IP address. Set TRUST_PROXY=true when running behind a trusted reverse proxy (Nginx, Traefik, etc.) " +
     "that reliably sets X-Forwarded-For. Without it, per-IP limiting is disabled."
   );
 }
@@ -13,20 +13,29 @@ interface RateLimitEntry {
   expiresAt: number;
 }
 
-const windows = new Map<string, RateLimitEntry>();
+// One map for the whole process (see process-singleton.ts). Next.js copies this
+// module into every server bundle ("chunk") that imports it. A plain
+// module-level Map would give each chunk its own counters, so a key used by two
+// routes would get twice the intended limit.
+const windows = processSingleton("rate-limit:windows", () => {
+  const map = new Map<string, RateLimitEntry>();
+  // One cleanup timer per process, created with the map. .unref() lets Node
+  // exit (tests, shutdown) without waiting for this timer.
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of map) {
+      if (entry.expiresAt < now) map.delete(key);
+    }
+  }, 60_000).unref();
+  return map;
+});
 
 const MAX_KEYS = 100_000;
 
-// .unref() so this timer doesn't prevent Node from exiting during tests or graceful shutdown
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of windows) {
-    if (entry.expiresAt < now) windows.delete(key);
-  }
-}, 60_000).unref();
-
-// Sliding-window rate limiter: records a hit for `key` and returns false once
-// `limit` hits fall within `windowMs`. Bounded by MAX_KEYS via LRU eviction.
+// Sliding-window rate limiter: records a hit for `key` and returns true, or
+// returns false (recording nothing) once `limit` hits already fall within the
+// last `windowMs`. At most MAX_KEYS keys are kept; the least recently used key
+// is dropped first.
 export function checkRateLimit(key: string, limit: number, windowMs: number): boolean {
   if (limit <= 0) return true;
   const now = Date.now();
@@ -41,7 +50,8 @@ export function checkRateLimit(key: string, limit: number, windowMs: number): bo
     if (oldestKey !== undefined) windows.delete(oldestKey);
   }
   hits.push(now);
-  // Delete then re-insert to move the key to the end of Map insertion order (used by LRU eviction above)
+  // Delete then re-insert to move the key to the end of the Map's order; the
+  // eviction above drops keys from the front, so this marks it recently used.
   windows.delete(key);
   windows.set(key, { hits, expiresAt: now + windowMs });
   return true;
@@ -62,17 +72,12 @@ export function peekRateLimit(key: string, limit: number, windowMs: number): boo
   return hits.length < limit;
 }
 
-// Pushes a single hit for `key` (the "record a failure" half of the
-// peek/record split). Same Map/window/LRU bookkeeping as checkRateLimit's
-// recording path, minus the over-limit short-circuit — callers gate with
-// peekRateLimit first. No-op when limit semantics are disabled at the callsite.
-// Removes the most recent hit for `key` — the "this attempt turned out to be
-// legitimate" half of an atomic reserve-then-refund. Exists because peek-then-record is
-// NOT atomic across concurrent requests: peekRateLimit is synchronous, but the password
-// verify between it and recordFailure is awaited, so N concurrent attempts all observe
-// an under-limit bucket and all proceed. Reserving with checkRateLimit (which checks and
-// pushes in one synchronous step) and refunding on success closes that window while
-// keeping the original intent — a SUCCESSFUL login must not consume the account bucket.
+// Removes the most recent hit for `key`: "this attempt was fine after all".
+// Why not just peek first and record later? The password check in between is
+// async, so many concurrent attempts could all peek, all see room, and all get
+// through. Instead the caller reserves a hit with checkRateLimit (check and
+// record in one step) and refunds it here on success, so a SUCCESSFUL login
+// still doesn't use up the account's budget.
 export function refundHit(key: string): void {
   const entry = windows.get(key);
   if (!entry || entry.hits.length === 0) return;
@@ -80,6 +85,9 @@ export function refundHit(key: string): void {
   if (entry.hits.length === 0) windows.delete(key);
 }
 
+// Records one hit for `key` (the "record" half of peek-then-record). Same
+// bookkeeping as checkRateLimit, but with no limit check: callers check with
+// peekRateLimit first.
 export function recordFailure(key: string, windowMs: number): void {
   const now = Date.now();
   const cutoff = now - windowMs;
@@ -91,7 +99,7 @@ export function recordFailure(key: string, windowMs: number): void {
     if (oldestKey !== undefined) windows.delete(oldestKey);
   }
   hits.push(now);
-  // Delete then re-insert to move the key to the end of Map insertion order (used by LRU eviction above)
+  // Move the key to the end of the Map's order (see checkRateLimit).
   windows.delete(key);
   windows.set(key, { hits, expiresAt: now + windowMs });
 }
@@ -179,9 +187,10 @@ export function ipBucketKey(ip: string): string {
   return prefix ? `v6:${prefix}` : ip;
 }
 
-// Canonical /64 prefix ("xxxx:xxxx:xxxx:xxxx") of a syntactically valid IPv6
-// address; null when the shape defeats expansion (callers then fall back to the
-// full address, which only ever under-shares a bucket, never over-shares one).
+// The first four groups (the /64 prefix, "xxxx:xxxx:xxxx:xxxx") of an IPv6
+// address, written out in full. Returns null if the address can't be expanded;
+// the caller then uses the full address, which can only make buckets narrower,
+// never wider.
 function ipv6Prefix64(ip: string): string | null {
   const pct = ip.indexOf("%"); // zone index (fe80::1%eth0)
   let s = (pct === -1 ? ip : ip.slice(0, pct)).toLowerCase();

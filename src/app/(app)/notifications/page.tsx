@@ -33,11 +33,9 @@ export default async function NotificationsPage() {
   }));
 
   return (
-    <div>
-      <PageHeader title="Notifications" />
-      <div style={{ marginTop: 16 }}>
-        <NotificationList initialItems={items} initialTotal={total} />
-      </div>
+    <div className="ds-page-enter">
+      <PageHeader title="Notifications" subtitle="Request updates and replies" />
+      <NotificationList initialItems={items} initialTotal={total} />
     </div>
   );
 }

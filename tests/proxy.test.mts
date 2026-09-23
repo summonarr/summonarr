@@ -664,9 +664,8 @@ test("the refreshed JWT is forwarded to the app on the Authorization header — 
   // (so the downstream verifier sees the token THIS pass just re-signed);
   // bearer was not, which is what made a native request pay the full
   // DB-checked verify twice. The rewrite is on the request the ROUTE sees —
-  // the client is handed nothing, so guardrail 6b's "no sliding refresh for
-  // bearer clients" is intact: it keeps presenting its original token to
-  // expiry.
+  // the client is handed nothing, so guardrail 6b's "no refresh for bearer
+  // clients" is intact: it keeps presenting the token it got at sign-in.
   const { userId, sessionId, token } = await mintSession();
   const res = await proxy(req("/api/requests", { headers: asBearer(token) }));
   assertPassedThrough(res);
@@ -779,8 +778,9 @@ test("the cookie transport keeps its own rewrite: the forwarded cookie carries t
 });
 
 test("the slide happens on public paths too: /login with a live cookie still refreshes", async () => {
-  // Keeps the sliding window alive while a logged-in user navigates the
-  // public surface — the coded rationale for resolving sessions pre-gating.
+  // The session is resolved (and re-signed) before the public-path check, so a
+  // signed-in user browsing a public page still gets a fresh cookie. The re-sign
+  // keeps the original sign-in deadline (guardrail 6c) — it never extends it.
   const { token } = await mintSession();
   const res = await proxy(req("/login", { headers: asCookie(token) }));
   assertPassedThrough(res);

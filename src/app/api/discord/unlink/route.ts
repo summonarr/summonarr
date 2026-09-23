@@ -4,8 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { revokeDiscordRolesOnUnlink } from "@/lib/discord-notify";
 
-// Unlink the caller's Discord account. No unlink path existed (web only ever
-// showed linked status), so native clients had no way to disconnect.
+// Unlink the caller's Discord account (used by the native clients).
 export const POST = withAuth(async (req, _ctx, session) => {
   // Read the id BEFORE clearing it — the update nulls the only record of which
   // Discord member to strip roles from.
@@ -19,11 +18,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
     data: { discordId: null },
   });
 
-  // Roles are revoked only AFTER the unlink commits (guardrail 27: never act on
-  // external state before the DB write it represents). Fire-and-forget and
-  // self-swallowing — the account is already unlinked, so a Discord API blip
-  // must not fail the request. Without this the user kept every role Summonarr
-  // granted them, admin included, with no way to lose it.
+  // Remove the Discord roles Summonarr gave this user, but only AFTER the
+  // unlink is saved (guardrail 27: DB write first, side effects second). It is
+  // not awaited and handles its own errors: the account is already unlinked,
+  // so a Discord API hiccup must not fail the request.
   if (prev?.discordId) {
     void revokeDiscordRolesOnUnlink(prev.discordId);
   }

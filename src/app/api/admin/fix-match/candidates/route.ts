@@ -6,6 +6,7 @@ import { getPlexConfig } from "@/lib/plex-config";
 import { safeFetchAdminConfigured, safeFetchTrusted } from "@/lib/safe-fetch";
 import { arrFetch } from "@/lib/arr";
 import { tmdbAuth, type TmdbAuth } from "@/lib/tmdb-auth";
+import { settleLimit } from "@/lib/concurrency";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 
 const TMDB_HOSTS = ["api.themoviedb.org"];
@@ -295,15 +296,19 @@ async function resolveArrConfirmation(
       const arrCfg = { url: arrUrlRow.value.replace(/\/$/, ""), apiKey: arrKeyRow.value };
       // Fold Windows separators first (as file-info does): without it the
       // dirname regex strips nothing off a backslash path, so the filename
-      // stays on folderPath and every pathMatches() below reads false.
-      const folderPath = nodePath.posix.normalize(filePath.replace(/\\/g, "/").replace(/\/[^/]+$/, ""));
+      // stays on the path and every pathMatches() below reads false.
+      // The library path ITSELF, not its parent: a Jellyfin series row's Path is
+      // the series folder (Plex's is an episode file), so its parent is the
+      // library root, which equals no Sonarr series path. A path at or under the
+      // arr folder covers a movie file, an episode file and a series folder alike.
+      const libraryPath = nodePath.posix.normalize(filePath.replace(/\\/g, "/").replace(/\/$/, ""));
       const endpoint   = mediaType === "MOVIE" ? "movie" : "series";
 
       type ArrMovie = { tmdbId?: number; path?: string; hasFile?: boolean; statistics?: { episodeFileCount?: number } };
 
       const pathMatches = (arrPathRaw: string | undefined): boolean => {
-        const arrPath = nodePath.posix.normalize((arrPathRaw ?? "").replace(/\\/g, "/"));
-        return !!arrPath && !!folderPath && (arrPath === folderPath || folderPath.startsWith(arrPath + "/"));
+        const arrPath = nodePath.posix.normalize((arrPathRaw ?? "").replace(/\\/g, "/").replace(/\/$/, ""));
+        return !!arrPath && !!libraryPath && (arrPath === libraryPath || libraryPath.startsWith(arrPath + "/"));
       };
 
       // Radarr's movie list honors ?tmdbId= server-side. Sonarr's series list
@@ -467,9 +472,8 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
     // `serverInstance`. Scoping the Jellyfin read with the Plex slug therefore
     // blanked (or mis-sourced) the hint on exactly the cross-instance mismatch
     // an admin opens this picker to resolve. Widening is safe because
-    // `jellyfinFilePath` is display-only — nothing is written from it, and the
-    // POST that applies a fix targets Plex alone (`server !== "plex"` is
-    // rejected above).
+    // `jellyfinFilePath` is display-only — nothing is written from it, and this
+    // part of the route only runs for server=plex (Jellyfin returned above).
     prisma.jellyfinLibraryItem.findMany({
       where: { tmdbId, mediaType },
       select: { serverInstance: true, filePath: true },
@@ -593,12 +597,12 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
 
   const tmdbDetailMap = new Map<string, TmdbDetails>();
   if (tAuth && tmdbIdsToFetch.length) {
-    const fetches = await Promise.allSettled(
-      tmdbIdsToFetch.map(async (id) => {
-        const d = await fetchTmdbDetails(Number(id), mediaType, tAuth);
-        return { id, d };
-      }),
-    );
+    // Bounded (guardrail 31): five Plex searches can return dozens of
+    // candidates, and each one is a separate TMDB request.
+    const fetches = await settleLimit(tmdbIdsToFetch, 6, async (id) => {
+      const d = await fetchTmdbDetails(Number(id), mediaType, tAuth);
+      return { id, d };
+    });
     for (const r of fetches) {
       if (r.status === "fulfilled" && r.value.d) {
         tmdbDetailMap.set(r.value.id, r.value.d);

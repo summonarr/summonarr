@@ -82,9 +82,10 @@ process.env.TRUST_PROXY = "true";
 (globalThis as { AsyncLocalStorage?: typeof AsyncLocalStorage }).AsyncLocalStorage =
   AsyncLocalStorage;
 
-// Scripted fetch: default refuses (the arr verify helpers catch, warn, and
-// return null → the route proceeds optimistically). Tests that exercise the
-// authoritative-verify path install a handler.
+// Scripted fetch: by default every call fails. The arr verify helpers catch
+// that, warn, and return null ("can't tell"). Radarr then goes ahead with the
+// flip; Sonarr defers it (guardrail 14a). Tests that need a real verify
+// answer install their own handler.
 type FetchCall = { url: string; init: RequestInit | undefined };
 const fetchCalls: FetchCall[] = [];
 let fetchHandler: (url: string) => Response | Promise<Response> = () => {

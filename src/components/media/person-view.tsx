@@ -10,6 +10,7 @@ import { useState } from "react";
 import Image from "next/image";
 import { User } from "@/components/icons";
 import { MediaCard } from "@/components/media/media-card";
+import { EmptyState } from "@/components/ui/design";
 import type { PersonDetails, PersonCredit, TmdbMedia } from "@/lib/tmdb-types";
 
 // "YYYY-MM-DD" → "June 9, 1963", pinned to UTC + en-US so server and client
@@ -79,11 +80,13 @@ export function PersonView({
   const bioText = bioExpanded || !bioIsLong ? bio : `${bio.slice(0, BIO_CLAMP).trimEnd()}…`;
 
   return (
-    <div>
-      <div style={{ display: "flex", gap: 20, padding: "16px 16px 24px", flexWrap: "wrap" }}>
+    <div className="ds-page-enter">
+      {/* No horizontal padding anywhere on this page: unlike movie/tv it is not
+          bled to the viewport edge, so <main>'s own padding is the inset. */}
+      <div style={{ display: "flex", gap: 20, padding: "16px 0 24px", flexWrap: "wrap" }}>
         <div
           className="relative shrink-0 overflow-hidden"
-          style={{ width: 120, height: 180, borderRadius: 12, background: "var(--ds-bg-3)" }}
+          style={{ width: 120, height: 180, borderRadius: 8, background: "var(--ds-bg-3)" }}
         >
           {person.profilePath ? (
             <Image
@@ -104,7 +107,10 @@ export function PersonView({
         </div>
 
         <div style={{ flex: 1, minWidth: 260 }}>
-          <h1 style={{ fontSize: 26, fontWeight: 700, letterSpacing: "-0.02em", color: "var(--ds-fg)", margin: "0 0 4px" }}>
+          <h1
+            className="font-semibold"
+            style={{ fontSize: 32, letterSpacing: "-0.025em", lineHeight: 1.08, color: "var(--ds-fg)", margin: "0 0 4px" }}
+          >
             {person.name}
           </h1>
           {person.knownForDepartment && (
@@ -126,7 +132,8 @@ export function PersonView({
                 <button
                   type="button"
                   onClick={() => setBioExpanded((v) => !v)}
-                  style={{ background: "none", border: 0, color: "var(--ds-accent)", cursor: "pointer", fontSize: 13, padding: 0 }}
+                  className="hover:underline"
+                  style={{ background: "none", border: 0, color: "var(--ds-accent-text)", fontSize: 13, padding: "4px 0" }}
                 >
                   {bioExpanded ? "Show less" : "Show more"}
                 </button>
@@ -136,10 +143,10 @@ export function PersonView({
         </div>
       </div>
 
-      <section style={{ padding: "0 16px 32px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
-          <h2 className="section-title font-semibold" style={{ fontSize: 15, letterSpacing: "-0.01em", color: "var(--ds-fg)", margin: 0 }}>
-            Known for
+      <section style={{ padding: "0 0 32px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+          <h2 className="font-semibold" style={{ fontSize: 15, letterSpacing: "-0.01em", color: "var(--ds-fg)", margin: 0 }}>
+            Known For
           </h2>
           <div style={{ display: "inline-flex", gap: 6 }}>
             {(
@@ -156,15 +163,15 @@ export function PersonView({
                   key={val}
                   type="button"
                   onClick={() => setFilter(val)}
-                  className="ds-mono"
+                  className="ds-mono ds-hover-tint"
                   style={{
                     fontSize: 12,
-                    padding: "4px 10px",
+                    minHeight: 32,
+                    padding: "6px 12px",
                     borderRadius: 999,
                     border: "1px solid var(--ds-border)",
                     background: active ? "var(--ds-accent)" : "var(--ds-bg-2)",
-                    color: active ? "#fff" : "var(--ds-fg-muted)",
-                    cursor: "pointer",
+                    color: active ? "var(--ds-accent-fg)" : "var(--ds-fg-muted)",
                   }}
                 >
                   {label} {count}
@@ -175,9 +182,9 @@ export function PersonView({
         </div>
 
         {shown.length === 0 ? (
-          <div style={{ fontSize: 13, color: "var(--ds-fg-subtle)", padding: "20px 0" }}>No titles to show.</div>
+          <EmptyState title="No titles to show" />
         ) : (
-          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-3">
+          <div className="ds-media-grid">
             {shown.map((c) => (
               <MediaCard
                 // Same identity key as every other MediaCard grid. An index in the
@@ -186,6 +193,7 @@ export function PersonView({
                 // credits per (mediaType, id) so this can't collide.
                 key={`${c.mediaType}-${c.id}`}
                 media={toMedia(c)}
+                size="md"
                 requestToken={c.requestToken}
                 showPlex={showPlex}
                 showJellyfin={showJellyfin}

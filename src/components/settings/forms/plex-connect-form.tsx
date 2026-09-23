@@ -81,7 +81,7 @@ function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage
                     onChange={() => toggle(s.key)}
                     className="w-4 h-4 rounded border-zinc-600 bg-zinc-800 accent-indigo-500"
                   />
-                  <span className="text-sm text-zinc-200 group-hover:text-white transition-colors">
+                  <span className="text-sm text-zinc-300 group-hover:text-zinc-100 transition-colors">
                     {s.title}
                   </span>
                   <span className="text-xs px-1.5 py-0.5 rounded bg-zinc-700 text-zinc-400">
@@ -118,7 +118,8 @@ interface PlexConnectFormProps {
   siteUrl: string;
 }
 
-// Plex connection uses PIN-based OAuth; the admin token is stored in the Setting table, not an env var
+// Connects Plex with Plex's PIN sign-in: the admin approves a short code on plex.tv
+// and the resulting admin token is saved in the Setting table (not an env var).
 export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLibraries, siteUrl }: PlexConnectFormProps) {
   const [connectedEmail, setConnectedEmail] = useState(initialEmail);
   const [status, setStatus] = useState<"idle" | "waiting" | "saving" | "error">("idle");
@@ -195,7 +196,8 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
       `&context[device][product]=Summonarr` +
       `&forwardUrl=${forwardUrl}`;
 
-    // PIN state stashed so /auth/plex/done can pick it up after Plex redirects back
+    // Save the PIN details in sessionStorage: this page is about to navigate away,
+    // and /auth/plex/done reads them when Plex sends the browser back.
     try {
       sessionStorage.setItem("plex-redirect-auth", JSON.stringify({
         flow: "settings", pinId, state,
@@ -219,7 +221,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
         return;
       }
     } catch {
-      // fall through to the shared error state below
+      // Handled by the error lines below.
     }
     setError("Failed to disconnect");
     setStatus("error");
@@ -287,7 +289,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
         <div className="flex items-center justify-between rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-3">
           <div className="flex items-center gap-2 text-sm">
             <CheckCircle className="w-4 h-4 text-green-400 shrink-0" />
-            <span className="text-zinc-300">Connected as <span className="text-white font-medium">{connectedEmail}</span></span>
+            <span className="text-zinc-300">Connected as <span className="text-zinc-100 font-medium">{connectedEmail}</span></span>
           </div>
           <button
             onClick={handleDisconnect}
@@ -383,7 +385,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
                   onClick={handleImport}
                   disabled={importStatus === "running"}
                   variant="outline"
-                  className="border-zinc-700 text-zinc-300 hover:text-white"
+                  className="border-zinc-700 text-zinc-300 hover:text-zinc-100"
                 >
                   {importStatus === "running" ? (
                     <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Importing…</>

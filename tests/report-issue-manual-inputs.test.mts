@@ -1,15 +1,16 @@
 // ReportIssueButton's manual-vs-select season/episode predicate.
 //
-// The component is a "use client" .tsx (JSX + icon/dialog imports the test
-// loader cannot resolve), so the pure helper is extracted from the source text
-// and type-stripped with the classic TypeScript compiler already in the tree,
-// then evaluated on its own. This pins the review-2026-09 f96 fix: for a TV
-// title that is NOT in any visible library, /api/tv-availability answers 200
-// `{ source: null, seasons: [] }` — `availabilityFailed` stays false and the
-// season list is empty — so the manual NumberInputs must stay mounted while
-// the dialog is `submitting`, not only while it is `open`. Keying on `open`
-// alone swapped them for an empty, disabled <select> for the length of every
-// submit and flipped back on a server error.
+// The component is a "use client" .tsx file that the test loader cannot import
+// (JSX plus icon/dialog imports). So the test cuts the one pure helper out of
+// the source text, strips its types with the TypeScript compiler, and runs it
+// on its own.
+//
+// What it pins (review-2026-09 fix f96): for a TV title that is NOT in any
+// visible library, /api/tv-availability answers 200 `{ source: null, seasons: [] }`.
+// `availabilityFailed` stays false and the season list is empty, so the manual
+// number inputs must stay on screen while the dialog is `submitting`, not only
+// while it is `open`. Checking `open` alone swapped them for an empty, disabled
+// <select> during every submit, then flipped back on a server error.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

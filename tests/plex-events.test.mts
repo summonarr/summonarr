@@ -28,13 +28,14 @@
 // token, Plex headers), the bootstrap grace window + ledger release, the
 // finalized-session ledger helpers, SSE frame plumbing (CRLF, chunk splits,
 // array payloads, noise immunity), the stopped-event pipeline (cross-check
-// advisory stops, viewOffset override into PlayHistory, the GR27
+// advisory stops, viewOffset override into PlayHistory, the guardrail-27
 // ledger-after-write rule, unknown-session ledgering), the 30s
 // timeline-resync debounce into the /api/sync loopback, reachability
 // persistence dedupe/retry, and stream-end reconnection. Phase J at the
 // bottom pins the Phase-2 multi-instance surface: the registry-driven manager
 // map, per-instance ActiveSession ids + ledger + bootstrap isolation,
-// default-only reachability, registry-removal stop, and the config-read shape
+// per-instance reachability keys (a named server never touches the default's),
+// registry-removal stop, and the config-read shape
 // contract (one plexInstances findUnique per map pass, one connection-keys
 // findMany per manager reconcile).
 //
@@ -1437,7 +1438,7 @@ test("registry removal: dropping the slug stops (aborts) its manager on the next
 });
 
 test("config-read contract: one plexInstances findUnique per map pass + one connection-keys findMany per manager reconcile, nothing else", async () => {
-  // The poller's test harness (the later Phase 2 worker) distinguishes this
+  // The play-history poller's test harness distinguishes this
   // module's DB reads from the route's own BY SHAPE — pin it: a steady-state
   // reconcile (sole remaining manager: default, unchanged config) issues
   // exactly one registry findUnique and exactly one two-key connection

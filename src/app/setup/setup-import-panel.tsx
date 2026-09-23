@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
@@ -37,8 +37,14 @@ export function SetupImportPanel() {
   const [importing, setImporting] = useState(false);
   const [progress, setProgress] = useState<ChunkedUploadProgress | null>(null);
   const [result, setResult] = useState<ImportResult>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // The header check below is async. If the user picks a second file before the
+  // first check finishes, this ref lets the stale check see it is out of date
+  // and drop its answer instead of overwriting the newer file's state.
+  const pickedFileRef = useRef<File | null>(null);
 
   async function handleFileChange(f: File | null) {
+    pickedFileRef.current = f;
     setFile(f);
     setResult(null);
     setProgress(null);
@@ -47,11 +53,13 @@ export function SetupImportPanel() {
     if (!f) return;
     try {
       const isEnc = await isEncryptedFile(f);
+      if (pickedFileRef.current !== f) return;
       setEncrypted(isEnc);
       const kb = (f.size / 1024).toFixed(1);
       const mb = (f.size / (1024 * 1024)).toFixed(1);
       setSize(f.size > 1024 * 1024 ? `${mb} MB` : `${kb} KB`);
     } catch {
+      if (pickedFileRef.current !== f) return;
       setResult({ ok: false, error: "Could not read file" });
     }
   }
@@ -80,7 +88,7 @@ export function SetupImportPanel() {
     }
 
     const data = outcome.data as ImportResult & { ok: boolean };
-    setResult({ ok: data.ok, summary: data.summary, errors: data.errors, warning: data.warning });
+    setResult({ ok: data.ok, summary: data.summary, errors: data.errors, error: data.error, warning: data.warning });
     if (data.ok) {
       setTimeout(() => {
         window.location.href = withBasePath("/login");
@@ -89,11 +97,14 @@ export function SetupImportPanel() {
   }
 
   function clearFile() {
+    pickedFileRef.current = null;
     setFile(null);
     setEncrypted(null);
     setSize(null);
     setResult(null);
     setProgress(null);
+    // Reset the native input too, or re-choosing the same file fires no change event.
+    if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
   const dropBorder =
@@ -116,6 +127,14 @@ export function SetupImportPanel() {
       </div>
 
       <div
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => {
+          // Without preventDefault the browser would open the dropped file itself.
+          e.preventDefault();
+          if (importing) return;
+          const dropped = e.dataTransfer.files?.[0];
+          if (dropped) void handleFileChange(dropped);
+        }}
         className={`flex flex-col items-center justify-center gap-2 px-4 py-6 rounded-lg border border-dashed text-center transition-colors ${dropBorder} ${
           file ? "bg-zinc-950" : "bg-transparent"
         }`}
@@ -155,23 +174,30 @@ export function SetupImportPanel() {
       </div>
 
       <div className="flex items-center gap-2 flex-wrap">
-        <label className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-zinc-800 border border-zinc-700 text-zinc-300 hover:bg-zinc-700 cursor-pointer transition-colors">
+        {/* The native file input stays in the DOM (visually hidden) and is
+            opened programmatically so the visible control is a real <Button>. */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".enc"
+          aria-label="Backup file"
+          onChange={(e) => handleFileChange(e.target.files?.[0] ?? null)}
+          className="sr-only"
+          tabIndex={-1}
+        />
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={importing}
+          onClick={() => fileInputRef.current?.click()}
+        >
           Choose file
-          <input
-            type="file"
-            accept=".enc"
-            onChange={(e) => handleFileChange(e.target.files?.[0] ?? null)}
-            className="hidden"
-          />
-        </label>
+        </Button>
         {file && (
-          <button
-            type="button"
-            onClick={clearFile}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-zinc-800 border border-zinc-700 text-zinc-400 hover:bg-zinc-700 transition-colors"
-          >
+          <Button type="button" size="sm" variant="outline" disabled={importing} onClick={clearFile}>
             Clear
-          </button>
+          </Button>
         )}
       </div>
 
@@ -180,7 +206,7 @@ export function SetupImportPanel() {
           type="button"
           onClick={handleImport}
           disabled={!file || !encrypted || importing}
-          className="w-full bg-indigo-600 hover:bg-indigo-500"
+          className="w-full min-h-11"
         >
           {importing ? (
             <>
@@ -246,7 +272,7 @@ export function SetupImportPanel() {
             ))}
           </div>
           {result.warning && (
-            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300 leading-relaxed">
+            <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-400 leading-relaxed">
               {result.warning}
             </div>
           )}
@@ -266,7 +292,7 @@ export function SetupImportPanel() {
       )}
 
       {result?.error && (
-        <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+        <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-400">
           <XCircle className="w-4 h-4 shrink-0 mt-0.5" />
           <span>{result.error}</span>
         </div>

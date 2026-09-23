@@ -1,18 +1,29 @@
 // Skeleton for the Votes list while DeletionVote groupBy + batched lookups run.
+// Shape mirrors votes/page.tsx: PageHeader with a two-line subtitle (the long
+// nomination hint wraps), the mine/sort FilterPills + 32px SearchBox row
+// (mb-5), then rows — 44px poster thumb inside 14px padding, 8px apart, with
+// title, vote count and a reason line.
+import { Bar, ControlRow, SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
+
 export default function Loading() {
   return (
     <div className="animate-pulse">
-      <div className="flex flex-col gap-2" style={{ marginBottom: 24 }}>
-        <div className="rounded" style={{ width: 180, height: 24, background: "var(--ds-bg-3)" }} />
-        <div className="rounded" style={{ width: 420, height: 14, background: "var(--ds-bg-2)" }} />
+      <SkeletonHeader subtitle subtitleLines={2} />
+      <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:items-center sm:justify-between">
+        <ControlRow w={220} />
+        <div className="flex items-center gap-3">
+          <ControlRow w={200} />
+          <Bar w={192} h={32} r={6} style={{ ...SKELETON_CARD, maxWidth: "100%" }} />
+        </div>
       </div>
-      <div className="flex flex-col gap-2">
+      <div className="flex flex-col" style={{ gap: 8 }}>
         {Array.from({ length: 6 }).map((_, i) => (
-          <div key={i} className="flex items-start gap-3 rounded-lg" style={{ padding: 14, background: "var(--ds-bg-2)" }}>
-            <div className="shrink-0 rounded" style={{ width: 56, height: 84, background: "var(--ds-bg-3)" }} />
-            <div className="flex-1 flex flex-col gap-2">
-              <div className="rounded" style={{ width: "60%", height: 14, background: "var(--ds-bg-3)" }} />
-              <div className="rounded" style={{ width: "30%", height: 12, background: "var(--ds-bg-3)" }} />
+          <div key={i} className="flex items-start" style={{ ...SKELETON_CARD, gap: 14, padding: 14, borderRadius: 8 }}>
+            <Bar w={44} h={66} r={4} />
+            <div className="flex-1 min-w-0 flex flex-col" style={{ gap: 6 }}>
+              <Bar w="45%" h={14} />
+              <Bar w={60} h={12} />
+              <Bar w="60%" h={10} />
             </div>
           </div>
         ))}

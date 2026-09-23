@@ -27,6 +27,16 @@
  * what Tailwind ships — upgrade Tailwind and this re-derives itself, which is
  * how the v4 renames (`bg-left-top` → `bg-top-left`) surface.
  *
+ * ARBITRARY values get a fourth check (4. MISFILED). getClassList() contains no
+ * `text-[…]` / `border-(--x)` forms at all, and the table has to GUESS their
+ * type from the bracket text (`text-[10px]` is a size, `text-[var(--x)]` a
+ * colour, `shadow-[var(--x)]` the shadow, `shadow-[red]` its colour). Those
+ * guesses shipped wrong three times in one review, silently, because nothing
+ * here looked at them. So the auditor compiles a matrix of arbitrary values
+ * over every family the table splits by value type — plus every arbitrary
+ * token src/ actually uses — and requires each to land in the group of the
+ * NAMED utility whose declarations it most resembles.
+ *
  * What it does NOT check: that merging is *desirable* for a given pair, the
  * variant/important class-space logic, or anything about how src/ composes
  * classes. `tests/tw-merge.test.mts` pins the behaviour; this pins the table's
@@ -79,6 +89,7 @@ const OVER_MERGE_ALLOWLIST: Array<{ group: string; reason: string }> = [
   { group: "transition", reason: "transition-none sets only transition-property; it is the reset for the same shorthand" },
   { group: "outline-style", reason: "outline-hidden also zeroes outline/outline-offset but is still one of the mutually exclusive outline styles (as in real tailwind-merge)" },
   { group: "via", reason: "via-none drops the via stop that via-<color> sets" },
+  { group: "drop-shadow", reason: "drop-shadow-none sets only `filter`; it is the reset for the same drop-shadow the sized utilities set" },
 ];
 
 /**
@@ -99,11 +110,20 @@ const UNDER_MERGE_ALLOWLIST: Array<{ groups: string[]; reason: string }> = [
  */
 const UNGROUPED_ALLOWLIST: Array<{ property: string; reason: string }> = [];
 
+/**
+ * Arbitrary values the table deliberately files unlike Tailwind. Empty unless a
+ * case is genuinely unmodellable by a prefix regex — say why in `reason`.
+ */
+const MISFILED_ALLOWLIST: Array<{ test: (cls: string) => boolean; reason: string }> = [];
+
 interface Utility {
   name: string;
   signature: string;
   group: string | null;
 }
+
+/** Compiles class names to CSS; `null` for a class Tailwind does not recognise. */
+type Compile = (candidates: string[]) => Array<string | null>;
 
 /**
  * Load the installed Tailwind's design system. `__unstable__loadDesignSystem`
@@ -112,7 +132,8 @@ interface Utility {
  * major upgrade. If it does, this throws loudly rather than silently auditing
  * an empty set — a green run on zero utilities would be worse than a red one.
  */
-async function loadUtilities(): Promise<Utility[]> {
+
+async function loadUtilities(): Promise<{ utilities: Utility[]; compile: Compile }> {
   const require_ = createRequire(import.meta.url);
   let twRoot: string;
   try {
@@ -164,7 +185,7 @@ async function loadUtilities(): Promise<Utility[]> {
       if (signature) out.push({ name, signature, group: matchGroup(name) });
     });
   }
-  return out;
+  return { utilities: out, compile: candidatesToCss };
 }
 
 /**
@@ -223,7 +244,7 @@ function tokensUsedInSrc(): Set<string> {
 }
 
 interface Finding {
-  kind: "over-merge" | "under-merge" | "ungrouped";
+  kind: "over-merge" | "under-merge" | "ungrouped" | "misfiled";
   key: string;
   detail: string[];
   allowlisted: string | null;
@@ -316,20 +337,93 @@ const KIND_HINT: Record<Finding["kind"], string> = {
   "over-merge": "one group spans utilities that set DIFFERENT properties — one silently deletes the other",
   "under-merge": "utilities setting the SAME property sit in different groups — they never collapse",
   "ungrouped": "a family with no group at all, and src/ uses it — two of them will never collapse",
+  "misfiled": "an arbitrary value is grouped unlike the named utility Tailwind compiles it like — it deletes (or fails to replace) the wrong class",
 };
+
+/**
+ * Families whose arbitrary values the table must TYPE (size vs colour, shadow
+ * vs shadow colour, …), each crossed with value shapes Tailwind infers
+ * differently. The expected group is not written down anywhere: it is the
+ * group of the named utility in the same family whose compiled declarations
+ * overlap the arbitrary one's most (Jaccard over the property set, same
+ * selector suffix). Add a family here when you add a size/colour split.
+ */
+const ARBITRARY_FAMILIES = [
+  "text", "border", "border-t", "border-x", "border-s", "ring", "ring-offset", "outline", "outline-offset",
+  "divide", "divide-x", "divide-y", "shadow", "inset-shadow", "drop-shadow", "text-shadow", "inset-ring",
+  "decoration", "underline-offset", "bg", "stroke", "fill", "leading", "tracking",
+];
+const ARBITRARY_VALUES = [
+  "[var(--x)]", "[10px]", "[0.5rem]", "[1.5em]", "[-1px]", "[50%]", "[2]", "[#f00]", "[red]", "[currentColor]",
+  "[transparent]", "[color:var(--x)]", "[length:var(--x)]", "[calc(1px+2px)]", "[clamp(1px,2px,3px)]",
+  "[min(1px,2px)]", "[thin]", "[medium]", "[rgb(1_2_3)]", "[oklch(0.5_0.1_20)]", "[0_0_2px_black]",
+  "(--x)", "(length:--x)", "(color:--x)",
+];
+
+function propsOf(signature: string): { props: Set<string>; suffix: string } {
+  const [props, suffix] = JSON.parse(signature) as [string[], string];
+  return { props: new Set(props), suffix };
+}
+
+function misfiled(utilities: Utility[], used: Set<string>, compile: Compile): Finding[] {
+  const familyOf = (cls: string) => cls.match(/^(-?[a-z][a-z0-9-]*?)-[[(]/)?.[1] ?? null;
+  const candidates = new Set<string>();
+  for (const f of ARBITRARY_FAMILIES) for (const v of ARBITRARY_VALUES) candidates.add(`${f}-${v}`);
+  for (const t of used) if (familyOf(t) && /-[[(]/.test(t)) candidates.add(t);
+
+  const list = [...candidates];
+  const css = compile(list);
+  const findings: Finding[] = [];
+  list.forEach((cls, i) => {
+    const signature = signatureOf(css[i]);
+    const family = familyOf(cls);
+    if (!signature || !family) return; // Tailwind rejects it — nothing to merge
+    const mine = propsOf(signature);
+    let best: { score: number; groups: Set<string | null>; names: string[] } = { score: 0, groups: new Set(), names: [] };
+    for (const u of utilities) {
+      if (!(u.name === family || u.name.startsWith(family + "-"))) continue;
+      if (u.name.startsWith(family + "-") && /^-?[a-z]/.test(u.name.slice(family.length + 1)) === false && !/^\d/.test(u.name.slice(family.length + 1))) continue;
+      const theirs = propsOf(u.signature);
+      if (theirs.suffix !== mine.suffix) continue;
+      let inter = 0;
+      for (const p of mine.props) if (theirs.props.has(p)) inter++;
+      const score = inter / (mine.props.size + theirs.props.size - inter);
+      if (score === 0) continue;
+      if (score > best.score) best = { score, groups: new Set([u.group]), names: [u.name] };
+      else if (score === best.score) { best.groups.add(u.group); best.names.push(u.name); }
+    }
+    if (best.score === 0 || best.groups.size !== 1) return; // no unambiguous twin
+    const expected = [...best.groups][0];
+    const actual = matchGroup(cls);
+    if (actual === expected) return;
+    findings.push({
+      kind: "misfiled",
+      key: cls,
+      detail: [
+        `grouped as ${actual ?? "(none)"}, but Tailwind compiles it like ${best.names.slice(0, 3).join(" ")} → ${expected ?? "(none)"}`,
+        `declares: ${[...mine.props].join(", ")}${used.has(cls) ? "   (used in src/)" : ""}`,
+      ],
+      allowlisted: MISFILED_ALLOWLIST.find((a) => a.test(cls))?.reason ?? null,
+    });
+  });
+  return findings;
+}
 
 async function main() {
   const json = process.argv.includes("--json");
   const list = process.argv.includes("--list");
 
-  const utilities = await loadUtilities();
-  const findings = audit(utilities, tokensUsedInSrc());
+  const { utilities, compile } = await loadUtilities();
+  const used = tokensUsedInSrc();
+  const findings = [...audit(utilities, used), ...misfiled(utilities, used, compile)];
   const failures = findings.filter((f) => f.allowlisted === null);
   const allowed = findings.filter((f) => f.allowlisted !== null);
 
   if (json) {
     console.log(JSON.stringify({ audited: utilities.length, findings }, null, 2));
-    process.exit(failures.length > 0 ? 1 : 0);
+    // exitCode, not exit(): a piped stdout is async, and exit() cut the JSON off mid-string.
+    process.exitCode = failures.length > 0 ? 1 : 0;
+    return;
   }
 
   console.log(color("\n  tw-merge Group Table Audit", COLORS.bold + COLORS.cyan));
@@ -349,7 +443,8 @@ async function main() {
 
   if (failures.length === 0) {
     console.log(color("  ✓ Every group maps 1:1 onto a real CSS property.\n", COLORS.green));
-    process.exit(0);
+    process.exitCode = 0;
+    return;
   }
 
   console.log(color(`  ✗ ${failures.length} finding(s):\n`, COLORS.red + COLORS.bold));
@@ -366,10 +461,11 @@ async function main() {
       COLORS.dim,
     ),
   );
-  process.exit(1);
+  // exitCode rather than exit(), for the same piped-stdout reason as the --json path.
+  process.exitCode = 1;
 }
 
-// Only run the CLI when invoked directly, so the helpers stay importable.
+// Only run the CLI when this file is executed directly, not when it is imported.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     console.error(color(`\n  tw-merge audit failed to run: ${err instanceof Error ? err.message : err}\n`, COLORS.red));

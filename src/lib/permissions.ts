@@ -37,16 +37,15 @@ export const Permission = {
   AUTO_APPROVE_MOVIE: 1n << 8n,
   AUTO_APPROVE_TV: 1n << 9n,
 
-  // Request on behalf of another user (admin / power user). Used in Phase 2.
+  // Request on behalf of another user (admin / power user).
   REQUEST_ON_BEHALF: 1n << 10n,
 
   // Exempt from request quotas (== legacy quotaExempt).
   QUOTA_UNLIMITED: 1n << 11n,
 
   // ─── 4K block ─────────────────────────────────────────────────────────────
-  // Live: 4K requests + auto-approve are wired end-to-end (request-4k-button →
-  // /api/requests is4k → addMovieToRadarr/addSeriesToSonarr "4k" variant). Bit
-  // numbers are fixed so stored masks never need renumbering.
+  // Gates requests (and auto-approve) on the legacy "4k" Radarr/Sonarr instance.
+  // Bit numbers are fixed so masks already stored in the DB never need renumbering.
   REQUEST_4K: 1n << 12n,
   REQUEST_4K_MOVIE: 1n << 13n,
   REQUEST_4K_TV: 1n << 14n,
@@ -124,9 +123,9 @@ export function hasPermission(
     : reqs.some((r) => (userPerms & r) !== 0n);
 }
 
-// Can this permission set request the given media type at the given resolution?
-// Encodes the umbrella-OR-specific rule once; the 4K bits are AND-ed on top for
-// 4K requests. The is4k path gates live 4K requests (see /api/requests).
+// Can this permission set request the given media type, in HD or in 4K?
+// Encodes the umbrella-OR-specific rule once; a 4K request must ALSO pass the
+// 4K bits (or the server-wide 4K toggle) on top of the base check.
 export function canRequest(
   userPerms: bigint,
   mediaType: "MOVIE" | "TV",

@@ -11,7 +11,7 @@ import { settleLimit } from "@/lib/concurrency";
 
 // Keys read from the Setting table. `emailBackend` picks the transport:
 //   - "resend" → Resend HTTP API (direct POST to api.resend.com via safeFetchTrusted)
-//   - "smtp"   → SMTP via the in-tree client in [src/lib/smtp.ts](src/lib/smtp.ts) (default when unset)
+//   - "smtp"   → SMTP via our own small client in smtp.ts (the default when unset)
 // Resend sender falls back to smtpFrom so users sharing one from-address
 // don't have to enter it twice. siteUrl is read so CTAs can link to the app.
 // `enableUserEmails` is the "Send notification emails" master switch: while it is
@@ -186,15 +186,14 @@ async function sendMany(cfg: EmailConfig, recipients: string[], subject: string,
   const results = await settleLimit(recipients, 3, (addr) => sendOne(cfg, addr, subject, html));
   const failures = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
   if (failures.length > 1) {
-    // Only the first reason reaches the caller's catch, so a relay refusing most
-    // recipients would otherwise read as a single transient error. Count only —
-    // recipient addresses stay out of the logs.
+    // Log the count only — recipient addresses stay out of the logs.
     console.error(`[email] ${failures.length}/${recipients.length} recipients failed to send`);
   }
   if (failures.length > 0) throw failures[0].reason;
 }
 
-// CRLF injection in email headers can forge From/Subject — strip newlines from any value that goes into a header
+// A newline (CR/LF) inside a header value would let an attacker add fake headers
+// ("CRLF injection"), so strip newlines from any value that goes into a header.
 function safeHeader(str: string): string {
   return str.replace(/[\r\n]+/g, " ");
 }
@@ -481,8 +480,8 @@ export async function notifyAdminsNewIssue(data: {
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
 
-    // ISSUE_ADMINs must get the new-issue email too — the push counterpart
-    // already targets them. getAdminEmails() is ADMIN-only.
+    // Issue managers (MANAGE_ISSUES) must get the new-issue email, matching the
+    // push counterpart. getAdminEmails() picks request managers instead.
     const to = await getIssueAdminEmails({ excludeUserId: data.excludeUserId });
     if (!to.length) return;
 

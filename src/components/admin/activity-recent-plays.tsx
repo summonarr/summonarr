@@ -140,8 +140,8 @@ function DetailRow({ play }: { play: RecentPlay }) {
   );
 }
 
-// Recent-plays table with expandable per-session detail rows and cursor-style
-// "Load more" pagination against /api/play-history.
+// Recent-plays table. Click a row to show its details; "Load more" fetches
+// the next page from /api/play-history.
 export function ActivityRecentPlays({
   plays: initialPlays,
   source,
@@ -162,20 +162,13 @@ export function ActivityRecentPlays({
   const [page, setPage] = useState(1);
   const mounted = useHasMounted();
 
-  // ActivityLiveRefresher calls router.refresh() on every activity:history-updated
-  // SSE event so this table reflects a finished stream. But router.refresh()
-  // re-renders the SERVER tree without unmounting client components, and this
-  // component's key only changes on a filter change — so `plays` stayed frozen at
-  // whatever loaded on first mount while the cards and leaderboards around it
-  // updated. Re-seed from the incoming prop. Same pattern as browse-grid.tsx and
-  // audit-log-table.tsx.
+  // When a stream finishes, ActivityLiveRefresher calls router.refresh(). That
+  // sends new props but keeps this component (and its useState) alive, so we
+  // copy the fresh `plays` prop into state here. Same pattern as
+  // browse-grid.tsx and audit-log-table.tsx.
   useEffect(() => {
-    // Only re-seed while the user is still on page 1. A live SSE refresh fires
-    // router.refresh() on every finished play, and re-seeding unconditionally
-    // threw away every page loaded via "Load more" — on a busy server the list
-    // snapped back to 20 rows mid-read, repeatedly, which made the button
-    // effectively unusable. Past page 1 the newest rows arrive on the next
-    // explicit load instead.
+    // Only while still on page 1: otherwise every finished stream would throw
+    // away the rows the user loaded with "Load more".
     if (page !== 1) return;
     setPlays(initialPlays);
     setHasMore(initialPlays.length >= 20);
@@ -188,10 +181,10 @@ export function ActivityRecentPlays({
       const filterParams = new URLSearchParams();
       filterParams.set("page", String(nextPage));
       filterParams.set("limit", "20");
-      // Page 1 is server-seeded from raw PlayHistory rows (admin/activity/page.tsx
-      // findMany, take 20), but /api/play-history defaults to collapsing
-      // referenceId chains — so paging without this offsets 20 into chain space
-      // and skips every chain ranked past the raw row count.
+      // Page 1 came from the server as 20 plain PlayHistory rows. The API
+      // normally groups related rows (referenceId chains) together, which would
+      // make "page 2" start at the wrong place and skip rows, so ask for
+      // ungrouped rows to match page 1.
       filterParams.set("ungrouped", "true");
       if (source) filterParams.set("source", source);
       if (mediaType) filterParams.set("mediaType", mediaType);
@@ -235,12 +228,10 @@ export function ActivityRecentPlays({
         userSource: p.mediaServerUser?.source ?? "",
         userThumb: p.mediaServerUser?.thumbUrl ?? null,
       }));
-      // De-dup by id. Pagination is OFFSET-based over a newest-first list, so a
-      // play finishing between page 1 and page 2 shifts every row down one and
-      // the next page repeats the row that straddled the boundary. That gives
-      // React duplicate keys, and — independently of keys — `expandedId === p.id`
-      // matches both copies, so clicking one expands both. The two sibling
-      // load-more lists (watch-history-list, notification-list) already do this.
+      // Skip rows we already have. Pages are counted by position in a
+      // newest-first list, so a play that finishes between loads pushes
+      // everything down one and the next page repeats a row. A duplicate would
+      // break React keys and make one click expand both copies.
       setPlays((prev) => {
         const seen = new Set(prev.map((p) => p.id));
         return [...prev, ...items.filter((p) => !seen.has(p.id))];
@@ -248,8 +239,8 @@ export function ActivityRecentPlays({
       setPage(nextPage);
       setHasMore(items.length >= 20);
     } catch (err) {
-      // Without this, a network failure rejected loadMore's promise as an
-      // unhandled rejection (it's wired straight to onClick with no await).
+      // onClick does not await loadMore, so a network error must be caught
+      // here or it becomes an unhandled promise rejection.
       console.error("[activity-recent-plays] load more failed:", err);
     } finally {
       setLoading(false);
@@ -462,8 +453,13 @@ export function ActivityRecentPlays({
                                   fontSize: 9.5,
                                   padding: "1px 5px",
                                   borderRadius: 999,
-                                  background: "oklch(1 0 0 / 0.06)",
-                                  color: sourceDotColor(p.source),
+                                  background: "color-mix(in oklab, var(--ds-fg) 6%, transparent)",
+                                  // Brand colours are fills; as text they are
+                                  // 2.0–2.5:1 on light surfaces (guardrail 42).
+                                  color:
+                                    p.source === "plex"
+                                      ? "var(--ds-plex-text)"
+                                      : "var(--ds-jellyfin-text)",
                                   letterSpacing: "0.04em",
                                   flexShrink: 0,
                                 }}

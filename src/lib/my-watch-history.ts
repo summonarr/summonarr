@@ -61,8 +61,8 @@ export interface MyWatchHistoryItem {
 
 export interface MyWatchHistoryPage {
   // false ⇒ the account has no linked MediaServerUser rows yet (linkage happens
-  // automatically by email match at ingest, by the caller's own Plex/Jellyfin
-  // sign-in identity, or manually by an admin). The UI uses this to explain
+  // automatically at ingest — by provider id, then email — or by the caller's
+  // own Plex/Jellyfin sign-in identity, or manually by an admin). The UI uses this to explain
   // WHY history is empty instead of showing a bare list.
   linked: boolean;
   items: MyWatchHistoryItem[];
@@ -110,8 +110,8 @@ interface RawGroupedRow {
 
 // Scope resolution: which media-server identities belong to the caller.
 // Two sources of truth, unioned:
-//   1. The explicit MediaServerUser.userId FK (email-matched at ingest, or
-//      linked manually by an admin).
+//   1. The explicit MediaServerUser.userId FK (set automatically at ingest by
+//      provider id or email — guardrail 34 — or linked manually by an admin).
 //   2. The caller's OWN provider identity (User.plexUserId/jellyfinUserId,
 //      bound at Plex/Jellyfin sign-in) matched against the MediaServerUser
 //      (source, sourceUserId) key. Jellyfin accounts frequently have no
@@ -155,12 +155,9 @@ export function linkedIdentityBranches(user: {
   // still be honored, which is the whole point of pinning.
   //
   // The provider-subject branches, however, are AUTOMATIC resolution, and guardrail 34
-  // requires those to skip a pinned row entirely. An admin's manual UNLINK clears
-  // `userId` and sets `manualUserLink`, so the FK branch correctly stopped matching —
-  // but the subject branches matched the very same row on plexUserId/jellyfinUserId
-  // and handed the history straight back, so the detach did nothing the user could
-  // see. The same slip re-surfaced a row an admin had deliberately re-assigned to a
-  // DIFFERENT account.
+  // requires those to skip a pinned row entirely (`manualUserLink: false`). Without
+  // that, an admin's manual unlink — or a re-assignment to a different account —
+  // would be undone here, because the subject id still matches the row.
   const branches: LinkedIdentityBranch[] = [{ userId: user.id }];
   if (user.plexUserId) {
     branches.push({ source: "plex", sourceUserId: user.plexUserId, manualUserLink: false });
@@ -413,11 +410,9 @@ export async function getMyWatchHistory(
   // Two aggregates, two deliberately different populations — do NOT collapse
   // them into one `aggregate()` call.
   //
-  // `plays` counts WATCHED sessions only, matching getPlayStatsForServerUsers
-  // ("plays" surfaces filter watched=true; raw counts are reserved for
-  // technical/resource analytics). Without that filter this page reported 818
-  // where My Stats reported 525 for the same account — the same headline word
-  // measuring two different things on two pages.
+  // `plays` counts WATCHED sessions only, matching getPlayStatsForServerUsers, so
+  // this page and My Stats report the same "plays" number for the same account.
+  // (Raw session counts are only used for technical/resource analytics.)
   //
   // `playSeconds` stays UNFILTERED, which is why the two pages already agreed
   // on watch time. A session that stopped below the watched threshold is still
@@ -540,7 +535,8 @@ const ANCHOR_SELECT = {
  *
  * The group membership mirrors the list query's identity ladder exactly:
  * tmdb identity (null-safe season/episode/mediaType equality, source-agnostic),
- * else same library item (source + sourceItemId), else the row alone.
+ * else same library item (source + serverInstance + sourceItemId), else the row
+ * alone.
  */
 export async function getMyWatchHistoryEntry(
   summonarrUserId: string,
@@ -564,11 +560,9 @@ export async function getMyWatchHistoryEntry(
       episodeNumber: anchor.episodeNumber,
     };
   } else if (anchor.sourceItemId != null) {
-    // serverInstance is part of the identity, matching the list query's consolidation
-    // key. A sourceItemId is server-local — two Plex servers reuse the same small
-    // integer ratingKeys — so without it this detail view expands into a group the LIST
-    // never formed: two unrelated unmatched titles merged, with their plays interleaved
-    // and their totals summed, disagreeing with the row the user clicked.
+    // serverInstance is part of the identity, matching the list query's group key.
+    // A sourceItemId is only unique within one server (two Plex servers reuse the
+    // same small ratingKeys), so without it two unrelated titles would merge here.
     groupWhere = {
       tmdbId: null,
       source: anchor.source,

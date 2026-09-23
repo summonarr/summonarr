@@ -103,7 +103,8 @@ jobs:
 
       # Source-tree scan: lockfile CVEs Trivy sees that npm audit may not, plus
       # Dockerfile/compose misconfiguration and committed secrets. `exit-code: 1`
-      # is the difference from trivy.yml, which is observability-only.
+      # is the difference from trivy.yml, whose push/PR runs never fail
+      # (only its weekly scheduled run does).
       - name: Trivy filesystem gate
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -171,11 +172,9 @@ jobs:
   #
   #   - CORRECTNESS: the pruned Prisma CLI's wasm get-config returns corrupted
   #     bytes under QEMU and reports every line of a valid schema as
-  #     unparseable, which blocked v0.25.0 twice. The Dockerfile currently
-  #     works around it by skipping that smoke test when cross-building — a
-  #     workaround this change makes unnecessary (see the follow-up note in
-  #     Dockerfile: with both halves native, the test can go back to
-  #     unconditional).
+  #     unparseable, which blocked v0.25.0 twice. With both halves native the
+  #     Dockerfile's smoke test runs unconditionally — never re-add a
+  #     cross-build skip there (see CLAUDE.md's Deployment section).
   #   - TIME: a cold emulated arm64 half exceeds 90 minutes on its own, and
   #     the v0.24.2 release was KILLED at 90:17 by the previous budget. GitHub
   #     records a job timeout as `cancelled`, so it read as a human hitting
@@ -204,9 +203,9 @@ jobs:
     # ~3 min warm-cache build because a cold FIRST run on the new arm64 cache
     # scope still has to do a full `npm ci` + `next build` from scratch.
     timeout-minutes: 60
-    # Unchanged from the single-job version — see the original rationale: skip
-    # the main-push build when the push carries a `chore(release):` commit,
-    # since the tag push publishes the same SHA with version tags + `:latest`.
+    # Skip the main-push build when the push carries a `chore(release):`
+    # commit: the tag push that follows publishes the same SHA with the
+    # version tags + `:latest`, so building here would just duplicate work.
     # `gate_only` exercises the security gate without publishing.
     if: |
       !inputs.gate_only && (
@@ -286,7 +285,7 @@ jobs:
       # the Security tab shows a single platform's findings.
       - name: Upload Trivy SARIF
         if: ${{ always() && steps.scan.outcome != 'skipped' }}
-        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
         with:
           sarif_file: trivy-publish-${{ matrix.arch }}.sarif
           category: trivy-publish-${{ matrix.arch }}

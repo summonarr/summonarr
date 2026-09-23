@@ -430,7 +430,7 @@ test("skipRatings bypasses the ratings pass — the ratings cache is never queri
 // ── per-user media-server visibility ────────────────────────────────────────
 
 test("no restricted server: both library queries scope to the default slug and the grants column is NEVER read", async () => {
-  // The cost contract for every deployment that hasn't opted in. `["" ]` is
+  // The cost contract for every deployment that hasn't opted in. `[""]` is
   // satisfied by every row in a single-server install, so results are unchanged,
   // and the per-user read that would otherwise ride on every discovery grid is skipped.
   plexLib.state.movie = [603];

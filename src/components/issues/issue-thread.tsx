@@ -20,8 +20,9 @@ interface IssueThreadProps {
   variant?: "inline" | "panel";
 }
 
-// Renders an issue's message thread and reply box; live-refreshes on the SSE
-// issuemessage:created event and polls once on mount.
+// Renders an issue's message thread and reply box. Loads the thread once on
+// mount, then reloads it whenever the server's live event stream (SSE) sends
+// an issuemessage:created event for this issue.
 export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
   const [messages, setMessages] = useState<IssueMessageData[]>([]);
   const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -30,8 +31,8 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
   const [sendError, setSendError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // Guardrail 16: toLocaleString output diverges between SSR and CSR
-  // (locale + timezone resolution). Empty string on the server, fill on mount.
+  // Guardrail 16: toLocaleString can differ between the server render and the
+  // browser (different locale/timezone). Show nothing until mounted in the browser.
   const mounted = useHasMounted();
 
   const loadMessages = useCallback(
@@ -100,7 +101,9 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
         setSendError(data.error ?? "Failed to send");
       } else {
         const msg: IssueMessageData = await res.json();
-        setMessages((prev) => [...prev, msg]);
+        // The server also sends an SSE event for this message, and the silent
+        // reload it triggers can land first — skip the append if it's already here.
+        setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
         setBody("");
         textareaRef.current?.focus();
       }
@@ -162,15 +165,15 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
           <p className="text-xs text-zinc-500 py-2">No messages yet. Start the conversation below.</p>
         )}
         {messages.map((msg) => {
-          // `email` is only selected for admins on GET and never on POST, and
-          // User.name is nullable — so this was `undefined` for a null-named
-          // author and `authorName[0]` below threw, blanking the whole thread.
+          // `name` can be null, and `email` is only sent to admins (never on a
+          // POST reply), so fall back to "Unknown" — `authorName[0]` below
+          // would throw on undefined and blank the whole thread.
           const authorName = msg.author.name ?? msg.author.email ?? "Unknown";
           const isAdmin = msg.fromAdmin;
           return (
             <div key={msg.id} className={`flex gap-2.5 ${isAdmin ? "flex-row-reverse" : "flex-row"}`}>
               <div className={`w-6 h-6 rounded-full shrink-0 flex items-center justify-center text-[10px] font-bold mt-0.5 ${
-                isAdmin ? "bg-indigo-700 text-white" : "bg-zinc-700 text-zinc-300"
+                isAdmin ? "bg-indigo-700 text-[var(--ds-accent-fg)]" : "bg-zinc-700 text-zinc-300"
               }`}>
                 {isAdmin ? <ShieldCheck className="w-3.5 h-3.5" /> : (authorName[0] ?? "?").toUpperCase()}
               </div>
@@ -178,7 +181,7 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
               <div className={`flex flex-col gap-0.5 max-w-[75%] ${isAdmin ? "items-end" : "items-start"}`}>
                 <div className={`px-3 py-2 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${
                   isAdmin
-                    ? "bg-indigo-600 text-white rounded-tr-sm"
+                    ? "bg-indigo-600 text-[var(--ds-accent-fg)] rounded-tr-sm"
                     : "bg-zinc-800 text-zinc-200 rounded-tl-sm"
                 }`}>
                   {msg.body}
@@ -204,7 +207,7 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
           maxLength={2000}
           rows={2}
           disabled={sending || loadState !== "ready"}
-          className="flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+          className="flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         />
         <Button
           type="submit"

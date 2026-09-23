@@ -26,7 +26,7 @@ export function StatsCharts({ data }: { data: MonthData[] }) {
             </div>
             <span className="text-[10px] text-zinc-500 tabular-nums">{label}</span>
             {label === "01" && (
-              <span className="text-[9px] text-zinc-700 -mt-0.5">{year}</span>
+              <span className="text-[9px] text-zinc-500 -mt-0.5">{year}</span>
             )}
           </div>
         );

@@ -1,4 +1,4 @@
-// Route-level unit tests for the five uncovered TRaSH Guides admin routes:
+// Route-level unit tests for the five TRaSH Guides admin routes:
 //   GET  /api/admin/trash-guides/status
 //   GET  /api/admin/trash-guides/spec/[id]
 //   POST /api/admin/trash-guides/refresh
@@ -33,11 +33,12 @@
 //      not exist" into a schemaDiagnostic hint so a pre-migration deployment gets
 //      an actionable message instead of a stack trace.
 //
-// Harness: real withAdmin-wrapped handlers, genuine signed session JWTs, a
-// synthetic Next request scope, in-memory prisma stubs, and a monkey-patched
-// `pg` Client.prototype for the advisory lock. applySpecs is observed through
-// the `trashSpec.findMany({ where: { id: { in: … } } })` it issues first — that
-// id list IS the set being pushed to the arr servers. No DB, no network.
+// Harness: real withAdmin-wrapped handlers, genuinely signed session JWTs, a
+// fake Next request scope, in-memory prisma stubs, and a patched `pg`
+// Client.prototype standing in for the Postgres advisory lock. We see what
+// applySpecs would push by watching the first query it makes,
+// `trashSpec.findMany({ where: { id: { in: … } } })` — that id list IS the set
+// sent to the arr servers. No DB, no network.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
@@ -58,8 +59,8 @@ const errors: string[] = [];
 console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" ")); };
 console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
 
-// GitHub (catalog pull) is the only outbound reach; keep it failing so
-// refreshCatalog exercises its error path without any real network.
+// Every outbound call (the GitHub catalog pull and the Radarr/Sonarr writes)
+// gets a 503, so the error paths run without any real network.
 const fetchCalls: URL[] = [];
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = new URL(String(input));
@@ -69,7 +70,7 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
   });
 }) as unknown as typeof fetch;
 
-// ── pg Client prototype stub (the withAdvisoryLock seam) ─────────────────────
+// ── pg Client prototype stub (what withAdvisoryLock talks to) ────────────────
 type PgResult = { rows: unknown[] };
 let pgLockCalls: Array<{ op: "try" | "unlock"; lockId: number }> = [];
 let lockAcquire: (lockId: number) => boolean = () => true;
@@ -338,8 +339,8 @@ beforeEach(() => {
   settings.clear();
   settings.set("trashGuidesEnabled", "true");
   // applySpecs resolves a Radarr/Sonarr connection before it does anything; with
-  // none configured it THROWS rather than returning a per-spec failure. RFC1918
-  // literals so the SSRF stack short-circuits DNS; the scripted fetch then 503s,
+  // none configured it THROWS rather than returning a per-spec failure. The URLs
+  // are private-range IPs so no DNS lookup happens; the scripted fetch then 503s,
   // which is the per-spec failure path we actually want to exercise.
   settings.set("radarrUrl", "http://10.0.0.11:7878");
   settings.set("radarrApiKey", "radarr-key");

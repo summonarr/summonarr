@@ -41,25 +41,18 @@ async function getVapidKeysRaw(): Promise<VapidKeys | null> {
   });
   const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
   if (!cfg.vapidPublicKey || !cfg.vapidPrivateKey) return null;
-  // RFC 8292 requires `sub` to be a URI. smtpFrom legitimately holds an RFC 5322
-  // header value (`Summonarr <noreply@host>` — email.ts consumes it as one), and
-  // concatenating that raw into `mailto:` produces an unparseable URI: push services
-  // that validate it reject the signed JWT, so every web push fails with nothing in
-  // the log pointing at the From address. Take the bracketed address when present.
   const contact = buildVapidContact(cfg.smtpFrom, cfg.smtpUser);
   return { publicKey: cfg.vapidPublicKey, privateKey: cfg.vapidPrivateKey, contact };
 }
 
-// RFC 8292 requires VAPID `sub` to be a URI. smtpFrom legitimately holds an RFC 5322
-// header value (`Summonarr <noreply@host>` — email.ts consumes it as one), and
-// concatenating that raw into `mailto:` produces an unparseable URI: push services that
-// validate it reject the signed JWT, so every web push fails with nothing in the log
-// pointing at the From address. Take the bracketed address when present.
+// Builds the VAPID contact ("sub"), which RFC 8292 requires to be a URI.
+// smtpFrom often holds a display-name address like `Summonarr <noreply@host>`.
+// Pasting that straight after `mailto:` makes an invalid URI, and push services
+// then reject every web push with no hint that the From address is the cause.
+// So we pull out the address inside the <...> brackets when there is one.
 //
-// Exported because there is a SECOND caller — /api/push/test — which built the contact
-// inline from the raw smtpFrom and so reproduced exactly this bug, making the admin
-// "send test notification" button fail on any deployment with a display-name From
-// while real notifications worked. One implementation, both call sites.
+// Exported so /api/push/test uses the same logic; it once built the contact
+// itself and hit exactly this bug.
 export function buildVapidContact(smtpFrom?: string | null, smtpUser?: string | null): string {
   const raw = (smtpFrom || smtpUser || "").trim();
   const addr = raw.match(/<([^>]+)>/)?.[1]?.trim() || raw;
@@ -67,14 +60,16 @@ export function buildVapidContact(smtpFrom?: string | null, smtpUser?: string | 
 }
 
 export async function getOrCreateVapidPublicKey(): Promise<string> {
-  // VAPID keys must never change after subscriptions are stored — changing them invalidates all existing push subscriptions
+  // VAPID keys must never change once subscriptions exist: new keys would
+  // invalidate every stored browser subscription.
   const existing = await getVapidKeysRaw();
   if (existing) return existing.publicKey;
 
   const generated = generateVapidKeys();
   try {
     await prisma.$transaction(async (tx) => {
-    // Advisory lock prevents two concurrent requests both generating and storing different key pairs
+    // A Postgres advisory lock stops two concurrent requests from each
+    // generating and saving a different key pair.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(1001, 5)`;
 
     const rows = await tx.setting.findMany({
@@ -83,13 +78,11 @@ export async function getOrCreateVapidPublicKey(): Promise<string> {
     const hasPublic = rows.some((r) => r.key === "vapidPublicKey");
     const hasPrivate = rows.some((r) => r.key === "vapidPrivateKey");
     if (hasPublic && hasPrivate) return;
-    // A partial keypair (exactly one half present) must NOT trigger a full
-    // regenerate — overwriting the surviving key invalidates every existing web
-    // push subscription. Backfill the missing half from the surviving one would
-    // be impossible (the secret half can't be derived from the public half), so
-    // the only safe move is to refuse and leave the stored half untouched. The
-    // outer getVapidKeysRaw() then returns null (both must be present), and web
-    // push stays disabled until an operator repairs the pair.
+    // Only one half present: do NOT regenerate. Overwriting the surviving key
+    // would invalidate every existing web push subscription, and the missing
+    // half can't be rebuilt from the other one. So refuse and leave the stored
+    // half alone. getVapidKeysRaw() keeps returning null (it needs both), and
+    // web push stays off until an operator repairs the pair.
     if (hasPublic || hasPrivate) {
       throw new VapidPartialKeypairError();
     }
@@ -162,33 +155,28 @@ const APNS_ALERTS: Record<ApnsCategory, { title: string; body: string }> = {
 // `apnsRelayUrl` Setting (e.g. to point at a self-hosted relay).
 const DEFAULT_APNS_RELAY_URL = "https://summonapns.gadgetusaf.com/push";
 
-// The relay config is two Setting rows that change only when an admin edits
-// them, but sendApns read them PER DEVICE — so a fan-out cost one findMany per
-// iOS row, not per user: a 50-title availability batch against 3-device users
-// issued 150 identical queries against the small Prisma pool. Memoized on the
-// same shape as omdb.ts's getApiKey (30s TTL + in-flight coalescing), which
-// exists for exactly this reason.
+// The relay config is two Setting rows that rarely change, but sendApns runs
+// once per iOS device. Reading them every time meant e.g. 150 identical queries
+// for a 50-title batch to 3-device users. So the config is cached for 30s, and
+// callers that arrive while a read is running share that one read (the same
+// pattern as omdb.ts's getApiKey).
 //
-// The memo holds the DECRYPTED relay key in process memory for the TTL. That is
-// not a new class of exposure — omdb.ts already memoizes an API key on the same
-// basis — but it is worth stating rather than leaving implicit.
+// Note: the cache holds the DECRYPTED relay key in memory for up to 30s, just
+// as omdb.ts does with its API key.
 const APNS_RELAY_TTL_MS = 30_000;
 let apnsRelayCache: { value: { url: string; key: string }; at: number } | null = null;
 let apnsRelayInflight: Promise<{ url: string; key: string }> | null = null;
 
-/**
- * Drops the memo. Called by /api/settings after a relay write — without it the
- * admin flow is "save the relay key, press Send test notification", and that
- * test would run against a config up to 30s stale, which is precisely the
- * interaction an operator uses to check the change landed.
- */
-// Bumped by every invalidation; an in-flight read only populates the cache if
-// no invalidation landed while it was running. Nulling the two variables alone
-// cannot stop a promise that is already reading — its .then would re-cache the
-// PRE-invalidation value with a fresh 30s TTL, which is exactly the window the
-// admin's "save relay key → send test notification" flow hits.
+// Bumped by every invalidation. A read that was already running only saves
+// its result if no invalidation happened meanwhile; otherwise it would put the
+// OLD value back into the cache for another 30s.
 let apnsRelayEpoch = 0;
 
+/**
+ * Clears the cache. Called by /api/settings after a relay change, so the
+ * admin's usual "save the relay key, then press Send test notification" check
+ * uses the new config instead of one up to 30s old.
+ */
 export function invalidateApnsRelayCache(): void {
   apnsRelayEpoch += 1;
   apnsRelayCache = null;
@@ -268,10 +256,11 @@ async function sendApns(subscription: PushRow, payload: PushPayload): Promise<bo
       timeoutMs: 10_000,
     });
     if (!res.ok) {
-      // Non-200 is not retried and the token is kept (5xx / timeouts are
-      // transient; the usual unregistered pruning happens on the 200 path
-      // below). Parse the relay's JSON error body when present so the log says
-      // WHY — and so an explicitly-permanent APNs reason can still prune.
+      // A non-2xx answer is not retried, and the device token is normally kept
+      // (5xx and timeouts are temporary; the usual "unregistered" cleanup is on
+      // the success path below). Read the relay's JSON error body, if any, so
+      // the log says WHY, and so a clearly permanent APNs reason can still
+      // delete the dead token.
       const errBody = (await res.json().catch(() => null)) as
         | { error?: string; reason?: string; apnsReason?: string }
         | null;
@@ -290,11 +279,10 @@ async function sendApns(subscription: PushRow, payload: PushPayload): Promise<bo
       } else {
         console.error(`[push] APNs relay HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
       }
-      // APNs Unregistered / BadDeviceToken is permanent — the install is gone. If the
-      // relay surfaces it on a non-2xx instead of the 200 + reason path, keeping the
-      // row means every later fan-out burns a relay round-trip on a dead token AND the
-      // dead row keeps consuming the per-user subscription cap, evicting a live device.
-      // Only these two explicit reasons prune; any other failure stays transient.
+      // APNs "Unregistered" / "BadDeviceToken" is permanent: the app install is
+      // gone. Keeping the row would waste a relay call on every later send, and
+      // the dead row would still count toward the per-user device limit and push
+      // out a live device. Only these two reasons delete the row.
       if (/unregistered|baddevicetoken/i.test(`${errBody?.apnsReason ?? ""} ${errBody?.reason ?? ""}`)) {
         await prisma.pushSubscription.deleteMany({ where: { endpoint: subscription.endpoint } });
       }
@@ -348,13 +336,10 @@ export async function sendApnsTestToUser(
 export async function sendAppUpdateNoticeToAllIos(): Promise<{ sent: number; failed: number }> {
   const subs = await prisma.pushSubscription.findMany({
     // A disabled account keeps its PushSubscription rows (guardrail 33 — the
-    // deactivate write set is exactly two fields), so without this a removed
-    // user gets a push telling them to update an app they can no longer sign
-    // into. This was the only fan-out in the file missing the filter; the four
-    // siblings all carry it. Guardrail 33's two chokepoints cannot cover this
-    // one — both are keyed on a request, and a broadcast has neither a request
-    // nor a requester — so the filter belongs on the query, exactly as it does
-    // in getAdminSubscriptions.
+    // deactivate write set is exactly two fields), so without this filter a
+    // removed user would be told to update an app they can no longer sign
+    // into. Guardrail 33's two notification chokepoints are keyed on a request,
+    // and a broadcast has none, so the filter has to live on this query.
     where: { platform: "ios", user: { deactivatedAt: null } },
   });
   const payload: PushPayload = {
@@ -387,7 +372,8 @@ async function pushContext(): Promise<{ keys: VapidKeys | null } | null> {
 }
 
 async function getAdminSubscriptions(excludeUserId?: string) {
-  // Bitmask: MANAGE_REQUESTS holders (new requests, deletion votes, manual arr interaction).
+  // Recipients are users whose permissions include MANAGE_REQUESTS (used for
+  // new requests, deletion votes and manual *arr imports).
   const subs = await prisma.pushSubscription.findMany({
     // A disabled account keeps its PushSubscription rows (guardrail 33 — the
     // deactivate write set is exactly two fields), so its devices would keep
@@ -451,7 +437,8 @@ async function sendPush(
     return true;
   } catch (err: unknown) {
     const status = (err as { statusCode?: number }).statusCode;
-    // 410 Gone / 404 Not Found means the subscription was revoked by the browser — remove it to stop retrying
+    // 410 Gone / 404 Not Found: the browser revoked this subscription, so
+    // delete it rather than keep sending to it.
     if (status === 410 || status === 404) {
       await prisma.pushSubscription.deleteMany({ where: { endpoint: subscription.endpoint } });
     } else {
@@ -599,11 +586,11 @@ export async function notifyAdminsIssueMessagePush(data: {
   }
 }
 
-// Outcome of an admin push send attempt. Lets the webhook caller distinguish
-// "user has no subs / no VAPID configured" (don't retry, but the notification
-// channel was effectively a no-op — caller may want to backstop via email or
-// Discord) from "delivered" (success) and "failed" (retryable network/transport
-// error).
+// Result of the grab-complete push, read by the Radarr/Sonarr webhooks:
+// - "delivered": at least one device got it.
+// - "skipped-no-subs" / "skipped-no-keys": nothing could be sent (no devices,
+//   push turned off, or only web devices and no VAPID keys). Retrying won't help.
+// - "failed": a send was attempted and failed; the webhook retries later.
 export type AdminGrabPushOutcome =
   | "delivered"
   | "skipped-no-subs"
@@ -630,6 +617,10 @@ export async function notifyAdminGrabCompletedPush(data: {
       where: { userId: data.userId, user: { deactivatedAt: null } },
     });
     if (!subs.length) return "skipped-no-subs";
+    // Web devices need VAPID keys; iOS devices do not. With no keys and no iOS
+    // device nothing can be sent, and reporting "failed" would make the webhook
+    // retry forever.
+    if (!ctx.keys && !subs.some((s) => s.platform === "ios")) return "skipped-no-keys";
 
     let scopeLabel = "";
     if (data.scope === "EPISODE" && data.seasonNumber != null && data.episodeNumber != null) {
@@ -763,8 +754,7 @@ export async function notifyUsersRequestsAvailablePush(
         category: "available",
         deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
       };
-      // Send to ALL of the user's devices — matches the approved/declined push
-      // siblings; previously only userSubs[0] got the "now available" push.
+      // Send to every one of the user's devices, like the approved/declined pushes.
       return userSubs.map((s) => ({ sub: s, payload }));
     });
     // Bounded fan-out (guardrail 31): a large sync can flip a whole backlog to
@@ -906,14 +896,12 @@ export async function notifyAdminsNewIssuePush(data: {
   }
 }
 
-// Radarr/Sonarr fire ManualInteractionRequired when a grabbed release can't be imported
-// automatically and is parked in the queue waiting for an operator. Best-effort push to all
-// admins so they know to go resolve it; there's nothing to mark available.
-// `instanceName` is the Radarr/Sonarr INSTANCE's display name (registry `name`,
-// e.g. "Default", "4K", "Anime") — never the download client. The webhook payload's
-// `downloadClient` ("SABnzbd", "qBittorrent") used to fill this slot, which told the
-// admin where the file sits but not which *arr queue to open to resolve it; with
-// several instances that is the one thing they need to know.
+// Radarr/Sonarr send ManualInteractionRequired when a downloaded release can't
+// be imported automatically and waits in the queue for a person. This is a
+// best-effort push telling admins to go sort it out.
+// `instanceName` is the Radarr/Sonarr INSTANCE's display name (e.g. "Default",
+// "4K", "Anime"), never the download client (e.g. "SABnzbd"): with several
+// instances, the admin needs to know which queue to open.
 export async function notifyAdminsManualInteractionRequiredPush(data: {
   service: "Radarr" | "Sonarr";
   title: string;

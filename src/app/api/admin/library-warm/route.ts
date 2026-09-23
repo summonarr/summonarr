@@ -10,7 +10,9 @@ const COOLDOWN_KEY = "lastLibraryWarmAt";
 export const POST = withAdmin(async (_req, _ctx, session) => {
   const now = Date.now();
 
-  // Atomic upsert acts as a distributed CAS: only succeeds if the cooldown window has elapsed
+  // One atomic SQL statement claims the cooldown (a compare-and-swap): it only
+  // writes — and returns 1 row — when the last warm is 5+ minutes old, so two
+  // clicks at the same moment can't both start a warm.
   const claimed = await prisma.$executeRaw`
     INSERT INTO "Setting" (key, value, "updatedAt")
     VALUES (${COOLDOWN_KEY}, ${String(now)}, NOW())

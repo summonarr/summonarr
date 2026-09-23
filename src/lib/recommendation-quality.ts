@@ -14,17 +14,13 @@ import type { TmdbMedia } from "./tmdb-types";
 // with OMDB filling gaps, plus TMDB's own score which every candidate already
 // carries.
 //
-// EVIDENCE-WEIGHTED, IMDb-led. The original prior took an unweighted mean over
-// whichever sources answered and applied it at one fixed strength — so a lone
-// Trakt percentage re-ranked a title exactly as hard as IMDb + RT + Metacritic
-// in agreement, and an IMDb score backed by a million votes counted no more
-// than one backed by three hundred, even though both providers ship the vote
-// count. Now each source carries a weight (IMDb's grows with its vote depth —
-// it is the deepest vote base any of these providers has, which is why it
-// anchors the blend), the quality figure is the weighted mean, and the
-// multiplier's strength scales with the total evidence behind it: a verdict
-// corroborated by deep-voted IMDb plus the critic aggregates pulls harder than
-// the old prior ever did, while a thin single-source opinion barely registers.
+// EVIDENCE-WEIGHTED, IMDb-led. Each source has a weight, and the quality figure
+// is the weighted average. IMDb's weight grows with its vote count (it has the
+// most voters of any source, so it anchors the blend). The multiplier's
+// strength also grows with the total weight behind the verdict: IMDb with many
+// votes plus the critic scores pulls hard, while one thin source (say, a lone
+// Trakt percentage) barely moves anything. An unweighted average would let
+// that lone source re-rank a title as hard as IMDb + RT + Metacritic agreeing.
 //
 // Still deliberately centred: NEUTRAL is roughly the mean rating of a
 // mainstream title, so the multiplier only pulls a candidate away from its
@@ -36,14 +32,11 @@ import type { TmdbMedia } from "./tmdb-types";
 // tail-of-/similar junk used to outrank known-mediocre titles the prior had
 // pulled down.
 
-// Ceiling strength of the prior. Never applied bare: the effective strength is
+// Maximum strength of the prior. It is never used alone: the real strength is
 // QUALITY_WEIGHT × confidence, where confidence = evidence/(evidence + PIVOT)
-// saturates toward 1 as source weight accumulates. Deep-voted IMDb plus the
-// critic aggregates lands around 0.75 effective — a stronger pull than the old
-// flat 0.5, which is the point of the rework — while a lone thin source gets
-// ~0.2-0.3, weaker than it used to wield. Raising the ceiling without the
-// confidence term would resurrect exactly the single-source yank the term
-// exists to prevent.
+// climbs toward 1 as more source weight piles up. IMDb with many votes plus the
+// critic scores lands around 0.75; a lone thin source around 0.2-0.3. Dropping
+// the confidence term would let a single source swing a title too hard.
 export const QUALITY_WEIGHT = 0.9;
 export const QUALITY_NEUTRAL = 0.65;
 export const QUALITY_CONFIDENCE_PIVOT = 1.0;
@@ -186,29 +179,23 @@ export function withTmdbTerm(
   return { quality: (verdict.quality * verdict.evidence + value * weight) / evidence, evidence };
 }
 
-// The score multiplier a verdict earns. ONE definition, shared by the per-user
-// engine and by anything that wants to reason about a precomputed verdict —
-// the two used to be the same inline expression in one place, and splitting the
-// storage of a verdict from its application is exactly how they would drift.
+// The score multiplier a verdict earns. Kept as ONE shared function so every
+// caller applies stored verdicts the same way.
 //
-// A null verdict means not one provider answered. For a title with a real
-// audience that stays neutral — "unrated" usually means the providers just
-// don't cover it. But a null verdict on a title ALMOST NOBODY HAS RATED
-// ANYWHERE (under the same 50-vote bar the TMDB term uses) is the suggestion
-// tail's obscure junk, and it used to keep its full relevance score while
-// properly-rated 6.0 titles were pulled DOWN — mediocre-but-known lost to
-// unknown. The damp is bounded and mild — 0.9 sits inside the band a mediocre-
-// rated title lands in, so obscurity reads as "probably middling", never as
-// known-bad.
+// A null verdict means no provider answered. For a title with a real audience
+// that stays neutral (1.0): "unrated" usually just means the providers don't
+// cover it. But if almost nobody has rated it anywhere (under the same 50-vote
+// bar the TMDB term uses), it is likely obscure filler from the end of a
+// suggestion list, and without a penalty it would outrank known 6/10 titles
+// that the prior pulled down. The penalty is mild: 0.9 is about where a
+// middling title lands, so "obscure" reads as "probably average", not "bad".
 export function qualityMultiplier(verdict: QualityVerdict | null, tmdbVoteCount: number): number {
   if (verdict === null) {
     return tmdbVoteCount < MIN_TMDB_VOTES_FOR_QUALITY ? OBSCURITY_DAMP : 1;
   }
-  // Confidence saturates with evidence: one full-weight source (a critic
-  // aggregate) applies the prior at half its ceiling; deep-voted IMDb plus the
-  // critics push it toward ~0.85 of it; a lone thin source stays a nudge. This
-  // is what lets the ceiling above sit higher than the old flat weight without
-  // handing single sources a bigger yank than they ever had.
+  // Confidence grows with evidence: one full-weight source (a critic score)
+  // applies the prior at half strength; IMDb with many votes plus the critics
+  // reach ~0.85 of it; a lone thin source stays a small nudge.
   const confidence = verdict.evidence / (verdict.evidence + QUALITY_CONFIDENCE_PIVOT);
   return 1 + QUALITY_WEIGHT * confidence * (verdict.quality - QUALITY_NEUTRAL);
 }

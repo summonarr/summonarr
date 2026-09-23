@@ -231,7 +231,7 @@ export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, str
                     {SPREAD_COLUMNS.map((c) => {
                       const changed = preview.result.proposed![c.key] !== preview.result.current![c.key];
                       return (
-                        <td key={c.key} className={`text-right tabular-nums px-2 py-1 ${changed ? "text-white font-semibold" : ""}`}>
+                        <td key={c.key} className={`text-right tabular-nums px-2 py-1 ${changed ? "text-zinc-100 font-semibold" : ""}`}>
                           {preview.result.proposed![c.key]}
                         </td>
                       );

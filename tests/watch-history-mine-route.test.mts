@@ -24,7 +24,7 @@
 //      titles never merge just because their ids are null.
 //   6. Filters (mediaType, ILIKE-escaped literal search) and the keyset cursor
 //      page within the caller's scope; all-time stats ignore both filters AND
-//      consolidation (raw play counts).
+//      consolidation (a count of every WATCHED row, not of grouped entries).
 //
 // Harness: the sessions-routes idiom — real signed session JWTs (bearer
 // transport, which skips the UA-fingerprint binding per guardrail 6b) against
@@ -228,10 +228,11 @@ shadowPrismaModel(prisma, "playHistory", {
 });
 
 // ── raw-SQL mirror ───────────────────────────────────────────────────────────
-// Evaluates the grouped page/count queries over the in-memory rows by parsing
-// bind positions out of the SQL shape the lib emits. Mirrors the identity
-// ladder exactly; divergence between this mirror and the real SQL is what the
-// live-Postgres verification exists to catch.
+// Runs the grouped page/count queries over the in-memory rows, finding each
+// bound value's position by parsing the SQL text the lib emits. Rows are
+// grouped the same way the real SQL does (tmdb id first, then sourceItemId,
+// then the row itself — see groupKey). If this copy and the real SQL ever
+// disagree, only a check against a real Postgres would notice.
 
 function groupKey(r: HistoryRow): string {
   if (r.tmdbId != null) {

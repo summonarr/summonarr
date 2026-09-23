@@ -13,8 +13,8 @@
 //      next column-0 declaration, a comment documenting the NEXT handler is
 //      attributed to the PREVIOUS one.
 //
-// Fixtures use handler forms that actually occur in this codebase (verified
-// across all 157 route files): direct wrapper calls, curried withPermission,
+// Fixtures use handler forms that actually occur in this codebase's route
+// files: direct wrapper calls, curried withPermission,
 // bare functions with inline isCronAuthorized, local-helper indirection, and the
 // two-statement shared alias in cron/trash-diagnostic. Brace re-exports do NOT
 // occur today — they are the synthetic case the parser must still refuse to
@@ -196,8 +196,9 @@ test("PIN: a comment documenting the next handler does not arm the handler decla
 test("stripComments preserves `//` inside string literals", () => {
   const src = 'const url = "https://example.com/x"; // trailing note\nconst withAdmin = 1;\n';
   const out = stripComments(src);
-  assert.match(out, /https:\/\/example\.com\/x/);
-  assert.doesNotMatch(out, /trailing note/);
+  // Exact comparison: the string literal (with its `//`) survives, the real
+  // trailing comment is gone, and line breaks are kept.
+  assert.equal(out, 'const url = "https://example.com/x"; \nconst withAdmin = 1;\n');
 });
 
 test("stripComments keeps line structure so column-0 anchoring still works", () => {

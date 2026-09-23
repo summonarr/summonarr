@@ -392,8 +392,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
       return NextResponse.json({ error: "This request has been permanently denied" }, { status: 403 });
     }
     // An ordinary (non-permanent) decline is not terminal — let the user
-    // re-request: delete the stale DECLINED row and fall through to a fresh
-    // create. APPROVED/AVAILABLE/PENDING still block with a 409.
+    // re-request: remember the stale DECLINED row (it is deleted inside the tx
+    // below) and fall through to a fresh create. APPROVED/AVAILABLE/PENDING
+    // still block with a 409.
     if (existing.status === "DECLINED") {
       staleDeclinedId = existing.id;
     } else {

@@ -15,8 +15,12 @@ const inputStyle: React.CSSProperties = {
   color: "var(--ds-fg)",
   border: "1px solid var(--ds-border)",
   borderRadius: 6,
-  colorScheme: "dark",
 };
+
+// The native date picker's indicator follows `color-scheme`, which must track
+// the app theme: a fixed `dark` drew a white calendar icon on the light theme's
+// white field. `dark:` keys off the <html class="dark"> the theme toggles.
+const dateInputClass = "dark:[color-scheme:dark]";
 
 function SegGroup<T extends string>({
   label,
@@ -107,6 +111,7 @@ function SelectField({
       </span>
       <select
         value={value}
+        aria-label={label}
         onChange={(e) => onChange(e.target.value)}
         style={{
           fontFamily: "inherit",
@@ -226,6 +231,7 @@ export function HistoryFilterBar({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search by title, user, or IP…"
+            aria-label="Search plays"
             style={{
               fontFamily: "inherit",
               fontSize: 12.5,
@@ -276,7 +282,9 @@ export function HistoryFilterBar({
         >
           <input
             type="date"
+            className={dateInputClass}
             value={fromDate}
+            aria-label="From date"
             onChange={(e) => setFromDate(e.target.value)}
             style={{
               ...inputStyle,
@@ -291,7 +299,9 @@ export function HistoryFilterBar({
           </span>
           <input
             type="date"
+            className={dateInputClass}
             value={toDate}
+            aria-label="To date"
             onChange={(e) => setToDate(e.target.value)}
             style={{
               ...inputStyle,

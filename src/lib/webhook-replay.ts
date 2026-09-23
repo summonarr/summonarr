@@ -2,10 +2,11 @@ import { createHash } from "node:crypto";
 import { Prisma } from "@/generated/prisma";
 import { prisma } from "@/lib/prisma";
 
-// 24-hour TTL covers Sonarr/Radarr long retry windows; Plex/Jellyfin retries are much shorter
+// How long a delivery is remembered. 24 hours covers Sonarr/Radarr's long retry windows.
 const TTL_MS = 24 * 60 * 60 * 1000;
 
-// Digest binds source + secret + body so replays to a different endpoint or with a different secret are distinct keys
+// The hash covers source + secret + body, so the same body sent to a different
+// endpoint, or with a different secret, gets its own key.
 function digest(source: string, secret: string, body: string): string {
   const h = createHash("sha256");
   h.update(source);
@@ -28,8 +29,8 @@ function canonicalize(value: unknown): unknown {
   return out;
 }
 
-// JSON-payload digest for the Sonarr/Radarr webhook handlers (the only callers; both parse JSON).
-// Canonicalizes key order before hashing so a replay with reordered fields still hits the same key.
+// Digest for a parsed JSON webhook body (Sonarr/Radarr are the only callers).
+// Keys are sorted first, so a replay with reordered fields still gets the same key.
 function digestForJson(source: string, secret: string, parsedJson: unknown): string {
   return digest(source, secret, JSON.stringify(canonicalize(parsedJson)));
 }
@@ -46,22 +47,21 @@ export async function checkAndRecordWebhookJson(
 async function checkAndRecordDigest(key: string): Promise<boolean> {
   const now = new Date();
 
-  // Atomic create-or-detect: a parallel webhook with the same digest can't slip past a
-  // findUnique-then-upsert window. If create succeeds, this is the first delivery; if it
-  // fails with P2002, the row already exists and we treat it as a replay (refresh TTL).
+  // Insert first, then look at the result. Doing it in one step means two identical
+  // webhooks arriving together can't both pass a "read, then write" check. A
+  // successful insert means this is the first delivery; a P2002 (unique
+  // violation) means the row already exists.
   try {
     await prisma.webhookReplay.create({
       data: { digest: key, expiresAt: new Date(Date.now() + TTL_MS) },
     });
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
-      // The row already exists. Refreshing the TTL with a conditional CAS
-      // (WHERE expiresAt <= now) closes the expired-row TOCTOU: two concurrent
-      // deliveries arriving after expiry would both read expiresAt<=now and both
-      // proceed if the refresh were unconditional. With the guarded updateMany,
-      // exactly one delivery flips the expired row (count===1 ⇒ it owns this
-      // delivery); any other (still-live row, or the loser of the expired race)
-      // sees count===0 and is treated as a replay.
+      // The row already exists. If it has expired, the delivery is allowed
+      // again. The update only matches an EXPIRED row (expiresAt <= now), so when
+      // two deliveries race after expiry exactly one of them renews it
+      // (count === 1) and proceeds. Everyone else — a still-live row, or the
+      // loser of that race — sees count === 0 and is treated as a replay.
       const refreshed = await prisma.webhookReplay.updateMany({
         where: { digest: key, expiresAt: { lte: now } },
         data: { expiresAt: new Date(Date.now() + TTL_MS) },
@@ -103,8 +103,7 @@ export async function clearWebhookReplayDigestJson(
       err instanceof Prisma.PrismaClientKnownRequestError &&
       err.code === "P2025"
     ) {
-      // Row already gone — handler succeeded against the source-side retry but
-      // the local cleanup raced. Benign.
+      // The row is already gone (e.g. the expiry sweep removed it). Nothing to do.
       return;
     }
     console.warn(

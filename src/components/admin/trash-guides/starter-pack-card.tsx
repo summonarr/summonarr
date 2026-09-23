@@ -80,6 +80,9 @@ export function StarterPackCard({
     () => items.filter((i) => i.spec && i.item.recommended).map((i) => i.spec!.id),
     [items],
   );
+  // Pre-select the recommended specs, but only when the set of available specs
+  // actually changes. A reload after Apply returns the same set, so the admin's
+  // own picks are kept.
   useEffect(() => {
     const key = resolvedIds.slice().sort().join(",");
     if (key !== lastResolvedKeyRef.current) {
@@ -142,6 +145,7 @@ export function StarterPackCard({
       setRefreshState("error");
       setRefreshError({ errors: [err instanceof Error ? err.message : String(err)] });
     }
+    // Clear a success message after 3s; an error stays until the next click.
     setTimeout(() => setRefreshState((s) => (s === "error" ? s : "idle")), 3000);
   }
 
@@ -202,7 +206,7 @@ export function StarterPackCard({
               <Sparkles className="w-5 h-5 text-indigo-300" />
             </div>
             <div>
-              <h2 className="font-semibold text-white text-lg">Profile Library</h2>
+              <h2 className="font-semibold text-zinc-100 text-lg">Profile Library</h2>
               <p className="text-sm text-zinc-400 mt-0.5 max-w-2xl">
                 Every TRaSH quality profile, naming scheme, and quality-size template in the catalog. The{" "}
                 <span className="text-indigo-300">Recommended</span> baseline for 1080p movies and TV is pre-selected;
@@ -215,7 +219,7 @@ export function StarterPackCard({
               type="button"
               onClick={handleRefresh}
               disabled={refreshState === "running"}
-              className="bg-zinc-800 hover:bg-zinc-700 text-white"
+              className="bg-zinc-800 hover:bg-zinc-700 text-zinc-100"
               title="Pull the latest catalog from TRaSH"
             >
               {refreshState === "running"
@@ -226,7 +230,7 @@ export function StarterPackCard({
               type="button"
               onClick={handleApply}
               disabled={!canApply || applyState === "running"}
-              className="bg-indigo-600 hover:bg-indigo-500 text-white"
+              className="bg-indigo-600 hover:bg-indigo-500 text-[var(--ds-accent-fg)]"
             >
               {applyState === "running"
                 ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Applying…</>
@@ -236,11 +240,11 @@ export function StarterPackCard({
         </div>
 
         {catalogEmpty && (
-          <div className="mb-4 p-3 rounded-md bg-amber-500/10 border border-amber-500/30 flex items-start gap-2 text-xs text-amber-200">
+          <div className="mb-4 p-3 rounded-md bg-amber-500/10 border border-amber-500/30 flex items-start gap-2 text-xs text-amber-400">
             <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
             <div>
               <p className="font-medium">Catalog is empty</p>
-              <p className="mt-0.5 text-amber-300/80">
+              <p className="mt-0.5 text-zinc-400">
                 Click <span className="font-semibold">Refresh Catalog</span> above to pull the TRaSH catalog into the database. This takes ~20 s the first time; subsequent refreshes only fetch changed specs.
               </p>
             </div>
@@ -259,7 +263,7 @@ export function StarterPackCard({
                 type="button"
                 onClick={selectRecommended}
                 disabled={recommendedIds.length === 0 || recommendedSelected}
-                className="px-2 py-0.5 rounded bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="px-2 py-0.5 rounded bg-indigo-600/30 hover:bg-indigo-600/20 text-zinc-100 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Recommended ({recommendedIds.length})
               </button>
@@ -275,7 +279,7 @@ export function StarterPackCard({
                 <button
                   type="button"
                   onClick={clearAll}
-                  className="px-2 py-0.5 text-zinc-400 hover:text-white"
+                  className="px-2 py-0.5 text-zinc-400 hover:text-zinc-100"
                 >
                   Clear ({selected.size})
                 </button>

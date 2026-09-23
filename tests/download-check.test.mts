@@ -598,8 +598,9 @@ test("no third copy of the check body: only download-check.ts and the orchestrat
   assert.match(text, /scheduleDelayed\(DOWNLOAD_CHECK_DELAY_MS/);
   assert.match(text, /console\.error\("\[download-check\]/, "the wrapper must swallow-and-log, never reject into the job pool");
 
-  // The two legitimate importers. /api/sync/route.ts is the periodic backstop that
-  // sweeps elapsed pendingNotifyAt rows; anything else means the body was re-inlined.
+  // The only two files allowed to call the notifiers. /api/sync/route.ts is the
+  // periodic backstop that sweeps overdue pendingNotifyAt rows; any other caller
+  // means someone copied the check body back in.
   const ALLOWED = new Set(["src/lib/download-check.ts", "src/app/api/sync/route.ts"]);
   const offenders = walkSrc()
     .filter((f) => f !== "src/lib/discord-notify.ts" && /notifyUserDownloadPending|notifyUserAwaitingRelease/.test(src(f)))

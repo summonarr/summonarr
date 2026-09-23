@@ -121,8 +121,8 @@ async function buildArrPathMap(mediaType: "MOVIE" | "TV"): Promise<Map<string, n
         const cfg = await getArrCfg(service, inst.slug);
         if (!cfg) continue;
         // arrFetch (not a bare safeFetchAdminConfigured): it carries the 50 MB body
-        // cap. The default 10 MB silently truncated large libraries (guardrail 5 /
-        // commit c7902db), leaving every arrVerdict past the cut null with no log.
+        // cap. The default 10 MB silently truncated large libraries (guardrail 5),
+        // leaving every arrVerdict past the cut null with no log.
         // arrFetch throws ArrResponseError on non-2xx, handled by the catch below.
         const items = await arrFetch<ArrItem[]>(cfg, `/api/v3/${endpoint}`);
         for (const item of items) {

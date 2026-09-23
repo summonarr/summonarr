@@ -22,11 +22,14 @@ export default async function SetupPage() {
       <div className="w-full max-w-md">
         <div className="flex flex-col items-center mb-8">
           <div className="w-14 h-14 rounded-2xl bg-indigo-600 flex items-center justify-center mb-4">
-            <svg className="w-7 h-7 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <svg className="w-7 h-7 text-[var(--ds-accent-fg)]" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden>
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 4v16M17 4v16M3 8h4m10 0h4M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z" />
             </svg>
           </div>
-          <h1 className="text-2xl font-bold text-white">Welcome to {siteTitle}</h1>
+          {/* 22px/600 — the same scale as PageHeader inside the app. */}
+          <h1 className="m-0 font-semibold text-center" style={{ fontSize: 22, color: "var(--ds-fg)" }}>
+            Welcome to {siteTitle}
+          </h1>
           <p className="text-zinc-400 text-sm mt-1 text-center">
             Create your admin account to get started.
           </p>

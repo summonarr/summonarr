@@ -27,9 +27,9 @@ export interface TrashPageContext {
   serviceConfigured: boolean;
 }
 
-// Shared auth + service/instance-resolution for every TRaSH sub-page. The layout already enforces
-// ADMIN, but each page is its own server component and Next won't run the layout's redirect inside
-// it, so we re-check here as a defense-in-depth measure.
+// Shared auth + service/instance lookup for every TRaSH sub-page. The layout already checks for
+// ADMIN, but Next can render a page without re-running its layout (e.g. on a prefetch or a
+// client-side navigation), so each page re-checks here too (guardrail 29).
 export async function loadTrashPageContext(
   searchParams: TrashPageSearchParams,
 ): Promise<TrashPageContext> {

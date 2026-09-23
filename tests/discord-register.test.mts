@@ -10,13 +10,21 @@
 // entirely on an unchanged schema so a crash-looping container can't burn the
 // global-command rate limit.
 //
-// No network: globalThis.fetch is scripted. No DB: prisma.setting is an
-// in-memory shadow (the jellyfin-config/poster-cache idiom).
+// No network: globalThis.fetch is scripted and dns.lookup is stubbed.
+// No DB: prisma.setting is an in-memory shadow (the jellyfin-config/poster-cache idiom).
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import dns from "node:dns/promises";
 
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32); // prisma.ts pulls in token-crypto
 process.env.NEXTAUTH_SECRET = "discord-register-test-secret-0123456789ab";
+
+// ── DNS stub ────────────────────────────────────────────────────────────────
+// safeFetchTrusted resolves discord.com (its SSRF check) before calling fetch.
+// Without this stub the test would make a real DNS query and fail offline.
+const fakeLookup = async () => [{ address: "93.184.216.34", family: 4 }];
+(dns as { lookup: unknown }).lookup = fakeLookup;
+if ((dns as { lookup: unknown }).lookup !== fakeLookup) throw new Error("could not stub dns.lookup");
 
 // ── console capture ─────────────────────────────────────────────────────────
 const warns: string[] = [];

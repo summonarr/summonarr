@@ -286,11 +286,11 @@ test("LRU eviction at MAX_KEYS gives the evicted (oldest) key a fresh bucket", (
 // ── reserve-then-refund (the login gate) ───────────────────────────────────
 
 test("concurrent attempts cannot all pass the gate — reserving is atomic where peeking was not", () => {
-  // peekRateLimit is synchronous, but the password verify between it and
-  // recordFailure is AWAITED, so N concurrent sign-in attempts every one observed an
-  // under-limit bucket and every one got a real password verification regardless of
-  // the limit. This simulates that interleaving: gate all attempts BEFORE any of them
-  // reports its outcome.
+  // peekRateLimit itself is synchronous, but the password check that ran between it
+  // and recordFailure is AWAITED. So when N sign-in attempts arrived together, each
+  // one peeked before any had failed, saw an under-limit bucket, and got a real
+  // password check no matter the limit. This simulates that: every attempt passes
+  // the gate BEFORE any of them reports its outcome.
   const key = `atomic-${Math.round(performance.now() * 1000)}`;
   const LIMIT = 3;
 

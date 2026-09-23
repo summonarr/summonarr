@@ -5,18 +5,16 @@
 // the admin removed.
 //
 // ── THE HEADLINE: removing an instance used to orphan its library rows ───────
-// Availability readers are UNSCOPED unions: plex-availability.ts /
-// jellyfin-availability.ts do a findMany on { mediaType, tmdbId: { in } } with no
-// serverInstance filter and then a Set.has. No sync path ever targets a
-// de-registered slug again (the per-source routes are ""-scoped; the orchestrator
-// loops only REGISTERED instances). So a PlexLibraryItem/JellyfinLibraryItem row
-// left behind by a removal makes that server's entire catalogue read
-// "In Plex"/"In Jellyfin" FOREVER — across discovery cards, the request POST's
-// already-available rejection, issues, votes, the Discord bot and admin stats —
-// with nothing left that could ever retry the cleanup. Hence the pins below:
-// the deletes happen, they are SCOPED to the removed slug, and they commit in
-// the SAME transaction as the registry write (a registry that says "gone" plus
-// rows that say "present" is exactly the permanent-orphan state).
+// No sync path ever targets a de-registered slug again (the orchestrator loops
+// only REGISTERED instances), so a PlexLibraryItem/JellyfinLibraryItem row left
+// behind by a removal can never be cleaned up by anything else. The user-facing
+// availability reads are now scoped to registered instances and skip those
+// rows, but the admin dashboard, the settings library count and
+// /api/admin/stats read the tables unscoped and would count the orphans
+// forever (guardrail 35). Hence the pins below: the deletes happen, they are
+// SCOPED to the removed slug, and they commit in the SAME transaction as the
+// registry write (a registry that says "gone" plus rows that say "present" is
+// exactly the permanent-orphan state).
 //
 // The destructive cleanup is also where the data-loss guardrails bite, so each
 // gets its own pin:
@@ -383,8 +381,8 @@ test("HEADLINE: removing a named Plex instance DELETES its PlexLibraryItem rows,
   const res = await POST(postReq(removeAll, admin.header), undefined);
   assert.equal(res.status, 200);
 
-  // The rows are gone: without this delete, plex-availability.ts's unscoped
-  // union keeps reporting tmdb 1 + 2 as "In Plex" forever.
+  // The rows are gone: without this delete, nothing would ever remove them and
+  // the admin stats would keep counting tmdb 1 + 2 forever.
   assert.deepEqual(libSlugs(plexLibrary), ["", "keep"], "only the removed slug's rows may be deleted");
   assert.deepEqual(libSlugs(jellyfinLibrary), ["remote"], "a Plex removal must not touch JellyfinLibraryItem");
 
@@ -430,8 +428,8 @@ test("GUARDRAIL 28: MediaServerUser is SOFT-deleted (active:false), scoped by so
   assert.deepEqual(upd[0].where, { source: "plex", serverInstance: "remote" });
   assert.deepEqual(upd[0].data, { active: false });
 
-  // The rows still EXIST — their history stays attributed (guardrail 33's rule
-  // that usage data outlives a removal).
+  // The rows still EXIST — their history stays attributed (guardrail 28: usage
+  // data outlives a removal).
   assert.deepEqual(serverUsers.map((u) => `${u.id}:${u.active}`).sort(), [
     "su-default:true",
     "su-jf-remote:true",
@@ -641,7 +639,7 @@ test("an untouched secret sent back as the mask sentinel is SKIPPED, not written
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// TASK 2 — restrictSignIn on the Jellyfin instance payload
+// restrictSignIn on the Jellyfin instance payload
 // Wire contract the settings UI depends on:
 //   GET  → jellyfin[].restrictSignIn: boolean (absent row ⇒ true, fail-closed)
 //   POST → { restrictSignIn?: boolean } writes "true"/"false"; omitted ⇒ untouched
@@ -805,7 +803,7 @@ test("restricted is coerced strictly (=== true) — a hand-edited \"true\"/1 in 
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// TASK 3 — the Plex connection test must probe the entered ServerUrl
+// The Plex connection test must probe the entered ServerUrl
 // ════════════════════════════════════════════════════════════════════════════
 
 test("Plex connection test: a valid token but an UNREACHABLE ServerUrl reports failure — pingPlexToken alone never touches the URL", async () => {

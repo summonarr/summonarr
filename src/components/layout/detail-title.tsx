@@ -46,7 +46,7 @@ export function useDetailTitle(): string | null {
   return useContext(DetailTitleContext).title;
 }
 
-// Rendered by /movie/[id] and /tv/[id]. Renders nothing; it exists to publish
+// Rendered by /movie/[id], /tv/[id] and /person/[id]. Renders nothing; it exists to publish
 // the title and to clear it on unmount so navigating back to a list page
 // doesn't leave a stale title in the breadcrumb.
 export function DetailTitle({ title }: { title: string }) {

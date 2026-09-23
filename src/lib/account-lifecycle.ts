@@ -214,8 +214,9 @@ export async function purgeUserDataInTx(
     where: { id, deactivatedAt: { not: null } },
     data: {
       name: "Deleted user",
-      // Shared with isPurgedRow / markLegacyPurgedAccounts — the two must never
-      // drift, or a scrubbed row stops being recognisable as one.
+      // isPurgedRow checks for this exact address, and the raw SQL in
+      // reactivateUser / markLegacyPurgedAccounts spells the same pattern by
+      // hand. Keep them in step, or a scrubbed row stops being recognisable.
       email: purgedEmailFor(id),
       image: null,
       passwordHash: null,

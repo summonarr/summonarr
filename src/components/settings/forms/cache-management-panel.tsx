@@ -5,12 +5,13 @@ import { Button } from "@/components/ui/button";
 import { XCircle, Loader2, RefreshCw, RefreshCcw, Trash2, Database } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 
-// ── Cache Management ─────────────────────────────────────────────────────────
-// Per-source clear + refetch controls, plus a combined "Clear & Refetch All".
+// Cache Management: a Clear and a Refetch button for each metadata source, plus
+// one "Clear & Refetch All" button.
 //
-// Each source maps to a DELETE /api/admin/clear-cache?source=<id> (clear) and a POST warm route
-// (refetch). TMDB details cache (movie:/tv: keys) holds the bulk of metadata — country, language,
-// keywords, watch providers, genres — and previously had a warm button but no clear button.
+// "Clear" calls DELETE /api/admin/clear-cache?source=<id>. "Refetch" POSTs to the
+// source's warm route, which re-downloads data for the whole library. The TMDB
+// details cache holds most of the metadata (country, language, keywords, watch
+// providers, genres).
 
 type CacheSourceId = "tmdb" | "mdblist" | "omdb";
 
@@ -19,7 +20,8 @@ interface CacheSourceDef {
   label: string;
   description: string;
   warmUrl: string;
-  // MDBList accepts { force } to also purge NOT_FOUND sentinels before refetching.
+  // Extra JSON body for the warm route. MDBList takes { force: true } to also
+  // delete its saved "not found" markers first, so those titles are retried.
   warmBody?: Record<string, unknown>;
 }
 
@@ -47,9 +49,9 @@ const CACHE_SOURCES: CacheSourceDef[] = [
 
 type WarmResult = { fetched?: number; skipped?: number; total?: number; failed?: number; purged?: number; cleared?: number; error?: string };
 
-// A clear also resets the tables that hold denormalized copies of the same
-// upstream data — the grid-metadata table and the recommendation graph — so the
-// count of cache rows alone under-reports what the button did.
+// A clear also resets other tables that keep copies of the same data (the grid
+// metadata table and the "For You" recommendation graph), so the cache-row count
+// alone would under-report what the button did.
 type ClearResult = WarmResult & { coreCleared?: number; edgesCleared?: number; verdictsCleared?: number };
 
 function summarizeClear(d: ClearResult): string {
@@ -118,8 +120,8 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
       {confirmClear ? (
         <div className="flex items-center gap-2">
           <span className="text-xs text-zinc-300">Clear {source.label}?</span>
-          <Button type="button" size="sm" onClick={doClear} className="bg-red-600 hover:bg-red-500 h-8 px-3 text-xs">Clear</Button>
-          <Button type="button" size="sm" variant="outline" onClick={() => setConfirmClear(false)} className="border-zinc-600 text-zinc-400 hover:text-white h-8 px-3 text-xs">Cancel</Button>
+          <Button type="button" size="sm" onClick={doClear} className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] h-8 px-3 text-xs">Clear</Button>
+          <Button type="button" size="sm" variant="outline" onClick={() => setConfirmClear(false)} className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-8 px-3 text-xs">Cancel</Button>
         </div>
       ) : (
         <div className="flex items-center gap-2">
@@ -129,7 +131,7 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
             variant="outline"
             onClick={() => setConfirmClear(true)}
             disabled={busy !== null}
-            className="border-zinc-700 text-zinc-400 hover:text-white gap-1.5 h-8 px-3 text-xs"
+            className="border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1.5 h-8 px-3 text-xs"
           >
             {busy === "clear" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
             Clear
@@ -140,7 +142,7 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
             variant="outline"
             onClick={doRefetch}
             disabled={busy !== null}
-            className="border-zinc-700 text-zinc-300 hover:text-white gap-1.5 h-8 px-3 text-xs"
+            className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-1.5 h-8 px-3 text-xs"
           >
             {busy === "refetch" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
             Refetch
@@ -169,12 +171,13 @@ export function CacheManagementPanel() {
     const out: string[] = [];
     let anyError = false;
 
-    // Clear every source in one pass, then refetch each. Refetch routes keep their own cooldown
-    // guards; a 429 surfaces as a per-source line rather than aborting the whole run.
+    // Clear every source with one request, then refetch each source in turn.
+    // Each refetch route has its own cooldown; if one answers 429 (too many
+    // requests) it just shows as a failed line and the rest still run.
     try {
       const clearRes = await fetch(withBasePath("/api/admin/clear-cache?source=all"), { method: "DELETE" });
-      const clearData: WarmResult = await clearRes.json().catch(() => ({}));
-      if (clearRes.ok) out.push(`Cleared ${clearData.cleared ?? 0} cache entries`);
+      const clearData: ClearResult = await clearRes.json().catch(() => ({}));
+      if (clearRes.ok) out.push(summarizeClear(clearData));
       else { anyError = true; out.push(`Clear failed: ${clearData.error ?? clearRes.status}`); }
     } catch {
       anyError = true;
@@ -225,8 +228,8 @@ export function CacheManagementPanel() {
           <div className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/60 px-3 py-2.5 w-fit">
             <XCircle className="w-4 h-4 text-amber-400 shrink-0" />
             <p className="text-sm text-zinc-200">Clear and refetch all sources?</p>
-            <Button type="button" size="sm" onClick={runAll} className="bg-amber-600 hover:bg-amber-500 h-8 px-3 text-xs">Run</Button>
-            <Button type="button" size="sm" variant="outline" onClick={() => setConfirmAll(false)} className="border-zinc-600 text-zinc-400 hover:text-white h-8 px-3 text-xs">Cancel</Button>
+            <Button type="button" size="sm" onClick={runAll} className="bg-amber-600 text-black hover:bg-amber-600/90 h-8 px-3 text-xs">Run</Button>
+            <Button type="button" size="sm" variant="outline" onClick={() => setConfirmAll(false)} className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-8 px-3 text-xs">Cancel</Button>
           </div>
         ) : (
           <Button
@@ -234,7 +237,7 @@ export function CacheManagementPanel() {
             variant="outline"
             onClick={() => setConfirmAll(true)}
             disabled={status === "running"}
-            className="border-zinc-700 text-zinc-200 hover:text-white gap-2"
+            className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
           >
             {status === "running" ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCcw className="w-4 h-4" />}
             {status === "running" ? "Running…" : "Clear & Refetch All"}

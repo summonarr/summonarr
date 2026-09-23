@@ -27,8 +27,8 @@ import { requireFeature, getFeatureFlags } from "@/lib/features";
 
 export const dynamic = "force-dynamic";
 
-// Period-over-period delta for a KPI cell. Mirrors the old TrendBadge logic
-// so the redesigned strip keeps the same up/down/new semantics.
+// Change versus the previous period for a KPI cell: "new" when the previous
+// period had nothing, otherwise a rounded percentage with an up/down/flat arrow.
 function kpiDelta(
   current: number,
   previous: number,
@@ -177,10 +177,15 @@ export default async function ActivityPage({
     isPlayHistoryEnabled(),
     isSourceEnabled("plex"),
     prisma.$queryRawUnsafe<
-      { id: string; username: string; source: string; hours: number | null }[]
+      { id: string; username: string; source: string; hours: number | null; plays: bigint }[]
     >(
+      // `plays` is computed HERE, per row, with the same `watched = true` rule as
+      // getPlayHistoryStats' topUsers. Looking it up from topUsers instead read 0
+      // for anyone outside the per-source top 10 by PLAY COUNT — exactly the
+      // few-long-plays viewer a watch-time leaderboard surfaces ("42h · 0 plays").
       `WITH user_hours AS (
-         SELECT m."id", m."username", m."source", (COALESCE(SUM(p."playDuration"), 0) / 3600.0)::float8 AS hours
+         SELECT m."id", m."username", m."source", (COALESCE(SUM(p."playDuration"), 0) / 3600.0)::float8 AS hours,
+                COUNT(*) FILTER (WHERE p."watched" = true)::bigint AS plays
          FROM "PlayHistory" p JOIN "MediaServerUser" m ON m."id" = p."mediaServerUserId"
          WHERE p."startedAt" >= $1${fpJoin.sql}
          GROUP BY m."id", m."username", m."source"
@@ -188,7 +193,7 @@ export default async function ActivityPage({
          SELECT *, ROW_NUMBER() OVER (PARTITION BY "source" ORDER BY "hours" DESC) AS rn
          FROM user_hours
        )
-       SELECT "id", "username", "source", "hours"
+       SELECT "id", "username", "source", "hours", "plays"
        FROM ranked
        WHERE rn <= 10
        ORDER BY "hours" DESC`,
@@ -214,20 +219,14 @@ export default async function ActivityPage({
   const rewatchedPostersPromise = resolvePosterMap(rewatchedSlice);
   rewatchedPostersPromise.catch(() => {});
 
-  // Parse the persisted Plex reachability snapshot (JSON written by
-  // plex-events.persistReachability) — defensive parse so a malformed row falls
-  // back to null (= "unknown") instead of crashing the page.
+  // Parse the saved Plex reachability snapshot (JSON written by
+  // plex-events.persistReachability). A malformed row falls back to null
+  // (= "unknown") instead of crashing the page.
   //
-  // Only trust the flag when the poller that maintains it is running:
-  // plexServerReachable tracks *local* reachability, written by the 5s poller
-  // (true on getPlexSessions success, false on throw) plus the SSE connect-time
-  // probe. The poller only runs when play-history + Plex source are enabled and
-  // url+token are set (mirrored by doReconcile's `shouldRun`). Otherwise the
-  // value is stale, so gate the badge on the same conditions as its data source.
-  // Resolved PER SERVER. Each instance is gated on its OWN url+token, so an
-  // unconfigured named server contributes no chip rather than inheriting the
-  // default's verdict — and a configured one that goes down is finally visible,
-  // which is the whole point of making this per-instance.
+  // Worked out PER SERVER. Each instance is checked against its OWN url+token,
+  // so an unconfigured named server stays "unknown" (no chip) instead of
+  // borrowing the default server's answer, and a configured one that goes down
+  // gets its own "unreachable" chip.
   const plexSettings = new Map(plexReachableRows.map((r) => [r.key, r.value]));
   const plexReachability = plexInstances.map((inst) => {
     const configured =
@@ -620,13 +619,12 @@ export default async function ActivityPage({
     if (d.count > 0) activeDays++;
   }
 
-  const playsById = new Map(stats.topUsers.map((u) => [u.id, u.count]));
   const leaderUsers = watchTimeLeaderboard.slice(0, 8).map((u, i) => ({
     id: u.id,
     username: u.username,
     source: u.source,
     hours: u.hours ?? 0,
-    plays: playsById.get(u.id) ?? 0,
+    plays: Number(u.plays),
     rank: i + 1,
   }));
   const rewatchedPosters = await rewatchedPostersPromise;

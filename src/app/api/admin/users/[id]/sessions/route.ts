@@ -58,7 +58,9 @@ export const DELETE = withAdmin(async (
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  if (body.all) {
+  // Strict `=== true`: a stray truthy value (e.g. the string "false") must not
+  // sign the user out of every device.
+  if (body.all === true) {
     await revokeAllUserSessions(id);
 
     void logAudit({
@@ -79,7 +81,6 @@ export const DELETE = withAdmin(async (
   }
 
   if (body.sessionId && typeof body.sessionId === "string") {
-
     const record = await prisma.authSession.findUnique({
       where: { sessionId: body.sessionId },
       select: { userId: true, deviceLabel: true },

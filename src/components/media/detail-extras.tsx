@@ -39,14 +39,16 @@ export function DetailExtras({ media, mediaType }: { media: TmdbMedia; mediaType
 
   return (
     <section
-      className="flex flex-col"
-      style={{ padding: "0 16px 32px", gap: 20 }}
+      className="ds-detail-section flex flex-col"
+      style={{ gap: 20 }}
     >
       {hasProviders && (
         <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <h2 className="ds-mono" style={{ fontSize: 11, letterSpacing: "0.04em", color: "var(--ds-fg-subtle)", margin: 0, textTransform: "uppercase" }}>
+          {/* h3, not h2: these are small sub-labels, below the page's real
+              section headings (Cast, Seasons, More Like This). */}
+          <h3 className="ds-mono" style={{ fontSize: 11, letterSpacing: "0.04em", color: "var(--ds-fg-subtle)", margin: 0, textTransform: "uppercase" }}>
             Where to watch
-          </h2>
+          </h3>
           <div className="flex flex-wrap items-start" style={{ gap: 18 }}>
             {grouped.map((g) => (
               <div key={g.type} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -60,12 +62,15 @@ export function DetailExtras({ media, mediaType }: { media: TmdbMedia; mediaType
                       style={{ width: 36, height: 36, borderRadius: 8, border: "1px solid var(--ds-border)", background: "var(--ds-bg-3)" }}
                     >
                       {p.logoPath ? (
-                        <Image src={`${PROVIDER_LOGO_BASE}${p.logoPath}`} alt={p.name} fill className="object-cover" sizes="36px" />
+                        <Image src={`${PROVIDER_LOGO_BASE}${p.logoPath}`} alt="" fill className="object-cover" sizes="36px" />
                       ) : (
-                        <span className="flex items-center justify-center h-full w-full" style={{ fontSize: 9, color: "var(--ds-fg-muted)" }}>
+                        <span aria-hidden="true" className="flex items-center justify-center h-full w-full" style={{ fontSize: 9, color: "var(--ds-fg-muted)" }}>
                           {p.name.slice(0, 3)}
                         </span>
                       )}
+                      {/* The name travels with the tile (`title` is hover-only);
+                          the logo/abbreviation are decorative beside it. */}
+                      <span className="sr-only">{p.name}</span>
                     </div>
                   ))}
                 </div>
@@ -77,9 +82,9 @@ export function DetailExtras({ media, mediaType }: { media: TmdbMedia; mediaType
 
       {hasKeywords && (
         <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <h2 className="ds-mono" style={{ fontSize: 11, letterSpacing: "0.04em", color: "var(--ds-fg-subtle)", margin: 0, textTransform: "uppercase" }}>
+          <h3 className="ds-mono" style={{ fontSize: 11, letterSpacing: "0.04em", color: "var(--ds-fg-subtle)", margin: 0, textTransform: "uppercase" }}>
             Keywords
-          </h2>
+          </h3>
           <div className="flex flex-wrap" style={{ gap: 6 }}>
             {keywords.map((k) => (
               <Link
@@ -99,8 +104,8 @@ export function DetailExtras({ media, mediaType }: { media: TmdbMedia; mediaType
           href={homepage}
           target="_blank"
           rel="noopener noreferrer"
-          className="ds-mono"
-          style={{ fontSize: 11.5, color: "var(--ds-accent)", textDecoration: "none", width: "fit-content" }}
+          className="ds-mono no-underline hover:underline"
+          style={{ fontSize: 11.5, color: "var(--ds-accent-text)", width: "fit-content" }}
         >
           Official site ↗
         </a>

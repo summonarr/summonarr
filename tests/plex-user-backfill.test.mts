@@ -6,10 +6,10 @@
 //   - the "IfNeeded" gate is CANDIDATE-DRIVEN: the exact Plex-only where-filter
 //     (null plexUserId/jellyfinUserId/passwordHash/deactivatedAt, no oidc
 //     Account, no @jellyfin.local synthetic email) runs first, and an empty
-//     result is a
-//     complete no-op — no Setting reads, no plex.tv traffic, no writes. There
-//     is deliberately NO module-level once-guard and the ranAt marker is
-//     write-only (never read): once-per-boot lives in instrumentation.ts;
+//     result is a complete no-op — no Setting reads, no plex.tv traffic, no
+//     writes. There is deliberately NO module-level once-guard, and this
+//     helper only WRITES the ranAt marker; instrumentation.ts is what reads it
+//     to skip the backfill on later boots;
 //   - unconfigured Plex (NO instance with an admin token) returns before any
 //     network; an instance whose account fetch fails or returns empty warns
 //     (instance-labeled) and contributes nothing, and when NO instance
@@ -314,8 +314,8 @@ test("happy path: owner + friend matched by normalized email; exact update shape
   );
   for (const c of fetchCalls) assert.equal(c.headers.get("X-Plex-Token"), TOKEN);
 
-  // ranAt marker: written with an ISO timestamp, and NEVER read — the gate is
-  // candidate-driven, not marker-driven.
+  // ranAt marker: written with an ISO timestamp. This helper never reads it —
+  // its gate is the candidate query. (instrumentation.ts reads it at boot.)
   assert.equal(settingUpserts.length, 1);
   assert.equal(settingUpserts[0].where.key, "plexUserIdBackfillRanAt");
   assert.ok(!Number.isNaN(Date.parse(settingUpserts[0].create.value)));

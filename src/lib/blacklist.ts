@@ -5,8 +5,8 @@ import type { MediaType } from "@/generated/prisma";
 // The blacklist is a small admin-maintained table that changes only when an admin
 // adds/removes a title. Discovery marks against it on every list render (the title
 // stays visible but is flagged unrequestable), so cache the resolved key set for a
-// short window and coalesce concurrent cold
-// reads into one query (mirrors getApiKey in omdb.ts). invalidateBlacklistCache()
+// short window and share one query between callers that arrive while the cache is
+// empty (mirrors getApiKey in omdb.ts). invalidateBlacklistCache()
 // is called by the admin add/remove routes so a change propagates immediately;
 // the TTL is only a backstop against a missed invalidation on another replica.
 const BLACKLIST_TTL_MS = 30_000;

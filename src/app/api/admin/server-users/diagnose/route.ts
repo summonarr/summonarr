@@ -5,7 +5,7 @@ import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 
-// Raw Jellyfin user shape — intentionally permissive so nothing is filtered
+// Raw Jellyfin user shape — every field optional so no user is dropped while parsing.
 interface RawJellyfinUser {
   Id?: string | null;
   Name?: string | null;
@@ -19,10 +19,10 @@ interface RawJellyfinUser {
   } | null;
 }
 
-// GET /Users requires RequiresElevation in Jellyfin. X-MediaBrowser-Token alone
-// does not satisfy the elevation check in 10.9+; the full Authorization:
-// MediaBrowser ... header is required. Mirrors the real /Users fetch so the
-// diagnose result reflects what library sync actually sees.
+// Jellyfin's GET /Users needs admin ("elevated") rights. From 10.9 on, the
+// X-MediaBrowser-Token header alone is not enough; the full
+// `Authorization: MediaBrowser ...` header is required. These headers mirror
+// the real /Users fetch so the diagnosis sees what the user sync sees.
 function jellyfinHeaders(apiKey: string): Record<string, string> {
   return {
     "Authorization": `MediaBrowser Client="Summonarr", Device="Summonarr", DeviceId="summonarr-server", Version="1.0", Token="${apiKey}"`,
@@ -33,12 +33,10 @@ function jellyfinHeaders(apiKey: string): Record<string, string> {
 }
 
 export const GET = withAdmin(async (req, _ctx, _session) => {
-  // Which server to diagnose. Both halves of the comparison must describe the
-  // SAME instance: the /Users fetch used to resolve getJellyfinConfig() with no
-  // argument (the default server) while dbCount spanned every configured
-  // Jellyfin, so `gap` subtracted an all-instances total from a single-instance
-  // fetch and read a healthy multi-server setup as phantom DB rows. Defaults to
-  // "" so a single-server deployment is byte-identical.
+  // Which server to diagnose. The live /Users fetch and the DB count below must
+  // describe the SAME server, or `gap` compares one server's users against
+  // every server's rows. Defaults to "" (the default server), so a
+  // single-server deployment needs no parameter.
   const instance = new URL(req.url).searchParams.get("instance") ?? DEFAULT_MEDIA_INSTANCE;
   if (instance !== DEFAULT_MEDIA_INSTANCE && !isValidMediaInstanceSlug(instance)) {
     return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
@@ -51,7 +49,7 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
 
   const base = url.replace(/\/$/, "");
 
-  // Fetch with no query params — baseline
+  // Plain fetch with no query params, so nothing is filtered on the server side.
   let httpStatus = 0;
   let rawBody: unknown = null;
   let fetchError: string | null = null;
@@ -79,7 +77,7 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     responseShape = `unexpected:${typeof rawBody}`;
   }
 
-  // Categorise every item so the user can see exactly what's being filtered
+  // Flag every user the sync would skip, and say why, so the admin can see it.
   const breakdown = items.map((u) => {
     const issues: string[] = [];
     if (!u.Id) issues.push("missing Id");

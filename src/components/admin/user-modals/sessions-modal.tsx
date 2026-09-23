@@ -44,7 +44,8 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
   const [error, setError]             = useState<string | null>(null);
   const [confirmingRevoke, setConfirmingRevoke] = useState<string | null>(null);
   const [confirmingRevokeAll, setConfirmingRevokeAll] = useState(false);
-  // Guardrail 16: formatRelativeTime uses Date.now() and toLocaleDateString varies by locale
+  // Guardrail 16: formatRelativeTime reads Date.now() and toLocaleDateString
+  // depends on locale, so both render only after mount to avoid a hydration mismatch.
   const mounted = useHasMounted();
   const titleId = `sessions-modal-title-${u.id}`;
   const closeBtnRef = useRef<HTMLButtonElement>(null);
@@ -57,7 +58,11 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
     fetch(withBasePath(`/api/admin/users/${u.id}/sessions`))
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((data: AdminAuthSession[]) => setSessions(Array.isArray(data) ? data : []))
-      .catch(() => setSessions([]))
+      .catch(() => {
+        // Say so: an empty list here would read as "no active sessions".
+        setSessions([]);
+        setError("Could not load sessions.");
+      })
       .finally(() => setLoading(false));
   }, [u.id]);
 
@@ -72,10 +77,8 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
         body:    JSON.stringify({ sessionId }),
       });
       if (!res.ok) {
-        // A failed revoke reported only to the devtools console, so the row
-        // stayed in the list with no explanation and the admin was left unsure
-        // whether the device had actually been signed out. That is the wrong
-        // thing to be unsure about.
+        // Show why it failed, so the admin knows the device may still be
+        // signed in rather than guessing from a row that didn't disappear.
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
         setError(data?.error ?? `Could not revoke session (${res.status})`);
         return;
@@ -128,11 +131,10 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
         className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 w-80 lg:w-96 xl:w-[460px] shadow-2xl flex flex-col max-h-[80vh] outline-none"
         onClick={(e) => e.stopPropagation()}
       >
-        {}
         <div className="flex items-center justify-between mb-1">
           <h3
             id={titleId}
-            className="text-sm font-semibold text-white flex items-center gap-2"
+            className="text-sm font-semibold text-zinc-100 flex items-center gap-2"
           >
             <KeyRound className="w-4 h-4 text-zinc-400" />
             Active Sessions
@@ -142,14 +144,13 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
             type="button"
             aria-label="Close"
             onClick={onClose}
-            className="text-zinc-500 hover:text-white transition-colors"
+            className="text-zinc-500 hover:text-zinc-100 transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
         <p className="text-xs text-zinc-500 mb-4 truncate">{displayName}</p>
 
-        {}
         {error && (
           <p role="alert" aria-live="assertive" className="text-xs text-red-400 mb-2">
             {error}
@@ -163,7 +164,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
             </div>
           )}
 
-          {!loading && sessions.length === 0 && (
+          {!loading && sessions.length === 0 && !error && (
             <p className="text-xs text-zinc-500 py-4 text-center">No active sessions.</p>
           )}
 
@@ -206,7 +207,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                     disabled={revoking === s.sessionId || revokingAll}
                     onClick={() => revoke(s.sessionId)}
                     autoFocus
-                    className="rounded-md px-2 py-1 text-[10px] font-medium bg-red-600 text-white hover:bg-red-500 transition-colors disabled:opacity-40"
+                    className="rounded-md px-2 py-1 text-[10px] font-medium bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-40"
                   >
                     {revoking === s.sessionId
                       ? <Loader2 className="w-3 h-3 animate-spin" />
@@ -217,7 +218,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                     aria-label="Cancel revoke this session"
                     disabled={revoking === s.sessionId || revokingAll}
                     onClick={() => setConfirmingRevoke(null)}
-                    className="rounded-md px-2 py-1 text-[10px] text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors disabled:opacity-40"
+                    className="rounded-md px-2 py-1 text-[10px] text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors disabled:opacity-40"
                   >
                     Cancel
                   </button>
@@ -238,7 +239,6 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
           ))}
         </div>
 
-        {}
         {!loading && sessions.length > 0 && (
           <div className="mt-4 pt-3 border-t border-zinc-800">
             {!confirmingRevokeAll ? (
@@ -260,7 +260,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                   disabled={revokingAll}
                   onClick={revokeAll}
                   autoFocus
-                  className="flex-1 flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium bg-red-600 text-white hover:bg-red-500 transition-colors disabled:opacity-40"
+                  className="flex-1 flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-40"
                 >
                   {revokingAll
                     ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Revoking…</>
@@ -271,7 +271,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                   aria-label="Cancel revoke all"
                   disabled={revokingAll}
                   onClick={() => setConfirmingRevokeAll(false)}
-                  className="rounded-md px-3 py-2 text-xs text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors disabled:opacity-40"
+                  className="rounded-md px-3 py-2 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors disabled:opacity-40"
                 >
                   Cancel
                 </button>

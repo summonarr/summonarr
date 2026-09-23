@@ -7,6 +7,7 @@ import { ChevronDown, CheckCircle, Circle, Loader2, Tv2, Calendar } from "@/comp
 import { cn } from "@/lib/utils";
 import { posterUrl, stillUrl, type TmdbSeason, type TmdbEpisode } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
+import { DetailActionButton } from "./detail-action-button";
 
 interface TVSeasonsProps {
   tmdbId: number;
@@ -25,14 +26,25 @@ interface SeasonState {
   owned: Set<number>;
 }
 
-// Uses the browser's own locale/timezone (no pinned args), which is only safe
-// post-hydration — the sole call site below gates on `mounted` for exactly
-// this reason (guardrail 16). Do not call this from an SSR-visible spot
-// without also gating it, or the server/client render will disagree.
+// Formats with the browser's own locale, which the server can't know. So it is
+// only safe after hydration (the first client render): the one call site below
+// waits for `mounted` for that reason (guardrail 16). Calling it during the
+// server render would make the server and browser HTML disagree.
+//
+// TMDB's `air_date` is a bare date ("2024-03-05"), which `new Date` reads as
+// midnight UTC. Showing that in the viewer's time zone gave the PREVIOUS day to
+// everyone west of UTC, so a bare date is formatted in UTC (the same fix as
+// format-release-date.ts). Only the language/locale comes from the browser.
 function formatAirDate(iso: string | null): string | null {
   if (!iso) return null;
   try {
-    return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(iso);
+    return new Date(iso).toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      ...(dateOnly ? { timeZone: "UTC" } : {}),
+    });
   } catch {
     return iso;
   }
@@ -46,7 +58,8 @@ function formatRuntime(min: number | null): string | null {
   return m === 0 ? `${h}h` : `${h}h ${m}m`;
 }
 
-// Collapsible per-season list; expanding a season lazy-fetches its episodes and library-ownership marks.
+// Collapsible list of seasons. Episodes (and which ones are in the library) are
+// only fetched the first time a season is expanded.
 export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
   const mounted = useHasMounted();
   const [state, setState] = useState<Record<number, SeasonState>>(() => {
@@ -67,9 +80,9 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
       const current = state[seasonNumber];
       if (!current) return;
 
-      // forceReload (the Retry button) skips the collapse + already-loaded
-      // short-circuits and re-runs the fetch below — otherwise Retry, fired from
-      // inside the expanded error panel, just collapsed the panel.
+      // forceReload is used by the Retry button. It skips the two early returns
+      // below (collapse, and "already loaded") and always re-fetches. Without it,
+      // clicking Retry inside the open error panel would just close the panel.
       if (current.expanded && !forceReload) {
         setState((prev) => ({ ...prev, [seasonNumber]: { ...prev[seasonNumber], expanded: false } }));
         return;
@@ -110,9 +123,9 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
   if (seasons.length === 0) return null;
 
   return (
-    <section style={{ padding: "0 16px 32px" }}>
+    <section className="ds-detail-section">
       <h2
-        className="section-title font-semibold"
+        className="font-semibold"
         style={{
           fontSize: 15,
           letterSpacing: "-0.01em",
@@ -144,10 +157,14 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                 borderRadius: 8,
               }}
             >
+              {/* Hover uses the shared ds-hover-tint class (JS mouse-enter/leave
+                  handlers got stuck "hovered" after a tap on touch screens). The
+                  focus ring is drawn inside the button (negative outlineOffset)
+                  because the card's overflow-hidden would clip one drawn outside. */}
               <button
                 type="button"
                 onClick={() => toggleSeason(season.seasonNumber)}
-                className="w-full flex items-center text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+                className="ds-hover-tint w-full flex items-center text-left"
                 aria-expanded={s?.expanded ?? false}
                 aria-controls={`season-${season.seasonNumber}-panel`}
                 style={{
@@ -156,12 +173,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                   background: "transparent",
                   border: 0,
                   color: "var(--ds-fg)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "var(--ds-bg-3)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "transparent";
+                  outlineOffset: -2,
                 }}
               >
                 <div
@@ -192,8 +204,11 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center flex-wrap" style={{ gap: 8 }}>
+                    {/* min-w-0 lets a flex child shrink below its nowrap content
+                        so `truncate` can act; flex-1 would push the meta spans
+                        to the far right of the row. */}
                     <h3
-                      className="font-semibold truncate"
+                      className="font-semibold truncate min-w-0"
                       style={{
                         fontSize: 14,
                         color: "var(--ds-fg)",
@@ -232,7 +247,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                       style={{ marginTop: 6 }}
                     >
                       <CheckCircle style={{ width: 10, height: 10 }} />
-                      {ownershipLabel} owned
+                      {fullyOwned ? ownershipLabel : `${ownershipLabel} owned`}
                     </span>
                   )}
                 </div>
@@ -272,7 +287,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                         style={{
                           width: 14,
                           height: 14,
-                          color: "var(--ds-accent)",
+                          color: "var(--ds-accent-text)",
                         }}
                       />
                       Loading episodes…
@@ -281,27 +296,19 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
 
                   {s.loadState === "error" && (
                     <div
-                      className="text-center ds-mono"
-                      style={{
-                        fontSize: 12,
-                        color: "var(--ds-danger)",
-                        padding: "16px 0",
-                      }}
+                      className="flex flex-col items-center"
+                      style={{ gap: 10, padding: "16px 0" }}
                     >
-                      Failed to load episodes.{" "}
-                      <button
-                        type="button"
+                      <span className="ds-mono" style={{ fontSize: 12, color: "var(--ds-danger)" }}>
+                        Failed to load episodes.
+                      </span>
+                      <DetailActionButton
+                        variant="secondary"
+                        size="sm"
                         onClick={() => toggleSeason(season.seasonNumber, true)}
-                        className="underline transition-colors"
-                        style={{
-                          background: "transparent",
-                          border: 0,
-                          color: "inherit",
-                          cursor: "pointer",
-                        }}
                       >
                         Retry
-                      </button>
+                      </DetailActionButton>
                     </div>
                   )}
 
@@ -328,7 +335,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                         return (
                           <div
                             key={ep.episodeNumber}
-                            className="group relative flex transition-colors"
+                            className="group relative flex"
                             style={{
                               gap: 12,
                               padding: 8,
@@ -396,6 +403,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                                       marginTop: 2,
                                     }}
                                     aria-label="In library"
+                                    role="img"
                                   />
                                 ) : (
                                   <Circle
@@ -406,6 +414,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                                       marginTop: 2,
                                     }}
                                     aria-label="Not in library"
+                                    role="img"
                                   />
                                 )}
                               </div>

@@ -111,8 +111,8 @@ export async function notifyAvailablePerServer(
     // In-app inbox for the batch winners (one createMany, same CAS-once guarantee).
     void writeAvailableInAppNotifications(winners, logScope);
 
-    // Email channel — webhook/sync AVAILABLE paths previously fanned out only
-    // Discord + push, leaving `emailOnAvailable` a dead preference there.
+    // Email channel, so the user's `emailOnAvailable` preference is honoured on
+    // the webhook/sync paths too.
     await notifyUsersRequestsAvailableEmail(winners, logScope);
   }
 }
@@ -120,17 +120,15 @@ export async function notifyAvailablePerServer(
 // Shared BATCH in-app inbox writer for the "now available" fan-out. The
 // webhook-poll path (notifyAvailablePerServer above) AND all six
 // sync-orchestrator/per-source claimAvailableNotificationWinners sites route their
-// winners through here so the header bell / /notifications inbox records a
-// REQUEST_AVAILABLE row for every AVAILABLE transition (previously only the
-// webhook path did — sync-path availables never created an inbox row). The manual
-// admin path (notifyRequestStatusChange) writes single rows via
-// createInAppNotification instead. The CAS in claimAvailableNotificationWinners
-// already deduped the winner set; skipDuplicates is belt-and-suspenders. Single
-// createMany, one DB round-trip, shared field-shaping via buildNotificationData.
-// Best-effort: swallows its own
-// errors so an inbox-write blip never aborts the sync run or the triggering
-// action. Exported so the sync routes can fan out the inbox channel for their
-// winner rows. Call fire-and-forget: `void writeAvailableInAppNotifications(...)`.
+// winners through here, so the header bell / /notifications inbox gets a
+// REQUEST_AVAILABLE row for every AVAILABLE transition. The manual admin path
+// (notifyRequestStatusChange) writes single rows via createInAppNotification
+// instead. The CAS (compare-and-swap) in claimAvailableNotificationWinners has
+// already deduped the winner set; skipDuplicates is an extra safety net.
+// One createMany = one DB round-trip.
+// Best-effort: swallows its own errors so an inbox-write blip never aborts the
+// sync run or the triggering action. Call fire-and-forget:
+// `void writeAvailableInAppNotifications(...)`.
 export async function writeAvailableInAppNotifications(
   winners: Array<{
     requestedBy: string;
@@ -187,9 +185,9 @@ export async function notifyUsersRequestsAvailableEmail(
   });
   const prefByUserId = new Map(userPrefs.map((u) => [u.id, u]));
   // BOUNDED (guardrail 31), and awaited. Each send opens its own SMTP connection, and
-  // firing the whole winner set at once blew past the per-client concurrent-connection
-  // cap every real relay enforces (Office 365 allows 3, Gmail ~10) — so a backlog pass,
-  // which is exactly when this fans out widest, had most of its mail rejected. The
+  // firing the whole winner set at once blew past the relay's per-client connection
+  // cap (see EMAIL_SEND_CONCURRENCY) — so a backlog pass, which is exactly when this
+  // fans out widest, had most of its mail rejected. The
   // "now available" claim is a once-only CAS that has ALREADY been burned by the time
   // this runs, so a dropped send is never retried: that mail is simply lost.
   const recipients = winners.flatMap((w) => {
@@ -213,7 +211,8 @@ export async function notifyUsersRequestsAvailableEmail(
 // connections per client (Office 365 allows 3, Gmail ~10). Stay under the tightest.
 const EMAIL_SEND_CONCURRENCY = 3;
 
-// Poll for up to 12 minutes (24 × 30 s) before giving up — covers slow Plex/Jellyfin scan propagation after a webhook
+// Poll for up to 12 minutes (24 × 30 s) before giving up — long enough for a
+// slow Plex/Jellyfin library scan to pick up the file after a webhook.
 const ITEM_POLL_INTERVAL_MS = 30_000;
 const ITEM_POLL_MAX = 24;
 
@@ -222,7 +221,8 @@ const ITEM_POLL_MAX = 24;
 // against Plex + Jellyfin — hundreds of concurrent pollers hammering the media
 // servers during a mass import when the library scan lags. The pending rows stay
 // unnotified until a poll completes, so repeat webhooks fetch the same id set and
-// join the running poll (HD and 4K sets differ by is4k scoping, so they key apart).
+// join the running poll (requests on different arr instances are different rows,
+// so their id sets key apart).
 // A request row created AFTER a running poll snapshotted its set misses that
 // poll's notify — the sync orchestrator's AVAILABLE+unnotified fallback picks it
 // up on the next tick.

@@ -47,7 +47,7 @@ function CopyRow({
       <p className="text-xs font-medium text-zinc-400">{label}</p>
       <div className="flex items-center gap-2 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2">
         <span className="flex-1 font-mono text-xs text-zinc-300 truncate">{revealed ?? displayUrl}</span>
-        <button onClick={copy} className="shrink-0 text-zinc-500 hover:text-white transition-colors" aria-label="Copy">
+        <button onClick={copy} className="shrink-0 text-zinc-500 hover:text-zinc-100 transition-colors" aria-label="Copy">
           {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
         </button>
       </div>
@@ -56,10 +56,13 @@ function CopyRow({
   );
 }
 
-// The ?token= query param is the only auth option because Radarr/Sonarr webhook UIs have no header field.
-// HD rows prefer the per-source secret and fall back to the legacy shared secret (matching how the
-// webhook handler resolves tokens). The 4K rows point at the SAME endpoint with the 4K instance's own
-// secret — the handler uses secret-as-discriminator to set is4k — and only appear once that secret is set.
+// Placeholder row for a 4K instance that is configured but has no webhook secret yet.
+//
+// About the URLs below: the token rides in a ?token= query param because the Radarr/Sonarr
+// webhook screens have no field for custom headers (guardrail 2). The default rows use the
+// per-service secret and fall back to the legacy shared one, the same way the webhook handler
+// does. The 4K rows point at the SAME endpoint with the 4K instance's own secret; the handler
+// works out which instance fired by which secret matched (guardrail 32).
 function SecretNeededRow({ label }: { label: string }) {
   return (
     <div className="space-y-1">
@@ -143,7 +146,7 @@ export function WebhookUrls({
       )}
       {noHdSecret && (
         <p className="text-xs text-amber-500">
-          No secret token set — webhook endpoints are unauthenticated. Set a token above.
+          No secret token set — Radarr/Sonarr webhook calls will be rejected until you set a token above.
         </p>
       )}
       <p className="text-xs text-zinc-500">

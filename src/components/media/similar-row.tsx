@@ -11,9 +11,9 @@ interface SimilarRowProps {
 export function SimilarRow({ items, showPlex, showJellyfin }: SimilarRowProps) {
   if (items.length === 0) return null;
   return (
-    <section style={{ padding: "0 16px 32px" }}>
+    <section className="ds-detail-section">
       <h2
-        className="section-title font-semibold"
+        className="font-semibold"
         style={{
           fontSize: 15,
           letterSpacing: "-0.01em",

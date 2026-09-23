@@ -74,7 +74,9 @@ function escapeCSV(value: unknown): string {
 }
 
 export async function GET(request: NextRequest) {
-  const session = await requireAuth(); // permission checked inside
+  // Not wrapped in withPermission because this route streams a CSV body; the
+  // ADMIN check is done by hand just below (guardrail 6a).
+  const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   if (!hasPermission(session.user.permissions, Permission.ADMIN)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });

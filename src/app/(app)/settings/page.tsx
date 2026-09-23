@@ -115,9 +115,8 @@ const ALL_KEYS = [
   "radarr4kUrl", "radarr4kApiKey", "radarr4kRootFolder", "radarr4kQualityProfileId", "radarr4kMinimumAvailability", "radarr4kWebhookSecret",
   "sonarr4kUrl", "sonarr4kApiKey", "sonarr4kRootFolder", "sonarr4kQualityProfileId", "sonarr4kLanguageProfileId", "sonarr4kWebhookSecret",
   "request4kAll",
-  // plexAdminToken rides along so the sync buttons can be told whether Plex is
-  // configured — the same url+token pair /api/sync/plex itself gates on. It was
-  // already read below, but inside a block-scoped Promise.all the JSX cannot see.
+  // plexAdminToken is read here so the page can tell the sync buttons whether
+  // Plex is configured — the same url+token pair /api/sync/plex itself checks.
   "plexAdminEmail", "plexServerUrl", "plexAdminToken", "plexLibraries", "plexPathStripPrefix", "plexMoviePathStripPrefix", "plexTvPathStripPrefix",
   "jellyfinUrl", "jellyfinApiKey", "jellyfinLibraries", "jellyfinPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
   "donationPaypal", "donationVenmo", "donationZelle", "donationAmazon", "donationPatreon", "donationBuyMeACoffee",
@@ -334,9 +333,9 @@ export default async function SettingsPage({
     // would be the hydration bug that guardrail exists to prevent.
     // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
     const oneHourAgoMs = Date.now() - 60 * 60 * 1000;
-    // Audit log is the fallback for jobs that already wrote there before this
-    // change shipped (e.g. upcoming-cache, trash-sync) — nothing about that
-    // breaks, the Setting row simply takes precedence once it exists.
+    // The audit log is the fallback for jobs that only ever logged there
+    // (e.g. upcoming-cache, trash-sync). Once a job has a Setting row, the
+    // loop after this one overwrites the fallback with it.
     for (const r of lastRuns) {
       if (!r) continue;
       lastRunMap.set(r.target, { createdAt: r.createdAt, details: r.details });
@@ -422,7 +421,7 @@ export default async function SettingsPage({
       // the only browser trigger that also builds the suggestion graph.
       { name: "Warm Library", description: "TMDB metadata for entire library + the \"For You\" suggestion graph", endpoint: "/api/cron/warm-library", interval: formatInterval(process.env.WARM_LIBRARY_INTERVAL, "86400"), ...lastRunInfo("library") },
       { name: "Purge Sessions", description: "Delete expired auth sessions", endpoint: "/api/cron/purge-auth-sessions", interval: formatInterval(process.env.PURGE_SESSIONS_INTERVAL, "86400"), ...lastRunInfo("auth-sessions:purge-expired") },
-      { name: "Scrub Audit PII", description: "Remove IP/UA from audit entries older than 90 days", endpoint: "/api/cron/scrub-audit-pii", interval: formatInterval(process.env.SCRUB_AUDIT_PII_INTERVAL, "86400"), ...lastRunInfo("audit-log:pii-scrub") },
+      { name: "Scrub Audit PII", description: "Remove IP/UA from audit entries past the retention window (default 90 days)", endpoint: "/api/cron/scrub-audit-pii", interval: formatInterval(process.env.SCRUB_AUDIT_PII_INTERVAL, "86400"), ...lastRunInfo("audit-log:pii-scrub") },
       { name: "TRaSH Sync", description: "Refresh TRaSH-Guides catalog (capped at hourly) and re-apply managed specs each tick", endpoint: "/api/cron/trash-sync", interval: formatInterval(process.env.TRASH_SYNC_INTERVAL, "86400"), ...lastRunInfo("trash-sync") },
       { name: "Download Policy Sync", description: "Sync Plex & Jellyfin user download permissions, enforce any restrictions set in Summonarr", endpoint: "/api/cron/sync-download-policies", interval: formatInterval(process.env.SYNC_INTERVAL, "3600"), ...lastRunInfo("download-policies") },
     ];
@@ -440,8 +439,10 @@ export default async function SettingsPage({
           role="alert"
           style={{
             padding: 16,
-            background: "rgba(239, 68, 68, 0.08)",
-            border: "1px solid rgba(239, 68, 68, 0.35)",
+            // Theme tokens, not raw rgba/hex: the old #fca5a5 text was a
+            // dark-theme pink that read ~1.8:1 on the light theme (guardrail 42).
+            background: "color-mix(in oklab, var(--ds-danger) 8%, transparent)",
+            border: "1px solid color-mix(in oklab, var(--ds-danger) 35%, transparent)",
             borderRadius: 10,
             marginBottom: 16,
           }}
@@ -454,8 +455,8 @@ export default async function SettingsPage({
                 width: 22,
                 height: 22,
                 borderRadius: 999,
-                background: "rgba(239, 68, 68, 0.18)",
-                color: "#fca5a5",
+                background: "color-mix(in oklab, var(--ds-danger) 18%, transparent)",
+                color: "var(--ds-danger)",
                 display: "inline-flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -467,7 +468,7 @@ export default async function SettingsPage({
               !
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <h3 style={{ fontSize: 14, fontWeight: 600, color: "#fca5a5", margin: 0 }}>
+              <h3 style={{ fontSize: 14, fontWeight: 600, color: "var(--ds-danger)", margin: 0 }}>
                 {decryptFailures.length === 1
                   ? "1 saved setting could not be decrypted"
                   : `${decryptFailures.length} saved settings could not be decrypted`}
@@ -683,7 +684,7 @@ export default async function SettingsPage({
               <div className="mb-5">
                 <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Play History</h2>
                 <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  Track playback sessions from Plex and Jellyfin. Configure webhook URLs in your media server to enable real-time tracking.
+                  Track playback sessions from Plex and Jellyfin. Plex is followed live through its event stream and Jellyfin through a frequent poller — no media-server webhooks are needed.
                 </p>
               </div>
               <PlayHistorySettingsForm
@@ -1041,7 +1042,7 @@ export default async function SettingsPage({
                   ].map(({ label, value }) => (
                     <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-white tabular-nums">{value.toLocaleString()}</p>
+                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString()}</p>
                     </div>
                   ))}
                 </div>
@@ -1058,7 +1059,7 @@ export default async function SettingsPage({
                   ].map(({ label, value }) => (
                     <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-white tabular-nums">{value.toLocaleString()}</p>
+                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString()}</p>
                     </div>
                   ))}
                 </div>
@@ -1075,7 +1076,7 @@ export default async function SettingsPage({
                   ].map(({ label, value }) => (
                     <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-white tabular-nums">{value.toLocaleString()}</p>
+                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString()}</p>
                     </div>
                   ))}
                 </div>
@@ -1109,7 +1110,7 @@ export default async function SettingsPage({
                   ].map(({ label, value }) => (
                     <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-white tabular-nums">{value}</p>
+                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value}</p>
                     </div>
                   ))}
                 </div>
@@ -1135,7 +1136,7 @@ export default async function SettingsPage({
                     ].map(({ label, value, dim }) => (
                       <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
                         <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                        <p className={`text-xl font-semibold tabular-nums ${dim ? "text-zinc-500" : "text-white"}`}>{value}</p>
+                        <p className={`text-xl font-semibold tabular-nums ${dim ? "text-zinc-500" : "text-zinc-100"}`}>{value}</p>
                       </div>
                     ));
                   })()}
@@ -1154,7 +1155,7 @@ export default async function SettingsPage({
                   ].map(({ label, value }) => (
                     <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-white tabular-nums">{value}</p>
+                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value}</p>
                     </div>
                   ))}
                 </div>

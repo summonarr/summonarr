@@ -105,8 +105,8 @@ test("FK ordering, full invariant: every relation's parent precedes its child in
 
 test("no @@map on any model: model name must equal the physical table name", () => {
   // backup-import.ts uses BACKUP_TABLES entries verbatim as quoted Postgres
-  // identifiers — `"public"."<Model>"` in the TRUNCATE (line ~555) and in the
-  // INSERT allowlist regex — and db-export writes INSERTs the same way. An
+  // identifiers — `"public"."<Model>"` in the TRUNCATE and in the INSERT
+  // allowlist regex — and db-export writes INSERTs the same way. An
   // @@map on a backed-up model would rename the physical table out from under
   // both while the model-name↔BACKUP_TABLES test above stayed green.
   assert.equal(schema.includes("@@map("), false, "schema.prisma contains @@map( — backup TRUNCATE/INSERT identifiers assume model name == table name");

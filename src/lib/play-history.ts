@@ -5,6 +5,7 @@ import { normalizeEmail } from "./email-normalize";
 import { posterUrl } from "./tmdb-types";
 import { resolvePosterPathMap, posterPathKey } from "./poster-cache";
 import { DELIVERED_KBPS_SQL } from "./bitrate";
+import { processSingleton } from "./process-singleton";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
 // Postgres GROUP BY day omits zero-play days; the AreaChart needs an entry per
@@ -65,7 +66,15 @@ async function loadSettings(): Promise<Record<SettingKey, string | null>> {
   }
 }
 
-const activityCache = new Map<string, { data: unknown; expiresAt: number }>();
+// Process-wide (see process-singleton.ts): this module is compiled into the
+// route chunks that FINALIZE sessions and delete history (and call
+// clearActivityCache) and separately into the page chunks that READ the stats.
+// A per-chunk Map meant the invalidation never reached the admin pages, which
+// kept serving pre-finalize/pre-delete aggregates for the full TTL.
+const activityCache = processSingleton(
+  "play-history:activityCache",
+  () => new Map<string, { data: unknown; expiresAt: number }>(),
+);
 const STATS_TTL = 5 * 60 * 1000;
 const CALENDAR_TTL = 30 * 60 * 1000;
 const REWATCHED_TTL = 10 * 60 * 1000;
@@ -189,10 +198,10 @@ export async function resolveMediaServerUser(params: {
   const email = params.email ? normalizeEmail(params.email) : null;
 
   // Serialize concurrent calls for the same MediaServerUser via an advisory
-  // lock keyed on (source, sourceUserId). Two parallel webhook + sync paths
-  // for the same playback otherwise hit a find→upsert TOCTOU where a
-  // freshly-created User row falls into the gap and the MediaServerUser is
-  // bound to no User. The User lookup is re-done INSIDE the lock so a
+  // lock keyed on (source, serverInstance, sourceUserId). Two overlapping calls
+  // for the same identity otherwise hit a find→upsert race (TOCTOU: the row
+  // changes between the check and the write) where a freshly-created User row
+  // falls into the gap and the MediaServerUser is bound to no User. The User lookup is re-done INSIDE the lock so a
   // concurrent User.create is picked up.
   //
   // Mask to 31 bits (signed int32 positive range) so Postgres reads the value
@@ -250,13 +259,11 @@ export async function resolveMediaServerUser(params: {
 
     // Defense-in-depth server-binding check: once a (source, sourceUserId) row has
     // been pinned to a specific server (serverMachineId recorded), refuse any later
-    // upsert that arrives carrying a DIFFERENT machineId. Without this, a caller who
-    // has obtained the webhook secret could submit events stamped with their own
-    // server's machineId for a (source, sourceUserId) that already belongs to the
-    // operator's server, hijacking that identity and attributing play history (or a
-    // user linkage) to a server they control. Pinning the first-seen machineId and
-    // rejecting mismatches keeps each media-server user bound to the one server that
-    // originally established it.
+    // upsert that arrives carrying a DIFFERENT machineId. This guards a future
+    // untrusted ingestion path (see MediaServerMismatchError — dormant today): a
+    // payload stamped with another server's machineId must not hijack an identity
+    // that already belongs to the operator's server. Pinning the first-seen
+    // machineId keeps each media-server user bound to the server that created it.
     // Read unconditionally (not just when a machineId is offered): `manualUserLink`
     // is needed on every upsert so an admin's hand-set binding survives this poll.
     const existing = await tx.mediaServerUser.findUnique({
@@ -341,8 +348,8 @@ export const SESSION_ABSENCE_GRACE_MS = 60_000;
 // End-of-file clamp window. When the playhead lands within this distance of the
 // media's total duration at finalize, treat it as a full-completion stop —
 // Plex/Jellyfin clients commonly leave the player at viewOffset ≈ duration − a
-// few seconds when the user "stops at the credits," and the natural endpoint
-// of natural-end playback is rarely exactly duration. Without the clamp,
+// few seconds when the user "stops at the credits," and even playback that
+// runs to the end rarely reports exactly duration. Without the clamp,
 // sessions that effectively reached the end get classed as 99% completionRatio
 // (not completed) and slide just below the 80% watched threshold for media
 // where the credits roll consumes the tail. Tautulli uses the same 10 s window
@@ -367,7 +374,7 @@ export function computePlaytimeIncrement(
 }
 
 // Build a finalized session to pass to recordCompletedSession. Callers that close a "live" session
-// (webhook stop, polling-sync-detected end) use this so the trailing playtime between lastSeenAt
+// (SSE stop, poller-detected end) use this so the trailing playtime between lastSeenAt
 // and the close event is counted. cleanupStaleSessions does not use this — a stale session has no
 // signal it was still playing.
 //
@@ -501,7 +508,7 @@ export async function recordCompletedSession(
   // Jellyfin (and some Plex clients) reuse PlaySessionId across distinct watches — DLNA, browser
   // tabs, and per-device session caches all reproduce it. Combining sessionKey with the playback's
   // own startedAt yields a key that's unique per watch instance while still being deterministic
-  // across webhook replays of the same Stop event.
+  // when two finalize paths record the same watch (the dedupe below relies on that).
   const uniqueSourceSessionId = `${session.sessionKey}:${session.startedAt.toISOString()}`;
 
   // Resume-grouping: link this row into a chain when a previous unwatched
@@ -591,7 +598,7 @@ export async function recordCompletedSession(
   };
 
   // recordCompletedSession runs from three paths that can fire concurrently for the same
-  // sessionKey: SSE 'stopped' notification, 5s poller stall detection, and webhook handlers.
+  // sessionKey: SSE 'stopped' notification, 5s poller stall/absence detection, and cleanupStaleSessions.
   // Prisma's upsert is SELECT-then-INSERT (not atomic) — under that race the loser hits P2002
   // even though `update: {}` already means "first writer wins". Catching P2002 in JS works but
   // still leaves a Postgres ERROR and a `prisma:error` log per collision because the INSERT
@@ -606,7 +613,7 @@ export async function recordCompletedSession(
   // CAS on lastSeenAt: only delete if the row hasn't been touched since the
   // caller read it. Without this, a concurrent activeSession update or
   // re-create from sync/play-history could be silently deleted here when
-  // recordCompletedSession was triggered by a stale Stop webhook.
+  // recordCompletedSession was triggered by a stale stop signal.
   // deleteMany returns 0 if the lastSeenAt timestamp shifted; in that case
   // we leave the row alone (it's now part of a different playback session).
   await prisma.activeSession.deleteMany({
@@ -860,7 +867,8 @@ export async function purgeOldHistory(): Promise<number> {
 }
 
 // Aggregate the full per-user stats bundle (totals, recent plays, top media,
-// daily/heatmap series, codec/resolution/device breakdowns) for one MediaServerUser.
+// daily/heatmap series, codec/resolution/device breakdowns) across a SET of
+// MediaServerUser ids (one person can have several server identities).
 export async function getPlayStatsForServerUsers(ids: string[]) {
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
   const oneYearAgo = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
@@ -901,8 +909,8 @@ export async function getPlayStatsForServerUsers(ids: string[]) {
       take: 50,
     }),
     // Group by tmdbId (cross-source dedupe — Plex + Jellyfin entries for the
-    // same show collapse) with title fallback for unmapped rows. See bug #7
-    // notes: previously the GROUP BY also keyed on title, so the same show
+    // same show collapse) with title fallback for unmapped rows. Previously
+    // the GROUP BY also keyed on title, so the same show
     // appeared twice when one source resolved tmdbId and the other didn't.
     prisma.$queryRawUnsafe<{ title: string; tmdbId: number | null; mediaType: string | null; posterPath: string | null; count: bigint }[]>(
       `SELECT MAX("title") AS title, "tmdbId", "mediaType"::text AS "mediaType", MAX("posterPath") AS "posterPath", COUNT(*)::bigint AS count
@@ -1396,7 +1404,11 @@ const MAX_POPULAR_PAGE = 100;
 // Hard ceiling on distinct cached (mediaType, sort, page, limit) combinations so the
 // map can't grow without bound (belt-and-suspenders alongside the page/limit clamps).
 const MAX_POPULAR_CACHE_ENTRIES = 2_000;
-const popularCache = new Map<string, { data: PopularResult; expiresAt: number }>();
+// Process-wide for the same reason as activityCache — clearActivityCache flushes it.
+const popularCache = processSingleton(
+  "play-history:popularCache",
+  () => new Map<string, { data: PopularResult; expiresAt: number }>(),
+);
 
 // Popularity counts *completed arcs*, not raw sessions. An "arc" is a run of consecutive
 // sessions on the same (user, tmdbId, season, episode) that hasn't been broken by either
@@ -1639,8 +1651,8 @@ async function withLivePosterPaths(
 
 async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, limit = 10) {
   const { where, params } = buildStatsFilters(filters);
-  // Push then read length so a future param insertion in buildStatsFilters can't shift the limit's $-index.
-  // Same shape as the bug fixed in commit 803cd11 — sibling builders (buildStatsFilters itself) already do this.
+  // Push then read length so a future param insertion in buildStatsFilters can't shift the limit's $-index
+  // (the "803cd11" placeholder-offset bug class the tests pin).
   params.push(limit);
   const limitIdx = params.length;
 
@@ -1684,7 +1696,7 @@ async function getMostRewatchedUncached(filters: PlayHistoryStatsFilters = {}, l
 }
 
 // Top-watched titles split per media type. Unlike getMostRewatchedUncached
-// this has NO `HAVING COUNT(*) > 1` rewatch filter — a movie watched once
+// this has NO rewatch filter — a movie watched once
 // still ranks — and partitions by mediaType so movies can't be starved out
 // of a global top-N by TV shows (whose tmdbId aggregates every episode).
 // Posters resolve the same way (withLivePosterPaths).

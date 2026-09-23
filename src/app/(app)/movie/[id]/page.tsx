@@ -25,6 +25,7 @@ import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName } from "@/lib/tmdb-types";
+import { formatDigitalRelease } from "@/lib/format-release-date";
 import { Chip } from "@/components/ui/design";
 import { canRequest, hasPermission, Permission } from "@/lib/permissions";
 import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
@@ -37,17 +38,15 @@ export default async function MovieDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  // The gate MUST precede the TMDB fetch. On the RSC layout-skip path (proxy
-  // skipped by a prefetch header, (app)/layout render skipped by a matching
-  // Next-Router-State-Tree) this page's own requireAppSession() is the ONLY
-  // check — overlapping it with getMovieDetails let an unauthenticated caller
-  // burn TMDB/OMDB/MDBList quota and write cache rows before the redirect fired.
+  // The login gate MUST run before the TMDB fetch. When a crafted request
+  // skips both the proxy and the (app) layout, this call is the ONLY check —
+  // running the fetch alongside it let a signed-out caller use up TMDB/OMDB/
+  // MDBList quota and write cache rows before the redirect happened.
   const session = await requireAppSession();
-  // A malformed id or a genuine TMDB 404 is a not-found; ANY other failure
-  // (TMDB outage/timeout/5xx, missing credentials, a ratings-chain throw)
-  // propagates to (app)/error.tsx, which offers a retry. The old bare
-  // catch-all-to-notFound showed "might have been removed" for an existing
-  // title during a TMDB blip — same shape as person/[id]/page.tsx.
+  // A malformed id or a real TMDB 404 shows the not-found page. ANY other
+  // failure (TMDB outage, timeout, missing credentials, a ratings error) is
+  // rethrown to (app)/error.tsx, which offers a retry — so a brief TMDB outage
+  // doesn't claim an existing title was removed. Same shape as person/[id].
   const tmdbId = Number(id);
   if (!Number.isFinite(tmdbId) || tmdbId <= 0) notFound();
   const media = await getMovieDetails(tmdbId).catch((err: unknown) => {
@@ -117,13 +116,11 @@ export default async function MovieDetailPage({
     prisma.setting.findUnique({ where: { key: "request4kAll" } }),
     prisma.radarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
     prisma.radarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: media.id, arrInstance: "4k" } } }),
-    // The TV detail page has gated on these four since it was written; this
-    // page never did. Without the page flags the Report-issue and Vote-to-
-    // delete buttons render even when the feature is off, and only fail on
-    // submit with the API's 403 — a dead-end button. Without the integration
-    // flags getBadgeVisibility defaults both servers to true, so a disabled
-    // Plex still shows Plex badges AND still satisfies the showPlex gate that
-    // guards those very buttons.
+    // Feature flags, same as the TV page. The page flags hide the Report-issue
+    // and Vote-to-delete buttons when those features are off (otherwise they
+    // would only fail with a 403 on submit). The integration flags go to
+    // getBadgeVisibility, which would otherwise assume both servers are on
+    // and show badges (and those buttons) for a disabled Plex or Jellyfin.
     isFeatureEnabled("feature.page.votes"),
     isFeatureEnabled("feature.page.issues"),
     isFeatureEnabled("feature.integration.plex"),
@@ -246,6 +243,7 @@ export default async function MovieDetailPage({
                 media.releaseYear,
                 media.certification,
                 media.runtime ? `${media.runtime}m` : null,
+                formatDigitalRelease(media.releasedDigital),
                 media.productionCountries?.[0],
                 languageName(media.originalLanguage),
                 media.status && media.status !== "Released" ? media.status : null,
@@ -314,8 +312,12 @@ export default async function MovieDetailPage({
               </p>
             )}
 
+            {/* items-end, not items-center: RequestButton is a flex-col block
+                (availability/queue status line above its CTA), so centering
+                floated the sibling buttons above the CTA whenever a status
+                line rendered. */}
             <div
-              className="flex items-center flex-wrap"
+              className="flex items-end flex-wrap"
               style={{ gap: 10, marginTop: 6 }}
             >
               <RequestButton
@@ -360,10 +362,10 @@ export default async function MovieDetailPage({
               ))}
               <WatchlistButton tmdbId={media.id} mediaType="MOVIE" initialOnWatchlist={onWatchlist} />
               <HideButton
-                  tmdbId={media.id}
-                  mediaType="MOVIE"
-                  title={media.title}
-                  posterPath={media.posterPath}
+                tmdbId={media.id}
+                mediaType="MOVIE"
+                title={media.title}
+                posterPath={media.posterPath}
                 initialHidden={onHidden}
               />
               {issuesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
@@ -384,19 +386,6 @@ export default async function MovieDetailPage({
               )}
               {(media.trailerKey || media.trailerUrl) && (
                 <TrailerButton trailerKey={media.trailerKey} trailerUrl={media.trailerUrl} />
-              )}
-              {media.releasedDigital && (
-                <span
-                  className="ds-mono"
-                  style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
-                >
-                  Digital{" "}
-                  {new Date(media.releasedDigital).toLocaleDateString("en-US", {
-                    month: "short",
-                    day: "numeric",
-                    year: "numeric",
-                  })}
-                </span>
               )}
             </div>
           </div>

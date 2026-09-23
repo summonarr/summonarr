@@ -74,9 +74,9 @@ export async function POST(req: NextRequest) {
     throw err;
   }
   // Best-effort clear of the flow cookie. This is NOT a server-side one-shot —
-  // a client that ignores the Set-Cookie can resubmit until the 10-min TTL. True
-  // single-use is enforced one layer up: Plex invalidates the PIN token on first
-  // redemption, so a replayed (cookie, token) pair fails at authorizeWithPlex().
+  // a client that ignores the Set-Cookie can resubmit until the cookie's TTL
+  // runs out. That is acceptable because a resubmission must also carry the
+  // Plex token, which is already a full credential for that Plex account.
   return buildSignInResponse(req, result, {
     extraSetCookies: [buildPlexFlowClearedSetCookie()],
   });

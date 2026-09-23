@@ -160,23 +160,20 @@ export function PermissionsModal({
   // Focus-in + Tab-trap + Escape + focus-restore for this hand-rolled overlay.
   useModalA11y(dialogRef, onClose, closeBtnRef);
 
-  // Every mutator in this modal is the same shape: flip local state, PATCH the
-  // one field that changed, put the state back if the server disagrees. The
-  // rollback was already written into each copy — what did not exist anywhere
-  // was any way to SAY SO. The modal had no error state at all, so a refused
-  // change simply snapped the control back with no explanation, and two of the
-  // refusals are things an admin does on purpose:
+  // Every change in this modal works the same way: update local state first
+  // (an "optimistic" update), PATCH the one field that changed, and call
+  // `rollback` to undo the local change if the server refuses. The server's
+  // error message is shown, because some refusals are things an admin does on
+  // purpose and needs explained:
   //   • clearing the last permission bit sends a mask of 0, which the route
   //     rejects with a sentence explaining what to do instead;
   //   • a quota limit of 0 is rejected because 0 already means "unlimited" —
-  //     the response spells out the three real alternatives.
-  // The route is also rate-limited to 20 PATCHes a minute and this modal
-  // renders up to 18 checkboxes, so an admin working steadily down the list
-  // hits a 429 that was equally invisible.
+  //     the response spells out the real alternatives.
+  // The route also allows only 20 PATCHes a minute and this modal has up to 18
+  // checkboxes, so an admin clicking steadily down the list can hit a 429.
   //
-  // The rollback closure only has to restore the reference it captured: both
-  // nested updates below rebuild their maps immutably and never touch `prev`,
-  // so no deep clone is involved.
+  // The rollback only has to restore the value it captured: the nested updates
+  // below build new maps instead of editing `prev`, so no deep copy is needed.
   async function patchUser(body: Record<string, unknown>, rollback: () => void): Promise<void> {
     setSaving(true);
     setError(null);
@@ -194,10 +191,9 @@ export function PermissionsModal({
       }
       router.refresh();
     } catch {
-      // A transport failure REJECTS rather than returning a response, so it
-      // skipped the !res.ok branch above entirely: the checkbox stayed flipped
-      // against an unchanged database, and the rejection escaped as an
-      // unhandled promise because every caller discards the returned promise.
+      // A network failure throws instead of returning a response, so the
+      // !res.ok branch above never runs. Roll back here too, and swallow the
+      // error: callers don't await this promise, so a throw would go unhandled.
       rollback();
       setError("Network error — please try again.");
     } finally {
@@ -246,11 +242,10 @@ export function PermissionsModal({
     const trimmed = raw.trim();
     const value = trimmed === "" ? null : Math.max(0, Math.floor(Number(trimmed)));
     if (value !== null && !Number.isFinite(value)) return;
-    // Nothing changed ⇒ nothing to save. These fire from onBlur, so simply
-    // tabbing through the four inputs issued four PATCHes, each one an
-    // unconditional UPDATE plus an audit row whose before and after are
-    // identical — and each one spending a slot from the 20/min budget shared
-    // with the permission checkboxes above.
+    // Nothing changed, so nothing to save. This runs on blur, so without this
+    // check just tabbing through the four inputs would send four PATCHes — each
+    // writing a no-op audit row and using up the 20-per-minute rate limit
+    // shared with the permission checkboxes above.
     if (value === (u[field] ?? null)) return;
     // Rollback restores the server's value, not the typed text: the server
     // refused, so what it holds is still what it held before.
@@ -280,7 +275,7 @@ export function PermissionsModal({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-1">
-          <h3 id={titleId} className="text-sm font-semibold text-white flex items-center gap-2">
+          <h3 id={titleId} className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
             <ShieldCheck className="w-4 h-4 text-zinc-400" />
             Permissions &amp; Quota
           </h3>
@@ -289,7 +284,7 @@ export function PermissionsModal({
             type="button"
             aria-label="Close"
             onClick={onClose}
-            className="text-zinc-500 hover:text-white transition-colors"
+            className="text-zinc-500 hover:text-zinc-100 transition-colors"
           >
             <X className="w-4 h-4" />
           </button>

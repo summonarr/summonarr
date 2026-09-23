@@ -1,6 +1,6 @@
-// Route-level unit tests for two more uncovered guardrail-35 read surfaces,
-// plus the shared enrichment behind one of them:
-//   GET /api/person/[id]        → src/lib/person.ts getEnrichedPerson (untested)
+// Route-level unit tests for two guardrail-35 read surfaces, plus the shared
+// enrichment behind one of them:
+//   GET /api/person/[id]        → src/lib/person.ts getEnrichedPerson
 //   GET /api/tv/[id]/season/[n]
 //
 // Both hand a caller per-title availability derived from the Plex/Jellyfin
@@ -226,7 +226,8 @@ shadowPrismaModel(prisma, "jellyfinLibraryItem", libModel("jellyfinLibraryItem",
 
 type EpRow = { tmdbId: number; seasonNumber: number; episodeNumber: number; source: string };
 let episodeRows: EpRow[] = [];
-shadowPrismaModel(prisma, "tVEpisodeCache", {
+// Named so the tests that swap in their own stub can put THIS back in a finally.
+const tvEpisodeCacheModel = {
   findMany: async (args: { where: { tmdbId: number; seasonNumber?: number; source: { in: string[] } } }) => {
     rec("tVEpisodeCache.findMany", args.where);
     return episodeRows.filter(
@@ -236,7 +237,8 @@ shadowPrismaModel(prisma, "tVEpisodeCache", {
     );
   },
   update: async (args: unknown) => { rec("tVEpisodeCache.update", args); return {}; },
-});
+};
+shadowPrismaModel(prisma, "tVEpisodeCache", tvEpisodeCacheModel);
 
 type ReqRow = { tmdbId: number; mediaType: string; requestedBy: string; status: string };
 let requestRows: ReqRow[] = [];
@@ -535,10 +537,15 @@ test("person: a person with no credits short-circuits without touching the libra
       { status: 200, headers: { "content-type": "application/json" } },
     );
   }) as unknown as typeof fetch;
-  const res = await getPerson(me.token, "1");
-  assert.equal(res.status, 200);
-  assert.equal(opsOf("plexLibraryItem.findMany").length, 0);
-  globalThis.fetch = originalFetch;
+  // finally: a failed assertion must not leave this fetch stub installed for
+  // every later test.
+  try {
+    const res = await getPerson(me.token, "1");
+    assert.equal(res.status, 200);
+    assert.equal(opsOf("plexLibraryItem.findMany").length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 // ── season: auth + validation ────────────────────────────────────────────────
@@ -692,11 +699,15 @@ test("season: a failing warm never breaks the response (unawaited, errors swallo
     },
     update: async () => { rec("tVEpisodeCache.update"); throw new Error("warm failed"); },
   });
-  const me = await mintSession();
-  const res = await getSeason(me.token, "1399", "1");
-  assert.equal(res.status, 200, "a failed cache warm must not surface to the caller");
-  await new Promise((r) => setImmediate(r));
-  assert.deepEqual((await res.json()).owned, [1]);
+  try {
+    const me = await mintSession();
+    const res = await getSeason(me.token, "1399", "1");
+    assert.equal(res.status, 200, "a failed cache warm must not surface to the caller");
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual((await res.json()).owned, [1]);
+  } finally {
+    shadowPrismaModel(prisma, "tVEpisodeCache", tvEpisodeCacheModel);
+  }
 });
 
 test("season: an owned episode TMDB no longer lists is skipped by the warm rather than throwing", async () => {
@@ -709,9 +720,13 @@ test("season: an owned episode TMDB no longer lists is skipped by the warm rathe
     },
     update: async (args: unknown) => { rec("tVEpisodeCache.update", args); return {}; },
   });
-  const me = await mintSession();
-  const res = await getSeason(me.token, "1399", "1");
-  assert.equal(res.status, 200);
-  await new Promise((r) => setImmediate(r));
-  assert.equal(opsOf("tVEpisodeCache.update").length, 0, "no TMDB metadata for ep 99 ⇒ nothing to warm");
+  try {
+    const me = await mintSession();
+    const res = await getSeason(me.token, "1399", "1");
+    assert.equal(res.status, 200);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(opsOf("tVEpisodeCache.update").length, 0, "no TMDB metadata for ep 99 ⇒ nothing to warm");
+  } finally {
+    shadowPrismaModel(prisma, "tVEpisodeCache", tvEpisodeCacheModel);
+  }
 });

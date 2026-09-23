@@ -78,20 +78,15 @@ test("malformed allowlist entries are skipped, not fatal", () => {
   assert.equal(isIpAllowed("10.0.0.1", ["10.0.0.0/99"]), false); // out-of-range prefix ignored
 });
 
-// LATENT SRC QUIRK (pinned, not endorsed): isIpAllowed's prefix parse
-// (src/lib/ip-allowlist.ts ~lines 141-143) uses Number(entry.slice(slash + 1)),
-// and Number("") === 0 / Number(" 8") === 8. So a degenerate entry like
-// "10.0.0.0/" silently acts as /0 and matches EVERY same-family client, and
-// "10.0.0.0/ 8" acts as /8 — while isValidIpOrCidr rejects both tokens.
-// PATCH-time validation is the only thing standing between a stored degenerate
-// entry and match-everything. These tests pin the current permissive matcher
-// behavior AND the validator's rejection, so any refactor that widens the gap
-// (e.g. loosening the validator without tightening the matcher) fails loudly.
-test("degenerate prefixes: matcher is looser than the validator (pinned quirk)", () => {
-  // Empty prefix — Number("") === 0 → behaves as /0, matches any v4 client.
-  assert.equal(isIpAllowed("99.9.9.9", ["10.0.0.0/"]), true);
-  // Whitespace-padded prefix — Number(" 8") === 8 → behaves as /8.
-  assert.equal(isIpAllowed("10.5.5.5", ["10.0.0.0/ 8"]), true);
+// Degenerate prefixes: the matcher used to parse the prefix with a bare
+// Number(), so "10.0.0.0/" (Number("") === 0) acted as /0 and matched EVERY
+// same-family client, and "10.0.0.0/ 8" acted as /8, while isValidIpOrCidr
+// rejected both. A stored degenerate entry (backup restore, hand edit) could
+// therefore open the allowlist. The matcher now fails closed like the validator.
+test("degenerate prefixes: matcher fails closed, same as the validator", () => {
+  assert.equal(isIpAllowed("99.9.9.9", ["10.0.0.0/"]), false);
+  assert.equal(isIpAllowed("10.5.5.5", ["10.0.0.0/"]), false);
+  assert.equal(isIpAllowed("10.5.5.5", ["10.0.0.0/ 8"]), false);
   assert.equal(isIpAllowed("99.9.9.9", ["10.0.0.0/ 8"]), false);
   // The validator rejects both tokens, so a PATCH can never store them.
   assert.equal(isValidIpOrCidr("10.0.0.0/"), false);

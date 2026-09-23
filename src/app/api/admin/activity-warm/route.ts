@@ -10,7 +10,10 @@ const COOLDOWN_KEY = "lastActivityWarmAt";
 export const POST = withAdmin(async (_req, _ctx, session) => {
   const now = Date.now();
 
-  // Atomic upsert acts as a distributed CAS: only succeeds if the cooldown window has elapsed
+  // One atomic SQL statement claims the cooldown slot: it writes the new
+  // timestamp only if the old one is at least COOLDOWN_MS old (or unreadable).
+  // Two admins clicking at once can't both win, because Postgres serializes
+  // the write. `claimed` is the number of rows written (0 = still cooling down).
   const claimed = await prisma.$executeRaw`
     INSERT INTO "Setting" (key, value, "updatedAt")
     VALUES (${COOLDOWN_KEY}, ${String(now)}, NOW())

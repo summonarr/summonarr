@@ -9,7 +9,8 @@ export const TTL = {
   ARR_PATHS:   6 * 60 * 60,
 } as const;
 
-// Older titles change infrequently; TTL scales with age so fresh releases get updated more aggressively
+// Older titles change rarely, so the cache TTL grows with a title's age;
+// new releases are refreshed more often.
 export function libraryDetailsTtl(releaseDate: string | null | undefined): number {
   const year = releaseDate ? parseInt(releaseDate.substring(0, 4), 10) : NaN;
   const age = isNaN(year) ? Infinity : new Date().getFullYear() - year;
@@ -19,12 +20,15 @@ export function libraryDetailsTtl(releaseDate: string | null | undefined): numbe
   return              30 * 24 * 60 * 60;
 }
 
-// Expired rows are lazily deleted on read rather than via a scheduled job; callers never receive stale data
+// Returns null for a missing, expired or unparseable row, so callers never get
+// stale data. An expired row is also deleted here in the background (the /api/sync
+// run purges any that are never read again).
 export async function getCache<T>(key: string): Promise<T | null> {
   const row = await prisma.tmdbCache.findUnique({ where: { key } });
   if (!row) return null;
   if (new Date() > row.expiresAt) {
-    // deleteMany with the expiresAt guard so a concurrent setCache upsert isn't clobbered by stale-read cleanup
+    // deleteMany with an expiresAt guard: if a concurrent setCache just refreshed
+    // this key, the new row is not expired and is left alone.
     prisma.tmdbCache.deleteMany({ where: { key, expiresAt: { lt: new Date() } } }).catch(() => {});
     return null;
   }
@@ -62,7 +66,8 @@ export async function getCacheMany<T>(keys: readonly string[]): Promise<Map<stri
   return out;
 }
 
-// Returns expired entries with isStale=true so callers can serve the old value and revalidate async
+// Stale-while-revalidate read: an expired row is still returned, flagged
+// isStale=true, so the caller can show the old value and refresh it in the background.
 export async function getCacheStale<T>(key: string): Promise<{ value: T | null; isStale: boolean }> {
   const row = await prisma.tmdbCache.findUnique({ where: { key } });
   if (!row) return { value: null, isStale: false };

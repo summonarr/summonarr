@@ -15,9 +15,9 @@ const STEP_UP_MAX_AGE_MS = 5 * 60 * 1000;
 //     signed in. The caller's JWT continues to work; up to ~60s replica lag exists for
 //     any stolen JWT replayed elsewhere (acceptable for "kill my old laptop" UX).
 //
-//   includeCurrent=true: bump User.sessionsRevokedAt — refreshToken() rejects every
-//     JWT minted before this timestamp on every replica, so the caller is also signed
-//     out. Use this when you suspect compromise.
+//   includeCurrent=true: bump User.sessionsRevokedAt — verifyAndRefreshSession()
+//     (src/lib/session-refresh.ts) rejects every JWT minted before this timestamp on
+//     every replica, so the caller is also signed out. Use this when you suspect compromise.
 //
 // Step-up auth mirrors DELETE /api/sessions: credentials users prove with
 // confirmPassword, SSO users must hold a session younger than 5 minutes.
@@ -74,7 +74,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
   let deletedCount = 0;
   if (includeCurrent) {
     // Replica-safe full revoke: bump sessionsRevokedAt then delete all rows.
-    // refreshToken() in src/lib/auth.ts rejects any JWT with iat < this timestamp.
+    // verifyAndRefreshSession() rejects any JWT whose iat (issued-at time) is older
+    // than this timestamp.
     await prisma.$transaction(async (tx) => {
       await tx.user.update({
         where: { id: session.user.id },
@@ -85,7 +86,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     });
   } else {
     // Delete every other session row AND bump sessionsRevokedAt to a value just
-    // before the current session's createdAt, so refreshToken() rejects any
+    // before the current session's createdAt, so verifyAndRefreshSession() rejects any
     // cached JWT for the deleted sessions on every replica within the next
     // dbCheckedAt cycle (otherwise the cached state passes for up to 60s after
     // row deletion). The current session survives because its iat > createdAt

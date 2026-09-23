@@ -81,7 +81,7 @@ function JellyfinLibraryPicker({ initialSelected, folders, loadStatus, errorMess
                     onChange={() => toggle(f.id)}
                     className="w-4 h-4 rounded border-zinc-600 bg-zinc-800 accent-indigo-500"
                   />
-                  <span className="text-sm text-zinc-200 group-hover:text-white transition-colors">
+                  <span className="text-sm text-zinc-300 group-hover:text-zinc-100 transition-colors">
                     {f.name}
                   </span>
                   <span className="text-xs px-1.5 py-0.5 rounded bg-zinc-700 text-zinc-400">
@@ -180,8 +180,8 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
       const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; jellyfinError?: string };
       saveOk = res.ok && body.ok !== false;
       if (!saveOk) {
-        // 422 + jellyfinError: the route probed the new URL/key, it failed, and the
-        // previous working config was rolled back — nothing durable changed.
+        // A 422 with `jellyfinError` means the server tried the new URL/key, the
+        // test failed, and it put the old settings back — nothing was saved.
         setSaveErrorMessage(body.jellyfinError ?? body.error ?? "Failed to save");
       }
     } catch {
@@ -208,10 +208,10 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
     setSyncStatus("running");
     setSyncResult(null);
     try {
-      // { full: true } requests a full delete+replace, matching the Plex form's
-      // "Import from Plex" button. A bodyless POST runs the recentOnly
-      // insert-only path (2h window), which never removes stale rows — so this
-      // button silently couldn't repair a drifted library.
+      // { full: true } asks for a full sync: delete this server's library rows
+      // and rebuild them (like the Plex form's "Import from Plex" button).
+      // Without it the route only adds items changed in the last 2 hours and
+      // never removes old rows, so it could not fix a library that is out of date.
       const res = await fetch(withBasePath("/api/sync/jellyfin"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -291,7 +291,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
               onClick={handleSync}
               disabled={syncStatus === "running"}
               variant="outline"
-              className="border-zinc-700 text-zinc-300 hover:text-white"
+              className="border-zinc-700 text-zinc-300 hover:text-zinc-100"
             >
               {syncStatus === "running" ? (
                 <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Syncing…</>

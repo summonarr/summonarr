@@ -13,14 +13,16 @@ import { sanitizeForLog } from "./sanitize";
 
 export type ScanMediaType = "movie" | "tv";
 
-// Debounce prevents redundant back-to-back scan triggers from rapid webhook bursts (e.g. season grab)
+// Debounce: wait for a quiet gap before scanning, so a burst of webhooks (e.g. a
+// season grab) triggers one scan instead of many back-to-back ones.
 const SCAN_DEBOUNCE_MS = 15_000;
 
 // Debounce deadline: a sustained import burst (webhooks < 15s apart) would otherwise
-// reset the timer forever and postpone the scan until the burst ends.
+// keep resetting the timer and postpone the scan until the burst ends.
 const SCAN_MAX_WAIT_MS = 2 * 60_000;
 
-// After this many retries the scan fires anyway so a stalled Arr queue doesn't block library updates indefinitely
+// After this many retries the scan fires anyway, so a stalled Radarr/Sonarr queue
+// can't block library updates forever.
 const MAX_QUEUE_WAIT_RETRIES = 4;
 
 interface PendingScan {
@@ -31,15 +33,16 @@ interface PendingScan {
   firstScheduledAt: number;
 
   tmdbId?: number;
-  // Which ARR instance's queue to gate on. A 4K-only grab lives in the 4K queue, so
-  // checking HD (the default) reports "not downloading" and the rescan fires before
-  // the file imports. undefined → "hd" via the helper defaults.
+  // Which Radarr/Sonarr instance's queue to wait on (guardrail 32). A 4K-only grab
+  // lives in the 4K queue, so checking the default instance would report "not
+  // downloading" and the rescan would fire before the file imports. undefined →
+  // the default instance ("") via the arr.ts helper defaults.
   variant?: ArrVariant;
 }
 
 const pending = new Map<ScanMediaType, PendingScan>();
-// Track in-flight triggerLibraryScan calls so a new schedule arriving mid-scan awaits the running one
-// instead of firing a parallel scan against the same backend.
+// Scans currently running. A new schedule arriving mid-scan waits on the running
+// one instead of firing a parallel scan against the same backend.
 const inFlight = new Map<ScanMediaType, Promise<void>>();
 
 export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number, variant?: ArrVariant): Promise<void> {
@@ -56,11 +59,12 @@ export function scheduleLibraryScan(mediaType: ScanMediaType, tmdbId?: number, v
       clearTimeout(existing.timer);
       existing.timer = setTimeout(() => runScan(mediaType), SCAN_DEBOUNCE_MS);
     }
-    // Queue-gate hint; last writer wins on coalesce (a best-effort timing optimisation).
+    // Which instance's queue to wait on; when calls merge, the latest one wins
+    // (this only tunes timing, so best-effort is fine).
     if (variant !== undefined) existing.variant = variant;
 
     if (tmdbId !== undefined && existing.tmdbId !== undefined && existing.tmdbId !== tmdbId) {
-      // Two different titles coalesced into the same scan window — fall back to full queue check
+      // Two different titles merged into one scan window — fall back to checking the whole queue
       existing.tmdbId = undefined;
     } else if (tmdbId !== undefined && existing.tmdbId === undefined) {
       // Already a full-queue check; a single-title hint can't narrow it back down
@@ -163,12 +167,13 @@ async function runScan(mediaType: ScanMediaType): Promise<void> {
     );
   }
 
-  // Hold the pending entry until the scan finishes so a concurrent schedule sees inFlight and awaits;
-  // delete pending only after we've registered the in-flight promise.
-  // Same "a throw escapes runScan" class as the queue check above, one step
-  // later: a rejection here is discarded by the setTimeout that called us
-  // (unhandled) AND is handed to every caller coalescing on inFlight, whose
-  // `await scheduleLibraryScan(...)` then skips the work that follows it.
+  // Register the scan in inFlight BEFORE deleting the pending entry, so a
+  // schedule arriving in between sees inFlight and waits on it.
+  // The .catch() matters for the same reason as the queue-check try/catch
+  // above: without it a failed scan would be an unhandled rejection in the
+  // setTimeout that called us, AND would reject for every caller waiting on
+  // inFlight, making their `await scheduleLibraryScan(...)` skip the work that
+  // follows it.
   const scanPromise = triggerLibraryScan(mediaType)
     .catch((err) =>
       console.error(

@@ -1,23 +1,30 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
+import { Switch } from "@/components/ui/switch";
 
 export function Request4kAllToggle({ initialEnabled }: { initialEnabled: boolean }) {
   const [enabled, setEnabled] = useState(initialEnabled);
   const [status, setStatus] = useState<SaveStatus>("idle");
+  // The timer that fades the ✓/✗ back to idle. A new save cancels the old
+  // timer; otherwise it could fire mid-save, set "idle", and unlock the control
+  // while the request is still in flight.
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // One write at a time. request4kAll is exempt from the settings route's
-  // per-key cooldown (so a corrective second click isn't 429'd back to the
-  // state the admin just left), and nothing else serialises this control —
-  // two overlapping PATCHes could commit out of order and leave the switch
-  // showing OFF while the server still grants everyone 4K.
+  // Only one save at a time: the switch is disabled while a save is running.
+  // request4kAll skips the settings route's per-key cooldown (so a quick
+  // second click to undo isn't rejected with a 429), which means nothing else
+  // stops two saves overlapping. Two overlapping saves could finish in the
+  // wrong order and leave the switch showing OFF while the server still lets
+  // everyone request 4K.
   async function toggle() {
     const next = !enabled;
     const prev = enabled;
     setEnabled(next);
+    if (idleTimer.current) clearTimeout(idleTimer.current);
     setStatus("saving");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
@@ -36,7 +43,7 @@ export function Request4kAllToggle({ initialEnabled }: { initialEnabled: boolean
       setEnabled(prev);
       setStatus("error");
     }
-    setTimeout(() => setStatus("idle"), 3000);
+    idleTimer.current = setTimeout(() => setStatus("idle"), 3000);
   }
 
   return (
@@ -53,16 +60,7 @@ export function Request4kAllToggle({ initialEnabled }: { initialEnabled: boolean
         {status === "saving" && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500" />}
         {status === "ok"     && <CheckCircle className="w-3.5 h-3.5 text-green-400" />}
         {status === "error"  && <XCircle className="w-3.5 h-3.5 text-red-400" />}
-        <button
-          type="button"
-          role="switch"
-          aria-checked={enabled}
-          onClick={toggle}
-          disabled={status === "saving"}
-          className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-zinc-900 ${enabled ? "bg-indigo-600" : "bg-zinc-700"}`}
-        >
-          <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${enabled ? "translate-x-4" : "translate-x-0.5"}`} />
-        </button>
+        <Switch checked={enabled} onCheckedChange={toggle} disabled={status === "saving"} />
       </div>
     </div>
   );

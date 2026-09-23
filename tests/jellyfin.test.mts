@@ -18,8 +18,6 @@
 //
 //   Library surface (hasJellyfinItemByTmdbId, getJellyfinTmdbIds,
 //   getJellyfinMediaFolders, refreshJellyfinLibrary):
-//   (getJellyfinUserEmail is GONE — UserDto carries no Email field in any
-//   Jellyfin version, so the probe was dead code; its callers were removed.)
 //   - the exact /Items queries: the availability probe's recent-additions
 //     fetch with CLIENT-side ProviderIds matching (Jellyfin never implemented
 //     the Emby-style AnyProviderIdEquals filter — jellyfin/jellyfin#1990 — so
@@ -85,7 +83,7 @@
 //     existing policy with only EnableContentDownloading overridden (posting a
 //     partial policy would wipe every other permission bit).
 //
-// No DB (jellyfin.ts imports nothing but safe-fetch) and no network:
+// No DB (jellyfin.ts imports only safe-fetch and log-dedup) and no network:
 // globalThis.fetch is scripted per test. Base URLs are unique-per-test RFC1918
 // IP LITERALS — safeFetchAdminConfigured runs allowPrivate=true and ssrf.ts
 // short-circuits isIP() hosts past DNS entirely, so no dns.lookup stub is
@@ -438,12 +436,11 @@ test("ProviderIds parsing: lowercase tmdb fallback, non-numeric skipped, absent 
   });
 });
 
-// This test previously pinned the BUG: `duplicate tmdb ids last-write-wins into
-// the Map`. One tmdb id in two libraries overwrote the first copy wholesale, and
-// because the library-scoped walk fetches folders CONCURRENTLY the survivor —
-// and with it the row's itemId, filePath, addedAt and ratings — could flip
-// between syncs. The collapse to one row stays (the schema has nowhere to put a
-// second itemId); the coin-flip does not.
+// Why the winner must be chosen by a rule: the library-scoped walk fetches
+// folders CONCURRENTLY, so with plain last-write-wins the surviving copy — and
+// with it the row's itemId, filePath, addedAt and ratings — could flip between
+// syncs. The collapse to one row stays (the schema has nowhere to put a second
+// itemId); the coin-flip does not (guardrail 37).
 test("a tmdb id in several libraries resolves to the most recently added copy, whatever order the libraries land in", async () => {
   const B = nextBase();
   respond = () => okJson({
@@ -677,7 +674,7 @@ test("episodes without a provided map discover the Series set first, then map ep
   assert.deepEqual(episodes, [{ tmdbId: 1399, seasonNumber: 1, episodeNumber: 2 }]);
 });
 
-// The regression this whole change exists for. A show in two libraries has two
+// The main regression pin for guardrail 37. A show in two libraries has two
 // Jellyfin item ids, and each of its episodes carries whichever SeriesId it was
 // filed under. Only one id survives into JellyfinLibraryItem.jellyfinItemId, and
 // processEpisodes `continue`s on a SeriesId it doesn't recognise — so a series

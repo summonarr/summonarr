@@ -35,17 +35,10 @@ export function MasterDbFillButton({
     const libraryParts: string[] = [];
     let libraryDegraded = false;
     try {
-      // Only the servers that exist. The old code POSTed to both and gated the
-      // failure on `!plexRes.ok && !jellyRes.ok` — a logical AND, so BOTH had to
-      // fail before anything was reported. On a two-server deployment that
-      // turned a real Jellyfin outage into green text: the Jellyfin error was
-      // discarded, its count fell through to 0, and `if (jellyCount > 0)` simply
-      // omitted the line, so the summary read as a clean fill.
-      //
-      // Note this is the opposite mistake from resync-library-button, which
-      // took the FIRST error and so went red whenever either server was merely
-      // absent. Neither could tell "not configured" from "broken"; both now
-      // decide it before the request instead of from the response.
+      // Only call the servers that are configured (the page tells us which).
+      // Deciding this up front lets us tell "not set up" apart from "broken":
+      // an unconfigured server is skipped, while a configured one that fails
+      // is always reported (guardrail 36).
       const targets = [
         ...(plexConfigured ? [{ name: "Plex", path: "/api/sync/plex" }] : []),
         ...(jellyfinConfigured ? [{ name: "Jellyfin", path: "/api/sync/jellyfin" }] : []),
@@ -106,16 +99,15 @@ export function MasterDbFillButton({
     setPhase("phase2");
     try {
       const warmRes = await fetch(withBasePath("/api/admin/library-warm"), { method: "POST" });
-      const warmData = await warmRes.json() as { fetched?: number; backfilled?: number; skipped?: number; error?: string };
-      if (warmData.error) {
+      const warmData = (await warmRes.json().catch(() => ({}))) as { fetched?: number; backfilled?: number; skipped?: number; error?: string };
+      if (!warmRes.ok || warmData.error) {
         setPhase("error");
-        setSummary(warmData.error);
+        setSummary(warmData.error ?? `TMDB warm failed (${warmRes.status})`);
         scheduleReset(15_000);
         return;
       }
-      // Every configured server is named, including one that scanned 0 items —
-      // the old `if (count > 0)` guard silently omitted such a line, which is
-      // exactly how a failed server disappeared from the summary.
+      // Name every configured server, even one that scanned 0 items, so a
+      // failed server can never silently drop out of the summary.
       const parts: string[] = [...libraryParts];
       const fetched    = warmData.fetched    ?? 0;
       const backfilled = warmData.backfilled ?? 0;
@@ -149,7 +141,7 @@ export function MasterDbFillButton({
               <li>Phase 1 — full library scan (fills contentRating, addedAt, communityRating)</li>
               <li>Phase 2 — TMDB metadata warm (populates TmdbMediaCore table)</li>
             </ul>
-            <p className="text-xs text-amber-400/80">
+            <p className="text-xs text-amber-400">
               Large libraries may take several minutes. Intended for initial setup — routine syncs handle this automatically going forward.
             </p>
           </div>
@@ -158,7 +150,7 @@ export function MasterDbFillButton({
           <Button
             size="sm"
             onClick={handleFill}
-            className="bg-amber-600 hover:bg-amber-500 h-7 px-4 text-xs"
+            className="bg-amber-600 text-black hover:bg-amber-600/90 h-7 px-4 text-xs"
           >
             Run Full Fill
           </Button>
@@ -166,7 +158,7 @@ export function MasterDbFillButton({
             size="sm"
             variant="outline"
             onClick={() => setPhase("idle")}
-            className="border-zinc-600 text-zinc-400 hover:text-white h-7 px-3 text-xs"
+            className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-7 px-3 text-xs"
           >
             Cancel
           </Button>
@@ -189,7 +181,7 @@ export function MasterDbFillButton({
           size="sm"
           onClick={() => { clearTimeout(resetTimer.current); setPhase("confirm"); }}
           disabled={loading}
-          className="border-zinc-700 text-zinc-300 hover:text-white gap-2"
+          className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
         >
           {loading
             ? <Loader2 className="w-4 h-4 animate-spin" />

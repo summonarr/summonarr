@@ -9,18 +9,17 @@
 //   3. a live TMDB verification (verifyTmdbMedia) is the last resort, and its
 //      null (id doesn't exist on TMDB) is what lets the request routes 404
 //      instead of minting a row for a fabricated tmdbId.
-// Also pinned: the exact core/cache query shapes (composite tmdbId_mediaType
-// key; MOVIE→movie:/TV→tv: cache-key casing), the null/"" normalization of
-// optional fields (posterPath ?? null, releaseYear ?? ""), that a throwing
-// core/cache read degrades to the next tier instead of failing the request,
-// and the live tier's wire shape (GET /3/movie|tv/<id> with the TMDB v4
-// bearer header).
+// Also pinned: the exact query shapes (the composite tmdbId_mediaType key; the
+// lowercase movie:/tv: cache-key prefix), how missing optional fields are filled
+// in (posterPath → null, releaseYear → ""), that a core/cache read which THROWS
+// falls through to the next tier instead of failing the request, and the live
+// call's shape (GET /3/movie|tv/<id> with the TMDB v4 bearer header).
 //
-// No DB or network: src/lib/prisma.ts caches its client on globalThis, so a
-// fake client is pre-seeded BEFORE the module graph loads (the
-// poster-cache.test pattern); globalThis.fetch is scripted per URL and
-// dns/promises.lookup is stubbed so safe-fetch's SSRF resolver never issues a
-// real lookup for api.themoviedb.org.
+// No DB or network: src/lib/prisma.ts reuses a client stored on globalThis, so
+// a fake client is put there BEFORE the source modules load (the
+// poster-cache.test pattern). globalThis.fetch is scripted, and
+// dns/promises.lookup is stubbed so safe-fetch's SSRF check (the guard against
+// requests to internal addresses) never does a real DNS lookup.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import dns from "node:dns/promises";

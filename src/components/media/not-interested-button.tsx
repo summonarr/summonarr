@@ -44,11 +44,11 @@ export function NotInterestedButton({
       // 409 = already hidden. The desired end state holds either way, so it is
       // a success for this button (same reading as HideButton).
       if (res.ok || res.status === 409) {
-        toast({ title: `Hidden — "${title}" won't be suggested again`, variant: "success" });
+        toast({ title: `Hidden — "${title}" won’t be suggested again`, variant: "success" });
         router.refresh();
       } else {
         const data = await res.json().catch(() => ({}));
-        toast({ title: data.error ?? "Couldn't hide that — try again", variant: "error" });
+        toast({ title: data.error ?? "Couldn’t hide that — try again", variant: "error" });
       }
     } catch {
       toast({ title: "Network error — please try again", variant: "error" });
@@ -64,7 +64,7 @@ export function NotInterestedButton({
       disabled={loading}
       aria-label={`Not interested in ${title}`}
       title="Not interested — stop suggesting this"
-      className="ds-tap inline-flex items-center justify-center transition-opacity"
+      className="ds-tap ds-hover-tint relative inline-flex items-center justify-center"
       style={{
         width: 26,
         height: 26,
@@ -73,9 +73,14 @@ export function NotInterestedButton({
         backdropFilter: "blur(6px)",
         border: "1px solid var(--ds-border)",
         color: "var(--ds-fg-muted)",
-        cursor: loading ? "progress" : "pointer",
+        cursor: loading ? "progress" : undefined,
       }}
     >
+      {/* Extends the hit area to 36×36 while the visual stays 26px: this is
+          always visible on touch (see the overlay wrapper in media-card.tsx),
+          where 26px is under the platform minimum. A tap on the span targets
+          the button. */}
+      <span aria-hidden="true" style={{ position: "absolute", inset: -5 }} />
       {loading ? (
         <Loader2 className="animate-spin" style={{ width: 13, height: 13 }} />
       ) : (

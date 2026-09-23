@@ -47,16 +47,20 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={value}>
       {children}
+      {/* One live region on the container; the items carry only a role. Nesting
+          aria-live on both made screen readers announce each toast twice.
+          Below lg the fixed bottom tab bar (mobile-nav.tsx, ≥64px tall) covers
+          the bottom-right corner, so the anchor clears it there and drops back
+          to 16px once the bar is hidden. */}
       <div
         aria-live="polite"
-        className="fixed z-[100] flex flex-col gap-2 pointer-events-none"
-        style={{ bottom: "calc(env(safe-area-inset-bottom, 0px) + 16px)", right: 16, maxWidth: "min(92vw, 380px)" }}
+        className="fixed z-[100] flex flex-col gap-2 pointer-events-none right-4 bottom-[calc(env(safe-area-inset-bottom,0px)_+_80px)] lg:bottom-[calc(env(safe-area-inset-bottom,0px)_+_16px)]"
+        style={{ maxWidth: "min(92vw, 380px)" }}
       >
         {toasts.map((t) => (
           <div
             key={t.id}
             role={t.variant === "error" ? "alert" : "status"}
-            aria-live={t.variant === "error" ? "assertive" : "polite"}
             className="pointer-events-auto flex items-start gap-2.5 ds-page-enter"
             style={{
               padding: "10px 12px",
@@ -75,7 +79,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
                 marginTop: 1,
                 color:
                   t.variant === "success"
-                    ? "var(--ds-accent)"
+                    ? "var(--ds-success)"
                     : t.variant === "error"
                       ? "var(--ds-danger)"
                       : "var(--ds-fg-subtle)",
@@ -94,8 +98,15 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
               type="button"
               onClick={() => dismiss(t.id)}
               aria-label="Dismiss"
-              className="shrink-0"
-              style={{ color: "var(--ds-fg-subtle)", cursor: "pointer", marginTop: 1 }}
+              className="ds-hover-tint shrink-0 inline-flex items-center justify-center rounded-md"
+              // 28px hit box around the 14px glyph; the negative margins keep
+              // the row's height and right edge where the text puts them.
+              style={{
+                width: 28,
+                height: 28,
+                margin: "-5px -7px -5px 0",
+                color: "var(--ds-fg-subtle)",
+              }}
             >
               <X style={{ width: 14, height: 14 }} />
             </button>

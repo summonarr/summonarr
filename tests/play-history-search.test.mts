@@ -596,8 +596,9 @@ beforeEach(() => {
   rawCalls.length = 0;
   auditRows.length = 0;
   exportFullPages = 0;
-  warns.length = 0;
-  errors.length = 0;
+  // warns/errors are deliberately NOT cleared here: the guardrail-7 test at the
+  // end checks everything the earlier tests logged. Clearing them before each
+  // test would leave it nothing to check, so it could never fail.
 });
 
 // ── the headline pins ────────────────────────────────────────────────────────
@@ -801,11 +802,12 @@ test("the search paths stay silent (guardrail 7)", () => {
 
 // The grouped path computes chain-wide counterparts of pausedDuration /
 // startedAt / stoppedAt (SUM / MIN / MAX window aggregates) that the detail
-// panel reads beside totalPlayDuration. Both modes have to carry them: the
-// panel reads `totalPausedDuration ?? pausedDuration` (etc.) unconditionally,
-// so an ungrouped response that omits the mirror is fine, but a grouped one
-// that stops mapping the aliases silently regresses the panel to the newest
-// segment's values (the defect this pins). The mirror's grouped rows are all
+// panel reads beside totalPlayDuration. Both modes send them: ungrouped copies
+// each row's own values (every row is a one-segment chain). The panel reads
+// `totalPausedDuration ?? pausedDuration` (etc.), so a missing field falls back
+// quietly — which is why a grouped response that stops mapping the aliases
+// would silently show only the newest segment's values (the defect this
+// pins). The mirror's grouped rows are all
 // single-segment chains, so the SUM/MIN/MAX arithmetic itself is Postgres's
 // and is not exercised here — only that the route maps the aliases through.
 interface ChainFields {

@@ -656,12 +656,18 @@ test("PIN: the grid shorthand does not evict a preceding col-start/col-end", () 
   assert.equal(twMerge("row-end-3 row-span-2"), "row-end-3 row-span-2");
 });
 
-test("PIN: arbitrary text values always classify as text-size", () => {
-  // text-[...] matches the text-size regex regardless of bracket content, so a
-  // color like text-[#ff0000] clobbers (and is clobbered by) text sizes. This
-  // is the documented pragmatic trade-off of the hand-written merger.
-  assert.equal(twMerge("text-sm text-[#ff0000]"), "text-[#ff0000]");
+test("PIN: an arbitrary text value is a size only when length-shaped (Tailwind infers the same)", () => {
+  // Lengths are sizes…
   assert.equal(twMerge("text-[10px] text-lg"), "text-lg");
+  assert.equal(twMerge("text-sm text-[0.8rem]"), "text-[0.8rem]");
+  assert.equal(twMerge("text-sm text-[length:var(--fs)]"), "text-[length:var(--fs)]");
+  assert.equal(twMerge("text-sm text-[clamp(1rem,2vw,2rem)]"), "text-[clamp(1rem,2vw,2rem)]");
+  // …while a bare var() or a colour literal is a COLOUR (Tailwind emits
+  // `color:`), so it must neither delete nor be deleted by a size. The old
+  // catch-all silently dropped text-xs beside every text-[var(--ds-accent-fg)].
+  assert.equal(twMerge("text-xs text-[var(--ds-accent-fg)]"), "text-xs text-[var(--ds-accent-fg)]");
+  assert.equal(twMerge("text-sm text-[#ff0000]"), "text-sm text-[#ff0000]");
+  assert.equal(twMerge("text-zinc-100 text-[var(--ds-on-status)]"), "text-[var(--ds-on-status)]");
 });
 
 test("PIN: modifier ORDER forms distinct class spaces", () => {
@@ -708,4 +714,62 @@ test("PERF PIN: the group scan runs ONCE per token, not once per pass (review 20
   } finally {
     RegExp.prototype.test = nativeTest;
   }
+});
+
+test("PIN: an arbitrary COLOUR on a width-shaped prefix never deletes the bare width (StyledSelect lost its border)", () => {
+  // `border-[var(--ds-border)]` compiles to border-color only. Grouping it as a
+  // width made it delete the bare `border`, so the element rendered 0px wide.
+  assert.equal(twMerge("border border-[var(--ds-border)]"), "border border-[var(--ds-border)]");
+  assert.equal(twMerge("border-t border-t-[#333]"), "border-t border-t-[#333]");
+  assert.equal(twMerge("ring-2 ring-[var(--ds-accent-ring)]"), "ring-2 ring-[var(--ds-accent-ring)]");
+  assert.equal(twMerge("outline-2 outline-[color:red]"), "outline-2 outline-[color:red]");
+  // …while length-shaped arbitrary values are still widths.
+  assert.equal(twMerge("border-2 border-[3px]"), "border-[3px]");
+  assert.equal(twMerge("border border-[length:var(--w)]"), "border-[length:var(--w)]");
+  assert.equal(twMerge("ring-2 ring-[0.5px]"), "ring-[0.5px]");
+  // and an arbitrary drop-shadow is the filter, not its colour.
+  assert.equal(twMerge("drop-shadow-[0_0_2px_black] drop-shadow-red-500"), "drop-shadow-[0_0_2px_black] drop-shadow-red-500");
+});
+
+test("PIN: arbitrary values follow Tailwind's own type inference across every size/colour split", () => {
+  // Each expectation mirrors what Tailwind 4 actually compiles (checked with
+  // the design system's candidatesToCss): a length is a width/size, a colour
+  // literal is a colour, and a bare var() goes wherever Tailwind puts it.
+  // ring-offset: var() is the offset COLOUR, a length the offset width.
+  assert.equal(twMerge("ring-offset-2 ring-offset-[var(--x)]"), "ring-offset-2 ring-offset-[var(--x)]");
+  assert.equal(twMerge("ring-offset-2 ring-offset-[3px]"), "ring-offset-[3px]");
+  // border keywords are widths; the (length:…) shorthand is a width/size.
+  assert.equal(twMerge("border-2 border-[thin]"), "border-[thin]");
+  assert.equal(twMerge("border border-[medium] border-zinc-700"), "border-[medium] border-zinc-700");
+  assert.equal(twMerge("text-sm text-(length:--fs)"), "text-(length:--fs)");
+  assert.equal(twMerge("text-sm text-(--c)"), "text-sm text-(--c)");
+  assert.equal(twMerge("border border-(--c)"), "border border-(--c)");
+  // shadow: var() / a full shadow is the box-shadow; only a colour literal is its colour.
+  assert.equal(twMerge("shadow-lg shadow-[var(--ds-shadow-lg)]"), "shadow-[var(--ds-shadow-lg)]");
+  assert.equal(twMerge("shadow-[var(--ds-shadow-lg)] shadow-2xl"), "shadow-2xl");
+  assert.equal(twMerge("shadow-[0_0_0_1px_red] shadow-red-500"), "shadow-[0_0_0_1px_red] shadow-red-500");
+  assert.equal(twMerge("shadow-lg shadow-[#f00]"), "shadow-lg shadow-[#f00]");
+  assert.equal(twMerge("drop-shadow-md drop-shadow-[var(--x)]"), "drop-shadow-[var(--x)]");
+  assert.equal(twMerge("drop-shadow-md drop-shadow-[#f00]"), "drop-shadow-md drop-shadow-[#f00]");
+  assert.equal(twMerge("text-shadow-sm text-shadow-[var(--x)]"), "text-shadow-[var(--x)]");
+  assert.equal(twMerge("inset-shadow-sm inset-shadow-[var(--x)]"), "inset-shadow-[var(--x)]");
+  assert.equal(twMerge("inset-shadow-sm inset-shadow-[oklch(0.5_0.1_20)]"), "inset-shadow-sm inset-shadow-[oklch(0.5_0.1_20)]");
+});
+
+test("PIN: the arbitrary-value regressions found in review 2026-09-22 (audit:tw-merge check 4 covers the full matrix)", () => {
+  // divide-x/-y: Tailwind types EVERY value as the width, so a divide colour must survive.
+  assert.equal(twMerge("divide-x-[var(--w)] divide-zinc-800"), "divide-x-[var(--w)] divide-zinc-800");
+  assert.equal(twMerge("divide-y-2 divide-y-[var(--w)]"), "divide-y-[var(--w)]");
+  // named colours / currentColor are the shadow COLOUR; a paren var is the shadow.
+  assert.equal(twMerge("shadow-lg shadow-[currentColor]"), "shadow-lg shadow-[currentColor]");
+  assert.equal(twMerge("shadow-(--x) shadow-red-500"), "shadow-(--x) shadow-red-500");
+  assert.equal(twMerge("shadow-lg shadow-(--x)"), "shadow-(--x)");
+  // clamp()/min() and negative lengths are widths; %/multi-token values on a ring are colours.
+  assert.equal(twMerge("ring-[clamp(1px,2px,3px)] ring-red-500"), "ring-[clamp(1px,2px,3px)] ring-red-500");
+  assert.equal(twMerge("border-zinc-700 border-[min(1px,2px)]"), "border-zinc-700 border-[min(1px,2px)]");
+  assert.equal(twMerge("ring-2 ring-[50%]"), "ring-2 ring-[50%]");
+  // font-size keywords and the line-height modifier are sizes.
+  assert.equal(twMerge("text-red-500 text-[medium]"), "text-red-500 text-[medium]");
+  assert.equal(twMerge("text-xs text-sm/6"), "text-sm/6");
+  assert.equal(twMerge("text-zinc-400 text-sm/6"), "text-zinc-400 text-sm/6");
 });

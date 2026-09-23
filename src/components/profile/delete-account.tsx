@@ -6,12 +6,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { withBasePath } from "@/lib/base-path";
 
-// Self-service account deletion (App Store Guideline 5.1.1(v)). Calls
-// DELETE /api/profile, which DISABLES the account: every session is revoked and
-// sign-in is refused from then on, but nothing is scrubbed, so an admin can
-// restore it. The copy below must not promise erasure — the irreversible scrub
-// is a separate admin action (see src/lib/account-lifecycle.ts). The server
-// already revoked the session, so we just bounce to /login.
+// Self-service "close account" (required by App Store Guideline 5.1.1(v)).
+// It calls DELETE /api/profile, which DISABLES the account: every session is
+// signed out and sign-in is refused from then on, but no data is erased, so an
+// admin can restore it. The text below must not promise erasure — permanently
+// erasing data is a separate admin action (see src/lib/account-lifecycle.ts,
+// guardrail 33). The server has already ended our session, so we just go to /login.
 export function DeleteAccount({ requiresPassword = false }: { requiresPassword?: boolean }) {
   const [confirming, setConfirming] = useState(false);
   const [confirmText, setConfirmText] = useState("");
@@ -79,7 +79,6 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
         placeholder="DELETE"
         autoComplete="off"
         aria-label="Type DELETE to confirm account deletion"
-        className="bg-zinc-800 border-zinc-700"
       />
       {requiresPassword && (
         <Input
@@ -89,7 +88,6 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
           placeholder="Current password"
           autoComplete="current-password"
           aria-label="Current password"
-          className="bg-zinc-800 border-zinc-700"
         />
       )}
       {error && <p className="text-sm text-red-400">{error}</p>}

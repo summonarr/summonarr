@@ -4688,7 +4688,7 @@ MIT License
 
 ------------------------------------------------------------------------------
 
-@types/node@26.5.0
+@types/node@26.5.1
 License: MIT
 
 MIT License
@@ -4742,7 +4742,7 @@ MIT License
 
 ------------------------------------------------------------------------------
 
-@types/react@19.2.18
+@types/react@19.3.0
 License: MIT
 
 MIT License
@@ -8713,7 +8713,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 ------------------------------------------------------------------------------
 
-react@19.2.8
+react@19.3.0
 License: MIT
 
 MIT License
@@ -8740,7 +8740,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-react-dom@19.2.8
+react-dom@19.3.0
 License: MIT
 
 MIT License
@@ -8993,7 +8993,7 @@ SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-scheduler@0.27.0
+scheduler@0.28.0
 License: MIT
 
 MIT License

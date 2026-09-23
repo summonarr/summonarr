@@ -34,13 +34,9 @@ export function ResyncLibraryButton({
     setStatus("loading");
     setResult(null);
     try {
-      // Call only the servers that exist. This used to POST to both
-      // unconditionally and then fold the two answers into one `??` chain, so
-      // the FIRST error won — and on a single-server deployment that error was
-      // always the other server's `400 {"error":"… not configured"}`. The
-      // configured server had just rewritten its whole library and the admin
-      // was shown a red failure naming a server they do not run, with no counts
-      // and no refresh.
+      // Call only the servers that are configured. Calling an absent one just
+      // returns "not configured", which used to show up as a red failure for a
+      // server the admin doesn't even run (guardrail 36).
       //
       // The booleans come from the page rather than from probing, so an absent
       // server costs no request at all. They describe the DEFAULT instance,
@@ -108,7 +104,7 @@ export function ResyncLibraryButton({
         <Button
           size="sm"
           onClick={handleResync}
-          className="bg-amber-600 hover:bg-amber-500 h-7 px-3 text-xs"
+          className="bg-amber-600 text-black hover:bg-amber-600/90 h-7 px-3 text-xs"
         >
           Re-sync
         </Button>
@@ -116,7 +112,7 @@ export function ResyncLibraryButton({
           size="sm"
           variant="outline"
           onClick={() => setStatus("idle")}
-          className="border-zinc-600 text-zinc-400 hover:text-white h-7 px-3 text-xs"
+          className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-7 px-3 text-xs"
         >
           Cancel
         </Button>
@@ -131,7 +127,7 @@ export function ResyncLibraryButton({
         size="sm"
         onClick={() => { clearTimeout(resetTimer.current); setStatus("confirm"); }}
         disabled={status === "loading"}
-        className="border-zinc-700 text-zinc-300 hover:text-white gap-2"
+        className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
       >
         <RefreshCw className={`w-4 h-4 ${status === "loading" ? "animate-spin" : ""}`} />
         {status === "loading" ? "Syncing…" : "Re-sync Libraries"}

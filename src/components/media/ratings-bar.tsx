@@ -1,6 +1,11 @@
 "use client";
 
+import type { CSSProperties } from "react";
 import { useHiddenRatingSources } from "./ratings-visibility";
+
+// IMDb's brand yellow (#F5C518) is unreadable on the light theme; blending it
+// toward the foreground keeps the hue and lands legible on both.
+const IMDB_LABEL_STYLE: CSSProperties = { color: "color-mix(in oklab, #F5C518 55%, var(--ds-fg))" };
 
 interface RatingsBarProps {
   imdbRating?: string | null;
@@ -44,12 +49,16 @@ function rtIcon(score: string): string {
   return n >= 60 ? "🍅" : "🫙";
 }
 
-function metacriticColor(score: string): string {
+// Filled badges: yellow/orange/green/red all remap to a status token, so the
+// text is --ds-on-status (dark on the dark theme’s L .65–.78 fills, white on
+// the light theme’s L .53–.55 ones — black fails 4.5:1 there).
+// Only the neutral fallback keeps foreground-coloured text on a surface.
+function metacriticBadge(score: string): string {
   const n = parseInt(score, 10);
-  if (isNaN(n)) return "bg-zinc-600";
-  if (n >= 61) return "bg-green-600";
-  if (n >= 40) return "bg-yellow-500";
-  return "bg-red-600";
+  if (isNaN(n)) return "bg-zinc-700 text-zinc-100";
+  if (n >= 61) return "bg-green-600 text-[var(--ds-on-status)]";
+  if (n >= 40) return "bg-yellow-500 text-[var(--ds-on-status)]";
+  return "bg-red-600 text-[var(--ds-on-status)]";
 }
 
 function rtAudienceColor(score: string): string {
@@ -59,12 +68,12 @@ function rtAudienceColor(score: string): string {
   return "text-amber-400";
 }
 
-function traktColor(score: string): string {
+function traktBadge(score: string): string {
   const n = parseInt(score, 10);
-  if (isNaN(n)) return "bg-zinc-600";
-  if (n >= 70) return "bg-red-700";
-  if (n >= 50) return "bg-orange-600";
-  return "bg-zinc-600";
+  if (isNaN(n)) return "bg-zinc-700 text-zinc-100";
+  if (n >= 70) return "bg-red-500 text-[var(--ds-on-status)]";
+  if (n >= 50) return "bg-orange-500 text-[var(--ds-on-status)]";
+  return "bg-zinc-700 text-zinc-100";
 }
 
 function mdblistColor(score: string): string {
@@ -140,8 +149,11 @@ export function RatingsBar({
           rel="noopener noreferrer"
           className="flex items-center gap-0.5 group"
           title="IMDb rating"
+          // MediaCard is a role="button" div that navigates on click; without
+          // this, opening IMDb in a new tab also pushed the card's detail page.
+          onClick={(e) => e.stopPropagation()}
         >
-          <span className={`font-bold text-[#F5C518] ${textSm}`}>IMDb</span>
+          <span className={`font-bold ${textSm}`} style={IMDB_LABEL_STYLE}>IMDb</span>
           <span className={`font-semibold text-zinc-100 ${textSm}`}>{imdbRating}</span>
           {!compact && <span className={`text-zinc-500 ${textXs}`}>/10</span>}
           {!compact && imdbVotes && (
@@ -150,7 +162,7 @@ export function RatingsBar({
         </a>
       ) : showImdb ? (
         <div className="flex items-center gap-0.5" title="IMDb rating">
-          <span className={`font-bold text-[#F5C518] ${textSm}`}>IMDb</span>
+          <span className={`font-bold ${textSm}`} style={IMDB_LABEL_STYLE}>IMDb</span>
           <span className={`font-semibold text-zinc-100 ${textSm}`}>{imdbRating}</span>
           {!compact && <span className={`text-zinc-500 ${textXs}`}>/10</span>}
           {!compact && imdbVotes && (
@@ -175,7 +187,7 @@ export function RatingsBar({
 
       {showMetacritic && metacritic && (
         <div className="flex items-center gap-0.5" title="Metacritic">
-          <span className={`font-bold text-white rounded px-1 py-0.5 ${textXs} ${metacriticColor(metacritic)}`}>
+          <span className={`font-bold rounded px-1 py-0.5 ${textXs} ${metacriticBadge(metacritic)}`}>
             {metacritic.replace("/100", "")}
           </span>
           {!compact && <span className={`text-zinc-500 ${textXs}`}>MC</span>}
@@ -184,7 +196,7 @@ export function RatingsBar({
 
       {showTrakt && traktRating && (
         <div className="flex items-center gap-0.5" title="Trakt rating">
-          <span className={`font-bold text-white rounded px-1 py-0.5 ${textXs} ${traktColor(traktRating)}`}>
+          <span className={`font-bold rounded px-1 py-0.5 ${textXs} ${traktBadge(traktRating)}`}>
             {traktRating}
           </span>
           {!compact && <span className={`text-zinc-500 ${textXs}`}>TR</span>}
@@ -207,7 +219,7 @@ export function RatingsBar({
 
       {showMal && malRating && (
         <div className="flex items-center gap-0.5" title="MyAnimeList">
-          <span className={`font-semibold text-blue-400 ${textXs}`}>MAL</span>
+          <span className={`font-semibold text-sky-400 ${textXs}`}>MAL</span>
           <span className={`font-semibold text-zinc-100 ${textSm}`}>{malRating}</span>
         </div>
       )}
@@ -222,7 +234,7 @@ export function RatingsBar({
 
       {showJellyfin && jellyfinRating && (
         <div className="flex items-center gap-0.5" title="Jellyfin community rating">
-          <span className={`font-semibold text-purple-400 ${textXs}`}>JF</span>
+          <span className={`font-semibold ${textXs}`} style={{ color: "var(--ds-jellyfin-text)" }}>JF</span>
           <span className={`font-semibold text-zinc-100 ${textSm}`}>{jellyfinRating}</span>
           {!compact && <span className={`text-zinc-500 ${textXs}`}>/10</span>}
         </div>

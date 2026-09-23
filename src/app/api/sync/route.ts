@@ -34,7 +34,8 @@ import { effectivePermissions, parseMediaServerGrants } from "@/lib/permissions"
 import { visibleInstancesFor, type VisibleServerInstances } from "@/lib/media-visibility";
 import { deduplicatePlexRowsByRatingKey } from "@/lib/plex-dedupe";
 
-// Advisory-lock id 2000 — distinct from 2001-2011 (cron warm/sync routes) and TRASH_SYNC_LOCK_ID (2010).
+// Advisory-lock id 2000 — distinct from the 2001-2011 ids the other cron warm/sync routes
+// use (TRASH_SYNC_LOCK_ID is 2010). An advisory lock is a Postgres-held named mutex.
 // Held for the entire orchestrator run so a second concurrent invocation (admin "Resync" while
 // the cron POST is mid-flight) returns immediately with skipped=true rather than racing the
 // shared-state writes (notifiedAvailable CAS, library tables, MediaRequest status updates).
@@ -152,11 +153,10 @@ const sanitizeStr = (s: string | null | undefined, maxLen = 1000): string | null
 async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Promise<NextResponse> {
   // withAdvisoryLock aborts at DEFAULT_WORK_TIMEOUT_MS (30 min) and RELEASES the
   // lock; it cannot cancel this function (guardrail 41). Left unobserved, a run
-  // past 30 minutes carried on lock-free while the next trigger acquired the
+  // past 30 minutes would carry on lock-free while the next trigger acquired the
   // freed lock and started a SECOND concurrent full library sync — two
-  // delete-and-replace passes over the same tables (guardrail 13). Live logs
-  // showed runs already exceeding 10 minutes with a 30-second trigger poll
-  // queued behind them, so the margin was not comfortable.
+  // delete-and-replace passes over the same tables (guardrail 13). Real runs
+  // have exceeded 10 minutes, so the margin is not comfortable.
   //
   // Checked ONLY at arm boundaries, never inside one. Prisma 7's
   // $transaction(fn, opts) takes no AbortSignal, so a mid-transaction bail is not
@@ -380,7 +380,7 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
     try {
       // Fan out over every configured Radarr instance (default first, plus the legacy
       // 4K and any named instances). getRadarrWantedTmdbIds returns empty sets when an
-      // instance is unconfigured and null on a real fetch failure. Bound the fan-out (G31).
+      // instance is unconfigured and null on a real fetch failure. Bound the fan-out (guardrail 31).
       const instances = await getSyncableArrInstances("radarr");
       const settled = await settleLimit(instances, CONCURRENCY_LIMIT, async (inst) => ({
         slug: inst.slug,
@@ -397,7 +397,7 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
         console.warn("[sync] skipping Radarr cache update — ARR fetch failed");
       } else {
         // Only instances whose fetch succeeded get their rows scoped-cleared + rewritten;
-        // a null result leaves THAT instance's existing rows intact (G13) so one instance's
+        // a null result leaves THAT instance's existing rows intact (guardrail 13) so one instance's
         // fetch failure never empties another's cache.
         const writable = fetched.flatMap((f) => (f.result ? [{ slug: f.slug, result: f.result }] : []));
         // Advisory lock 1001,1 coordinates with the Radarr webhook handler. Each instance's
@@ -615,8 +615,8 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
   const pushedAt = new Date();
   await runConcurrent(dedupedRepush, async (req) => {
     try {
-      // Push to the request's own instance (fixes the latent HD-pin — a 4K/named
-      // request re-pushed to the default instance would land at the wrong quality).
+      // Push to the request's own instance — a 4K/named request re-pushed to the
+      // default instance would land at the wrong quality.
       if (req.mediaType === "MOVIE") {
         await addMovieToRadarr(req.tmdbId, req.arrInstance, req.qualityProfileId ?? undefined, req.requestedBy);
         await prisma.mediaRequest.update({ where: { id: req.id }, data: { lastArrPushAt: pushedAt } });
@@ -850,8 +850,8 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
           // Advisory lock 2001,1 — matches /api/sync/plex so the two callers can't race the
           // same write. Per-instance scoped delete (mirrors the Jellyfin arm below) so one
           // instance's rewrite never touches another's rows; only instances whose fetch
-          // succeeded are touched at all (G13 — a failed instance's existing rows are left
-          // intact, never wiped).
+          // succeeded are touched at all (guardrail 13 — a failed instance's existing rows are
+          // left intact, never wiped).
           await prisma.$transaction(async (tx) => {
             await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 1)`;
             for (const { slug, finalMovieRows, finalTvRows } of rowsByInstance) {
@@ -1007,8 +1007,8 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
           // Advisory lock 2001,2 — matches /api/sync/jellyfin. Per-instance scoped delete
           // (mirrors the arr side's per-slug scoping above) so one instance's rewrite
           // never touches another's rows; only instances whose fetch succeeded are
-          // touched at all (G13 — a failed instance's existing rows are left intact,
-          // never wiped).
+          // touched at all (guardrail 13 — a failed instance's existing rows are left
+          // intact, never wiped).
           await prisma.$transaction(async (tx) => {
             await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;
             for (const { slug, movieIds, tvIds } of writable) {
@@ -1102,8 +1102,7 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
   // leave a failed instance's rows intact.
   //
   // Read ONCE here, after the library writes, and shared with the demote guard
-  // below (which needs the same REGISTERED set, for the same reason) — the two
-  // used to issue this identical pair of registry reads ~50 lines apart.
+  // below (which needs the same REGISTERED set, for the same reason).
   const [registeredPlex, registeredJellyfin] = await Promise.all([
     getMediaInstances("plex"),
     getMediaInstances("jellyfin"),
@@ -1172,22 +1171,22 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
   // getSyncableMediaInstances — CONFIGURED servers only — so a registered server whose
   // url/token an admin cleared silently drops out of this run's union while its
   // PlexLibraryItem/JellyfinLibraryItem rows are deliberately preserved (guardrail 35).
-  // It never enters `fetched`, so it cannot make plexSyncSucceeded false either. A title
-  // living only on that server therefore read as absent and its requests were demoted
-  // AVAILABLE -> APPROVED, from data that simply was not consulted. The
+  // It never enters `fetched`, so it cannot make plexSyncSucceeded false either. Without
+  // this guard a title living only on that server would read as absent and its requests
+  // would be demoted AVAILABLE -> APPROVED, from data that simply was not consulted. The
   // registeredPlex/registeredJellyfin lists were read once, post-write, above
   // the de-registered-instance sweep and are shared with it.
   // `plexInstances.length > 0` is load-bearing. getMediaInstances ALWAYS synthesizes the
   // default instance, so a service with nothing configured reads as 1 registered vs 0
-  // syncable — "incomplete" — and without this term the guard below disabled demotes on
-  // every deployment not running BOTH Plex and Jellyfin, which is most of them. A service
+  // syncable — "incomplete" — and without this term the guard below would disable demotes
+  // on every deployment not running BOTH Plex and Jellyfin, which is most of them. A service
   // that is entirely unconfigured is already handled by the plexConfiguredEnabled /
   // jellyfinConfiguredEnabled guards; this one is only about a service in USE that has a
   // registered server missing its connection details.
   // A raw count comparison is not enough either: getMediaInstances synthesizes the
   // default, so a deployment using a service EXCLUSIVELY through a named instance —
   // legacy default fields never filled in — reads as 2 registered vs 1 syncable on every
-  // run and vetoed every demote forever. The guard's own rationale ("its preserved
+  // run and would veto every demote forever. The guard's own rationale ("its preserved
   // library rows are not in this run's union") is vacuous for a server that was never
   // configured: it holds no rows, so absence IS provable. Veto only on a missing slug
   // that ACTUALLY still holds rows. The existence probe is gated behind both cheap
@@ -1218,10 +1217,8 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
       "so their preserved library rows are not in this run's union and absence cannot be proven.",
     );
   }
-  // Hoisted above the revert (it used to sit below markLibraryRequests): the demote is
-  // a per-user decision too, so it needs the same visibility helpers the marking pass
-  // uses. Pure const declarations with no dependency on anything between here and
-  // their old home.
+  // These visibility helpers are declared before the revert because the demote is a
+  // per-user decision too, and needs the same helpers the marking pass uses.
   // visibilityEnforced is the byte-identical escape hatch (guardrail 35): with
   // no restricted instance configured — every single-server deployment, and
   // every multi-server one that hasn't opted in — every configured slug is
@@ -1315,10 +1312,10 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
     // Only consult the ARR cache when the integration is enabled AND this run refreshed
     // THE REQUEST'S OWN instance. A disabled integration, a failed refresh, or an
     // enabled-but-UNCONFIGURED instance all leave that instance's cache meaningless —
-    // skip the demote. (The old global radarrSyncSucceeded flag read true after the
-    // no-op empty loop of an unconfigured integration, so its empty cache masqueraded
-    // as an authoritatively-empty library and mass-demoted every arr-backed AVAILABLE
-    // request the moment an admin cleared the arr connection with the flag still on.)
+    // skip the demote. (The global radarrSyncSucceeded flag is not enough: it reads true
+    // after the no-op empty loop of an unconfigured integration, so its empty cache would
+    // look like an authoritatively-empty library and mass-demote every arr-backed
+    // AVAILABLE request the moment an admin cleared the arr connection.)
     if (req.mediaType === "MOVIE" && (!radarrEnabled || !radarrSyncedSlugs.has(req.arrInstance))) return false;
     if (req.mediaType === "TV"    && (!sonarrEnabled || !sonarrSyncedSlugs.has(req.arrInstance))) return false;
     // Don't demote while a configured library source is down — we can't prove absence
@@ -1333,9 +1330,9 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
       : inSonarrSet.has(vkey(req.tmdbId, req.arrInstance));
     // Only count a source's map as authoritative-present when it actually synced, and
     // ask the question PER REQUESTER — the same predicate the marking pass uses. Reading
-    // the global union here meant a restricted server the requester holds no grant for
-    // still counted as "present", so their request stayed AVAILABLE for a copy they
-    // cannot watch and the UI has always rendered as unavailable. presentForRequester
+    // the global union here would count a restricted server the requester holds no grant
+    // for as "present", keeping their request AVAILABLE for a copy they cannot watch and
+    // the UI renders as unavailable. presentForRequester
     // checks the union FIRST and short-circuits to it whenever nothing is restricted, so
     // the common case costs exactly what it did before.
     const inLibrary =
@@ -1424,7 +1421,6 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
   // folder, not which media server indexes it), so there is no per-instance
   // presence to gate on. In every real topology the *arr feeds the DEFAULT
   // server, which is visible to everyone by construction.
-  //
 
   const markLibraryRequests = async (
     movieIds: Map<number, unknown>,
@@ -1475,7 +1471,7 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
     }
     if (toMark.length === 0) return 0;
 
-    // Re-fetch notifiedAvailable to catch any updates the concurrent Plex pass may have committed
+    // Re-fetch notifiedAvailable to catch updates an earlier pass (or a concurrent webhook) committed
     const freshRows = await prisma.mediaRequest.findMany({
       where: { id: { in: toMark.map((r) => r.id) } },
       select: { id: true, notifiedAvailable: true },
@@ -1634,11 +1630,9 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
       // "Unusable" = this source cannot prove presence either way: not configured/enabled
       // at all, OR its sync has been failing past the 24h stale window. A source that
       // synced fine this run is NOT unusable, so its empty result still blocks a false
-      // notify. The gate used to AND a `plexDataValid` term with `!plexConfigured`, where
-      // plexDataValid is implied true — so plexStale (which requires plexConfigured) could
-      // never contribute and a permanently-broken Plex starved every plex-pinned user's
-      // "now available" notification forever, which is exactly what the fallback above
-      // was written to prevent.
+      // notify. plexStale must be able to make Plex "unusable" on its own; otherwise a
+      // permanently-broken Plex would starve every plex-pinned user's "now available"
+      // notification forever, which is exactly what the fallback above prevents.
       // Grants extend "unusable" per requester: someone who can see NO configured
       // server of a type is in exactly the position of a deployment with that type
       // unconfigured — it can never prove presence for them either way, so it must
@@ -1739,9 +1733,9 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
     });
   }
 
-  // Surface degraded runs to withCronRunRecording via the X-Cron-Degraded header:
-  // an enabled source that failed this run previously still recorded ok:true, so
-  // the admin System tab showed green even when nothing was refreshed. Status
+  // Surface degraded runs to withCronRunRecording via the X-Cron-Degraded header,
+  // so an enabled source that failed this run shows up on the admin System tab
+  // instead of reading green when nothing was refreshed. Status
   // stays 200 (NOT 502) deliberately — the docker entrypoint reschedules non-2xx
   // after CRON_RETRY_INTERVAL (300s), so a 502 during a sustained Radarr/Plex
   // outage would run this full library replace every 5 minutes instead of hourly.
@@ -1759,11 +1753,8 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
   //
   // A client cannot work this out from the counts. plexMarked/jellyfinMarked are
   // initialised to 0 and always serialized, so "no Jellyfin on this deployment"
-  // and "Jellyfin is configured and matched nothing" both arrive as 0. That
-  // ambiguity is why every admin sync control in the tree got this wrong: with
-  // no way to ask the server, they each probed the per-source routes and read
-  // the resulting `400 {"error":"Jellyfin server not configured"}` as a failure.
-  // The predicates were already computed above for the guards — this just says
+  // and "Jellyfin is configured and matched nothing" both arrive as 0 (guardrail
+  // 36). The predicates were already computed above for the guards — this just says
   // out loud what the run actually covered.
   // For *arr, `radarrEnabled` is deliberately NOT "configured" — the flag means
   // "the step did not blow up", and an enabled-but-unconfigured integration

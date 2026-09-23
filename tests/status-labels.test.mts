@@ -225,8 +225,9 @@ test("an unknown status key reads back undefined rather than throwing", () => {
 });
 
 test("the maps are plain objects with no prototype-chain surprises on lookup", () => {
-  // `REQUEST_STATUS_LABEL["toString"]` must not resolve to Object.prototype's
-  // method and render a function into a chip.
+  // A lookup like `map["toString"]` still reaches Object.prototype's method (true
+  // of any object literal). What we pin is that no map defines such a key ITSELF,
+  // and that every value it does define is a string, never a function.
   for (const map of [
     REQUEST_STATUS_TONE,
     REQUEST_STATUS_LABEL,

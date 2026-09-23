@@ -65,9 +65,9 @@ export default async function UsersPage() {
       select: { id: true },
     }),
     // The only Account rows this app writes are the OIDC bindings (auth.ts) —
-    // Plex/Jellyfin pin their subject on the User row instead. Without this the
-    // ternary below reads every OIDC account (no passwordHash, IdP email) as
-    // "plex" and hides the server-access controls it actually needs.
+    // Plex/Jellyfin store their id on the User row instead. Without this list,
+    // deriveUserSource below would read an OIDC account (no passwordHash, IdP
+    // email) as "plex" and hide the server-access controls it actually needs.
     prisma.account.findMany({
       where: { provider: "oidc" },
       select: { userId: true },
@@ -210,7 +210,7 @@ export default async function UsersPage() {
       {(hasPlex || hasJellyfin || serverUsers.length === 0) && (
         <div className="mt-10">
           <div className="mb-4">
-            <h2 className="text-base font-semibold text-white">Media Server Users</h2>
+            <h2 className="text-base font-semibold text-zinc-100">Media Server Users</h2>
             <p className="text-xs text-zinc-500 mt-0.5">
               All Plex and Jellyfin accounts. Jellyfin download permissions are synced and enforced each run; Plex permissions must be managed in Plex.
             </p>

@@ -3,16 +3,6 @@ import { serializeSessionCookie } from "@/lib/session-cookie";
 import { NATIVE_CLIENT_HEADER, hasNativeClientHeader } from "@/lib/mobile-auth";
 import type { SignInResult } from "@/lib/auth";
 
-// Shared response builder for the provider sign-in routes
-// (/api/auth/sign-in/*). Always sets the HttpOnly session cookie so the web
-// flow is unchanged. A native client opts in via the X-Summonarr-Client header
-// to ALSO receive the JWT in the JSON body, which it then stores and presents
-// as `Authorization: Bearer <token>`.
-//
-// The token is gated on the header (not returned unconditionally) so a browser
-// login never exposes the session JWT to JavaScript — preserving the HttpOnly
-// guarantee for the web app. Browsers don't send X-Summonarr-Client.
-//
 // Shown when signInAndMintSession throws AccountDeactivatedError — i.e. the
 // credential was valid but the account is disabled (see account-lifecycle.ts).
 // 403, not 401: retrying with different credentials for the same account will
@@ -24,6 +14,15 @@ export function disabledAccountResponse(): NextResponse {
   return NextResponse.json({ error: DISABLED_ACCOUNT_MESSAGE }, { status: 403 });
 }
 
+// Shared response builder for the provider sign-in routes
+// (/api/auth/sign-in/*). Always sets the HttpOnly session cookie so the web
+// flow is unchanged. A native client opts in via the X-Summonarr-Client header
+// to ALSO receive the JWT in the JSON body, which it then stores and presents
+// as `Authorization: Bearer <token>`.
+//
+// The token is gated on the header (not returned unconditionally) so a browser
+// login never exposes the session JWT to JavaScript — preserving the HttpOnly
+// guarantee for the web app. Browsers don't send X-Summonarr-Client.
 export function buildSignInResponse(
   req: NextRequest,
   result: SignInResult,

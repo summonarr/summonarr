@@ -56,8 +56,8 @@ export default async function AdminPage({
     : sort === "year-asc" ? { _min: { releaseYear: "asc" } }
     : { _max: { createdAt: "desc" } };
 
-  // Distinct-group count as a raw aggregate: the previous groupBy pulled every
-  // (tmdbId, mediaType) group row across the wire only to read `.length`.
+  // Count the distinct (tmdbId, mediaType) groups in SQL. Doing it with a
+  // groupBy would download every group row just to read how many there are.
   const statusCond = statusFilter
     ? Prisma.sql`AND "status" = ${statusFilter}::"RequestStatus"`
     : Prisma.empty;
@@ -89,11 +89,11 @@ export default async function AdminPage({
   const cacheKey = (p: { tmdbId: number; mediaType: string }) =>
     p.mediaType === "MOVIE" ? `movie:${p.tmdbId}:details` : `tv:${p.tmdbId}:details`;
 
-  // 1. Database first: read the cached TMDB detail (with all rating sources)
-  //    straight from TmdbCache — one findMany over the page's keys, not a
-  //    point read per pair. No external calls; stale rows still serve. Folded
-  //    into the page batch so it doesn't add a serial round-trip (an empty
-  //    pairs list short-circuits to an empty map, same as getCacheStaleMany([])).
+  // 1. Database first: read the cached TMDB details (which carry the ratings)
+  //    from TmdbCache in one query for the whole page. No external calls, and
+  //    stale rows are still used. It runs in the same Promise.all as the other
+  //    page queries so it adds no extra wait. With no pairs we skip the queries
+  //    and use empty results.
   const [requests, plexItems, jellyfinItems, cached] = pairs.length
     ? await Promise.all([
         prisma.mediaRequest.findMany({
@@ -135,9 +135,9 @@ export default async function AdminPage({
     ratingsMap.set(key, toRatings(v));
   });
 
-  // 2. Not in the database and the request is pending → fetch live from TMDB
-  //    to keep the information fresh. getMovie/TVDetails caches the response,
-  //    so the next load is served from the database.
+  // 2. Missing from the cache AND the request is pending → fetch it live from
+  //    TMDB. getMovieDetails/getTVDetails save the response to the cache, so the
+  //    next page load is served from the database.
   const pendingKeys = new Set(
     requests.filter((r) => r.status === "PENDING").map((r) => `${r.tmdbId}:${r.mediaType}`),
   );

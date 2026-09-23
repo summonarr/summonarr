@@ -1,5 +1,4 @@
-// Architecture drift pins for the three guardrails that had NO test coverage at
-// all: 3 (schema-first Prisma, no migrations directory), 9 (no client-state
+// Architecture drift pins for three guardrails no other test covers: 3 (schema-first Prisma, no migrations directory), 9 (no client-state
 // library), and 10 (no tRPC / server actions / GraphQL). Plus the stack facts
 // CLAUDE.md states as absolutes and the Releasing section's "no version constant
 // in src/" rule.

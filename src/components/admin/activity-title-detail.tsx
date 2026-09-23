@@ -1,8 +1,8 @@
 "use client";
 
-// Refined per-title activity screen, ported from the Claude Design handoff
-// (details.jsx → TitleDetail), wired to getMediaPlayStats(). Relative-time
-// labels gated behind useHasMounted (guardrail 16).
+// Per-title activity screen, drawn from getMediaPlayStats(). "2h ago" style
+// labels only appear after the page has mounted in the browser (useHasMounted),
+// so the server and the first browser render match (guardrail 16).
 
 import Link from "next/link";
 import { useHasMounted } from "@/hooks/use-has-mounted";
@@ -11,6 +11,7 @@ import {
   ActivityCard,
   AreaChart,
   Avatar,
+  DetailHeader,
   HeaderStat,
   HorizontalBars,
   MethodPill,
@@ -74,9 +75,10 @@ const STREAM_META: Record<string, { label: string; color: string }> = {
 };
 
 function absTime(iso: string): string {
-  // Pin to UTC so SSR (container TZ) and CSR (browser TZ) produce identical
-  // text — prevents the React #418 hydration mismatch for plays near UTC
-  // midnight when the formatRelativeTime() path is gated behind useHasMounted.
+  // Format in UTC so the server (its own time zone) and the browser (the
+  // viewer's time zone) print the same date. Otherwise a play near midnight
+  // could show different days and cause a React #418 hydration error. This is
+  // the text shown before mount, and for the chart's day labels.
   return new Date(iso).toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
@@ -100,158 +102,89 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
 
   return (
     <div className="ds-page-enter">
-      <Link
-        href="/admin/activity"
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          marginBottom: 18,
-          fontSize: 12.5,
-          color: "var(--ds-fg-muted)",
-          textDecoration: "none",
-        }}
-      >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-          <path
-            d="M7 3l-3 3 3 3"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
+      <DetailHeader
+        back={{ href: "/admin/activity", label: "Back to activity" }}
+        leading={
+          <Poster
+            src={s.posterSrc}
+            letter={(s.title[0] ?? "?").toUpperCase()}
+            accent={accent}
+            w={56}
+            h={84}
+            radius={5}
           />
-        </svg>
-        Back to activity
-      </Link>
-
-      <header
-        className="resp-title-hero"
-        style={{
-          display: "flex",
-          alignItems: "flex-start",
-          gap: 22,
-          marginBottom: 28,
-          padding: 18,
-          background: "var(--ds-bg-2)",
-          border: "1px solid var(--ds-border)",
-          borderRadius: 12,
-          position: "relative",
-          overflow: "hidden",
-        }}
-      >
-        <div
-          aria-hidden
-          style={{
-            position: "absolute",
-            inset: 0,
-            background: `radial-gradient(120% 80% at 0% 0%, ${accent} 0%, transparent 65%)`,
-            opacity: 0.18,
-            pointerEvents: "none",
-          }}
-        />
-        <Poster
-          src={s.posterSrc}
-          letter={(s.title[0] ?? "?").toUpperCase()}
-          accent={accent}
-          w={88}
-          h={132}
-          radius={6}
-        />
-        <div style={{ flex: 1, minWidth: 0, position: "relative" }}>
-          <div
+        }
+        title={s.title}
+        meta={
+          <span
             className="ds-mono uppercase"
             style={{
               fontSize: 10,
               letterSpacing: "0.14em",
               color: "var(--ds-fg-disabled)",
-              marginBottom: 4,
+              whiteSpace: "nowrap",
             }}
           >
             {isTV ? "Television series" : "Feature film"}
-          </div>
-          <h1
-            style={{
-              margin: 0,
-              fontSize: 28,
-              fontWeight: 600,
-              letterSpacing: "-0.025em",
-              color: "var(--ds-fg)",
-              lineHeight: 1.1,
-              marginBottom: 6,
-            }}
-          >
-            {s.title}
-          </h1>
+          </span>
+        }
+        subtitle={`${s.year ? `${s.year} · ` : ""}TMDB ${s.tmdbId} · playback activity across ${s.uniqueViewers} viewers`}
+        right={
           <div
-            className="ds-mono"
             style={{
-              fontSize: 12,
-              color: "var(--ds-fg-subtle)",
-              marginBottom: 14,
+              display: "grid",
+              gridTemplateColumns: "auto auto auto",
+              gap: 24,
             }}
           >
-            {s.year ? `${s.year} · ` : ""}TMDB {s.tmdbId} · playback activity
-            across {s.uniqueViewers} viewers
+            <HeaderStat label="Plays" value={s.totalPlays.toLocaleString("en-US")} />
+            <HeaderStat
+              label="Viewers"
+              value={s.uniqueViewers.toLocaleString("en-US")}
+            />
+            <HeaderStat
+              label="Completion"
+              value={`${s.avgCompletion}%`}
+              tone={
+                s.avgCompletion >= 75
+                  ? "ok"
+                  : s.avgCompletion >= 50
+                    ? "info"
+                    : "warn"
+              }
+            />
           </div>
-          <div style={{ display: "flex", gap: 10 }}>
-            <Link
-              href={s.libraryHref}
-              style={{
-                fontSize: 12,
-                padding: "6px 11px",
-                borderRadius: 6,
-                background: "var(--ds-bg-3)",
-                border: "1px solid var(--ds-border)",
-                color: "var(--ds-fg)",
-                cursor: "pointer",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 5,
-                whiteSpace: "nowrap",
-                textDecoration: "none",
-              }}
-            >
-              Open in library
-              <svg width="10" height="10" viewBox="0 0 12 12">
-                <path
-                  d="M4 3h5v5M9 3l-6 6"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.4"
-                  strokeLinecap="round"
-                />
-              </svg>
-            </Link>
-          </div>
-        </div>
-        <div
-          className="resp-title-stats"
+        }
+      >
+        <Link
+          href={s.libraryHref}
+          className="ds-hover-tint"
           style={{
-            display: "grid",
-            gridTemplateColumns: "auto auto auto",
-            gap: 24,
-            position: "relative",
-            paddingTop: 6,
+            fontSize: 12,
+            padding: "6px 11px",
+            borderRadius: 6,
+            background: "var(--ds-bg-3)",
+            border: "1px solid var(--ds-border)",
+            color: "var(--ds-fg)",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 5,
+            whiteSpace: "nowrap",
+            textDecoration: "none",
           }}
         >
-          <HeaderStat label="Plays" value={s.totalPlays.toLocaleString("en-US")} />
-          <HeaderStat
-            label="Viewers"
-            value={s.uniqueViewers.toLocaleString("en-US")}
-          />
-          <HeaderStat
-            label="Completion"
-            value={`${s.avgCompletion}%`}
-            tone={
-              s.avgCompletion >= 75
-                ? "ok"
-                : s.avgCompletion >= 50
-                  ? "info"
-                  : "warn"
-            }
-          />
-        </div>
-      </header>
+          Open in library
+          <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden>
+            <path
+              d="M4 3h5v5M9 3l-6 6"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.4"
+              strokeLinecap="round"
+            />
+          </svg>
+        </Link>
+      </DetailHeader>
 
       <div style={{ marginBottom: 22 }}>
         <ActivityCard>
@@ -356,7 +289,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
                   <div
                     style={{
                       height: 4,
-                      background: "oklch(1 0 0 / 0.05)",
+                      background: "color-mix(in oklab, var(--ds-fg) 5%, transparent)",
                       borderRadius: 999,
                       overflow: "hidden",
                     }}

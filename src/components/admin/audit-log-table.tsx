@@ -23,8 +23,9 @@ interface AuditRow {
   provider: string | null;
 }
 
-// ACTION_LABELS + ACTION_GROUP imported from @/lib/audit-actions — single source
-// of truth, typed as Record<AuditAction, ...> so the schema enum drives both.
+// ACTION_LABELS and ACTION_GROUP come from @/lib/audit-actions so every screen
+// shares one list. Both are keyed by the AuditAction type, so adding an action
+// to the schema forces a label and group to be added too.
 const ALL_ACTIONS = Object.keys(ACTION_LABELS);
 
 const GROUP_OPTIONS: { value: AuditGroup | ""; label: string }[] = [
@@ -147,17 +148,14 @@ function AuditLogFilters({
     ? ALL_ACTIONS.filter((a) => ACTION_GROUP[a as AuditAction] === currentGroup)
     : ALL_ACTIONS;
 
-  // Follow the URL on a SOFT navigation (Back/Forward). The inputs seed from the
-  // props once, but a soft nav doesn't remount this component — so after pressing
-  // Back, `userInput` still held the old query while `currentUser` had reverted,
-  // the debounce effect below saw them differ, and 500 ms later it router.push'ed
-  // the stale filter as a NEW history entry. Back was effectively dead on this
-  // page: the list flashed unfiltered and snapped straight back.
+  // Copy the URL value into the text box when the user presses Back/Forward.
+  // That kind of navigation doesn't remount this component, so without this the
+  // box keeps the old text, the debounce below sees it differ from the URL, and
+  // pushes the old filter again — making Back useless on this page.
   //
-  // Skip the prop change our OWN debounce caused, though: the RSC round-trip
-  // lands well after the 500 ms debounce, so overwriting then erases whatever
-  // was typed while it was in flight (and the re-run debounce, now seeing
-  // input === prop, drops the fuller term instead of searching it).
+  // But ignore a URL change that our OWN debounce caused: the server response
+  // arrives after the 500 ms debounce, so copying it back would wipe out
+  // anything typed while it was loading.
   useEffect(() => {
     if (currentUser === userUrlRef.current) return;
     userUrlRef.current = currentUser;
@@ -231,7 +229,7 @@ function AuditLogFilters({
           <button
             onClick={() => navigate({ action: "" })}
             className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-              !currentAction ? "bg-indigo-600 text-white" : "bg-zinc-800 text-zinc-400 hover:text-white"
+              !currentAction ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
             }`}
           >
             All
@@ -241,7 +239,7 @@ function AuditLogFilters({
               key={a}
               onClick={() => navigate({ action: a })}
               className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                currentAction === a ? "bg-indigo-600 text-white" : "bg-zinc-800 text-zinc-400 hover:text-white"
+                currentAction === a ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
               }`}
             >
               {ACTION_LABELS[a as AuditAction].label}
@@ -254,8 +252,8 @@ function AuditLogFilters({
             onClick={() => navigate({ hideCron: currentHideCron ? "" : "1" })}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
               currentHideCron
-                ? "bg-indigo-600 text-white"
-                : "bg-zinc-800 text-zinc-400 hover:text-white"
+                ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+                : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
             }`}
             title={currentHideCron ? "Showing only real users — click to include cron jobs" : "Hide system cron job entries"}
           >
@@ -265,14 +263,14 @@ function AuditLogFilters({
           <div className="flex rounded-md border border-zinc-700 overflow-hidden">
             <button
               onClick={() => onViewModeChange("table")}
-              className={`p-1.5 transition-colors ${viewMode === "table" ? "bg-indigo-600 text-white" : "bg-zinc-800 text-zinc-400 hover:text-white"}`}
+              className={`p-1.5 transition-colors ${viewMode === "table" ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"}`}
               title="Table view"
             >
               <List size={16} />
             </button>
             <button
               onClick={() => onViewModeChange("timeline")}
-              className={`p-1.5 transition-colors ${viewMode === "timeline" ? "bg-indigo-600 text-white" : "bg-zinc-800 text-zinc-400 hover:text-white"}`}
+              className={`p-1.5 transition-colors ${viewMode === "timeline" ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"}`}
               title="Timeline view"
             >
               <Activity size={16} />
@@ -301,7 +299,7 @@ function AuditLogFilters({
             type="date"
             value={currentDateFrom}
             onChange={(e) => navigate({ dateFrom: e.target.value })}
-            className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 [color-scheme:dark]"
+            className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:[color-scheme:dark]"
           />
         </div>
         <div className="flex items-center gap-1.5">
@@ -311,7 +309,7 @@ function AuditLogFilters({
             type="date"
             value={currentDateTo}
             onChange={(e) => navigate({ dateTo: e.target.value })}
-            className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 [color-scheme:dark]"
+            className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:[color-scheme:dark]"
           />
         </div>
         <Input
@@ -335,7 +333,7 @@ function AuditLogFilters({
               setTargetInput("");
               navigate({ action: "", group: "", dateFrom: "", dateTo: "", user: "", target: "", hideCron: "" });
             }}
-            className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs text-zinc-400 hover:text-white bg-zinc-800 hover:bg-zinc-700 transition-colors"
+            className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs text-zinc-400 hover:text-zinc-100 bg-zinc-800 hover:bg-zinc-700 transition-colors"
           >
             <X size={12} /> Clear
           </button>
@@ -382,7 +380,7 @@ function ExportButton({
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-800 text-zinc-400 hover:text-white transition-colors"
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-800 text-zinc-400 hover:text-zinc-100 transition-colors"
       >
         <Download size={14} /> Export
       </button>
@@ -442,13 +440,13 @@ function ScrubPiiButton() {
         <span className="text-xs text-zinc-300">Redact IP, device & names on old rows?</span>
         <button
           onClick={runScrub}
-          className="px-2.5 py-1.5 rounded-md text-xs font-medium bg-red-600 text-white hover:bg-red-500 transition-colors"
+          className="px-2.5 py-1.5 rounded-md text-xs font-medium bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
         >
           Scrub
         </button>
         <button
           onClick={() => setConfirming(false)}
-          className="px-2 py-1.5 rounded-md text-xs text-zinc-400 hover:text-white bg-zinc-800 transition-colors"
+          className="px-2 py-1.5 rounded-md text-xs text-zinc-400 hover:text-zinc-100 bg-zinc-800 transition-colors"
         >
           Cancel
         </button>
@@ -461,7 +459,7 @@ function ScrubPiiButton() {
       <button
         onClick={() => setConfirming(true)}
         disabled={busy}
-        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-800 text-zinc-400 hover:text-white transition-colors disabled:opacity-50"
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-800 text-zinc-400 hover:text-zinc-100 transition-colors disabled:opacity-50"
         title="Immediately redact IP addresses, devices, and user names from rows past the retention window (normally done by the daily cron)"
       >
         <Shield size={14} /> {busy ? "Scrubbing…" : "Scrub PII"}
@@ -484,8 +482,9 @@ function formatSummary(action: string, d: Record<string, unknown>): string | nul
     case "REQUEST_APPROVE":
     case "REQUEST_DECLINE":
     case "REQUEST_DELETE":
-      // The batch route logs REQUEST_APPROVE/BATCH_REQUEST_DECLINE with a
-      // {batch, count, ids} shape instead of a single title.
+      // The batch route logs a bulk approve or non-permanent decline under
+      // these same actions, but with a {batch, count, ids} shape instead of a
+      // single title. (A permanent bulk decline has its own case below.)
       if (d.batch) {
         return [
           `Batch: ${d.count ?? "?"} request(s)`,
@@ -556,11 +555,9 @@ function formatSummary(action: string, d: Record<string, unknown>): string | nul
         return `${d.service}: ${(d.instances as unknown[]).length} instance(s)${removed}`;
       }
       if (d.scrubbed != null) return `Scrubbed PII from ${d.scrubbed} row(s)`;
-      // TRaSH sync logs under SETTINGS_CHANGE with a shape of its own
-      // ({refreshed[], applied{count,failures}, errors[], durationMs}). With no
-      // case here it fell to the raw-payload path and spilled the whole
-      // `refreshed` array — several wrapped lines of JSON per row, pushing real
-      // entries off screen.
+      // TRaSH sync also logs under SETTINGS_CHANGE, with its own shape
+      // ({refreshed[], applied{count,failures}, errors[], durationMs}). Summarize
+      // it in one line instead of dumping the whole `refreshed` array as JSON.
       if (Array.isArray(d.refreshed) || d.applied != null) {
         const applied = d.applied as { count?: number; failures?: number; recreated?: number } | undefined;
         const failures = applied?.failures ?? 0;
@@ -718,11 +715,10 @@ function DetailSection({ details, action, expanded }: { details: string | null; 
 
   const summary = formatSummary(action, parsed);
 
-  // Actions with no summary case (cron shapes, anything added later) used to
-  // dump their whole payload inline — `refreshed:[{"service":"RADARR",…` across
-  // several wrapped lines, pushing real entries off screen. Put it behind the
-  // same toggle the diff rows already use, and show a field-name preview
-  // collapsed so the row still says what it is.
+  // Actions with no summary case (cron shapes, anything added later) keep their
+  // raw payload behind the same expand toggle the diff rows use, so long JSON
+  // doesn't push other entries off screen. Collapsed, the row shows just the
+  // field names so it still says what it is.
   const rawEntries = !summary && !hasDiff ? Object.entries(parsed) : [];
   const hasRaw = rawEntries.length > 0;
 
@@ -756,14 +752,14 @@ function DetailSection({ details, action, expanded }: { details: string | null; 
         <div className="mt-2 pl-4 space-y-1.5 border-l-2 border-zinc-700/60">
           {before && Object.keys(before).length > 0 && (
             <div className="flex items-start gap-2">
-              <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-900/40 text-red-400">BEFORE</span>
-              <span className="text-red-400/70">{Object.entries(before).map(([k, v]) => `${k}: ${v}`).join(", ")}</span>
+              <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-500/15 text-red-400">BEFORE</span>
+              <span className="text-red-400">{Object.entries(before).map(([k, v]) => `${k}: ${v}`).join(", ")}</span>
             </div>
           )}
           {after && Object.keys(after).length > 0 && (
             <div className="flex items-start gap-2">
-              <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-900/40 text-green-400">AFTER</span>
-              <span className="text-green-400/70">{Object.entries(after).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join(", ")}</span>
+              <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-500/15 text-green-400">AFTER</span>
+              <span className="text-green-400">{Object.entries(after).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join(", ")}</span>
             </div>
           )}
         </div>
@@ -799,7 +795,7 @@ function AuditLogTable({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }
                   <td className="px-4 py-3 text-zinc-400 whitespace-nowrap text-xs" title={mounted ? new Date(log.createdAt).toLocaleString("en-US") : undefined}>
                     {mounted ? relativeTime(log.createdAt) : ""}
                   </td>
-                  <td className="px-4 py-3 text-white text-sm">{log.userName}</td>
+                  <td className="px-4 py-3 text-zinc-100 text-sm">{log.userName}</td>
                   <td className="px-4 py-3">
                     <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${actionInfo.color}`}>
                       {actionInfo.label}
@@ -843,10 +839,9 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
   let currentDate = "";
 
   for (const log of logs) {
-    // Bucket by UTC ISO date so server-rendered (server TZ) and client-rendered (browser TZ)
-    // group structures always agree. The previous toDateString() bucketing produced different
-    // group boundaries between SSR and hydration whenever a row landed near midnight in either
-    // TZ, triggering React #418 hydration mismatches on the keyed group divs.
+    // Group rows by their UTC date. The server and the browser can be in different
+    // time zones, so grouping by local date could split rows near midnight
+    // differently on each side and cause a React #418 hydration mismatch.
     const dateStr = log.createdAt.slice(0, 10);
     if (dateStr !== currentDate) {
       currentDate = dateStr;
@@ -877,7 +872,7 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
                     <Card className="bg-zinc-900 border-zinc-800 p-3">
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-sm font-medium text-white">{log.userName}</span>
+                          <span className="text-sm font-medium text-zinc-100">{log.userName}</span>
                           <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${actionInfo.color}`}>
                             {actionInfo.label}
                           </span>
@@ -957,14 +952,20 @@ export function AuditLogView({
   const mounted = useHasMounted();
 
   useEffect(() => {
-    const saved = localStorage.getItem("audit-log-view");
+    // Storage access throws (SecurityError) with site data blocked or in some
+    // private windows; a throw here unwinds to the error boundary and blanks
+    // the page over a cosmetic preference.
+    let saved: string | null = null;
+    try {
+      saved = localStorage.getItem("audit-log-view");
+    } catch {}
     if (saved === "timeline" || saved === "table") setViewMode(saved);
   }, []);
 
-  // Bumped whenever a filter navigation replaces the server-rendered page, so an
-  // in-flight loadMore() can tell its response is stale. Without it, a slow
-  // "Load more" landed after this resync and re-appended the PREVIOUS query's rows
-  // beneath the new list, then installed that query's cursor.
+  // A "generation" counter, bumped whenever a filter change brings in a new
+  // server-rendered page. loadMore() remembers the value it started with, so a
+  // slow response for the OLD filter can see it is stale and not append its rows
+  // (or its cursor) under the new list.
   const filterGen = useRef(0);
   useEffect(() => {
     filterGen.current += 1;
@@ -975,7 +976,9 @@ export function AuditLogView({
 
   function handleViewModeChange(mode: "table" | "timeline") {
     setViewMode(mode);
-    localStorage.setItem("audit-log-view", mode);
+    try {
+      localStorage.setItem("audit-log-view", mode);
+    } catch {}
   }
 
   async function loadMore() {

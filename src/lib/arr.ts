@@ -35,9 +35,8 @@ export async function resolveTvdbToTmdb(
   let hadErrors = false;
   if (tvdbIds.length === 0) return { map: result, hadErrors };
 
-  // One batched read for the whole id set — the old per-id getCache loop issued
-  // hundreds of sequential round-trips per sync run on libraries where Sonarr
-  // doesn't supply a native tmdbId.
+  // One batched cache read for the whole id set, instead of one read per id
+  // (hundreds of round-trips per sync on libraries where Sonarr gives no tmdbId).
   const cachedRows = await getCacheMany<TvdbToTmdbCache>(tvdbIds.map((id) => `tvdb-to-tmdb:${id}`));
   const uncached: number[] = [];
   for (const tvdbId of tvdbIds) {
@@ -199,7 +198,7 @@ export async function getArrCfg(service: "radarr" | "sonarr", variant: ArrVarian
   return { url: cfg.url, apiKey: cfg.apiKey };
 }
 
-// Whether a given instance variant is configured (the 4K instance is optional).
+// Whether a given instance is configured (only the default one is expected to be).
 export async function isArrConfigured(service: "radarr" | "sonarr", variant: ArrVariant = ""): Promise<boolean> {
   return (await getCfg(service, variant)) !== null;
 }
@@ -502,10 +501,8 @@ export async function addMovieToRadarr(tmdbId: number, variant: ArrVariant = "",
     movie.status === "released" ||
     (releaseDates.length === 0 && movie.year > 0 && movie.year < now.getFullYear());
 
-  // Explicit allowlist of the Radarr POST body fields we own — previous code
-  // spread the entire lookup row (~30 fields, untyped) which would silently
-  // forward whatever Radarr returned at lookup time, exposing us to a
-  // future Radarr API tightening that rejects unexpected fields on add.
+  // Send only the fields listed here, not the whole lookup row (~30 untyped
+  // fields), so a future Radarr that rejects unexpected fields can't break adds.
   // `pathOverride` is set only on the collision-retry below.
   const postMovie = (pathOverride?: string) =>
     arrFetch<unknown>(cfg, "/api/v3/movie", {
@@ -976,8 +973,9 @@ export async function isSeriesDownloadedInSonarr(
 // Live completeness of a series by tmdbId, for the arr-state diagnostic: the
 // same lookup + filtered library read as the webhook check, reported as counts
 // so an operator can see WHY a request has not flipped (e.g. 59/60 aired
-// episodes on disk). null = instance unconfigured, series not in Sonarr, or
-// Sonarr unreachable — the caller logs the distinction; this is read-only.
+// episodes on disk). null = instance unconfigured or series not in Sonarr.
+// A Sonarr request failure THROWS instead, so the caller (the arr-state debug
+// route) can report it separately. Read-only.
 export async function getSonarrSeriesCompletion(
   tmdbId: number,
   variant: ArrVariant = "",
@@ -1047,9 +1045,10 @@ async function getRadarrQueueSet(cfg: ArrCfg): Promise<Set<number> | null> {
   const cached = queueCache.get(cacheKey);
   if (cached && cached.expiresAt > now) return cached.tmdbIds;
   try {
-    // The queue endpoint is paged — pageSize=200 silently dropped downloads past
-    // the 200th on busy instances, giving false "not downloading" badges. Page
-    // through totalRecords with a 40-page (10k-item) runaway backstop.
+    // The queue endpoint is paged: read every page (250 items each) until
+    // totalRecords is covered, capped at 40 pages (10k items) as a safety limit.
+    // Reading only the first page gave false "not downloading" badges on busy
+    // instances.
     const tmdbIds = new Set<number>();
     for (let page = 1; page <= 40; page++) {
       const queue = await arrFetch<{ records: { movie?: { tmdbId: number } }[]; totalRecords: number }>(
@@ -1079,8 +1078,7 @@ async function getSonarrQueueSet(cfg: ArrCfg): Promise<Set<number> | null> {
   const cached = queueCache.get(cacheKey);
   if (cached && cached.expiresAt > now) return cached.tvdbIds;
   try {
-    // Paged endpoint — see getRadarrQueueSet. pageSize=200 dropped downloads past
-    // the 200th; page through totalRecords with a runaway backstop.
+    // Paged endpoint — see getRadarrQueueSet.
     const tvdbIds = new Set<number>();
     for (let page = 1; page <= 40; page++) {
       const queue = await arrFetch<{ records: { series?: { tvdbId: number } }[]; totalRecords: number }>(
@@ -1290,10 +1288,9 @@ export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = ""
   const qualityProfileId = qualityProfileIdOverride ?? cfg.qualityProfileId ?? profiles[0].id;
   const tagIds = await resolveRequesterTagIds(cfg, requesterUserId);
 
-  // Explicit allowlist of POST body fields — previous code spread the entire
-  // lookup row (~30 fields, untyped) which silently forwarded whatever Sonarr
-  // returned, exposing us to a future Sonarr API tightening that rejects
-  // unexpected fields on add. `pathOverride` is set only on the collision-retry.
+  // Send only the fields listed here, not the whole lookup row (~30 untyped
+  // fields), so a future Sonarr that rejects unexpected fields can't break adds.
+  // `pathOverride` is set only on the collision-retry.
   const postSeries = (pathOverride?: string) =>
     arrFetch<unknown>(cfg, "/api/v3/series", {
       method: "POST",

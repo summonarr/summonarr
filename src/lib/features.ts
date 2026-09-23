@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
+import { processSingleton } from "@/lib/process-singleton";
 
 // Central registry for admin-toggleable feature flags.
 //
@@ -218,25 +219,33 @@ export type FeatureKey = (typeof FEATURE_DEFINITIONS)[number]["key"];
 
 export type FeatureFlags = Record<string, boolean>;
 
-// Short-TTL memo + in-flight coalescing for the flag rows (the loadSettings()/
-// getApiKey() pattern — guardrail 31): isFeatureEnabled runs on every authenticated
-// page render and many route calls, and the sync orchestrator fires several
-// concurrent checks per tick — each was an identical findMany over the same tiny
-// table. /api/settings calls invalidateFeatureFlagCache() after its writes, so
-// admin toggles apply immediately (Summonarr is a single long-lived server); the
-// TTL only bounds staleness for out-of-band writes like a DB restore.
+// Short-lived cache for the flag rows, plus "in-flight coalescing" (callers that
+// arrive while a read is running share that one read). isFeatureEnabled runs on
+// every authenticated page render and many route calls, and the sync orchestrator
+// fires several concurrent checks per tick — each used to be an identical
+// findMany over the same tiny table (the loadSettings()/getApiKey() pattern —
+// guardrail 31). /api/settings calls invalidateFeatureFlagCache() after its
+// writes, so admin toggles apply immediately (Summonarr is a single long-lived
+// server); the TTL only bounds staleness for out-of-band writes like a DB restore.
+//
+// The state is process-wide (see process-singleton.ts). A plain module-level
+// variable could be copied into each route bundle, and then the invalidate call
+// from /api/settings would clear only its own copy while every other bundle kept
+// serving the old toggle until its TTL ran out.
 const FLAG_CACHE_TTL_MS = 10_000;
-let flagCache: { flags: FeatureFlags; expiresAt: number } | null = null;
-let flagInflight: Promise<FeatureFlags> | null = null;
-// Generation counter: a read that was already in flight when invalidate ran holds
-// pre-write rows; without the gen check it would re-populate flagCache AFTER the
-// invalidation and serve the stale toggle for a full TTL.
-let flagGen = 0;
+const flagState = processSingleton("features:flagCache", () => ({
+  cache: null as { flags: FeatureFlags; expiresAt: number } | null,
+  inflight: null as Promise<FeatureFlags> | null,
+  // Generation counter: a read that was already in flight when invalidate ran
+  // holds pre-write rows; without the gen check it would re-populate the cache
+  // AFTER the invalidation and serve the stale toggle for a full TTL.
+  gen: 0,
+}));
 
 export function invalidateFeatureFlagCache(): void {
-  flagGen++;
-  flagCache = null;
-  flagInflight = null;
+  flagState.gen++;
+  flagState.cache = null;
+  flagState.inflight = null;
 }
 
 function computeFlags(map: Record<string, string>): FeatureFlags {
@@ -257,22 +266,22 @@ function computeFlags(map: Record<string, string>): FeatureFlags {
  */
 export async function getFeatureFlags(cfg?: Record<string, string>): Promise<FeatureFlags> {
   if (cfg) return computeFlags(cfg);
-  if (flagCache && Date.now() < flagCache.expiresAt) return flagCache.flags;
-  if (flagInflight) return flagInflight;
-  const gen = flagGen;
+  if (flagState.cache && Date.now() < flagState.cache.expiresAt) return flagState.cache.flags;
+  if (flagState.inflight) return flagState.inflight;
+  const gen = flagState.gen;
   const inflight = (async () => {
     try {
       const rows = await prisma.setting.findMany({ where: { key: { in: [...FEATURE_KEYS] } } });
       const flags = computeFlags(Object.fromEntries(rows.map((r) => [r.key, r.value])));
       // Only cache if no invalidation happened while this read was in flight.
-      if (gen === flagGen) flagCache = { flags, expiresAt: Date.now() + FLAG_CACHE_TTL_MS };
+      if (gen === flagState.gen) flagState.cache = { flags, expiresAt: Date.now() + FLAG_CACHE_TTL_MS };
       return flags;
     } finally {
       // Clear only if a later invalidate/read hasn't already replaced the slot.
-      if (gen === flagGen) flagInflight = null;
+      if (gen === flagState.gen) flagState.inflight = null;
     }
   })();
-  flagInflight = inflight;
+  flagState.inflight = inflight;
   return inflight;
 }
 
@@ -297,9 +306,7 @@ export async function requireFeature(key: FeatureKey | string): Promise<void> {
   if (!enabled) notFound();
 }
 
-/**
- * Group definitions by category for rendering.
- */
+/** Group definitions by category for rendering. */
 export function groupFeaturesByCategory(): Record<FeatureCategory, FeatureDefinition[]> {
   return {
     pages: FEATURE_DEFINITIONS.filter((f) => f.category === "pages"),

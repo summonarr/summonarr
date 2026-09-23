@@ -1,11 +1,10 @@
 "use client";
 
-// Refined Activity overview sections, ported from the Claude Design
-// "Activity Page" handoff (sections.jsx). These are pure render-from-props
-// components — every time/label/aggregate is computed server-side in
-// page.tsx and passed down, so there is no Date.now()/new Date() in the
-// client render path (CLAUDE.md guardrail 16). The module is "use client"
-// only because the shared chart primitives call useId().
+// Sections of the admin Activity overview page. These components only draw
+// what they are given: every time, label and total is worked out on the
+// server in page.tsx and passed in as props, so nothing here calls
+// Date.now()/new Date() while rendering (CLAUDE.md guardrail 16). The file is
+// "use client" only because the shared chart pieces call React's useId().
 
 import Link from "next/link";
 import type { ReactNode } from "react";
@@ -28,8 +27,8 @@ export interface Kpi {
   value: string;
   delta?: { text: string; dir: "up" | "down" | "flat" } | null;
   spark?: number[];
-  // Precomputed server-side per-point labels for the sparkline tooltip
-  // (element i ↔ spark[i]). Never derive from Date client-side — guardrail 16.
+  // Tooltip label for each sparkline point (sparkLabels[i] goes with spark[i]).
+  // Built on the server; never build these from a Date in the browser (guardrail 16).
   sparkLabels?: string[];
   sparkSuffix?: string;
   sub?: string;
@@ -400,7 +399,7 @@ export function Leaderboards({
                   <div
                     style={{
                       height: 4,
-                      background: "oklch(1 0 0 / 0.05)",
+                      background: "color-mix(in oklab, var(--ds-fg) 5%, transparent)",
                       borderRadius: 999,
                       overflow: "hidden",
                     }}
@@ -522,7 +521,7 @@ export function Leaderboards({
                   <div
                     style={{
                       height: 4,
-                      background: "oklch(1 0 0 / 0.05)",
+                      background: "color-mix(in oklab, var(--ds-fg) 5%, transparent)",
                       borderRadius: 999,
                       overflow: "hidden",
                     }}

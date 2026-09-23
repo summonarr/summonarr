@@ -1,8 +1,8 @@
 "use client";
 
 // Pagination footer for the history table: rows-per-page select, result-range
-// label, and the page-number strip. Page/limit state lives in the parent;
-// the range/window values are pure derivations computed here.
+// label, and the page-number strip. The page and page-size state live in the
+// parent; this file only works out which numbers to show.
 
 export function HistoryPagination({
   page,
@@ -54,6 +54,7 @@ export function HistoryPagination({
         </span>
         <select
           value={limit}
+          aria-label="Rows per page"
           onChange={(e) => setLimit(Number(e.target.value))}
           style={{
             fontFamily: "var(--font-mono)",

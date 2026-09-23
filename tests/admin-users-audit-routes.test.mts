@@ -1,10 +1,9 @@
-// Route-level unit tests for three uncovered admin routes:
+// Route-level unit tests for three admin routes:
 //   GET/POST   /api/admin/users            list + create a local-credentials user
 //   GET/DELETE /api/admin/audit-log        the trail, and the manual PII scrub
 //   GET        /api/admin/audit-log/export CSV/JSON export of the whole trail
 //
-// These are the highest-privilege surfaces left uncovered, and each has a
-// distinct sharp edge:
+// These are high-privilege surfaces, and each has its own sharp edge:
 //
 //   1. SELF-ESCALATION (users POST). Both verbs are gated on MANAGE_USERS rather
 //      than withAdmin — deliberately, so the bit that gates the [id] PATCH/DELETE
@@ -34,9 +33,9 @@
 //   6. The user list must not serialize passwordHash, which it selects only to
 //      derive the local-vs-OAuth `source` label.
 //
-// Harness: the tests/votes-route.test.mts idiom — real wrapped handlers, genuine
-// signed session JWTs, a synthetic workAsyncStorage + workUnitAsyncStorage scope,
-// in-memory prisma stubs. No DB, no network.
+// Harness (same approach as tests/votes-route.test.mts): the real wrapped
+// handlers, genuinely signed session JWTs, a fake Next request scope so
+// cookies()/after() work, and in-memory prisma stubs. No DB, no network.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
@@ -116,7 +115,7 @@ let appUsers: AppUser[] = [];
 let nextUserCreateThrows: "P2002" | null = null;
 
 shadowPrismaModel(prisma, "user", {
-  // Session resolution AND the admin list both land here.
+  // findUnique answers session lookups; findMany answers the admin user list.
   findUnique: async (args: { where: { id: string } }) => sessionUsers.get(args.where.id) ?? null,
   update: async () => ({}),
   findMany: async (args: { select?: unknown; take?: number; orderBy?: unknown }) => {
@@ -179,10 +178,6 @@ function auditMatch(r: AuditRow, where: Record<string, unknown> | undefined): bo
     }
     if (k === "AND") {
       for (const clause of v as Record<string, unknown>[]) if (!auditMatch(r, clause)) return false;
-      continue;
-    }
-    if (k === "OR") {
-      if (!(v as Record<string, unknown>[]).some((clause) => auditMatch(r, clause))) return false;
       continue;
     }
     if (k === "userId") {
@@ -909,13 +904,14 @@ test("export: the filters actually applied are recorded on the audit row", async
 
 test("export: applies the same wildcard stripping as the list", async () => {
   const t = await mintSession();
-  const res = await exportAudit(t, "?user=%25%5F%5C");
+  // Real letters around the wildcards, so the filter survives stripping and the
+  // assertions below always run (an all-wildcard term could be dropped entirely).
+  const res = await exportAudit(t, "?user=al%25%5F%5Cice");
   await readAll(res);
   const read = opsOf("auditLog.findMany")[0];
   const where = (read.args as { where: { userName?: { contains: string } } }).where;
-  if (where.userName) {
-    for (const ch of ["%", "_", "\\"]) {
-      assert.ok(!where.userName.contains.includes(ch), `wildcard ${ch} reached the export query`);
-    }
+  assert.ok(where.userName, "the user filter should reach the export query");
+  for (const ch of ["%", "_", "\\"]) {
+    assert.ok(!where.userName.contains.includes(ch), `wildcard ${ch} reached the export query`);
   }
 });

@@ -33,9 +33,10 @@ const PER_PAGE = 100;
 // Dedicated "For You" page — the full ranked recommendation set behind the
 // home rail (which shows only the top slice). Recommendations are precomputed
 // per user by the warm-recommendations cron (see src/lib/recommendations.ts):
-// seeds come from the last 180 days of watched history plus the watchlist,
-// fanned through TMDB's recommendations/similar, scored by seed weight, and
-// cached in UserRecommendation. This page never calls TMDB.
+// "seeds" (titles the user recently watched, put on their watchlist or
+// requested) are looked up in the stored suggestion graph, scored, and saved
+// in UserRecommendation. This page only reads that stored result — it never
+// calls TMDB.
 //
 // Unlike a plain browse grid it also EXPLAINS itself: the header reports when
 // this user's set was last built and how many of their own titles produced it,
@@ -73,11 +74,10 @@ export default async function ForYouPage({
   const visible = filtered.slice(offset, offset + PER_PAGE);
   const totalPages = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
 
-  // Reads as one sentence about where these picks came from. formatRelativeTime
-  // is called on the SERVER here (this page is force-dynamic and PageHeader is a
-  // server component), so the string is computed once and hydration receives the
-  // identical text — the guardrail-16 hazard is a Date.now() inside a "use
-  // client" render, which this is not.
+  // The subtitle reads as one sentence about where these picks came from.
+  // formatRelativeTime runs on the SERVER here, so the browser receives the
+  // finished text and hydration can't disagree with it (guardrail 16 is about
+  // Date.now() inside a "use client" render, which this is not).
   //
   // The seed counts are taken off `enriched` — the same set the "of N picks"
   // denominator reports — so the sentence describes ONE population throughout.
@@ -135,7 +135,7 @@ export default async function ForYouPage({
       />
 
       {enriched.length > 0 && (
-        <div className="flex items-center gap-x-5 gap-y-3 flex-wrap mb-5">
+        <div className="flex items-center gap-x-5 gap-y-3 flex-wrap mb-6">
           <Suspense>
             <PillFilter
               label="Type"
@@ -144,7 +144,7 @@ export default async function ForYouPage({
               options={[
                 { value: undefined, label: "All" },
                 { value: "movie", label: "Movies" },
-                { value: "tv", label: "TV" },
+                { value: "tv", label: "TV Shows" },
               ]}
             />
           </Suspense>
@@ -155,8 +155,8 @@ export default async function ForYouPage({
               active={availability}
               options={[
                 { value: undefined, label: "All" },
-                { value: "available", label: "On your server" },
-                { value: "missing", label: "Not on server" },
+                { value: "available", label: "On Your Server" },
+                { value: "missing", label: "Not on Server" },
               ]}
             />
           </Suspense>
@@ -168,9 +168,9 @@ export default async function ForYouPage({
               // so it maps to undefined rather than to its own literal.
               active={sort === "match" ? undefined : sort}
               options={[
-                { value: undefined, label: "Best match" },
+                { value: undefined, label: "Best Match" },
                 { value: "newest", label: "Newest" },
-                { value: "rating", label: "Highest rated" },
+                { value: "rating", label: "Highest Rated" },
               ]}
             />
           </Suspense>
@@ -249,7 +249,7 @@ function MatchTierChip({ tier }: { tier: NonNullable<TmdbMedia["matchTier"]> }) 
         paddingRight: 7,
         ...(isTop
           ? {}
-          : { background: "var(--ds-accent-soft)", color: "var(--ds-accent)", border: "1px solid var(--ds-accent-ring)" }),
+          : { background: "var(--ds-accent-soft)", color: "var(--ds-accent-text)", border: "1px solid var(--ds-accent-ring)" }),
       }}
       title={
         isTop
@@ -302,7 +302,7 @@ function RecommendationReason({ media }: { media: TmdbMedia }) {
         style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", lineHeight: 1.4 }}
         title={
           others > 0
-            ? `${lead} ${why.title}, plus ${others} other title${others === 1 ? "" : "s"} you've seen`
+            ? `${lead} ${why.title}, plus ${others} other title${others === 1 ? "" : "s"} you’ve seen`
             : `${lead} ${why.title}`
         }
       >

@@ -6,10 +6,10 @@
 //   POST /api/push/announce-update — admin broadcast "update the app" to all iOS
 //
 // THE anchor assertion is guardrail 7a. /api/push/subscribe and /api/push/apns
-// are TWO of the only THREE legitimate call-site `encryptToken` uses in the tree
-// (PushSubscription is NOT covered by the prisma crypto extension — see
-// tests/token-crypto.test.mts + CLAUDE.md guardrail 7a), so the row-at-rest
-// shape is the route's own responsibility and exactly the surface that regressed
+// are the only routes allowed to call `encryptToken` themselves, because the
+// PushSubscription table is NOT covered by the prisma crypto extension (see
+// tests/token-crypto.test.mts + CLAUDE.md guardrail 7a). So the route alone decides
+// how the row is stored at rest, and that is exactly the surface that regressed
 // as double-encryption (`enc:v1:<enc:v1:…>`) or plaintext elsewhere. These tests
 // register real subscriptions and prove the stored p256dh/auth (web) and
 // deviceToken (iOS) are encrypted EXACTLY ONCE — they carry the `enc:v1:` marker
@@ -432,7 +432,7 @@ test("POST /api/push/subscribe stores p256dh+auth encrypted EXACTLY ONCE (guardr
   // ...and it is encrypted EXACTLY ONCE: a single decrypt pass returns the
   // original plaintext, not a nested envelope. A value that decrypted to another
   // `enc:v1:…` would be the double-encryption bug (enc:v1:<enc:v1:…>) — the
-  // prisma extension would then under-decrypt it and ship a corrupt key upstream.
+  // sender decrypts only once, so it would ship a corrupt key upstream.
   assert.equal(
     decryptToken(stored.p256dh!, "PushSubscription.p256dh"),
     P256DH,
@@ -549,8 +549,8 @@ test("POST /api/push/apns stores the APNs deviceToken encrypted (guardrail 7a) w
     "guardrail 7a: one decrypt pass must yield the plaintext token, not another enc:v1: marker",
   );
 
-  // E2E publicKey is the deliberate exception: stored in the clear (the relay/NSE
-  // needs it to verify the ECIES envelope; it is not a secret).
+  // The E2E publicKey is the deliberate exception: stored in the clear. The server
+  // uses it to encrypt payloads for this device, and a public key is not a secret.
   assert.equal(stored.publicKey, PUBLIC_KEY, "the E2E publicKey is stored verbatim, in plaintext by design");
   assert.ok(!stored.publicKey!.startsWith("enc:v1:"), "the E2E publicKey must NOT be encrypted");
   const pubBytes = Buffer.from(stored.publicKey!, "base64");

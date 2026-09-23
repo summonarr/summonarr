@@ -29,15 +29,14 @@ export interface CronJobInfo {
   runsLastHourCapped: boolean;
 }
 
-// Above this many runs in an hour, the count is rendered as a warning rather
-// than as information. The fastest job in this table is Warm Activity at 1800s
-// (2/h), so 4/h is already double the rate of the most frequent thing here and
-// cannot be normal for any row. The COUNT is always shown regardless — this
-// threshold only decides the colour, so an operator can still judge a rate the
-// threshold does not catch.
+// At this many runs in an hour or more, the count is shown in warning colour.
+// With default intervals the most frequent job here is Warm Activity, every
+// 1800s (2 per hour), so 4 per hour is double that and not normal for any row.
+// The count is shown either way — this number only picks the colour.
 const RUNS_PER_HOUR_WARN_AT = 4;
 
-// Admin table of internal cron jobs with last-run/status and a per-job manual Run trigger.
+// Admin table of the app's scheduled (cron) jobs: when each last ran, whether
+// it worked, and a Run button to start one by hand.
 export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
   const [jobs, setJobs] = useState(initialJobs);
   const [running, setRunning] = useState<Set<string>>(new Set());
@@ -48,14 +47,12 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
     try {
       const res = await fetch(withBasePath(endpoint), { method: "POST" });
       const data = await res.json() as { ok?: boolean; skipped?: unknown; durationMs?: number; error?: string };
-      // Judge on the HTTP status plus an explicit `error`, NOT on `ok`/`skipped`.
-      // Most of these endpoints return neither: /api/sync answers
-      // {checked, marked, …} and /api/sync/upcoming {movies, tv, …}, so a fully
-      // successful run fell through to "error" and showed a red badge. And
-      // /api/sync/ratings' `skipped` is a COUNT, not a boolean — so the best
-      // possible run (skipped: 0) read as falsy and was also marked failed.
-      // Failures are already signalled properly: a non-2xx status (upcoming
-      // returns 502) or an `error` field (the degraded-sync case, which is a 200).
+      // Success = a 2xx status and no `error` field. Don't look at `ok` or
+      // `skipped`: most of these endpoints don't return `ok` at all (/api/sync
+      // answers {checked, marked, …}), and /api/sync/ratings' `skipped` is a
+      // COUNT, so `skipped: 0` — the best possible run — would look like a
+      // failure. Real failures come back as a non-2xx status (e.g. upcoming's
+      // 502) or as an `error` field on a 200 (a partly failed sync).
       const succeeded = res.ok && !data.error;
 
       setJobs((prev) =>
@@ -66,8 +63,8 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                 lastRun: new Date().toISOString(),
                 lastDuration: data.durationMs ?? null,
                 lastStatus: succeeded ? "ok" : "error",
-                // A manual run is a run: recordCronRun writes it to the same
-                // ledger, so keep the visible rate honest without a reload.
+                // A manual run is recorded in the same run history as a
+                // scheduled one, so count it here too without needing a reload.
                 runsLastHour: (j.runsLastHour ?? 0) + 1,
               }
             : j,
@@ -98,10 +95,9 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
             <th scope="col" className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Job</th>
             <th scope="col" className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Interval</th>
             <th scope="col" className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Last Run</th>
-            {/* Duration is the lowest-information column; hidden below the sm
-                breakpoint so the rest of the table fits a ~440px viewport
-                without horizontal scroll (the overflow-x-auto wrapper still
-                allows scroll when widened). */}
+            {/* Duration is the least useful column, so it's hidden on small
+                screens to let the rest of the table fit a ~440px phone without
+                sideways scrolling. */}
             <th scope="col" className="hidden sm:table-cell py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Duration</th>
             <th scope="col" className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Status</th>
             <th scope="col" className="py-2 text-xs font-semibold uppercase tracking-wider text-zinc-500"></th>
@@ -113,7 +109,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
             return (
               <tr key={job.name} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
                 <td className="py-3 pr-4">
-                  <div className="text-white font-medium text-xs">{job.name}</div>
+                  <div className="text-zinc-100 font-medium text-xs">{job.name}</div>
                   <div className="text-zinc-500 text-[11px] mt-0.5">{job.description}</div>
                 </td>
                 <td className="py-3 pr-4 text-zinc-400 text-xs tabular-nums whitespace-nowrap">{job.interval}</td>
@@ -125,10 +121,9 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                   ) : (
                     <span className="text-zinc-500">never</span>
                   )}
-                  {/* Cadence, not just recency. A lone timestamp reads the same
-                      whether the job ran once or four hundred times, which is
-                      exactly the blind spot that let a runaway sync trigger hide
-                      on this panel while the logs pointed operators at it. */}
+                  {/* How OFTEN it ran, not just when. A single "last run" time
+                      looks the same whether the job ran once or 400 times in
+                      the hour, which once hid a runaway sync loop. */}
                   {job.runsLastHour != null && job.runsLastHour > 1 && (
                     <div
                       className={`text-[11px] mt-0.5 ${
@@ -170,7 +165,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                     variant="outline"
                     disabled={isRunning}
                     onClick={() => triggerJob(job.endpoint, job.name)}
-                    className="h-9 px-2.5 text-xs border-zinc-700 text-zinc-400 hover:text-white gap-1.5"
+                    className="h-9 px-2.5 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1.5"
                   >
                     {isRunning ? (
                       <><Loader2 className="w-3 h-3 animate-spin" /> Running</>

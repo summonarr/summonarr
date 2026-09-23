@@ -46,9 +46,9 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentT
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-      {/* Same fix as user-list-filters.tsx: flex-wrap instead of
-          overflow-x-auto so the 5 status pills wrap to a second row on narrow
-          viewports instead of "Available" being clipped at the right edge. */}
+      {/* flex-wrap (not a horizontal scroll) lets the 5 status pills wrap to a
+          second row on narrow screens instead of clipping "Available" off the
+          right edge. user-list-filters.tsx does the same. */}
       <div
         className="flex flex-wrap gap-1 max-w-full"
         style={{
@@ -87,7 +87,7 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentT
                   background: active
                     ? "var(--ds-accent-soft)"
                     : "var(--ds-bg-3)",
-                  color: active ? "var(--ds-accent)" : "var(--ds-fg-subtle)",
+                  color: active ? "var(--ds-accent-text)" : "var(--ds-fg-subtle)",
                 }}
               >
                 {count}

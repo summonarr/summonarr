@@ -54,7 +54,6 @@ export const PATCH = withIssueAdmin(async (
     if (!isValidInstanceSlug(instance)) {
       return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
     }
-    let arrError: string | null = null;
     try {
       if (issue.mediaType === "MOVIE") {
         await searchMovieInRadarr(issue.tmdbId, instance);
@@ -93,8 +92,7 @@ export const PATCH = withIssueAdmin(async (
       return NextResponse.json({ ...(updated ?? issue), arrError: null });
     } catch (err) {
       console.error("[arr] Issue refetch failed:", err);
-      arrError = "Arr service request failed";
-      return NextResponse.json({ ...issue, arrError });
+      return NextResponse.json({ ...issue, arrError: "Arr service request failed" });
     }
   }
 
@@ -167,10 +165,9 @@ export const PATCH = withIssueAdmin(async (
       .then((u) => !!u && u.deactivatedAt == null)
       .catch(() => false);
 
-    // An issue admin resolving their OWN reported issue must not be notified about it —
-    // on a single-admin self-hosted instance that is the common case. The inbox row
-    // below already honoured this; Discord and push did not, so the admin got pinged by
-    // their own action on every resolve.
+    // An issue admin resolving their OWN reported issue must not be notified about it
+    // (on a single-admin instance that is the common case). This covers Discord, push
+    // and the in-app inbox row below.
     const selfAction = issue.reportedBy === session.user.id;
     void reporterActive.then((active) => {
       if (!active || selfAction) return;
@@ -183,9 +180,6 @@ export const PATCH = withIssueAdmin(async (
       }).catch(() => {});
     });
     const res = (sanitizedResolution ?? issue.resolution) ?? "";
-    // An issue admin resolving their OWN reported issue shouldn't get a
-    // self-notification inbox row ("Your reported issue was resolved"). Mirrors the
-    // selfAction guard the request routes use.
     if (!selfAction) {
       createInAppNotification(issue.reportedBy, {
         type: "ISSUE_RESOLVED",

@@ -71,7 +71,7 @@ export async function GET() {
   }
 
   // Per-event-type delivery rules:
-  //   activity:* — system admin only (live session/history streams)
+  //   activity:sessions, activity:history-updated, plex:reachability — system admin only
   //   issue:* / issuemessage:* — system admin OR ISSUE_ADMIN bypasses per-user filter
   //   everything else (request:*, votes:*, push:*, settings:*) — only system admin bypasses;
   //     ISSUE_ADMIN goes through the same per-user filter as a normal USER.
@@ -110,13 +110,12 @@ export async function GET() {
     try { controller?.close(); } catch { }
   }
 
-  // A ReadableStream defaults to highWaterMark 1, so desiredSize drops to 0 after
-  // a single enqueue. emitSSE fans out to every listener SYNCHRONOUSLY in one
-  // tick, so any handler emitting two events back-to-back drove the second
-  // enqueue's backpressure check to `<= 0` and tore down every connected client —
-  // including healthy ones that simply had not been scheduled to drain yet. SSE
-  // frames are tiny; 64 of them is ample headroom, and the check below still
-  // catches a genuinely stalled consumer.
+  // The stream buffers up to 64 frames (the CountQueuingStrategy at the bottom).
+  // The default buffer is 1 frame, and events are sent to every listener at
+  // once, so two events emitted back-to-back would fill it and the backpressure
+  // check below would disconnect perfectly healthy clients. SSE frames are
+  // tiny, so 64 is plenty, and a client that has truly stopped reading still
+  // fills the buffer and gets disconnected.
   const stream = new ReadableStream({
     start(controller) {
 

@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
-// CSP is now set dynamically per-request in proxy.ts (nonce-based).
-// Only non-CSP security headers remain here.
+// The Content-Security-Policy header is set per request in src/proxy.ts,
+// because it carries a fresh random nonce each time. The fixed security
+// headers live here.
 const securityHeaders = [
   // Prevent the page from being embedded in iframes (clickjacking protection)
   { key: "X-Frame-Options", value: "DENY" },
@@ -26,16 +27,17 @@ const nextConfig: NextConfig = {
   // Don't advertise the framework — drops the default `X-Powered-By: Next.js`.
   poweredByHeader: false,
   experimental: {
-    // Cap proxy body buffering — defence-in-depth against oversized request payloads.
-    // Route handlers enforce their own limits; this prevents the proxy layer from
-    // buffering unbounded request bodies into memory.
+    // Cap how much of a request body the proxy layer will buffer in memory.
+    // This is only a backstop: each route enforces its own, much smaller
+    // limit via readJsonCapped (guardrail 30).
     proxyClientMaxBodySize: "50mb",
   },
   logging: {
     fetches: { fullUrl: false },
   },
   // Allow deploying under a subpath (e.g. /request) behind a reverse proxy.
-  // Set BASE_PATH=/request in your environment to enable.
+  // BASE_PATH is read at BUILD time and baked into the client bundle, so set it
+  // when running `next build` (the Dockerfile takes it as a build arg).
   ...(process.env.BASE_PATH ? { basePath: process.env.BASE_PATH } : {}),
   // Exclude packages from standalone tracing that are not needed at runtime.
   // Drop Wasm query compilers for databases other than PostgreSQL, and prisma dev tooling.

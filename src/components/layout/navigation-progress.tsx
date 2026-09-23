@@ -11,23 +11,26 @@ const STALL_TIMEOUT_MS = 8000;
 
 export function NavigationProgress() {
   const pathname = usePathname();
-  // Completion was keyed on pathname ALONE, so a query-only navigation (a filter
-  // change, a tab switch) never completed the bar. Almost every filter surface in
-  // this app pushes exactly that shape, so it sat pinned across the viewport
-  // until the user navigated to a different path. Track the full URL.
+  // Track the full URL (path + query), not just the path: most filters and
+  // tabs in this app only change the query string, and those navigations must
+  // complete the bar too.
   const searchParams = useSearchParams();
   const url = `${pathname}?${searchParams.toString()}`;
   const [width, setWidth] = useState(0);
   const [visible, setVisible] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stallRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Holds the complete/hide timeouts scheduled by the URL-change effect so a NEW
-  // navigation can cancel them. They used to be effect-local consts the start
-  // path could never reach, so a stale hide-timeout from the previous navigation
-  // fired mid-way through the next one and blanked the bar.
+  // The complete/hide timeouts scheduled by the URL-change effect. Kept in a
+  // ref so a NEW navigation can cancel them; otherwise the previous
+  // navigation's hide timer could fire mid-way through the next one.
   const completionTimeouts = useRef<ReturnType<typeof setTimeout>[]>([]);
   // Seeded with the mount URL so the completion effect does not run on mount.
   const prevUrl = useRef(url);
+  // window.location's path + query as of the last committed navigation. Lets
+  // a popstate (Back/Forward) that only moves between `#hash` entries — like
+  // the settings side-nav's anchor links — be ignored, since no page load
+  // follows it. Read in effects only (guardrail 16).
+  const committedLocation = useRef<string | null>(null);
 
   const clearCompletionTimeouts = () => {
     for (const id of completionTimeouts.current) clearTimeout(id);
@@ -70,19 +73,14 @@ export function NavigationProgress() {
 
   // Navigation START.
   //
-  // This used to monkey-patch history.pushState, which cannot work: the App
-  // Router calls pushState from a useInsertionEffect keyed on the router state,
-  // i.e. in the commit that ALREADY carries the new URL — the same commit in
-  // which usePathname()/useSearchParams() below return that URL. Start and
-  // completion therefore fired together and the bar only ever flashed 0→100
-  // AFTER the navigation, never during the fetch it exists to cover.
+  // We listen for link clicks in the capture phase (before the router sees
+  // the click), which is the earliest moment we can learn a navigation began.
+  // Watching history.pushState does NOT work: the App Router only calls it
+  // once the new URL is already committed, so the bar would start and finish
+  // at the same instant.
   //
-  // A capture-phase click listener runs before the router handles the event, so
-  // it is the earliest signal available without wrapping every Link. Known gap:
-  // a programmatic router.push (the header search, for one) starts no bar. Next
-  // exposes Link's onNavigate and useLinkStatus for per-link pending state, but
-  // neither reaches a single global bar; wrap those call sites if the coverage
-  // matters more than the indirection.
+  // Known gap: a programmatic router.push (the header search, for one) is not
+  // a click, so it starts no bar.
   useEffect(() => {
     const onDocumentClick = (e: MouseEvent) => {
       // Anything the browser will not treat as a plain in-page navigation:
@@ -120,12 +118,21 @@ export function NavigationProgress() {
       start();
     };
 
+    // Back/forward: the URL changes with no click to observe. A hash-only
+    // entry change commits no router navigation, so it must not start the bar
+    // (same reasoning as the hash-only click guard above).
+    const onPopState = () => {
+      const here = window.location.pathname + window.location.search;
+      if (committedLocation.current !== null && here === committedLocation.current) return;
+      start();
+    };
+
+    committedLocation.current = window.location.pathname + window.location.search;
     document.addEventListener("click", onDocumentClick, true);
-    // Back/forward: the URL changes with no click to observe.
-    window.addEventListener("popstate", start);
+    window.addEventListener("popstate", onPopState);
     return () => {
       document.removeEventListener("click", onDocumentClick, true);
-      window.removeEventListener("popstate", start);
+      window.removeEventListener("popstate", onPopState);
     };
   }, [start]);
 
@@ -133,6 +140,7 @@ export function NavigationProgress() {
   useEffect(() => {
     if (url === prevUrl.current) return;
     prevUrl.current = url;
+    committedLocation.current = window.location.pathname + window.location.search;
 
     stop();
 
@@ -164,7 +172,8 @@ export function NavigationProgress() {
       className="fixed top-0 left-0 z-[200] h-0.5 bg-indigo-500 transition-[width] duration-200 ease-out pointer-events-none"
       style={{
         width: `${width}%`,
-        boxShadow: "0 0 8px 0 rgba(99,102,241,0.6)",
+        // Glow follows the accent (bg-indigo-500 is token-mapped to it).
+        boxShadow: "0 0 8px 0 color-mix(in oklab, var(--ds-accent) 60%, transparent)",
       }}
     />
   );

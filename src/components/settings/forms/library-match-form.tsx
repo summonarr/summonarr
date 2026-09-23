@@ -12,7 +12,8 @@ import type { SaveStatus } from "./shared";
 type MediaSampleData = { mountPoint: string; samples: string[] };
 type ServerSamples   = { movie: MediaSampleData; tv: MediaSampleData };
 
-// Strips a leading prefix (trailing slash tolerated) from a path — client-side preview of the server's path-strip logic.
+// Removes `prefix` from the start of `path` (the prefix may or may not end in "/").
+// This is a browser-side preview of the prefix stripping the server does.
 function applyPrefix(path: string, prefix: string): string {
   if (!prefix) return path;
   const p = prefix.endsWith("/") ? prefix : prefix + "/";
@@ -194,7 +195,7 @@ export function LibraryMatchForm({
           variant="outline"
           onClick={loadSamples}
           disabled={loading}
-          className="border-zinc-700 text-zinc-400 hover:text-white gap-2 shrink-0"
+          className="border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-2 shrink-0"
         >
           {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
           Load examples

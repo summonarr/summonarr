@@ -28,12 +28,10 @@ export const GET = withAuth(async (req, _ctx, session) => {
   const canManageIssues = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
   const where = canManageIssues ? {} : { reportedBy: session.user.id };
 
-  const isAdmin = canManageIssues;
-
   const limitParam = req.nextUrl.searchParams.get("limit");
   const limit = Math.min(100, Math.max(1, parseInt(limitParam ?? "50", 10) || 50));
 
-  const issues = await (isAdmin
+  const issues = await (canManageIssues
     ? prisma.issue.findMany({
         where,
         include: { user: { select: { name: true, email: true } } },
@@ -126,7 +124,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
     }
   }
 
-  // Three-tier cached resolver — see votes/route.ts for the rationale.
+  // Look the title up via TMDB (cached) so the stored title/poster come from TMDB,
+  // not from the client. See votes/route.ts for how the cache tiers work.
   const verified = await resolveMediaMeta(tmdbId, mediaType as "MOVIE" | "TV");
   if (!verified) {
     return NextResponse.json({ error: "Could not verify media with TMDB" }, { status: 422 });

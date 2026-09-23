@@ -14,18 +14,16 @@ import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { requireFeature } from "@/lib/features";
 import Link from "next/link";
-import { cn } from "@/lib/utils";
 import { Suspense } from "react";
-import { PageHeader, EmptyState } from "@/components/ui/design";
+import { PageHeader, EmptyState, SectionHeader } from "@/components/ui/design";
 import { TrendingUp, Film } from "@/components/icons";
 
 type EnrichedMedia = TmdbMedia & {
-  // 1-based position in the SERVER-WIDE ranking (page offset included), fixed
-  // at resolve time from the item's index in the unfiltered page. Both later
-  // steps shrink the array — resolveMedia drops a rejected TMDB detail fetch and
-  // attachAllAvailability removes the viewer's hidden titles — so a badge or
-  // range computed from the survivor index re-labels every later title one
-  // rank too high and claims "1–39 of 200" with #40 on no page at all.
+  // 1-based position in the SERVER-WIDE ranking (page offset included), taken
+  // from the item's slot in the unfiltered page. Later steps can drop items (a
+  // failed TMDB fetch, a title the viewer hid), so the rank is stored up front
+  // instead of recounted from what survives — otherwise every later title
+  // would show the wrong number.
   rank: number;
   plays: number;
   allTimePlays: number;
@@ -106,10 +104,8 @@ export default async function PopularOnServerPage({
     if (items.length === 0) return [];
     const dbType = type === "movie" ? "MOVIE" : "TV";
 
-    // One IN clause, not one OR per item. mediaType and the freshness bound are
-    // the same for every item here, so the OR form only varied tmdbId — it grew
-    // the query text with the page for no selectivity the planner could not get
-    // from an id list against the [tmdbId, mediaType] key.
+    // One query for the whole page: every item shares mediaType and the
+    // freshness check, so a single `tmdbId IN (...)` list is all that's needed.
     const coreRows = await prisma.tmdbMediaCore.findMany({
       where: {
         tmdbId: { in: items.map((i) => i.tmdbId) },
@@ -119,13 +115,10 @@ export default async function PopularOnServerPage({
     });
     const coreMap = new Map(coreRows.map((r) => [r.tmdbId, r]));
 
-    // Bounded, not a bare Promise.allSettled over the page (guardrail 31). Only
-    // items missing a fresh TmdbMediaCore row reach the network, but on a cold
-    // cache that is every one of them — POPULAR_PER_PAGE is 40, and movies and
-    // TV resolve concurrently, so the unbounded form burst up to 80 TMDB detail
-    // requests at once against an API that tolerates ~50/s. 8 matches the cap
-    // the push fan-outs use; the TMDB list helpers sit at 5 because each of
-    // those tasks is itself a multi-page fetch.
+    // At most 8 at a time, not a bare Promise.allSettled (guardrail 31). Items
+    // without a fresh TmdbMediaCore row hit TMDB, and on a cold cache that is
+    // all of them: 40 movies + 40 shows at once would burst past TMDB's ~50
+    // requests/second limit.
     const results = await settleLimit(
       items,
       8,
@@ -221,7 +214,8 @@ export default async function PopularOnServerPage({
               <Link
                 key={value}
                 href={buildHref({ sort: value === "trending" ? undefined : value })}
-                className="inline-flex items-center whitespace-nowrap font-medium transition-colors"
+                aria-current={isActive ? "page" : undefined}
+                className="ds-hover-tint inline-flex items-center whitespace-nowrap font-medium"
                 style={{
                   padding: "5px 12px",
                   borderRadius: 6,
@@ -256,9 +250,8 @@ export default async function PopularOnServerPage({
               <Link
                 key={label}
                 href={buildHref({ mediaType: value })}
-                className={cn(
-                  "inline-flex items-center whitespace-nowrap font-medium transition-colors",
-                )}
+                aria-current={isActive ? "page" : undefined}
+                className="ds-hover-tint inline-flex items-center whitespace-nowrap font-medium"
                 style={{
                   padding: "5px 12px",
                   borderRadius: 6,
@@ -275,19 +268,21 @@ export default async function PopularOnServerPage({
       </div>
 
       {!hasAny ? (
-        sort === "trending" ? (
-          <EmptyState
-            icon={TrendingUp}
-            title="No plays in the last 30 days"
-            description="Try switching to Most Played for all-time data."
-            cta={{ href: buildHref({ sort: "plays" }), label: "Switch to Most Played" }}
-          />
-        ) : page > 1 ? (
+        // Page overflow first: a past-the-end ?page= on the trending sort is
+        // not "nothing was played in 30 days".
+        page > 1 ? (
           <EmptyState
             icon={Film}
             title="No more results on this page"
             description="Try going back to the first page."
             cta={{ href: buildHref({}), label: "Back to page 1" }}
+          />
+        ) : sort === "trending" ? (
+          <EmptyState
+            icon={TrendingUp}
+            title="No plays in the last 30 days"
+            description="Nothing was played in this window."
+            cta={{ href: buildHref({ sort: "plays" }), label: "Switch to Most Played" }}
           />
         ) : (
           <EmptyState
@@ -300,9 +295,9 @@ export default async function PopularOnServerPage({
         <div style={{ display: "flex", flexDirection: "column", gap: 40 }}>
           {showMovies && movies.length > 0 && (
             <section>
-              <PopularSectionHeader
+              <SectionHeader
                 title="Movies"
-                range={rankRange(movies, totalMovies)}
+                right={<RangeLabel>{rankRange(movies, totalMovies)}</RangeLabel>}
               />
               <MediaGrid
                 items={movies}
@@ -315,9 +310,9 @@ export default async function PopularOnServerPage({
 
           {showTV && tv.length > 0 && (
             <section>
-              <PopularSectionHeader
+              <SectionHeader
                 title="TV Shows"
-                range={rankRange(tv, totalTv)}
+                right={<RangeLabel>{rankRange(tv, totalTv)}</RangeLabel>}
               />
               <MediaGrid
                 items={tv}
@@ -337,32 +332,15 @@ export default async function PopularOnServerPage({
   );
 }
 
-function PopularSectionHeader({
-  title,
-  range,
-}: {
-  title: string;
-  range: string;
-}) {
+// "1–40 of 200 titles" beside a section title. Same label /top uses.
+function RangeLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex items-end mb-3">
-      <h2
-        className="section-title m-0 font-semibold"
-        style={{ fontSize: 15, letterSpacing: "-0.01em", color: "var(--ds-fg)" }}
-      >
-        {title}
-      </h2>
-      <span
-        className="ds-mono ml-auto uppercase"
-        style={{
-          fontSize: 10.5,
-          color: "var(--ds-fg-subtle)",
-          letterSpacing: "0.06em",
-        }}
-      >
-        {range}
-      </span>
-    </div>
+    <span
+      className="ds-mono uppercase"
+      style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", letterSpacing: "0.06em" }}
+    >
+      {children}
+    </span>
   );
 }
 
@@ -418,7 +396,7 @@ function MediaGrid({
                 whiteSpace: "nowrap",
                 color:
                   sort === "plays" || sort === "trending"
-                    ? "var(--ds-accent)"
+                    ? "var(--ds-accent-text)"
                     : "var(--ds-fg-subtle)",
                 fontWeight: sort === "plays" || sort === "trending" ? 500 : 400,
               }}
@@ -435,7 +413,7 @@ function MediaGrid({
               style={{
                 whiteSpace: "nowrap",
                 color:
-                  sort === "viewers" ? "var(--ds-accent)" : "var(--ds-fg-subtle)",
+                  sort === "viewers" ? "var(--ds-accent-text)" : "var(--ds-fg-subtle)",
                 fontWeight: sort === "viewers" ? 500 : 400,
               }}
             >

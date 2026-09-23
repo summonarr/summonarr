@@ -146,7 +146,7 @@ beforeEach(() => {
 
 // ── happy path ──────────────────────────────────────────────────────────────
 
-// The four pins below are deliberately SEPARATE tests. An exhaustive
+// The pins below are deliberately SEPARATE tests. An exhaustive
 // `assert.deepEqual` (node:assert/strict ⇒ deepStrictEqual) already rejects
 // extra keys, missing keys and wrong order, so any narrower assertion written
 // underneath one is dead code — it can never be the assertion that reports a

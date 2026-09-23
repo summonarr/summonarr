@@ -3,7 +3,8 @@ import { requireAppSession } from "@/lib/require-app-session";
 import { getMyWrapped } from "@/lib/my-watch-history";
 import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
 import { posterUrl } from "@/lib/tmdb-types";
-import { PageHeader } from "@/components/ui/design";
+import { ChevronLeft, Sparkles } from "@/components/icons";
+import { EmptyState, PageHeader } from "@/components/ui/design";
 import { WrappedView, type WrappedData } from "@/components/watch-history/wrapped-view";
 
 export const dynamic = "force-dynamic";
@@ -76,36 +77,33 @@ export default async function WrappedPage({
   }
 
   return (
-    <div>
+    <div className="ds-page-enter">
       <Link
         href="/my-stats"
+        className="inline-flex items-center transition-colors text-[var(--ds-fg-muted)] hover:text-[var(--ds-fg)]"
         style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
+          gap: 4,
           marginBottom: 14,
           fontSize: 12.5,
-          color: "var(--ds-fg-muted)",
           textDecoration: "none",
         }}
       >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-          <path d="M7 3l-3 3 3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <ChevronLeft aria-hidden style={{ width: 14, height: 14 }} />
         Back to My Stats
       </Link>
 
       <PageHeader title="Year in Review" subtitle="Your watching, wrapped up" />
 
       {years.length > 1 && (
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
           {years.map((y) => {
             const active = y === year;
             return (
               <Link
                 key={y}
                 href={`/my-stats/wrapped?year=${y}`}
-                className="ds-mono"
+                className="ds-mono ds-hover-tint"
+                aria-current={active ? "page" : undefined}
                 style={{
                   fontSize: 12.5,
                   padding: "5px 12px",
@@ -113,7 +111,7 @@ export default async function WrappedPage({
                   textDecoration: "none",
                   border: "1px solid var(--ds-border)",
                   background: active ? "var(--ds-accent)" : "var(--ds-bg-2)",
-                  color: active ? "#fff" : "var(--ds-fg-muted)",
+                  color: active ? "var(--ds-accent-fg)" : "var(--ds-fg-muted)",
                   fontWeight: active ? 600 : 400,
                 }}
               >
@@ -124,29 +122,21 @@ export default async function WrappedPage({
         </div>
       )}
 
-      <div style={{ marginTop: 18 }}>
-        {view ? (
-          <WrappedView data={view} />
-        ) : (
-          <div
-            style={{
-              padding: 24,
-              border: "1px solid var(--ds-border)",
-              borderRadius: 10,
-              background: "var(--ds-bg-2)",
-              color: "var(--ds-fg-subtle)",
-              fontSize: 13,
-              lineHeight: 1.6,
-            }}
-          >
-            {!linked
+      {view ? (
+        <WrappedView data={view} />
+      ) : (
+        <EmptyState
+          icon={Sparkles}
+          title="Nothing to wrap up yet"
+          description={
+            !linked
               ? serverProvider
                 ? "No watch activity has been recorded for your account yet — once you play something on the server, your Year in Review will appear here."
                 : "Your account isn't linked to a Plex or Jellyfin identity yet, so there's nothing to wrap up. Your account links automatically when your media-server email matches, or an admin can link it manually."
-              : "Not enough watch activity yet to build a Year in Review. Come back once you've watched a few things on the server."}
-          </div>
-        )}
-      </div>
+              : "Not enough watch activity yet to build a Year in Review. Come back once you've watched a few things on the server."
+          }
+        />
+      )}
     </div>
   );
 }

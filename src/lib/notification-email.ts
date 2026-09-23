@@ -1,5 +1,7 @@
 import "server-only";
 
+const SYNTHETIC_EMAIL_SUFFIXES = ["@jellyfin.local", "@discord.local"] as const;
+
 /**
  * Resolves the address to use for outgoing email notifications for a given user row.
  *
@@ -17,8 +19,6 @@ import "server-only";
  * Returns `null` when there is no deliverable address, signalling the caller to skip
  * sending. This is the correct behaviour for Jellyfin/Discord users who haven't set one yet.
  */
-const SYNTHETIC_EMAIL_SUFFIXES = ["@jellyfin.local", "@discord.local"] as const;
-
 export function resolveUserNotificationEmail(user: {
   email: string;
   notificationEmail: string | null;

@@ -138,7 +138,12 @@ export function isIpAllowed(clientIp: string, allowlist: string[]): boolean {
       continue;
     }
     const target = ipToBigInt(entry.slice(0, slash));
-    const prefix = Number(entry.slice(slash + 1));
+    // Digits only: Number("") is 0, so a stored "10.0.0.0/" (backup restore,
+    // hand edit — the PATCH validator already refuses it) would act as /0 and
+    // match every same-family client. Fail closed like the validator.
+    const prefixText = entry.slice(slash + 1);
+    if (!/^\d{1,3}$/.test(prefixText)) continue;
+    const prefix = Number(prefixText);
     if (!target || target.bits !== client.bits) continue;
     if (!Number.isInteger(prefix) || prefix < 0 || prefix > target.bits) continue;
     const shift = BigInt(target.bits - prefix);

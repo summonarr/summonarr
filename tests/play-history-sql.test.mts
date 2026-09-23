@@ -6,8 +6,9 @@
 // Why this file exists: CLAUDE.md records that "raw-SQL aggregates (the
 // play-history stats/calendar queries) are not exercised at all", and this is
 // the one part of the module that has already shipped a real bug — the `$1`
-// placeholder offset in getActivityCalendarUncached (the 803cd11 class, where
-// the SQL said `$2` while the value sat at params[0]). tests/play-history.test.mts
+// placeholder offset in getActivityCalendarUncached (the 803cd11 class — that
+// hash is no longer in the squashed history — where the SQL said `$2` while
+// the value sat at params[0]). tests/play-history.test.mts
 // pins the SHARED helper (appendPlayHistoryFilter) but nothing pins the callers,
 // and the callers are where the risk actually lives:
 //

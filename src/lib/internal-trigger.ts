@@ -4,7 +4,7 @@
 // behave exactly as an external CRON_SECRET caller would.
 //
 // This is the *sole* permitted direct `fetch` for server-side outbound HTTP
-// (see Claude.md guardrail 5a). All other external HTTP must use safeFetch*.
+// (see CLAUDE.md guardrail 5b). All other external HTTP must use safeFetch*.
 //
 // Target is always hardcoded 127.0.0.1 + CRON_SECRET; SSRF policy does not
 // apply. The call is intentionally to the public route so the full path
@@ -71,7 +71,10 @@ function sinceLastTriggerSuffix(nowMs: number): string {
 
 export async function triggerFullSync(): Promise<TriggerFullSyncResult> {
   const secret = process.env.CRON_SECRET;
-  if (!secret) return "failed"; // no auth token available — silently skip (matches prior behaviour)
+  // No CRON_SECRET means we cannot authenticate the loopback call. Skip without
+  // a warning: a production boot refuses to start without CRON_SECRET, so this
+  // only happens in development, tests, or a broken environment.
+  if (!secret) return "failed";
 
   // Stamped for the NEXT call before dispatching, and read into the suffix
   // first, so the interval reported is always dispatch-to-dispatch. A trigger

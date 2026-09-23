@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -55,10 +55,18 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
   const [syncRolesMessage, setSyncRolesMessage] = useState("");
   const [tab, setTab] = useState<"core" | "channels" | "roles">("core");
   const mounted = useHasMounted();
+  // The last values we know the server has saved, one entry per setting key.
+  // It starts as the page-load values and is updated after every successful
+  // save. We can't just compare against the `initial*` props: they never
+  // refresh, so after one save an already-saved field would be sent again
+  // (and hit the route's 10s per-key cooldown, a 429), and changing a field
+  // back to its page-load value would look like "no change" and never be saved.
+  const savedRef = useRef<Record<string, string> | null>(null);
 
-  // The app's Discord interactions handler lives at /api/interactions (respecting BASE_PATH).
-  // Show the running instance's own origin so admins can paste it straight into the Developer Portal;
-  // fall back to a placeholder pre-mount (window is unavailable during SSR — guardrail 16).
+  // Discord sends slash-command events to /api/interactions (with BASE_PATH added).
+  // Show this site's real address so admins can paste it into the Developer Portal.
+  // Until the component has mounted in the browser we show a placeholder instead,
+  // because `window` doesn't exist during server rendering (guardrail 16).
   const interactionsEndpoint = mounted
     ? `${window.location.origin}${withBasePath("/api/interactions")}`
     : "https://<your-domain>/api/interactions";
@@ -68,11 +76,12 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
     setStatus("saving");
     setMessage("");
 
-    // Send only the fields that differ from what the page loaded. Posting all 16
-    // on every save made a Channels/Roles-tab edit re-register the slash commands
-    // with Discord (the route keyed on the ids' presence), stamped the 10s write
-    // cooldown on every key (so a second tab's save within 10s 429'd), and wrote
-    // an audit row listing 16 "changed" keys with identical before/after values.
+    // Send only the fields that differ from the last saved values. Sending all 16
+    // every time caused three problems: a Channels/Roles edit re-registered the
+    // slash commands with Discord (the route does that whenever the ids are in
+    // the body), every key got the 10s write cooldown (so saving another tab
+    // within 10s failed with 429), and the audit log listed 16 "changed" keys
+    // whose values hadn't changed.
     const fields: Array<[key: string, current: string, initial: string]> = [
       ["discordBotToken", botToken, initialBotToken],
       ["discordClientId", clientId, initialClientId],
@@ -91,7 +100,11 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
       ["discordAdminRoleId", adminRoleId, initialAdminRoleId],
       ["discordIssueAdminRoleId", issueAdminRoleId, initialIssueAdminRoleId],
     ];
-    const changed = Object.fromEntries(fields.filter(([, current, initial]) => current !== initial).map(([key, current]) => [key, current]));
+    if (savedRef.current === null) {
+      savedRef.current = Object.fromEntries(fields.map(([key, , initial]) => [key, initial]));
+    }
+    const saved = savedRef.current;
+    const changed = Object.fromEntries(fields.filter(([key, current]) => current !== saved[key]).map(([key, current]) => [key, current]));
     if (Object.keys(changed).length === 0) {
       setMessage("No changes to save");
       setStatus("ok");
@@ -109,6 +122,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
 
       if (res.ok && data.ok) {
+        Object.assign(saved, changed);
         setMessage("Saved · Restart the bot for changes to take effect");
         setStatus("ok");
       } else {
@@ -271,7 +285,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
             onClick={() => setTab(t)}
             className={`px-4 py-2 text-sm font-medium capitalize transition-colors border-b-2 -mb-px ${
               tab === t
-                ? "border-indigo-500 text-white"
+                ? "border-indigo-500 text-zinc-100"
                 : "border-transparent text-zinc-500 hover:text-zinc-300"
             }`}
           >

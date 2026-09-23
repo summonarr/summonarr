@@ -1,9 +1,8 @@
 "use client";
 
-// Refined per-user activity screen, ported from the Claude Design handoff
-// (details.jsx → UserDetail), wired to getUserPlayStats(). Relative-time
-// labels are gated behind useHasMounted (guardrail 16): server renders an
-// absolute fallback, the client swaps in "Xd ago" after hydration.
+// Per-user activity screen, fed by getUserPlayStats(). Relative-time labels
+// wait for useHasMounted (guardrail 16): the server renders an absolute date,
+// and the browser swaps in "Xd ago" once the page has hydrated.
 
 import Link from "next/link";
 import { useHasMounted } from "@/hooks/use-has-mounted";
@@ -13,6 +12,7 @@ import {
   ActivityCard,
   AreaChart,
   Avatar,
+  DetailHeader,
   HorizontalBars,
   HourHeatmap,
   Poster,
@@ -72,9 +72,9 @@ const STREAM_META: Record<string, { label: string; color: string }> = {
 };
 
 function absTime(iso: string): string {
-  // Pin to UTC so SSR (container TZ) and CSR (browser TZ) produce identical
-  // text — prevents the React #418 hydration mismatch for plays near UTC
-  // midnight when the formatRelativeTime() path is gated behind useHasMounted.
+  // Pin to UTC so the server (container time zone) and the browser (user time
+  // zone) print the same date. Otherwise a play near midnight could render as
+  // different days and cause a React #418 hydration mismatch.
   return new Date(iso).toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
@@ -87,7 +87,8 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
   const when = (iso: string | null) =>
     !iso ? "—" : mounted ? formatRelativeTime(iso) : absTime(iso);
 
-  // Postgres DOW 0=Sun..6=Sat → design heatmap rows are Mon-first.
+  // Postgres day-of-week is 0=Sun..6=Sat; the heatmap rows start on Monday,
+  // so (dow + 6) % 7 shifts Sunday to the last row.
   const heatmapMatrix: number[][] = Array.from({ length: 7 }, () =>
     new Array<number>(24).fill(0),
   );
@@ -104,78 +105,27 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
   }));
 
   const playsByDay = s.playsByDay.map((d) => d.count);
-  const maxTopMedia = s.topMedia[0]?.count ?? 1;
+  // Floor at 1 so a zero count can't divide by zero (NaN bar widths).
+  const maxTopMedia = Math.max(s.topMedia[0]?.count ?? 1, 1);
 
   return (
     <div className="ds-page-enter">
-      <Link
-        href="/admin/activity/users"
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          marginBottom: 18,
-          fontSize: 12.5,
-          color: "var(--ds-fg-muted)",
-          textDecoration: "none",
-        }}
-      >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-          <path
-            d="M7 3l-3 3 3 3"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
+      <DetailHeader
+        back={{ href: "/admin/activity/users", label: "Back to users" }}
+        leading={
+          <Avatar
+            letter={(s.username[0] ?? "?").toUpperCase()}
+            accent="oklch(0.42 0.10 275)"
+            size={48}
           />
-        </svg>
-        Back to users
-      </Link>
-
-      <header
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 16,
-          marginBottom: 22,
-        }}
-      >
-        <Avatar
-          letter={(s.username[0] ?? "?").toUpperCase()}
-          accent="oklch(0.42 0.10 275)"
-          size={56}
-        />
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              marginBottom: 4,
-            }}
-          >
-            <h1
-              style={{
-                margin: 0,
-                fontSize: 26,
-                fontWeight: 600,
-                letterSpacing: "-0.025em",
-                color: "var(--ds-fg)",
-              }}
-            >
-              {s.username}
-            </h1>
-            <SourceTag source={s.source} />
-          </div>
-          <div
-            className="ds-mono"
-            style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
-          >
-            {[s.email, s.linkedLabel].filter(Boolean).join(" · ") ||
-              `${s.source} account`}
-          </div>
-        </div>
-      </header>
+        }
+        title={s.username}
+        meta={<SourceTag source={s.source} />}
+        subtitle={
+          [s.email, s.linkedLabel].filter(Boolean).join(" · ") ||
+          `${s.source} account`
+        }
+      />
 
       <div
         className="resp-grid-3"
@@ -414,7 +364,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
                     <div
                       style={{
                         height: 4,
-                        background: "oklch(1 0 0 / 0.05)",
+                        background: "color-mix(in oklab, var(--ds-fg) 5%, transparent)",
                         borderRadius: 999,
                         overflow: "hidden",
                       }}

@@ -150,7 +150,7 @@ export function HeatmapCellPopover({
             className="ds-mono flex items-center"
             style={{ gap: 7, padding: "10px 0", color: "var(--ds-fg-subtle)" }}
           >
-            <Loader2 className="animate-spin" style={{ width: 13, height: 13, color: "var(--ds-accent)" }} />
+            <Loader2 className="animate-spin" style={{ width: 13, height: 13, color: "var(--ds-accent-text)" }} />
             Loading…
           </div>
         ) : detail.totalPlays === 0 ? (
@@ -169,7 +169,7 @@ export function HeatmapCellPopover({
             padding: "8px 12px",
             borderTop: "1px solid var(--ds-border)",
             fontSize: 10.5,
-            color: "var(--ds-accent)",
+            color: "var(--ds-accent-text)",
             textDecoration: "none",
           }}
         >
@@ -397,7 +397,7 @@ function KV({
           <Link
             href={href}
             title={k}
-            style={{ color: "var(--ds-accent)", textDecoration: "none", minWidth: 0 }}
+            style={{ color: "var(--ds-accent-text)", textDecoration: "none", minWidth: 0 }}
           >
             {keyText}
           </Link>

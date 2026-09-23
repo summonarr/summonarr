@@ -26,9 +26,9 @@ import { shadowPrismaModel } from "./_helpers.mts";
 type StubRow = { key?: string; value?: string } | null;
 
 let nextRow: StubRow = null;
-// Multi-key mode for getJellyfinConfig (which issues TWO findUnique calls per
-// key at once, unlike getConfiguredJellyfinUrl's single call) — a per-key map
-// instead of the single nextRow. Cleared before every test so an old
+// Multi-key mode for getJellyfinConfig, which reads TWO keys (url + apiKey)
+// at once, unlike getConfiguredJellyfinUrl's single read — so it needs a
+// per-key map instead of the single nextRow. Cleared before every test so an old
 // nextRow-based test never sees leftover keyed state (and vice versa).
 const keyedRows = new Map<string, StubRow>();
 const findUniqueCalls: Array<{ where: { key: string } }> = [];
@@ -105,7 +105,7 @@ test("no memoization — an admin edit is visible on the very next call", async 
   assert.equal(findUniqueCalls.length, 2); // one Setting read per call, no cache
 });
 
-// ── instance parameterization (Phase 1.5) ───────────────────────────────────
+// ── named server instances (multi-server support, guardrail 35) ─────────────
 
 test("a named instance reads its OWN Setting key, not the default's", async () => {
   findUniqueCalls.length = 0;

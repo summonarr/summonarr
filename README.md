@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.26.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.27.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,35 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.27.0
+
+**Changed**
+
+- **Light theme and accent colours work everywhere.** Text fields, headings and filter menus that were white-on-white in light mode are readable, card borders and row dividers are visible again, and button labels stay readable under every accent colour in both themes. Status colours (success, warning, danger, info) were tuned against every background they sit on, including their own tinted chips.
+- Every page now shows a loading placeholder shaped like the page itself instead of the Discover grid, and every list page uses the same empty-state message.
+- The 404, error and maintenance pages share one layout; breadcrumbs cover Notifications, person pages and My Stats → Wrapped; the admin Activity sub-pages share one header and tab bar.
+- All settings toggles use one shared switch.
+- Runtime image moved to Node 26.9.0 (Alpine 3.23), and React updated to 19.3.0.
+
+**Fixed**
+
+- Selects and inputs lost their border in several places because two styling classes were merged wrongly.
+- Keyboard: pressing Enter or Space on a button inside a media card no longer opens the title's page, and clicking the IMDb link no longer does either.
+- An approval rolled back by a failed Radarr/Sonarr push no longer stays shown as Approved.
+- The Request buttons show "Available" instead of "Requested" when the title is already on your server.
+- "My votes only" shows each title's real vote count instead of 1.
+- PayPal and Venmo donation links entered as `paypal.me/name` or a full URL no longer come out doubled.
+- TV pages show the digital release date again, and dates no longer show as the previous day for servers west of UTC.
+- Going past the last page on Issues, Votes, Popular and Top, or deleting the last row of an Activity history page, no longer shows an empty list.
+- Only one Plex live connection runs per server (some setups opened two), and clearing the activity cache now reaches every page.
+- Rate limits that apply to more than one route are now counted once, not separately for each route.
+- A background fix-match job can always be polled for its status.
+- Issue replies no longer appear twice, searches keep their spinner until they finish, and settings buttons stay disabled until their save or warm-up completes.
+- The Users table no longer crashes on a user with an empty display name; disk sizes no longer read "NaN".
+- An IP allowlist entry with a missing prefix length (`10.0.0.0/`) is rejected instead of allowing every address.
+- Watch grades now also check other viewers for requests that were almost fully watched.
+- Several settings descriptions and `.env.example` notes that described old behaviour were corrected (`TOKEN_ENCRYPTION_KEY` is required; there are no Plex/Jellyfin webhooks; the image tag has no `v`).
 
 ### v0.26.0
 
@@ -702,7 +731,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.26.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.27.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

@@ -7,18 +7,15 @@ import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2, Trash2, RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 
-// Admin UI for NAMED Plex/Jellyfin instances (multi-server support), one
-// service at a time — exported per-service (unlike ArrInstancesManager's
-// both-in-one export) so a later phase can mount only the Jellyfin manager and
-// add the Plex one afterward without a half-built component. The default
-// instance keeps its own form (PlexConnectForm/JellyfinSyncForm) — this
-// manages the extra registry-backed instances via /api/admin/media-instances.
-// Secrets are write-only: a blank field means "unchanged".
+// Admin UI for the EXTRA (named) Plex or Jellyfin servers, one service per
+// component. The default server keeps its own form (PlexConnectForm /
+// JellyfinSyncForm); this one manages the additional servers stored through
+// /api/admin/media-instances. Secrets are write-only: a blank field means
+// "keep the saved value".
 //
-// Deliberately thinner than ArrInstancesManager: no routing rule, no
-// root-folder/quality-profile live fetch, no webhook secret — nothing routes a
-// request to a specific Plex/Jellyfin server (availability is a union across
-// every configured server of a type), so there's no routing metadata to manage.
+// Simpler than ArrInstancesManager on purpose: nothing routes a request to a
+// specific Plex/Jellyfin server (availability is combined across every server
+// of a type — guardrail 35), so there are no routing rules to edit here.
 
 const MASKED_VALUE = "••••••••";
 const SLUG_RE = /^[a-z][a-z0-9]{0,23}$/;
@@ -229,10 +226,9 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       setConfirmRemove(null);
       setLoadFailed(false);
     } catch {
-      // Leaving `drafts` empty here used to be silent — and an empty draft list
-      // saves as "remove every named instance", which deletes their (encrypted,
-      // unrecoverable) token/key. A failed load must never be mistaken for "the
-      // admin has no instances", so block saving and say so.
+      // An empty draft list saves as "remove every named instance", which
+      // deletes their encrypted (unrecoverable) token/key. So a failed load must
+      // never look like "the admin has no instances": block saving and say so.
       setLoadFailed(true);
     } finally {
       setLoaded(true);
@@ -428,12 +424,9 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
               </div>
             )}
 
-            {/* Jellyfin-only sign-in policy. Mirrors the default instance's
-                JellyfinRestrictSignInToggle, which writes `jellyfinRestrictSignIn`
-                via /api/settings; a named instance's key is only reachable here.
-                Until this shipped a named instance was permanently fail-closed —
-                isJellyfinSignInAllowed reads the Setting and defaults to
-                restricted, and nothing could ever write it. */}
+            {/* Jellyfin-only sign-in policy. The default server's version is
+                JellyfinRestrictSignInToggle; a named server's setting can only
+                be changed here. When unset it defaults to restricted. */}
             {service === "jellyfin" && (
               <div className="pt-1">
                 <label className="flex items-start gap-2 text-sm text-zinc-300">
@@ -553,7 +546,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                   // server-side to destroy — discard it straight away and only
                   // ask for confirmation on a persisted instance.
                   onClick={() => (d.isNew ? removeInstance(idx) : setConfirmRemove(idx))}
-                  className="flex items-center gap-1 text-xs text-red-400/80 hover:text-red-400"
+                  className="flex items-center gap-1 text-xs text-red-400 hover:text-[var(--ds-danger-hover)]"
                 >
                   <Trash2 className="w-3.5 h-3.5" />Remove
                 </button>
@@ -568,8 +561,8 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                 server. Play history deliberately survives (guardrail 28 — its
                 MediaServerUser rows are soft-deleted, never hard-deleted). */}
             {confirmRemove === idx && (
-              <div className="rounded-md border border-red-900/60 bg-red-950/30 p-3 space-y-2">
-                <p className="text-xs text-red-200">
+              <div className="rounded-md border border-red-500/40 bg-red-500/10 p-3 space-y-2">
+                <p className="text-xs text-red-400">
                   Remove <strong>{d.name.trim() || d.slug || "this server"}</strong>? On <strong>Save</strong> this deletes
                   its cached library items, its active sessions, and its stored URL + {tokenLabel} (encrypted —
                   not recoverable), and marks its media-server users departed. <strong>Play history is preserved.</strong>
@@ -579,14 +572,14 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                     type="button"
                     onClick={() => removeInstance(idx)}
                     autoFocus
-                    className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-500 transition-colors"
+                    className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
                   >
                     <Trash2 className="w-3.5 h-3.5" />Remove server
                   </button>
                   <button
                     type="button"
                     onClick={() => setConfirmRemove(null)}
-                    className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+                    className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
                   >
                     Cancel
                   </button>
@@ -598,13 +591,13 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       })}
 
       <div className="flex items-center gap-3">
-        <Button type="button" variant="outline" onClick={addInstance} className="border-zinc-600 text-zinc-300 hover:text-white h-8 px-3 text-xs">
+        <Button type="button" variant="outline" onClick={addInstance} className="border-zinc-600 text-zinc-300 hover:text-zinc-100 h-8 px-3 text-xs">
           + Add {label} server
         </Button>
         <Button type="button" onClick={save} disabled={status === "saving" || loadFailed} className="bg-indigo-600 hover:bg-indigo-500 h-8 px-3 text-xs">
           {status === "saving" ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Saving…</> : "Save & Test"}
         </Button>
-        <button type="button" onClick={load} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-white"><RefreshCw className="w-3 h-3" />Refresh</button>
+        <button type="button" onClick={load} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-100"><RefreshCw className="w-3 h-3" />Refresh</button>
         {status === "ok" && <span className="text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4" />{message}</span>}
         {status === "error" && <span className="text-sm text-red-400 flex items-center gap-1.5"><XCircle className="w-4 h-4" />{message}</span>}
       </div>

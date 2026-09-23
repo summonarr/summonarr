@@ -445,7 +445,8 @@ test("revoke-all (includeCurrent=false) deletes every OTHER device, keeps the ca
   // Guardrail 27: user ledger mark comes after the delete.
   assert.equal(revokeAllLedgerAtDelete, false, "the user is NOT force-revalidated before the DB delete");
   assert.equal(shouldForceDbCheck(caller.userId, "anything"), true, "the user is force-revalidated after the delete");
-  // A sessionsRevokedAt cutoff just before the caller's createdAt was written.
+  // One sessionsRevokedAt write happened (its exact value — just before the
+  // caller's createdAt — is computed in src/lib/auth.ts and not checked here).
   assert.equal(opsOf("tx.user.update").length, 1, "the cross-replica cutoff is bumped");
 });
 

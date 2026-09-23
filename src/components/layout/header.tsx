@@ -21,7 +21,7 @@ async function signOutAndRedirect(callbackUrl: string) {
   try {
     await fetch(withBasePath("/api/auth/sign-out"), { method: "POST", credentials: "include" });
   } catch {
-    // ignore — best-effort
+    // Best-effort: redirect to the login page even if the request failed.
   }
   window.location.href = withBasePath(callbackUrl);
 }
@@ -60,10 +60,24 @@ export function SearchBar({
   // Keyboard-highlighted option (-1 = none). Mouse hover shares the same
   // state so the highlight visual has a single source of truth.
   const [activeIndex, setActiveIndex] = useState(-1);
-  // Per-instance option-id base — the SearchBar mounts twice (desktop header
-  // + mobile sheet), so ids must not collide for aria-activedescendant.
+  // Unique id prefix per SearchBar. It is mounted twice (desktop header and
+  // mobile sheet), so fixed ids would appear twice in the page and confuse
+  // screen readers (aria-activedescendant / aria-controls point at them).
   const optionIdBase = useId();
+  const listboxId = `${optionIdBase}-listbox`;
   const containerRef = useRef<HTMLDivElement>(null);
+  // The shortcut hint reads "⌘K" on the server and on the first client render;
+  // the platform is only known after mount (guardrail 16 — no navigator read
+  // in the render path). Non-Mac users see it flip to "Ctrl K" post-hydration.
+  const [isMac, setIsMac] = useState(true);
+  useEffect(() => {
+    const platform =
+      (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData
+        ?.platform ??
+      navigator.platform ??
+      "";
+    setIsMac(/mac|iphone|ipad|ipod/i.test(platform));
+  }, []);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -132,7 +146,10 @@ export function SearchBar({
           setActiveIndex(-1);
         }
       } finally {
-        setLoading(false);
+        // Only the newest request may clear the spinner. An aborted older
+        // request finishes after its replacement has started, and would
+        // otherwise hide the spinner while the new search is still loading.
+        if (abortRef.current === controller) setLoading(false);
       }
     }, 350);
 
@@ -214,7 +231,7 @@ export function SearchBar({
           aria-label="Search"
           role="combobox"
           aria-expanded={open && (Boolean(query.trim()) || results.length > 0)}
-          aria-controls="header-search-results"
+          aria-controls={listboxId}
           aria-autocomplete="list"
           aria-activedescendant={
             open && activeIndex >= 0 && activeIndex < results.length
@@ -245,13 +262,13 @@ export function SearchBar({
             className="animate-spin"
           />
         ) : variant === "inline" ? (
-          <kbd className="ds-kbd">⌘K</kbd>
+          <kbd className="ds-kbd">{isMac ? "⌘K" : "Ctrl K"}</kbd>
         ) : null}
       </div>
 
       {open && (query.trim() || results.length > 0) && (
         <div
-          id="header-search-results"
+          id={listboxId}
           role="listbox"
           aria-label="Search results"
           style={{
@@ -278,9 +295,8 @@ export function SearchBar({
                   key={value}
                   type="button"
                   // preventDefault on mousedown keeps focus in the search input
-                  // (no blur/close); the actual filter change is on onClick so
-                  // keyboard users (Enter/Space on the focused button) can toggle
-                  // it too — onMouseDown alone was mouse-only.
+                  // so the results stay open. The filter itself changes in
+                  // onClick, which keyboard users (Enter/Space) can trigger too.
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => setFilter(value)}
                   className="inline-flex items-center gap-1 font-medium transition-colors"
@@ -289,7 +305,7 @@ export function SearchBar({
                     borderRadius: 4,
                     fontSize: 11,
                     background: isActive ? "var(--ds-accent-soft)" : "transparent",
-                    color: isActive ? "var(--ds-accent)" : "var(--ds-fg-muted)",
+                    color: isActive ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
                   }}
                 >
                   {value === "movie" && <Film style={{ width: 12, height: 12 }} />}
@@ -374,13 +390,13 @@ export function SearchBar({
                       {media.releaseYear && `${media.releaseYear} · `}
                       {media.mediaType === "movie" ? "MOVIE" : "TV"}
                       {showPlex && media.plexAvailable && (
-                        <span style={{ color: "var(--ds-plex)", marginLeft: 6 }}>
+                        <span style={{ color: "var(--ds-plex-text)", marginLeft: 6 }}>
                           · plex
                         </span>
                       )}
                       {showJellyfin && media.jellyfinAvailable && (
                         <span
-                          style={{ color: "var(--ds-jellyfin)", marginLeft: 6 }}
+                          style={{ color: "var(--ds-jellyfin-text)", marginLeft: 6 }}
                         >
                           · jellyfin
                         </span>
@@ -411,20 +427,17 @@ export function Header() {
   const { session } = useSummonarrSession();
   const role = session?.user?.role;
   const permsStr = session?.user?.permissions;
-  // The avatar menu's Settings entry used to render for EVERY signed-in user, but
-  // /settings is ADMIN-only and redirects everyone else to "/" — so most users had
-  // a dead item in their own menu. Resolved through the shared nav resolver rather
-  // than a local ADMIN check so it follows the page's gate if that ever changes.
+  // Show "Settings" only to users who can actually open /settings (anyone else
+  // is redirected away). We ask the shared nav resolver instead of checking
+  // for ADMIN here, so this stays in step with the page's own gate.
   const canOpenSettings = getVisibleAdminItems(permsStr ? { role, permissions: permsStr } : role)
     .some((i) => i.href === "/settings");
-  // Shared with MobileNav and the server surfaces. This copy already read the
-  // permission bits, but still keyed on `provider` rather than `mediaServer` —
-  // which are different fields for a credentials or OIDC sign-in, where
-  // mediaServer comes from the admin-set User column.
+  // Same Plex/Jellyfin badge rule as MobileNav and the server pages. It keys
+  // on the user's `mediaServer`, not the sign-in `provider` — the two differ
+  // for a local-password or OIDC account.
   const { showPlex, showJellyfin } = getClientBadgeVisibility(session?.user);
-  // `image` isn't part of SummonarrSession yet — claims are kept slim. Avatar
-  // falls back to initials when image is absent, which is the existing
-  // behaviour for credentials/plex/jellyfin users who never had it set anyway.
+  // `image` isn't part of SummonarrSession (the session is kept slim), so this
+  // is normally undefined and the avatar shows the user's initials instead.
   const sessionUserImage = (session?.user as { image?: string | null } | undefined)?.image;
   const initials = session?.user?.name
     ?.split(" ")
@@ -448,47 +461,50 @@ export function Header() {
       }}
     >
       {/* Breadcrumb */}
-      <div className="flex items-center min-w-0" style={{ gap: 6 }}>
-        {crumbs.map((c, i) => {
-          const last = i === crumbs.length - 1;
-          const content = (
-            <span
-              className="font-medium"
-              style={{
-                fontSize: 13,
-                fontWeight: last ? 500 : 400,
-                color: last ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-              }}
-            >
-              {c.label}
-            </span>
-          );
-          return (
-            // biome-ignore lint/suspicious/noArrayIndexKey: crumbs are positional
-            <span key={i} className="flex items-center" style={{ gap: 6 }}>
-              {i > 0 && (
-                <ChevronRight
-                  style={{
-                    width: 12,
-                    height: 12,
-                    color: "var(--ds-fg-subtle)",
-                  }}
-                />
-              )}
-              {c.href && !last ? (
-                <Link
-                  href={c.href}
-                  className="hover:text-[var(--ds-fg)] transition-colors"
-                >
-                  {content}
-                </Link>
-              ) : (
-                content
-              )}
-            </span>
-          );
-        })}
-      </div>
+      <nav aria-label="Breadcrumb" className="min-w-0">
+        <ol className="flex items-center min-w-0 m-0 p-0 list-none" style={{ gap: 6 }}>
+          {crumbs.map((c, i) => {
+            const last = i === crumbs.length - 1;
+            const content = (
+              <span
+                aria-current={last ? "page" : undefined}
+                style={{
+                  fontSize: 13,
+                  fontWeight: last ? 500 : 400,
+                  color: last ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+                }}
+              >
+                {c.label}
+              </span>
+            );
+            return (
+              // biome-ignore lint/suspicious/noArrayIndexKey: crumbs are positional
+              <li key={i} className="flex items-center min-w-0" style={{ gap: 6 }}>
+                {i > 0 && (
+                  <ChevronRight
+                    aria-hidden
+                    style={{
+                      width: 12,
+                      height: 12,
+                      color: "var(--ds-fg-subtle)",
+                    }}
+                  />
+                )}
+                {c.href && !last ? (
+                  <Link
+                    href={c.href}
+                    className="hover:text-[var(--ds-fg)] transition-colors"
+                  >
+                    {content}
+                  </Link>
+                ) : (
+                  content
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      </nav>
 
       {/* Search */}
       <div className="flex-1 min-w-0 flex justify-center">
@@ -501,9 +517,14 @@ export function Header() {
         {session && <PushNotifications />}
 
         <DropdownMenu>
-          <DropdownMenuTrigger aria-label="Account menu" className="rounded-full outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]">
+          {/* 36px hit box around a 28px avatar — the visual stays small, the
+              target clears the 32–36px minimum the other header controls use. */}
+          <DropdownMenuTrigger
+            aria-label="Account menu"
+            className="inline-flex items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+            style={{ width: 36, height: 36 }}
+          >
             <Avatar
-              className="cursor-pointer"
               style={{
                 width: 28,
                 height: 28,
@@ -556,7 +577,7 @@ export function Header() {
             <AppearanceMenu />
             <DropdownMenuSeparator />
             <DropdownMenuItem
-              className="text-red-400"
+              variant="destructive"
               onClick={() => signOutAndRedirect("/login")}
             >
               Sign out

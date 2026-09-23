@@ -5,7 +5,7 @@
 //
 // SCOPE NOTE: per the project brief, the DB-restore SUCCESS path (a real
 // encrypted blob + PBKDF2 + the destructive TRUNCATE/INSERT) stays out of the
-// unit suite — that is live-verification territory, and tests/backup-import.mts
+// unit suite — that is live-verification territory, and tests/backup-import.test.mts
 // already covers the decrypt/allowlist/rollback layer against real fixtures.
 // What is covered here is everything BEFORE a byte is ever imported: the
 // configuration gate, the rate limit, the header contract, the size caps and the

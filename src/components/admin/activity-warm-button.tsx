@@ -16,7 +16,13 @@ export function ActivityWarmButton() {
 
     try {
       const res = await fetch(withBasePath("/api/admin/activity-warm"), { method: "POST" });
-      const data = await res.json();
+      // Tolerate a non-JSON body (e.g. a proxy's HTML error page) so the
+      // status-based message below still shows instead of a parse error.
+      const data = (await res.json().catch(() => ({}))) as {
+        warmed?: number;
+        error?: string;
+        retryAfter?: number;
+      };
 
       if (res.ok) {
         setMessage({ text: `Warmed ${data.warmed} entries`, type: "success" });
@@ -48,12 +54,9 @@ export function ActivityWarmButton() {
 
   return (
     <div className="flex items-center gap-2">
-      {/* This control POSTs on first click — it runs a cache warm immediately,
-          with no confirm step. An unlabelled icon is the wrong affordance for
-          that, so the button now says what it does. The `title` was already
-          here but a native tooltip is a hover-only, screen-reader-last-resort
-          hint; `aria-label` gives it a real accessible name, and the visible
-          text means nobody has to click to find out. */}
+      {/* One click starts a cache warm right away (no confirm step), so the
+          button shows visible text saying what it does. `aria-label` gives
+          screen readers a proper name; `title` is only a hover hint. */}
       <button
         onClick={handleWarm}
         disabled={loading || cooldown > 0}

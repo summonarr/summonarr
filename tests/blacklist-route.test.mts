@@ -558,7 +558,8 @@ test("a failing audit write does NOT turn a successful POST into a 500", async (
 
 test("a failing audit write does NOT turn a successful DELETE into a 500", async () => {
   // The sharp edge of guardrail 26: a 500 here has the caller retry a delete
-  // whose row is already gone, so the retry 404s with no audit trail either way.
+  // whose row is already gone. The retry removes nothing (removed: 0), so no
+  // audit row is ever written for the delete that really happened.
   auditFails = true;
   items = [{ id: "a", tmdbId: 603, mediaType: "MOVIE", title: null, reason: null, addedBy: "x", createdAt: new Date() }];
   const res = await remove(await mintSession(), "?tmdbId=603&mediaType=MOVIE");

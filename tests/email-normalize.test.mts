@@ -39,9 +39,9 @@ test("idempotent — normalizing twice is a no-op", () => {
 
 test("BOUNDARY PIN: NFKC does not fold cross-script homoglyphs", () => {
   // Cyrillic "а" (U+0430) renders identically to Latin "a" (U+0061) in most
-  // fonts, but NFKC only applies *compatibility* decompositions — cross-script
-  // confusables have none (that's Unicode UTS #39 skeleton territory, a
-  // different algorithm). So "\u0430dmin@x.com" and "admin@x.com" remain distinct
+  // fonts, but NFKC only folds *compatibility* variants — lookalikes from a
+  // different alphabet are left alone (catching those needs Unicode's separate
+  // "confusables" check, UTS #39). So "\u0430dmin@x.com" and "admin@x.com" remain distinct
   // canonical strings and CAN mint separate accounts. The module header's
   // "homoglyph" claim holds only for compatibility variants (fullwidth,
   // ligatures), not cross-script lookalikes.

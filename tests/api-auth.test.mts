@@ -10,7 +10,7 @@
 //     consumer of the same primitives);
 //   - tests/session-jwt.test.mts owns signature/expiry/alg-pin crypto;
 //   - tests/session-refresh-rotation.test.mts + tests/session-refresh.test.mts
-//     own verifyAndRefreshSession's internals (fast path, slide, cutoffs,
+//     own verifyAndRefreshSession's internals (fast path, deadline, cutoffs,
 //     rotation);
 //   - tests/mobile-auth.test.mts owns parseBearerToken parsing; tests/
 //     ua-fingerprint.test.mts, ip-allowlist.test.mts, rate-limit.test.mts own
@@ -33,9 +33,10 @@
 //     `bearer ?? cookie` contract never falls back);
 //   - req/ctx passthrough (dynamic-route params promise) and handler-response
 //     passthrough (same Response object out);
-//   - the sliding-refresh Set-Cookie is threaded onto cookie-session responses
-//     but withheld from bearer sessions (guardrail 6b: native clients ride
-//     their fixed-lifetime token — no Set-Cookie they can't read);
+//   - the refreshed (re-signed) session cookie is sent back as Set-Cookie on
+//     cookie-session responses but withheld from bearer sessions (guardrail
+//     6b: native clients can't read Set-Cookie, so they keep presenting the
+//     token they got at sign-in);
 //   - the UA-fingerprint and machine-IP checks are actually WIRED into
 //     authenticateRequest (mismatch ⇒ 401 before the handler; bearer skips
 //     the fingerprint check).
@@ -494,7 +495,7 @@ test("a cookie session's response gets the slid token appended as Set-Cookie; be
   assert.equal(refreshedClaims.id, userId);
 
   // The SAME token presented as a bearer re-signs too, but the wrapper
-  // withholds it (native clients ride the original to expiry).
+  // withholds it (native clients keep presenting their original token).
   const viaBearer = await withAuth(handler)(makeReq(asBearer(token)), undefined);
   assert.equal(viaBearer.headers.get("set-cookie"), null);
 });

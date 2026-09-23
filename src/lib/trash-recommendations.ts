@@ -1,5 +1,3 @@
-
-
 import { prisma } from "./prisma";
 import { stripTrashHtml } from "./trash-html";
 import type { TrashService, TrashSpecKind } from "@/generated/prisma";
@@ -145,8 +143,8 @@ async function resolveCurated(item: StarterPackItem) {
 export async function resolveStarterPack(): Promise<StarterPackStatus[]> {
   const curatedSpecIds = new Set<string>();
 
-  // Resolve all starter-pack items in parallel — replaces a serial loop that ran
-  // up to 3 queries per item back-to-back (12 round-trips for the 4-item pack).
+  // Resolve all starter-pack items in parallel. Each item can take up to 3
+  // queries, so running them one after another would stack up round-trips.
   const specs = await Promise.all(STARTER_PACK.map((item) => resolveCurated(item)));
 
   const results: StarterPackStatus[] = STARTER_PACK.map((item, i) => {

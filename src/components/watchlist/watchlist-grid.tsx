@@ -4,9 +4,9 @@ import { useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { posterUrl } from "@/lib/tmdb-types";
-import { X, Film, Tv2 } from "@/components/icons";
+import { X, Film, Tv2, Bookmark } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
-import { EmptyState } from "@/components/ui/empty-state";
+import { EmptyState } from "@/components/ui/design";
 
 export interface WatchlistGridItem {
   tmdbId: number;
@@ -34,9 +34,9 @@ export function WatchlistGrid({ initialItems }: { initialItems: WatchlistGridIte
         withBasePath(`/api/watchlist?tmdbId=${it.tmdbId}&mediaType=${it.mediaType}`),
         { method: "DELETE" },
       );
-      if (!res.ok) restore(); // rollback
+      if (!res.ok) restore();
     } catch {
-      restore(); // rollback
+      restore();
     } finally {
       setRemoving(null);
     }
@@ -44,9 +44,12 @@ export function WatchlistGrid({ initialItems }: { initialItems: WatchlistGridIte
 
   if (items.length === 0) {
     return (
-      <EmptyState>
-        Your watchlist is empty. Browse Movies or TV and tap Watchlist to save titles for later.
-      </EmptyState>
+      <EmptyState
+        icon={Bookmark}
+        title="Your watchlist is empty"
+        description="Browse Movies or TV and tap Watchlist to save titles for later."
+        cta={{ href: "/movies", label: "Browse movies" }}
+      />
     );
   }
 
@@ -58,10 +61,10 @@ export function WatchlistGrid({ initialItems }: { initialItems: WatchlistGridIte
         const poster = posterUrl(it.posterPath, "w342");
         return (
           <div key={key} className="relative">
-            <Link href={href} className="block">
+            <Link href={href} className="block group">
               <div
-                className="relative overflow-hidden"
-                style={{ aspectRatio: "2 / 3", borderRadius: 8, background: "var(--ds-bg-3)", border: "1px solid var(--ds-border)" }}
+                className="ds-card-lift relative overflow-hidden border border-[var(--ds-border)]"
+                style={{ aspectRatio: "2 / 3", borderRadius: 8, background: "var(--ds-bg-3)" }}
               >
                 {poster ? (
                   <Image src={poster} alt={it.title} fill className="object-cover" sizes="140px" />
@@ -71,7 +74,10 @@ export function WatchlistGrid({ initialItems }: { initialItems: WatchlistGridIte
                   </div>
                 )}
               </div>
-              <div className="ds-mono" style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", marginTop: 6, lineHeight: 1.3 }}>
+              <div
+                className="ds-mono line-clamp-2 transition-colors group-hover:text-[var(--ds-fg)]"
+                style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", marginTop: 6, lineHeight: 1.3 }}
+              >
                 {it.title}
               </div>
             </Link>
@@ -80,12 +86,13 @@ export function WatchlistGrid({ initialItems }: { initialItems: WatchlistGridIte
               onClick={() => remove(it)}
               disabled={removing === key}
               aria-label={`Remove ${it.title} from watchlist`}
-              className="absolute"
+              title="Remove from watchlist"
+              className="ds-hover-tint absolute"
               style={{
                 top: 6,
                 right: 6,
-                width: 26,
-                height: 26,
+                width: 32,
+                height: 32,
                 display: "inline-flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -93,7 +100,7 @@ export function WatchlistGrid({ initialItems }: { initialItems: WatchlistGridIte
                 background: "color-mix(in oklab, var(--ds-bg) 70%, transparent)",
                 color: "var(--ds-fg)",
                 border: "1px solid var(--ds-border)",
-                cursor: removing === key ? "progress" : "pointer",
+                cursor: removing === key ? "progress" : undefined,
               }}
             >
               <X style={{ width: 14, height: 14 }} />

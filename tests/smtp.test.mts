@@ -674,8 +674,8 @@ test("NUL bytes in From/To are stripped alongside CR/LF", async () => {
 // compatibility note that clients "SHOULD be prepared to process the code alone
 // (with or without a trailing space character)".
 //
-// The reply-completeness scan required the space, so a bare code never looked
-// like a terminated reply and every command died on the 30s read timeout. These
+// An older reply-completeness scan required the space, so a bare code never
+// looked like a finished reply and every command died on the 30s read timeout. These
 // run instantly when the parser is right and take 30s to go red when it is not,
 // which is the same signal — a regression cannot pass quickly.
 //
@@ -720,11 +720,10 @@ test("code plus a trailing space but no text stays acceptable", async () => {
 
 // ── defensive paths (buffer cap, read timeout) ──────────────────────────────
 //
-// These are the paths that exist for a hostile or broken peer, and they had
-// ZERO coverage: nothing in tests/ referenced the cap, the timeout, or the
-// destroy that releases the fd. tests/email.test.mts cannot reach them either —
-// it installs THROWING net/tls connect stubs, so it only ever tests pre-connect
-// failure.
+// These paths exist for a hostile or broken peer: the reply-size cap, the read
+// timeout, and the socket destroy that frees the file descriptor ("fd").
+// tests/email.test.mts cannot reach them — it installs THROWING net/tls connect
+// stubs, so it only ever tests failures before a connection opens.
 
 test("reply-buffer cap: an oversized reply rejects, destroys the socket, and writes nothing", async () => {
   // MAX_SMTP_REPLY_BYTES is 1 MiB. Flood the very FIRST read (the banner) so

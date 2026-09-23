@@ -84,16 +84,12 @@ function DbExportSection() {
   const mounted = useHasMounted();
 
   function handleExport() {
-    // Direct navigation, not fetch()+Blob: the route streams the encrypted
-    // dump with backpressure precisely because it can be hundreds of MB, and
-    // `res.blob()` would re-materialize the whole artifact in the renderer
-    // (Safari keeps Blobs in memory) with no download-manager progress. The
-    // server's `Content-Disposition: attachment` names the file, so the
-    // browser streams straight to disk — the same pattern as the audit-log
-    // and play-history export buttons. A non-2xx response (429 rate limit,
-    // 500) renders as the route's JSON `{ error }` body in the new tab, as it
-    // does for those siblings. Navigation gives no completion signal, so
-    // there is no spinner: the filename preview is the only feedback.
+    // Open the download URL directly instead of fetch() + Blob. The dump can be
+    // hundreds of MB, and a Blob would hold all of it in browser memory. With
+    // direct navigation the browser saves it straight to disk (the server's
+    // `Content-Disposition: attachment` header names the file) and shows its
+    // normal download progress. Errors (429, 500) show up as JSON in the new
+    // tab. There is no "done" signal, so there is no spinner here.
     window.open(withBasePath("/api/admin/backup/db-export"), "_blank");
     // Same date formula as the route so the preview matches the served name.
     const date = new Date().toISOString().slice(0, 10);
@@ -184,11 +180,22 @@ function DbImportSection() {
     setResult(null);
     setProgress({ uploaded: 0, total: file.size, phase: "upload" });
 
-    const outcome = await uploadInChunks({
-      file,
-      endpoint: withBasePath("/api/admin/backup/db-import-chunk"),
-      onProgress: setProgress,
-    });
+    // uploadInChunks folds fetch failures into an "error" outcome, but it can
+    // still throw before its own try (crypto.randomUUID is undefined outside a
+    // secure context — a plain-HTTP LAN deployment). Unguarded, that rejection
+    // left `importing` true forever: a spinner with no way to retry.
+    let outcome: Awaited<ReturnType<typeof uploadInChunks>>;
+    try {
+      outcome = await uploadInChunks({
+        file,
+        endpoint: withBasePath("/api/admin/backup/db-import-chunk"),
+        onProgress: setProgress,
+      });
+    } catch (err) {
+      setImporting(false);
+      setResult({ ok: false, error: err instanceof Error ? err.message : "Upload failed" });
+      return;
+    }
 
     setImporting(false);
 

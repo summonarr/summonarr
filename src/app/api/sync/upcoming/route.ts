@@ -79,9 +79,9 @@ export async function POST(request: NextRequest) {
         details: { movies: movieItems.length, tv: tvItems.length, total: rows.length, errors, durationMs },
       }).catch(() => {});
 
-      // Both TMDB fetches failed and nothing was cached → 502 so the cron
-      // dashboard doesn't show green on a total failure. A partial failure (one
-      // source) that still wrote rows stays 200.
+      // A fetch failed and nothing was cached → 502 so the cron dashboard doesn't
+      // show green on a total failure. A partial failure (one source) that still
+      // wrote rows stays 200.
       const failed = errors > 0 && rows.length === 0;
       return NextResponse.json({
         movies: movieItems.length,

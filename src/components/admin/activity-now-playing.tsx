@@ -291,7 +291,7 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
                     rows={3}
                     autoFocus
                     disabled={busy}
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 resize-none"
+                    className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 resize-none"
                   />
                 </div>
 
@@ -325,7 +325,7 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
                       borderRadius: 6,
                       fontSize: 12,
                       background: "var(--ds-danger, #c44)",
-                      color: "oklch(0.98 0 0)",
+                      color: "var(--ds-on-status)",
                       border: "1px solid transparent",
                     }}
                   >
@@ -618,8 +618,9 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
   );
 }
 
-// Live "Now playing" grid: seeds from server-rendered sessions, then updates
-// from activity:sessions / plex:reachability SSE pushes.
+// Live "Now playing" grid. It starts from the sessions the server rendered,
+// then updates from activity:sessions / plex:reachability messages on the SSE
+// stream (server-sent events: the server's one-way live push to the browser).
 export function ActivityNowPlaying({
   initialSessions,
   source,
@@ -640,7 +641,8 @@ export function ActivityNowPlaying({
   const [sessions, setSessions] =
     useState<ActiveSessionLive[]>(initialSessions);
   const [connected, setConnected] = useState(false);
-  // Keyed by instance slug so one server's event can never overwrite another's.
+  // One entry per Plex server. An SSE event only updates the entry whose
+  // `instance` slug matches, so one server's news never overwrites another's.
   const [reachability, setReachability] = useState(plexReachability);
 
   useLiveEvents((event) => {

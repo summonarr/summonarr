@@ -5,8 +5,8 @@
 // the cache-row lifecycle contracts:
 //
 //  - getCache/getCacheMany treat an expired row as a MISS and lazily delete it
-//    (there is no scheduled purge for reads — the sync's bulk purge is
-//    separate), and the delete is fire-and-forget with an `expiresAt < now`
+//    (the /api/sync run also bulk-purges expired rows, but that is a separate
+//    path), and the delete is fire-and-forget with an `expiresAt < now`
 //    guard so a concurrent setCache upsert that just refreshed the row is
 //    never clobbered by a stale reader's cleanup;
 //  - a failed lazy delete is swallowed — the read path must keep serving

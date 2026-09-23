@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { attachArrPending } from "@/lib/arr-availability";
-import { arrFetch, getArrCfg, getSonarrSeriesCompletion, isArrConfigured, isMovieWantedInRadarr, isSeriesWantedInSonarr } from "@/lib/arr";
+import { arrFetch, getArrCfg, getSonarrSeriesCompletion, isArrConfigured, isMovieWantedInRadarr, isSeriesWantedInSonarr, pickSeriesByTmdbId } from "@/lib/arr";
 import { getArrInstances } from "@/lib/arr-instance-registry";
 import { mapLimit } from "@/lib/concurrency";
 import { getCache } from "@/lib/tmdb-cache";
@@ -120,10 +120,13 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
       // safeFetchAdminConfigured that defaulted to a 10 MB cap / 15s timeout).
       const cfg = await getArrCfg("sonarr");
       if (cfg) {
-        const lookup = await arrFetch<{ tvdbId?: number }[]>(
+        const lookup = await arrFetch<{ tmdbId?: number; tvdbId?: number }[]>(
           cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`,
         );
-        const tvdbId = lookup[0]?.tvdbId ?? null;
+        // Same row selection as every real read path (guardrail 14a): a degraded
+        // lookup can answer with a DIFFERENT show, and reporting lookup[0]'s
+        // tvdbId would send the diagnosis after the wrong series.
+        const tvdbId = pickSeriesByTmdbId(lookup, tmdbId)?.tvdbId ?? null;
         let cachedMapping: { tmdbId: number | null } | null = null;
         // Expose any negative-cached tvdb→tmdb mapping so stale entries can be diagnosed
         if (tvdbId) {

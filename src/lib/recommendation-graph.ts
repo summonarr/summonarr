@@ -21,14 +21,10 @@ import { tmdbAuth } from "./tmdb-auth";
 
 // The SERVER-WIDE half of the "For You" engine.
 //
-// Every input the per-user engine needs about a TITLE — the suggestion list a
-// seed fans out into, and the quality verdict a candidate is re-weighted by —
-// is a property of that title, not of the viewer. It used to be derived per
-// user anyway: each account's cron pass read up to ~148 suggestion blobs out of
-// TmdbCache (fetching from TMDB on a miss) and then ran a 300-title MDBList/
-// OMDB pass of its own. Two accounts that watch the same show paid for the same
-// fan-out twice, and the first account of each cycle paid the cold-cache cost
-// for everyone.
+// Two things the per-user engine needs about a TITLE are the same for every
+// viewer: its list of suggested titles, and its quality verdict (how well it is
+// rated). Working them out per user would repeat the same upstream calls for
+// every account that watches the same show.
 //
 // This module computes both ONCE for the whole instance, into TitleSuggestion
 // (the edges) and RecommendationTitle (the per-title node: refresh bookkeeping
@@ -152,9 +148,9 @@ export interface TitleQualityRow {
 // TWO queries for every seed a user holds, in place of one cache read per seed.
 // The second one is what makes a KNOWN-EMPTY source distinguishable from an
 // unbuilt one: a title TMDB has no suggestions for writes no edges, so without
-// the node read it would look uncovered and be re-fetched live, per user, on
-// every run — which is the exact per-user query this module exists to remove.
-// A covered source with no edges is returned as an explicit empty list.
+// the node read it would look "not built yet" and wrongly lower the user's
+// seed coverage. A built source with no edges is returned as an explicit empty
+// list.
 export async function readGraphSuggestions(sources: GraphSource[]): Promise<Map<string, TmdbMedia[]>> {
   const out = new Map<string, TmdbMedia[]>();
   if (sources.length === 0) return out;
@@ -206,9 +202,9 @@ export async function readGraphSuggestions(sources: GraphSource[]): Promise<Map<
   return out;
 }
 
-// Precomputed verdicts for the given candidates. Absent keys are titles the
-// graph has not rated yet — the caller decides whether to fall back to a live
-// ratings lookup for them (recommendations.ts does) or to leave them neutral.
+// Precomputed verdicts for the given candidates. A missing key means the graph
+// has not rated that title yet; the caller treats it as "no opinion" (there is
+// no live ratings lookup).
 export async function readTitleQuality(titles: GraphSource[]): Promise<Map<string, TitleQualityRow>> {
   const out = new Map<string, TitleQualityRow>();
   if (titles.length === 0) return out;
@@ -452,8 +448,8 @@ async function refreshSuggestionEdges(
 
   const batch = Number.isFinite(limit) ? stale.slice(0, limit) : stale;
   for (let i = 0; i < batch.length; i += SOURCE_WRITE_PAGE) {
-    // An ignored abort keeps this walking after withAdvisoryLock released the
-    // lock — see the note in omdb-prewarm.
+    // Stop when the lock's timeout aborts us; ignoring it would keep this
+    // running after withAdvisoryLock released the lock (guardrail 41).
     if (signal?.aborted) break;
     const page = batch.slice(i, i + SOURCE_WRITE_PAGE);
     const results = await settleLimit(page, SOURCE_CONCURRENCY, (source) =>
@@ -462,16 +458,12 @@ async function refreshSuggestionEdges(
         : getTVSuggestions(source.tmdbId, SUGGESTIONS_CACHE_MAX),
     );
 
-    // getMovieSuggestions/getTVSuggestions swallow their own upstream failures
-    // and return [] (see the don't-cache-an-empty guard in tmdb.ts), so an empty
-    // list is ambiguous here exactly as it is in the per-user engine — and here
-    // the stakes are higher, because a zero result gets STAMPED as "TMDB has
-    // nothing for this title" and then serves that verdict to every user for a
-    // week. This is the same conclusiveness test the engine applies to a user's
-    // whole seed set, at page granularity: one source in the page answering with
-    // anything proves TMDB is up, which makes a zero from a NEIGHBOUR a real
-    // answer. A page where nothing at all came back is treated as an outage and
-    // written nowhere — those sources are simply re-tried next run.
+    // getMovieSuggestions/getTVSuggestions hide upstream failures and return [],
+    // so an empty list could mean "TMDB has nothing" OR "TMDB is down". Saving a
+    // wrong "nothing" would serve it to every user for a week. So: if any
+    // source in this page got results, TMDB is up and the empty ones are real
+    // answers. If the whole page came back empty, treat it as an outage, write
+    // nothing, and retry those sources next run.
     const conclusive = results.some((r) => r.status === "fulfilled" && r.value.length > 0);
     const fetched: FetchedSource[] = [];
     for (let j = 0; j < page.length; j++) {
@@ -500,13 +492,10 @@ async function refreshSuggestionEdges(
 
 // Reads the trending/popular lists and registers them as graph nodes.
 //
-// Two jobs, and the first one is easy to miss. buildFallbackCandidates (the
-// cold-start / thin-shelf top-up) calls getTrending & co DURING the per-user
-// compute. Those are instance-wide caches with in-flight coalescing, so they
-// were never a per-user FETCH — but on a cold cache the first user of a cycle
-// would still be the one paying for it. Reading them here, in the refresh,
-// makes every one of those reads a warm cache hit by construction, which is the
-// same guarantee shape the required set gives the seeds.
+// Two jobs. First: buildFallbackCandidates (which fills new or thin shelves)
+// reads these lists during the per-user pass. They are shared caches, but on a
+// cold cache the first user of the run would pay for the fetch. Reading them
+// here first means every later read is a cache hit.
 //
 // Second job: the pool's titles are scored by the same quality prior as any
 // other candidate, so they need verdicts. skipDuplicates — an already-known
@@ -575,13 +564,11 @@ async function staleQualityTitles(
 
 // Resolves quality verdicts for the titles the engine will actually score.
 //
-// PRIORITY-FIRST, and that ordering carries real weight now that nothing rates a
-// candidate on demand: an unrated candidate is ranked on relevance alone until
-// some later run reaches it. Spend the run's budget on the suggestion targets of
-// the REQUIRED sources — the candidate universe of the users who exist — before
-// anything the speculative library walk has dragged in. Whatever budget is left
-// goes to the general oldest-first scan, which is what eventually covers the
-// trending/popular fallback pool and the pre-warmed tail.
+// PRIORITY-FIRST. Nothing rates a candidate on demand, so an unrated one is
+// ranked on relevance alone until some run reaches it. The run's budget goes
+// first to the suggestions of the REQUIRED sources (what real users will
+// actually see). Whatever is left goes to the general oldest-first scan, which
+// eventually covers the trending/popular pool and the rest of the library.
 async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefreshResult, signal?: AbortSignal): Promise<void> {
   const cutoff = new Date(Date.now() - QUALITY_TTL_MS);
 
@@ -664,23 +651,15 @@ async function refreshQualityVerdicts(required: GraphSource[], stats: GraphRefre
       continue;
     }
 
-    // A NULL verdict is only authoritative if the providers were actually
-    // answering. attachRatingsUnified swallows its own upstream failures
-    // (getOmdbRatingsForTmdb is wrapped in .catch), so it returns the full item
-    // list whether the lookup worked or not and the try/catch above never fires
-    // for a transport failure — every title would reach the write below and get
-    // "asked, nobody answered" stamped on it for a full QUALITY_TTL_MS.
+    // A NULL verdict ("nobody answered") can only be trusted if the providers
+    // were reachable. attachRatingsUnified hides its own upstream failures, so
+    // the try/catch above does not fire on a network outage. Without this check
+    // an outage would stamp week-long null verdicts, and the obscurity penalty
+    // would then demote every low-vote title it touched.
     //
-    // That is the same mistake the edge writer above is explicitly guarded
-    // against (a page where nothing came back is written nowhere), one layer
-    // over, and it shipped: an OMDB outage was baking week-long null verdicts
-    // into the graph, which the obscurity damp then reads as evidence and
-    // multiplies by OBSCURITY_DAMP — so a network blip quietly demoted every
-    // sub-50-vote candidate it touched.
-    //
-    // Checked AFTER the batch so a lockout tripped mid-flight is seen. This is
-    // what makes the OMDB transport circuit breaker (omdb.ts) load-bearing
-    // rather than merely tidy: without it a timeout storm never sets this flag.
+    // Checked AFTER the batch so a lockout tripped mid-batch is seen. This is
+    // why the OMDB transport circuit breaker (omdb.ts) matters: without it a
+    // run of timeouts would never set this flag.
     const providersAnswering = !isMdblistQuotaLocked() && !isOmdbQuotaLocked();
 
     const now = new Date();
@@ -764,14 +743,12 @@ export interface SuggestionEdgePrewarmResult {
 // Builds suggestion edges for every graph source, on the warm-library cron's
 // cadence, as a companion to the metadata walk that cron already does.
 //
-// This stores nothing new — TitleSuggestion is the same table refreshRecommendationGraph
-// writes. What it changes is WHEN. Left to the recommendations run alone, the
-// speculative tier is capped at MAX_SOURCES_PER_RUN, so a 20k-title library takes
-// ten runs (five days) before a title somebody starts watching tomorrow is already
-// covered. The library warm is the pass that already walks the whole library to
-// fetch exactly this kind of thing, so building the edges there spreads the work
-// onto a job that owns its own daily run and leaves the 12h recommendations run
-// short.
+// It writes the same TitleSuggestion table as refreshRecommendationGraph; it
+// just does the work EARLIER. The recommendations run only builds
+// MAX_SOURCES_PER_RUN speculative sources per run, so a 20k-title library
+// would take ten runs (five days) to cover. Doing it in the daily library
+// cron, which already walks the whole library, keeps the 12h recommendations
+// run short.
 //
 // It is an ACCELERANT, never a substitute. refreshRecommendationGraph still builds
 // the required set uncapped on every recommendations run; this pass just means it
@@ -860,11 +837,8 @@ export async function refreshRecommendationGraph(
   if (tail.length > 0) await refreshSuggestionEdges(tail, stats, MAX_SOURCES_PER_RUN, opts.signal);
 
   // 3. Reap sources that have left the server. Only on a COMPLETE source list —
-  //    see SourceSet.complete. (The clipped case is guarded here rather than
-  //    pinned by a test: reaching a ceiling needs tens of thousands of fixture
-  //    rows, and a test that faked it would be pinning the fake.) The required
-  //    set is unioned in: a seed is by definition still live, and a truncated
-  //    library walk must never make one look departed.
+  //    see SourceSet.complete. The required set is added to `live` too: a seed
+  //    is still in use by definition, so it must never look departed.
   if (complete) {
     const live = new Set([...requiredKeys, ...tail.map((s) => key(s.tmdbId, s.mediaType))]);
     await sweepOrphanSources(live, stats);

@@ -15,19 +15,19 @@ interface ArrFormProps {
   initialApiKey: string;
   initialRootFolder: string;
   initialQualityProfileId: string;
-  // Radarr only — "" means "don't send, use Radarr's default".
+  // Radarr only. "" means "don't send it, let Radarr use its own default".
   initialMinimumAvailability?: string;
-  // Sonarr v3 only — "" means "don't send". The select renders only when the
-  // connected Sonarr actually serves language profiles (v4 removed them).
+  // Sonarr v3 only. "" means "don't send it". The dropdown only appears when
+  // the connected Sonarr actually has language profiles (Sonarr v4 removed them).
   initialLanguageProfileId?: string;
-  // "4k" targets the optional second instance (radarr4k*/sonarr4k* keys).
+  // "4k" points the form at the optional second 4K instance (the radarr4k*/sonarr4k* settings).
   variant?: "hd" | "4k";
 }
 
 interface ArrOptions {
   rootFolders: { path: string }[];
   qualityProfiles: { id: number; name: string }[];
-  // Present only for a Sonarr v3 upstream — absent on v4 and on Radarr.
+  // Only sent back by Sonarr v3; missing for Sonarr v4 and for Radarr.
   languageProfiles?: { id: number; name: string }[];
 }
 
@@ -58,9 +58,9 @@ export function ArrForm({
   const minAvailKey = `${service}${v}MinimumAvailability`;
   const langKey    = `${service}${v}LanguageProfileId`;
   const versionKey = `${service}${v}Version`;
-  // /api/settings answers a failed connection test with 422 and only the
-  // per-variant `<service><v>Error` key (no top-level `error`), so read that
-  // first — the same shape email-form reads via `smtpError`.
+  // When the connection test fails, /api/settings replies 422 with the reason
+  // under a key like `radarrError` / `sonarr4kError` (not the usual `error`),
+  // so we read that key first. email-form does the same with `smtpError`.
   const errorKey   = `${service}${v}Error`;
 
   const [url,    setUrl]    = useState(initialUrl);
@@ -134,8 +134,8 @@ export function ArrForm({
         body: JSON.stringify({
           [folderKey]: rootFolder,
           [profileKey]: qualityProfileId,
-          // Both are clearable server-side: "" means "stop sending the field on
-          // adds" (the arr service's own default applies again).
+          // Sending "" clears the saved value, so new adds stop including the
+          // field and Radarr/Sonarr fall back to their own default.
           ...(service === "radarr" ? { [minAvailKey]: minimumAvailability } : {}),
           ...(service === "sonarr" && options?.languageProfiles?.length ? { [langKey]: languageProfileId } : {}),
         }),
@@ -192,7 +192,7 @@ export function ArrForm({
               type="button"
               onClick={fetchOptions}
               disabled={optionsStatus === "loading"}
-              className="flex items-center gap-1 text-xs text-zinc-500 hover:text-white transition-colors disabled:opacity-50"
+              className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-100 transition-colors disabled:opacity-50"
             >
               <RefreshCw className={`w-3 h-3 ${optionsStatus === "loading" ? "animate-spin" : ""}`} />
               Refresh
@@ -212,14 +212,13 @@ export function ArrForm({
                     id={`${idPrefix}-folder`}
                     value={rootFolder}
                     onChange={(e) => setRootFolder(e.target.value)}
-                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">— select a root folder —</option>
-                    {/* A saved folder the server no longer lists would otherwise
-                        make this controlled select silently display the first
-                        option (the placeholder) while the stale value stays in
-                        state — and keeps Save Defaults enabled — so surface it
-                        explicitly instead of hiding it (mirrors arr-instances-manager). */}
+                    {/* If the saved folder no longer exists on the server, the
+                        dropdown would show the placeholder while still holding the
+                        old value (and Save Defaults stays enabled). Show it as its
+                        own option so the admin can see it. Same as arr-instances-manager. */}
                     {rootFolder && !options.rootFolders.some((f) => f.path === rootFolder) && (
                       <option value={rootFolder}>{rootFolder} (not found on server)</option>
                     )}
@@ -234,7 +233,7 @@ export function ArrForm({
                     id={`${idPrefix}-profile`}
                     value={qualityProfileId}
                     onChange={(e) => setQualityProfileId(e.target.value)}
-                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">— select a quality profile —</option>
                     {qualityProfileId && !options.qualityProfiles.some((p) => String(p.id) === qualityProfileId) && (
@@ -253,7 +252,7 @@ export function ArrForm({
                       id={`${idPrefix}-min-availability`}
                       value={minimumAvailability}
                       onChange={(e) => setMinimumAvailability(e.target.value)}
-                      className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     >
                       <option value="">— {label}&apos;s default —</option>
                       {MINIMUM_AVAILABILITY_OPTIONS.map((o) => (
@@ -267,9 +266,8 @@ export function ArrForm({
                   </div>
                 )}
 
-                {/* Sonarr v3 only — v4 removed language profiles, and the options
-                    endpoint omits the list there, so this select simply never
-                    renders against a v4 upstream. */}
+                {/* Sonarr v3 only. v4 removed language profiles, so the options
+                    endpoint returns no list and this dropdown never shows. */}
                 {service === "sonarr" && (options.languageProfiles?.length ?? 0) > 0 && (
                   <div className="space-y-1.5">
                     <Label htmlFor={`${idPrefix}-language-profile`}>Language Profile</Label>
@@ -277,7 +275,7 @@ export function ArrForm({
                       id={`${idPrefix}-language-profile`}
                       value={languageProfileId}
                       onChange={(e) => setLanguageProfileId(e.target.value)}
-                      className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     >
                       <option value="">— {label}&apos;s default —</option>
                       {languageProfileId && !options.languageProfiles!.some((p) => String(p.id) === languageProfileId) && (
@@ -327,7 +325,7 @@ function ArrImportSection({ service }: { service: "radarr" | "sonarr" }) {
     setImportError("");
     try {
       const res = await fetch(withBasePath(`/api/sync/${service}`), { method: "POST" });
-      const data: { wanted?: number; error?: string } = await res.json();
+      const data = (await res.json().catch(() => ({}))) as { wanted?: number; error?: string };
       if (!res.ok) throw new Error(data.error ?? "Import failed");
       setImportCount(data.wanted ?? 0);
       setImportStatus("ok");
@@ -351,7 +349,7 @@ function ArrImportSection({ service }: { service: "radarr" | "sonarr" }) {
           onClick={handleImport}
           disabled={importStatus === "importing"}
           variant="outline"
-          className="border-zinc-700 text-zinc-300 hover:text-white hover:border-zinc-500"
+          className="border-zinc-700 text-zinc-300 hover:text-zinc-100 hover:border-zinc-500"
         >
           {importStatus === "importing"
             ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Importing…</>

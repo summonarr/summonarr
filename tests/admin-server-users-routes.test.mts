@@ -1,4 +1,4 @@
-// Route-level unit tests for the three uncovered admin server-user routes:
+// Route-level unit tests for three admin server-user routes:
 //   GET/PATCH /api/admin/server-users
 //   POST      /api/admin/server-users/bulk
 //   GET       /api/admin/server-users/diagnose
@@ -40,11 +40,10 @@
 //      needs to see which bindings are pinned and which server a row belongs to,
 //      and both are guardrail-34/35 concepts.
 //
-// Harness: the tests/votes-route.test.mts idiom — real withAdmin-wrapped handlers,
-// genuine signed session JWTs, a synthetic workAsyncStorage + workUnitAsyncStorage
-// scope, in-memory prisma stubs, scripted fetch for the Jellyfin admin API
-// (RFC1918 literal so safeFetchAdminConfigured's SSRF stack short-circuits DNS).
-// No DB, no network.
+// Harness (same approach as tests/votes-route.test.mts): the real withAdmin-wrapped
+// handlers, genuinely signed session JWTs, a fake Next request scope so
+// cookies()/after() work, in-memory prisma stubs, and a scripted fetch standing
+// in for the Jellyfin admin API. No DB, no network.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
@@ -64,7 +63,8 @@ console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" "));
 console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
 
 // ── scripted Jellyfin admin API ──────────────────────────────────────────────
-// RFC1918 literal ⇒ safeFetchAdminConfigured's isIP short-circuit, no DNS.
+// A private-range IP address (not a hostname), so safeFetchAdminConfigured
+// accepts it without doing a DNS lookup.
 const JF_URL = "http://10.10.0.5:8096";
 type FetchCall = { url: URL; method: string };
 const fetchCalls: FetchCall[] = [];

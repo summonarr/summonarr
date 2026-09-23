@@ -2,9 +2,8 @@ import * as client from "openid-client";
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 
-// Summonarr-native OIDC client — the sole OIDC path (the parallel next-auth
-// provider it replaced has been removed). Configured by the OIDC_* env vars,
-// targeting a single IdP.
+// Summonarr's OIDC (OpenID Connect) sign-in client. Configured by the OIDC_*
+// env vars and talks to a single identity provider (IdP).
 //
 // State management: PKCE codeVerifier + state + nonce live in a short-lived
 // (5 min) signed JWT cookie between the /start and /callback requests, so
@@ -44,9 +43,9 @@ let configPromise: Promise<client.Configuration> | null = null;
 const oidcCustomFetch: client.CustomFetch = (url, options) =>
   safeFetchAdminConfigured(url, options as Parameters<typeof safeFetchAdminConfigured>[1]);
 
-// Discovery is cached process-wide. If the IdP changes its metadata the
-// process needs to restart — this matches next-auth's behaviour and the
-// realistic ops shape (env-var-driven config + container restart).
+// Discovery (fetching the IdP's endpoints and keys) is cached for the life of
+// the process. If the IdP changes its metadata, restart the app — config comes
+// from env vars anyway, so a change already means a restart.
 function getOidcConfig(): Promise<client.Configuration> {
   if (!configPromise) {
     configPromise = (async () => {
@@ -65,7 +64,7 @@ function getOidcConfig(): Promise<client.Configuration> {
       config[client.customFetch] = oidcCustomFetch;
       return config;
     })().catch((err) => {
-      // Reset so a later attempt can re-discover after a transient failure
+      // Clear the cache so a later attempt can retry after a transient failure.
       configPromise = null;
       throw err;
     });
@@ -239,7 +238,7 @@ export async function exchangeOidcCode(
   // Pull email/profile from claims directly. If the IdP only releases them via
   // userinfo, we could fetchUserInfo here — but most providers (Authelia,
   // Keycloak, Google, Authentik) include them in id_token when the openid+email+profile
-  // scope is requested, which matches next-auth's default behaviour.
+  // scope is requested.
   return {
     sub,
     email: typeof claims.email === "string" ? claims.email : null,

@@ -10,7 +10,7 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground [a]:hover:bg-primary/80",
+        default: "bg-primary text-primary-foreground hover:bg-primary/90",
         outline:
           "border-border bg-background hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50",
         secondary:
@@ -42,9 +42,9 @@ const buttonVariants = cva(
   }
 )
 
-// Default to type="button" — native <button> defaults to type="submit" inside
-// a <form>, which fires unintended submits. base-ui's Button had this default;
-// preserving it avoids breaking the dozens of form-adjacent buttons in the app.
+// Defaults to type="button". A plain <button> inside a <form> defaults to
+// type="submit", so every Button in a form would otherwise submit it on click.
+// Pass type="submit" explicitly for a real submit button.
 function Button({
   className,
   variant = "default",

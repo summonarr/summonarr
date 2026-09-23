@@ -1046,8 +1046,8 @@ async function handleComponent(interaction: any): Promise<void> {
       const requestId = customId.substring(colonIdx + 1);
 
       // Match the web UI gate (/api/requests/[id] PATCH → withPermission(MANAGE_REQUESTS)):
-      // anyone holding the MANAGE_REQUESTS permission bit (ADMIN superbit, ISSUE_ADMIN+,
-      // or a custom mask) can approve/decline — not just role=ADMIN. Look up by discordId,
+      // anyone holding the MANAGE_REQUESTS permission bit (the ADMIN superbit, or a
+      // custom mask that includes it) can approve/decline — not just role=ADMIN. Look up by discordId,
       // then resolve the effective permission mask (ADMIN superbit / legacy-unseeded → role
       // preset) before checking the bit. `deactivatedAt: null` is load-bearing: deactivation
       // leaves role/permissions/discordId intact, so a banned admin would still pass the

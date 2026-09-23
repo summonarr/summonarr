@@ -6,13 +6,11 @@ import { withAdvisoryLock, WARM_LIBRARY_LOCK_ID } from "@/lib/advisory-lock";
 import { getCronActor, recordCronRun } from "@/lib/cron-auth";
 import { tmdbAuth } from "@/lib/tmdb-auth";
 
-// Recurring counterpart to the boot-time prewarm (instrumentation.ts) and the
-// admin "Warm library cache" button. The prewarm's outputs carry 3-30 day
-// age-aware TTLs and the sync purge reaps them (after the :details grace), so
-// a long-uptime server used to decay to a cold library cache between
-// restarts — nothing re-ran the warm. The 25%-remaining triage inside
-// prewarmLibraryCache makes this recurring run a cheap incremental top-up
-// (fresh rows skip; only the aging tail re-fetches), not a daily full walk.
+// Scheduled version of the boot-time prewarm (instrumentation.ts) and the admin
+// "Warm library cache" button. The cached TMDB data expires after 3-30 days, so
+// without a recurring run a server that stays up a long time slowly ends up
+// with a cold cache. prewarmLibraryCache only re-fetches rows with less than
+// 25% of their lifetime left, so each run is a cheap top-up, not a full walk.
 
 export async function POST(request: NextRequest) {
   const authCtx = await getCronActor(request);
@@ -40,23 +38,18 @@ export async function POST(request: NextRequest) {
         // a details-walk throw, and the ledger write below already covers it.
         edges = await prewarmSuggestionEdges({ signal });
       } catch (err) {
-        // A throw used to skip the ledger write altogether, so the row kept the
-        // last SUCCESSFUL run — the dashboard stayed green and only the ageing
-        // "Last Run" timestamp hinted anything was wrong.
+        // Record the failed run before re-throwing. Otherwise the cron history
+        // would still show the last successful run and look healthy.
         await recordCronRun("library", Date.now() - startTime, false);
         throw err;
       }
 
       const durationMs = Date.now() - startTime;
 
-      // `lastRunAt` observability — see warm-activity for rationale.
-            // `ok` is derived, not assumed. Two ways a warm used to write green:
-      // a throw skipped this line entirely and left the PREVIOUS success
-      // standing, and a run that completed while reporting failures wrote an
-      // affirmative success anyway. The cron table reads `ok === false` to show
-      // Error, and the container reschedules a failing job every
-      // CRON_RETRY_INTERVAL (300s) — so a job broken for a week showed a green
-      // tick while being retried 12x an hour.
+      // Save this run to the cron history (Admin -> Settings -> System). It is
+      // kept in the Setting table, not AuditLog, so scheduled runs don't flood
+      // the audit log. `ok` comes from the real failure count, so a run that
+      // finished with failures shows as an error instead of a green tick.
       const failed = result.failed + edges.failed;
       await recordCronRun("library", durationMs, failed === 0);
 
@@ -70,13 +63,12 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      // `ok` in the BODY is the same derived verdict the ledger just recorded —
-      // never a literal true. The admin "Run now" badge judges `res.ok && !error`
-      // (cron-job-table.tsx), so a run in which every task failed painted green
-      // until a reload re-read the ledger's ok:false. Status stays 200 on purpose:
-      // the container reschedules any non-2xx every CRON_RETRY_INTERVAL (300s)
-      // instead of the job's own interval. `error` + X-Cron-Degraded are the
-      // documented degraded-but-completed signal (see withCronRunRecording).
+      // The body's `ok` matches what was just recorded. The admin "Run now"
+      // badge (cron-job-table.tsx) turns red on `ok: false` or an `error` field.
+      // The status stays 200 on purpose: the container retries any non-2xx
+      // every CRON_RETRY_INTERVAL (300s) instead of waiting for the job's normal
+      // interval. `error` plus the X-Cron-Degraded header mean "finished, but
+      // with failures" (the same signal withCronRunRecording reads).
       return NextResponse.json({
         ok: failed === 0,
         ...result,

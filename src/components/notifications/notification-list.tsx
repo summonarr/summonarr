@@ -3,12 +3,12 @@
 import { useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
-import { Film, Tv2, Check, X } from "@/components/icons";
+import { Film, Tv2, Check, X, Bell, Trash2 } from "@/components/icons";
 import { posterUrl } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { notificationHref, timeAgo } from "@/lib/notification-links";
-import { EmptyState } from "@/components/ui/empty-state";
+import { EmptyState } from "@/components/ui/design";
 
 export interface NotificationListItem {
   id: string;
@@ -30,11 +30,15 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
   const [hasMore, setHasMore] = useState(initialItems.length < initialTotal);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Two-step "Clear all": the first click swaps the link for a confirm + Cancel
+  // pair (mirrors vote-actions' dismiss) — it deletes every notification.
+  const [confirmingClear, setConfirmingClear] = useState(false);
   const mounted = useHasMounted();
-  // Bumped by any list-wiping op (clearAll). An in-flight removeOne records the
-  // generation at start and skips its whole-list rollback if it changed — else a
-  // failed single-delete could restore a stale list a successful clear-all
-  // already wiped server-side. (Pattern mirrors watch-history-list's filterGen.)
+  // A counter bumped every time the whole list is wiped (clearAll). removeOne
+  // notes the value when it starts; if it changed by the time its delete fails,
+  // it skips putting the row back — otherwise a failed single delete could
+  // resurrect a row that a successful clear-all already removed on the server.
+  // (Same pattern as watch-history-list's filterGen.)
   const listGen = useRef(0);
 
   const anyUnread = items.some((n) => !n.readAt);
@@ -61,25 +65,36 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
   }
   async function removeOne(id: string) {
     const gen = listGen.current;
-    const prev = items;
+    // Restore only THIS row on failure. A whole-list snapshot resurrected any
+    // other row removed (successfully, server-side) while this delete was in
+    // flight — the same reason markAllRead tracks its own rows.
+    const index = items.findIndex((n) => n.id === id);
+    if (index === -1) return;
+    const removed = items[index];
     setItems((cur) => cur.filter((n) => n.id !== id));
     setTotal((t) => Math.max(0, t - 1));
     // Selection via query param — DELETE bodies are stripped by some proxies.
     const res = await fetch(withBasePath(`/api/notifications?ids=${encodeURIComponent(id)}`), { method: "DELETE" }).catch(() => null);
+    // If gen changed, a clear-all happened meanwhile — don't bring the row back.
     if ((!res || !res.ok) && gen === listGen.current) {
-      // A clear-all landed while this was in flight — don't resurrect the list.
-      setItems(prev);
+      setItems((cur) => {
+        if (cur.some((n) => n.id === id)) return cur;
+        const next = [...cur];
+        next.splice(Math.min(index, next.length), 0, removed);
+        return next;
+      });
       setTotal((t) => t + 1);
     }
   }
   async function clearAll() {
+    setConfirmingClear(false);
     listGen.current += 1;
     const prevItems = items;
     const prevTotal = total;
     setItems([]);
     setTotal(0);
     setHasMore(false);
-    // Explicit clear-all signal (never "empty body means all").
+    // Ask for "delete all" explicitly with ?all=1 (an empty request never means "all").
     const res = await fetch(withBasePath("/api/notifications?all=1"), { method: "DELETE" }).catch(() => null);
     if (!res || !res.ok) {
       setItems(prevItems);
@@ -105,33 +120,63 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
         setTotal(data.total);
         setHasMore(data.nextCursor != null);
       } else {
-        setError("Couldn't load more. Tap to retry.");
+        setError("Couldn't load more. Tap Load more to retry.");
       }
     } catch {
-      // `if (res.ok)` with no else meant a failed page load did nothing at all:
-      // the spinner stopped, the list was unchanged, and "Load more" sat there
-      // looking like it had simply reached the end.
-      setError("Couldn't load more. Tap to retry.");
+      // Always show an error on failure — otherwise a failed load looks the
+      // same as having nothing more to load.
+      setError("Couldn't load more. Tap Load more to retry.");
     } finally {
       setLoading(false);
     }
   }
 
-  if (items.length === 0) {
-    return <EmptyState>No notifications yet. Request updates (approved / available / declined) will show up here.</EmptyState>;
+  // Only show the empty state when there is nothing left to load either. After
+  // removing every loaded row one by one, older notifications may still exist
+  // on the server, and the "Load more" button below must stay reachable.
+  if (items.length === 0 && !hasMore) {
+    return (
+      <EmptyState
+        icon={Bell}
+        title="No notifications yet"
+        description="Request updates (approved, available, declined) and replies will show up here."
+        cta={{ href: "/requests", label: "View your requests" }}
+      />
+    );
   }
 
   return (
     <div>
-      <div className="flex items-center justify-end gap-3" style={{ marginBottom: 10 }}>
+      <div className="flex items-center justify-end gap-3 flex-wrap" style={{ marginBottom: 10 }}>
         {anyUnread && (
           <button type="button" onClick={markAllRead} className="text-xs text-zinc-400 hover:text-zinc-200 underline">
             Mark all read
           </button>
         )}
-        <button type="button" onClick={clearAll} className="text-xs text-zinc-500 hover:text-zinc-300 underline">
-          Clear all
-        </button>
+        {confirmingClear ? (
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={clearAll}
+              autoFocus
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
+            >
+              <Trash2 className="w-3 h-3" />
+              Clear all?
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmingClear(false)}
+              className="text-xs px-2 py-1.5 text-zinc-400 hover:text-zinc-100 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button type="button" onClick={() => setConfirmingClear(true)} className="text-xs text-zinc-500 hover:text-zinc-300 underline">
+            Clear all
+          </button>
+        )}
       </div>
 
       <div className="flex flex-col" style={{ gap: 8 }}>
@@ -140,35 +185,56 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
           return (
             <div
               key={n.id}
-              className="flex gap-3 items-start"
-              style={{
-                padding: "10px 12px",
-                borderRadius: 8,
-                background: n.readAt ? "var(--ds-bg-1)" : "var(--ds-bg-2)",
-                border: "1px solid var(--ds-border)",
-              }}
+              className={`flex items-start transition-colors border border-[var(--ds-border)] hover:bg-[var(--ds-bg-3)] ${
+                n.readAt ? "bg-[var(--ds-bg-1)]" : "bg-[var(--ds-bg-2)]"
+              }`}
+              style={{ gap: 14, padding: 14, borderRadius: 8 }}
             >
-              <Link href={notificationHref(n)} className="relative shrink-0 overflow-hidden" style={{ width: 40, height: 60, borderRadius: 4, background: "var(--ds-bg-3)", border: "1px solid var(--ds-border)" }}>
-                {poster ? (
-                  <Image src={poster} alt="" fill className="object-cover" sizes="40px" />
-                ) : (
-                  <span className="flex items-center justify-center h-full" style={{ color: "var(--ds-fg-subtle)" }}>
-                    {n.mediaType === "TV" ? <Tv2 style={{ width: 16, height: 16 }} /> : <Film style={{ width: 16, height: 16 }} />}
+              <Link href={notificationHref(n)} className="flex items-start flex-1 min-w-0 group" style={{ gap: 14 }}>
+                <span
+                  className="relative shrink-0 overflow-hidden"
+                  style={{ width: 44, height: 66, borderRadius: 4, background: "var(--ds-bg-3)", border: "1px solid var(--ds-border)" }}
+                >
+                  {poster ? (
+                    <Image src={poster} alt="" fill className="object-cover" sizes="44px" />
+                  ) : (
+                    <span className="flex items-center justify-center h-full" style={{ color: "var(--ds-fg-subtle)" }}>
+                      {n.mediaType === "TV" ? <Tv2 style={{ width: 16, height: 16 }} /> : <Film style={{ width: 16, height: 16 }} />}
+                    </span>
+                  )}
+                </span>
+                <span className="block min-w-0 flex-1">
+                  <span
+                    className="block font-medium transition-colors group-hover:text-[var(--ds-accent-text)]"
+                    style={{ fontSize: 14, color: "var(--ds-fg)" }}
+                  >
+                    {n.title}
                   </span>
-                )}
+                  <span className="block" style={{ fontSize: 12, color: "var(--ds-fg-muted)", lineHeight: 1.4, marginTop: 2 }}>{n.body}</span>
+                  <span className="ds-mono block" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", marginTop: 3 }}>{mounted ? timeAgo(n.createdAt) : ""}</span>
+                </span>
               </Link>
-              <Link href={notificationHref(n)} className="min-w-0 flex-1">
-                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ds-fg)" }}>{n.title}</div>
-                <div style={{ fontSize: 12, color: "var(--ds-fg-muted)", lineHeight: 1.4, marginTop: 1 }}>{n.body}</div>
-                <div className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", marginTop: 3 }}>{mounted ? timeAgo(n.createdAt) : ""}</div>
-              </Link>
-              <div className="flex flex-col items-center gap-1.5 shrink-0">
+              <div className="flex flex-col items-center shrink-0" style={{ gap: 2, margin: "-6px -6px 0 0" }}>
                 {!n.readAt && (
-                  <button type="button" onClick={() => markOneRead(n.id)} aria-label="Mark read" title="Mark read" style={{ color: "var(--ds-accent)", cursor: "pointer" }}>
+                  <button
+                    type="button"
+                    onClick={() => markOneRead(n.id)}
+                    aria-label="Mark read"
+                    title="Mark read"
+                    className="ds-hover-tint inline-flex items-center justify-center"
+                    style={{ width: 32, height: 32, borderRadius: 6, color: "var(--ds-accent-text)" }}
+                  >
                     <Check style={{ width: 15, height: 15 }} />
                   </button>
                 )}
-                <button type="button" onClick={() => removeOne(n.id)} aria-label="Remove notification" title="Remove" style={{ color: "var(--ds-fg-subtle)", cursor: "pointer" }}>
+                <button
+                  type="button"
+                  onClick={() => removeOne(n.id)}
+                  aria-label="Remove notification"
+                  title="Remove"
+                  className="ds-hover-tint inline-flex items-center justify-center"
+                  style={{ width: 32, height: 32, borderRadius: 6, color: "var(--ds-fg-subtle)" }}
+                >
                   <X style={{ width: 15, height: 15 }} />
                 </button>
               </div>

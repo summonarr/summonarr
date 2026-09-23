@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2, AlertTriangle, Send } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
@@ -8,8 +8,20 @@ import { withBasePath } from "@/lib/base-path";
 export function AnnounceUpdateButton() {
   const [phase, setPhase] = useState<"idle" | "confirm" | "sending" | "done" | "error">("idle");
   const [summary, setSummary] = useState<string | null>(null);
+  // Timer that clears the result 10s after a send. Kept in a ref so it can be
+  // cancelled — otherwise an old timer could close a confirm box the admin
+  // opened again within those 10 seconds.
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
+
+  function openConfirm() {
+    if (resetTimer.current) clearTimeout(resetTimer.current);
+    setSummary(null);
+    setPhase("confirm");
+  }
 
   async function handleSend() {
+    if (resetTimer.current) clearTimeout(resetTimer.current);
     setPhase("sending");
     setSummary(null);
     try {
@@ -28,7 +40,7 @@ export function AnnounceUpdateButton() {
       setPhase("error");
       setSummary("Failed to send update notice");
     }
-    setTimeout(() => { setPhase("idle"); setSummary(null); }, 10_000);
+    resetTimer.current = setTimeout(() => { setPhase("idle"); setSummary(null); }, 10_000);
   }
 
   if (phase === "confirm") {
@@ -49,7 +61,7 @@ export function AnnounceUpdateButton() {
           <Button
             size="sm"
             onClick={handleSend}
-            className="bg-amber-600 hover:bg-amber-500 h-7 px-4 text-xs"
+            className="bg-amber-600 text-black hover:bg-amber-600/90 h-7 px-4 text-xs"
           >
             Send to all devices
           </Button>
@@ -57,7 +69,7 @@ export function AnnounceUpdateButton() {
             size="sm"
             variant="outline"
             onClick={() => setPhase("idle")}
-            className="border-zinc-600 text-zinc-400 hover:text-white h-7 px-3 text-xs"
+            className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-7 px-3 text-xs"
           >
             Cancel
           </Button>
@@ -72,9 +84,9 @@ export function AnnounceUpdateButton() {
         <Button
           type="button"
           variant="outline"
-          onClick={() => setPhase("confirm")}
+          onClick={openConfirm}
           disabled={phase === "sending"}
-          className="border-zinc-700 text-zinc-300 hover:text-white gap-2"
+          className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
         >
           {phase === "sending" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
           {phase === "sending" ? "Sending…" : "Send update notice to all iOS devices"}

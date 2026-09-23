@@ -61,7 +61,7 @@ test("413 message formats KB under 1 MiB, MB at/above, and never renders 0KB/0MB
     [64 * KB, "64KB"],
     [MB - 1, "1024KB"], // last KB-branch value: unit switches exactly at 1 MiB
     [MB, "1MB"],
-    [50 * MB, "50MB"], // the ARR-sized backstop
+    [50 * MB, "50MB"], // same size as the 50 MB proxy backstop
     [100, "1KB"], // sub-KB cap must not render "0KB"
     [512, "1KB"],
   ];

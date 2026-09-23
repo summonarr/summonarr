@@ -25,10 +25,9 @@
 // and 401s at step 1 — it NEVER reaches the inline CRON_SECRET branch. So the
 // CRON_SECRET path is effectively shadowed for THIS route: the only way through
 // is an admin session — via bearer, or via a cookie that ALSO clears
-// isCronAuthorized's same-origin gate. That is exactly why the route requires
-// "both an admin session AND" the inline check — the inline check hardens the
-// cookie-session path (same-origin/CSRF), it is not an independent CRON_SECRET
-// escape hatch here.
+// isCronAuthorized's same-origin gate. In other words, the inline check only
+// hardens the cookie-session path against CSRF (a forged cross-site request);
+// it is not a second way in with CRON_SECRET on this route.
 //
 // ── Division of labour (owned elsewhere; NOT re-pinned) ──────────────────────
 //   - tests/cron-auth.test.mts OWNS isCronAuthorized's CRON_SECRET compare

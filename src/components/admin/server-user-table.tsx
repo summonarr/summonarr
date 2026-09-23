@@ -7,6 +7,7 @@ import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Download, Ban, ShieldCheck, Link, Loader2, RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { mediaInstanceLabel } from "@/lib/media-instances";
+import { Switch } from "@/components/ui/switch";
 
 interface ServerUser {
   id: string;
@@ -55,9 +56,15 @@ const sourceStyles: Record<string, string> = {
   jellyfin: "border-purple-600/30 bg-purple-500/10 text-purple-400",
 };
 
+// Fixed (non-theme) fills, so the initials colour is fixed too: black on the
+// light yellow-600 (white there is ~2.9:1), white on the dark purple-700.
 const avatarColors: Record<string, string> = {
   plex:     "bg-yellow-600",
   jellyfin: "bg-purple-700",
+};
+const avatarText: Record<string, string> = {
+  plex:     "text-black",
+  jellyfin: "text-white",
 };
 
 // Manual account binding for one media-server identity. Automatic resolution
@@ -129,7 +136,7 @@ function LinkPicker({
         </select>
       </div>
       {row.manualUserLink && !error && (
-        <span className="text-[10px] text-amber-500/80">pinned by admin</span>
+        <span className="text-[10px] text-amber-400">pinned by admin</span>
       )}
       {error && <span className="text-[10px] text-red-400">{error}</span>}
     </div>
@@ -149,15 +156,10 @@ function DownloadToggle({
   const [loading, setLoading] = useState(false);
   const [optimistic, setOptimistic] = useState(enabled);
 
-  // Re-sync when the server-rendered value changes. useState's initializer runs
-  // only at first mount, and router.refresh() deliberately preserves client
-  // state while the row key (u.id) keeps this instance alive — so "Disable all"
-  // flipped the database AND the Jellyfin server while every toggle on screen
-  // went on rendering the value it read at mount. The footer count beside them
-  // reads straight from the refreshed props, so the two elements visibly
-  // contradicted each other: "3 users with downloads disabled" above three
-  // switches all showing green. The user's own click is unaffected — the prop
-  // arrives matching what they already set, so this is a no-op there.
+  // Follow the server value when it changes. useState only reads `enabled`
+  // on first mount, and router.refresh() keeps component state, so without
+  // this a bulk "Disable all" would leave every switch showing its old value.
+  // After the admin's own click the new prop already matches, so it's a no-op.
   useEffect(() => {
     setOptimistic(enabled);
   }, [enabled]);
@@ -204,22 +206,15 @@ function DownloadToggle({
   const on = optimistic;
 
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
+    <Switch
+      variant="success"
+      checked={on}
       aria-label="Toggle downloads for this user"
       disabled={loading}
-      onClick={toggle}
+      loading={loading}
+      onCheckedChange={toggle}
       title={on ? "Downloads enabled — click to disable" : "Downloads disabled — click to enable"}
-      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors disabled:opacity-50 ${on ? "bg-green-600" : "bg-zinc-700"}`}
-    >
-      {loading ? (
-        <Loader2 className="w-3 h-3 text-white absolute left-1 animate-spin" />
-      ) : (
-        <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${on ? "translate-x-4" : "translate-x-0.5"}`} />
-      )}
-    </button>
+    />
   );
 }
 
@@ -250,7 +245,7 @@ function SyncUsersButton() {
       <button
         onClick={sync}
         disabled={loading}
-        className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-zinc-700 bg-zinc-800/60 text-zinc-300 hover:bg-zinc-700/60 hover:text-white transition-colors disabled:opacity-50"
+        className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-zinc-700 bg-zinc-800/60 text-zinc-300 hover:bg-zinc-700/60 hover:text-zinc-100 transition-colors disabled:opacity-50"
       >
         {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
         {loading ? "Syncing…" : "Sync users from server"}
@@ -349,20 +344,13 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
           New Jellyfin accounts discovered on sync have downloads disabled. Manually re-enabled users are left alone.
         </p>
       </div>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={on}
+      <Switch
+        checked={on}
         aria-label="Auto-disable downloads for new Jellyfin users"
         disabled={loading}
-        onClick={toggle}
-        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors disabled:opacity-50 ${on ? "bg-indigo-600" : "bg-zinc-700"}`}
-      >
-        {loading
-          ? <Loader2 className="w-3 h-3 text-white absolute left-1 animate-spin" />
-          : <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${on ? "translate-x-4" : "translate-x-0.5"}`} />
-        }
-      </button>
+        loading={loading}
+        onCheckedChange={toggle}
+      />
     </div>
   );
 }
@@ -370,11 +358,12 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
 export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }: ServerUserTableProps) {
   const [search, setSearch] = useState("");
 
-  const filtered = search.trim()
+  const query = search.trim().toLowerCase();
+  const filtered = query
     ? users.filter(
         (u) =>
-          u.username.toLowerCase().includes(search.toLowerCase()) ||
-          (u.email ?? "").toLowerCase().includes(search.toLowerCase()),
+          u.username.toLowerCase().includes(query) ||
+          (u.email ?? "").toLowerCase().includes(query),
       )
     : users;
 
@@ -399,13 +388,13 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
                   to initials when the thumb is missing or fails to load. */}
               <Avatar className={`size-7 shrink-0 ${avatarColors[source] ?? "bg-zinc-700"}`}>
                 {u.thumbUrl ? <AvatarImage src={u.thumbUrl} alt={u.username} /> : null}
-                <AvatarFallback className="bg-transparent text-[10px] font-bold text-white">
+                <AvatarFallback className={`bg-transparent text-[10px] font-bold ${avatarText[source] ?? "text-zinc-100"}`}>
                   {initials}
                 </AvatarFallback>
               </Avatar>
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
-                  <span className="text-sm font-medium text-white truncate">{u.username}</span>
+                  <span className="text-sm font-medium text-zinc-100 truncate">{u.username}</span>
                   {u.isServerAdmin && (
                     <ShieldCheck className="w-3 h-3 text-indigo-400 shrink-0" aria-label="Server admin" />
                   )}
@@ -485,7 +474,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
         placeholder="Filter by username or email…"
         value={search}
         onChange={(e) => setSearch(e.target.value)}
-        className="w-full sm:w-72 rounded-lg border border-zinc-700 bg-zinc-800/60 px-3 py-1.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+        className="w-full sm:w-72 rounded-lg border border-zinc-700 bg-zinc-800/60 px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
       />
 
       <div className="rounded-xl border border-zinc-800 overflow-hidden">
@@ -505,11 +494,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
         </table>
       </div>
 
-      {/* Both numbers describe the same set. They used to disagree: the total
-          came from the unfiltered `users` while the disabled count came from
-          the SEARCH-FILTERED `jellyfinUsers`, so filtering to audit who has
-          downloads disabled showed the full user count beside a count of only
-          the matching rows — an admin reading "1" while 12 actually existed. */}
+      {/* Both counts use the same search-filtered set, so they always agree. */}
       <p className="text-[11px] text-zinc-500">
         {filtered.length} server {filtered.length === 1 ? "user" : "users"}
         {search.trim() && ` of ${users.length}`}

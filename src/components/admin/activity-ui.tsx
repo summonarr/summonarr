@@ -1,12 +1,11 @@
 "use client";
 
-// Shared presentational primitives for the refined Activity dashboard.
-// Ported from the Claude Design "Activity Page" handoff — DS-token styled.
-// Consumed only by the Activity dashboard's "use client" section components
-// (activity-sections, -now-playing, -recent-plays, and other activity-* views);
-// page.tsx never imports this module directly. Sparkline/AreaChart carry hover state, so this is a
-// client module. Tooltip date labels are precomputed server-side and passed
-// down as `labels` — never derived from Date here (CLAUDE.md guardrail 16).
+// Shared building blocks (cards, headers, charts, tags) for the Activity
+// dashboard. Used by the activity-* client components and by the server-rendered
+// play detail page (admin/activity/play/[id]), so every Activity view shares one
+// look. Sparkline/AreaChart keep hover state, which is why this is a client
+// module. Tooltip date labels are computed on the server and passed in as
+// `labels` — never built from Date here (CLAUDE.md guardrail 16).
 
 import {
   Fragment,
@@ -18,6 +17,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import Image from "next/image";
+import Link from "next/link";
 import { bitrateToKbps } from "@/lib/bitrate";
 import {
   HeatmapCellPopover,
@@ -30,13 +30,11 @@ export function sourceDotColor(source: string): string {
   return source === "plex" ? "var(--ds-plex)" : "var(--ds-jellyfin)";
 }
 
-// `instance` is a media-server instance slug (media-instances.ts). It is
-// appended to the label as ":<slug>" — the same shape mediaInstanceLabel
-// produces ("plex:remote") — and ONLY when non-empty: `serverInstance` is a
-// `@default("")` column, so every pre-multi-server row reads "" and is
-// indistinguishable from "the default server". Omitting it there keeps
-// single-server deployments byte-identical and never mislabels legacy rows.
-// Colour stays keyed off `source`; the slug lives in the text.
+// `instance` is a media-server instance slug (see media-instances.ts). When it
+// is non-empty the tag reads "PLEX:remote", matching mediaInstanceLabel. The
+// default server's slug is "" (also what every older row holds), so it shows
+// just "PLEX" — single-server setups look exactly as they did before.
+// The colour depends only on `source`.
 export function SourceTag({ source, instance }: { source: string; instance?: string }) {
   const isPlex = source === "plex";
   return (
@@ -47,7 +45,7 @@ export function SourceTag({ source, instance }: { source: string; instance?: str
         padding: "1px 5px",
         borderRadius: 3,
         background: isPlex ? "var(--ds-plex)" : "var(--ds-jellyfin)",
-        color: isPlex ? "#000" : "#fff",
+        color: "#000",
         fontWeight: 700,
         letterSpacing: "0.04em",
         textTransform: "uppercase",
@@ -179,7 +177,7 @@ export function Poster({
         overflow: "hidden",
         flexShrink: 0,
         position: "relative",
-        boxShadow: "inset 0 0 0 1px oklch(1 0 0 / 0.04)",
+        boxShadow: "inset 0 0 0 1px color-mix(in oklab, var(--ds-fg) 4%, transparent)",
       }}
     >
       <span
@@ -200,7 +198,7 @@ export function Poster({
 
 export function Avatar({
   letter,
-  accent = "var(--ds-bg-3)",
+  accent,
   size = 22,
 }: {
   letter: string;
@@ -213,13 +211,17 @@ export function Avatar({
         width: size,
         height: size,
         borderRadius: 999,
-        background: accent,
+        // With no accent this is a plain surface chip, so the letter uses a
+        // theme colour. The fixed near-white letter below is only readable on
+        // the dark accent backgrounds callers pass; on the light theme's
+        // surface it would be white-on-white.
+        background: accent ?? "var(--ds-bg-3)",
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
         fontSize: Math.round(size * 0.46),
         fontWeight: 600,
-        color: "oklch(0.96 0 0 / 0.9)",
+        color: accent ? "oklch(0.96 0 0 / 0.9)" : "var(--ds-fg-muted)",
         flexShrink: 0,
         textTransform: "uppercase",
       }}
@@ -419,16 +421,12 @@ export function Sparkline({
           strokeLinecap="round"
           vectorEffect="non-scaling-stroke"
         />
-        {/* hover.i is captured from a mousemove against the data array as it
-            was THEN. Nothing clears it when the array shrinks — the live SSE
-            refresh recomputes a rolling cutoff, so the oldest day drops out
-            while the pointer still rests on the last index, and a filter
-            change can take the series from ~60 points to ~7. The index then
-            reads past the end and `data[hover.i].toLocaleString()` throws
-            during render, which unwinds to the (app) error boundary and
-            blanks the whole activity dashboard. Dropping the tooltip for an
-            out-of-range index is honest; `?? 0` would render a value that
-            was never in the data. */}
+        {/* hover.i was recorded against the data as it was when the mouse
+            moved. A live refresh or filter change can shrink `data` while the
+            pointer stays put, leaving hover.i past the end. Reading
+            data[hover.i] would then crash the whole dashboard, so an
+            out-of-range index simply hides the tooltip (showing `?? 0` would
+            invent a value that was never in the data). */}
         {hover && hover.i < data.length && (
           <>
             <line
@@ -635,16 +633,12 @@ export function AreaChart({
           vectorEffect="non-scaling-stroke"
           strokeLinejoin="round"
         />
-        {/* hover.i is captured from a mousemove against the data array as it
-            was THEN. Nothing clears it when the array shrinks — the live SSE
-            refresh recomputes a rolling cutoff, so the oldest day drops out
-            while the pointer still rests on the last index, and a filter
-            change can take the series from ~60 points to ~7. The index then
-            reads past the end and `data[hover.i].toLocaleString()` throws
-            during render, which unwinds to the (app) error boundary and
-            blanks the whole activity dashboard. Dropping the tooltip for an
-            out-of-range index is honest; `?? 0` would render a value that
-            was never in the data. */}
+        {/* hover.i was recorded against the data as it was when the mouse
+            moved. A live refresh or filter change can shrink `data` while the
+            pointer stays put, leaving hover.i past the end. Reading
+            data[hover.i] would then crash the whole dashboard, so an
+            out-of-range index simply hides the tooltip (showing `?? 0` would
+            invent a value that was never in the data). */}
         {hover && hover.i < data.length && (
           <>
             <line
@@ -786,6 +780,15 @@ export function HourHeatmap({
 
   return (
     <>
+    {/* The grid is a fixed ~364px (28px gutter + 24 × 12px cells + gaps), so
+        inside an 18px-padded card it overruns a 375px viewport. Same fix as
+        the 365-day calendar (activity-calendar.tsx): scroll the grid inside
+        its own container instead of clipping it. `contain: inline-size` is
+        load-bearing: every caller places this card in a `1fr` grid column
+        (minmax(auto, 1fr)), and without containment the wrapper's min-content
+        width sizes the column, so the card grows past the viewport and the
+        scroll container never engages. */}
+    <div className="overflow-x-auto" style={{ contain: "inline-size" }}>
     <div
       style={{
         display: "grid",
@@ -855,7 +858,7 @@ export function HourHeatmap({
                   cursor: clickable ? "pointer" : "default",
                   background:
                     v === 0
-                      ? "oklch(1 0 0 / 0.025)"
+                      ? "color-mix(in oklab, var(--ds-fg) 2.5%, transparent)"
                       : `oklch(0.58 0.21 275 / ${(0.1 + (v / max) * 0.76).toFixed(3)})`,
                 }}
               />
@@ -863,6 +866,7 @@ export function HourHeatmap({
           })}
         </Fragment>
       ))}
+    </div>
     </div>
     {selected && (
       <HeatmapCellPopover
@@ -894,7 +898,7 @@ export function ProgressTrack({
       style={{
         position: "relative",
         height,
-        background: "oklch(1 0 0 / 0.06)",
+        background: "color-mix(in oklab, var(--ds-fg) 6%, transparent)",
         borderRadius: 999,
         overflow: "hidden",
       }}
@@ -948,7 +952,7 @@ export function DistributionList({
           <div
             style={{
               height: 4,
-              background: "oklch(1 0 0 / 0.05)",
+              background: "color-mix(in oklab, var(--ds-fg) 5%, transparent)",
               borderRadius: 999,
               overflow: "hidden",
             }}
@@ -1054,6 +1058,111 @@ export function SectionHeader({
       </div>
       {right && <div style={{ flexShrink: 0 }}>{right}</div>}
     </div>
+  );
+}
+
+// The one header composition every Activity DETAIL view uses (user, title,
+// play): a back-link line, then the exact type scale of the shared PageHeader
+// (22px / 600 / -0.02em title, 12px ds-mono subtitle) so a detail page reads
+// as the same section as the tabbed list pages above it. `leading` is the
+// avatar/poster, `meta` sits beside the title (source tag, year), `children`
+// is an optional chip row under the subtitle, and `right` mirrors PageHeader's
+// action slot (it stacks below on mobile via .ds-page-header).
+export function DetailHeader({
+  back,
+  leading,
+  title,
+  meta,
+  subtitle,
+  right,
+  children,
+}: {
+  back: { href: string; label: string };
+  leading?: ReactNode;
+  title: ReactNode;
+  meta?: ReactNode;
+  subtitle?: ReactNode;
+  right?: ReactNode;
+  children?: ReactNode;
+}) {
+  return (
+    <>
+      <Link
+        href={back.href}
+        className="ds-hover-tint"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          marginBottom: 14,
+          marginLeft: -4,
+          padding: "4px 8px 4px 4px",
+          borderRadius: 6,
+          fontSize: 12.5,
+          color: "var(--ds-fg-muted)",
+          textDecoration: "none",
+        }}
+      >
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+          <path
+            d="M7 3l-3 3 3 3"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+        {back.label}
+      </Link>
+
+      <header className="ds-page-header" style={{ marginBottom: 22 }}>
+        <div
+          className="flex-1 min-w-0"
+          style={{ display: "flex", alignItems: "center", gap: 14 }}
+        >
+          {leading && <div style={{ flexShrink: 0 }}>{leading}</div>}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                flexWrap: "wrap",
+              }}
+            >
+              <h1
+                className="m-0 font-semibold"
+                style={{
+                  fontSize: 22,
+                  letterSpacing: "-0.02em",
+                  lineHeight: 1.2,
+                  color: "var(--ds-fg)",
+                  minWidth: 0,
+                  overflowWrap: "anywhere",
+                }}
+              >
+                {title}
+              </h1>
+              {meta}
+            </div>
+            {subtitle && (
+              <p
+                className="ds-mono m-0 mt-1"
+                style={{ color: "var(--ds-fg-subtle)", fontSize: 12 }}
+              >
+                {subtitle}
+              </p>
+            )}
+            {children && <div style={{ marginTop: 10 }}>{children}</div>}
+          </div>
+        </div>
+        {right && (
+          <div className="ds-page-header-actions flex gap-1.5 flex-wrap">
+            {right}
+          </div>
+        )}
+      </header>
+    </>
   );
 }
 
@@ -1186,7 +1295,7 @@ export function HorizontalBars({
             style={{
               flex: 1,
               height: 6,
-              background: "oklch(1 0 0 / 0.05)",
+              background: "color-mix(in oklab, var(--ds-fg) 5%, transparent)",
               borderRadius: 999,
               overflow: "hidden",
               minWidth: 30,
@@ -1234,7 +1343,7 @@ export function StreamTypeBars({
           height: 8,
           borderRadius: 999,
           overflow: "hidden",
-          background: "oklch(1 0 0 / 0.04)",
+          background: "color-mix(in oklab, var(--ds-fg) 4%, transparent)",
         }}
       >
         {data.map(
@@ -1441,10 +1550,10 @@ export function HeaderStat({
       </span>
       <span
         style={{
-          fontSize: 26,
+          fontSize: 20,
           fontWeight: 600,
           color,
-          letterSpacing: "-0.025em",
+          letterSpacing: "-0.02em",
           fontVariantNumeric: "tabular-nums",
           lineHeight: 1,
         }}
@@ -1511,7 +1620,7 @@ export function SortIcon({
       width="10"
       height="10"
       viewBox="0 0 12 12"
-      style={{ color: "var(--ds-accent)" }}
+      style={{ color: "var(--ds-accent-text)" }}
     >
       {dir === "asc" ? (
         <path

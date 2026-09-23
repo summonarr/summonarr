@@ -15,8 +15,9 @@
 // Postgres). Webhook replay protection is backed by the WebhookReplay table
 // and is exercised against a live database, not here.
 //
-// This is intentionally a small standalone runner — there is no test
-// framework in this project. Exits non-zero on the first failure.
+// This is intentionally a small standalone runner, separate from the
+// node:test unit suite under tests/. It runs every check, then exits
+// non-zero if any of them failed.
 
 import { resolveToSafeUrl } from "../src/lib/ssrf";
 import { safeFetchTrusted, SafeFetchError } from "../src/lib/safe-fetch";

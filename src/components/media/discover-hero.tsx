@@ -11,7 +11,6 @@ import {
   Clock,
   CheckCircle,
   Play,
-  ChevronRight,
 } from "@/components/icons";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
 import { safeExternalHref } from "@/lib/safe-url";
@@ -33,7 +32,7 @@ export function DiscoverHero({
   media,
   showPlex = true,
   showJellyfin = true,
-  label = "TRENDING #1",
+  label = "Trending #1",
 }: DiscoverHeroProps) {
   const poster = posterUrl(media.posterPath, "w500");
   const [liveRatings, setLiveRatings] = useState<RatingsPayload | null>(null);
@@ -60,6 +59,13 @@ export function DiscoverHero({
 
   const detailPath =
     media.mediaType === "movie" ? `/movie/${media.id}` : `/tv/${media.id}`;
+  // Same "available" reading as MediaCard/AvailabilityBadges: a copy on a
+  // server whose badges this viewer doesn't see must not suppress the Queued /
+  // Requested chips (the raw flags hid them while showing no Plex chip either).
+  const isAvailable = !!(
+    (showPlex && media.plexAvailable) ||
+    (showJellyfin && media.jellyfinAvailable)
+  );
   // media.trailerUrl is UNTRUSTED (MDBList `raw.trailer`) — gate it through
   // safeExternalHref so a `javascript:`/`data:` URL can't become a clickable
   // href (XSS). Matches the sibling TrailerButton. The YouTube fallback is a
@@ -78,7 +84,6 @@ export function DiscoverHero({
         border: "1px solid var(--ds-border)",
         borderRadius: 12,
         padding: 20,
-        marginBottom: 28,
         position: "relative",
         overflow: "hidden",
       }}
@@ -154,8 +159,7 @@ export function DiscoverHero({
               Jellyfin
             </span>
           )}
-          {!media.plexAvailable &&
-            !media.jellyfinAvailable &&
+          {!isAvailable &&
             media.arrPending && (
               <span
                 className="ds-chip ds-chip-pending"
@@ -173,7 +177,7 @@ export function DiscoverHero({
                 paddingLeft: 5,
                 paddingRight: 6,
                 background: "var(--ds-accent-soft)",
-                color: "var(--ds-accent)",
+                color: "var(--ds-accent-text)",
                 border: "1px solid var(--ds-accent-ring)",
               }}
             >
@@ -190,8 +194,7 @@ export function DiscoverHero({
               4K Queued
             </span>
           )}
-          {!media.plexAvailable &&
-            !media.jellyfinAvailable &&
+          {!isAvailable &&
             media.requested && (
               <span
                 className="ds-chip ds-chip-accent"
@@ -203,14 +206,18 @@ export function DiscoverHero({
             )}
         </div>
 
+        {/* 24px (20px on phones) — under the 22px page h1, which this used to
+            outrank at 28px. overflowWrap keeps an unbroken title inside the
+            column instead of pushing the poster/content grid wider. */}
         <h2
+          className="text-[20px] sm:text-[24px]"
           style={{
-            fontSize: 28,
             fontWeight: 600,
             margin: 0,
             letterSpacing: "-0.025em",
             color: "var(--ds-fg)",
             lineHeight: 1.15,
+            overflowWrap: "anywhere",
           }}
         >
           {media.title}
@@ -277,7 +284,7 @@ export function DiscoverHero({
         <div className="flex flex-wrap" style={{ gap: 8, marginTop: 6 }}>
           <Link
             href={detailPath}
-            className="ds-tap inline-flex items-center justify-center gap-1.5 font-medium transition-colors"
+            className="ds-tap ds-hover-tint inline-flex items-center justify-center gap-1.5 font-medium"
             style={{
               height: 32,
               padding: "0 14px",
@@ -296,7 +303,7 @@ export function DiscoverHero({
               href={trailerHref}
               target="_blank"
               rel="noopener noreferrer"
-              className="ds-tap inline-flex items-center justify-center gap-1.5 font-medium transition-colors"
+              className="ds-tap ds-hover-tint inline-flex items-center justify-center gap-1.5 font-medium"
               style={{
                 height: 32,
                 padding: "0 14px",
@@ -309,16 +316,9 @@ export function DiscoverHero({
             >
               <Play style={{ width: 14, height: 14 }} />
               Trailer
+              <span className="sr-only"> (opens in new tab)</span>
             </a>
           )}
-          <Link
-            href={detailPath}
-            className="ds-tap ml-auto inline-flex items-center gap-1 font-medium transition-colors self-center"
-            style={{ fontSize: 12, color: "var(--ds-fg-muted)" }}
-          >
-            More info
-            <ChevronRight style={{ width: 12, height: 12 }} />
-          </Link>
         </div>
       </div>
     </section>

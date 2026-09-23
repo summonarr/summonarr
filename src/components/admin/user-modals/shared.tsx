@@ -3,6 +3,7 @@
 import type { MediaServerGrants } from "@/lib/permissions";
 import type { UserSource } from "@/lib/user-source";
 import type { WatchGradeSummary } from "@/lib/watch-grade";
+import { Switch } from "@/components/ui/switch";
 
 // A named (non-default, non-4K) Radarr/Sonarr instance eligible for per-user
 // grants. Mirrors the registry's ArrInstanceConfig access fields.
@@ -89,16 +90,7 @@ export function AdminToggleRow({ label, checked, onChange, disabled }: { label: 
   return (
     <div className="flex items-center justify-between py-2 border-b border-zinc-800 last:border-0">
       <span className="text-xs text-zinc-300">{label}</span>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        disabled={disabled}
-        onClick={onChange}
-        className={`relative inline-flex h-4 w-8 shrink-0 cursor-pointer items-center rounded-full transition-colors disabled:opacity-50 ${checked ? "bg-indigo-600" : "bg-zinc-700"}`}
-      >
-        <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow transition-transform ${checked ? "translate-x-4" : "translate-x-0.5"}`} />
-      </button>
+      <Switch size="sm" checked={checked} disabled={disabled} onCheckedChange={onChange} />
     </div>
   );
 }

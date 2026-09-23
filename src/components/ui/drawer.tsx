@@ -46,7 +46,7 @@ function DrawerPopup({
       <DrawerPrimitive.Popup
         data-slot="drawer-popup"
         className={cn(
-          "fixed bottom-0 inset-x-0 z-50 flex flex-col max-h-[85vh] rounded-t-2xl bg-zinc-900 border-t border-zinc-800 shadow-2xl outline-none transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] data-[ending-style]:translate-y-full data-[starting-style]:translate-y-full",
+          "fixed bottom-0 inset-x-0 z-50 flex flex-col max-h-[85vh] rounded-t-2xl bg-zinc-900 border-t border-zinc-800 shadow-[var(--ds-shadow-lg)] outline-none transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] data-[ending-style]:translate-y-full data-[starting-style]:translate-y-full",
           className
         )}
         {...props}

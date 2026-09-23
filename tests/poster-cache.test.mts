@@ -6,10 +6,10 @@
 // letter-placeholder fallback off absence, so a null/empty entry would break
 // the UI contract — and (d) key on `posterPathKey`, never the bare number, so a
 // mixed movie+TV list can't collapse two titles onto one poster.
-// There is no local DB in this harness: src/lib/prisma.ts
-// caches its client on globalThis (`globalForPrisma.prisma ?? create...`), so
-// we pre-seed that slot with an in-memory fake BEFORE the module graph loads —
-// no query ever leaves the process.
+// There is no real database here. src/lib/prisma.ts reuses a client stored on
+// globalThis (`globalForPrisma.prisma ?? create...`), so we put an in-memory
+// fake in that slot BEFORE importing the code under test. No query ever leaves
+// the process.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
@@ -260,9 +260,9 @@ test("a movie and a TV title sharing one tmdbId keep their OWN posters", async (
 test("the URL variant survives a MIXED movie+TV list sharing one tmdbId", async () => {
   // The collapse this pins: resolvePosterMap did the namespace-correct per-item
   // lookup and then wrote it under the bare number, so the first item's art was
-  // returned for both media. 5 of its 7 call sites pass mixed lists (a watch
-  // history page, the wrapped top titles, the two topMedia dashboards, the
-  // rewatched leaderboard), so both media routinely arrive in one call.
+  // returned for both media. Several callers (watch history, the top-titles
+  // dashboards, the rewatched leaderboard) pass mixed movie+TV lists, so both
+  // media routinely arrive in one call.
   reset({
     core: [
       { tmdbId: 1399, mediaType: "MOVIE", posterPath: "/film.jpg" },

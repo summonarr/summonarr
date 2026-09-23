@@ -1,7 +1,7 @@
 import { requireAppSession } from "@/lib/require-app-session";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb";
-import { EmptyState } from "@/components/ui/empty-state";
+import { Suspense } from "react";
 import { DesktopIssueThread } from "@/components/issues/desktop-issue-thread";
 import {
   IssueDetailMobileDrawer,
@@ -12,9 +12,10 @@ import Link from "next/link";
 import { Film, Tv2, MessageSquare, ChevronRight } from "@/components/icons";
 import { LiveRefresh } from "@/components/live-refresh";
 import { FilterPills, SearchBox } from "@/components/user-list-filters";
+import { PaginationBar } from "@/components/media/pagination-bar";
 import { requireFeature } from "@/lib/features";
 import type { Prisma } from "@/generated/prisma";
-import { Chip, PageHeader } from "@/components/ui/design";
+import { Chip, EmptyState, PageHeader } from "@/components/ui/design";
 import { ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL, ISSUE_TYPE_LABELS } from "@/lib/status-labels";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
 
@@ -60,8 +61,9 @@ export default async function IssuesPage({
   const issueType = VALID_ISSUE_TYPES.includes(typeParam as typeof VALID_ISSUE_TYPES[number])
     ? (typeParam as typeof VALID_ISSUE_TYPES[number])
     : null;
-  // Prisma `contains` → ILIKE with no ESCAPE clause; strip wildcard
-  // metacharacters and bound the length (search-box DoS, matches /api/votes).
+  // Prisma's `contains` becomes a SQL ILIKE, where % and _ are wildcards.
+  // sanitizeContainsSearch strips those and caps the length so a crafted
+  // search can't make the query slow (same as /api/votes).
   const q = sanitizeContainsSearch((qParam ?? "").trim());
 
   const where: Prisma.IssueWhereInput = {
@@ -121,7 +123,7 @@ export default async function IssuesPage({
 
   const hasFilters = status !== null || issueType !== null || q !== "";
 
-  const subtitle =
+  const countLine =
     `${total} issue${total !== 1 ? "s" : ""} reported` +
     (hasFilters && totalAllStatuses !== total
       ? ` (of ${totalAllStatuses} total)`
@@ -132,26 +134,22 @@ export default async function IssuesPage({
       <LiveRefresh
         on={["issue:updated", "issue:deleted", "issuemessage:created"]}
       />
-      <PageHeader title="My Issues" subtitle={subtitle} />
-      <p
-        className="ds-mono"
-        style={{
-          fontSize: 11,
-          color: "var(--ds-fg-subtle)",
-          marginTop: -12,
-          marginBottom: 20,
-        }}
-      >
-        To report a new issue, search for the movie or TV show using the
-        search bar above, then click{" "}
-        <span style={{ color: "var(--ds-fg-muted)", fontWeight: 500 }}>
-          Report Issue
-        </span>{" "}
-        on its page.
-      </p>
+      <PageHeader
+        title="My Issues"
+        subtitle={
+          <>
+            {countLine} · To report a new issue, search for the movie or TV
+            show above, then click{" "}
+            <span style={{ color: "var(--ds-fg-muted)", fontWeight: 500 }}>
+              Report Issue
+            </span>{" "}
+            on its page
+          </>
+        }
+      />
 
       {totalAllStatuses > 0 && (
-        <div className="flex flex-col gap-3 mb-6 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:items-center sm:justify-between">
           <FilterPills
             param="status"
             active={status ?? ""}
@@ -171,8 +169,8 @@ export default async function IssuesPage({
                 { value: "", label: "Any type" },
                 { value: "BAD_VIDEO", label: "Video" },
                 { value: "WRONG_AUDIO", label: "Audio" },
-                { value: "MISSING_SUBTITLES", label: "Subs" },
-                { value: "WRONG_MATCH", label: "Match" },
+                { value: "MISSING_SUBTITLES", label: "Subtitles" },
+                { value: "WRONG_MATCH", label: "Wrong match" },
                 { value: "OTHER", label: "Other" },
               ]}
               preserve={["status", "q", "selected"]}
@@ -187,12 +185,23 @@ export default async function IssuesPage({
         </div>
       )}
 
-      {total === 0 ? (
-        <EmptyState>
-          {hasFilters
-            ? "No issues match these filters."
-            : "No issues reported yet. Use the Report Issue button on any movie or TV show page."}
-        </EmptyState>
+      {issues.length === 0 ? (
+        // Key on the paged slice, not `total` (same as /requests): `?page=9`
+        // with 3 issues has total=3 and issues=[], and the pager is hidden when
+        // totalPages <= 1, so a past-the-end page rendered an empty list with
+        // no way back.
+        <EmptyState
+          icon={MessageSquare}
+          title={total > 0 ? "Nothing on this page" : hasFilters ? "No matching issues" : "No issues reported"}
+          description={
+            total > 0
+              ? "No more issues on this page."
+              : hasFilters
+                ? "No issues match these filters."
+                : "Use the Report Issue button on any movie or TV show page."
+          }
+          cta={total > 0 ? { href: buildHref({ page: 1, selected: "" }), label: "Back to page 1" } : undefined}
+        />
       ) : (
         <div className="xl:grid xl:grid-cols-[1fr_480px] xl:gap-6 xl:items-start">
           <div className="min-w-0">
@@ -318,7 +327,7 @@ export default async function IssuesPage({
                                 "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))",
                             }}
                           >
-                            ↳ {issue.resolution}
+                            Resolution: {issue.resolution}
                           </p>
                         )}
                         {issue._count.messages > 0 && (
@@ -328,7 +337,7 @@ export default async function IssuesPage({
                               marginTop: 6,
                               fontSize: 10.5,
                               color:
-                                "color-mix(in oklab, var(--ds-accent) 80%, var(--ds-fg))",
+                                "color-mix(in oklab, var(--ds-accent-text) 80%, var(--ds-fg))",
                             }}
                           >
                             {issue._count.messages} message
@@ -357,35 +366,9 @@ export default async function IssuesPage({
               })}
             </div>
 
-            {totalPages > 1 && (
-              <div
-                className="flex items-center justify-between"
-                style={{ marginTop: 24 }}
-              >
-                <p
-                  className="ds-mono"
-                  style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
-                >
-                  Page {page} of {totalPages}
-                </p>
-                <div className="flex items-center gap-2">
-                  <IssuePagerLink
-                    href={page > 1 ? buildHref({ page: page - 1 }) : undefined}
-                  >
-                    Previous
-                  </IssuePagerLink>
-                  <IssuePagerLink
-                    href={
-                      page < totalPages
-                        ? buildHref({ page: page + 1 })
-                        : undefined
-                    }
-                  >
-                    Next
-                  </IssuePagerLink>
-                </div>
-              </div>
-            )}
+            <Suspense>
+              <PaginationBar currentPage={page} totalPages={totalPages} />
+            </Suspense>
           </div>
 
           <aside className="hidden xl:block sticky top-6 h-[calc(100vh-3rem)]">
@@ -512,30 +495,12 @@ export default async function IssuesPage({
                 <DesktopIssueThread issueId={selectedIssue.id} />
               </div>
             ) : (
-              <div
-                className="h-full flex flex-col items-center justify-center text-center"
-                style={{
-                  padding: 32,
-                  background: "var(--ds-bg-1)",
-                  border: "1px dashed var(--ds-border)",
-                  borderRadius: 8,
-                }}
-              >
-                <MessageSquare
-                  style={{
-                    width: 28,
-                    height: 28,
-                    color: "var(--ds-fg-disabled)",
-                    marginBottom: 12,
-                  }}
-                />
-                <p
-                  className="ds-mono"
-                  style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
-                >
-                  Select an issue to view its thread
-                </p>
-              </div>
+              <EmptyState
+                className="h-full justify-center"
+                icon={MessageSquare}
+                title="Select an issue"
+                description="Pick an issue from the list to view its thread."
+              />
             )}
           </aside>
         </div>
@@ -564,33 +529,5 @@ export default async function IssuesPage({
         closeHref={buildHref({ selected: "" })}
       />
     </div>
-  );
-}
-
-function IssuePagerLink({
-  href,
-  children,
-}: {
-  href?: string;
-  children: React.ReactNode;
-}) {
-  const style: React.CSSProperties = {
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: "0 12px",
-    height: 28,
-    borderRadius: 6,
-    border: "1px solid var(--ds-border)",
-    background: href ? "var(--ds-bg-2)" : "transparent",
-    color: href ? "var(--ds-fg-muted)" : "var(--ds-fg-disabled)",
-    fontSize: 11,
-    fontWeight: 500,
-  };
-  if (!href) return <span style={style}>{children}</span>;
-  return (
-    <Link href={href} style={style}>
-      {children}
-    </Link>
   );
 }

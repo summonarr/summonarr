@@ -6,8 +6,7 @@ name: CI
 #
 # A weekly schedule keeps a heartbeat on main without re-running on every
 # merge commit (the merge tree is identical to the PR head that just passed).
-# The CodeQL job that used to live here was removed in favour of codeql.yml,
-# which already runs CodeQL on a properly-configured matrix.
+# CodeQL runs in its own workflow, codeql.yml.
 
 on:
   pull_request:
@@ -45,16 +44,16 @@ jobs:
       # `next build` step can load the app without throwing.
       # See .env.example for the production descriptions.
       DATABASE_URL: "postgresql://ci:ci@localhost:5432/ci?schema=public"
-      # NEXTAUTH_SECRET must be ≥32 chars (instrumentation.ts:17).
+      # NEXTAUTH_SECRET must be ≥32 chars (checked in instrumentation.ts).
       NEXTAUTH_SECRET: "ci-nextauth-secret-placeholder-not-real-do-not-use"
       AUTH_URL: "http://localhost:3000"
-      # CRON_SECRET must be ≥32 chars (instrumentation.ts:65).
+      # CRON_SECRET must be ≥32 chars (checked in instrumentation.ts).
       CRON_SECRET: "ci-cron-secret-placeholder-not-real-do-not-use-00"
-      # TRUST_PROXY=false keeps the localhost AUTH_URL check happy
-      # (instrumentation.ts:43 / :54).
+      # TRUST_PROXY=false pairs with the localhost AUTH_URL above (the
+      # local-only startup rules live in src/lib/local-only.ts).
       TRUST_PROXY: "false"
-      # TOKEN_ENCRYPTION_KEY must be exactly 64 hex chars
-      # (instrumentation.ts:76). 32 bytes of zeros is fine for CI.
+      # TOKEN_ENCRYPTION_KEY must be exactly 64 hex chars (checked first
+      # in instrumentation.ts). 32 bytes of zeros is fine for CI.
       TOKEN_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
       # TMDB_READ_TOKEN (v4 bearer) is the only TMDB credential;
       # instrumentation.ts warns if it is not set. Value is a dummy
@@ -93,7 +92,7 @@ jobs:
 
       # Two compilers gate the same tree: the native TS 7 (tsgo alias — what
       # `npx tsc` resolves to) and the classic TS 6 that `next build` and
-      # typescript-eslint load via require('typescript'). Next 16.2 and
+      # typescript-eslint load via require('typescript'). Next 16 and
       # typescript-eslint cannot use TS 7's JS API yet (see dependabot.yml),
       # so the classic check must stay green until they migrate.
       - name: Typecheck (native TS 7)
@@ -103,9 +102,8 @@ jobs:
         run: npm run typecheck:classic
 
       # Unit tests (Node's built-in runner — no test-framework dependency).
-      # Covers the pure, safety-critical leaf modules: the permission bitmask,
-      # request quotas, the native client/version gate, and the parental-rating
-      # cap. Blocking — a regression in authorization/quota logic is a defect.
+      # Covers most of src/lib plus many route handlers, all against in-memory
+      # stubs (no real DB or network). Blocking — a failing test is a defect.
       - name: Unit tests
         run: npm test
 

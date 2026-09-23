@@ -4,6 +4,7 @@ import { useState } from "react";
 import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
+import { Switch } from "@/components/ui/switch";
 
 export function EnableMachineSessionToggle({
   initialEnabled,
@@ -84,25 +85,16 @@ export function EnableMachineSessionToggle({
           {status === "saving" && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500" />}
           {status === "ok"     && <CheckCircle className="w-3.5 h-3.5 text-green-400" />}
           {status === "error"  && <XCircle className="w-3.5 h-3.5 text-red-400" />}
-          <button
-            type="button"
-            role="switch"
-            aria-checked={enabled}
-            onClick={toggle}
-            className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-zinc-900 ${enabled ? "bg-indigo-600" : "bg-zinc-700"}`}
-          >
-            <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${enabled ? "translate-x-4" : "translate-x-0.5"}`} />
-          </button>
+          <Switch checked={enabled} onCheckedChange={toggle} />
         </div>
       </div>
 
       {/*
-        Rendered unconditionally, NOT gated on `enabled`. The server refuses to
-        turn this on while the allowlist is empty, and `toggle()` reverts
-        `enabled` on that rejection — so gating the editor on `enabled` made a
-        fresh install un-enableable: the only place to set the allowlist appeared
-        for a moment and then vanished with the failed toggle. Set the IPs first,
-        then flip the switch.
+        Always shown, even while the switch is off. The server refuses to turn
+        the switch on while the IP list is empty, and `toggle()` then flips the
+        switch back. If this editor only showed while the switch was on, it would
+        vanish along with the failed toggle and a fresh install could never be
+        enabled. So: set the IPs first, then flip the switch.
       */}
       {(
         <div className="mt-3 pl-0.5">
@@ -118,7 +110,7 @@ export function EnableMachineSessionToggle({
             onChange={(e) => setAllowedIps(e.target.value)}
             rows={2}
             spellCheck={false}
-            placeholder="Any IP allowed"
+            placeholder="e.g. 10.0.0.5, 192.168.1.0/24"
             className="w-full rounded-md bg-zinc-900 border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-200 font-mono placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
           <div className="flex items-center gap-2 mt-1.5">
@@ -126,7 +118,7 @@ export function EnableMachineSessionToggle({
               type="button"
               onClick={saveAllowedIps}
               disabled={!ipsDirty || ipStatus === "saving"}
-              className="rounded-md bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-indigo-500"
+              className="rounded-md bg-indigo-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-accent-fg)] disabled:opacity-40 disabled:cursor-not-allowed hover:bg-indigo-500"
             >
               Save IPs
             </button>

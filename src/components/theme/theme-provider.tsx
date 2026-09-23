@@ -9,13 +9,13 @@ import {
   useState,
 } from "react";
 
-/* Persisted appearance preferences.
-   - theme  drives globals.css `[data-theme]` (ds-* tokens + legacy remap)
-     and the shadcn `.dark` class together.
-   - accent drives globals.css `[data-accent]` (the --ds-accent hue).
-   Persistence is per-device via localStorage (the next-themes convention);
-   an inline blocking script in src/app/layout.tsx applies the same values
-   before first paint so there is no flash. */
+/* Saved appearance preferences.
+   - theme  sets `[data-theme]` on <html> (the ds-* colour tokens in
+     globals.css) and the shadcn `.dark` class together.
+   - accent sets `[data-accent]` on <html> (the --ds-accent hue).
+   Both are saved per device in localStorage. A small inline script in
+   src/app/layout.tsx applies them before the first paint, so the page never
+   flashes the wrong colours. */
 
 export type Theme = "dark" | "light";
 export type Accent = "indigo" | "amber" | "emerald" | "cyan" | "rose" | "mono";
@@ -45,33 +45,45 @@ type ThemeContextValue = {
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
+// Browser-chrome colour (mobile toolbar / PWA status bar) — the hex forms of
+// --ds-bg. layout.tsx's static viewport.themeColor is the dark one because the
+// app defaults to dark; a <meta> can't read the stored choice, so the client
+// rewrites it whenever the theme is known.
+const THEME_CHROME: Record<Theme, string> = { dark: "#09090b", light: "#fbfcfd" };
+
+function applyChromeColor(theme: Theme) {
+  for (const meta of document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')) {
+    meta.content = THEME_CHROME[theme];
+  }
+}
+
 function applyTheme(theme: Theme) {
   const el = document.documentElement;
   el.setAttribute("data-theme", theme);
   el.classList.toggle("dark", theme === "dark");
+  applyChromeColor(theme);
 }
 
 function applyAccent(accent: Accent) {
   document.documentElement.setAttribute("data-accent", accent);
 }
 
-// Initial state mirrors the SSR defaults so the first client paint matches SSR
-// (no hydration mismatch). The useEffect below reconciles with the per-device
-// persisted values already applied to <html> by the inline blocking script in
-// src/app/layout.tsx — which also set the CSS variables before paint, so color
-// never flashes.
+// State starts at the server-rendered defaults so the first client render
+// matches the server HTML (no hydration mismatch). The effect below then reads
+// the saved values that layout.tsx's inline script already put on <html>.
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(DEFAULT_THEME);
   const [accent, setAccentState] = useState<Accent>(DEFAULT_ACCENT);
 
-  // One-time post-mount reconciliation with the <html data-theme/data-accent>
-  // values the inline blocking script already applied — the legitimate "sync
-  // React state with an external system" use of an effect. The attribute is
-  // owned by this provider after mount, so no subscription is needed.
+  // Runs once after mount to copy <html data-theme/data-accent> into state.
+  // After that this provider is the only writer, so nothing needs watching.
   useEffect(() => {
     const t = document.documentElement.getAttribute("data-theme");
     const a = document.documentElement.getAttribute("data-accent");
-    if (t === "light" || t === "dark") setThemeState(t);
+    if (t === "light" || t === "dark") {
+      setThemeState(t);
+      applyChromeColor(t);
+    }
     if (a && (ACCENTS as readonly string[]).includes(a)) {
       setAccentState(a as Accent);
     }

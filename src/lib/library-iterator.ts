@@ -9,12 +9,11 @@ export type LibraryItem = { tmdbId: number; mediaType: "MOVIE" | "TV" };
 // Cursor-based pagination avoids loading the entire library into memory; callers should not assume
 // a consistent snapshot — a concurrent full sync may repopulate rows mid-iteration.
 //
-// Multi-server support: the compound id widened to (tmdbId, mediaType, serverInstance),
-// so a page boundary can land between two rows that share a tmdbId (one per
-// server) — the cursor must carry serverInstance too, or the next page could
-// skip/repeat a same-tmdbId row from a different server. collectAllLibraryItems's
-// own tmdbId:mediaType dedup Set already collapses multi-server rows correctly,
-// so no change needed there.
+// Rows are keyed (tmdbId, mediaType, serverInstance), so two servers can hold
+// rows with the same tmdbId, and a page can end between them. The cursor
+// therefore carries serverInstance too, or the next page could skip or repeat
+// one of them. collectAllLibraryItems dedups on tmdbId:mediaType, so the
+// per-server duplicates collapse there.
 export async function* iterateLibrary(
   source: "plex" | "jellyfin",
   mediaType: "MOVIE" | "TV",
@@ -50,7 +49,8 @@ export async function* iterateLibrary(
   }
 }
 
-// UNION (not UNION ALL) deduplicates items that exist in both Plex and Jellyfin
+// UNION (not UNION ALL) removes duplicates, so a title on both Plex and
+// Jellyfin (or on two servers) counts once.
 export async function countUniqueLibraryItems(): Promise<number> {
   const result = await prisma.$queryRaw<[{ count: bigint }]>(
     Prisma.sql`

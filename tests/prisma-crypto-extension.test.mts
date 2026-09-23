@@ -73,7 +73,7 @@ console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")
 // Two tests below deliberately let a query reach the closed port. Prisma's own
 // logger (`log: ["error"]`, fixed at client construction — not something a
 // caller can turn off) emits that failure through console.LOG, not stderr and
-// not console.error. Unexplained `prisma:error` lines in a 190-file suite run
+// not console.error. Unexplained `prisma:error` lines in a full suite run
 // read as a broken test, so the expected connection failure is captured here.
 // Anything else still prints.
 const realLog = console.log;

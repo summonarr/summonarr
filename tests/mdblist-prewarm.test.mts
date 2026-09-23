@@ -5,11 +5,11 @@
 //     purged, quotaExhausted? } — deepEqual pins the exact key set, including
 //     that the early no-key/empty-library returns carry NO quotaExhausted key
 //     while a completed run always carries it (undefined when no quota hit);
-//   - the { force?: boolean } purge semantics: the default run deleteMany's
-//     ONLY rows whose data is exactly the NOT_FOUND sentinel serialization
-//     (second chance for sentinels) — under force too, which instead bypasses
-//     the freshness triage so valid rows keep serving until overwritten, and
-//     purges valid rows too, forcing a full refetch;
+//   - the { force?: boolean } purge semantics: every run deletes ONLY rows
+//     whose data is exactly the NOT_FOUND sentinel text (giving "not found"
+//     titles a second chance). force never deletes valid rows; it just skips
+//     the freshness check so every title is refetched, and the old rows keep
+//     serving until they are overwritten;
 //   - batch usage: cold items go out as ONE chunked POST per media type via
 //     fetchMdblistBatch — never per-item — with the details-blob releaseDate
 //     passed through per item (witnessed via the written rows' TTL buckets);
@@ -368,7 +368,7 @@ test("pages interleave across media types: page 0 (200 movie + 200 tv) completes
 
 // ── counter semantics ───────────────────────────────────────────────────────
 
-test("a partial batch response yields fetched < toFetch without counting failed (transient shortfall, retried next run)", async () => {
+test("a partial batch response yields fetched < toFetch without counting failed", async () => {
   tables.plex = [
     { tmdbId: 31, mediaType: "MOVIE" },
     { tmdbId: 32, mediaType: "MOVIE" },
@@ -380,8 +380,8 @@ test("a partial batch response yields fetched < toFetch without counting failed 
   ]);
 
   // `fetched` counts the ids MDBList actually returned (the batch map size);
-  // the omitted id is neither fetched nor failed — and (sibling-owned) a short
-  // response never writes it a sentinel, so the next run retries it.
+  // the omitted id is neither fetched nor failed. (fetchMdblistBatch then
+  // negative-caches the omitted id — that rule is pinned in tests/mdblist.test.mts.)
   assert.deepEqual(await prewarmMdblistCache(), {
     total: 3, fetched: 2, skipped: 0, failed: 0, purged: 0, quotaExhausted: undefined,
   });

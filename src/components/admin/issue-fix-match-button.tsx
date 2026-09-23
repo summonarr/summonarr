@@ -54,14 +54,12 @@ function resolveInstance(rows: FileInfoInstance[], hint: string): string | null 
   return rows[0].serverInstance;
 }
 
-// Seeds a side's instance from a (re)fetched file-info response. A pick the
-// admin already made survives as long as some refetched row still holds it;
-// only then does the hint/default resolution run. The file-info effect fires
-// on every open — including the reopen after a busy HIDE (see onOpenChange),
-// which keeps state on purpose — so seeding unconditionally with
-// resolveInstance discarded a named-server choice made in the picker and the
-// next "Fix" ran against the default server. A not-busy close nulls both
-// picks via reset(), so a fresh open still resolves from scratch.
+// Picks a side's server after file-info is (re)fetched. If the admin already
+// chose a server in the picker and it still holds the title, keep that choice;
+// otherwise fall back to resolveInstance. This matters because file-info is
+// refetched on every open, including reopening after a busy "hide" that keeps
+// state — re-resolving there would silently switch the fix back to the default
+// server. A normal close calls reset(), so a fresh open starts from scratch.
 function seedInstance(cur: string | null, rows: FileInfoInstance[], hint: string): string | null {
   if (cur !== null && rows.some((r) => r.serverInstance === cur)) return cur;
   return resolveInstance(rows, hint);
@@ -196,12 +194,10 @@ export function IssueFixMatchButton({
 
   const inputRef = useRef<HTMLInputElement>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Aborts the runFixMatch poll loop on unmount (the server-side job keeps
-  // running by design). One controller PER SIDE: neither apply button is gated on
-  // the other being in flight, so a single shared ref would be overwritten by the
-  // second apply and leave the first polling every 3s for its full 20-minute
-  // deadline after unmount — then resolve the issue and refresh a page that has
-  // moved on.
+  // Stops the runFixMatch status polling on unmount (the server-side job keeps
+  // running by design). One controller PER SIDE: Plex and Jellyfin can be
+  // applied at the same time, and a single shared ref would lose the first
+  // one, leaving it polling long after the dialog is gone.
   const plexAbort = useRef<AbortController | null>(null);
   const jellyfinAbort = useRef<AbortController | null>(null);
   useEffect(() => () => {
@@ -269,7 +265,7 @@ export function IssueFixMatchButton({
     if (searchTimer.current) clearTimeout(searchTimer.current);
     if (!query.trim()) { setSearchResults([]); setSearchError(""); return; }
     // AbortController in addition to the debounce timer: cancels the in-flight
-    // fetch when the query changes mid-request OR the popover closes, so stale
+    // fetch when the query changes mid-request OR the dialog closes, so stale
     // results from a previous keystroke can't overwrite the current ones.
     const ac = new AbortController();
     searchTimer.current = setTimeout(async () => {
@@ -476,13 +472,13 @@ export function IssueFixMatchButton({
                 <span className="text-xs font-mono text-zinc-500 shrink-0">#{tmdbId}</span>
               </div>
               {fileInfoError && (
-                <p className="text-xs text-orange-400/80">
+                <p className="text-xs text-orange-400">
                   Couldn&apos;t load file details. Match info may be incomplete.
                 </p>
               )}
               {plexPath && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold text-yellow-500/70 w-16 shrink-0">
+                  <span className="text-xs font-semibold text-yellow-400 w-16 shrink-0">
                     {plexInstanceLabel || "Plex"}
                   </span>
                   <p className="text-xs font-mono text-zinc-500 truncate" title={plexPath}>
@@ -492,7 +488,7 @@ export function IssueFixMatchButton({
               )}
               {jellyfinPath && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold text-purple-500/70 w-16 shrink-0">
+                  <span className="text-xs font-semibold text-purple-400 w-16 shrink-0">
                     {jellyfinInstanceLabel || "Jellyfin"}
                   </span>
                   <p className="text-xs font-mono text-zinc-500 truncate" title={jellyfinPath}>
@@ -508,7 +504,7 @@ export function IssueFixMatchButton({
                   <div className="flex items-center gap-2 min-w-0">
                     <span className="text-xs text-orange-400 font-mono shrink-0">→ TMDB #{fileInfo.arrTmdbId}</span>
                     {fileInfo.arrTitle && (
-                      <span className="text-xs text-orange-300 truncate">{fileInfo.arrTitle}</span>
+                      <span className="text-xs text-orange-400 truncate">{fileInfo.arrTitle}</span>
                     )}
                     <button
                       onClick={() => {
@@ -588,7 +584,7 @@ export function IssueFixMatchButton({
                           {thumb
                             // eslint-disable-next-line @next/next/no-img-element
                             ? <img src={thumb} alt={r.title} className="w-full h-full object-cover" />
-                            : <div className="w-full h-full flex items-center justify-center text-zinc-700 text-xs">?</div>}
+                            : <div className="w-full h-full flex items-center justify-center text-zinc-500 text-xs">?</div>}
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 flex-wrap">

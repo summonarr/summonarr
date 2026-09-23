@@ -1,20 +1,21 @@
-// Route-level unit tests for the four /api/admin/fix-match handlers, which had
-// ZERO coverage before this file. They are invoked directly with constructed
-// NextRequests + a REAL signed session; no DB, no network, no DNS.
+// Route-level unit tests for the five /api/admin/fix-match handlers (the POST
+// plus the candidates, file-info, thumb and status GETs). They are invoked
+// directly with constructed NextRequests + a REAL signed session; no DB, no
+// network, no DNS.
 //
-// THE HEADLINE — the multi-server trap. The POST route has accepted, validated
-// and DB-scoped a `serverInstance` body field since the multi-server migration
-// (findFirst by `{ tmdbId, mediaType, serverInstance }`, delete/upsert on the
+// THE HEADLINE — the multi-server trap. The POST route already read and wrote
+// the library row for the `serverInstance` named in the body (findFirst and
+// deleteMany by `{ tmdbId, mediaType, serverInstance }`, upsert on the
 // `tmdbId_mediaType_serverInstance` compound key), but its two remote-rewrite
-// helpers read `getPlexConfig()` / `getJellyfinConfig()` with NO argument — the
-// DEFAULT server. A fix-match against a named instance therefore read the RIGHT
-// row and then rewrote the WRONG server, replaying a ratingKey that belongs to
-// the named server against the default one. Plex ratingKeys are small
-// server-local integers, so that is a wrong-item remap on a live library, not a
-// harmless no-op. Every "goes to the remote origin, with the remote token" pin
-// below exists for that bug; the three sibling GET routes were instance-blind in
-// the milder direction (an unscoped findFirst let an arbitrary instance's row
-// win, and their Plex calls were likewise default-only).
+// helpers used to call `getPlexConfig()` / `getJellyfinConfig()` with NO
+// argument — i.e. the DEFAULT server. A fix-match against a named instance
+// therefore read the RIGHT row and then rewrote the WRONG server, replaying a
+// ratingKey that belongs to the named server against the default one. Plex
+// ratingKeys are small per-server integers, so that remaps an unrelated item on
+// a live library rather than doing nothing. Every "goes to the remote origin,
+// with the remote token" pin below exists for that bug. The GET routes had a
+// milder version: an unscoped findFirst let any instance's row win, and their
+// Plex calls also went to the default server only.
 //
 // Division of labour with the leaf-module suites (owned elsewhere, NOT re-pinned):
 //   - tests/plex-config.test.mts / tests/jellyfin-config.test.mts OWN the

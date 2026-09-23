@@ -1,6 +1,6 @@
 // Security regression guard: NO non-admin may read another user's watch
-// history. The only history surface open to a normal user is /api/play-history/
-// mine (self-scoped, pinned by tests/watch-history-mine-route.test.mts). EVERY
+// history. The only history surfaces open to a normal user are the self-scoped
+// /api/play-history/mine routes (pinned by tests/watch-history-mine-route.test.mts). EVERY
 // other play-history read route exposes ALL users' history — the list route
 // even binds a raw `?userId=` filter straight into `mediaServerUserId = ?` —
 // so each MUST require the full ADMIN permission bit.

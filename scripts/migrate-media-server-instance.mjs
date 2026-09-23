@@ -17,7 +17,7 @@
 // LOUDLY on a key collision (23505) and leaves the DB untouched — no silent
 // data loss — then run this and retry the push.
 //
-// Idempotent — ADD COLUMN IF NOT EXISTS. Safe to re-run.
+// Idempotent — a table that already has the column is skipped. Safe to re-run.
 //
 // Standalone — uses only `pg`. No Prisma, no crypto (serverInstance is not
 // secret). Mirrors scripts/migrate-is4k-to-arrinstance.mjs.

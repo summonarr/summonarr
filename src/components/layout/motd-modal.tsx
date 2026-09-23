@@ -9,11 +9,10 @@ interface MotdModalProps {
   body: string;
 }
 
-// The dismissal flag is keyed on the announcement's CONTENT, not a fixed
-// literal: a flat key suppresses a newly published or edited MOTD for the rest
-// of the tab session (sessionStorage survives reloads), so the next urgent
-// announcement is never seen by anyone who dismissed the previous one.
-// FNV-1a — a short stable digest, not a security hash.
+// The "dismissed" flag's storage key is built from the announcement's TEXT.
+// With one fixed key, dismissing an old message would also hide any new or
+// edited one for the rest of the tab session. The hash is FNV-1a: a short,
+// stable fingerprint of the text, not a security hash.
 function contentKey(title: string, body: string): string {
   const raw = `${title}\n${body}`;
   let h = 0x811c9dc5;
@@ -25,21 +24,33 @@ function contentKey(title: string, body: string): string {
 }
 
 export function MotdModal({ title, body }: MotdModalProps) {
-  // Effect flips visibility after hydration; initial render matches SSR (null) to avoid hydration mismatch
+  // Starts hidden so the first client render matches the server (which renders
+  // nothing); the effect below shows it after hydration.
   const [visible, setVisible] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
   const titleId = "motd-modal-title";
   const sessionKey = contentKey(title, body);
 
+  // sessionStorage throws (SecurityError) when site data is blocked, and an
+  // effect that throws takes the whole (app) layout down to its error
+  // boundary. Unreadable storage just means "not dismissed yet".
   useEffect(() => {
     if (!body) return;
-    if (sessionStorage.getItem(sessionKey)) return;
+    try {
+      if (sessionStorage.getItem(sessionKey)) return;
+    } catch {
+      // fall through and show it
+    }
     setVisible(true);
   }, [body, sessionKey]);
 
   const dismiss = useCallback(() => {
-    sessionStorage.setItem(sessionKey, "1");
+    try {
+      sessionStorage.setItem(sessionKey, "1");
+    } catch {
+      // dismissal just won't persist across reloads
+    }
     setVisible(false);
   }, [sessionKey]);
 
@@ -93,7 +104,7 @@ export function MotdModal({ title, body }: MotdModalProps) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
       onClick={dismiss}
     >
       <div
@@ -102,12 +113,14 @@ export function MotdModal({ title, body }: MotdModalProps) {
         aria-modal="true"
         aria-labelledby={title ? titleId : undefined}
         aria-label={title ? undefined : "Announcement"}
-        className="relative w-full max-w-md rounded-2xl bg-zinc-900 border border-zinc-700 shadow-2xl p-6"
+        className="relative w-full max-w-md rounded-xl bg-zinc-900 border border-zinc-700 shadow-[var(--ds-shadow-lg)] p-6"
         onClick={(e) => e.stopPropagation()}
       >
         <button
+          type="button"
           onClick={dismiss}
-          className="absolute top-4 right-4 text-zinc-500 hover:text-white transition-colors"
+          className="ds-hover-tint absolute top-3 right-3 inline-flex items-center justify-center rounded-md text-zinc-500 hover:text-zinc-100 transition-colors"
+          style={{ width: 32, height: 32 }}
           aria-label="Dismiss"
         >
           <X className="w-5 h-5" />
@@ -116,7 +129,7 @@ export function MotdModal({ title, body }: MotdModalProps) {
         {title && (
           <h2
             id={titleId}
-            className="text-lg font-bold text-white mb-3 pr-8"
+            className="text-lg font-bold text-zinc-100 mb-3 pr-8"
           >
             {title}
           </h2>

@@ -55,7 +55,7 @@ const METHOD_COLOR: Record<string, string> = {
   get: "var(--ds-info)",
   post: "var(--ds-success)",
   put: "var(--ds-warning)",
-  patch: "var(--ds-accent)",
+  patch: "var(--ds-accent-text)",
   delete: "var(--ds-danger)",
 };
 
@@ -514,7 +514,7 @@ export function OpenApiViewer() {
                             fontSize: 12,
                             padding: "0.3rem 0.7rem",
                             background: "var(--ds-accent-soft)",
-                            color: "var(--ds-accent)",
+                            color: "var(--ds-accent-text)",
                             border: "1px solid var(--ds-accent-ring)",
                             borderRadius: "var(--ds-r-sm)",
                             cursor: "pointer",

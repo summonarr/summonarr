@@ -9,15 +9,15 @@ import { defaultPermissionsForRole } from "@/lib/permissions";
 import { readJsonCapped } from "@/lib/body-size";
 import { parseBearerToken, hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 
-// In-process mutex: DB advisory lock is the real guard, but this catches obvious double-submits quickly
+// In-process flag: the DB advisory lock below is the real guard; this just turns away an obvious double-submit early.
 let registrationInFlight = false;
 
 export async function POST(req: NextRequest) {
   // CSRF Origin check. A native/bearer client (custom Authorization / X-Summonarr-Client
   // headers a cross-origin page can't forge) carries no ambient-cookie CSRF risk and
   // legitimately sends no browser Origin — exempt it, mirroring the proxy.ts CSRF skip.
-  // For everyone else, require a matching Origin: a missing Origin is now REJECTED
-  // (previously a blank Origin slipped through), closing the login-CSRF gap.
+  // Everyone else must send a matching Origin; a missing Origin is rejected too,
+  // which closes the login-CSRF gap.
   const isNativeClient =
     parseBearerToken(req.headers.get("authorization")) !== null ||
     hasNativeClientHeader(req.headers.get(NATIVE_CLIENT_HEADER));
@@ -113,11 +113,10 @@ export async function POST(req: NextRequest) {
   registrationInFlight = true;
 
   let user: { id: string; email: string; name: string | null; role: string };
-  // hashPassword sits INSIDE the try. Outside it, a throw there — bcrypt failure,
-  // OOM — skipped the finally, leaving the flag latched true for the life of the
-  // process. Since setup_completed_at was never written, every later attempt hit
-  // the in-flight check and got a permanent "Registration is closed", so the
-  // instance could not be bootstrapped at all without a restart.
+  // hashPassword must stay INSIDE the try. If it threw outside it, the finally
+  // would never reset registrationInFlight, and every later attempt would get
+  // "Registration is closed" until the process restarted — so the first admin
+  // could never be created.
   try {
     const passwordHash = await hashPassword(password);
     user = await prisma.$transaction(async (tx) => {
@@ -154,7 +153,8 @@ export async function POST(req: NextRequest) {
       return created;
     });
   } catch (err) {
-    const msg = (err as Error).message;
+    // `err` may not be an Error (anything can be thrown); fall back to "".
+    const msg = err instanceof Error ? err.message : "";
     if (msg === "CLOSED") {
       return NextResponse.json({ error: "Registration is closed" }, { status: 403 });
     }

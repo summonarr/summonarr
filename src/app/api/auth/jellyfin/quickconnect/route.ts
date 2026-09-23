@@ -32,15 +32,14 @@ function isSecureCookieContext(): boolean {
 // Long-poll can hold the connection up to ~25s, so bump the route timeout above the default
 export const maxDuration = 30;
 
-// In-memory per-secret poll limiter; caps attempts per QuickConnect session without a DB round-trip
+// In-memory per-secret poll counter; caps attempts per QuickConnect session without a DB round-trip
 interface PollEntry { count: number; expiresAt: number; }
 const pollCounts = new Map<string, PollEntry>();
-// Hard ceiling on the poll-count map. Entries are keyed on the CALLER-SUPPLIED secret
-// and this endpoint is unauthenticated, so an attacker polling with distinct secrets
-// inserted an entry per request. Nothing evicted them: an entry is only dropped when
-// that same key is polled again, so the map grew without bound for the life of the
-// process. Sweeping expired entries first keeps the ceiling from rejecting real
-// sessions — a genuine QuickConnect flow holds at most a handful of live keys.
+// Hard ceiling on the poll-count map. Entries are keyed on the CALLER-SUPPLIED
+// secret and this endpoint needs no login, so an attacker sending a new secret
+// on every request could otherwise grow the map without limit. Expired entries
+// are swept first, so the ceiling doesn't reject real sessions — a genuine
+// QuickConnect flow holds at most a handful of live keys.
 const MAX_POLL_KEYS = 10_000;
 function sweepExpiredPollCounts(now: number): void {
   for (const [k, v] of pollCounts) {
@@ -151,10 +150,9 @@ export async function GET(req: NextRequest) {
   if (existingRaw && !existing) pollCounts.delete(countKey);
   const attempts = (existing ? existing.count : 0) + 1;
   if (attempts > MAX_POLLS) {
-    // Keep the entry rather than dropping it: deleting the counter here let the
-    // very next poll for the same secret start a fresh 60-attempt window, so the
-    // per-session ceiling was never enforced against a persistent caller. The
-    // 60s sweep above reclaims the key once its TTL passes.
+    // Keep the entry rather than dropping it: deleting the counter here would let
+    // the very next poll for the same secret start a fresh 60-attempt window.
+    // The 60s sweep above reclaims the key once its TTL passes.
     pollCounts.set(countKey, { count: attempts, expiresAt: existing?.expiresAt ?? now + QC_TTL });
     return NextResponse.json({ error: "QuickConnect session expired" }, { status: 410 });
   }
@@ -192,11 +190,10 @@ export async function GET(req: NextRequest) {
       // Long-poll: keep hitting Jellyfin until authenticated, client disconnects, or budget elapses.
       // One inbound long-poll counts as one attempt against MAX_POLLS regardless of internal ticks.
       const deadline = Date.now() + LONG_POLL_MAX_MS;
-      // ONE abort listener for the whole long-poll, not one per tick. The
-      // per-iteration `{ once: true }` listener only self-removed if the abort
-      // actually fired; on the far commoner timeout-wins path it stayed attached,
-      // so a full ~13-tick poll accumulated 13 live listeners on the same signal
-      // and tripped Node's max-listeners warning.
+      // ONE abort listener for the whole long-poll, not one per tick. A
+      // per-tick listener stays attached when the timer (not the abort) wins,
+      // so a full poll would pile up ~13 listeners on the same signal and trip
+      // Node's max-listeners warning.
       let abortWake: (() => void) | null = null;
       const onAbort = () => abortWake?.();
       req.signal.addEventListener("abort", onAbort, { once: true });

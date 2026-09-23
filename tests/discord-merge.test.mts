@@ -163,8 +163,8 @@ test("the double-click guard: per-discordUserId advisory lock, first 7 id bytes 
     params: [0x31323334353637n],
   });
 
-  // A short id (< 7 bytes) clamps instead of throwing, and 7 bytes = 56 bits
-  // always fits Postgres's signed BIGINT.
+  // A short id (under 7 bytes) just uses the bytes it has instead of throwing.
+  // 7 bytes = 56 bits, which always fits Postgres's signed 64-bit BIGINT.
   ops.length = 0;
   await mergeDiscordIntoWebAccount(WEB, "ab");
   const { params } = opArgs("$executeRawUnsafe") as { params: bigint[] };

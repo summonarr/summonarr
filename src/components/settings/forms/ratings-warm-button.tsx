@@ -24,8 +24,12 @@ export function RatingsWarmButton() {
         }),
       ]);
 
-      const omdbData: { fetched?: number; skipped?: number; total?: number; failed?: number; error?: string } = await omdbRes.json();
-      const mdblistData: MdblistWarmData = await mdblistRes.json();
+      // A reply that isn't JSON (e.g. a reverse proxy's timeout page on a long
+      // warm) becomes an error line for that source instead of throwing.
+      const omdbData: { fetched?: number; skipped?: number; total?: number; failed?: number; error?: string } =
+        await omdbRes.json().catch(() => ({ error: `Request failed (HTTP ${omdbRes.status})` }));
+      const mdblistData: MdblistWarmData =
+        await mdblistRes.json().catch(() => ({ error: `Request failed (HTTP ${mdblistRes.status})` }));
 
       const omdbErr    = omdbData.error;
       const mdblistErr = mdblistData.error;
@@ -61,7 +65,7 @@ export function RatingsWarmButton() {
         size="sm"
         onClick={() => runWarm(false)}
         disabled={status === "loading"}
-        className="border-zinc-700 text-zinc-300 hover:text-white gap-2"
+        className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
       >
         {status === "loading"
           ? <><Loader2 className="w-4 h-4 animate-spin" />Warming…</>
@@ -74,7 +78,7 @@ export function RatingsWarmButton() {
         size="sm"
         onClick={() => runWarm(true)}
         disabled={status === "loading"}
-        className="border-zinc-700 text-zinc-400 hover:text-white gap-2"
+        className="border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-2"
         title="Purge all MDBList sentinels and re-fetch the entire library"
       >
         <RefreshCw className="w-4 h-4" />Full Sync

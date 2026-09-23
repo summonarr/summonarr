@@ -77,11 +77,11 @@ export function TopFilterBar({
   const searchParams = useSearchParams();
   const years = useMemo(() => buildYears(maxYear), [maxYear]);
 
-  // Not-yet-committed filter changes. `searchParams` reflects the COMMITTED
-  // url and router.push is async, so two changes in quick succession rebuilt
-  // the second query string from a snapshot still holding the first filter's
-  // old value and silently reverted it. Same delta reconciliation as
-  // filter-bar.tsx — see the longer note there.
+  // Filter changes we've pushed but the URL hasn't caught up with yet.
+  // `searchParams` only shows the URL as it is NOW, and router.push is async,
+  // so without this two quick changes in a row would build the second URL from
+  // stale params and silently undo the first. Each entry is dropped once the
+  // URL shows it. Same approach as filter-bar.tsx — see the longer note there.
   const pendingRef = useRef<Record<string, string | undefined>>({});
   const committed = searchParams.toString();
 
@@ -122,7 +122,7 @@ export function TopFilterBar({
   const hasFilters = !!(activeMediaType || activeSortBy || activeMinImdb || activeMinVotes || activeFromYear || activeToYear || activeHideAvailable);
 
   return (
-    <div className="flex flex-col gap-3 mb-8">
+    <div className="flex flex-col gap-3 mb-6">
       <Segments
         segments={[
           { value: "both", label: "All" },
@@ -189,16 +189,18 @@ export function TopFilterBar({
         <button
           type="button"
           onClick={() => push({ hideAvailable: activeHideAvailable ? undefined : "1" })}
-          className="ds-tap inline-flex items-center gap-1.5 font-medium transition-colors"
+          aria-pressed={!!activeHideAvailable}
+          className="ds-tap ds-hover-tint inline-flex items-center gap-1.5 font-medium"
           style={{
             padding: "5px 12px",
+            minHeight: 32,
             borderRadius: 6,
             fontSize: 12,
             background: activeHideAvailable
               ? "var(--ds-accent-soft)"
               : "var(--ds-bg-2)",
             color: activeHideAvailable
-              ? "var(--ds-accent)"
+              ? "var(--ds-accent-text)"
               : "var(--ds-fg-muted)",
             border: `1px solid ${activeHideAvailable ? "var(--ds-accent-ring)" : "var(--ds-border)"}`,
           }}
@@ -210,9 +212,10 @@ export function TopFilterBar({
           <button
             type="button"
             onClick={clearAll}
-            className="ds-tap inline-flex items-center gap-1 transition-colors"
+            className="ds-tap ds-hover-tint inline-flex items-center gap-1"
             style={{
               padding: "5px 10px",
+              minHeight: 32,
               borderRadius: 6,
               fontSize: 11,
               background: "var(--ds-bg-2)",
@@ -273,12 +276,18 @@ function Chip({ label, onRemove }: { label: string; onRemove: () => void }) {
         onClick={onRemove}
         aria-label={`Remove filter: ${label}`}
         title={`Remove filter: ${label}`}
-        className="inline-flex items-center transition-colors ml-0.5"
+        className="ds-hover-tint inline-flex items-center justify-center shrink-0"
         style={{
+          // A 24px box is easy to tap. The negative margins shrink the space it
+          // takes in the layout back to 12px (a 2px gap + the 10px icon), so
+          // the chip stays the same size and the icon doesn't move.
+          width: 24,
+          height: 24,
+          margin: "-6px -7px -6px -5px",
+          borderRadius: 999,
           background: "transparent",
           border: 0,
           padding: 0,
-          cursor: "pointer",
           color: "inherit",
         }}
       >

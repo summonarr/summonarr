@@ -674,7 +674,6 @@ async function fixJellyfinMatch(
   return { newItemId: resolvedItemId, baseUrl, apiKey };
 }
 
-// ISSUE_ADMIN intentionally has fix-match access to resolve wrong-match issues without full admin privileges
 type FixMatchInput = {
   server: "plex" | "jellyfin";
   tmdbId: number;
@@ -900,6 +899,8 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
   }
 }
 
+// withIssueAdmin, not withAdmin: an ISSUE_ADMIN may fix a wrong match to
+// resolve a reported issue without holding full admin rights.
 export const POST = withIssueAdmin(async (request, _ctx, session) => {
   // fix-match runs ~60s of Plex/Jellyfin remap calls plus DB writes — without
   // a rate limit, an admin loop (intentional or scripted) can saturate the
@@ -932,6 +933,9 @@ export const POST = withIssueAdmin(async (request, _ctx, session) => {
   }
   if (tmdbId === correctTmdbId) {
     return NextResponse.json({ error: "TMDB IDs are already the same" }, { status: 400 });
+  }
+  if (canonicalGuid != null && typeof canonicalGuid !== "string") {
+    return NextResponse.json({ error: "canonicalGuid must be a string" }, { status: 400 });
   }
   if (body.serverInstance !== undefined && !isValidMediaInstanceSlug(body.serverInstance)) {
     return NextResponse.json({ error: `invalid serverInstance: ${body.serverInstance}` }, { status: 400 });

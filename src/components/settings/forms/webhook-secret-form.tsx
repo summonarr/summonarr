@@ -64,7 +64,7 @@ function WebhookSecretField({
           <Button
             type="button"
             variant="outline"
-            className="shrink-0 border-zinc-700 text-zinc-300 hover:text-white"
+            className="shrink-0 border-zinc-700 text-zinc-300 hover:text-zinc-100"
             onClick={() => { setSecret(generateSecret()); setStatus("idle"); }}
           >
             Generate

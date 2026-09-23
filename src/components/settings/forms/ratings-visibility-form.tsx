@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { RATING_SOURCES } from "@/lib/ratings-visibility";
@@ -9,16 +9,21 @@ import type { SaveStatus } from "./shared";
 export function RatingsVisibilityForm({ initialHidden }: { initialHidden: string[] }) {
   const [hidden, setHidden] = useState<string[]>(initialHidden);
   const [status, setStatus] = useState<SaveStatus>("idle");
+  // The timer that fades the ✓/✗ back to idle. A new save cancels the old
+  // timer; otherwise it could fire mid-save, set "idle", and unlock the control
+  // while the request is still in flight.
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // One write at a time. All 11 checkboxes write the same ratingsHiddenSources
-  // key, which is exempt from the settings route's per-key cooldown (so a
-  // second tick within 10s isn't 429'd and rolled back) — without the boxes
-  // locking while a save is on the wire, two overlapping PATCHes each carrying
-  // a full snapshot could commit out of order and persist the older set.
+  // Only one save at a time: the checkboxes are disabled while a save runs.
+  // Every checkbox saves the whole list into one setting (ratingsHiddenSources),
+  // and that setting skips the route's per-key cooldown (so a second tick within
+  // 10s isn't rejected with a 429). Without the lock, two overlapping saves could
+  // finish in the wrong order and store the older list.
   async function toggleSource(key: string) {
     const prev = hidden;
     const next = prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key];
     setHidden(next);
+    if (idleTimer.current) clearTimeout(idleTimer.current);
     setStatus("saving");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
@@ -37,7 +42,7 @@ export function RatingsVisibilityForm({ initialHidden }: { initialHidden: string
       setHidden(prev);
       setStatus("error");
     }
-    setTimeout(() => setStatus("idle"), 3000);
+    idleTimer.current = setTimeout(() => setStatus("idle"), 3000);
   }
 
   return (

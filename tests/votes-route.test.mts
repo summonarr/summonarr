@@ -3,47 +3,48 @@
 //   GET  /api/votes            (same file — the grouped vote list)
 //   DELETE/PATCH /api/votes/[tmdbId]  (src/app/api/votes/[tmdbId]/route.ts)
 //
-// The headline contract is CLAUDE.md guardrail 23, which this exact route once
-// violated: a one-shot "notify admins at threshold" gate did a caught
-// tx.setting.create of a unique key AFTER the vote insert, inside a single-level
-// interactive $transaction. Once the key existed, every later vote hit the
-// unique violation, aborted the tx (no per-statement SAVEPOINT at depth 1), and
-// the vote was silently ROLLED BACK behind a 201. The fix moved the gate OUT of
-// any transaction as an idempotent createMany({skipDuplicates:true}) one-shot.
-// What this file pins about that fix:
-//   - the vote insert is a single standalone create — prisma.$transaction is
-//     NEVER invoked on the POST path (there is no tx for a caught error to
-//     abort);
-//   - the threshold gate runs strictly AFTER the vote create, and its outcome
-//     cannot un-commit the vote: when createMany reports count 0 (another
-//     caller already owns the claim key) the response is STILL 201 and the
-//     created vote row is still returned;
-//   - only the single claim winner (count === 1, recount still >= threshold)
-//     enqueues the admin notify fan-out via after(); losers, below-threshold
-//     votes, and the dismiss-race recount all enqueue nothing;
-//   - a duplicate vote's P2002 propagates out of the bare create and is mapped
-//     to 409 "Already voted" (never a 500, never a phantom 201);
-//   - DELETE re-arms the one-shot gate INSIDE its transaction when the tally
-//     drops below the threshold, and leaves the claim key alone when it stays
-//     at/above (or no threshold is configured).
-// Around that core: auth (401 before any business read), the feature-flag and
+// The main contract is CLAUDE.md guardrail 23, which this route once broke.
+// A one-shot "notify admins when the vote threshold is reached" gate did a
+// tx.setting.create of a unique key AFTER the vote insert, inside one
+// $transaction, and swallowed the error. Once the key existed, every later vote
+// hit a unique-key error. In Postgres that error aborts the whole transaction
+// (there is no SAVEPOINT at the top level), so the vote was silently ROLLED
+// BACK while the route still answered 201. The fix moved the gate OUT of any
+// transaction and made it an idempotent createMany({skipDuplicates:true}).
+// This file pins that fix:
+//   - the vote insert is one standalone create — prisma.$transaction is NEVER
+//     called on the POST path, so there is no transaction to abort;
+//   - the threshold gate runs only AFTER the vote create and cannot undo it:
+//     when createMany reports count 0 (someone else already claimed the key)
+//     the response is STILL 201 with the created vote row;
+//   - only the single claim winner (count === 1, and a recount still at or
+//     above the threshold) queues the admin notification via after(); losers,
+//     votes below the threshold, and a recount that dropped (an admin dismissed
+//     the votes meanwhile) queue nothing;
+//   - a duplicate vote's P2002 (Prisma's "unique constraint" error) comes out
+//     of the create and becomes 409 "Already voted" — never a 500 or a fake 201;
+//   - DELETE clears the one-shot claim key INSIDE its transaction when the
+//     tally drops below the threshold, and leaves it alone when the tally stays
+//     at/above it (or no threshold is configured).
+// Also covered: auth (401 before any business read), the feature-flag and
 // maintenance gates, the per-user rate limit, guardrail-30 body caps, field
-// validation, the request-token gate, TMDB verification failure, the
-// in-a-library requirement, the own-request bar, the admin dismiss (PATCH), and
-// the GET list shape (voteCount / userVoted / deduped-and-capped reasons).
+// validation, the request-token check, TMDB verification failure, the
+// "must be in a library" rule, the "can't vote on your own request" rule, the
+// admin dismiss (PATCH), and the GET list shape (voteCount / userVoted /
+// deduped-and-capped reasons).
 //
-// Harness: the handlers are withAuth/withAdmin-wrapped (guardrail 6a), so they
-// are invoked as real route functions with a NextRequest carrying a REAL signed
+// Harness: the handlers are wrapped in withAuth/withAdmin (guardrail 6a), so we
+// call the real route functions with a NextRequest carrying a REAL signed
 // session JWT, backed by in-memory authSession/user stubs (the
 // tests/api-auth.test.mts fixture). maintenanceGuard reads cookies() from
 // next/headers and the winner path calls after() from next/server — both throw
-// outside a Next request scope — so every invocation runs inside a synthetic
+// outside a Next request — so every call runs inside a fake
 // workAsyncStorage + workUnitAsyncStorage scope (the tests/maintenance.test.mts
-// idiom) whose work store also carries an afterContext that RECORDS enqueued
-// after() tasks instead of running them. No DB or network: all touched prisma
-// delegates are shadowed in-memory (tests/_helpers.mts), $transaction is a
-// recording stub (the tests/discord-merge.test.mts idiom), dns.lookup is
-// stubbed, and globalThis.fetch is scripted per URL (TMDB verification only).
+// pattern). Its afterContext RECORDS queued after() tasks instead of running
+// them. No DB or network: every prisma model the routes touch is replaced
+// in-memory (tests/_helpers.mts), $transaction is a recording stub (the
+// tests/discord-merge.test.mts pattern), dns.lookup is stubbed, and
+// globalThis.fetch answers per URL (only TMDB verification uses it).
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
@@ -286,14 +287,9 @@ shadowPrismaModel(prisma, "auditLog", {
   },
 });
 
-// The winner path's notify fan-out reads push subscriptions; keep it empty so
-// the channel short-circuits before any network (channel internals are owned by
-// tests/push.test.mts / tests/email.test.mts / tests/discord-notify.test.mts).
-
-// resolveMediaMeta's first two tiers (TmdbMediaCore, the details TmdbCache
-// blob). Default to misses so the existing tests keep exercising the tier-3
-// live-verify wire path; a test can point `metaRow` at a row to pin the
-// cached tier short-circuiting the wire.
+// The first two lookup tiers of resolveMediaMeta (TmdbMediaCore, then the
+// cached TMDB details blob). Both miss by default, so tests reach tier 3 (the
+// live TMDB call). A test can set `metaRow` to prove the cached tier skips it.
 let metaRow: { title: string; posterPath: string | null; releaseYear: string } | null = null;
 shadowPrismaModel(prisma, "tmdbMediaCore", {
   findUnique: async () => metaRow,
@@ -304,12 +300,15 @@ shadowPrismaModel(prisma, "tmdbCache", {
   deleteMany: async () => ({ count: 0 }),
 });
 
+// The winner's notify fan-out reads push subscriptions. Keeping the list empty
+// makes that channel stop before any network call (each channel's internals
+// are tested in push/email/discord-notify tests).
 shadowPrismaModel(prisma, "pushSubscription", {
   findMany: async () => [],
 });
 
-// $transaction recording stub: callback form tags ops inTx; array form awaits
-// the already-issued stub promises (the PATCH dismiss shape).
+// $transaction recording stub. Callback form: ops inside it are marked inTx.
+// Array form (what PATCH dismiss uses): just awaits the already-started calls.
 const txObj = { deletionVote: deletionVoteModel, setting: settingModel };
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
   txCalls++;
@@ -327,11 +326,11 @@ const { GET: listVotes, POST: postVote } = await import("../src/app/api/votes/ro
 const { DELETE: deleteVote, PATCH: dismissVotes } = await import("../src/app/api/votes/[tmdbId]/route.ts");
 
 // ── synthetic request scope with a recording afterContext ───────────────────
-// maintenanceGuard reaches cookies()/headers() (next/headers) and the winner
-// path calls after() (next/server) — both need a live store. The request store
-// carries NO session cookie, so authActive() resolves anonymous and the admin
-// maintenance bypass never fires; the enqueued after() tasks are captured, not
-// run (tests run them explicitly where reach matters).
+// maintenanceGuard calls cookies()/headers() (next/headers) and the winner
+// path calls after() (next/server) — both need a live request store. This
+// store has NO session cookie, so authActive() sees an anonymous visitor and
+// the admin maintenance bypass never fires. Queued after() tasks are saved,
+// not run; a test runs them itself when it needs to.
 const afterTasks: Array<() => Promise<unknown>> = [];
 function inScope<T>(fn: () => Promise<T>): Promise<T> {
   const workStore = {

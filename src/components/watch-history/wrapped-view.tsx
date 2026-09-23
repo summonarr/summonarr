@@ -73,16 +73,20 @@ function mediaHref(tmdbId: number | null, mediaType: string | null): string | nu
 }
 
 // Gradient palette cycled across the stat cards for the "wrapped" vibrancy.
+// Every stop sits at L ≤ .54 so the tile's white 10px kicker (opacity .85)
+// clears 4.5:1 on each end of the gradient (worst stop 4.52:1).
 const GRADS = [
-  "linear-gradient(135deg, oklch(0.55 0.2 275) 0%, oklch(0.5 0.22 320) 100%)",
-  "linear-gradient(135deg, oklch(0.6 0.17 200) 0%, oklch(0.55 0.19 250) 100%)",
-  "linear-gradient(135deg, oklch(0.62 0.19 150) 0%, oklch(0.58 0.17 195) 100%)",
-  "linear-gradient(135deg, oklch(0.68 0.18 60) 0%, oklch(0.62 0.2 35) 100%)",
-  "linear-gradient(135deg, oklch(0.62 0.2 350) 0%, oklch(0.55 0.21 300) 100%)",
-  "linear-gradient(135deg, oklch(0.6 0.16 240) 0%, oklch(0.56 0.18 285) 100%)",
+  "linear-gradient(135deg, oklch(0.53 0.2 275) 0%, oklch(0.5 0.22 320) 100%)",
+  "linear-gradient(135deg, oklch(0.47 0.11 200) 0%, oklch(0.5 0.15 250) 100%)",
+  "linear-gradient(135deg, oklch(0.48 0.14 150) 0%, oklch(0.46 0.1 195) 100%)",
+  "linear-gradient(135deg, oklch(0.52 0.12 60) 0%, oklch(0.53 0.18 35) 100%)",
+  "linear-gradient(135deg, oklch(0.53 0.2 350) 0%, oklch(0.54 0.21 300) 100%)",
+  "linear-gradient(135deg, oklch(0.5 0.14 240) 0%, oklch(0.53 0.18 285) 100%)",
 ];
 
-function StatCard({ grad, kicker, value, sub }: { grad: string; kicker: string; value: ReactNode; sub?: ReactNode }) {
+// Named WrappedStat (not StatCard) so it can't be confused with the design
+// system's StatCard — this one is the gradient "wrapped" tile.
+function WrappedStat({ grad, kicker, value, sub }: { grad: string; kicker: string; value: ReactNode; sub?: ReactNode }) {
   return (
     <div style={{ background: grad, borderRadius: 14, padding: "18px 18px 20px", color: "#fff", minHeight: 128, display: "flex", flexDirection: "column", justifyContent: "space-between", boxShadow: "0 1px 3px rgba(0,0,0,0.25)" }}>
       <div className="ds-mono uppercase" style={{ fontSize: 10, letterSpacing: "0.1em", opacity: 0.85 }}>{kicker}</div>
@@ -147,11 +151,11 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
   }
 
   return (
-    <div className="ds-page-enter" style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       {/* Hero */}
       <div
         style={{
-          background: "linear-gradient(135deg, oklch(0.5 0.22 285) 0%, oklch(0.52 0.22 330) 55%, oklch(0.6 0.2 25) 100%)",
+          background: "linear-gradient(135deg, oklch(0.5 0.22 285) 0%, oklch(0.52 0.22 330) 55%, oklch(0.53 0.2 25) 100%)",
           borderRadius: 18,
           padding: "30px 26px",
           color: "#fff",
@@ -183,10 +187,10 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
         <div style={{ display: "flex", gap: 18, alignItems: "center", background: "var(--ds-bg-2)", border: "1px solid var(--ds-border)", borderRadius: 14, padding: 18 }}>
           <Poster src={top.posterSrc} letter={(top.title[0] ?? "?").toUpperCase()} w={70} h={104} radius={6} />
           <div style={{ minWidth: 0 }}>
-            <div className="ds-mono uppercase" style={{ fontSize: 10.5, letterSpacing: "0.12em", color: "var(--ds-accent)" }}>Your #1 this year</div>
+            <div className="ds-mono uppercase" style={{ fontSize: 10.5, letterSpacing: "0.12em", color: "var(--ds-accent-text)" }}>Your #1 this year</div>
             <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.02em", color: "var(--ds-fg)", margin: "4px 0 6px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {heroHref ? (
-                <Link href={heroHref} style={{ color: "inherit", textDecoration: "none" }}>{top.title}</Link>
+                <Link href={heroHref} className="hover:underline" style={{ color: "inherit", textDecoration: "none" }}>{top.title}</Link>
               ) : (
                 top.title
               )}
@@ -201,11 +205,11 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
       {/* Stat cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
         {cards.map((c, i) => (
-          <StatCard key={c.kicker} grad={GRADS[i % GRADS.length]} kicker={c.kicker} value={c.value} sub={c.sub} />
+          <WrappedStat key={c.kicker} grad={GRADS[i % GRADS.length]} kicker={c.kicker} value={c.value} sub={c.sub} />
         ))}
       </div>
 
-      {/* Top 5 */}
+      {/* Top titles list */}
       {w.topTitles.length > 0 && (
         <div style={{ background: "var(--ds-bg-2)", border: "1px solid var(--ds-border)", borderRadius: 14, padding: 18 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ds-fg)", marginBottom: 14 }}>
@@ -216,11 +220,11 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
               const href = mediaHref(t.tmdbId, t.mediaType);
               return (
                 <div key={`${t.title}-${i}`} style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <span className="ds-mono" style={{ width: 20, textAlign: "right", fontSize: 15, fontWeight: 700, color: "var(--ds-accent)" }}>{i + 1}</span>
+                  <span className="ds-mono" style={{ width: 20, textAlign: "right", fontSize: 15, fontWeight: 700, color: "var(--ds-accent-text)" }}>{i + 1}</span>
                   <Poster src={t.posterSrc} letter={(t.title[0] ?? "?").toUpperCase()} w={32} h={46} radius={4} />
                   <div style={{ flex: 1, minWidth: 0, display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
                     {href ? (
-                      <Link href={href} style={{ fontSize: 14, color: "var(--ds-fg)", textDecoration: "none", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.title}</Link>
+                      <Link href={href} className="hover:underline" style={{ fontSize: 14, color: "var(--ds-fg)", textDecoration: "none", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.title}</Link>
                     ) : (
                       <span style={{ fontSize: 14, color: "var(--ds-fg)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.title}</span>
                     )}

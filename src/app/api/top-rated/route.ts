@@ -71,12 +71,10 @@ async function backfillMetadata(items: TmdbMedia[]): Promise<TmdbMedia[]> {
   const missing = items.filter((i) => !i.posterPath);
   if (missing.length === 0) return items;
 
-  // Two IN clauses, not one OR per item. `missing` is a whole page of results,
-  // so the OR form emitted a predicate with one (tmdbId = ? AND mediaType = ?)
-  // pair per item — a query whose TEXT grows with the page and which the
-  // planner has to walk clause by clause. The composite key is
-  // [tmdbId, mediaType], so grouping by media type turns it into two index
-  // range scans over an id list instead.
+  // Query with two `IN` lists (one per media type) instead of one OR clause per
+  // item. `missing` can be a whole page of results, and one clause per item makes
+  // the SQL grow with the page. The table's key is [tmdbId, mediaType], so two
+  // id lists become two cheap index lookups.
   const movieIds = missing.filter((i) => i.mediaType === "movie").map((i) => i.id);
   const tvIds = missing.filter((i) => i.mediaType !== "movie").map((i) => i.id);
   const coreRows = await prisma.tmdbMediaCore.findMany({

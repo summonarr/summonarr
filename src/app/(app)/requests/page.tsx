@@ -1,18 +1,19 @@
 import { requireAppSession } from "@/lib/require-app-session";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb";
-import { EmptyState } from "@/components/ui/empty-state";
-import { Film, Tv2 } from "@/components/icons";
+import { Suspense } from "react";
+import { ClipboardList, Film, Tv2 } from "@/components/icons";
 import Image from "next/image";
 import Link from "next/link";
 import { LiveRefresh } from "@/components/live-refresh";
 import { FilterPills, SearchBox } from "@/components/user-list-filters";
+import { PaginationBar } from "@/components/media/pagination-bar";
 import type { Prisma } from "@/generated/prisma";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
 import type { TmdbMedia } from "@/lib/tmdb-types";
-import { Chip, PageHeader } from "@/components/ui/design";
+import { Chip, EmptyState, PageHeader } from "@/components/ui/design";
 import { REQUEST_STATUS_TONE, REQUEST_STATUS_LABEL } from "@/lib/status-labels";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
 
@@ -40,8 +41,9 @@ export default async function RequestsPage({
   const sort = VALID_SORTS.includes(sortParam as typeof VALID_SORTS[number])
     ? (sortParam as typeof VALID_SORTS[number])
     : "newest";
-  // Prisma `contains` → ILIKE with no ESCAPE clause; strip wildcard
-  // metacharacters and bound the length (search-box DoS, matches /api/votes).
+  // Prisma's `contains` becomes a SQL ILIKE, where % and _ are wildcards.
+  // sanitizeContainsSearch strips those and caps the length so a crafted
+  // search can't make the query slow (same as /api/votes).
   const q = sanitizeContainsSearch((qParam ?? "").trim());
 
   const where: Prisma.MediaRequestWhereInput = {
@@ -164,23 +166,39 @@ export default async function RequestsPage({
         // totalPages <= 1 — so a past-the-end page used to render the "3
         // requests" header above an empty list with no way back short of
         // editing the URL. Mirrors /popular's "No more results" state.
-        <EmptyState>
-          {total > 0 ? (
-            <>
-              No more requests on this page.{" "}
-              <Link
-                href={pageHref(1)}
-                style={{ color: "var(--ds-accent)", fontWeight: 500 }}
-              >
-                Back to page 1
-              </Link>
-            </>
-          ) : hasFilters ? (
-            "No requests match these filters."
-          ) : (
-            "No requests yet. Find something on Discover, Movies, or TV and hit Request."
-          )}
-        </EmptyState>
+        <EmptyState
+          icon={ClipboardList}
+          title={
+            total > 0
+              ? "Nothing on this page"
+              : hasFilters
+                ? "No matching requests"
+                : "No requests yet"
+          }
+          description={
+            total > 0 ? (
+              <>
+                No more requests on this page.{" "}
+                <Link
+                  href={pageHref(1)}
+                  className="hover:underline"
+                  style={{ color: "var(--ds-accent-text)", fontWeight: 500 }}
+                >
+                  Back to page 1
+                </Link>
+              </>
+            ) : hasFilters ? (
+              "No requests match these filters."
+            ) : (
+              "Find something on Discover, Movies, or TV and hit Request."
+            )
+          }
+          cta={
+            total === 0 && !hasFilters
+              ? { href: "/movies", label: "Browse movies" }
+              : undefined
+          }
+        />
       ) : (
         <>
           <div className="flex flex-col" style={{ gap: 8 }}>
@@ -192,12 +210,10 @@ export default async function RequestsPage({
               return (
                 <div
                   key={r.id}
-                  className="flex items-start"
+                  className="flex items-start transition-colors bg-[var(--ds-bg-2)] hover:bg-[var(--ds-bg-3)] border border-[var(--ds-border)]"
                   style={{
                     gap: 14,
                     padding: 14,
-                    background: "var(--ds-bg-2)",
-                    border: "1px solid var(--ds-border)",
                     borderRadius: 8,
                   }}
                 >
@@ -243,7 +259,7 @@ export default async function RequestsPage({
 
                     <div className="flex-1 min-w-0">
                       <p
-                        className="font-medium truncate transition-colors group-hover:text-[var(--ds-accent)]"
+                        className="font-medium truncate transition-colors group-hover:text-[var(--ds-accent-text)]"
                         style={{ fontSize: 14, color: "var(--ds-fg)" }}
                       >
                         {r.title}
@@ -300,59 +316,11 @@ export default async function RequestsPage({
             })}
           </div>
 
-          {totalPages > 1 && (
-            <div
-              className="flex items-center justify-between"
-              style={{ marginTop: 24 }}
-            >
-              <p
-                className="ds-mono"
-                style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
-              >
-                Page {page} of {totalPages}
-              </p>
-              <div className="flex items-center gap-2">
-                <PagerLink href={page > 1 ? pageHref(page - 1) : undefined}>
-                  Previous
-                </PagerLink>
-                <PagerLink
-                  href={page < totalPages ? pageHref(page + 1) : undefined}
-                >
-                  Next
-                </PagerLink>
-              </div>
-            </div>
-          )}
+          <Suspense>
+            <PaginationBar currentPage={page} totalPages={totalPages} />
+          </Suspense>
         </>
       )}
     </div>
-  );
-}
-
-function PagerLink({
-  href,
-  children,
-}: {
-  href?: string;
-  children: React.ReactNode;
-}) {
-  const style: React.CSSProperties = {
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: "0 12px",
-    height: 28,
-    borderRadius: 6,
-    border: "1px solid var(--ds-border)",
-    background: href ? "var(--ds-bg-2)" : "transparent",
-    color: href ? "var(--ds-fg-muted)" : "var(--ds-fg-disabled)",
-    fontSize: 11,
-    fontWeight: 500,
-  };
-  if (!href) return <span style={style}>{children}</span>;
-  return (
-    <Link href={href} style={style}>
-      {children}
-    </Link>
   );
 }

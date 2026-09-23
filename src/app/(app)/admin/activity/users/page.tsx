@@ -4,8 +4,9 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import Link from "next/link";
 import { Card } from "@/components/ui/card";
 import { getAllUsersStats } from "@/lib/play-history";
+import { PageHeader } from "@/components/ui/design";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
-import { ArrowDown, ArrowUp, ArrowUpDown, Users } from "@/components/icons";
+import { ArrowDown, ArrowUp, ArrowUpDown } from "@/components/icons";
 import { formatRelativeTimeWithDateFallback } from "@/lib/relative-time";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 
@@ -53,11 +54,14 @@ function SortHeader({
   const alignClass = align === "right" ? "text-right" : "text-left";
   const flexAlign = align === "right" ? "justify-end" : "justify-start";
 
+  // The Link is the hit target, not the <th>: py-1 on the cell + min-h-8 on the
+  // link keeps the row at its previous 40px while making the whole 32px
+  // tappable.
   return (
-    <th scope="col" className={`py-3 px-4 ${alignClass}`}>
+    <th scope="col" className={`py-1 px-4 ${alignClass}`}>
       <Link
         href={`/admin/activity/users?${params.toString()}`}
-        className={`inline-flex items-center gap-1 select-none hover:text-zinc-300 transition-colors ${flexAlign}`}
+        className={`inline-flex items-center min-h-8 gap-1 select-none rounded hover:text-zinc-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)] ${flexAlign}`}
       >
         <span>{label}</span>
         {isActive ? (
@@ -116,18 +120,14 @@ export default async function UsersActivityPage({
   });
 
   return (
-    <div>
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold mb-1 flex items-center gap-2">
-          <Users className="w-6 h-6 text-zinc-400" />
-          Server Users
-        </h1>
-        <p className="text-zinc-400 text-sm">{users.length} user{users.length !== 1 ? "s" : ""} with play history</p>
-      </div>
+    <div className="ds-page-enter">
+      <PageHeader
+        title="Server Users"
+        subtitle={`${users.length} user${users.length !== 1 ? "s" : ""} with play history`}
+      />
 
       <ActivityFilterBar />
 
-      {}
       <form method="GET" className="mb-4">
         <input type="hidden" name="sort" value={sort} />
         <input type="hidden" name="dir" value={dir} />
@@ -136,7 +136,7 @@ export default async function UsersActivityPage({
           name="search"
           defaultValue={search ?? ""}
           placeholder="Search by username…"
-          className="w-full max-w-xs px-3 py-1.5 text-sm bg-zinc-800 border border-zinc-700 rounded-lg text-white placeholder:text-zinc-500 focus:outline-none focus:border-indigo-500"
+          className="w-full max-w-xs px-3 py-1.5 text-sm bg-zinc-800 border border-zinc-700 rounded-lg text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-[var(--ds-accent-ring)]"
         />
       </form>
 
@@ -184,7 +184,7 @@ export default async function UsersActivityPage({
                             {u.username.slice(0, 2).toUpperCase()}
                           </AvatarFallback>
                         </Avatar>
-                        <span className="text-white group-hover:text-indigo-400 transition-colors font-medium">
+                        <span className="text-zinc-100 group-hover:text-indigo-400 transition-colors font-medium">
                           {u.username}
                         </span>
                       </Link>

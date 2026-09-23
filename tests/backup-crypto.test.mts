@@ -44,7 +44,8 @@ const PLAINTEXT = Buffer.from(
   JSON.stringify({ tables: ["User", "Setting"], rows: "x".repeat(200) }),
   "utf8",
 );
-// Encrypt once at load; the KDF runs 600k PBKDF2 iterations, so tests share this blob.
+// Encrypt once at load and share the blob: the key-derivation step (KDF) runs 600k
+// PBKDF2 iterations, which is too slow to repeat in every test.
 const ENCRYPTED = await collect(wrapEncryptStream(streamFrom([new Uint8Array(PLAINTEXT)]), PASSWORD));
 
 test("encrypt → decrypt roundtrip, decrypting across awkward chunk boundaries", async () => {

@@ -20,22 +20,18 @@ const MAX_THUMB_BYTES = 5 * 1024 * 1024;
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif", "image/avif"];
 
 export async function GET(request: NextRequest) {
-  // DB-checked auth — see /api/events for why inline JWT-only auth() is
-  // insufficient on the prefetch-header path. role:"ISSUE_ADMIN" admits ADMIN
-  // too. requireAuth returns 401 (no/expired/revoked session) or 403 (wrong role).
+  // This route returns an image, not JSON, so it calls requireAuth directly
+  // instead of a withAuth wrapper (guardrail 6a). requireAuth is DB-checked
+  // (revoked sessions are refused), unlike the JWT-only auth(). It returns 401
+  // when there is no valid session.
   //
-  // Intentionally does NOT thread a sliding-refresh Set-Cookie. requireAuth
-  // (api-auth.ts) discards the refreshed JWT; re-issuing it here would mean
-  // re-implementing the verify/fingerprint/role boilerplate inline (guardrail 6a
-  // forbids) or widening the shared api-auth signature (out of scope). Impact is
-  // nil — this binary image proxy carries no Set-Cookie, and the next normal
-  // withAuth request re-runs the sliding refresh, so the window is never lost.
-  // Authenticate only — the MANAGE_ISSUES bitmask check below is the authorization.
-  // Requiring role ISSUE_ADMIN here 403'd a plain USER who had been GRANTED the bit,
-  // which guardrail 6a explicitly supports and the proxy's /api/admin backstop
-  // deliberately admits (it 403s only a caller with no admin-surface bit at all). Every
-  // sibling fix-match route gates on the bitmask via withIssueAdmin, so that user could
-  // open the fix-match picker and load candidates while every thumbnail returned 403.
+  // It does NOT send back a refreshed session cookie: requireAuth drops the
+  // re-signed token. That is harmless — the next normal API call refreshes it.
+  //
+  // requireAuth only checks "signed in". The MANAGE_ISSUES permission check
+  // below is the real access rule. Requiring the ISSUE_ADMIN role instead would
+  // wrongly block a plain USER who was granted that permission, while the other
+  // fix-match routes (withIssueAdmin) let them in.
   const gate = await requireAuth();
   if (gate instanceof NextResponse) return gate;
   // Authoritative on the MANAGE_ISSUES bit (same gate as the sibling fix-match

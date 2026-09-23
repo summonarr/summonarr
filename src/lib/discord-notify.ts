@@ -346,7 +346,8 @@ async function chunkSequential(
   }
 }
 
-// Discord rate-limits DM channel creation; serialise DMs through a queue to avoid 429s when notifying many users
+// Discord rate-limits opening DM channels, so DMs go out one at a time through
+// this queue (600 ms apart) to avoid 429 "too many requests" errors.
 const dmQueue: Array<() => Promise<void>> = [];
 let dmQueueRunning = false;
 
@@ -453,8 +454,13 @@ export async function notifyUserRequestAvailable(userId: string, title: string, 
 
 export async function notifyUserAwaitingRelease(userId: string, title: string, mediaType: string, releaseDate: string | null): Promise<void> {
   const label = mediaLabel(mediaType);
-  const releasePart = releaseDate
-    ? ` Expected around **${new Date(releaseDate).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })}**.`
+  // Formatted in UTC: TMDB release dates and Sonarr firstAired are DATE values
+  // carried as UTC midnight ("2024-05-01" / "…T00:00:00Z"), so the server's local
+  // zone (any TZ west of UTC) would name the PREVIOUS day. Same convention as
+  // formatDigitalRelease (format-release-date.ts).
+  const parsed = releaseDate ? new Date(releaseDate) : null;
+  const releasePart = parsed && !Number.isNaN(parsed.getTime())
+    ? ` Expected around **${parsed.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" })}**.`
     : "";
   await notifyUser(userId, {
     color: COLORS.pending,
@@ -506,7 +512,7 @@ export async function notifyAdminsIssueMessage(title: string, userName: string, 
         discordId: { not: null },
         notifyOnIssue: true,
         // A disabled account keeps its Discord link (guardrail 33), so without
-        // this it keeps getting DM'd about every new issue.
+        // this it would keep getting pinged about every issue message.
         deactivatedAt: null,
         ...idFilter,
       },

@@ -75,8 +75,9 @@ test("every currently-known sensitive key stays in the list (removal = plaintext
       `"${key}" was removed from SETTINGS_SENSITIVE_KEYS — it would be stored plaintext-at-rest`,
     );
   }
-  // Guard the pin itself: if the source list grows, this count check nudges
-  // the maintainer to extend mustStay so new credentials get pinned too.
+  // Sanity check on the pin itself: the source list can never be shorter than
+  // mustStay. (It does not fail when the list grows — extend mustStay by hand
+  // when you add a key so the new credential is pinned too.)
   assert.equal(
     SETTINGS_SENSITIVE_KEYS.length >= mustStay.length,
     true,

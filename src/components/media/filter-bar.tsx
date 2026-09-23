@@ -219,7 +219,7 @@ export function FilterBar({
   const activeProviderName = sortedProviders.find((p) => String(p.provider_id) === activeWatchProvider)?.provider_name;
 
   return (
-    <div className="flex flex-col gap-3 mb-8">
+    <div className="flex flex-col gap-3 mb-6">
       <SortSegments
         segments={SORT_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
         active={activeSortBy ?? "popularity.desc"}
@@ -299,16 +299,18 @@ export function FilterBar({
         <button
           type="button"
           onClick={() => push({ hideAvailable: activeHideAvailable ? undefined : "1" })}
-          className="ds-tap inline-flex items-center gap-1.5 font-medium transition-colors"
+          aria-pressed={!!activeHideAvailable}
+          className="ds-tap ds-hover-tint inline-flex items-center gap-1.5 font-medium"
           style={{
             padding: "5px 12px",
+            minHeight: 32,
             borderRadius: 6,
             fontSize: 12,
             background: activeHideAvailable
               ? "var(--ds-accent-soft)"
               : "var(--ds-bg-2)",
             color: activeHideAvailable
-              ? "var(--ds-accent)"
+              ? "var(--ds-accent-text)"
               : "var(--ds-fg-muted)",
             border: `1px solid ${activeHideAvailable ? "var(--ds-accent-ring)" : "var(--ds-border)"}`,
           }}
@@ -320,9 +322,10 @@ export function FilterBar({
           <button
             type="button"
             onClick={clearAll}
-            className="ds-tap inline-flex items-center gap-1 transition-colors"
+            className="ds-tap ds-hover-tint inline-flex items-center gap-1"
             style={{
               padding: "5px 10px",
+              minHeight: 32,
               borderRadius: 6,
               fontSize: 11,
               background: "var(--ds-bg-2)",
@@ -383,12 +386,18 @@ function Chip({ label, onRemove }: { label: string; onRemove: () => void }) {
         onClick={onRemove}
         aria-label={`Remove filter: ${label}`}
         title={`Remove filter: ${label}`}
-        className="inline-flex items-center transition-colors ml-0.5"
+        className="ds-hover-tint inline-flex items-center justify-center shrink-0"
         style={{
+          // 24px hit box. The negative margins pull it back to the 12px
+          // footprint the 2px gap + 10px glyph occupied, so the chip keeps its
+          // size and the glyph stays exactly where it was.
+          width: 24,
+          height: 24,
+          margin: "-6px -7px -6px -5px",
+          borderRadius: 999,
           background: "transparent",
           border: 0,
           padding: 0,
-          cursor: "pointer",
           color: "inherit",
         }}
       >

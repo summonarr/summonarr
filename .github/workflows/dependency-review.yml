@@ -1,7 +1,7 @@
 name: Dependency Review
 
-# Blocks PRs that introduce new vulnerable dependencies or restricted
-# licenses before they merge. Dependabot reacts after a CVE is published
+# Blocks PRs that introduce new vulnerable dependencies before they merge.
+# (No license policy is configured below — only severity.) Dependabot reacts after a CVE is published
 # against an installed version; this acts at PR time on the diff itself,
 # so a brand-new dep with an existing advisory can't slip in.
 #

@@ -23,6 +23,8 @@ import {
   fmtDuration,
 } from "@/components/admin/activity-ui";
 import { ActivityCalendar } from "@/components/admin/activity-calendar";
+import { BarChart3 } from "@/components/icons";
+import { EmptyState } from "@/components/ui/design";
 
 export interface MyStatsData {
   totalPlays: number;
@@ -66,8 +68,8 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
   const when = (iso: string | null) =>
     !iso ? "—" : mounted ? formatRelativeTime(iso) : absTime(iso);
 
-  // Postgres DOW 0=Sun..6=Sat → heatmap rows are Mon-first (matches the admin
-  // grid): pgDow (row + 6) % 7.
+  // Postgres numbers weekdays 0=Sun..6=Sat, but the heatmap rows start on
+  // Monday (like the admin grid), so a day lands on row (dow + 6) % 7.
   const heatmapMatrix: number[][] = Array.from({ length: 7 }, () =>
     new Array<number>(24).fill(0),
   );
@@ -82,25 +84,16 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
   // Linked, but nothing recorded yet — a media-server user with no plays.
   if (s.totalPlays === 0 && s.topMedia.length === 0) {
     return (
-      <ActivityCard>
-        <div
-          style={{
-            padding: "24px 8px",
-            textAlign: "center",
-            color: "var(--ds-fg-subtle)",
-            fontSize: 13,
-            lineHeight: 1.6,
-          }}
-        >
-          No watch activity has been recorded yet. Once you play something on the
-          server, your stats will appear here.
-        </div>
-      </ActivityCard>
+      <EmptyState
+        icon={BarChart3}
+        title="No watch activity yet"
+        description="Once you play something on the server, your stats will appear here."
+      />
     );
   }
 
   return (
-    <div className="ds-page-enter" style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
       <div
         style={{
           display: "grid",
@@ -151,7 +144,7 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
           <SectionHeader label="Devices" sub={`${s.deviceList.length} known`} />
           <HorizontalBars
             items={s.deviceList.slice(0, 6).map((d) => ({ label: d.device, count: d.count }))}
-            color="oklch(0.62 0.14 295)"
+            color="var(--ds-info)"
             labelWidth={100}
           />
         </ActivityCard>

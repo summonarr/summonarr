@@ -52,8 +52,9 @@ type SettingUpsertArgs = {
 
 const upsertCalls: SettingUpsertArgs[] = [];
 let failUpserts = false;
-// Backing store for the ledger read recordCronRun now performs. Empty by
-// default, so every pre-existing case still sees "no prior history".
+// Backing store for the ledger read recordCronRun does before each write (it
+// reads the old row to keep its run history). Empty by default, so tests start
+// with "no prior history".
 const settingRows = new Map<string, string>();
 let failFindUnique = false;
 
@@ -311,7 +312,8 @@ test("batchCreateMany: a failed chunk propagates and stops later chunks", async 
 // isCronAuthorized — CRON_SECRET Bearer path (guardrail 6)
 // ---------------------------------------------------------------------------
 
-// ≥32 chars, matching the boot-time enforcement the no-throttle comment relies on.
+// ≥32 chars, matching the boot-time minimum. cron-auth.ts relies on that length
+// to skip throttling failed Bearer attempts (see its "no failure throttle" note).
 const CRON_SECRET = "unit-test-cron-secret-0123456789abcdef";
 
 function cronRequest(headers?: Record<string, string>, path = "/api/sync"): NextRequest {

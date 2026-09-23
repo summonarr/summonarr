@@ -219,9 +219,9 @@ test("NOT ONE key this route reads is a sensitive (encrypted) setting", async ()
 });
 
 test("no key this route reads looks like a credential or a server URL", async () => {
-  // Belt-and-braces over the isSensitiveSettingKey check: a key that the
-  // sensitive-key matcher doesn't yet know about but which is obviously secret
-  // or infrastructural should still not be here.
+  // A second safety net on top of the isSensitiveSettingKey check: a key the
+  // sensitive-key matcher doesn't know about yet, but whose name is obviously a
+  // secret or a server address, must still not be read here.
   await body();
   const suspicious = requestedKeys().filter((k) => /token|secret|apikey|password|url|adminemail/i.test(k));
   assert.deepEqual(suspicious, [], `suspicious keys in the public read: ${suspicious.join(", ")}`);

@@ -5,10 +5,9 @@ import { safeFetchTrusted, SafeFetchError } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
 import { mapLimit, coalesce } from "./concurrency";
 
-// Bounded concurrency for the per-page cache upserts. A full 200-item page used
-// to write its rows with a sequential await-in-loop (~200 serial Postgres
-// round-trips on the blocking ratings-attach path); flush them a few at a time
-// instead without saturating the small Prisma pool.
+// How many cache writes one batch page runs at once. A full page has up to 200
+// rows; writing them one by one is slow, and writing all at once would swamp
+// the small Prisma connection pool.
 const MDBLIST_CACHE_WRITE_CONCURRENCY = 8;
 
 const MDBLIST_REST_BASE  = "https://api.mdblist.com/";
@@ -16,6 +15,7 @@ const MDBLIST_FETCH_TIMEOUT_MS = 10_000;
 const MDBLIST_BATCH_TIMEOUT_MS = 30_000;
 const MDBLIST_HOSTS = ["api.mdblist.com"];
 
+// How long (seconds) a "MDBList has no data for this title" answer is cached.
 const MDBLIST_NEGATIVE_TTL = 24 * 60 * 60;
 
 // Sentinel stored in cache to distinguish "MDBList returned no data" from "not yet fetched"
@@ -165,7 +165,6 @@ export async function fetchAndCacheMdblistForTmdb(
     await setCache(cacheKey, ratings, libraryDetailsTtl(releaseDate ?? (respYear ? `${respYear}-01-01` : null)));
     return { found: true, data: ratings };
   } catch (err) {
-
     const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
     console.error(`[mdblist] Error fetching for ${sanitizeForLog(mediaType)}:${tmdbId}: ${sanitizeForLog(reason)}`);
     return { found: false, keyConfigured: true, transient: true };
@@ -225,7 +224,6 @@ function sourceValue(value: number | null | undefined): number | null {
 
 // Exported for direct unit coverage (tests/mdblist-parse.test.mts) — pure parser, no I/O.
 export function parseBatchItem(raw: MdblistBatchRaw): MdblistRatings {
-
   // MDBList source names vary across API versions; multiple aliases are checked per source
   const findSrc = (...names: string[]) => {
     const arr = raw.ratings ?? [];
@@ -345,10 +343,8 @@ export async function fetchMdblistBatch(
           break;
         }
         if (errMsg) {
-          // A 200-with-error body (bad key, malformed request) previously fell
-          // through to arr=[] and masqueraded as "returned empty array" — name
-          // the real error (mirrors the single-item warn) and count it toward
-          // the breaker; nothing about this page is a ratings answer.
+          // A 200-with-error body (bad key, malformed request) is not a ratings
+          // answer. Log the real error and count it toward the failure breaker.
           console.warn(`[mdblist] batch ${mediaType} API error: ${sanitizeForLog(errMsg)}`);
           if (++consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
             console.warn(`[mdblist] batch ${mediaType}: ${consecutiveFailures} consecutive page failures — stopping the walk`);
@@ -399,9 +395,8 @@ export async function fetchMdblistBatch(
           }
           continue;
         }
-        // Cache/result key is the REQUESTED TMDB id (pageItem.id), never raw.id — the
-        // old code keyed on raw.id (MDBList's internal id), so even a positional match
-        // wrote the row under the wrong cache key.
+        // Cache/result key is the REQUESTED TMDB id (pageItem.id), never raw.id,
+        // which is MDBList's own internal id.
         const tmdbId = pageItem.id;
 
         const ratings = parseBatchItem(raw);
@@ -414,28 +409,17 @@ export async function fetchMdblistBatch(
         cacheWrites.push(() => setCache(cacheKey, ratings, ttl));
       }
 
-      // A SHORT response is genuine per-id absence, not truncation, so the ids
-      // MDBList left out are negative-cached like any other miss.
+      // A SHORT response means MDBList simply has no data for the missing ids —
+      // it is not a cut-off batch. Live logs showed the row count tracks the
+      // request size (197/200, 87/88, 8/9), which is per-id absence, not
+      // truncation. So the missing ids get a "not found" marker like any other
+      // miss. Without it, every such id was re-requested on each page load and
+      // sent to the OMDB fallback each time. If a short answer was ever a blip,
+      // the cost is one MDBLIST_NEGATIVE_TTL (24h) and it fixes itself.
       //
-      // This reverses an earlier reading. The old rule required
-      // `arr.length >= page.length` on the theory that MDBList "echoes one entry
-      // per requested id (with null ratings for ones it has no data on)", making
-      // a short response a truncated batch. Live logs refute that:
-      //   - the numerator tracks the request (197/200, 87/88, 30/31, 8/9) — a
-      //     truncation ceiling would cap at a constant, not scale;
-      //   - the shortfall varies 0.5%-36% with batch CONTENT, which is what
-      //     per-id coverage looks like (deep suggestion-tail batches lose most);
-      //   - nine-id requests come back with eight. Nothing truncates one row out
-      //     of nine.
-      // The cost of the old rule was unbounded: an id MDBList simply does not
-      // have was re-requested on every page load forever AND pushed into the
-      // OMDB fallback each time, which is most of where the OMDB load came from.
-      // If a short response ever IS transient, the damage is one
-      // MDBLIST_NEGATIVE_TTL (24h) and it self-heals.
-      //
-      // The two genuinely ambiguous shapes below still skip: an EMPTY array
-      // (indistinguishable from an upstream blip) and any response carrying
-      // UNMATCHED rows (they displaced requested ids MDBList never answered for).
+      // Two shapes are still ambiguous and skip the marker: an EMPTY array
+      // (looks the same as an upstream blip) and any response with UNMATCHED
+      // rows (they took the place of requested ids MDBList never answered for).
       if (unmatchedRows === 0 && arr.length > 0) {
         for (const item of page) {
           if (!result.has(item.id)) {
@@ -443,11 +427,9 @@ export async function fetchMdblistBatch(
             cacheWrites.push(() => setCache(cacheKey, NOT_FOUND_SENTINEL, MDBLIST_NEGATIVE_TTL));
           }
         }
-        // No routine log for the shortfall any more: it is now expected, and it
-        // is self-limiting — a negative-cached id is not in the next run's page,
-        // so the volume that flooded the boot log decays to nothing on its own.
-        // A genuine coverage collapse still surfaces as absent ratings and via
-        // /api/admin/debug/ratings-state.
+        // No log for the shortfall: it is expected, and a marked id drops out of
+        // the next run's page on its own. A real coverage collapse still shows
+        // up as missing ratings and in /api/admin/debug/ratings-state.
       } else if (arr.length === 0) {
         // An empty array likely means MDBList had a transient issue, not that all items are absent —
         // skip negative-caching to avoid poisoning future lookups.
@@ -456,9 +438,9 @@ export async function fetchMdblistBatch(
         console.warn(`[mdblist] batch ${mediaType} returned ${unmatchedRows} unmatched row(s) (${arr.length} rows for ${page.length} ids) — skipping NOT_FOUND caching for omitted ids`);
       }
 
-      // Flush this page's cache writes a few at a time. A rejection propagates to
-      // the surrounding catch (same as the old serial await), which logs and
-      // moves on to the next page — caching is best-effort.
+      // Flush this page's cache writes a few at a time. A failed write jumps to
+      // the catch below, which logs and moves on to the next page — caching is
+      // best-effort.
       await mapLimit(cacheWrites, MDBLIST_CACHE_WRITE_CONCURRENCY, (w) => w());
     } catch (err) {
       const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
@@ -606,12 +588,9 @@ export async function getMdblistTopLists(limit = 10): Promise<MdblistListMeta[]>
 async function fetchMdblistListItemsWithStatus(
   listId: number,
 ): Promise<{ items: TmdbMedia[]; ok: boolean }> {
-  // ONE cache row per list, holding the unfiltered projection. The old
-  // type-suffixed keys (`:movie`/`:tv`/`:all`) cached disjoint post-filter
-  // copies, so the same upstream list was fetched once per requested type;
-  // filtering in memory serves every variant from one row, and coalesce
-  // dedups the concurrent movie+tv cold fan-out the /top page fires. Old
-  // type-suffixed rows simply expire out.
+  // ONE cache row per list, holding every item (movies and TV together).
+  // Callers filter by type in memory, so one upstream fetch serves both, and
+  // coalesce merges the movie + TV requests the /top page fires at once.
   const key = `mdblist:list:${listId}`;
   return coalesce(key, async (): Promise<{ items: TmdbMedia[]; ok: boolean }> => {
   const cached = await getCache<TmdbMedia[]>(key);

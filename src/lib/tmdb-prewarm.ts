@@ -336,6 +336,7 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
 async function processPrewarmPage(
   page: LibraryItem[],
   stats: { fetched: number; backfilled: number; skipped: number; failed: number },
+  signal?: AbortSignal,
 ): Promise<void> {
   const cacheKey = (i: LibraryItem) =>
     `${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}:details`;
@@ -399,6 +400,10 @@ async function processPrewarmPage(
   }
 
   for (let i = 0; i < staleItems.length; i += CONCURRENCY) {
+    // Guardrail 41: stop at the batch boundary once the advisory lock has
+    // timed out — a page holds up to LIBRARY_PAGE_SIZE stale items, i.e.
+    // minutes of lock-free TMDB fetching if the walk ignored the abort here.
+    if (signal?.aborted) return;
     const batch = staleItems.slice(i, i + CONCURRENCY);
     const results = await Promise.allSettled(
       batch.map((item) => fetchAndStore(item.tmdbId, item.mediaType)),
@@ -432,7 +437,7 @@ export async function prewarmLibraryCache(opts: { signal?: AbortSignal } = {}): 
 
   const flushPage = async () => {
     if (pageBuffer.length === 0) return;
-    await processPrewarmPage(pageBuffer, stats);
+    await processPrewarmPage(pageBuffer, stats, opts.signal);
     pageBuffer = [];
   };
 
@@ -462,7 +467,10 @@ export async function prewarmLibraryCache(opts: { signal?: AbortSignal } = {}): 
     }
   }
 
-  await flushPage();
+  // An aborted walk must not flush its partial page: that would issue up to
+  // LIBRARY_PAGE_SIZE - 1 more fetches after the lock was released, which is
+  // exactly the overshoot the per-item check above exists to prevent.
+  if (!opts.signal?.aborted) await flushPage();
 
   if (total === 0) {
     return { total: 0, ...stats };

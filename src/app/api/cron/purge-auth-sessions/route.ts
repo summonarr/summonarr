@@ -17,9 +17,9 @@ export async function POST(request: NextRequest) {
       // typical RIR data freshness — beyond that, AS/org reassignments mean
       // a re-lookup is cheaper than serving stale geolocation.
       const ipLookupCutoff = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
-      // PlexTokenCache: legacy rows (pre-TTL migration) have null expiresAt.
-      // Purge both expired rows AND null rows older than 90 days, per the
-      // model comment. Sweeper was promised in maintenance.ts but never landed.
+      // PlexTokenCache: old rows written before the TTL column existed have a
+      // null expiresAt, so they would never match the "expired" delete. We also
+      // purge those null rows once they are older than 90 days.
       const plexTokenLegacyCutoff = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
       // AuditLog: PII is scrubbed at 90 days by scrub-audit-pii. Row deletion
       // at 365 days bounds unbounded table growth from per-tick LIBRARY_SYNC /

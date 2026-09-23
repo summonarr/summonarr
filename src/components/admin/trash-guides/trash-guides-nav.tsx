@@ -32,7 +32,8 @@ interface TrashGuidesNavProps {
 
 // Sub-page tabs plus service (Radarr/Sonarr) and instance toggles for the
 // trash-guides admin section; toggles drive the ?service= / ?variant= params.
-// ?variant= carries an instance SLUG ("" default via param absence, "4k", named).
+// ?variant= holds an instance slug such as "4k" or a named instance; the
+// default instance ("") is selected by leaving the param out.
 export function TrashGuidesNav({
   radarrConfigured,
   sonarrConfigured,
@@ -124,7 +125,7 @@ export function TrashGuidesNav({
               href={`${page.href}${queryWithParams}`}
               className={`px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors ${
                 active
-                  ? "bg-zinc-800 text-white"
+                  ? "bg-zinc-800 text-zinc-100"
                   : "text-zinc-500 hover:text-zinc-300"
               }`}
             >
@@ -148,16 +149,16 @@ export function TrashGuidesNav({
                     onClick={() => setService(s.value)}
                     className={`px-2.5 py-1 text-xs font-medium transition-colors inline-flex items-center gap-1.5 ${
                       active
-                        ? "bg-indigo-600 text-white"
-                        : "bg-zinc-800 text-zinc-400 hover:text-white"
+                        ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+                        : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
                     }`}
                   >
                     <span>
                       {s.label}
-                      <span className={active ? "text-indigo-100/80 ml-1" : "text-zinc-500 ml-1"}>· {s.suffix}</span>
+                      <span className={active ? "text-[var(--ds-accent-fg)] ml-1" : "text-zinc-500 ml-1"}>· {s.suffix}</span>
                     </span>
                     {!cfg && (
-                      <span className="text-[10px] text-amber-300/80">(not configured)</span>
+                      <span className="text-[10px] text-amber-400">(not configured)</span>
                     )}
                   </button>
                 );
@@ -177,8 +178,8 @@ export function TrashGuidesNav({
                       onClick={() => setVariant(v.slug)}
                       className={`px-2.5 py-1 text-xs font-medium transition-colors ${
                         active
-                          ? "bg-indigo-600 text-white"
-                          : "bg-zinc-800 text-zinc-400 hover:text-white"
+                          ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+                          : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
                       }`}
                     >
                       {v.name}

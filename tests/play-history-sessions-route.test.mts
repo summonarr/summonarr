@@ -8,8 +8,9 @@
 // 500'd for anyone with something playing.
 //
 // It went unnoticed because the iOS app is this route's ONLY consumer — the web
-// now-playing list is rendered by the admin/activity server component (RSC
-// serializes BigInt natively) and refreshed over the `activity:sessions` SSE
+// now-playing list is rendered by the admin/activity server component (React
+// Server Components serialize BigInt natively) and refreshed over the
+// `activity:sessions` SSE
 // payload, which projects its fields one by one. Neither path passes through
 // here, so "works on the web" said nothing about this route.
 //

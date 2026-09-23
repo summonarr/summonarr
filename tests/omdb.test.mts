@@ -2,7 +2,8 @@
 // quota-lockout family — tests/omdb-quota.test.mts already pins the lockout
 // contracts (trips on 429/quota bodies, not on invalid-key/not-found; locked
 // short-circuits; cached values served while locked; strict-< 1h expiry) plus
-// the not-found sentinel write/short-circuit and one basic Response=True parse.
+// the transport circuit breaker, the "a not-found writes no cache row" pin, and
+// one basic Response=True parse.
 // This file covers the rest of the module:
 //   - getOmdbRatings response parsing: the Ratings array is consulted ONLY for
 //     the "Rotten Tomatoes" source (the array's Metacritic entry is ignored —

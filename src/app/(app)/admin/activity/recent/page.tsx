@@ -6,8 +6,9 @@ import Link from "next/link";
 import Image from "next/image";
 import { Card } from "@/components/ui/card";
 import { posterUrl } from "@/lib/tmdb-types";
+import { PageHeader } from "@/components/ui/design";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
-import { Clock, Film, Tv2 } from "@/components/icons";
+import { Film, Tv2 } from "@/components/icons";
 import { formatRelativeTimeWithDateFallback } from "@/lib/relative-time";
 
 export const dynamic = "force-dynamic";
@@ -110,7 +111,9 @@ export default async function RecentlyAddedPage() {
         const parsed = JSON.parse(row.data) as { poster_path?: string | null; posterPath?: string | null };
         const path = parsed.poster_path ?? parsed.posterPath ?? null;
         posterByKey.set(row.key, posterUrl(path, "w342"));
-      } catch { }
+      } catch {
+        // A corrupt cache row just means this title shows no poster.
+      }
     }
     items = items.map((i) => ({
       ...i,
@@ -119,20 +122,18 @@ export default async function RecentlyAddedPage() {
   }
 
   return (
-    <div>
-      <ActivityFilterBar />
+    <div className="ds-page-enter">
+      <PageHeader
+        title="Recently Added"
+        subtitle={
+          // items is capped (slice above), so this is "the latest N", not a total.
+          items.length > 0
+            ? `The latest ${items.length} ${items.length === 1 ? "item" : "items"} added to your media server`
+            : "Items recently added to your media server"
+        }
+      />
 
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold mb-1 flex items-center gap-2">
-          <Clock className="w-6 h-6 text-zinc-400" />
-          Recently Added
-        </h1>
-        <p className="text-zinc-400 text-sm">
-          {items.length > 0
-            ? `${items.length} items recently added to your media server`
-            : "Items recently added to your media server"}
-        </p>
-      </div>
+      <ActivityFilterBar />
 
       {items.length === 0 ? (
         <Card className="bg-zinc-900 border-zinc-800 p-8 text-center">
@@ -166,23 +167,21 @@ export default async function RecentlyAddedPage() {
                       <p className="text-zinc-500 text-[10px] text-center leading-tight">{item.title}</p>
                     </div>
                   )}
-                  {}
                   <div className="absolute top-1.5 right-1.5 flex gap-1">
                     {item.sources.plex && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-amber-500/90 text-black">
+                      <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-[var(--ds-plex)] text-black">
                         Plex
                       </span>
                     )}
                     {item.sources.jellyfin && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-purple-500/90 text-white">
+                      <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-purple-700 text-white">
                         JF
                       </span>
                     )}
                   </div>
-                  {}
                 </div>
                 <div className="min-w-0">
-                  <Link href={activityHref} className="text-xs font-medium text-white hover:text-indigo-400 transition-colors truncate block">
+                  <Link href={activityHref} className="text-xs font-medium text-zinc-100 hover:text-indigo-400 transition-colors truncate block">
                     {item.title}
                   </Link>
                   <p className="text-[10px] text-zinc-500">

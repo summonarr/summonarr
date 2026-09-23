@@ -117,8 +117,6 @@ test("sanitizeForLog leaves ordinary unicode text intact", () => {
   assert.equal(sanitizeForLog(s), s);
 });
 
-// Pin the String() coercion contract log callsites rely on for
-// non-string values.
 // Source-level pin on the CodeQL contract. The barrier in
 // javascript/ql/lib/semmle/javascript/security/dataflow/LogInjectionQuery.qll is:
 //
@@ -152,6 +150,8 @@ test("sanitizeForLog keeps the exact replace form CodeQL's barrier matches", () 
   }
 });
 
+// Log call sites pass non-string values too; sanitizeForLog must turn them
+// into strings with String() rather than throw.
 test("sanitizeForLog stringifies undefined and plain objects", () => {
   assert.equal(sanitizeForLog(undefined), "undefined");
   assert.equal(sanitizeForLog({}), "[object Object]");

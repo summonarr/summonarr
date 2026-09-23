@@ -8,9 +8,10 @@ import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
 
-// PII retention window for audit rows. Read by getAuditPiiRetentionDays(),
-// which drives BOTH the daily scrub-audit-pii cron and the manual "Scrub PII"
-// button on the Audit Log page — one knob, one promise.
+// How many days audit-log rows keep personal data (PII, e.g. IP addresses)
+// before it is scrubbed. getAuditPiiRetentionDays() reads this one setting for
+// BOTH the daily scrub-audit-pii cron and the manual "Scrub PII" button on the
+// Audit Log page, so the two always agree.
 export function AuditRetentionForm({ initialDays }: { initialDays: string }) {
   const [days, setDays] = useState(initialDays);
   const [status, setStatus] = useState<SaveStatus>("idle");

@@ -18,7 +18,7 @@
 //
 // The second pin is repo-wide and structural. It exists because this exact code
 // drifted once already: the commit that raised the SQL threshold to 1_000_000
-// updated all nine SQL copies and missed the two client-side helpers, which sat
+// updated all nine SQL copies and missed the client-side helpers, which sat
 // on the old 100_000 cutoff for several releases — the SQL and the UI on the
 // same page disagreed about the same session. Nothing caught it, because there
 // was no single definition to pin. There is now, so the pin is "nobody

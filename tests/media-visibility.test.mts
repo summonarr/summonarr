@@ -5,10 +5,10 @@
 // legitimate viewers — and the same answer drives the request status that
 // follows from it, so it is not a cosmetic surface.
 //
-// Impurity: prisma.setting.findUnique (the two registry blobs) +
-// prisma.user.findUnique (the grants column). No local DB here, so both model
-// delegates are shadowed with in-memory stubs (the tests/_helpers.mts idiom, as
-// in tests/media-instance-registry.test.mts). No DB or network touched.
+// DB reads: prisma.setting.findUnique (the two registry JSON values) +
+// prisma.user.findUnique (the grants column). There is no local DB, so both
+// models are replaced with in-memory stubs (the tests/_helpers.mts pattern, as
+// in tests/media-instance-registry.test.mts). No DB or network is touched.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { prisma } from "../src/lib/prisma.ts";

@@ -25,20 +25,13 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
   const [optimisticStatus, setOptimisticStatus] = useState<string | null>(null);
   const status = optimisticStatus ?? currentStatus;
 
-  // Drop the optimistic value as soon as the server-rendered status catches up.
+  // Drop the optimistic value as soon as the server-rendered status changes.
   //
-  // router.refresh() re-renders the server component but deliberately preserves
-  // client state, and the row's key is derived from the title (tmdbId:mediaType),
-  // not from the request or its status — so this instance survives every refresh
-  // and the optimistic value, once set, masked `currentStatus` for the life of
-  // the page. Two consequences, the second much worse than a stale label:
-  //   • sync flips the row to AVAILABLE — the chip beside these buttons reads it
-  //     straight from the server data and says "Available" while this column
-  //     still renders the APPROVED actions. The row contradicts itself.
-  //   • a NEW requester joins the group. The group goes back to PENDING, but the
-  //     mask keeps rendering the APPROVED branch, so Approve/Decline are not
-  //     rendered AT ALL and the admin cannot action the new request without a
-  //     hard reload.
+  // router.refresh() keeps this component's state (the row is keyed by title,
+  // not by status), so without this reset an old optimistic value would hide
+  // the real status forever — e.g. a row that sync moved to AVAILABLE, or a
+  // group sent back to PENDING by a new requester, would keep showing the
+  // APPROVED buttons until a hard reload.
   useEffect(() => {
     setOptimisticStatus(null);
   }, [currentStatus]);
@@ -155,7 +148,16 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
         return;
       }
       const data: { arrError?: string } = await res.json().catch(() => ({}));
-      if (data.arrError) setArrError(data.arrError);
+      if (data.arrError) {
+        setArrError(data.arrError);
+        // A failed Radarr/Sonarr push rolls the approval back to PENDING
+        // server-side (single and batch alike). currentStatus then never
+        // changes, so the reset effect above never fires and the optimistic
+        // APPROVED would mask the real PENDING row — hiding Approve/Decline and
+        // offering a Re-push the route refuses ("only valid for APPROVED").
+        // Drop the optimistic value and let the refreshed server status render.
+        setOptimisticStatus(null);
+      }
       setShowDeclineNote(false);
       setDeclineNote("");
       setShowProfilePicker(false);
@@ -235,9 +237,8 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
       }
       router.refresh();
     } catch {
-      // `finally` closes the confirm dialog unconditionally, so a network
-      // failure previously read as "cancelled" — dialog gone, row still there,
-      // nothing said. The row surviving a delete needs an explanation.
+      // `finally` always closes the confirm dialog, so show an error here —
+      // otherwise a network failure would look like the admin just cancelled.
       setArrError("Network error — please try again.");
     } finally {
       setLoading(null);
@@ -263,7 +264,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             placeholder="Admin reply (visible to user)"
             rows={2}
             autoFocus
-            className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
+            className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
           />
           <div className="flex items-center gap-1.5">
             <Button
@@ -271,7 +272,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
               variant="outline"
               onClick={() => setShowReply(false)}
               disabled={loading === "NOTE"}
-              className="h-6 px-2 text-[11px] border-zinc-700 text-zinc-500 hover:text-white"
+              className="h-6 px-2 text-[11px] border-zinc-700 text-zinc-500 hover:text-zinc-100"
             >
               Cancel
             </Button>
@@ -306,7 +307,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
               variant="outline"
               onClick={() => setShowDeleteConfirm(false)}
               disabled={loading === "DELETE"}
-              className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white"
+              className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100"
             >
               Cancel
             </Button>
@@ -314,7 +315,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
               size="sm"
               onClick={deleteRequest}
               disabled={loading === "DELETE"}
-              className="h-7 px-3 text-xs bg-red-800 hover:bg-red-700 gap-1"
+              className="h-7 px-3 text-xs bg-red-800 text-white hover:bg-red-700 gap-1"
             >
               {loading === "DELETE" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
               Delete
@@ -332,7 +333,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             variant="outline"
             onClick={triggerSearch}
             disabled={loading !== null}
-            className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white gap-1"
+            className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1"
           >
             {loading === "SEARCH" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Search className="w-3 h-3" />}
             Search
@@ -342,7 +343,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             variant="outline"
             onClick={retryPush}
             disabled={loading !== null}
-            className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white gap-1"
+            className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1"
           >
             {loading === "RETRY" ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
             Re-push
@@ -352,7 +353,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             variant="outline"
             onClick={() => setShowDeleteConfirm(true)}
             disabled={loading !== null}
-            className="h-7 px-3 text-xs border-red-800/50 text-red-500 hover:bg-red-950 gap-1"
+            className="h-7 px-3 text-xs border-red-800/50 text-red-500 hover:bg-red-500/10 hover:text-red-400 gap-1"
           >
             <Trash2 className="w-3 h-3" />
             Delete
@@ -381,7 +382,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           variant="outline"
           onClick={() => updateStatus("APPROVED")}
           disabled={loading !== null}
-          className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white gap-1"
+          className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1"
         >
           {loading === "APPROVED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
           Re-approve
@@ -399,14 +400,10 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
   if (status === "AVAILABLE") {
     return (
       <div className="flex flex-col items-end gap-1">
-        {/* Mirrors the row's status Chip breakpoint (`hidden sm:inline-flex`)
-            so exactly one "Available" shows at any width. Both were rendering
-            at >=sm — the green Chip immediately to the left plus this one — so
-            the same word appeared twice in two different colours and read as
-            the request status colliding with the library status (which is in
-            fact a separate chip row, "On Plex" / "On Jellyfin"). This branch
-            exists because there is no action to offer once a request is
-            available. */}
+        {/* There is nothing to action once a request is available. This label
+            only shows on small screens: the row's own status chip is
+            `hidden sm:inline-flex`, so exactly one "Available" shows at any
+            width. */}
         <span className="sm:hidden text-xs text-indigo-400 font-medium">Available</span>
         {replyBlock}
         {/* saveReply is reachable from this branch too, so it needs somewhere to
@@ -429,7 +426,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           onChange={(e) => setDeclineNote(e.target.value)}
           placeholder="Reason (optional)"
           rows={2}
-          className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-white placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
+          className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
         />
         <div className="flex items-center gap-2">
           <Button
@@ -437,7 +434,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             variant="outline"
             onClick={() => { setShowDeclineNote(false); setDeclineNote(""); }}
             disabled={loading !== null}
-            className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-white"
+            className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100"
           >
             Cancel
           </Button>
@@ -445,7 +442,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             size="sm"
             onClick={() => updateStatus("DECLINED", declineNote.trim() || undefined, false)}
             disabled={loading !== null}
-            className="h-7 px-3 text-xs bg-red-800 hover:bg-red-700 gap-1"
+            className="h-7 px-3 text-xs bg-red-800 text-white hover:bg-red-700 gap-1"
             title="User can re-request this title later"
           >
             {loading === "DECLINED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3" />}
@@ -455,17 +452,15 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             size="sm"
             onClick={() => updateStatus("DECLINED", declineNote.trim() || undefined, true)}
             disabled={loading !== null}
-            className="h-7 px-3 text-xs bg-red-950 hover:bg-red-900 border border-red-700 gap-1"
+            className="h-7 px-3 text-xs bg-red-950 text-white hover:bg-red-900 border border-red-700 gap-1"
             title="User cannot re-request this title"
           >
             {loading === "DECLINED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3" />}
             Deny — permanent
           </Button>
         </div>
-        {/* A failed decline returns BEFORE setShowDeclineNote(false), so this
-            branch is still on screen holding the error it just set. Without a
-            render site here the message had nowhere to go and the decline
-            failed in complete silence — on a 4xx as well as a network error. */}
+        {/* A failed decline leaves this form open, so its error has to be
+            shown here or the failure would be silent. */}
         {arrError && (
           <span role="alert" aria-live="assertive" className="flex items-center gap-1 text-[11px] text-amber-400 text-right">
             <AlertTriangle className="w-3 h-3 shrink-0" />{arrError}
@@ -512,7 +507,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           variant="outline"
           onClick={() => { setShowProfilePicker(false); setArrError(null); }}
           disabled={loading !== null}
-          className="h-6 px-2 text-[11px] border-zinc-700 text-zinc-500 hover:text-white"
+          className="h-6 px-2 text-[11px] border-zinc-700 text-zinc-500 hover:text-zinc-100"
         >
           Cancel
         </Button>
@@ -534,7 +529,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           size="sm"
           onClick={() => updateStatus("APPROVED")}
           disabled={loading !== null}
-          className="h-7 px-3 text-xs bg-green-700 hover:bg-green-600 gap-1"
+          className="h-7 px-3 text-xs bg-green-700 text-white hover:bg-green-800 gap-1"
         >
           {loading === "APPROVED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
           Approve
@@ -557,7 +552,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           variant="outline"
           onClick={() => setShowDeclineNote(true)}
           disabled={loading !== null}
-          className="h-7 px-3 text-xs border-red-800 text-red-400 hover:bg-red-950 gap-1"
+          className="h-7 px-3 text-xs border-red-800 text-red-400 hover:bg-red-500/10 hover:text-red-400 gap-1"
         >
           <X className="w-3 h-3" />
           Decline
@@ -582,13 +577,9 @@ export function SyncButton() {
     setLoading(true);
     setResult(null);
     try {
-      // ONE call. The orchestrator's own Jellyfin arm already does a full,
-      // unwindowed replace across every configured instance — a strict superset
-      // of what a bodiless POST to /api/sync/jellyfin does, which is insert-only
-      // inside a 2-hour window on the default instance alone. The second call
-      // bought nothing and re-ran the entire marking pass (a full scan of every
-      // PENDING/APPROVED request, the visibility gate, and a second CAS attempt),
-      // while racing the orchestrator's own delete-and-replace of the same slug.
+      // ONE call. /api/sync already does a full Jellyfin sync of every server,
+      // so a second call to /api/sync/jellyfin would only repeat work and race
+      // this one (guardrail 36).
       const res = await fetch(withBasePath("/api/sync"), { method: "POST" });
 
       // These annotations are a claim, not a check — res.json() is `any`, so
@@ -599,10 +590,9 @@ export function SyncButton() {
         failedSources?: string[]; skippedSources?: string[];
       };
 
-      // The orchestrator answers { skipped: true } with HTTP 200 and no counts
-      // when the advisory lock is already held — the internal hourly cron or a
-      // Plex-SSE-triggered run is mid-flight. Every count field is absent here,
-      // so this has to be read before any arithmetic.
+      // { skipped: true } (HTTP 200, no counts) means another sync — the hourly
+      // cron or a Plex-triggered run — already holds the lock. Check it first,
+      // because none of the count fields are present in that answer.
       if (data.skipped) {
         setResult("A sync is already running");
         return;
@@ -618,10 +608,8 @@ export function SyncButton() {
       const failed = new Set(data.failedSources ?? []);
       const skipped = new Set(data.skippedSources ?? []);
 
-      // Never summed. plexMarked and jellyfinMarked are produced by the same
-      // marking pass over the same stillPending snapshot, so a title held by
-      // both servers is counted once by each — adding them reported it twice.
-      // Per-source is both the honest reading and what an admin can act on.
+      // Report per server, never summed: a title on both servers is counted
+      // once by each, so adding them would count it twice (guardrail 36).
       const parts = ([["Plex", "plex", data.plexMarked], ["Jellyfin", "jellyfin", data.jellyfinMarked]] as const)
         .filter(([, key]) => !skipped.has(key))
         .map(([name, key, count]) => (failed.has(key) ? `${name} failed` : `${name} ${count ?? 0}`));
@@ -647,7 +635,7 @@ export function SyncButton() {
         size="sm"
         onClick={handleSync}
         disabled={loading}
-        className="border-zinc-700 text-zinc-300 hover:text-white gap-2"
+        className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
       >
         <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
         {loading ? "Syncing…" : "Sync now"}
@@ -692,7 +680,7 @@ export function SyncRolesButton() {
         size="sm"
         onClick={handleSync}
         disabled={loading}
-        className="border-zinc-700 text-zinc-300 hover:text-white gap-2"
+        className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
       >
         <Users className={`w-4 h-4 ${loading ? "animate-pulse" : ""}`} />
         {loading ? "Syncing…" : "Sync Discord Roles"}

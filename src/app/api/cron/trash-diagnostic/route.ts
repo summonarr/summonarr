@@ -122,7 +122,9 @@ async function handle(request: NextRequest) {
     report.config = { error: err instanceof Error ? err.message : String(err) };
   }
 
-  // Surface the persisted GitHub-tree truncation marker (set in trash.ts ghTree). Absence = never truncated.
+  // When GitHub truncates the TRaSH repo file listing during a refresh, trash.ts
+  // saves the time here; a clean refresh deletes the row again. So no row means
+  // the most recent refresh was complete.
   try {
     const truncRow = await prisma.setting.findUnique({
       where: { key: "trashLastRefreshTruncatedAt" },
@@ -134,8 +136,9 @@ async function handle(request: NextRequest) {
     void err;
   }
 
-  // Per-spec error stats — failingByKind = total apps with lastError set per kind;
-  // flapping = apps with errorCount >= 3 and lastErrorAt within the last 24h.
+  // Error stats. failingByKind counts applied specs that currently have an
+  // error, per kind. "flapping" lists the ones that failed 3+ times with the
+  // latest failure in the last 24 hours.
   try {
     const failingApps = await prisma.trashApplication.findMany({
       where: { lastError: { not: null } },

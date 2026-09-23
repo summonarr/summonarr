@@ -64,9 +64,9 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
-  // Validate the type BEFORE calling a string method: req.json() is untyped at
-  // runtime, so a non-string body (number/object/null) would throw on .trim() and
-  // surface as a 500 instead of this 400. Mirrors the guard in releases/route.ts.
+  // Check the type BEFORE calling a string method: parsed JSON is not type-checked
+  // at runtime, so a number/object/null body would throw on .trim() and become a
+  // 500 instead of this 400.
   if (typeof body.body !== "string") {
     return NextResponse.json({ error: "body is required" }, { status: 400 });
   }
@@ -148,23 +148,16 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   };
 
   if (isAdmin) {
-    // ONE lookup decides whether any reporter-facing channel runs, mirroring
-    // notifyRequestStatusChange (guardrail 33 — gate at a chokepoint, never
-    // re-scatter it into the per-channel queries). Account removal disables
-    // rather than scrubs, so a removed reporter keeps a live email, Discord link
-    // and push subscriptions and would otherwise be notified forever.
+    // ONE lookup of the reporter decides whether any reporter-facing channel
+    // runs (guardrail 33: gate in one place, not in each channel). A removed
+    // account is only disabled, so it still has a live email, Discord link and
+    // push subscriptions, and would otherwise keep getting notified.
     //
-    // It also decides self-replies. An issue admin who REPORTED the issue and
-    // then replies in their own thread is talking to themselves — the inbox row
-    // already skipped that case, and the comment beside it even names the
-    // request routes' selfAction guard as the pattern, but Discord, push and
-    // email all gated purely on the reporter being active. Commit 40fea6e fixed
-    // exactly this shape in the sibling PATCH resolve path; this handler has the
-    // identical structure plus an extra email channel, and was missed.
+    // It also skips self-replies: an issue admin replying in an issue they
+    // reported themselves should not be notified about their own message.
     const selfAction = issue.reportedBy === session.user.id;
 
-    // One read, not two: the deactivatedAt chokepoint and the email preferences
-    // were separate findUniques for the same row.
+    // The same read gives both the deactivatedAt check and the email preferences.
     const reporter = selfAction
       ? Promise.resolve(null)
       : prisma.user

@@ -332,8 +332,8 @@ test("me: the refreshed session JWT is threaded back as Set-Cookie ONLY on the c
 
 test("a machine token replayed from a DISALLOWED ip is refused, not handed the identity", async () => {
   // The allowlist is snapshotted into the claims at mint time and re-checked per
-  // request by authActive and the withAuth wrappers. This route enforced the UA
-  // fingerprint but not the allowlist, so a leaked machine token was refused
+  // request by authActive and the withAuth wrappers. This route used to check the
+  // UA fingerprint but not the allowlist, so a leaked machine token was refused
   // everywhere EXCEPT here — where it still returned id, role and permissions.
   const { token } = await mintSession({ role: "ADMIN", machineAllowedIps: ["10.0.0.0/8"] });
   const res = await getMe(meReq({ ...asBearer(token), "x-forwarded-for": "203.0.113.9" }));

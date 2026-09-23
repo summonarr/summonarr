@@ -36,15 +36,16 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
   const router  = useRouter();
   const [revoking, setRevoking] = useState<string | null>(null);
   const [confirmingRevoke, setConfirmingRevoke] = useState<string | null>(null);
-  // Revoking a session OTHER than this one is step-up protected server-side:
-  // credential accounts must re-enter their password, SSO accounts must hold a
-  // recent sign-in. The client used to send neither and ignore res.ok, so every
-  // revoke 401'd and the UI reported success — the device was never signed out.
+  // Signing out ANOTHER device needs extra proof ("step-up") on the server:
+  // password accounts must re-enter their password, and single-sign-on accounts
+  // must have signed in recently. So we check res.ok and ask for the password
+  // when the server says so, instead of assuming the revoke worked.
   const [passwordFor, setPasswordFor] = useState<string | null>(null);
   const [password, setPassword] = useState("");
   const [revokeError, setRevokeError] = useState<string | null>(null);
-  // `formatRelativeTime` and `toLocaleDateString` both diverge between SSR and CSR
-  // (Date.now drift and runtime locale differences). See CLAUDE.md guardrail 16.
+  // `formatRelativeTime` and `toLocaleDateString` give different text on the
+  // server and in the browser (the clock moves on, and the locale can differ),
+  // so they only render once mounted. See CLAUDE.md guardrail 16.
   const mounted = useHasMounted();
 
   async function revoke(sessionId: string, confirmPassword?: string) {
@@ -98,10 +99,10 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
       {sessions.map((s) => (
         <div
           key={s.id}
-          className={`flex items-start justify-between gap-4 rounded-md border px-3 py-2.5 ${
+          className={`flex flex-wrap items-start justify-between gap-4 rounded-md border px-3 py-2.5 ${
             s.isCurrent
               ? "border-indigo-500/40 bg-indigo-500/5"
-              : "border-zinc-800 bg-zinc-800/50"
+              : "border-[var(--ds-border)] bg-[var(--ds-bg-1)]"
           }`}
         >
           <div className="flex items-start gap-2.5 min-w-0">
@@ -112,7 +113,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                   {s.deviceLabel ?? `${s.deviceType.charAt(0).toUpperCase() + s.deviceType.slice(1)} device`}
                 </p>
                 {s.isCurrent && (
-                  <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-indigo-600 text-white font-semibold shrink-0">
+                  <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-indigo-600 text-[var(--ds-accent-fg)] font-semibold shrink-0">
                     <Check className="w-3 h-3" />
                     This device
                   </span>
@@ -143,8 +144,8 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
               type="button"
               size="sm"
               variant="ghost"
-              // 36x36 hit area (HIG min) + aria-label so screen readers
-              // announce this destructive (sign-out-device) action.
+              // A 36x36 tap area, plus an aria-label so screen readers say
+              // what this button does (sign that device out).
               aria-label={`Revoke session ${s.deviceLabel ?? `${s.deviceType} device`}${s.ipAddress ? ` from ${s.ipAddress}` : ""}`}
               title="Revoke session"
               className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-9 w-9 p-0 mt-0.5"
@@ -162,7 +163,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                 type="button"
                 size="sm"
                 aria-label="Confirm revoke session"
-                className="h-9 px-2.5 bg-red-600 text-white hover:bg-red-500 gap-1"
+                className="h-9 px-2.5 bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
                 onClick={() => revoke(s.sessionId)}
                 autoFocus
               >
@@ -183,7 +184,9 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
           )}
           {!s.isCurrent && passwordFor === s.sessionId && (
             <form
-              className="flex items-center gap-1.5 shrink-0 mt-0.5"
+              // On small screens this takes a full row below the device details;
+              // squeezed beside them it crushed the device name.
+              className="flex items-center gap-1.5 basis-full sm:basis-auto sm:shrink-0 mt-0.5"
               onSubmit={(e) => { e.preventDefault(); if (password) revoke(s.sessionId, password); }}
             >
               <input
@@ -194,13 +197,13 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                 placeholder="Your password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="h-9 w-40 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="h-9 flex-1 min-w-0 sm:flex-none sm:w-40 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500"
               />
               <Button
                 type="submit"
                 size="sm"
                 aria-label="Confirm revoke session"
-                className="h-9 px-2.5 bg-red-600 text-white hover:bg-red-500 gap-1"
+                className="h-9 px-2.5 bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
                 disabled={!password || revoking === s.sessionId}
               >
                 {revoking === s.sessionId

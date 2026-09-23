@@ -32,6 +32,12 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
+  // The dark --ds-bg (oklch(0.145 0.004 275) ≈ #09090b). NOT keyed on
+  // prefers-color-scheme: the app is dark unless the user explicitly picks
+  // light (THEME_INIT_SCRIPT never follows the OS), and a <meta> cannot read
+  // that localStorage choice — an OS-keyed pair painted a white toolbar over
+  // the dark app for every light-OS user on the default theme. ThemeProvider
+  // rewrites it to the light hex once a stored light choice is known.
   themeColor: "#09090b",
 };
 

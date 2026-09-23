@@ -22,8 +22,8 @@
 //   - the CONCURRENCY=5 bound: the sixth stale item's fetch is not issued
 //     until the first batch of five has settled;
 //   - PINS CURRENT BEHAVIOR: fetch-level misses (404 / non-2xx / unparseable
-//     body) resolve, so they count as `fetched` even though nothing was
-//     written;
+//     body) resolve, so they count as `fetched` even though no details blob
+//     was written (a 404 writes only a "not found" tombstone row);
 //   - cross-source dedup on tmdbId:mediaType and the LIBRARY_PAGE_SIZE page
 //     buffer (a >500-item walk is processed in two flushes).
 //

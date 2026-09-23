@@ -21,7 +21,7 @@ export type AuditParams = {
 // them. userAgent is a raw attacker-controlled request header rendered into the
 // admin audit table (tooltip title attribute), so it gets the full
 // sanitizeForLog strip (controls + bidi overrides); ipAddress is normally a
-// validated getClientIp value but is sanitized the same way as belt-and-braces.
+// validated getClientIp value but is sanitized the same way as an extra safety step.
 function auditRowData(params: AuditParams) {
   return {
     userId: params.userId,

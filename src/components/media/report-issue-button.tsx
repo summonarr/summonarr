@@ -6,6 +6,7 @@ import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogT
 import type { TVAvailabilityResponse, TVSeasonInfo } from "@/app/api/tv-availability/route";
 import { withBasePath } from "@/lib/base-path";
 import { useToast } from "@/components/ui/toast";
+import { DetailActionButton } from "./detail-action-button";
 
 type IssueType = "BAD_VIDEO" | "WRONG_AUDIO" | "MISSING_SUBTITLES" | "WRONG_MATCH" | "OTHER";
 type IssueScope = "FULL" | "SEASON" | "EPISODE";
@@ -258,47 +259,33 @@ export function ReportIssueButton({
 
   return (
     <>
-      <button
-        type="button"
-        onClick={openDialog}
-        aria-label={compact ? `Report an issue with ${title}` : undefined}
-        title={compact ? "Report an issue" : undefined}
-        className="ds-tap inline-flex items-center gap-1.5 font-medium transition-colors"
-        style={
-          compact
-            ? {
-                width: 28,
-                height: 28,
-                borderRadius: 6,
-                justifyContent: "center",
-                background: "transparent",
-                color: "var(--ds-fg-subtle)",
-                border: "1px solid transparent",
-                flexShrink: 0,
-              }
-            : {
-                padding: "6px 12px",
-                height: 32,
-                borderRadius: 6,
-                fontSize: 12,
-                background: "var(--ds-bg-2)",
-                color: "var(--ds-fg-muted)",
-                border: "1px solid var(--ds-border)",
-              }
-        }
-        onMouseEnter={(e) => {
-          e.currentTarget.style.color = "var(--ds-warning)";
-          e.currentTarget.style.borderColor =
-            "color-mix(in oklab, var(--ds-warning) 40%, transparent)";
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.color = compact ? "var(--ds-fg-subtle)" : "var(--ds-fg-muted)";
-          e.currentTarget.style.borderColor = compact ? "transparent" : "var(--ds-border)";
-        }}
-      >
-        <AlertTriangle style={{ width: 14, height: 14 }} />
-        {!compact && "Report Issue"}
-      </button>
+      {compact ? (
+        // Icon-only trigger for dense rows (watch history). Hover is the shared
+        // inset tint — the old onMouseEnter/onMouseLeave repaint stuck after a
+        // tap on touch.
+        <button
+          type="button"
+          onClick={openDialog}
+          aria-label={`Report an issue with ${title}`}
+          title="Report an issue"
+          className="ds-hover-tint inline-flex items-center justify-center shrink-0"
+          style={{
+            width: 28,
+            height: 28,
+            borderRadius: 6,
+            background: "transparent",
+            color: "var(--ds-fg-subtle)",
+            border: "1px solid transparent",
+          }}
+        >
+          <AlertTriangle style={{ width: 14, height: 14 }} />
+        </button>
+      ) : (
+        <DetailActionButton variant="secondary" onClick={openDialog}>
+          <AlertTriangle style={{ width: 14, height: 14 }} />
+          Report Issue
+        </DetailActionButton>
+      )}
 
       {dialogState !== "idle" && (
         <Dialog open onOpenChange={(open) => { if (!open) closeDialog(); }}>
@@ -343,10 +330,10 @@ export function ReportIssueButton({
                 disabled={
                   dialogState === "submitting" || dialogState === "loading"
                 }
-                className="inline-flex items-center justify-center rounded-full transition-colors disabled:opacity-40"
+                className="ds-hover-tint inline-flex items-center justify-center rounded-full disabled:opacity-40"
                 style={{
-                  width: 28,
-                  height: 28,
+                  width: 32,
+                  height: 32,
                   background: "transparent",
                   border: 0,
                   color: "var(--ds-fg-muted)",
@@ -371,7 +358,7 @@ export function ReportIssueButton({
                   style={{
                     width: 14,
                     height: 14,
-                    color: "var(--ds-accent)",
+                    color: "var(--ds-accent-text)",
                   }}
                 />
                 Loading library info…
@@ -412,23 +399,14 @@ export function ReportIssueButton({
                 >
                   An admin will review it shortly.
                 </p>
-                <button
-                  type="button"
+                <DetailActionButton
+                  variant="secondary"
+                  size="sm"
                   onClick={closeDialog}
-                  className="ds-tap inline-flex items-center justify-center font-medium transition-colors"
-                  style={{
-                    marginTop: 18,
-                    padding: "6px 14px",
-                    height: 30,
-                    borderRadius: 6,
-                    fontSize: 12,
-                    background: "var(--ds-bg-2)",
-                    color: "var(--ds-fg)",
-                    border: "1px solid var(--ds-border)",
-                  }}
+                  style={{ marginTop: 18 }}
                 >
                   Close
-                </button>
+                </DetailActionButton>
               </div>
             )}
 
@@ -440,7 +418,7 @@ export function ReportIssueButton({
                   </p>
                 )}
                 {isTV && availabilityFailed && (
-                  <p className="text-[11px] text-amber-500/80">
+                  <p className="text-[11px] text-amber-400">
                     Could not load library data — enter season/episode manually
                   </p>
                 )}
@@ -537,7 +515,7 @@ export function ReportIssueButton({
                     maxLength={1000}
                     rows={3}
                     disabled={isSubmitting}
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 resize-none"
+                    className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 resize-none"
                   />
                 </div>
 
@@ -546,45 +524,29 @@ export function ReportIssueButton({
                 )}
 
                 <div className="flex justify-end gap-2 pt-1">
-                  <button
-                    type="button"
+                  <DetailActionButton
+                    variant="ghost"
+                    size="sm"
                     onClick={closeDialog}
                     disabled={isSubmitting}
-                    className="inline-flex items-center justify-center font-medium transition-colors disabled:opacity-50"
-                    style={{
-                      padding: "6px 12px",
-                      height: 30,
-                      borderRadius: 6,
-                      fontSize: 12,
-                      background: "transparent",
-                      color: "var(--ds-fg-muted)",
-                      border: "1px solid var(--ds-border)",
-                    }}
                   >
                     Cancel
-                  </button>
-                  <button
+                  </DetailActionButton>
+                  <DetailActionButton
                     type="submit"
+                    variant="primary"
+                    size="sm"
                     disabled={isSubmitting}
-                    className="inline-flex items-center justify-center gap-1.5 font-medium transition-colors disabled:opacity-50"
-                    style={{
-                      padding: "6px 14px",
-                      height: 30,
-                      borderRadius: 6,
-                      fontSize: 12,
-                      background: "var(--ds-warning)",
-                      color: "oklch(0.18 0 0)",
-                      border: "1px solid transparent",
-                    }}
+                    busy={isSubmitting}
                   >
                     {isSubmitting && (
                       <Loader2
                         className="animate-spin"
-                        style={{ width: 12, height: 12 }}
+                        style={{ width: 14, height: 14 }}
                       />
                     )}
                     Submit Report
-                  </button>
+                  </DetailActionButton>
                 </div>
               </form>
             )}
@@ -612,7 +574,7 @@ function SelectField({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
-        className="w-full appearance-none rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 pr-8"
+        className="w-full appearance-none rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 pr-8"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>{o.label}</option>
@@ -643,7 +605,7 @@ function NumberInput({
       placeholder={placeholder}
       required={required}
       disabled={disabled}
-      className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+      className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
     />
   );
 }

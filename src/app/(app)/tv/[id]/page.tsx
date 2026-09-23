@@ -24,6 +24,7 @@ import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName } from "@/lib/tmdb-types";
+import { formatDigitalRelease } from "@/lib/format-release-date";
 import { Chip } from "@/components/ui/design";
 import { canRequest, hasPermission, Permission } from "@/lib/permissions";
 import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
@@ -200,7 +201,7 @@ export default async function TVDetailPage({
   return (
     <div className="ds-page-enter ds-detail-bleed">
       {/* Renders nothing — publishes the title so the header breadcrumb
-          reads "Movies › <title>" instead of "Movies › Detail". */}
+          reads "TV Shows › <title>" instead of "TV Shows › Detail". */}
       <DetailTitle title={media.title} />
       <div
         className="relative w-full overflow-hidden aspect-video max-h-[500px] xl:max-h-[640px] 2xl:max-h-[760px]"
@@ -276,6 +277,7 @@ export default async function TVDetailPage({
                 media.numberOfSeasons
                   ? `${media.numberOfSeasons} season${media.numberOfSeasons === 1 ? "" : "s"}`
                   : null,
+                formatDigitalRelease(media.releasedDigital),
                 media.productionCountries?.[0],
                 languageName(media.originalLanguage),
                 media.status,
@@ -313,10 +315,14 @@ export default async function TVDetailPage({
             {media.nextEpisodeAirDate && (
               <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
                 Next episode:{" "}
+                {/* TMDB air dates are date-only ("YYYY-MM-DD"), which Date parses
+                    as UTC midnight — format in UTC too, or a server running west
+                    of UTC renders the day before (same fix as formatDigitalRelease). */}
                 {new Date(media.nextEpisodeAirDate).toLocaleDateString("en-US", {
                   month: "short",
                   day: "numeric",
                   year: "numeric",
+                  timeZone: "UTC",
                 })}
               </div>
             )}
@@ -355,8 +361,12 @@ export default async function TVDetailPage({
               </p>
             )}
 
+            {/* items-end, not items-center: RequestButton is a flex-col block
+                (availability/queue status line above its CTA), so centering
+                floated the sibling buttons above the CTA whenever a status
+                line rendered. */}
             <div
-              className="flex items-center flex-wrap"
+              className="flex items-end flex-wrap"
               style={{ gap: 10, marginTop: 6 }}
             >
               <RequestButton
@@ -401,10 +411,10 @@ export default async function TVDetailPage({
               ))}
               <WatchlistButton tmdbId={media.id} mediaType="TV" initialOnWatchlist={onWatchlist} />
               <HideButton
-                  tmdbId={media.id}
-                  mediaType="TV"
-                  title={media.title}
-                  posterPath={media.posterPath}
+                tmdbId={media.id}
+                mediaType="TV"
+                title={media.title}
+                posterPath={media.posterPath}
                 initialHidden={onHidden}
               />
               {issuesEnabled && ((showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable)) && (
@@ -426,19 +436,6 @@ export default async function TVDetailPage({
               )}
               {(media.trailerKey || media.trailerUrl) && (
                 <TrailerButton trailerKey={media.trailerKey} trailerUrl={media.trailerUrl} />
-              )}
-              {media.releasedDigital && (
-                <span
-                  className="ds-mono"
-                  style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
-                >
-                  Digital{" "}
-                  {new Date(media.releasedDigital).toLocaleDateString("en-US", {
-                    month: "short",
-                    day: "numeric",
-                    year: "numeric",
-                  })}
-                </span>
               )}
             </div>
           </div>

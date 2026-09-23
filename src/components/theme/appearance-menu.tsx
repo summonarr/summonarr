@@ -7,14 +7,11 @@ import {
   DropdownMenuRadioItem,
 } from "@/components/ui/dropdown-menu";
 
-/* Theme + accent picker for the header account dropdown. Rendered as two
-   menuitemradio groups so the controls join the menu's arrow-key roving focus
-   and expose aria-checked — the prior custom <button>s sat inside the role=menu
-   but weren't menu items, so base-ui's keyboard model skipped them (keyboard
-   users couldn't reach them). base-ui's RadioItem defaults closeOnClick=false,
-   so selecting a theme/accent keeps the menu open for live preview, preserving
-   the original behavior. The section header is a static, non-focusable label
-   (base-ui correctly skips it in navigation). */
+/* Theme + accent picker for the header account dropdown. The options are menu
+   radio items so the menu's arrow keys reach them and screen readers hear which
+   one is checked. base-ui radio items don't close the menu on click, so the
+   admin can preview each choice live. The section headers are plain labels
+   that keyboard navigation skips. */
 
 const ACCENT_SWATCH: Record<Accent, string> = {
   indigo: "oklch(0.58 0.21 275)",
@@ -22,7 +19,9 @@ const ACCENT_SWATCH: Record<Accent, string> = {
   emerald: "oklch(0.68 0.16 158)",
   cyan: "oklch(0.72 0.13 220)",
   rose: "oklch(0.66 0.21 15)",
-  mono: "oklch(0.85 0 0)",
+  // The dark-theme value ([data-accent="mono"] in globals.css); the picker
+  // sits in both themes' header and a mid-grey read as neither.
+  mono: "oklch(0.97 0 0)",
 };
 
 const ACCENT_LABEL: Record<Accent, string> = {
@@ -42,13 +41,11 @@ const sectionHeaderStyle: React.CSSProperties = {
   color: "var(--ds-fg-subtle)",
 };
 
-/* Standalone (non-menu) variant. The menu form below renders base-ui
-   Menu.RadioGroup/RadioItem, which THROW ("MenuRootContext is missing") unless a
-   <Menu.Root> is an ancestor — so it can only be used inside a DropdownMenu. The
-   mobile nav drawer is a Drawer, not a Menu, so rendering the menu form there
-   crashed the whole app into global-error ("Something went wrong") the moment the
-   drawer opened. This variant keeps the same options and roving a11y semantics
-   using a plain radiogroup that needs no menu context. */
+/* Standalone (non-menu) variant. The menu form below uses base-ui menu radio
+   items, which THROW ("MenuRootContext is missing") outside a DropdownMenu. The
+   mobile nav drawer is not a menu, so it uses this version: the same options as
+   plain buttons in a radiogroup (each one is tabbed to; there is no arrow-key
+   navigation). */
 function StandaloneRadioGroup<T extends string>({
   label,
   value,
@@ -81,9 +78,8 @@ function StandaloneRadioGroup<T extends string>({
               borderRadius: 6,
               fontSize: 13,
               minHeight: 36,
-              cursor: "pointer",
               background: selected ? "var(--ds-accent-soft)" : "transparent",
-              color: selected ? "var(--ds-accent)" : "var(--ds-fg)",
+              color: selected ? "var(--ds-accent-text)" : "var(--ds-fg)",
               border: `1px solid ${selected ? "var(--ds-accent)" : "var(--ds-border)"}`,
             }}
           >

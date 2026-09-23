@@ -52,7 +52,6 @@ export function Sidebar({
       {/* Brand */}
       <Link
         href="/"
-        aria-label="Home"
         className="flex items-center gap-2.5"
         style={{
           padding: "16px 16px 14px",
@@ -193,26 +192,20 @@ function NavLink({ item, active }: { item: NavItem; active: boolean }) {
   return (
     <Link
       href={item.href}
+      aria-current={active ? "page" : undefined}
+      // ds-hover-tint draws the hover tint on top of the inline background
+      // (so the active highlight stays visible underneath) and adds a
+      // keyboard focus ring.
       className={cn(
-        "flex items-center gap-2.5 relative text-left w-full font-medium transition-colors",
+        "ds-hover-tint flex items-center gap-2.5 relative text-left w-full font-medium transition-colors",
         !active && "hover:text-[var(--ds-fg)]",
       )}
       style={{
         padding: "6px 10px",
         borderRadius: 6,
         background: active ? "var(--ds-accent-soft)" : "transparent",
-        color: active ? "var(--ds-accent)" : "var(--ds-fg-muted)",
+        color: active ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
         fontSize: 13,
-      }}
-      onMouseEnter={(e) => {
-        if (!active) {
-          e.currentTarget.style.background = "var(--ds-bg-3)";
-        }
-      }}
-      onMouseLeave={(e) => {
-        if (!active) {
-          e.currentTarget.style.background = "transparent";
-        }
       }}
     >
       {active && (
@@ -234,7 +227,7 @@ function NavLink({ item, active }: { item: NavItem; active: boolean }) {
         style={{
           width: 16,
           height: 16,
-          color: active ? "var(--ds-accent)" : "inherit",
+          color: active ? "var(--ds-accent-text)" : "inherit",
         }}
       />
       <span>{item.label}</span>

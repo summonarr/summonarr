@@ -4,8 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { DISCORD_SLASH_COMMANDS } from "@/lib/discord-commands";
 
-// Shared Discord slash-command registration. Both the admin "Register commands"
-// button and the boot-time self-heal below PUT the canonical
+// Shared Discord slash-command registration. The admin "Register commands"
+// button, the settings save, and the boot-time self-heal below all PUT the canonical
 // DISCORD_SLASH_COMMANDS array (a FULL REPLACE) to the guild scope when a Guild
 // ID is set — instant, per-server — or the global scope otherwise.
 
@@ -44,8 +44,9 @@ export function discordSchemaHash(guildId: string | null): string {
 }
 
 // Record the schema+scope hash after a successful registration so the boot sync
-// treats it as current. Called by the admin button and the boot path; a failure
-// here only costs one redundant (idempotent) re-registration next boot.
+// treats it as current. Called by the admin button, the settings save and the
+// boot path; a failure here only costs one redundant (idempotent)
+// re-registration next boot.
 export async function recordDiscordSchemaHash(guildId: string | null): Promise<void> {
   const value = discordSchemaHash(guildId);
   // try/catch (not a trailing .catch): must swallow a SYNCHRONOUS throw too —

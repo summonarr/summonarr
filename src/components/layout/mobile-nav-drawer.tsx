@@ -10,7 +10,7 @@ async function signOutAndRedirect(callbackUrl: string) {
   try {
     await fetch(withBasePath("/api/auth/sign-out"), { method: "POST", credentials: "include" });
   } catch {
-    // ignore — best-effort
+    // Best-effort: redirect to the login page even if the request failed.
   }
   window.location.href = withBasePath(callbackUrl);
 }
@@ -158,7 +158,7 @@ export function MobileNavDrawer({
               <button
                 type="button"
                 onClick={() => signOutAndRedirect("/login")}
-                className="flex items-center gap-3 w-full font-medium transition-colors"
+                className="ds-hover-tint flex items-center gap-3 w-full font-medium transition-colors"
                 style={{
                   padding: "10px 12px",
                   borderRadius: 6,
@@ -167,15 +167,8 @@ export function MobileNavDrawer({
                   fontSize: 13,
                   color: "var(--ds-danger)",
                 }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background =
-                    "color-mix(in oklab, var(--ds-danger) 10%, transparent)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "transparent";
-                }}
               >
-                <LogOut style={{ width: 18, height: 18 }} />
+                <LogOut style={{ width: 16, height: 16 }} />
                 Sign out
               </button>
             </div>
@@ -223,8 +216,9 @@ export function MobileNavDrawer({
                 </span>
               </a>
             </div>
-
-            <div style={{ height: 80 }} aria-hidden />
+            {/* No trailing spacer: DrawerContent already pads its bottom by
+                max(1.5rem, safe-area-inset-bottom), and the drawer (z-50)
+                overlays the bottom tab bar (z-40) rather than sitting above it. */}
           </DrawerContent>
         </DrawerPopup>
       </DrawerPortal>
@@ -263,12 +257,14 @@ function NavLink({
     <Link
       href={item.href}
       onClick={onClick}
-      className="flex items-center gap-3 font-medium transition-colors relative"
+      aria-current={active ? "page" : undefined}
+      className="ds-hover-tint flex items-center gap-3 font-medium transition-colors relative"
       style={{
         padding: "10px 12px",
         borderRadius: 6,
         background: active ? "var(--ds-accent-soft)" : "transparent",
-        color: active ? "var(--ds-accent)" : "var(--ds-fg)",
+        // Inactive text is fg-muted, matching the sidebar and bottom tabs.
+        color: active ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
         fontSize: 13,
       }}
     >
@@ -289,9 +285,9 @@ function NavLink({
       <Icon
         className="shrink-0"
         style={{
-          width: 18,
-          height: 18,
-          color: active ? "var(--ds-accent)" : "var(--ds-fg-muted)",
+          width: 16,
+          height: 16,
+          color: active ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
         }}
       />
       {item.label}

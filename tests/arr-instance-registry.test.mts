@@ -4,8 +4,8 @@
 // 4K entries. A regression here mis-lists instances, which mis-routes requests
 // and mis-scopes the sync fan-out.
 //
-// Impurity: prisma.setting.findUnique (registry JSON) + findMany (per-instance
-// url/apiKey presence). No local DB here, so we shadow the `setting` delegate on
+// Impurity: prisma.setting.findUnique (registry JSON) + one batched findMany
+// (url/apiKey presence for every instance). No local DB here, so we shadow the `setting` delegate on
 // the shared extended client with an in-memory stub (same pattern as
 // jellyfin-config.test.mts / poster-cache.test.mts). No DB or network touched.
 import { test } from "node:test";
@@ -129,7 +129,7 @@ test("sonarr registry is read from its own key (services don't cross-contaminate
   assert.deepEqual(sonarr.map((i) => i.slug), [""]); // no arrSonarrInstances set
 });
 
-// ── query-count pins (review 2026-09 f104/f16/f56) ─────────────────────────
+// ── query-count pins ────────────────────────────────────────────────────────
 // The old shape was 1 registry read + a 4K probe + one findMany PER instance
 // (2 + N, on request-scoped paths: detail pages, POST /api/requests, admin
 // pages). Both list readers must now be exactly two queries however many

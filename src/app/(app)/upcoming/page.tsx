@@ -152,7 +152,7 @@ export default async function UpcomingPage({
             icon={Calendar}
             title="No upcoming titles to show"
             description="Everything upcoming is already available on your servers."
-            cta={{ href: "/upcoming", label: "Clear filters" }}
+            cta={{ href: "/upcoming", label: "Show available titles" }}
           />
         )
       ) : (

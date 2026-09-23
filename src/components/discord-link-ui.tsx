@@ -46,7 +46,7 @@ function TokenLinkFlow() {
     <div className="space-y-3">
       <p className="text-sm text-zinc-500 font-medium">Option A — Link from Discord</p>
       <ol className="text-sm text-zinc-400 space-y-1 list-decimal list-inside">
-        <li>Click <strong className="text-white">Generate Token</strong> below</li>
+        <li>Click <strong className="text-zinc-100">Generate token</strong> below</li>
         <li>Copy the token</li>
         <li>
           In Discord, run{" "}
@@ -57,9 +57,9 @@ function TokenLinkFlow() {
       <button
         onClick={generateToken}
         disabled={loading}
-        className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-md transition-colors"
+        className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-[var(--ds-accent-fg)] rounded-md transition-colors"
       >
-        {loading ? "Generating…" : "Generate Token"}
+        {loading ? "Generating…" : "Generate token"}
       </button>
 
       {error && <p className="text-sm text-red-400">{error}</p>}
@@ -70,9 +70,11 @@ function TokenLinkFlow() {
           <div className="flex items-center gap-2">
             <p className="font-mono text-sm font-bold text-zinc-100 break-all flex-1">{token}</p>
             <button
+              type="button"
               onClick={copyToken}
-              className="shrink-0 p-1.5 rounded text-zinc-400 hover:text-white hover:bg-zinc-700 transition-colors"
+              className="shrink-0 p-1.5 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700 transition-colors"
               title="Copy token"
+              aria-label="Copy token"
             >
               {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
             </button>
@@ -174,15 +176,15 @@ function WebMergeFlow() {
               value={discordId}
               onChange={(e) => { setDiscordId(e.target.value.replace(/\D/g, "")); setError(null); }}
               placeholder="123456789012345678"
-              className="flex-1 min-w-0 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm font-mono text-white placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              className="flex-1 min-w-0 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm font-mono text-zinc-100 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500"
             />
             <button
               onClick={sendCode}
               disabled={loading || !/^\d{17,20}$/.test(discordId.trim())}
-              className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-md transition-colors whitespace-nowrap flex items-center gap-2"
+              className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-[var(--ds-accent-fg)] rounded-md transition-colors whitespace-nowrap flex items-center gap-2"
             >
               {loading && <Loader2 className="w-3 h-3 animate-spin" />}
-              Send Code
+              Send code
             </button>
           </div>
         </>
@@ -193,27 +195,27 @@ function WebMergeFlow() {
           <div className="rounded-md bg-zinc-800 border border-zinc-700 px-4 py-3 text-sm text-zinc-300 space-y-1">
             <p>A 12-character code was sent to your Discord DMs.</p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <input
               type="text"
               value={code}
               onChange={(e) => { setCode(e.target.value.replace(/[^a-fA-F0-9]/g, "").toUpperCase().slice(0, 12)); setError(null); }}
               placeholder="A1B2C3D4E5F6"
               maxLength={12}
-              className="w-48 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm font-mono text-white placeholder-zinc-600 text-center tracking-widest focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              className="w-48 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm font-mono text-zinc-100 placeholder-zinc-600 text-center tracking-widest focus:outline-none focus:ring-1 focus:ring-indigo-500"
             />
             <button
               onClick={confirmCode}
               disabled={loading || code.length !== 12}
-              className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-md transition-colors flex items-center gap-2"
+              className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-[var(--ds-accent-fg)] rounded-md transition-colors flex items-center gap-2"
             >
               {loading && <Loader2 className="w-3 h-3 animate-spin" />}
-              Verify & Link
+              Verify &amp; link
             </button>
             <button
               onClick={() => { setStep("idle"); setCode(""); setError(null); }}
               disabled={loading}
-              className="px-3 py-2 text-sm text-zinc-400 hover:text-white transition-colors"
+              className="px-3 py-2 text-sm text-zinc-400 hover:text-zinc-100 transition-colors"
             >
               Back
             </button>
@@ -242,16 +244,24 @@ export function DiscordLinkSection({ linkedDiscordId, discordInviteUrl }: { link
   return (
     <div className="space-y-6">
       {inviteHref && (
-        <div className="rounded-md bg-indigo-950 border border-indigo-800 px-4 py-3 space-y-2">
-          <p className="text-sm font-medium text-indigo-200">Join our Discord server</p>
-          <p className="text-sm text-indigo-300">
+        <div
+          className="rounded-md px-4 py-3 space-y-2"
+          style={{
+            background: "var(--ds-accent-soft)",
+            border: "1px solid var(--ds-accent-ring)",
+            color: "var(--ds-fg)",
+          }}
+        >
+          <p className="text-sm font-medium">Join our Discord server</p>
+          <p className="text-sm" style={{ color: "var(--ds-fg-muted)" }}>
             Join the Discord server and link your account to request media directly from Discord.
           </p>
           <a
             href={inviteHref}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 text-sm font-medium text-indigo-400 hover:text-indigo-300 transition-colors"
+            className="inline-flex items-center gap-1.5 text-sm font-medium hover:underline"
+            style={{ color: "var(--ds-accent-text)" }}
           >
             Join Discord <ExternalLink className="w-3.5 h-3.5" />
           </a>

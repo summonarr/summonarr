@@ -7,7 +7,7 @@
 // POSTs to with `Bearer ${CRON_SECRET}`, and they do the destructive
 // housekeeping (session purge, audit-log deletion, PII scrub). They share one
 // gate and one concurrency primitive, so the file is organized as a MATRIX over
-// all ten rather than ten near-identical suites — which is also what makes it
+// all eleven rather than eleven near-identical suites — which is also what makes it
 // catch the regression that actually matters here: a NEW cron route, or an
 // edited one, that quietly stops enforcing the shared invariant.
 //
@@ -16,7 +16,7 @@
 //   1. isCronAuthorized ON EVERY ROUTE (guardrail 6). No route may re-implement
 //      a CRON_SECRET check inline, and every one must reject before doing any
 //      work. The matrix asserts unauthorized ⇒ 401 AND zero writes/locks for
-//      all ten, so an added route with a forgotten gate fails here.
+//      all eleven, so an added route with a forgotten gate fails here.
 //   2. THE SECRET IS COMPARED, NOT MERELY PRESENT. A wrong secret, a prefix of
 //      the real one, an empty bearer, and the secret in the wrong header or as
 //      a query param all fail — the last one because these routes deliberately
@@ -618,7 +618,7 @@ test("no cron route source contains a console.log call (guardrail 7)", async () 
   }
 });
 
-// ── f41: the response verdict must match the ledger verdict ─────────────────
+// ── the response verdict must match the ledger verdict ──────────────────────
 // The admin "Run now" badge judges `res.ok && !data.error` (cron-job-table.tsx),
 // deliberately ignoring `ok`. These five routes used to hardcode `ok: true` and
 // emit no `error`, so a run in which every task failed painted the badge green
@@ -698,7 +698,7 @@ test("no warm route hardcodes `ok: true` in its response body — the verdict is
   }
 });
 
-// ── f40: attribution comes from the SAME session read that authorized ────────
+// ── attribution comes from the SAME session read that authorized ────────────
 
 test("every cron route resolves its actor through getCronActor — no second readActiveSummonarrSessionFromRequest", async () => {
   const { readFileSync } = await import("node:fs");

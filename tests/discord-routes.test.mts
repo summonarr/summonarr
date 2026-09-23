@@ -1,4 +1,4 @@
-// Route-level unit tests for the seven uncovered Discord routes:
+// Route-level unit tests for seven Discord routes:
 //   POST /api/discord/generate-link      mint the /link token
 //   POST /api/discord/initiate-merge     DM a verification code
 //   POST /api/discord/confirm-merge      redeem it and merge the shadow account
@@ -350,14 +350,12 @@ beforeEach(async () => {
   settings.clear();
   settings.set("discordBotToken", "a-bot-token");
   settings.set("discordClientId", "999888777");
-  // revokeDiscordRolesOnUnlink / assignDiscordRolesOnLink no-op unless a guild
-  // AND at least one managed role id are configured — without these the role
-  // calls silently never happen and the ordering assertions below pass
-  // vacuously. (feature.integration.discord defaults ON, so it needs no row.)
-  // Both must be REAL snowflakes (17-20 digits): revokeDiscordRolesOnUnlink
-  // runs isValidSnowflake on the guild id and every managed role, and a short
-  // placeholder makes it return early — the role calls then never happen and the
-  // ordering assertions pass vacuously.
+  // revokeDiscordRolesOnUnlink / assignDiscordRolesOnLink do nothing unless a
+  // guild AND at least one managed role id are configured, and both must be REAL
+  // snowflakes (17-20 digit Discord ids) because each is checked with
+  // isValidSnowflake. Without these the role calls silently never happen and the
+  // ordering assertions below would pass without testing anything.
+  // (feature.integration.discord defaults ON, so it needs no row.)
   settings.set("discordGuildId", "555444333222111000");
   settings.set("discordLinkedRoleId", "111222333444555666");
   invalidateFeatureFlagCache();

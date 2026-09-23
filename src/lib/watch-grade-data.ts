@@ -43,8 +43,9 @@ import {
 
 export const WATCH_GRADE_FEATURE_KEY = "feature.behavior.watchGrades";
 
-// Bounds one aggregate's bind count (request ids + two per identity link), well
-// under Postgres' 65,535-parameter ceiling.
+// Caps how many request ids go into one query, keeping the number of bound
+// parameters (request ids + two per identity link) well under Postgres'
+// 65,535-parameter limit.
 const REQUEST_CHUNK = 5_000;
 
 // The detail endpoint's row cap. The summary is computed over EVERY request —
@@ -468,7 +469,10 @@ export async function computeWatchGrades(
 
   const needOthers: string[] = [];
   for (const grade of grades.values()) {
-    for (const v of grade.verdicts) if (v.scoring === "scored" && v.credit < 1) needOthers.push(v.requestId);
+    // `watch`, not `credit`: the verdict's credit is rounded to two decimals, so
+    // an own credit of 0.996 would read as 1 and skip a request gradeUser still
+    // wants the audience for.
+    for (const v of grade.verdicts) if (v.scoring === "scored" && v.watch !== "watched") needOthers.push(v.requestId);
   }
   if (needOthers.length === 0) return { availability, grades };
 

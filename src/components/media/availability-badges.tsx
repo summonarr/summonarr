@@ -27,7 +27,8 @@ export function AvailabilityBadges({
   show4k,
   className,
 }: AvailabilityBadgesProps) {
-  // All state is derived from cache tables; badges are only as fresh as the last library sync
+  // These flags come from cached library data, so the badges are only as fresh
+  // as the last library sync.
   const isAvailable = !!(
     (showPlex && plexAvailable) ||
     (showJellyfin && jellyfinAvailable)
@@ -36,8 +37,9 @@ export function AvailabilityBadges({
   const showJellyfinBadge = showJellyfin && jellyfinAvailable;
   const showQueueBadge = !isAvailable && !!arrPending;
   const showRequestedBadge = !isAvailable && !arrPending && !!requested;
-  // 4K is an independent dimension from library/HD state — a title can be downloading in HD while
-  // already present in 4K, so these render alongside (not instead of) the badges above.
+  // 4K is tracked separately from the normal (HD) state — a title can be
+  // downloading in HD while already present in 4K — so these badges show
+  // alongside the ones above, not instead of them.
   const show4kAvailBadge = !!(show4k && arr4kAvailable);
   const show4kQueueBadge = !!(show4k && !arr4kAvailable && arr4kPending);
 
@@ -67,7 +69,7 @@ export function AvailabilityBadges({
           className="ds-chip"
           style={{
             background: "var(--ds-accent-soft)",
-            color: "var(--ds-accent)",
+            color: "var(--ds-accent-text)",
             border: "1px solid var(--ds-accent-ring)",
           }}
         >
@@ -78,13 +80,13 @@ export function AvailabilityBadges({
       {showQueueBadge && (
         <span className="ds-chip ds-chip-pending">
           <Clock style={{ width: 10, height: 10 }} />
-          Approved in Queue
+          Queued
         </span>
       )}
       {show4kQueueBadge && (
         <span className="ds-chip ds-chip-pending">
           <Clock style={{ width: 10, height: 10 }} />
-          4K in Queue
+          4K Queued
         </span>
       )}
       {showRequestedBadge && (

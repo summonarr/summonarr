@@ -21,12 +21,10 @@ interface BrowseGridProps {
   // Latest year to show in From/To Year filter dropdowns. Computed by the
   // server page so SSR and hydration match — see filter-bar.tsx.
   maxYear: number;
-  // True when the server's discover fetch failed. Replaces the client fetch's
-  // own error state: without it a TMDB outage renders an empty grid under the
-  // "TMDB token not configured" empty state, which names the wrong cause. The
-  // empty-state branch below is therefore gated on `!failed` — the page maps a
-  // failure to `items: []`, so without that gate both the banner AND the
-  // wrong-cause empty state rendered together.
+  // True when the server's discover fetch failed. The page turns a failure
+  // into `items: []`, so the empty-state branch below checks `!failed` —
+  // otherwise a TMDB outage would also show the misleading "TMDB token not
+  // configured" message next to the error banner.
   failed?: boolean;
 }
 
@@ -57,50 +55,28 @@ export function BrowseGrid({
   const watchProvider = searchParams.get("watchProvider") || undefined;
   const hideAvailable = searchParams.get("hideAvailable") === "1";
 
-  // The SERVER owns every filter and page change.
+  // The SERVER owns every filter and page change: the page reads the URL's
+  // search params and renders `initialItems`, so this component does no
+  // fetching of its own. (It used to re-fetch /api/browse on every change,
+  // which doubled the work and could render different badges than the server.
+  // /api/browse still exists because the iOS app uses it.)
   //
-  // This component used to re-run the whole discover + enrichment pipeline
-  // against /api/browse on every search-param change — while the RSC page,
-  // which reads searchParams and is force-dynamic, had already run the exact
-  // same pipeline to produce `initialItems`. The two ran serially, so a filter
-  // change cost both round-trips added together, roughly 30 DB queries instead
-  // of 15, and the server's result was then thrown away unread: `hasFilters`
-  // gated the sync effect specifically to stop it overwriting the client fetch.
-  //
-  // Worse than the waste, the two paths could disagree, and did — the route
-  // resolved 4K visibility unscoped and badge visibility without the
-  // integration flags, so page 1 (server) and page 2 (client) rendered
-  // different badges and filtered differently. Deleting this fetch removes the
-  // second path entirely rather than trying to keep two copies in step.
-  //
-  // /api/browse itself stays: the iOS client is its consumer.
-  // React's own pending mechanism — no dependency, no client-state library
-  // (guardrail 9). Strictly better than the spinner it replaces: that one was
-  // driven by the client fetch, which only began AFTER the server render had
-  // finished, so it covered the tail of the wait. isPending covers all of it.
+  // useTransition is React's built-in "a navigation is in progress" flag
+  // (no client-state library — guardrail 9). FilterBar wraps its URL updates
+  // in startTransition, so isPending stays true until the new server render
+  // arrives, and we show a spinner over the grid meanwhile.
   const [isPending, startTransition] = useTransition();
 
   const items = initialItems;
   const totalPages = initialTotalPages;
   const currentPage = initialPage;
 
+  // The "N results" / "Popular right now" line lives in the page's PageHeader
+  // subtitle (movies/page.tsx, tv/page.tsx), not here.
   const hasFilters = !!(genreId || keywordId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider || hideAvailable);
-  const subtitle = hasFilters ? `${items.length} results` : "Popular right now";
 
   return (
     <>
-      <p
-        className="ds-mono"
-        style={{
-          fontSize: 12,
-          color: "var(--ds-fg-subtle)",
-          marginTop: -12,
-          marginBottom: 16,
-        }}
-      >
-        {subtitle}
-      </p>
-
       <FilterBar
         genres={genres}
         watchProviders={watchProviders}
@@ -156,7 +132,7 @@ export function BrowseGrid({
               style={{
                 width: 28,
                 height: 28,
-                color: "var(--ds-accent)",
+                color: "var(--ds-accent-text)",
               }}
             />
           </div>
@@ -185,10 +161,9 @@ export function BrowseGrid({
                 showPlex={showPlex}
                 showJellyfin={showJellyfin}
                 size="md"
-                // LCP: preload the first row's posters, but only for the
-                // SSR'd list (items still references the initialItems prop —
-                // client-fetched result pages load lazily as usual). Same
-                // value on the server and at hydration, so no mismatch.
+                // LCP (the page's main paint): preload the first row's
+                // posters. Same value on the server and at hydration, so no
+                // mismatch.
                 priority={i < 6 && items === initialItems}
               />
             ))}

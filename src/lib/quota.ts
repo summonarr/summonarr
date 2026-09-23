@@ -9,10 +9,9 @@
 // QUOTA_UNLIMITED / ADMIN bypass quotas entirely — checked by the caller via the
 // permission bitmask, not here.
 //
-// NOTE: this makes the global quota per-type. Before this change a single global
-// quotaLimit counted movie+TV requests combined; now a user gets that allowance
-// for movies AND for TV. Deployments with quota disabled (quotaLimit=0, the
-// default) are unaffected.
+// NOTE: the global quota is per type. One quotaLimit of N means a user gets N
+// movie requests AND N TV requests per window, not N combined. A quotaLimit of
+// 0 (the default) means quotas are off.
 //
 // Server-only leaf module (no imports). `new Date()` is fine here — never runs in
 // a client render path (guardrail 16).

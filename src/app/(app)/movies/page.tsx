@@ -44,10 +44,17 @@ export default async function MoviesPage({
   ]);
   const { items, totalPages, showPlex, showJellyfin, failed } = browse;
 
+  // Header subtitle. Same predicate as BrowseGrid's own `hasFilters` (which
+  // deliberately leaves watchRegion out — a region alone narrows nothing the
+  // user asked for); the grid used to render this line itself and pull it up
+  // under the header with a negative margin.
+  const hasFilters = !!(genreId || keywordId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider || hideAvailable);
+  const subtitle = hasFilters ? `${items.length} results` : "Popular right now";
+
   return (
     <div className="ds-page-enter">
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
-      <PageHeader title="Movies" />
+      <PageHeader title="Movies" subtitle={subtitle} />
       <BrowseGrid
         initialItems={items}
         initialTotalPages={totalPages}

@@ -90,12 +90,12 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
         setError(d.error ?? "Failed to block");
         return;
       }
-      // The route is an upsert and answers 201 whether or not the pair already
-      // existed, so the insert must be idempotent: `busy` is single-slot (only
-      // the in-flight key's button is disabled), so Block A → Block B → Block A
-      // again fires two POSTs for A and would otherwise prepend two rows sharing
-      // one React key. Prefer the server's row (sanitized title/reason, real
-      // createdAt) over the optimistic guess; fall back if the body won't parse.
+      // The route is an "upsert" (insert, or update if it already exists) and
+      // answers 201 either way. Only one button is disabled at a time, so
+      // Block A → Block B → Block A can send two POSTs for A. Remove any existing
+      // row for this title before adding, so the list never holds two rows with
+      // the same React key. Prefer the server's row (cleaned title/reason, real
+      // createdAt); fall back to local values if the body won't parse.
       const d = (await res.json().catch(() => ({}))) as { item?: Partial<BlacklistRow> | null };
       const item = d?.item ?? null;
       setItems((prev) => [

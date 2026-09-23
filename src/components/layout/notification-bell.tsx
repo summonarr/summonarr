@@ -10,11 +10,10 @@ import { useNotifications } from "@/components/notifications/notification-store"
 import { notificationHref, timeAgo } from "@/lib/notification-links";
 
 export function NotificationBell() {
-  // Fetching, polling and the SSE reload all live in NotificationStoreProvider
-  // ((app)/layout.tsx). This component used to own them, and so did the mobile
-  // nav's badge — both are mounted at every viewport (the breakpoints are CSS,
-  // not React), so every page load issued two identical GET /api/notifications.
-  // See the note on the store.
+  // Fetching, polling and live (SSE) reloads all happen in the shared
+  // NotificationStoreProvider ((app)/layout.tsx). This bell and the mobile
+  // nav's badge are both on every page, so sharing one store avoids fetching
+  // /api/notifications twice.
   const { items, unread, markAllRead } = useNotifications();
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -24,8 +23,7 @@ export function NotificationBell() {
   // Close on outside click / Escape.
   useEffect(() => {
     if (!open) return;
-    // Move focus into the panel on open so keyboard users land inside it (was
-    // relying on Tab reaching the links after the trigger).
+    // Move focus into the panel on open so keyboard users land inside it.
     (panelRef.current?.querySelector<HTMLElement>("a[href], button") ?? panelRef.current)?.focus();
     function onDoc(e: MouseEvent) {
       const t = e.target as Node;
@@ -59,7 +57,7 @@ export function NotificationBell() {
         ref={btnRef}
         type="button"
         onClick={toggle}
-        aria-label={unread > 0 ? `Notifications (${unread} unread)` : "Notifications"}
+        aria-label={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}
         aria-haspopup="menu"
         aria-expanded={open}
         className="relative inline-flex items-center justify-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
@@ -78,14 +76,16 @@ export function NotificationBell() {
               padding: "0 3px",
               borderRadius: 8,
               background: "var(--ds-accent)",
-              color: "var(--ds-accent-contrast, #fff)",
+              color: "var(--ds-accent-fg)",
               fontSize: 9.5,
               fontWeight: 700,
               lineHeight: "15px",
               textAlign: "center",
+              boxSizing: "border-box",
             }}
           >
-            {unread > 9 ? "9+" : unread}
+            {/* Same cap as the mobile top-bar badge (mobile-nav.tsx). */}
+            {unread > 99 ? "99+" : unread}
           </span>
         )}
       </button>
@@ -127,11 +127,14 @@ export function NotificationBell() {
                     href={notificationHref(n)}
                     role="menuitem"
                     onClick={() => setOpen(false)}
-                    className="flex gap-2.5 transition-colors"
+                    // The unread tint is a class, not an inline style, so the
+                    // hover class can win over it.
+                    className={`flex gap-2.5 transition-colors hover:bg-[var(--ds-bg-3)] ${
+                      n.readAt ? "" : "bg-[var(--ds-bg-2)]"
+                    }`}
                     style={{
                       padding: "10px 12px",
                       borderBottom: "1px solid var(--ds-border)",
-                      background: n.readAt ? "transparent" : "var(--ds-bg-2)",
                     }}
                   >
                     <div
@@ -164,8 +167,8 @@ export function NotificationBell() {
             href="/notifications"
             onClick={() => setOpen(false)}
             role="menuitem"
-            className="block text-center transition-colors"
-            style={{ padding: "9px 12px", borderTop: "1px solid var(--ds-border)", fontSize: 12, fontWeight: 500, color: "var(--ds-accent)" }}
+            className="block text-center transition-colors hover:bg-[var(--ds-bg-3)]"
+            style={{ padding: "9px 12px", borderTop: "1px solid var(--ds-border)", fontSize: 12, fontWeight: 500, color: "var(--ds-accent-text)" }}
           >
             View all
           </Link>

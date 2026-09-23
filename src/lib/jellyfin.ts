@@ -218,11 +218,12 @@ export interface JellyfinLibraryItemData {
   addedAt:        Date | null;
   // Item ids of the OTHER copies of this title, when it sits in more than one
   // library (Anime vs TV, HD vs 4K, an accidental double-import). Sorted, and
-  // empty for the overwhelmingly common single-copy case. Only `itemId` is
-  // persisted — JellyfinLibraryItem is keyed @@id([tmdbId, mediaType,
-  // serverInstance]) with a single `jellyfinItemId` — but the losing copies'
-  // ids still have to be resolvable in-process or every episode filed under
-  // them disappears. See buildSeriesItemIdIndex.
+  // empty for the overwhelmingly common single-copy case. JellyfinLibraryItem
+  // keeps one row per title (@@id([tmdbId, mediaType, serverInstance])), with
+  // `itemId` as its jellyfinItemId; these extra ids are stored alongside it in
+  // jellyfinItemIds (see libraryItemIds, guardrail 37). They must also resolve
+  // in-process, or every episode filed under them disappears — see
+  // buildSeriesItemIdIndex.
   duplicateItemIds: string[];
 }
 
@@ -463,10 +464,10 @@ async function getJellyfinItemsByType(
             if (prefersCandidate(candidate, incumbent)) items.set(n, candidate);
           }
         }
-      } else if (itemType === "Series") {
-        // Series without a TMDB provider ID are intentionally skipped; episode lookups rely on the
-        // itemId→tmdbId mapping built from this loop, so un-mapped series simply produce no episodes.
       }
+      // Items without a TMDB provider ID are skipped on purpose. For a Series
+      // that also means its episodes are skipped: episode lookups use the
+      // itemId→tmdbId map built from this loop.
     }
   };
 

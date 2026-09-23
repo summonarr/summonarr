@@ -227,8 +227,9 @@ for (const [type, id] of [["movie", "27205"], ["tv", "1396"]] as const) {
 
 test("f47: a failing DETAIL fetch still 502s — only the credits leg is best-effort", async () => {
   const { token } = await mintSession();
-  // 999999 matches no fixture, so it falls to the generic list body: an object
-  // with no id — normalize still yields a title, so use a real non-2xx instead.
+  // An unknown id would not work here: the stub answers it with a generic 200
+  // body that still normalizes into a title. So make the detail call itself
+  // return a real 500 instead.
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = new URL(String(input));

@@ -56,13 +56,13 @@ test("small servers: shrink-to-one passes only within tolerance", () => {
 // attribution to play history the live poller can never rebuild (guardrail
 // 19 — no Jellyfin backfill cron exists).
 //
-// Full integration harness (not just the pure predicate above): the real
-// syncDownloadPolicies/syncJellyfinPolicies run against a scripted
-// globalThis.fetch (the jellyfin.ts idiom — RFC1918 IP-literal bases skip the
-// SSRF DNS resolver entirely) and an in-memory prisma stub (the
-// jellyfin-config.ts idiom — shadowPrismaModel on the real, shared client).
-// Two configured instances are exercised together: the default ("") and a
-// named "remote" — mirroring a real friend's-second-server deployment.
+// Unlike the pure-predicate tests above, these run the real
+// syncDownloadPolicies/syncJellyfinPolicies end to end. Outbound HTTP goes to a
+// fake globalThis.fetch (as in jellyfin.test.mts — the servers use private IP
+// addresses, so the SSRF check never needs a DNS lookup), and the database is an
+// in-memory stub installed with shadowPrismaModel (as in jellyfin-config.test.mts).
+// Two servers are configured together: the default ("") and a named "remote",
+// like someone who also syncs a friend's second server.
 import { prisma } from "../src/lib/prisma.ts";
 import { shadowPrismaModel } from "./_helpers.mts";
 

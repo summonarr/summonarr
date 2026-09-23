@@ -11,8 +11,8 @@
 //     native-compiler half of the dual typecheck to nothing.
 //
 // .github/dependabot.yml carries two `ignore` rules plus a group
-// `exclude-patterns` for this, but a grouped "across 1 directory" PR bypassed
-// the ignores twice already (#165, #173, and again in #189, which bumped
+// `exclude-patterns` for this, but grouped "across 1 directory" PRs have
+// bypassed the ignores three times (#165, #173 and #189 — the last bumped
 // "typescript": "^6" -> "^7" and failed CI). Config alone has not held, so this
 // makes the constraint a `npm test` failure that no dependency PR can merge past.
 import { test } from "node:test";

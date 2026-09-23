@@ -6,21 +6,19 @@ import { getPlexSessions, terminatePlexSession } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 
-// Admin terminate-playback endpoint. POSTs to Plex's
-// /status/sessions/terminate, which prompts the client's player with `reason`
-// and tears the playback down. The actual session removal will surface as an
-// SSE state="stopped" event within ~1s; we don't write a PlayHistory row
-// inline — the normal finalize path handles it. Tautulli uses the same
-// endpoint (pmsconnect.py:108).
+// Admin terminate-playback endpoint for Plex. POSTs to Plex's
+// /status/sessions/terminate, which shows `reason` on the viewer's player and
+// stops playback. The session removal then reaches us as an SSE state="stopped"
+// event within ~1s, and the normal finalize path writes the PlayHistory row, so
+// we don't write one here. Tautulli uses the same Plex endpoint.
 //
 // Body: { sessionKey: string, serverInstance?: string, reason?: string }
-// The sessionKey is the short integer Plex assigns per playback. Plex's
-// terminate endpoint actually wants Session.id (the long GUID); we resolve
-// sessionKey → Session.id via a snapshot of /status/sessions because storing
-// the GUID on ActiveSession would be a single-purpose column. serverInstance
-// picks which configured Plex server to resolve against (multi-server
-// support); omitted/absent defaults to the default instance so existing
-// callers (older admin UI builds) are unaffected.
+// The sessionKey is the short integer Plex assigns per playback, but the
+// terminate endpoint wants Session.id (the long GUID). We look the key up in a
+// /status/sessions snapshot to get the GUID, rather than storing a GUID column
+// on ActiveSession just for this. serverInstance picks which configured Plex
+// server to use (multi-server support); when omitted it falls back to the
+// default server so older admin UI builds keep working.
 export const POST = withAdmin(async (req, _ctx, session) => {
   const parsed = await readJsonCapped<{ sessionKey?: unknown; serverInstance?: unknown; reason?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
@@ -51,10 +49,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     );
   }
 
-  // Cross-check that the session currently exists in /status/sessions and is
-  // owned by an account we recognize — without this anyone with admin can
-  // POST an arbitrary sessionKey at the upstream Plex server. The snapshot
-  // also gives us the Session.id (GUID) the terminate endpoint expects.
+  // Cross-check that the session currently exists in /status/sessions, so an
+  // admin can't POST an arbitrary identifier at the upstream Plex server. The
+  // snapshot also gives us the Session.id (GUID) the terminate endpoint expects.
   let sessions;
   try {
     sessions = await getPlexSessions(serverUrl, token);

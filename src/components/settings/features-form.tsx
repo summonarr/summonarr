@@ -8,6 +8,7 @@ import {
   type FeatureDefinition,
   type FeatureFlags,
 } from "@/lib/features";
+import { Switch } from "@/components/ui/switch";
 
 type SaveStatus = "idle" | "saving" | "ok" | "error";
 
@@ -21,30 +22,27 @@ interface FeaturesFormProps {
   }[];
 }
 
-// Trailing-edge coalescing pattern for rapid toggling, batched ACROSS keys.
+// How switch flips are saved: wait briefly, then send every pending flip (for
+// any number of switches) in one request.
 //
-// Why: a naïve optimistic-update + rollback approach races when a user
-// double-clicks. Two overlapping PATCHes can land out of order, and a
-// failure on the first rolls back state the user has already re-flipped.
+// Why not save each flip straight away: two quick requests for the same switch
+// can arrive out of order, and undoing a failed first one could undo a newer
+// flip the user already made.
 //
-// Why batched: /api/settings is rate limited to 10 PATCHes per minute per
-// admin, shared across every settings form. One request per flip meant an
-// admin working through the ~24 flags here started getting 429s partway,
-// with only a small red icon to explain it. The route accepts an arbitrary
-// map of allowed keys, so every pending flip goes out in ONE request —
-// matching how the multi-field settings forms (e.g. RateLimitForm) save.
+// Why one request for all switches: /api/settings allows only 10 saves per
+// minute per admin (shared by every settings form), so an admin flipping many
+// of the ~24 switches here would hit "too many requests" errors. The route
+// takes many keys at once, like the other multi-field settings forms do.
 //
-// How: per key we track the user's latest intent; a short debounce lets a
-// burst of flips collect into a single body.
-//   - savedState    — last value the server acknowledged
-//   - pendingTarget — user's latest intent, only present when it differs
-//                     from savedState and hasn't been acked yet
-//   - inFlight      — whether a flush is currently running (one at a time)
+// What we track, per switch:
+//   - savedState    — the last value the server confirmed
+//   - pendingTarget — the value the user wants, if not yet confirmed
+//   - inFlight      — whether a save is running right now (only one at a time)
 //
-// toggle() only updates local UI + pendingTarget and schedules a flush.
-// flush() loops: after each batch settles it re-reads pendingTarget, so a
-// key re-flipped mid-request is picked up by the next batch rather than
-// being clobbered by a stale response.
+// toggle() just updates the screen + pendingTarget and schedules a save.
+// flush() keeps going until nothing is pending, so a switch flipped again
+// while a save was running gets sent in the next round, and an older reply
+// never overwrites it.
 const FLUSH_DELAY_MS = 400;
 
 export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
@@ -55,11 +53,11 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
   const savedState = useRef<FeatureFlags>({ ...initialFlags });
   const pendingTarget = useRef<Map<string, boolean>>(new Map());
   const inFlight = useRef(false);
-  // Keys whose PATCH is currently on the wire. A key stays in pendingTarget
-  // until its response settles (so a mid-flight re-flip is re-sent), which means
-  // the unmount cleanup would otherwise re-PATCH a value already in flight —
-  // racing the two writes for the same key. Cleanup skips anything listed here.
-  const inFlightKeys = useRef<Set<string>>(new Set());
+  // Switches whose save request is on its way right now, and the value sent.
+  // A switch stays in pendingTarget until its reply comes back, so without this
+  // the unmount cleanup would send the same value a second time. Cleanup skips
+  // a switch only if it's still set to the value already being sent.
+  const inFlightKeys = useRef<Map<string, boolean>>(new Map());
   const flushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const statusTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
@@ -69,7 +67,7 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
     const timer = setTimeout(() => {
       statusTimers.current.delete(key);
       setStatusByKey((prev) => {
-        // Don't clear if another sync is already running for this key
+        // Don't clear it if a new save for this switch is already running.
         if (prev[key] === "saving") return prev;
         const copy = { ...prev };
         delete copy[key];
@@ -86,8 +84,8 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
   }
 
   async function flush() {
-    // One flush at a time. A toggle arriving mid-flush lands in pendingTarget
-    // and is picked up by the loop below, or by the reschedule in `finally`.
+    // Only one flush at a time. A flip made meanwhile waits in pendingTarget and
+    // is picked up by the loop below, or by the reschedule in `finally`.
     if (inFlight.current) return;
     inFlight.current = true;
 
@@ -121,7 +119,7 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
 
         let success = false;
         let message = "";
-        for (const [key] of batch) inFlightKeys.current.add(key);
+        for (const [key, target] of batch) inFlightKeys.current.set(key, target);
         try {
           const res = await fetch(withBasePath("/api/settings"), {
             method: "PATCH",
@@ -140,9 +138,9 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
 
         for (const [key, target] of batch) {
           if (success) savedState.current[key] = target;
-          // Only settle a key whose intent is still what we just sent. If the
-          // user re-flipped it mid-request, the next loop iteration sends the
-          // newer value rather than a stale response overwriting it.
+          // Only finish off a switch that's still set to what we just sent. If
+          // the user flipped it again meanwhile, the next loop round sends the
+          // newer value instead of letting this older reply overwrite it.
           if (pendingTarget.current.get(key) !== target) continue;
           pendingTarget.current.delete(key);
           if (!success) setFlags((prev) => ({ ...prev, [key]: savedState.current[key] ?? false }));
@@ -158,8 +156,8 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
       }
     } finally {
       inFlight.current = false;
-      // Closes the race where a toggle arrives after the final loop check but
-      // before the flag clears: that scheduled flush would have returned early.
+      // A flip made right after the loop's last check, but before inFlight was
+      // cleared, had its scheduled flush return early — so schedule one now.
       if (pendingTarget.current.size > 0) scheduleFlush();
     }
   }
@@ -173,24 +171,23 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
   }
 
   useEffect(() => {
-    // Capture the ref objects, not their contents: cleanup must read whatever
-    // is pending AT UNMOUNT, so dereferencing .current inside the closure is
-    // the point. Aliasing the containers (not the values) is what the
-    // exhaustive-deps rule actually asks for here.
+    // Copy the ref objects themselves (not their .current values) so the
+    // cleanup reads whatever is pending at the moment the page unmounts. This
+    // is also what the exhaustive-deps lint rule asks for.
     const timers = statusTimers;
     const pendingRef = pendingTarget;
     const inFlightRef = inFlightKeys;
     return () => {
       if (flushTimer.current) clearTimeout(flushTimer.current);
       for (const timer of timers.current.values()) clearTimeout(timer);
-      // Exclude keys whose PATCH is already on the wire — re-sending them would
-      // race a duplicate write for the same key (and the in-flight request will
-      // reach the server regardless of unmount).
-      const pending = [...pendingRef.current].filter(([key]) => !inFlightRef.current.has(key));
+      // Skip a switch whose same value is already being sent — that request
+      // still reaches the server after unmount. A switch flipped again since
+      // then is NOT skipped, or its newest value would be lost.
+      const pending = [...pendingRef.current].filter(([key, target]) => inFlightRef.current.get(key) !== target);
       if (pending.length === 0) return;
-      // Each toggle used to PATCH immediately, so navigating away right after a
-      // click still saved it. The debounce would drop that; `keepalive` lets the
-      // request outlive the unmount so batching does not cost a lost flip.
+      // Send flips still waiting on the delay, so leaving the page right after
+      // a click doesn't lose them. `keepalive` lets the request finish after the
+      // page is gone.
       void fetch(withBasePath("/api/settings"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -202,8 +199,8 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
   }, []);
 
   function toggle(key: string) {
-    // Next value is derived from the latest intent, not from React state —
-    // state may still be catching up to a rapid sequence of clicks.
+    // Work out the new value from the latest intent, not from React state,
+    // which may not have caught up yet after several fast clicks.
     const current = pendingTarget.current.has(key)
       ? (pendingTarget.current.get(key) as boolean)
       : (savedState.current[key] ?? false);
@@ -219,7 +216,7 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
       {groups.map((group) => (
         <div key={group.category} className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
           <div className="mb-5">
-            <h2 className="font-semibold text-white text-lg">{group.title}</h2>
+            <h2 className="font-semibold text-zinc-100 text-lg">{group.title}</h2>
             <p className="text-sm text-zinc-500 mt-0.5">{group.description}</p>
           </div>
           <div className="divide-y divide-zinc-800">
@@ -235,7 +232,7 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
                     <p className="text-sm font-medium text-zinc-200">{feature.label}</p>
                     <p className="text-xs text-zinc-500 mt-0.5">{feature.description}</p>
                     {feature.note && (
-                      <p className="text-xs text-amber-500/80 mt-1">{feature.note}</p>
+                      <p className="text-xs text-amber-400 mt-1">{feature.note}</p>
                     )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0 pt-0.5">
@@ -247,22 +244,11 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
                         aria-label={errorByKey[feature.key] ?? "Save failed"}
                       />
                     )}
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={enabled}
+                    <Switch
+                      checked={enabled}
                       aria-label={`Toggle ${feature.label}`}
-                      onClick={() => toggle(feature.key)}
-                      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-zinc-900 ${
-                        enabled ? "bg-indigo-600" : "bg-zinc-700"
-                      }`}
-                    >
-                      <span
-                        className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
-                          enabled ? "translate-x-4" : "translate-x-0.5"
-                        }`}
-                      />
-                    </button>
+                      onCheckedChange={() => toggle(feature.key)}
+                    />
                   </div>
                 </div>
               );

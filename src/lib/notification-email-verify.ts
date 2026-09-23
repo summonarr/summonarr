@@ -1,4 +1,4 @@
-// Helpers for the Jellyfin notification-email verification flow (2.2).
+// Helpers for the Jellyfin notification-email verification flow.
 //
 // A Jellyfin account has no provider-verified email the way Plex/OIDC do, so to
 // let such a user route notifications to an arbitrary address WITHOUT reopening
@@ -6,14 +6,14 @@
 // proof-of-possession: a one-time token is mailed to the candidate address and
 // the address is bound only after the link is clicked.
 //
-// Storage reuses the (otherwise-dead, NextAuth-legacy) VerificationToken model —
-// { identifier, token @unique, expires } — so no schema migration is needed:
+// Storage reuses the VerificationToken table left over from NextAuth
+// ({ identifier, token @unique, expires }), so no schema change was needed:
 //   identifier = "notif-email:<userId>:<normalizedEmail>"
 //   token      = sha256(rawToken)   (raw token travels only in the emailed link)
 //   expires    = now + TTL
 //
-// The identifier helpers are pure (unit-tested). node:crypto is a builtin, so no
-// "server-only" pin is needed; the module is only imported by server routes.
+// The helpers are pure (unit-tested). There is no "server-only" import because
+// node:crypto is built into Node; only server routes import this module.
 import { createHash, randomBytes } from "node:crypto";
 
 export const VERIFY_TTL_MS = 30 * 60 * 1000; // 30 minutes
@@ -38,8 +38,9 @@ export function verifyIdentifierPrefixFor(userId: string): string {
   return `${IDENTIFIER_PREFIX}${userId}:`;
 }
 
-// userId is a cuid (no ':'); the first ':' after the prefix splits it from the
-// email, and the remainder is the (normalized, colon-free) email.
+// Splits an identifier back into { userId, email }. userId is a cuid, which never
+// contains ':', so the first ':' after the prefix separates the two. Returns null
+// for anything that isn't one of our identifiers.
 export function parseVerifyIdentifier(identifier: string): { userId: string; email: string } | null {
   if (!identifier.startsWith(IDENTIFIER_PREFIX)) return null;
   const rest = identifier.slice(IDENTIFIER_PREFIX.length);

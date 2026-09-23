@@ -237,9 +237,6 @@ const HTTPS_ONLY_URL_KEYS = new Set<string>([
   "apnsRelayUrl",
 ]);
 
-// stripUrlUserinfo now lives in @/lib/server-url (shared with the per-instance
-// media-instances route so both redact GET responses the same way).
-
 // Per-key write cooldown prevents rapid settings toggling (e.g. maintenanceEnabled spam)
 const KEY_COOLDOWN_MS = 10_000;
 const lastKeyWriteAt = new Map<string, number>();
@@ -309,13 +306,10 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
 
   const USER_FACING_KEYS = new Set(["motdTitle", "motdBody", "siteTitle", "maintenanceMessage"]);
 
-  // URL_KEYS hoisted to module scope so GET masks userinfo too — see top of file.
-
-  // Donation keys accept either a full http(s) URL or a plain handle (e.g. "@alice").
-  // We must reject dangerous schemes (javascript:, data:, vbscript:, ftp:) on the URL form
-  // so the donate page can render <a href={value}> safely. donationAmazon must be a URL
-  // (no username form), so it falls into the strict URL_KEYS check above conceptually,
-  // but for consistency we apply the same scheme guard here for any value containing ":".
+  // Donation keys accept either a plain handle (e.g. "@alice") or a link. A link
+  // must be https:// (checked in the loop below), which also rules out dangerous
+  // schemes like javascript: or data: in the <a href> the donate page renders.
+  // donationAmazon has no handle form, so it must always be an https:// link.
   const DONATION_URL_KEYS = new Set<string>([
     "donationPaypal",
     "donationVenmo",
@@ -536,30 +530,19 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     }
   }
 
-  // Never enable the machine-session API while its IP allowlist is empty. The
-  // machine-session route enforces the allowlist ONLY when it is non-empty (an empty
-  // allowlist is treated as "no IP restriction"), so turning the feature on with an
-  // empty allowlist means ANY caller in possession of CRON_SECRET could mint a fully
-  // privileged admin session cookie from ANY source IP — a privilege-escalation hole.
-  // Guard against that misconfiguration at write time: require the allowlist to be
-  // already persisted non-empty, OR to be set non-empty in this same PATCH, before
-  // flipping enableMachineSession on.
-  // Evaluate the EFFECTIVE post-PATCH state, not just the case where the feature is
-  // being turned on. The original guard only fired on `enableMachineSession === "true"`,
-  // so a later PATCH that CLEARED machineSessionAllowedIps (an allowed clearable key)
-  // while the feature stayed on would silently restore the IP-unrestricted state this
-  // guard exists to prevent. Reject whenever the resulting state is feature-on +
-  // empty-allowlist, regardless of which of the two this PATCH is touching.
-  // An empty string is "unchanged", not "off". enableMachineSession is NOT in
-  // CLEARABLE_KEYS, so an empty value is dropped by the write filter and the
-  // persisted row survives — but the guard below read `"" === "true"` as false and
-  // concluded the feature was off. A PATCH sending an empty toggle alongside an
-  // empty allowlist therefore passed the guard, cleared the allowlist (which IS
-  // clearable), and left the feature enabled with no IP restriction: exactly the
-  // state this guard exists to prevent. Treat empty as absent so the effective
-  // state comes from the DB row, matching what the write layer will actually leave
-  // behind. The allowlist half deliberately keeps its own handling — there an
-  // empty string IS a real clearing write.
+  // Never leave the machine-session API enabled with an empty IP allowlist. The
+  // machine-session route treats an empty allowlist as "no IP restriction", so
+  // that combination would let anyone holding CRON_SECRET mint a full admin
+  // session from any IP — a privilege-escalation hole.
+  //
+  // We check the EFFECTIVE state after this PATCH (incoming values merged over
+  // the stored rows), so it catches both "turn the feature on with no allowlist"
+  // and "clear the allowlist while the feature stays on".
+  //
+  // An empty enableMachineSession means "unchanged", not "off": it is not in
+  // CLEARABLE_KEYS, so the write filter drops it and the stored row survives.
+  // Reading "" as "off" would let an empty toggle + empty allowlist slip past.
+  // For the allowlist, by contrast, an empty string IS a real clearing write.
   const enableMachineSessionValue =
     typeof body.enableMachineSession === "string" && body.enableMachineSession !== ""
       ? body.enableMachineSession

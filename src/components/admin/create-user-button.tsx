@@ -70,7 +70,7 @@ export function CreateUserButton() {
           resetForm();
           setOpen(true);
         }}
-        className="border-zinc-700 text-zinc-300 hover:text-white gap-2"
+        className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
       >
         <UserPlus className="w-4 h-4" />
         Create user
@@ -160,7 +160,7 @@ export function CreateUserButton() {
                   size="sm"
                   onClick={() => setOpen(false)}
                   disabled={loading}
-                  className="border-zinc-700 text-zinc-400 hover:text-white"
+                  className="border-zinc-700 text-zinc-400 hover:text-zinc-100"
                 >
                   Cancel
                 </Button>

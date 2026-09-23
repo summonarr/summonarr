@@ -74,8 +74,8 @@ self.addEventListener("notificationclick", (event) => {
             continue;
           }
           if (clientOrigin === self.location.origin && "focus" in client) {
-            // client.navigate isn't supported in every browser — fall back to
-            // opening a fresh window when it's unavailable.
+            // client.navigate isn't supported in every browser — when it's
+            // missing, just focus the existing app window (without navigating).
             if (typeof client.navigate === "function") {
               return client.navigate(absUrl).then(() => client.focus());
             }

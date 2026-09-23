@@ -58,12 +58,12 @@ export function ActivityFilterBar() {
     return pathname === page.href || pathname.startsWith(page.href + "/");
   }
 
-  // The activity and stats pages are `force-dynamic` and read searchParams, and
-  // Next's router-cache `staleTimes.dynamic` defaults to 0, so a `router.push`
-  // to the new URL already fetches a fresh RSC render with the new params. A
-  // trailing refresh here re-rendered the heaviest admin page a second time
-  // per click (and refetched the shared layouts on top) — don't re-add it.
-  // The same holds for the Overview/History tab buttons below.
+  // No `router.refresh()` after the push, on purpose. These pages are
+  // `force-dynamic` and Next does not cache dynamic pages on the client
+  // (`staleTimes.dynamic` defaults to 0), so `router.push` to the new URL
+  // already renders the page fresh on the server. An extra refresh made the
+  // heaviest admin page render twice per click. The same holds for the
+  // Overview/History tab buttons below.
   const setParam = useCallback(
     (key: string, value: string) => {
       const params = new URLSearchParams(searchParams.toString());
@@ -78,11 +78,8 @@ export function ActivityFilterBar() {
     [router, pathname, searchParams],
   );
 
-  // Rejecting an out-of-range value is right; doing it in silence was not.
-  // Previously this was the `if` alone with no `else`, so "-5" or "99999" left
-  // the page on its previous range with no message and the field unchanged —
-  // there was nothing to tell the user their input had been thrown away, so
-  // the natural response was to press Go again.
+  // Every rejected value shows a message. Without one, typing "-5" and pressing
+  // Go would just leave the page unchanged, and the user would not know why.
   const applyCustomDays = () => {
     const trimmed = customValue.trim();
     if (trimmed === "") {
@@ -115,10 +112,10 @@ export function ActivityFilterBar() {
               <button
                 key={page.label}
                 onClick={() => router.push(`/admin/activity?tab=${page.tab}`)}
-                className={`px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors ${
+                className={`inline-flex items-center min-h-8 px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                   active
-                    ? "bg-zinc-800 text-white"
-                    : "text-zinc-500 hover:text-zinc-300"
+                    ? "bg-zinc-800 text-zinc-100"
+                    : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60"
                 }`}
               >
                 {page.label}
@@ -130,10 +127,10 @@ export function ActivityFilterBar() {
               <button
                 key={page.label}
                 onClick={() => router.push("/admin/activity")}
-                className={`px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors ${
+                className={`inline-flex items-center min-h-8 px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                   active
-                    ? "bg-zinc-800 text-white"
-                    : "text-zinc-500 hover:text-zinc-300"
+                    ? "bg-zinc-800 text-zinc-100"
+                    : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60"
                 }`}
               >
                 {page.label}
@@ -144,10 +141,10 @@ export function ActivityFilterBar() {
             <Link
               key={page.label}
               href={page.href}
-              className={`px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors ${
+              className={`inline-flex items-center min-h-8 px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                 active
-                  ? "bg-zinc-800 text-white"
-                  : "text-zinc-500 hover:text-zinc-300"
+                  ? "bg-zinc-800 text-zinc-100"
+                  : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60"
               }`}
             >
               {page.label}
@@ -169,10 +166,10 @@ export function ActivityFilterBar() {
                     setShowCustom(false);
                     setParam("days", r.value === "30" ? "" : r.value);
                   }}
-                  className={`px-2.5 py-1 text-xs font-medium transition-colors ${
+                  className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                     !showCustom && (currentDays === r.value || (r.value === "30" && !searchParams.has("days")))
-                      ? "bg-indigo-600 text-white"
-                      : "bg-zinc-800 text-zinc-400 hover:text-white"
+                      ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+                      : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
                   }`}
                 >
                   {r.label}
@@ -180,10 +177,10 @@ export function ActivityFilterBar() {
               ))}
               <button
                 onClick={() => setShowCustom(true)}
-                className={`px-2.5 py-1 text-xs font-medium transition-colors ${
+                className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                   showCustom
-                    ? "bg-indigo-600 text-white"
-                    : "bg-zinc-800 text-zinc-400 hover:text-white"
+                    ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+                    : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
                 }`}
               >
                 Custom
@@ -206,7 +203,7 @@ export function ActivityFilterBar() {
                   aria-label="Custom range in days"
                   aria-invalid={customError ? true : undefined}
                   aria-describedby={customError ? "activity-custom-days-error" : undefined}
-                  className={`w-16 px-2 py-1 text-xs bg-zinc-800 border rounded-lg text-white placeholder:text-zinc-500 focus:outline-none tabular-nums ${
+                  className={`w-16 min-h-8 px-2 py-1 text-xs bg-zinc-800 border rounded-lg text-zinc-100 placeholder:text-zinc-500 focus:outline-none tabular-nums ${
                     customError
                       ? "border-red-500 focus:border-red-400"
                       : "border-zinc-700 focus:border-indigo-500"
@@ -214,7 +211,7 @@ export function ActivityFilterBar() {
                 />
                 <button
                   onClick={applyCustomDays}
-                  className="px-2 py-1 text-xs font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-500 transition-colors"
+                  className="inline-flex items-center min-h-8 px-2 py-1 text-xs font-medium bg-indigo-600 text-[var(--ds-accent-fg)] rounded-lg hover:bg-indigo-500 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
                 >
                   Go
                 </button>
@@ -238,10 +235,10 @@ export function ActivityFilterBar() {
                 <button
                   key={s.value}
                   onClick={() => setParam("source", s.value)}
-                  className={`px-2.5 py-1 text-xs font-medium transition-colors ${
+                  className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                     currentSource === s.value
-                      ? "bg-indigo-600 text-white"
-                      : "bg-zinc-800 text-zinc-400 hover:text-white"
+                      ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+                      : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
                   }`}
                 >
                   {s.label}
@@ -257,10 +254,10 @@ export function ActivityFilterBar() {
                 <button
                   key={t.value}
                   onClick={() => setParam("mediaType", t.value)}
-                  className={`px-2.5 py-1 text-xs font-medium transition-colors ${
+                  className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                     currentMediaType === t.value
-                      ? "bg-indigo-600 text-white"
-                      : "bg-zinc-800 text-zinc-400 hover:text-white"
+                      ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+                      : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
                   }`}
                 >
                   {t.label}

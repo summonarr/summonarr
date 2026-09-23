@@ -42,8 +42,8 @@ function namespacesFor(mediaType?: string | null): ("movie" | "tv")[] {
 }
 
 // Keyed by `posterPathKey`, like `resolvePosterPathMap` — a bare numeric key
-// cannot hold a movie and a TV title sharing one TMDB number, and 5 of the 7
-// call sites pass mixed movie+TV lists.
+// cannot hold a movie and a TV title sharing one TMDB number, and most callers
+// pass mixed movie+TV lists.
 export async function resolvePosterMap(
   items: PosterLookupItem[],
 ): Promise<Record<string, string>> {
@@ -149,7 +149,7 @@ export async function resolvePosterPathMap(
         map[key] = parsed.posterPath;
       }
     } catch {
-      // ignore unparseable cache rows
+      // Skip a cache row whose JSON can't be parsed; the id just gets no poster.
     }
   }
   return finalize(map, wanted, explicit);

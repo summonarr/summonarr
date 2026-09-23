@@ -146,7 +146,7 @@ async function readInstanceView(service: MediaServerService, slug: string, name:
       name,
       restricted,
       // Redacted like the /api/settings GET: never echo an embedded credential
-      // (older rows may predate the write-time rejection above).
+      // (older rows may predate the write-time URL check in POST below).
       serverUrl: stripUrlUserinfo(map[plexSettingKey(slug, "ServerUrl")] ?? ""),
       adminEmail: map[plexSettingKey(slug, "AdminEmail")] ?? "",
       hasAdminToken: !!map[plexSettingKey(slug, "AdminToken")],
@@ -256,12 +256,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
   // ONE transaction for the registry write, the connection-Setting writes AND
   // the removal cleanup. The registry JSON and the library rows must not
-  // diverge: availability readers union PlexLibraryItem/JellyfinLibraryItem
-  // across every serverInstance with no filter, and no sync path ever targets a
-  // de-registered slug again — so if the registry commits while the delete
-  // doesn't, that server's entire catalogue reads "In Plex"/"In Jellyfin"
-  // FOREVER, with nothing left to retry the cleanup. BATCH_TX_TIMEOUT because a
-  // single library deleteMany can span 25k+ rows.
+  // diverge: no sync path ever targets a de-registered slug again, so if the
+  // registry commits while the delete doesn't, that server's library rows are
+  // orphaned forever — still counted by the admin dashboard and stats, with
+  // nothing left to retry the cleanup (guardrail 35). BATCH_TX_TIMEOUT because
+  // a single library deleteMany can span 25k+ rows.
   //
   // Guardrail 23: nothing in here catches a write error. A failure propagates,
   // the whole transaction rolls back, and the route 500s — the admin retries

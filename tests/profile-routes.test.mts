@@ -4,13 +4,11 @@
 //   GET    /api/profile/notifications       — read notification preferences
 //   PATCH  /api/profile/notifications       — update notification preferences
 //   POST   /api/profile/notification-email  — begin verifying a notify email
-//   DELETE /api/profile                     — self-delete (anonymize + disable)
+//   DELETE /api/profile                     — self-delete (disable the account)
 //
 // NOTE on scope: /api/profile itself exports ONLY DELETE — there is no GET/PATCH
-// profile handler anywhere in the tree (the "profile GET/PATCH" the task brief
-// anticipated does not exist), so the fourth route pinned here is the DELETE
-// self-delete, which carries its OWN password step-up (the iOS deletion
-// regression from project memory). A couple of the routes' defensive branches
+// profile handler. The DELETE self-delete carries its OWN password step-up (an
+// earlier iOS build shipped without matching it). A couple of the routes' defensive branches
 // are deliberately NOT tested because a live authenticated session can never
 // reach them — session-refresh.ts requires a NON-deactivated user row to
 // authenticate at all (`if (!dbUser) return null` / `if (dbUser.deactivatedAt)
@@ -55,7 +53,7 @@
 // (tests/requests-route.test.mts idiom) — that scope has NO session cookie, so the
 // guard falls through to the (unconfigured ⇒ off) maintenance Settings and passes.
 // $transaction is a recording stub (array form for the password tx, callback form
-// for the delete anonymize tx). dns.lookup is stubbed and globalThis.fetch is a
+// for the delete/deactivate tx). dns.lookup is stubbed and globalThis.fetch is a
 // recording thrower — the ONLY test that expects a fetch is the notification-email
 // happy path, where the scripted Resend 200 IS the send. The current-password
 // fixture is scrypt-hashed ONCE at module scope and reused (scrypt is slow).
@@ -232,8 +230,9 @@ const verificationTokenModel = {
 };
 shadowPrismaModel(prisma, "verificationToken", verificationTokenModel);
 
-// Models the delete-anonymize tx touches (guardrail 28: MediaServerUser is
-// updateMany userId:null, never deleted). Recorded no-ops.
+// Models the OLD anonymize-on-delete code used to write. Self-delete now only
+// deactivates (guardrail 33), so these are recorded no-ops that let the delete
+// tests prove none of them is touched — above all the MediaServerUser link.
 const accountModel = { deleteMany: async (a: unknown) => { rec("account.deleteMany", a); return { count: 0 }; } };
 const pushSubscriptionModel = { deleteMany: async (a: unknown) => { rec("pushSubscription.deleteMany", a); return { count: 0 }; } };
 const discordLinkTokenModel = { deleteMany: async (a: unknown) => { rec("discordLinkToken.deleteMany", a); return { count: 0 }; } };
@@ -246,8 +245,8 @@ shadowPrismaModel(prisma, "discordMergeCode", discordMergeCodeModel);
 shadowPrismaModel(prisma, "mediaServerUser", mediaServerUserModel);
 
 // $transaction: ARRAY form (the password update+deleteMany) → Promise.all; CALLBACK
-// form (the delete anonymize) → run against a tx client carrying every anonymize
-// model + no-op raw executors (the ADMIN last-admin path is never exercised here
+// form (the self-delete deactivate) → run against a tx client carrying every model
+// above + no-op raw executors (the ADMIN last-admin path is never exercised here
 // — every delete test uses a USER-role target).
 const txObj = {
   user: userModel,

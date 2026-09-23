@@ -1,5 +1,6 @@
 // Route-level unit tests for POST /api/interactions — the Discord slash-command
-// and component webhook, and the largest single uncovered route in the tree.
+// and component webhook (Discord POSTs here when a user runs a bot command or
+// clicks a bot button).
 //
 // This endpoint is PUBLIC. Discord calls it directly from the internet with no
 // session, so the ONLY thing standing between an anonymous POST and "create a
@@ -404,10 +405,11 @@ test("the FUTURE tolerance is tighter than the past one — a future timestamp w
   const near = String(Math.floor(Date.now() / 1000) + 1);
   assert.equal((await post(null, { rawBody: body, timestamp: near, signature: signBody(near, body) })).status, 200);
 
-  // +10s: well inside the 5s PAST allowance in magnitude, but rejected because
-  // it is in the future.
+  // +4s: a 4s-OLD timestamp would pass the 5s past window, but 4s in the
+  // FUTURE is past the 2s skew allowance, so it is rejected. (A value above 5s
+  // would be rejected either way and would not prove the asymmetry.)
   const body2 = JSON.stringify(ping());
-  const far = String(Math.floor(Date.now() / 1000) + 10);
+  const far = String(Math.floor(Date.now() / 1000) + 4);
   assert.equal((await post(null, { rawBody: body2, timestamp: far, signature: signBody(far, body2) })).status, 401);
 });
 

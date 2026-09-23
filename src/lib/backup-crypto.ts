@@ -41,6 +41,8 @@ async function deriveKey(password: string, salt: Buffer): Promise<Buffer> {
   return pbkdf2P(password.normalize("NFKC"), salt, KDF_ITERATIONS, KEY_LEN, "sha256");
 }
 
+// 40-byte header layout: magic (bytes 0-7), version (8), three reserved zero
+// bytes (9-11), PBKDF2 salt (12-27), AES-GCM IV/nonce (28-39).
 function buildHeader(salt: Buffer, iv: Buffer): Buffer {
   const header = Buffer.alloc(HEADER_LEN);
   MAGIC.copy(header, 0);
@@ -132,7 +134,9 @@ export function wrapDecryptStream(
   let headerBuf = Buffer.alloc(0);
   let decipher: DecipherGCM | null = null;
 
-  // GCM auth tag (16 bytes) is appended at the very end; buffer the tail to avoid treating it as ciphertext
+  // The 16-byte GCM auth tag sits at the very end of the file. We can't know a
+  // chunk is the last one until the reader says "done", so always hold back the
+  // newest 16 bytes in `tail` instead of decrypting them as ciphertext.
   let tail = Buffer.alloc(0);
   let done = false;
 

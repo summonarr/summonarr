@@ -10,21 +10,17 @@ export const dynamic = "force-dynamic";
 // state tree, so each page enforces the login wall itself (see src/lib/require-app-session.ts).
 export default async function WatchlistPage() {
   const session = await requireAppSession();
-  const items = session
-    ? await prisma.watchlistItem.findMany({
-        where: { userId: session.user.id },
-        select: { tmdbId: true, mediaType: true, title: true, posterPath: true },
-        orderBy: { createdAt: "desc" },
-        take: 500,
-      })
-    : [];
+  const items = await prisma.watchlistItem.findMany({
+    where: { userId: session.user.id },
+    select: { tmdbId: true, mediaType: true, title: true, posterPath: true },
+    orderBy: { createdAt: "desc" },
+    take: 500,
+  });
 
   return (
-    <div>
-      <PageHeader title="Watchlist" />
-      <div style={{ marginTop: 16 }}>
-        <WatchlistGrid initialItems={items} />
-      </div>
+    <div className="ds-page-enter">
+      <PageHeader title="Watchlist" subtitle="Titles you saved for later" />
+      <WatchlistGrid initialItems={items} />
     </div>
   );
 }

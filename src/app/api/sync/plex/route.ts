@@ -35,9 +35,8 @@ export async function POST(request: NextRequest) {
 // orchestrator's job, where it is gated on all instances having been fetched).
 // A single-server resync cannot produce that union, so it rewrites the cache
 // ONLY when it is the sole configured Plex server. With more than one it leaves
-// the cache alone — previously it deleted `source: "plex"` unscoped and
-// repopulated from this server alone, silently destroying every other Plex
-// server's episode rows until the next orchestrator run.
+// the cache alone — rewriting from this server alone would destroy every other
+// Plex server's episode rows until the next orchestrator run.
 async function syncPlex(request: NextRequest, actor: CronActor) {
   const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
   if (rawBody instanceof NextResponse) return rawBody;
@@ -59,7 +58,7 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
   // (guardrail 35). Counting REGISTERED rather than CONFIGURED servers is also
   // the safer error: a registered-but-unconfigured server has no episodes to
   // contribute, so at worst this skips a rewrite the orchestrator will do anyway
-  // — the opposite mistake destroys another server rows.
+  // — the opposite mistake destroys another server's rows.
   const [plexConfig, librariesRow, plexInstances] = await Promise.all([
     getPlexConfig(instance),
     prisma.setting.findUnique({ where: { key: plexSettingKey(instance, "Libraries") } }),
@@ -106,7 +105,7 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
   // Bounds the recentOnly /recentlyAdded walk (addedAt-desc, early-stop once a
   // whole page predates the window) — mirrors the Jellyfin route's 2h
   // MinDateLastSaved: wider than the 1h sync interval so one missed run is
-  // survivable. Without it the "incremental" path paged the ENTIRE section.
+  // survivable. Without it the "incremental" path would page the ENTIRE section.
   const RECENT_WINDOW_MS = 2 * 60 * 60 * 1000;
   const recentSinceEpochSec = recentOnly ? Math.floor((Date.now() - RECENT_WINDOW_MS) / 1000) : undefined;
   try {
@@ -130,16 +129,16 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
     );
   }
 
-  // Fire-and-forget: episode cache is best-effort and must not block the main library write.
-  // Full replace: clear unconditionally then insert. getPlexTVEpisodes throws on a fetch
-  // failure (rejects → .catch, no clear), so an empty result is a genuinely empty library
-  // and the stale episode ownership must be cleared rather than left behind.
   if (!ownsEpisodeCache) {
     console.warn(
       `[sync/plex] ${plexInstances.length} Plex servers configured — leaving the shared TVEpisodeCache to the orchestrator, which rebuilds it from every server.`,
     );
   }
   const episodeFilePaths = new Map<string, string>();
+  // Fire-and-forget (not awaited): the episode cache is best-effort and must not
+  // hold up the library write below. The rewrite is a full replace. If the fetch
+  // fails, getPlexTVEpisodes throws and the .catch skips the rewrite, so an empty
+  // list really means "no episodes" and the old rows are rightly cleared.
   const episodesPromise = ownsEpisodeCache
     // The precomputed show map is complete only when the walk above was FULL —
     // on recentOnly it covers just the 2h window while this episode rewrite is
@@ -162,8 +161,8 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
   };
 
   // `serverInstance` is NOT optional here. Every delete on this path is scoped to
-  // `instance`, so omitting it on the insert made a named-instance resync delete that
-  // server's rows and re-insert them under the schema default "" — moving the whole
+  // `instance`, so omitting it on the insert would make a named-instance resync delete
+  // that server's rows and re-insert them under the schema default "" — moving the whole
   // library onto the DEFAULT server. That silently un-restricts a `restricted` server
   // (slug "" is visible to everyone) and drops its server-local ratingKeys into the
   // default's namespace, where a later fix-match would address the wrong server.
@@ -317,16 +316,13 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
   if (toMark.length > 0) {
     const unnotified = toMark.filter((r) => !r.notifiedAvailable);
     if (unnotified.length > 0) {
-      // Gate notification by the requester's mediaServer preference — mirror the
-      // orchestrator's markLibraryRequests. A Plex-pinned user must NOT get a "ready to
-      // watch" ping from a Jellyfin resync (and vice versa); users with no preference
-      // are notified by whichever source sees the item first.
+      // Notify based on the requester's preferred media server, like the
+      // orchestrator's markLibraryRequests. A user who picked Jellyfin must NOT get a
+      // "ready to watch" ping from a Plex resync (and vice versa); users with no
+      // preference are notified by whichever source sees the item first.
       //
-      // The per-user media-server VISIBILITY gate now runs where `toMark` is built
-      // above — it has to, because this route IS generalized to named instances and a
-      // restricted one must not flip a request AVAILABLE (or notify) for a requester
-      // who cannot see that server. The split below is the separate, older concern:
-      // which SOURCE the user prefers, not which server they may see.
+      // This is a different question from the visibility gate above: that one asks
+      // which servers the user MAY see; this one asks which kind they PREFER.
       const userRows = await prisma.user.findMany({
         where: { id: { in: unnotified.map((r) => r.requestedBy) } },
         select: { id: true, mediaServer: true },
@@ -342,12 +338,12 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
         return !!ms && ms !== "plex";
       });
       if (toNotify.length > 0) {
-        // CAS on notifiedAvailable so concurrent sync paths don't double-fire notifications;
-        // winner filter ensures we only notify on rows we actually flipped.
-        // `claimed` is every row the CAS flipped; `deliverable` drops the ones whose
-        // requester is disabled. Consequences of the TRANSITION key off `claimed` —
-        // that row went AVAILABLE too, and its claim is already burned, so nothing
-        // later would wipe its stale deletion votes. Only delivery keys off the split.
+        // CAS (compare-and-swap) on notifiedAvailable: only the sync path that
+        // actually flips a row gets to notify, so no one is notified twice.
+        // `claimed` = every row this call flipped. `deliverable` = the claimed rows
+        // whose requester is not disabled. Clean-up for the flip itself uses
+        // `claimed` (a disabled user's row also went AVAILABLE and will never be
+        // claimed again); only sending the notifications uses `deliverable`.
         const { claimed, deliverable } = await claimAvailableNotifications(toNotify, { markAvailable: true });
         if (claimed.length > 0) {
           // The claim helper sets status/availableAt/notifiedAvailable but not

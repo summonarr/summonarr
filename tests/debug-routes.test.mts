@@ -36,8 +36,8 @@
 // rows (tests/api-auth.test.mts idiom), globalThis.fetch is a recording script,
 // and dns/promises.lookup is stubbed so safe-fetch's SSRF resolver never issues a
 // real lookup for the (scripted) Arr host / api.mdblist.com. TOKEN_ENCRYPTION_KEY
-// and the session-JWT secret are set BEFORE the module graph loads (dynamic
-// imports below would otherwise hoist above them).
+// and the session-JWT secret are set BEFORE the module graph loads, which is why
+// the imports below are dynamic (static imports would hoist above them).
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import dns from "node:dns/promises";

@@ -86,13 +86,11 @@ export function IpInfo({ ip, inline = false }: Props) {
           return;
         }
         if (!r.ok) {
-          // 429 (per-admin rate limit) / 5xx / a transient upstream blip: the
-          // SERVER stays retryable (no notFound row is written for these), so
-          // the client must too. Never write the shared cache here — the map
-          // outlives client navigations, and a single blip would otherwise pin
-          // "Not available" on this IP in every table until a full reload.
-          // Surface the route's own message (the 429 says "try again shortly")
-          // and release the fetch guard so the next open retries.
+          // 429 (rate limit), 5xx, or a brief upstream hiccup: these are
+          // temporary, so don't write the shared cache. The cache survives page
+          // changes, and caching a blip would show "Not available" for this IP
+          // everywhere until a full reload. Show the route's own message and
+          // reset the fetch guard so the next open tries again.
           const body = (await r.json().catch(() => null)) as { error?: unknown } | null;
           const msg = typeof body?.error === "string" && body.error ? body.error : null;
           setError(msg ?? "Lookup failed — try again");

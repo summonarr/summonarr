@@ -3,30 +3,23 @@
 // every "Request on <instance>" button.
 //
 // One resolver, three consumers: the movie detail page, the TV detail page, and
-// GET /api/requests/instances (the native mirror of those buttons). They must
-// agree — a button the web hides but the app shows is a button that 400s — and
-// the three had each open-coded the same eight steps.
+// GET /api/requests/instances (the native app's copy of those buttons). They must
+// agree — a button the web hides but the app shows is a button that fails.
 //
-// They had already drifted. The route enumerated `getArrInstances`, the pages
-// `getSyncableArrInstances`: the former includes instances that are REGISTERED
-// but have no url/apiKey, so a native client rendered a "Request on X" button
-// for an unconfigured instance while the web page correctly hid it. Pressing it
-// could only ever fail — /api/requests rejects an unconfigured named slug with
-// 400 "that instance isn't configured" (requests/route.ts, the
-// isInstanceConfigured gate). Configured-only is the correct set, and it is now
-// impossible to pick the other one at a call site.
+// Only CONFIGURED instances count (getSyncableArrInstances, not getArrInstances).
+// An instance that is registered but has no url/apiKey can't take a request —
+// /api/requests answers 400 "that instance isn't configured" — so offering a
+// button for it would be a dead end. Keeping the choice here means no call site
+// can pick the wrong list.
 //
 // Scope is deliberately NAMED slugs only. The default instance ("") is the plain
 // Request button and "4k" is the dedicated 4K button; both are already modelled
 // on the media payload, and folding them in would give callers two competing
 // sources of truth for the same two actions.
 //
-// Query shape: TWO queries total, not two per instance. The per-instance
-// findFirst/findUnique pair this replaces made the round-trip count scale with
-// the number of named instances, on the two hottest pages in the app (guardrail
-// 31's cap is about fan-out width; this is the same cost with a cheaper fix —
-// the whole set is one `arrInstance: { in: [...] }` read against a key both
-// tables are already indexed on, `@@id([tmdbId, arrInstance])`).
+// Query cost: the request and availability lookups are two queries in total,
+// however many named instances exist. Each reads the whole slug set at once with `arrInstance: { in: [...] }`, which both
+// tables index (`@@id([tmdbId, arrInstance])`). These run on the two busiest pages.
 
 import { prisma } from "./prisma";
 import { getSyncableArrInstances } from "./arr-instance-registry";

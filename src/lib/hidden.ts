@@ -8,6 +8,7 @@ import { prisma } from "./prisma";
 // admin blacklist (global + cached), this is user-scoped and queried per discovery
 // render (indexed on userId): it is small per user and only ever changes from that
 // user's own actions, so a shared cache would buy little and complicate invalidation.
+//
 // Bound the per-render read. HiddenItem rows accumulate unbounded (POST /api/hidden
 // is only per-minute rate-limited, so a user can amass hundreds of thousands over
 // time), and this runs on EVERY discovery render — an uncapped findMany would load

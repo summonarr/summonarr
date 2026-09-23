@@ -50,23 +50,18 @@ function AvatarImage({
   const { status, setStatus } = useAvatarContext("AvatarImage")
   const ref = React.useRef<HTMLImageElement>(null)
 
-  // "error" is otherwise terminal: the <img> below unmounts, so no later load
-  // event can ever fire and a subsequently supplied valid src (a refreshed
-  // session thumb, a re-fetched Plex token) can never recover — the initials
-  // stay until the whole Avatar remounts. Only the error state resets; doing it
-  // for "loaded" too would flash the fallback over the old image on every swap.
+  // On error the <img> unmounts, so it can never fire another load event.
+  // Without this reset a new, valid src (e.g. a refreshed Plex thumb) would
+  // never show. Only "error" resets: resetting "loaded" too would flash the
+  // initials over the old image on every src change.
   React.useEffect(() => {
     setStatus((prev) => (prev === "error" ? "idle" : prev))
   }, [props.src, setStatus])
 
-  // React attaches the load listener during hydration and does NOT replay an
-  // event that already fired. For an <img> present in the SSR HTML whose bytes
-  // are already in the disk cache, `load` fires before that — so onLoad never
-  // runs and the status stays "idle" forever. Both this and AvatarFallback
-  // render at "idle", so the stuck state puts the image and the initials in the
-  // DOM together, each claiming size-full, and they squash each other. Reading
-  // `.complete` on mount is what the @base-ui primitive this replaced did, and
-  // it is the only way to observe a load that predates the listener.
+  // A cached image in the server HTML can finish loading before React attaches
+  // onLoad during hydration, and React does not replay that event. The status
+  // would then stay "idle" forever, leaving the image and the initials squashed
+  // side by side. Checking `.complete` on mount catches that early load.
   React.useEffect(() => {
     const img = ref.current
     if (!img || !img.complete) return
@@ -102,9 +97,8 @@ function AvatarFallback({
   ...props
 }: React.ComponentProps<"span">) {
   const { status } = useAvatarContext("AvatarFallback")
-  // Only render once the image has failed (or no <AvatarImage> child exists).
-  // Matches base-ui's "fallback hides while image is loading/loaded" behaviour
-  // so an avatar with a valid src doesn't flash initials before the image paints.
+  // Hidden only once the image has loaded. While it is still loading ("idle")
+  // or after it failed, the initials show.
   if (status === "loaded") return null
   return (
     <span

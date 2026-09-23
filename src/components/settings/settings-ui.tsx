@@ -1,7 +1,5 @@
-// Compatibility barrel — this file used to hold every settings form component
-// (~4,200 lines). Each form now lives in its own file under ./forms/; the
-// re-exports below preserve the original public surface so importers keep
-// using "@/components/settings/settings-ui" unchanged.
+// Re-export file ("barrel"): each settings form lives in its own file under
+// ./forms/, and this lets importers keep using "@/components/settings/settings-ui".
 export { ArrForm } from "./forms/arr-form";
 export { WebhookSecretForm } from "./forms/webhook-secret-form";
 export { WebhookUrls } from "./forms/webhook-urls";

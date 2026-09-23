@@ -1,4 +1,4 @@
-// Route-level unit tests for the five uncovered admin trigger routes:
+// Route-level unit tests for five admin trigger routes:
 //   POST /api/admin/activity-warm
 //   POST /api/admin/library-warm
 //   POST /api/admin/mdblist-warm
@@ -7,7 +7,8 @@
 //
 // The four warm routes share a cooldown mechanism whose exact shape is the point:
 //
-//   1. THE COOLDOWN IS AN ATOMIC CAS, NOT A READ-THEN-WRITE. Each does a single
+//   1. THE COOLDOWN IS AN ATOMIC CAS (compare-and-swap: one statement that writes
+//      only if a condition still holds), NOT A READ-THEN-WRITE. Each does a single
 //      `INSERT … ON CONFLICT DO UPDATE … WHERE <cooldown elapsed>` and treats an
 //      affected-row count of 0 as "too recent" → 429. The in-code comment names
 //      the bug this replaced: a check-then-update let two simultaneous admin
@@ -33,9 +34,9 @@
 // can't know the live count. The tests pin that it fails CLOSED on a missing,
 // wrong or stale count, and that the dry run writes nothing.
 //
-// Harness: real withAdmin-wrapped handlers, genuine signed session JWTs, a
-// synthetic Next request scope, in-memory prisma stubs, and a monkey-patched
-// `pg` Client.prototype for the advisory lock. No DB, no network.
+// Harness: real withAdmin-wrapped handlers, genuinely signed session JWTs, a
+// fake Next request scope, in-memory prisma stubs, and a patched `pg`
+// Client.prototype standing in for the Postgres advisory lock. No DB, no network.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
@@ -59,7 +60,7 @@ const errors: string[] = [];
 console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" ")); };
 console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
 
-// ── pg Client prototype stub (the withAdvisoryLock seam) ─────────────────────
+// ── pg Client prototype stub (what withAdvisoryLock talks to) ────────────────
 type PgResult = { rows: unknown[] };
 let pgLockCalls: Array<{ op: "try" | "unlock"; lockId: number }> = [];
 let lockAcquire: (lockId: number) => boolean = () => true;
@@ -140,8 +141,8 @@ async function mintSession(opts: { role?: string; permissions?: bigint } = {}): 
 const COOKIE = getSessionCookieName();
 
 // ── prisma stubs ─────────────────────────────────────────────────────────────
-// The CAS. `casClaims` decides the affected-row count the route sees: 1 ⇒ the
-// cooldown had elapsed and this caller claimed the slot; 0 ⇒ too recent.
+// The CAS. `casClaims` is the affected-row count the route sees: 1 means the
+// cooldown had elapsed and this caller claimed the slot; 0 means too recent.
 let casClaims = 1;
 const settings = new Map<string, string>();
 

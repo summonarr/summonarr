@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { ThumbsUp, Trash2, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useToast } from "@/components/ui/toast";
 
 interface Props {
   tmdbId: number;
@@ -14,6 +15,7 @@ interface Props {
 
 export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
   const router = useRouter();
+  const { toast } = useToast();
   const [loading, setLoading] = useState(false);
 
   const [voted, setVoted] = useState(userVoted);
@@ -26,10 +28,16 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
     setVoted(false);
     try {
       const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "DELETE" });
-      if (res.ok) router.refresh();
-      else setVoted(true);
+      if (res.ok) {
+        toast({ title: "Vote removed", variant: "success" });
+        router.refresh();
+      } else {
+        setVoted(true);
+        toast({ title: "Couldn't remove your vote", variant: "error" });
+      }
     } catch {
       setVoted(true);
+      toast({ title: "Couldn't remove your vote", variant: "error" });
     } finally {
       setLoading(false);
     }
@@ -42,19 +50,30 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
     setConfirmingDismiss(false);
     try {
       const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "PATCH" });
-      if (res.ok) router.refresh();
-      else setDismissed(false);
+      if (res.ok) {
+        toast({ title: "Votes dismissed", variant: "success" });
+        router.refresh();
+      } else {
+        setDismissed(false);
+        toast({ title: "Couldn't dismiss the votes", variant: "error" });
+      }
     } catch {
       setDismissed(false);
+      toast({ title: "Couldn't dismiss the votes", variant: "error" });
     } finally {
       setLoading(false);
     }
   }
 
   if (dismissed) return null;
+  // Nothing to render: an empty basis-full wrapper would still claim its own
+  // flex-wrap line (plus the row gap) under every non-admin, unvoted row.
+  if (!voted && !isAdmin) return null;
 
+  // Below `sm` the actions take a full row under the text column (the row is
+  // flex-wrap) — at 375px the confirm state (~180px) otherwise crushed the title.
   return (
-    <div className="flex flex-col gap-2 shrink-0">
+    <div className="flex flex-row flex-wrap gap-2 basis-full sm:basis-auto sm:flex-col sm:shrink-0">
       {voted && (
         <button
           onClick={handleUnvote}
@@ -80,7 +99,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
           <button
             onClick={handleDismiss}
             disabled={loading}
-            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-red-600 text-white hover:bg-red-500 transition-colors disabled:opacity-50"
+            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-50"
             autoFocus
           >
             {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
@@ -89,7 +108,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
           <button
             onClick={() => setConfirmingDismiss(false)}
             disabled={loading}
-            className="text-xs px-2 py-1.5 text-zinc-400 hover:text-white transition-colors"
+            className="text-xs px-2 py-1.5 text-zinc-400 hover:text-zinc-100 transition-colors"
           >
             Cancel
           </button>

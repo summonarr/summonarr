@@ -49,7 +49,7 @@ export default async function TrashGuidesLayout({ children }: { children: React.
               target="_blank"
               rel="noopener noreferrer"
               className="hover:underline"
-              style={{ color: "var(--ds-accent)" }}
+              style={{ color: "var(--ds-accent-text)" }}
             >
               trash-guides.info
             </a>

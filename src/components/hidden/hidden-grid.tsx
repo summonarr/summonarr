@@ -4,9 +4,9 @@ import { useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { posterUrl } from "@/lib/tmdb-types";
-import { X, Film, Tv2 } from "@/components/icons";
+import { X, Film, Tv2, EyeOff } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
-import { EmptyState } from "@/components/ui/empty-state";
+import { EmptyState } from "@/components/ui/design";
 
 export interface HiddenGridItem {
   tmdbId: number;
@@ -34,9 +34,9 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
         withBasePath(`/api/hidden?tmdbId=${it.tmdbId}&mediaType=${it.mediaType}`),
         { method: "DELETE" },
       );
-      if (!res.ok) restore(); // rollback
+      if (!res.ok) restore();
     } catch {
-      restore(); // rollback
+      restore();
     } finally {
       setRemoving(null);
     }
@@ -44,9 +44,15 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
 
   if (items.length === 0) {
     return (
-      <EmptyState>
-        You haven&apos;t hidden anything. Use &ldquo;Not interested&rdquo; on a movie or TV page to keep it out of your discovery.
-      </EmptyState>
+      <EmptyState
+        icon={EyeOff}
+        title="Nothing hidden"
+        description={
+          <>
+            Use &ldquo;Not interested&rdquo; on a movie or TV page to keep it out of your discovery.
+          </>
+        }
+      />
     );
   }
 
@@ -58,10 +64,10 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
         const poster = posterUrl(it.posterPath, "w342");
         return (
           <div key={key} className="relative">
-            <Link href={href} className="block">
+            <Link href={href} className="block group">
               <div
-                className="relative overflow-hidden"
-                style={{ aspectRatio: "2 / 3", borderRadius: 8, background: "var(--ds-bg-3)", border: "1px solid var(--ds-border)", opacity: 0.75 }}
+                className="ds-card-lift relative overflow-hidden border border-[var(--ds-border)]"
+                style={{ aspectRatio: "2 / 3", borderRadius: 8, background: "var(--ds-bg-3)", opacity: 0.75 }}
               >
                 {poster ? (
                   <Image src={poster} alt={it.title} fill className="object-cover" sizes="140px" />
@@ -71,7 +77,10 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
                   </div>
                 )}
               </div>
-              <div className="ds-mono" style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", marginTop: 6, lineHeight: 1.3 }}>
+              <div
+                className="ds-mono line-clamp-2 transition-colors group-hover:text-[var(--ds-fg)]"
+                style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", marginTop: 6, lineHeight: 1.3 }}
+              >
                 {it.title}
               </div>
             </Link>
@@ -79,14 +88,14 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
               type="button"
               onClick={() => unhide(it)}
               disabled={removing === key}
-              aria-label={`Un-hide ${it.title}`}
-              title="Un-hide"
-              className="absolute"
+              aria-label={`Unhide ${it.title}`}
+              title="Unhide"
+              className="ds-hover-tint absolute"
               style={{
                 top: 6,
                 right: 6,
-                width: 26,
-                height: 26,
+                width: 32,
+                height: 32,
                 display: "inline-flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -94,7 +103,7 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
                 background: "color-mix(in oklab, var(--ds-bg) 70%, transparent)",
                 color: "var(--ds-fg)",
                 border: "1px solid var(--ds-border)",
-                cursor: removing === key ? "progress" : "pointer",
+                cursor: removing === key ? "progress" : undefined,
               }}
             >
               <X style={{ width: 14, height: 14 }} />

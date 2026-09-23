@@ -7,9 +7,8 @@ import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey } fro
 // login and sync can't drift apart. Returns the trimmed URL, or null when
 // unconfigured; callers gate the Jellyfin sign-in surfaces on a non-null result.
 //
-// `instance` defaults to the default server ("") so every existing zero-arg
-// caller keeps reading exactly the legacy `jellyfinUrl` key, byte-for-byte —
-// multi-server support (Phase 1) is purely additive here.
+// `instance` defaults to the default server (""), so a call with no argument
+// reads exactly the legacy `jellyfinUrl` key (guardrail 35).
 export async function getConfiguredJellyfinUrl(instance: MediaInstanceKey = DEFAULT_MEDIA_INSTANCE): Promise<string | null> {
   const row = await prisma.setting.findUnique({ where: { key: jellyfinSettingKey(instance, "Url") } });
   const url = row?.value?.trim();

@@ -18,14 +18,12 @@ import { mapLimit } from "./concurrency";
 // sweeps APPROVED rows whose stamp has elapsed and runs this same check. The
 // scheduled job below is the PROMPT path — it fires at ~90s instead of "whenever
 // the next sync tick lands" — so a path that arms the field without scheduling
-// still notifies, just late. That is exactly the state the Discord admin-approve
-// button shipped in.
+// still notifies, just late (the Discord admin-approve button was once in that
+// state).
 //
-// This module exists because the body was duplicated across the web PATCH path
-// and the Discord /request auto-approve path, and the two copies had already
-// drifted: only the PATCH copy cleared pendingNotifyAt and honored guardrail 33.
-// Adding a third copy for the admin button would have widened that drift, so the
-// union of the two behaviors lives here once.
+// This check lives here once so every approval path (web, bulk, batch and
+// Discord) runs the same code. Separate copies used to drift: only one of them
+// cleared pendingNotifyAt and honored guardrail 33.
 export const DOWNLOAD_CHECK_DELAY_MS = 90_000;
 
 // Matches the delayed-job pool's own default worker count, so ONE batched job

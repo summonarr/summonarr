@@ -35,9 +35,9 @@ test("isValidContentRatingCap only accepts the MPAA ladder", () => {
   assert.equal(isValidContentRatingCap("X"), false);
 });
 
-// Distinct from the unrecognized-string case ("NR"): a MISSING certification hits
-// the `!cert` short-circuit in normalize(). The policy is fail-open — a title TMDB
-// has no US certification for must not be blocked, even under the strictest cap.
+// Distinct from the unrecognized-string case ("NR"): a MISSING or blank
+// certification makes normalize() return null. The policy is fail-open: a title
+// TMDB has no US certification for must not be blocked, even under the strictest cap.
 test("absent certification never exceeds, even under the strictest cap", () => {
   assert.equal(exceedsCap(null, "G"), false);
   assert.equal(exceedsCap(undefined, "G"), false);
@@ -61,11 +61,12 @@ test("empty string is not an assignable cap value", () => {
   assert.equal(isValidContentRatingCap(""), false);
 });
 
-// RANK is a plain object literal, so `"constructor" in RANK` (and toString/__proto__)
-// is TRUE via the prototype chain. These certs are rejected today only because
-// normalize() uppercases BEFORE the `in` lookup — Object.prototype keys are lowercase.
-// Pin that: a refactor that lowercased instead, or looked up before normalizing,
-// would treat inherited keys as ranked entries.
+// RANK is a plain object, so `"constructor" in RANK` is TRUE: every object
+// inherits keys like constructor/toString/__proto__ from Object.prototype.
+// These strings are rejected today only because normalize() uppercases them
+// BEFORE the `in` lookup, and the inherited keys are lowercase. This test pins
+// that, so a refactor that lowercased instead (or looked up before normalizing)
+// can't start treating inherited keys as real ratings.
 test("prototype-chain keys are not ranked certifications or caps", () => {
   assert.equal(exceedsCap("constructor", "G"), false);
   assert.equal(exceedsCap("toString", "G"), false);

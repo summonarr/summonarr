@@ -4,11 +4,12 @@ import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Check, Loader2, MessageCircle, Mail, AlertTriangle, Bell } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { Switch } from "@/components/ui/switch";
 
 interface NotificationPrefsProps {
-  // Server-computed: email feature on + "Send notification emails" master
-  // switch on + transport configured. When false the whole Email section is
-  // hidden — no email will ever send, so the prefs would be dead toggles.
+  // Worked out on the server: true only when the email feature is on, the
+  // "Send notification emails" switch is on, and a mail sender is configured.
+  // When false the whole Email section is hidden, since no email would be sent.
   emailEnabled: boolean;
   discordLinked: boolean;
   isAdminRole: boolean;
@@ -49,24 +50,15 @@ function ToggleRow({
         <p className="text-sm font-medium text-zinc-200">{label}</p>
         <p className="text-xs text-zinc-500 mt-0.5">{description}</p>
       </div>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        disabled={disabled}
-        onClick={onChange}
-        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-zinc-900 disabled:opacity-50 ${checked ? "bg-indigo-600" : "bg-zinc-700"}`}
-      >
-        <span
-          className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${checked ? "translate-x-4" : "translate-x-0.5"}`}
-        />
-      </button>
+      <Switch checked={checked} disabled={disabled} onCheckedChange={onChange} />
     </div>
   );
 }
 
-// Per-channel (Discord/email/push) notification toggles with debounced optimistic save +
-// rollback, plus the Jellyfin-only manual notification-email field.
+// Notification on/off switches per channel (Discord, email, push). Each flip
+// shows immediately and is saved 400ms later (so quick flips are sent together),
+// and is undone if the save fails. Also holds the Jellyfin-only field for
+// setting a notification email address.
 export function NotificationPrefs({
   emailEnabled,
   discordLinked,
@@ -114,21 +106,19 @@ export function NotificationPrefs({
   const savedPrefsRef = useRef<AllPrefs>(prefs);
 
   useEffect(() => {
-    // Alias the ref containers (not their contents) — cleanup must read whatever
-    // is pending AT UNMOUNT, so dereferencing .current inside the closure is the
-    // point.
+    // Copy the ref objects themselves (not their .current values) so the
+    // cleanup reads whatever is pending at the moment the component unmounts.
     const timer = saveTimerRef;
     const pendingRef = pendingPrefsRef;
     return () => {
       if (timer.current) clearTimeout(timer.current);
       const pending = pendingRef.current;
       if (!pending) return;
-      // The toggle IS the save on this page — there is no Save button — and the
-      // switch has already flipped optimistically. Clearing the timer without
-      // flushing silently discarded any toggle made within the 400ms debounce of
-      // navigating away, so the user watched it move and it never persisted.
-      // `keepalive` lets the request outlive the unmount. Mirrors the unmount
-      // flush in settings/features-form.tsx.
+      // There is no Save button: flipping a switch IS the save, and the switch
+      // has already moved on screen. A toggle made less than 400ms before
+      // leaving the page is still waiting on the timer, so send it now instead
+      // of dropping it. `keepalive` lets the request finish after the page is
+      // gone. Same as the unmount save in settings/features-form.tsx.
       void fetch(withBasePath("/api/profile/notifications"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -137,6 +127,16 @@ export function NotificationPrefs({
       }).catch(() => {});
     };
   }, []);
+
+  // Put the toggles back to the last state the server confirmed, so the UI never
+  // shows a position the server rejected. Skipped while a newer toggle is still
+  // waiting to be saved: that save sends the full set of toggles (including this
+  // one), so it will retry this change — and rolling back here would make the
+  // switches disagree with what that save then stores.
+  function rollBack() {
+    if (pendingPrefsRef.current) return;
+    setPrefs(savedPrefsRef.current);
+  }
 
   async function flush() {
     const updated = pendingPrefsRef.current;
@@ -153,9 +153,7 @@ export function NotificationPrefs({
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        // Roll the toggles back to the last confirmed state so the UI never
-        // shows a position the server rejected.
-        setPrefs(savedPrefsRef.current);
+        rollBack();
         setSaveError(data?.error ?? "Failed to save — please try again");
         return;
       }
@@ -163,7 +161,7 @@ export function NotificationPrefs({
       setSaved(true);
       router.refresh();
     } catch {
-      setPrefs(savedPrefsRef.current);
+      rollBack();
       setSaveError("Network error — please try again");
     } finally {
       setSaving(false);
@@ -179,10 +177,9 @@ export function NotificationPrefs({
     saveTimerRef.current = setTimeout(flush, 400);
   }
 
-  // Jellyfin: mail a one-time verification link to the entered address. The
-  // address is bound to the account only when that link is confirmed (server
-  // route) — this is what prevents redirecting notifications at an address the
-  // user doesn't control.
+  // Jellyfin: email a one-time verification link to the entered address. The
+  // server only saves the address once that link is clicked, so nobody can point
+  // notifications at an address they don't control.
   async function sendVerification() {
     const trimmed = emailInput.trim();
     if (trimmed === "" || !EMAIL_RE.test(trimmed)) {
@@ -327,7 +324,7 @@ export function NotificationPrefs({
                   type="button"
                   onClick={sendVerification}
                   disabled={emailSavingState === "saving" || emailInput.trim() === ""}
-                  className="rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed px-3 py-1.5 text-sm font-medium text-white transition-colors whitespace-nowrap"
+                  className="rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed px-3 py-1.5 text-sm font-medium text-[var(--ds-accent-fg)] transition-colors whitespace-nowrap"
                 >
                   {emailSavingState === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Send verification"}
                 </button>

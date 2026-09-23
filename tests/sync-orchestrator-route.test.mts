@@ -21,9 +21,10 @@
 //
 // Headline pins (their failure messages name the guardrail):
 //   - GUARDRAIL 13 / body-ignored: the orchestrator route does NOT read the
-//     request body — it ALWAYS does a full wholesale library replace. A
+//     request body — it ALWAYS does a full library replace. A
 //     { recentOnly:true } / { full:false } body must NOT downgrade it to
-//     insert-only; the unconditional plex/jellyfinLibraryItem.deleteMany still runs.
+//     insert-only; each server's plex/jellyfinLibraryItem.deleteMany (scoped to
+//     that server's serverInstance, with no date filter) still runs.
 //   - GUARDRAIL 15 / snapshot-once: the `stillPending` MediaRequest snapshot
 //     (status IN PENDING/APPROVED) is queried EXACTLY ONCE and reused by BOTH the
 //     Plex and Jellyfin marking passes — never once-per-source.
@@ -430,7 +431,8 @@ const fakePrisma = {
   plexLibraryItem: {
     // The dedupe prior-mapping lookup. Wheres are recorded so the instance-scoping
     // pin can assert the read carries serverInstance; no fixture seeds prior
-    // mappings, so conflation resolves via the keep-first-occurrence branch.
+    // mappings, so conflation resolves via the lowest-tmdbId tiebreak
+    // (plex-dedupe.ts, guardrail 37b).
     findMany: async (args?: { where?: Record<string, unknown> }) => {
       plexLibraryItemFindManyWheres.push(args?.where);
       return [];

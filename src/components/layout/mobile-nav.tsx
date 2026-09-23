@@ -39,11 +39,8 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
   const pathname = usePathname();
   const { session } = useSummonarrSession();
   const role = session?.user?.role;
-  // One shared predicate with the Header and the ~14 server surfaces. The
-  // hand-rolled copy that lived here read the role STRING only (so a delegate
-  // holding the ADMIN or MANAGE_ISSUES bit on role USER was missed) and keyed on
-  // `provider` rather than `mediaServer` (so a credentials or OIDC account with
-  // an admin-assigned media server got badges on browse cards and none here).
+  // The same Plex/Jellyfin badge rule the Header and server pages use, so every
+  // surface agrees on which badges this user sees.
   const { showPlex, showJellyfin } = getClientBadgeVisibility(session?.user);
 
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -89,8 +86,8 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
               className="ds-tap inline-flex items-center justify-center shrink-0"
               aria-label="Close search"
               style={{
-                width: 32,
-                height: 32,
+                width: 36,
+                height: 36,
                 borderRadius: 6,
                 background: "transparent",
                 color: "var(--ds-fg-muted)",
@@ -115,8 +112,8 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
               aria-label="Open menu"
               className="ds-tap inline-flex items-center justify-center shrink-0"
               style={{
-                width: 32,
-                height: 32,
+                width: 36,
+                height: 36,
                 borderRadius: 6,
                 background: "transparent",
                 color: "var(--ds-fg-muted)",
@@ -163,8 +160,8 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
               aria-label="Search"
               className="ds-tap inline-flex items-center justify-center shrink-0"
               style={{
-                width: 32,
-                height: 32,
+                width: 36,
+                height: 36,
                 borderRadius: 6,
                 background: "transparent",
                 color: "var(--ds-fg-muted)",
@@ -205,17 +202,17 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
                 key={t.href}
                 href={t.href}
                 onClick={() => setSearchOpen(false)}
+                aria-current={active ? "page" : undefined}
                 className="ds-tap flex flex-col items-center justify-center"
                 style={{
                   gap: 3,
                   padding: "6px 4px",
                   borderRadius: 8,
                   minHeight: 48,
-                  color: active ? "var(--ds-accent)" : "var(--ds-fg-subtle)",
+                  color: active ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
                   transition:
                     "color 140ms var(--ds-ease), background 140ms var(--ds-ease)",
                 }}
-                aria-label={t.label}
               >
                 <t.icon style={{ width: 18, height: 18 }} />
                 <span
@@ -245,8 +242,8 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
               minHeight: 48,
               color:
                 drawerOpen || !someTabActive
-                  ? "var(--ds-accent)"
-                  : "var(--ds-fg-subtle)",
+                  ? "var(--ds-accent-text)"
+                  : "var(--ds-fg-muted)",
               transition:
                 "color 140ms var(--ds-ease), background 140ms var(--ds-ease)",
             }}
@@ -271,15 +268,11 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
   );
 }
 
-// The in-app notification inbox is only reachable via the desktop header bell
-// (hidden below lg), so mobile/tablet gets a top-bar link here. The count comes
-// from the shared NotificationStoreProvider rather than a fetch of its own:
-// this component and the desktop bell are BOTH mounted at every viewport (one
-// is hidden with CSS, not gated in React), so owning a fetch here meant every
-// page load issued two identical GET /api/notifications — and at desktop widths
-// one of them was for a badge nobody could see. The badge stays hidden until
-// the count lands, so SSR and first client render agree — no Date.now()/new
-// Date() at render (guardrail 16).
+// Top-bar link to the notification inbox for mobile/tablet, where the desktop
+// header bell is hidden. The unread count comes from the shared
+// NotificationStoreProvider instead of its own fetch: this link and the
+// desktop bell are both mounted at every screen size (CSS hides one), so
+// separate fetches would request /api/notifications twice per page.
 function NotificationsLink() {
   const { unread } = useNotifications();
 
@@ -289,8 +282,8 @@ function NotificationsLink() {
       aria-label={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}
       className="ds-tap inline-flex items-center justify-center shrink-0 relative"
       style={{
-        width: 32,
-        height: 32,
+        width: 36,
+        height: 36,
         borderRadius: 6,
         background: "transparent",
         color: "var(--ds-fg-muted)",
@@ -367,17 +360,11 @@ function buildTabs(
       p === "/requests" || p === "/issues" || p === "/votes" || p === "/watchlist" || p === "/hidden",
   };
 
-  // Derive the 4th slot from the same resolver the sidebar uses, so the tab lands
-  // on a page this user can actually open. It used to hardcode "/admin", which
-  // requires MANAGE_REQUESTS — so a MANAGE_USERS-only delegate tapped Admin and
-  // was redirected straight back to Discover.
+  // Pick the 4th tab from the same admin-item list the sidebar uses, so it
+  // always points at a page this user is allowed to open (not a hardcoded
+  // "/admin" that some delegates would be redirected away from).
   const permsStr = sessionPerms;
-  // Feature-filtered, like the user items the caller already filters. Without
-  // this the bottom bar could show a permanent tab pointing at a page whose
-  // feature is off — and those pages call requireFeature(), which renders the
-  // 404. For an issues-only delegate that tab is their primary destination.
-  // The sidebar and the More drawer both filter here; this was the one
-  // getVisibleAdminItems call site that did not.
+  // Also drop items whose feature flag is off — those pages render a 404.
   const adminItems = filterNavByFeatures(
     getVisibleAdminItems(permsStr ? { role, permissions: permsStr } : role),
     featureFlags,

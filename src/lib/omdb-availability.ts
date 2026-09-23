@@ -188,13 +188,11 @@ export async function attachRatingsUnified(
   const staleOmdb = items.filter((item) => {
     if (!warm.staleKeys.has(omdbKey(item))) return false;
     if (warm.staleKeys.has(mdblistKey(item))) return false; // the MDBList batch revalidates it
-    // Gate on a USABLE MDBList row, not merely a present one. readCachedRatings
-    // admits any non-_notFound row, including a "found but entirely unscored"
-    // one — and MDBList can keep returning that fresh forever for a title it has
-    // indexed with no critic scores. Bare presence therefore trapped the item:
-    // its served ratings come from the OMDB row (mergeWarm falls through), while
-    // the refresh that would revalidate them was skipped indefinitely. Every
-    // other admission decision in this file already gates on hasAnyMdblistRating.
+    // Gate on a USABLE MDBList row, not merely a present one. MDBList can keep
+    // returning a fresh "indexed but no scores" row forever. For such a title
+    // the ratings shown come from the OMDB row (mergeWarm falls through to it),
+    // so that OMDB row must still get refreshed. Every other admission decision
+    // in this file gates on hasAnyMdblistRating the same way.
     const mdb = warm.byMdblist.get(mdblistKey(item));
     return !(mdb && hasAnyMdblistRating(mdb));
   });
@@ -276,14 +274,13 @@ export async function attachRatingsUnified(
     // Stale value rows likewise serve from the warm maps rather than re-entering the miss
     // fan-out; they revalidate post-response below. Mirrors the non-blocking path's exclusion.
     // Only MDBLIST state gates the miss: misses feed the MDBList batch — the primary
-    // source — so no OMDB row of ANY shape may exclude a title from it. An OMDB
-    // sentinel written while MDBList was unconfigured/quota-locked would otherwise
-    // exclude the title permanently, and an OMDB VALUE row (the same origin story)
-    // was just as permanent: nothing ever re-admitted the title to the richer
-    // source, so it could never gain the Trakt/Letterboxd/RT-Audience/MDBList
-    // fields OMDB lacks. Re-admitting costs one extra id in a batch POST;
-    // mergeWarm keeps serving the warm OMDB row until the batch lands, and a
-    // genuine MDBList miss then writes a sentinel that gates via negativeKeys.
+    // source — so no OMDB row of ANY shape may exclude a title from it. Otherwise
+    // an OMDB row written while MDBList was off or quota-locked would keep the
+    // title away from MDBList forever, and it could never gain the
+    // Trakt/Letterboxd/RT-Audience/MDBList fields OMDB lacks. Re-admitting costs
+    // one extra id in a batch POST; mergeWarm keeps serving the OMDB row until
+    // the batch lands, and a genuine MDBList miss then writes a "not found"
+    // marker that gates via negativeKeys.
     if (
       !warm.byMdblist.has(mdblistKey(item)) &&
       !warm.negativeKeys.has(mdblistKey(item))
@@ -374,7 +371,15 @@ export async function attachRatingsUnified(
 
   return items.map((item) => {
     const fresh = fetched.get(fetchedKey(item));
-    if (fresh) return fresh.source === "mdblist" ? applyMdblist(item, fresh.data) : applyOmdb(item, fresh.data);
+    if (fresh) {
+      if (fresh.source === "omdb") return applyOmdb(item, fresh.data);
+      // Per-FIELD parity with mergeWarm: a miss is admitted to the MDBList batch
+      // even when a warm OMDB row exists, so a fresh MDBList hit carrying only
+      // Trakt/Letterboxd-style fields must not blank the IMDb/RT/Metacritic
+      // values that OMDB row already holds.
+      const warmOmdb = warm.byOmdb.get(omdbKey(item));
+      return applyMdblist(item, warmOmdb ? overlayOmdb(fresh.data, warmOmdb) : fresh.data);
+    }
     return mergeWarm(item, warm);
   });
 }
@@ -426,8 +431,7 @@ async function readCachedRatings(items: TmdbMedia[]): Promise<WarmCache> {
 
   const byMdblist = new Map<string, MdblistRatings>();
   for (const [key, { value, isStale }] of mdblistEntries) {
-    // Valid-JSON non-object rows (e.g. a literal null) are misses, same as the
-    // old JSON.parse try/catch here treated them.
+    // Rows that aren't objects (e.g. a stored literal null) count as misses.
     if (value === null || typeof value !== "object") continue;
     if (isStale) staleKeys.add(key);
     if ("_notFound" in value) negativeKeys.add(key);
@@ -450,10 +454,9 @@ async function readCachedRatings(items: TmdbMedia[]): Promise<WarmCache> {
 // shadow a populated OMDB row, so treat it as "no data" when deciding which source wins.
 //
 // mdblistScore gets a NUMERIC test rather than a truthiness one: MDBList's
-// no-score sentinel is -1 (see aggregateScore in mdblist.ts), and rows cached
-// before that guard existed still carry it. As a truthy string it made a
-// scoreless row read as populated here — defeating the exact shadowing this
-// function exists to prevent.
+// "no score" value is -1 (see aggregateScore in mdblist.ts), and older cached
+// rows can still hold "-1". That string is truthy, so a plain truthiness check
+// would treat a scoreless row as having a rating.
 export function hasAnyMdblistRating(d: MdblistRatings): boolean {
   const score = d.mdblistScore != null ? Number(d.mdblistScore) : NaN;
   return Boolean(

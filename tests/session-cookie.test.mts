@@ -215,8 +215,8 @@ test("secure context does NOT honor a plain-named cookie (spoof resistance)", ()
   // the prefixed name may authenticate.
   withEnv({ AUTH_URL: "https://requests.example.com" }, () => {
     assert.equal(parseSessionCookie(`${INSECURE_NAME}=forged.tok.en`), null);
-    // And the reverse: insecure context ignores the prefixed name.
   });
+  // And the reverse: an insecure context ignores the prefixed name.
   withEnv({ AUTH_URL: "http://localhost:3000" }, () => {
     assert.equal(parseSessionCookie(`${SECURE_NAME}=stale.tok.en`), null);
   });

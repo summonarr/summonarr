@@ -4,16 +4,16 @@ import { Suspense } from "react";
 import { requireAppSession } from "@/lib/require-app-session";
 import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb-types";
-import { EmptyState } from "@/components/ui/empty-state";
 import Image from "next/image";
 import Link from "next/link";
+import { Trash2 } from "@/components/icons";
 import { VoteActions } from "@/components/votes/vote-actions";
 import { PaginationBar } from "@/components/media/pagination-bar";
 import { FilterPills, SearchBox } from "@/components/user-list-filters";
 import { requireFeature } from "@/lib/features";
 import { Prisma } from "@/generated/prisma";
 import { hasPermission, Permission } from "@/lib/permissions";
-import { Chip, PageHeader } from "@/components/ui/design";
+import { Chip, EmptyState, PageHeader } from "@/components/ui/design";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
 
 const PAGE_SIZE = 40;
@@ -93,8 +93,8 @@ export default async function VotesPage({
   ]);
   const totalPages = Math.max(1, Math.ceil(Number(count) / PAGE_SIZE));
 
-  // Batched lookup: 1 query total (was 3×PAGE_SIZE = up to 120 round-trips/render,
-  // then 2). Split by mediaType so each becomes a `tmdbId: { in: [...] }`
+  // Batched lookup: one query for the whole page instead of several per title.
+  // Split by mediaType so each becomes a `tmdbId: { in: [...] }`
   // predicate that the planner can serve from the composite (tmdbId, mediaType)
   // PK efficiently. The rows carry `userId`, so "did the viewer vote on this"
   // is derived in memory instead of re-reading the same row set filtered to
@@ -145,7 +145,10 @@ export default async function VotesPage({
       mediaType: g.mediaType as "MOVIE" | "TV",
       title: representative?.title ?? "",
       posterPath: representative?.posterPath ?? null,
-      voteCount: g._count.id,
+      // `votes` holds EVERY vote for this title (groupWhere ignores the
+      // mine/q filters), so its length is the real total. g._count.id is
+      // filtered: under "My votes only" it is always 1. Mirrors /api/votes.
+      voteCount: votes.length || g._count.id,
       userVoted: votes.some((v) => v.userId === session.user.id),
       reasons: reasons.map((v) => ({ reason: v.reason!, userName: v.user.name ?? "Anonymous" })),
     };
@@ -158,7 +161,7 @@ export default async function VotesPage({
     <div className="ds-page-enter">
       <PageHeader
         title="Vote to Delete"
-        subtitle="Nominate library items for removal. Browse movies or TV shows and click the vote button on any item already in your library."
+        subtitle="Nominate library titles for removal — browse Movies or TV and vote on anything already in your library"
       />
 
       <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:items-center sm:justify-between">
@@ -190,12 +193,27 @@ export default async function VotesPage({
         </div>
       </div>
 
-      {items.length === 0 ? (
-        <EmptyState>
-          {hasFilters
-            ? "No votes match these filters."
-            : "No deletion votes yet. Browse your library and vote on items you think should be removed."}
-        </EmptyState>
+      {items.length === 0 && Number(count) > 0 ? (
+        // Past the last page (same as /requests): the pager is hidden when
+        // totalPages <= 1, so "no votes yet" there would be both wrong and a
+        // dead end.
+        <EmptyState
+          icon={Trash2}
+          title="Nothing on this page"
+          description="No more votes on this page."
+          cta={{ href: "/votes", label: "Back to page 1" }}
+        />
+      ) : items.length === 0 ? (
+        <EmptyState
+          icon={Trash2}
+          title={hasFilters ? "No matching votes" : "No deletion votes yet"}
+          description={
+            hasFilters
+              ? "No votes match these filters."
+              : "Browse your library and vote on items you think should be removed."
+          }
+          cta={hasFilters ? undefined : { href: "/movies", label: "Browse movies" }}
+        />
       ) : (
         <div className="flex flex-col" style={{ gap: 8 }}>
           {items.map((item) => {
@@ -204,99 +222,96 @@ export default async function VotesPage({
             return (
               <div
                 key={`${item.mediaType}-${item.tmdbId}`}
-                className="flex items-start"
+                className="flex flex-wrap items-start transition-colors bg-[var(--ds-bg-2)] hover:bg-[var(--ds-bg-3)] border border-[var(--ds-border)]"
                 style={{
                   gap: 14,
                   padding: 14,
-                  background: "var(--ds-bg-2)",
-                  border: "1px solid var(--ds-border)",
                   borderRadius: 8,
                 }}
               >
                 <Link
                   href={href}
-                  className="relative shrink-0 overflow-hidden"
-                  style={{
-                    width: 56,
-                    aspectRatio: "2 / 3",
-                    borderRadius: 4,
-                    background: "var(--ds-bg-3)",
-                  }}
+                  className="flex items-start flex-1 min-w-0 group"
+                  style={{ gap: 14 }}
                 >
-                  {poster ? (
-                    <Image
-                      src={poster}
-                      alt={item.title}
-                      width={56}
-                      height={84}
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <div
-                      className="w-full h-full flex items-center justify-center ds-mono"
-                      style={{ color: "var(--ds-fg-subtle)", fontSize: 10 }}
-                    >
-                      No poster
-                    </div>
-                  )}
-                </Link>
-
-                <div className="flex-1 min-w-0">
                   <div
-                    className="flex items-center flex-wrap"
-                    style={{ gap: 6 }}
-                  >
-                    <h3
-                      className="font-medium truncate"
-                      style={{ fontSize: 14, margin: 0 }}
-                    >
-                      <Link
-                        href={href}
-                        className="hover:underline"
-                        style={{ color: "var(--ds-fg)" }}
-                      >
-                        {item.title}
-                      </Link>
-                    </h3>
-                    <Chip>{item.mediaType === "MOVIE" ? "MOVIE" : "TV"}</Chip>
-                  </div>
-
-                  <div
-                    className="ds-mono"
+                    className="relative shrink-0 overflow-hidden"
                     style={{
-                      marginTop: 6,
-                      fontSize: 12,
-                      color: "var(--ds-accent)",
-                      fontWeight: 600,
+                      width: 44,
+                      aspectRatio: "2 / 3",
+                      borderRadius: 4,
+                      background: "var(--ds-bg-3)",
                     }}
                   >
-                    {item.voteCount} vote{item.voteCount !== 1 ? "s" : ""}
+                    {poster ? (
+                      <Image
+                        src={poster}
+                        alt={item.title}
+                        width={44}
+                        height={66}
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div
+                        className="w-full h-full flex items-center justify-center ds-mono"
+                        style={{ color: "var(--ds-fg-subtle)", fontSize: 10 }}
+                      >
+                        No poster
+                      </div>
+                    )}
                   </div>
 
-                  {item.reasons.length > 0 && (
+                  <div className="flex-1 min-w-0">
                     <div
-                      className="flex flex-col"
-                      style={{ gap: 3, marginTop: 6 }}
+                      className="flex items-center flex-wrap"
+                      style={{ gap: 6 }}
                     >
-                      {item.reasons.map((r, i) => (
-                        <p
-                          // biome-ignore lint/suspicious/noArrayIndexKey: reasons are unordered snippets
-                          key={i}
-                          style={{
-                            fontSize: 11,
-                            color: "var(--ds-fg-subtle)",
-                            margin: 0,
-                          }}
-                        >
-                          <span style={{ color: "var(--ds-fg-muted)" }}>
-                            {r.userName}:
-                          </span>{" "}
-                          {r.reason}
-                        </p>
-                      ))}
+                      <h3
+                        className="font-medium truncate transition-colors group-hover:text-[var(--ds-accent-text)]"
+                        style={{ fontSize: 14, margin: 0, color: "var(--ds-fg)" }}
+                      >
+                        {item.title}
+                      </h3>
+                      <Chip>{item.mediaType === "MOVIE" ? "MOVIE" : "TV"}</Chip>
                     </div>
-                  )}
-                </div>
+
+                    <div
+                      className="ds-mono"
+                      style={{
+                        marginTop: 6,
+                        fontSize: 12,
+                        color: "var(--ds-accent-text)",
+                        fontWeight: 600,
+                      }}
+                    >
+                      {item.voteCount} vote{item.voteCount !== 1 ? "s" : ""}
+                    </div>
+
+                    {item.reasons.length > 0 && (
+                      <div
+                        className="flex flex-col"
+                        style={{ gap: 3, marginTop: 6 }}
+                      >
+                        {item.reasons.map((r, i) => (
+                          <p
+                            // biome-ignore lint/suspicious/noArrayIndexKey: reasons are unordered snippets
+                            key={i}
+                            style={{
+                              fontSize: 11,
+                              color: "var(--ds-fg-subtle)",
+                              margin: 0,
+                            }}
+                          >
+                            <span style={{ color: "var(--ds-fg-muted)" }}>
+                              {r.userName}:
+                            </span>{" "}
+                            {r.reason}
+                          </p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </Link>
 
                 <VoteActions
                   tmdbId={item.tmdbId}

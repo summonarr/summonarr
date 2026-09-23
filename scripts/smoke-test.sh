@@ -26,7 +26,8 @@
 #   - Plex/Jellyfin actual sign-in (needs interactive credentials)
 #   - SSO password-set 403 (needs an SSO session cookie)
 #
-# Exit code: 0 if all PASS+SKIP and zero FAIL; 1 if any FAIL.
+# Exit code: 0 if all PASS+SKIP and zero FAIL; 1 if any FAIL; 2 if CRON_SECRET
+# could not be found.
 
 set -uo pipefail
 
@@ -210,8 +211,11 @@ else
     skip "Settings encryption" "0 rows with enc:v1: prefix — re-save any sensitive setting (Plex token, Jellyfin API key, etc.) once to populate"
   fi
 
-  # 14. No leaking secrets in plain Settings (admin keys + tokens)
-  n=$(run_psql "SELECT count(*) FROM \"Setting\" WHERE key IN ('plexAdminToken','jellyfinApiKey','radarrApiKey','sonarrApiKey','discordBotToken','vapidPrivateKey','webhookSecret','tmdbApiKey','tmdbReadToken','traktApiKey','traktClientSecret','smtpPassword','resendApiKey','oidcClientSecret','discordClientSecret','omdbApiKey','mdblistApiKey') AND value NOT LIKE 'enc:v1:%' AND length(value) > 0;")
+  # 14. No leaking secrets in plain Settings. The key list mirrors
+  # SETTINGS_SENSITIVE_KEYS in src/lib/settings-sensitive-keys.ts, and the two
+  # regexes mirror its per-instance patterns (named Radarr/Sonarr and
+  # Plex/Jellyfin servers). Keep them in sync with that file.
+  n=$(run_psql "SELECT count(*) FROM \"Setting\" WHERE (key IN ('plexAdminToken','jellyfinApiKey','vapidPrivateKey','webhookSecret','sonarrWebhookSecret','radarrWebhookSecret','discordBotToken','radarrApiKey','sonarrApiKey','radarr4kApiKey','sonarr4kApiKey','radarr4kWebhookSecret','sonarr4kWebhookSecret','omdbApiKey','mdblistApiKey','traktClientId','ipinfoToken','resendApiKey','smtpPassword','trashGithubToken','apnsRelayKey') OR key ~ '^(radarr|sonarr)([A-Z0-9][A-Za-z0-9]*)?(ApiKey|WebhookSecret)$' OR key ~ '^(plex([A-Z0-9][A-Za-z0-9]*)?AdminToken|jellyfin([A-Z0-9][A-Za-z0-9]*)?ApiKey)$') AND value NOT LIKE 'enc:v1:%' AND length(value) > 0;")
   if [ -z "$n" ] || [ "$n" = "0" ]; then
     pass "No sensitive Setting keys stored in plaintext"
   else

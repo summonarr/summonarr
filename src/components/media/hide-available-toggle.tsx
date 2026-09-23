@@ -30,13 +30,15 @@ export function HideAvailableToggle({ active }: HideAvailableToggleProps) {
     <button
       type="button"
       onClick={toggle}
-      className="ds-tap inline-flex items-center gap-1.5 font-medium transition-colors"
+      aria-pressed={active}
+      className="ds-tap ds-hover-tint inline-flex items-center gap-1.5 font-medium"
       style={{
         padding: "5px 12px",
+        minHeight: 32,
         borderRadius: 6,
         fontSize: 12,
         background: active ? "var(--ds-accent-soft)" : "var(--ds-bg-2)",
-        color: active ? "var(--ds-accent)" : "var(--ds-fg-muted)",
+        color: active ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
         border: `1px solid ${active ? "var(--ds-accent-ring)" : "var(--ds-border)"}`,
         whiteSpace: "nowrap",
       }}

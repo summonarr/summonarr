@@ -3,9 +3,9 @@
 // getUserRecommendations). Pinned here:
 //   - cold start (zero seeds) short-circuits before any TMDB call;
 //   - only watched:true PlayHistory rows seed the engine;
-//   - history seeding is windowed to the last 180 days (an old binge cannot
-//     outrank recent watches), falling back to all-time ONLY when the window
-//     is empty — while the exclusion set stays all-time;
+//   - history seeding reads the last 180 days first, then tops up any unused
+//     slots from all-time history (an old binge fills a tail slot but cannot
+//     outrank recent watches) — while the exclusion set stays all-time;
 //   - scoring = seedTypeWeight × recency(seed age) × count(plays, log-compressed)
 //     × position(rank within the seed's suggestion list), summed across every
 //     seed that surfaced a candidate (multi-seed corroboration), with watchlist
@@ -16,8 +16,9 @@
 //     long-ago 40-episode binge outranks something watched two days ago;
 //   - the match-strength band is assigned by RANK over the viewer's surviving
 //     set (top 10% / top 33%), independently of whether a row carries a reason;
-//   - seed SELECTION is recency-first (the last 200 titles played), so a heavy
-//     series can no longer occupy the slots on play count alone. The stub's
+//   - seed SELECTION is recency-first (the last MAX_WATCH_HISTORY_SEEDS titles
+//     played), so a heavy series can no longer occupy the slots on play count
+//     alone. The stub's
 //     groupBy honours args.orderBy for exactly this reason — hardcoding a sort
 //     there made the real query's ordering untestable;
 //   - candidate languages that barely feature in the weighted pool are
@@ -432,7 +433,7 @@ shadowPrismaModel(prisma, "hiddenItem", {
       .map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType })),
 });
 shadowPrismaModel(prisma, "mediaRequest", {
-  // TWO query shapes share this delegate, discriminated by the OR clause:
+  // THREE query shapes share this delegate, told apart by the where clause:
   //   - collectKnownTitleKeys' exclusion read: requestedBy + (status in [...]
   //     OR permanentlyDeclined) — status-filtered;
   //   - selectSeeds' seed read: requestedBy alone, newest-first with a take —
@@ -477,10 +478,10 @@ shadowPrismaModel(prisma, "blacklistItem", {
 
 // ── the SERVER-WIDE recommendation graph (recommendation-graph.ts) ──────────
 // TitleSuggestion holds the precomputed edges, RecommendationTitle the per-title
-// node (refresh bookkeeping + the quality verdict). Both are empty in most tests
-// here, which is exactly the cold-graph state: the engine then falls back to the
-// scripted TMDB fetch, so every pre-graph assertion in this file still exercises
-// the path it was written for. The graph-specific tests seed them directly.
+// node (refresh bookkeeping + the quality verdict). Both start empty in every
+// test. Most tests go through computeSeeded (below), which runs the REAL graph
+// build against the scripted TMDB fetch first. The graph-specific tests seed
+// these tables directly to probe a partly-built graph.
 interface EdgeRow {
   sourceTmdbId: number;
   sourceMediaType: MT;
@@ -727,8 +728,9 @@ shadowPrismaModel(prisma, "plexLibraryItem", { findMany: libraryFindMany });
 shadowPrismaModel(prisma, "jellyfinLibraryItem", { findMany: async () => [] });
 
 // ── tmdbCache ───────────────────────────────────────────────────────────────
-// findUnique always misses (suggestion-cache correctness is tmdb.ts's concern,
-// not this file's) and writes are swallowed. findMany DOES serve, because it is
+// findUnique serves only the list rows a test seeded in listCacheRows (every
+// other key misses — suggestion-cache correctness is tmdb.ts's concern, not this
+// file's). findMany serves the ratings rows, because it is
 // what readCachedRatings reads: seeding `ratingRows` lets the quality prior be
 // driven deterministically with zero network — MDBList/OMDB are only consulted
 // for keys the cache misses, and here it never misses for a seeded title.
@@ -1275,10 +1277,10 @@ test("reason: a WEAKER later seed does not steal the reason, and seedCount still
   users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
   mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
 
-  // Reverse of the case above: the heaviest seed comes first (history seed 10 at
-  // full weight 1.0), and the later seeds are strictly lighter — the taper puts
-  // seed 20 at 0.5, and the sole watchlist seed at 1.5 is EXCLUDED from this
-  // fixture so nothing can outweigh the incumbent.
+  // Reverse of the case above: the heaviest seed comes first (seed 10: two
+  // plays, 1 day ago) and seed 20 is strictly lighter (one play, 3 days ago).
+  // There is no watchlist seed (1.5x) in this fixture, so nothing can outweigh
+  // the incumbent.
   playHistoryRows = [
     { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1), title: "Top Seed" },
     { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(2), title: "Top Seed" },
@@ -1789,9 +1791,9 @@ test("request seeds: the pool is capped at 24, newest first — a request-hoarde
   }));
   for (let i = 0; i < 30; i++) suggestionsFor.set(`movie:${100 + i}`, []);
 
-  // On the SEED PLAN rather than on fetches — see the note in the
-  // "last 200 titles played" test for why a fetch stopped being an observable
-  // of selection once the live path went away.
+  // On the SEED PLAN rather than on fetches — see the note in the "seed
+  // SELECTION is the last MAX_WATCH_HISTORY_SEEDS titles played" test for why a
+  // fetch stopped being an observable of selection once the live path went away.
   const { seeds } = await selectSeedPlan("u1");
   const seeded = new Set(seeds.map((sd) => sd.tmdbId));
 
@@ -2027,7 +2029,7 @@ test("seed SELECTION is the last MAX_WATCH_HISTORY_SEEDS titles played — a hea
   );
   assert.ok(
     !seeded.has("TV:5000"),
-    "the 50-play binge is #201 by recency and must NOT seed, despite dwarfing every other title on play count",
+    `the 50-play binge is #${MAX_WATCH_HISTORY_SEEDS + 1} by recency and must NOT seed, despite dwarfing every other title on play count`,
   );
 });
 
@@ -2278,10 +2280,10 @@ test("exclusion covers the FULL current watchlist and watched-set, not just the 
   mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
   playHistoryRows = [
     { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(1) },
-    // Watched, but never chosen as a seed (below) — still must be excluded.
+    // Watched, and must never come back as a suggestion.
     { mediaServerUserId: "msu1", tmdbId: 700, mediaType: "MOVIE", watched: true, startedAt: daysAgo(9) },
   ];
-  // 6 watchlist rows; only the 5 most-recent become seeds, the oldest (800) doesn't.
+  // 6 watchlist rows. 800 is on the watchlist, so it must be excluded too.
   watchlistRows = [
     { userId: "u1", tmdbId: 301, mediaType: "MOVIE", createdAt: daysAgo(0) },
     { userId: "u1", tmdbId: 302, mediaType: "MOVIE", createdAt: daysAgo(1) },
@@ -2290,7 +2292,7 @@ test("exclusion covers the FULL current watchlist and watched-set, not just the 
     { userId: "u1", tmdbId: 305, mediaType: "MOVIE", createdAt: daysAgo(4) },
     { userId: "u1", tmdbId: 800, mediaType: "MOVIE", createdAt: daysAgo(5) },
   ];
-  // Seed 10's suggestions include both unseeded exclusions plus one genuinely new title.
+  // Seed 10's suggestions include both of those plus one genuinely new title.
   suggestionsFor.set("movie:10", [movieItem(700), movieItem(800), movieItem(555)]);
   for (const id of [301, 302, 303, 304, 305]) suggestionsFor.set(`movie:${id}`, []);
 

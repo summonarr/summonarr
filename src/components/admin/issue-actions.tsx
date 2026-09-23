@@ -64,11 +64,12 @@ export function IssueActions({
   const [panel, setPanel] = useState<"resolve" | "delete" | "replace" | null>(null);
   const [resolution, setResolution] = useState("");
 
-  // `instances` is the CONFIGURED set (getSyncableArrInstances), default first — so
-  // on an install whose default *arr is unconfigured the "" slug is absent entirely
-  // and every refetch/replace/grab aimed at it hits a server that does not exist.
-  // Derived rather than seeded because the same component instance is reused when
-  // the selected issue switches between MOVIE (radarr) and TV (sonarr).
+  // `instances` lists only the CONFIGURED Radarr/Sonarr servers, default first.
+  // If the default server isn't configured, the "" slug is missing from the list,
+  // so we fall back to the first real entry instead of aiming at a server that
+  // doesn't exist. This is computed on every render (not stored once) because the
+  // same component is reused when the selected issue switches between a movie
+  // (Radarr) and a TV show (Sonarr).
   const instanceOptions = instances ?? [];
   const [pickedInstance, setPickedInstance] = useState<string | null>(null);
   const instance =
@@ -81,10 +82,10 @@ export function IssueActions({
   const [showRejected, setShowRejected] = useState(false);
   const [releaseFilter, setReleaseFilter] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
-  // Sequence token for the interactive-search fetch. Two instance switches leave two searches in
-  // flight (indexer latency differs wildly per instance), and without this the LAST one to resolve
-  // wins the release list regardless of which instance is selected — grabRelease() would then send
-  // one instance's guid/indexerId to another instance, whose indexer ids are a different numbering.
+  // Counter that numbers each release search. Switching instances twice can leave two
+  // searches running at once, and whichever finishes LAST would otherwise win — even if
+  // it belongs to the instance no longer selected. grabRelease() would then send one
+  // server's release ids to a different server. Only the newest search may write state.
   const releaseReqRef = useRef(0);
 
   async function triggerRefetch() {
@@ -99,12 +100,10 @@ export function IssueActions({
         // re-search the 4K instance, not the default. "" when there is one instance.
         body: JSON.stringify({ refetch: true, instance }),
       });
-      // res.ok has to be checked FIRST. Success was keyed purely on the absence
-      // of an `arrError` field, and the one failure that sets that field is
-      // returned as HTTP 200 — so every genuine error status (503 maintenance,
-      // 401/403, 404, 400 bad instance, 413 oversized body) arrived with no
-      // arrError and rendered a green "Search triggered". The single path the
-      // client checked was the only one the server did not report as an error.
+      // Check res.ok FIRST. The server reports two kinds of failure: a normal
+      // error status (503, 401/403, 404, 400, 413) with no `arrError` field,
+      // and a Radarr/Sonarr failure sent as HTTP 200 WITH `arrError`. Looking
+      // only for `arrError` would show a green "Search triggered" for the first kind.
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
         setArrError(data.message ?? data.error ?? `Search failed (${res.status})`);
@@ -153,6 +152,7 @@ export function IssueActions({
 
   async function deleteIssue() {
     setLoading("delete");
+    setArrError(null);
     try {
       const res = await fetch(withBasePath(`/api/issues/${issueId}`), { method: "DELETE" });
       if (!res.ok) {
@@ -195,11 +195,9 @@ export function IssueActions({
         if (first) setSelectedGuid(first.guid);
       }
     } catch {
-      // Same staleness guard as every other write in this function — a
-      // superseded search must not report its failure over the current one.
-      // Without a catch the dialog sat on the empty `setReleases([])` from entry
-      // and read "No releases found", which is a different claim from "the
-      // search never completed".
+      // Report the failure (only if this is still the latest search). Otherwise the
+      // dialog would show the empty list and say "No releases found", which is a
+      // different claim from "the search never completed".
       if (reqId === releaseReqRef.current) {
         setArrError("Network error — please try again.");
         setPanel(null);
@@ -291,7 +289,7 @@ export function IssueActions({
         <span className="text-[10px] text-zinc-500 font-mono">{scopeDetail}</span>
       )}
       {libraryConfirmed && scope === "EPISODE" && !isResolved && (
-        <span className="text-[10px] text-blue-500/70">library match confirmed</span>
+        <span className="text-[10px] text-sky-400">library match confirmed</span>
       )}
 
       {panel === null && (
@@ -317,8 +315,8 @@ export function IssueActions({
               disabled={loading !== null}
               className={`h-7 px-3 text-xs gap-1 ${
                 libraryConfirmed && scope === "EPISODE"
-                  ? "border-blue-600/50 text-blue-400 hover:text-blue-300 hover:border-blue-500"
-                  : "border-zinc-700 text-zinc-400 hover:text-blue-400 hover:border-blue-500/50"
+                  ? "border-sky-500/50 text-sky-400 hover:text-zinc-100 hover:border-sky-500"
+                  : "border-zinc-700 text-zinc-400 hover:text-sky-400 hover:border-sky-500/50"
               }`}
             >
               <Download className="w-3 h-3" />
@@ -358,7 +356,7 @@ export function IssueActions({
               variant="outline"
               onClick={() => updateStatus("OPEN")}
               disabled={loading !== null}
-              className="h-7 px-3 text-xs border-zinc-700 text-zinc-500 hover:text-white gap-1"
+              className="h-7 px-3 text-xs border-zinc-700 text-zinc-500 hover:text-zinc-100 gap-1"
             >
               Reopen
             </Button>
@@ -386,13 +384,13 @@ export function IssueActions({
             onChange={(e) => setResolution(e.target.value)}
             placeholder="Resolution note (optional)"
             aria-label="Resolution note"
-            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-white placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring w-44"
+            className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring w-44"
           />
           <Button
             size="sm"
             onClick={() => updateStatus("RESOLVED", resolution || undefined)}
             disabled={loading !== null}
-            className="h-6 px-2 text-xs bg-green-700 hover:bg-green-600 gap-1"
+            className="h-6 px-2 text-xs bg-green-700 text-white hover:bg-green-800 gap-1"
           >
             {loading === "status" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
             Done
@@ -408,7 +406,7 @@ export function IssueActions({
             size="sm"
             onClick={deleteIssue}
             disabled={loading !== null}
-            className="h-6 px-2 text-xs bg-red-800 hover:bg-red-700 gap-1"
+            className="h-6 px-2 text-xs bg-red-800 text-white hover:bg-red-700 gap-1"
           >
             {loading === "delete" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
             Delete
@@ -466,8 +464,8 @@ export function IssueActions({
             ) : (
               <>
                 {libraryConfirmed && scope === "EPISODE" && (
-                  <div className="px-6 py-2.5 bg-blue-950/30 border-b border-blue-900/30 flex items-center gap-2 flex-shrink-0">
-                    <span className="text-xs text-blue-400/80">
+                  <div className="px-6 py-2.5 bg-sky-500/10 border-b border-sky-500/30 flex items-center gap-2 flex-shrink-0">
+                    <span className="text-xs text-sky-400">
                       Library match confirmed — filter below to find the right episode release
                     </span>
                   </div>
@@ -514,34 +512,34 @@ export function IssueActions({
                         onClick={() => setSelectedGuid(rel.guid)}
                         className={`w-full text-left px-6 py-3.5 flex items-start gap-4 hover:bg-zinc-800/60 transition-colors ${isSelected ? "bg-zinc-800" : ""}`}
                       >
-                        <span className={`mt-0.5 shrink-0 ${rel.protocol === "torrent" ? "text-green-500" : "text-blue-400"}`}>
+                        <span className={`mt-0.5 shrink-0 ${rel.protocol === "torrent" ? "text-green-500" : "text-sky-400"}`}>
                           {rel.protocol === "torrent" ? <Magnet className="w-4 h-4" /> : <Radio className="w-4 h-4" />}
                         </span>
 
                         <div className="flex-1 min-w-0">
-                          <p className={`text-sm truncate ${isSelected ? "text-white" : "text-zinc-300"}`} title={rel.title}>
+                          <p className={`text-sm truncate ${isSelected ? "text-zinc-100" : "text-zinc-300"}`} title={rel.title}>
                             {rel.title}
                           </p>
                           <div className="flex items-center gap-3 mt-1 flex-wrap">
-                            <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${profileMatch ? "bg-blue-500/10 text-blue-400" : "bg-zinc-800 text-zinc-500"}`}>
+                            <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${profileMatch ? "bg-sky-500/10 text-sky-400" : "bg-zinc-800 text-zinc-500"}`}>
                               {rel.quality.quality.name}
                               {rel.quality.revision.version > 1 && " v2"}
                             </span>
                             <span className="text-xs text-zinc-500">{formatSize(rel.size)}</span>
                             <span className="text-xs text-zinc-500">{rel.indexer}</span>
                             {rel.protocol === "torrent" && rel.seeders != null && (
-                              <span className={`text-xs ${rel.seeders > 5 ? "text-green-500/70" : rel.seeders > 0 ? "text-yellow-500/70" : "text-red-500/70"}`}>
+                              <span className={`text-xs ${rel.seeders > 5 ? "text-green-400" : rel.seeders > 0 ? "text-yellow-400" : "text-red-400"}`}>
                                 {rel.seeders}S
                               </span>
                             )}
                             <span className="text-xs text-zinc-700">{formatAge(rel.age * 24)}</span>
                           </div>
                           {rel.rejected && rel.rejections.length > 0 && (
-                            <p className="text-xs text-amber-500/70 mt-0.5 truncate">{rel.rejections[0]}</p>
+                            <p className="text-xs text-amber-400 mt-0.5 truncate">{rel.rejections[0]}</p>
                           )}
                         </div>
 
-                        {isSelected && <Check className="w-4 h-4 text-blue-400 shrink-0 mt-0.5" />}
+                        {isSelected && <Check className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />}
                       </button>
                     );
                   })}
@@ -563,7 +561,7 @@ export function IssueActions({
                     size="sm"
                     onClick={grabRelease}
                     disabled={!selectedGuid || loading === "grab"}
-                    className="h-8 px-4 text-sm bg-blue-700 hover:bg-blue-600 gap-2"
+                    className="h-8 px-4 text-sm bg-blue-700 text-white hover:bg-blue-600 gap-2"
                   >
                     {loading === "grab" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
                     Grab release

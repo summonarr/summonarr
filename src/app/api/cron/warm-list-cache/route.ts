@@ -12,9 +12,9 @@ import {
 import { getTraktPopularMovies, getTraktPopularTV } from "@/lib/trakt";
 import { getMdblistTopRated } from "@/lib/mdblist";
 
-// No try/catch: a failed fetch must REJECT so the Promise.allSettled below counts
-// it (errorCount) and recordCronRun reports ok=false. Swallowing the error to 0
-// here made every run look green even when upstream fetches failed.
+// Runs one list fetch and returns how many items came back. There is no
+// try/catch on purpose: a failed fetch must reject, so the Promise.allSettled
+// below counts it as an error and the run is recorded as not ok.
 async function warm<T>(fn: () => Promise<T[]>): Promise<number> {
   const result = await fn();
   return result.length;
@@ -100,7 +100,7 @@ export async function POST(request: NextRequest) {
     const durationMs = Date.now() - startTime;
     const totalItems = Object.values(counts).reduce((s, n) => s + n, 0);
 
-    // `lastRunAt` observability — see warm-activity for rationale.
+    // Save this run to the cron history; any failed fetch marks it not ok.
     await recordCronRun("list-cache", durationMs, errorCount === 0);
 
     if (authCtx.trigger !== "cron") {
@@ -113,13 +113,12 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // `ok` in the BODY is the same derived verdict the ledger just recorded —
-    // never a literal true. The admin "Run now" badge judges `res.ok && !error`
-    // (cron-job-table.tsx), so a run in which every task failed painted green
-    // until a reload re-read the ledger's ok:false. Status stays 200 on purpose:
-    // the container reschedules any non-2xx every CRON_RETRY_INTERVAL (300s)
-    // instead of the job's own interval. `error` + X-Cron-Degraded are the
-    // documented degraded-but-completed signal (see withCronRunRecording).
+    // The body's `ok` matches what was just recorded. The admin "Run now"
+    // badge (cron-job-table.tsx) turns red on `ok: false` or an `error` field.
+    // The status stays 200 on purpose: the container retries any non-2xx
+    // every CRON_RETRY_INTERVAL (300s) instead of waiting for the job's normal
+    // interval. `error` plus the X-Cron-Degraded header mean "finished, but
+    // with failures" (the same signal withCronRunRecording reads).
     return NextResponse.json({
         ok: errorCount === 0,
         ...counts,

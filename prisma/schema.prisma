@@ -15,12 +15,13 @@ model User {
   email         String    @unique
   image         String?
   passwordHash  String?
-  // Set when the credentials password is changed. refreshToken() rejects any JWT
-  // whose iat predates this — replica-safe revocation without an in-memory Set.
+  // Set when the credentials password is changed. verifyAndRefreshSession()
+  // (src/lib/session-refresh.ts) rejects any session JWT issued (iat) at or before
+  // this time — a DB-backed revocation that works on every replica.
   passwordChangedAt DateTime?
   // Set when revokeAllUserSessions runs. Same comparison as passwordChangedAt;
   // gives admins a one-shot "log this user out everywhere" primitive that is
-  // honored on every replica's next refresh.
+  // honored on every replica's next session check.
   sessionsRevokedAt DateTime?
   // Set when the account is removed — by the user (self-delete, App Store
   // Guideline 5.1.1(v)) or by an admin. The row is DISABLED, not scrubbed: every
@@ -104,9 +105,10 @@ model User {
   // OAuth approval page (Plex only warns on clientIds not yet registered to the user's account).
   plexClientId String?
 
-  // Provider subject identity. For Plex/Jellyfin (Credentials providers — NextAuth's
-  // Account table doesn't apply), we bind sign-in to (provider, sub) instead of email
-  // to defeat email-collision auto-link. Populated on first successful sign-in.
+  // Provider subject identity (the user's id on Plex/Jellyfin). Plex and Jellyfin
+  // sign-ins don't create Account rows, so we bind sign-in to (provider, id) here
+  // instead of to email, which stops an email collision from auto-linking someone
+  // else's account. Populated on first successful sign-in.
   // If a sign-in arrives whose Plex/Jellyfin id collides with an existing user row's
   // email but not its plexUserId/jellyfinUserId, sign-in is REFUSED.
   plexUserId     String? @unique
@@ -341,7 +343,7 @@ model JellyfinLibraryItem {
   // 4K, an accidental double-import) and each copy carries its own id, but the
   // @@id below allows exactly one row — so without this the losing copies' ids
   // were unrecoverable and a watch filed under one attributed to nobody. Written
-  // by the library sync from JellyfinLibraryItemData.duplicateItemIds; see
+  // by the library sync via libraryItemIds() (itemId + duplicateItemIds); see
   // guardrail 37. Rows written before this column existed are `[]`, so every
   // read ORs this against jellyfinItemId rather than replacing it.
   jellyfinItemIds String[] @default([])
@@ -442,7 +444,9 @@ model RadarrAvailableItem {
 }
 
 // ─── Sonarr Wanted Cache ──────────────────────────────────────────────────────
-// TV shows in Sonarr that have zero downloaded episode files.
+// TV shows Sonarr does NOT report as complete: at least one aired, monitored,
+// regular-season episode still has no file (guardrail 14a). This is the
+// counterpart of SonarrAvailableItem below.
 // Populated by /api/sync/sonarr; cleared per-series by the Sonarr webhook on Download.
 
 model SonarrWantedItem {
@@ -793,8 +797,7 @@ model MediaServerUser {
   // play-history poller, which does not pass a machineId, so this stays null in
   // practice. The verification branch in resolveMediaServerUser
   // (MediaServerMismatchError) only fires if a future *untrusted* ingestion path
-  // passes one. The Plex/Jellyfin webhook handlers this comment once referenced
-  // were removed — do not treat this as an active security control.
+  // passes one — do not treat this as an active security control.
   serverMachineId  String?
   username         String
   email            String?
@@ -975,11 +978,12 @@ model ActiveSession {
   // session doesn't book the pre-resume runtime as watch time. Default 0
   // reproduces the old (start-of-file) math for pre-existing rows.
   startProgressMs BigInt @default(0)
-  // Wall-clock timestamp of the last poll that observed progressMs increasing. Drives Plex
-  // stall detection: when Plex keeps a session in /status/sessions after the client quit
-  // (mobile/TV especially, up to 30 min), the playhead freezes while state still reports
-  // "playing". progressUpdatedAt aging past STALL_THRESHOLD_MS in that state finalizes the
-  // session early instead of waiting on cleanupStaleSessions(30).
+  // Wall-clock time the playhead last MOVED (forward or backward), as seen by the 5s
+  // poller or the Plex SSE handler (guardrail 20). Drives Plex stall detection: when
+  // Plex keeps a session in /status/sessions after the client quit (mobile/TV
+  // especially, up to 30 min), the playhead freezes while state still reports
+  // "playing". progressUpdatedAt aging past PLEX_STALL_THRESHOLD_MS in that state
+  // finalizes the session early instead of waiting on cleanupStaleSessions(30).
   progressUpdatedAt DateTime @default(now())
   playtimeMs      BigInt @default(0) // Accumulated wall-clock ms spent in the "playing" state. Drives PlayHistory.playDuration / watched.
   durationMs      BigInt @default(0)
@@ -1042,8 +1046,8 @@ model IpLookupCache {
 // ─── TRaSH Guides ────────────────────────────────────────────────────────────
 
 // Upstream custom formats, quality profiles, naming, and quality-size specs
-// pulled from the TRaSH-Guides repo (Recyclarr was dropped in c0fe663 — TRaSH
-// now publishes quality profile JSON directly).
+// pulled from the TRaSH-Guides repo (Recyclarr is no longer used — TRaSH now
+// publishes quality profile JSON directly).
 // Keyed by the upstream trash_id so we can match against Radarr/Sonarr CFs that
 // have been imported via the TRaSH convention.
 model TrashSpec {
@@ -1160,9 +1164,9 @@ model HiddenItem {
 
 // Per-user "For You" recommendation cache, precomputed by the
 // warm-recommendations cron (src/lib/recommendations.ts) from the user's own
-// watched PlayHistory + WatchlistItem seeds fanned out through TMDB's
-// similar/recommendations endpoints. Read directly by the home page — no live
-// TMDB call on that hot path. Fields are denormalized from the TmdbMedia the
+// seeds (watched PlayHistory, WatchlistItem and requests) fanned out through the
+// server-wide recommendation graph below. Read directly by the home and For You
+// pages — no live TMDB call on that hot path. Fields are denormalized from the TmdbMedia the
 // suggestions call already returned (same rationale as WatchlistItem/HiddenItem:
 // a suggestion-only tmdbId isn't guaranteed a TmdbMediaCore/TmdbCache row) —
 // enough of them to reconstruct a valid TmdbMedia without a second fetch.
@@ -1236,9 +1240,9 @@ enum RecommendationSeed {
 // cold cache made the first user of each cycle pay for everyone.
 //
 // Per-user compute now reads two indexed queries out of these two tables and
-// issues no upstream request at all. The live TMDB/ratings path survives only as
-// a self-healing fallback for a title the graph has not covered yet (a watchlist
-// entry added since the last refresh), and it disappears as the graph fills.
+// issues no upstream request at all — there is no live fallback. The cron builds
+// the graph for every active user's seeds BEFORE computing any user, which is
+// what guarantees coverage (guardrail 40).
 
 // One row per (source title, suggested title) edge, ordered by the position TMDB
 // returned it at — the same ordering the engine's positionFactor scores on.

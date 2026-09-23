@@ -69,7 +69,7 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
   // (guardrail 35). Counting REGISTERED rather than CONFIGURED servers is also
   // the safer error: a registered-but-unconfigured server has no episodes to
   // contribute, so at worst this skips a rewrite the orchestrator will do anyway
-  // — the opposite mistake destroys another server rows.
+  // — the opposite mistake destroys another server's rows.
   const [jellyfinConfig, librariesRow, jellyfinInstances] = await Promise.all([
     getJellyfinConfig(instance),
     prisma.setting.findUnique({ where: { key: jellyfinSettingKey(instance, "Libraries") } }),
@@ -136,12 +136,11 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
   }
   (ownsEpisodeCache
     ? (episodeRecentOnly && seriesItemIdToTmdbId.size > 0 && seriesItemIdToTmdbId.size <= PER_SERIES_EPISODE_REFRESH_MAX
-        // Bounded per-series fan-out (the fix-match pattern, concurrency matching
-        // the library walker's MAX_PARALLEL_PAGES). Output is identical to the
-        // full walk's client-side SeriesId filter for these series; the
-        // tmdbId-scoped delete + insert downstream is unchanged. size === 0
-        // falls through to getJellyfinTVEpisodes, which short-circuits to []
-        // without fetching — byte-identical to before.
+        // Bounded per-series fan-out (at most 3 shows fetched at once, matching
+        // the library walker's MAX_PARALLEL_PAGES). It returns the same episodes
+        // the full walk would after filtering by SeriesId, so the tmdbId-scoped
+        // delete + insert below is unchanged. size === 0 falls through to
+        // getJellyfinTVEpisodes, which returns [] without fetching anything.
         ? mapLimit(Array.from(seriesItemIdToTmdbId.entries()), 3, ([itemId, tmdbId]) =>
             getJellyfinEpisodesForShow(baseUrl, apiKey, itemId, tmdbId),
           ).then((perSeries) => perSeries.flat())
@@ -194,8 +193,8 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
 
   if (recentOnly) {
     // Insert-only: never delete rows on this path — an empty window would nuke the whole library.
-    // The already-present check is default-instance-scoped: a named instance's row for the same
-    // tmdbId must not mask inserting the default instance's own row.
+    // The already-present check is scoped to `instance`: another server's row for the same
+    // tmdbId must not stop this server's own row from being inserted.
     const [existingMovies, existingTv] = await Promise.all([
       prisma.jellyfinLibraryItem.findMany({
         where: { mediaType: "MOVIE", serverInstance: instance, tmdbId: { in: movieRows.map((r) => r.tmdbId) } },
@@ -218,10 +217,9 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
       if (newTvRows.length    > 0) await batchCreateMany(tx.jellyfinLibraryItem, newTvRows);
     }, { timeout: BATCH_TX_TIMEOUT });
   } else {
-
     // Advisory lock 2001,2 — see comment in the recentOnly branch above. Full replace of
-    // the DEFAULT instance's rows only — an unscoped deleteMany here would wipe every
-    // named instance's rows and repopulate only the default's (availability flicker
+    // THIS instance's rows only (guardrail 13) — an unscoped deleteMany here would wipe
+    // every other server's rows and repopulate only this one's (availability flicker
     // until the next orchestrator run).
     await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(2001, 2)`;

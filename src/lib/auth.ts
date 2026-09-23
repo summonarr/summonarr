@@ -21,8 +21,6 @@ import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey, plex
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { getPlexConfig } from "@/lib/plex-config";
 
-// Always run a password verify (even on missing accounts) to prevent timing-based user enumeration
-
 // Wherever User.passwordHash is updated (e.g. src/app/api/profile/password/route.ts
 // and admin password-set endpoints), the same code path must also call
 // revokeAllUserSessions(userId) so the AuthSession rows are deleted and stale
@@ -41,9 +39,9 @@ export function hashAuditEmail(email: string): string {
 }
 
 // Sentinel returned when a provider-bound lookup refuses sign-in due to an email
-// collision with a user that has no corresponding provider subject yet. The caller
-// translates this to `return null` from authorize() so NextAuth surfaces a generic
-// failure to the client.
+// collision with a user that has no corresponding provider subject yet. The
+// authorize* callers turn this into `return null`, so the client only sees a
+// generic sign-in failure.
 export const PROVIDER_REBIND_REQUIRED = Symbol("provider-rebind-required");
 export type ProviderRebindRequired = typeof PROVIDER_REBIND_REQUIRED;
 
@@ -224,9 +222,8 @@ export interface OidcUserClaims {
   expiresAt: number | null;
 }
 
-// Finds or creates a User for an OIDC sub. Replaces next-auth's adapter
-// flow (getUserByAccount → getUserByEmail → linkAccount + maybe create) for
-// the Summonarr-native OIDC callback. The Prisma extension auto-encrypts
+// Finds or creates a User for an OIDC sub (the IdP's stable user id), used by
+// the OIDC callback. The Prisma extension auto-encrypts
 // Account.{access_token,refresh_token,id_token} on write per guardrail 7a —
 // callers must pass raw tokens.
 export async function findOrCreateOidcUser(
@@ -410,8 +407,7 @@ function claimsToSession(claims: SessionClaims): SummonarrSession {
   };
 }
 
-// Server-component-friendly session reader. Mirrors what next-auth's `auth()`
-// exported — synchronous-looking API that returns SummonarrSession | null.
+// Server-component-friendly session reader: returns SummonarrSession | null.
 // JWT-only: verifies signature + expiry, NOT DB revocation/role-rotation. Fine
 // for personalization reads; for an AUTHORIZATION decision in a page/layout use
 // authActive() instead. Routes that need 401/403 semantics should use
@@ -497,12 +493,10 @@ function isPrismaNotFound(err: unknown): boolean {
 }
 
 export async function revokeAllUserSessions(userId: string): Promise<void> {
-  // All three writes wrapped in a $transaction so a failed sessionsRevokedAt
-  // bump rolls back the AuthSession deletion — otherwise we'd end up with rows
-  // gone (primary path) but the cross-replica timestamp backstop never set, so
-  // a cached JWT on another replica would pass validation for up to 60s
-  // (refreshToken's dbCheckedAt window) by failing both the row-presence check
-  // AND the cutoff check.
+  // The read, the delete and the sessionsRevokedAt stamp share one $transaction,
+  // so either all of them land or none do. Without it, a failed stamp could leave
+  // the rows deleted but no cutoff set, and a JWT still inside its short
+  // dbCheckedAt fast-path window (see session-refresh.ts) could keep working.
   const sessionIds = await prisma.$transaction(async (tx) => {
     const sessions = await tx.authSession.findMany({
       where: { userId },
@@ -552,7 +546,7 @@ type JwtToken = Record<string, unknown>;
 // upserts the backing AuthSession row.
 export async function initializeTokenOnSignIn(token: JwtToken, user: Record<string, unknown>): Promise<JwtToken> {
   if (!token.sessionId) {
-    // Credentials provider supplies _sessionId via DeviceMeta; OIDC/OAuth do not
+    // Normally already set from DeviceMeta._sessionId; this is a fallback for a caller that skipped it.
     token.sessionId = crypto.randomUUID();
   }
 
@@ -682,7 +676,10 @@ export async function authorizeWithCredentials(
   // regardless of the limit. checkRateLimit checks and pushes in one step; the hit is
   // refunded on a successful login so the original intent still holds (the account
   // bucket counts real failed verifications, not successful sign-ins).
-  const accountAllowed = checkRateLimit(accountKey, accountLimit, accountWindowMs);
+  // Short-circuited on an IP rejection: that attempt never reaches the verify, so
+  // reserving (and never refunding) an account slot for it would charge the
+  // account bucket for an attempt it never judged.
+  const accountAllowed = ipAllowed && checkRateLimit(accountKey, accountLimit, accountWindowMs);
 
   if (!ipAllowed || !accountAllowed) {
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "rate_limited", emailHash } });
@@ -779,7 +776,6 @@ export async function authorizeWithPlex(
     if (instances.length === 0) {
       console.warn("[auth] Plex sign-in refused: no Plex server is configured.");
       void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "plex_server_not_configured" } });
-      // Fall through to the unified failure path below.
       await dummyVerify();
       return null;
     }
@@ -897,7 +893,8 @@ export async function authorizeWithPlex(
     console.error("[plex auth] error:", err);
   }
   if (!plexResult) {
-    // Constant-time delay mirrors the credentials provider path to prevent timing oracle
+    // Run a dummy password check so a failure takes about as long as a real
+    // attempt; response timing then leaks nothing (same as the credentials path).
     await dummyVerify();
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "plex", details: { reason: "invalid_credentials" } });
     return null;
@@ -1087,18 +1084,10 @@ export async function authorizeWithJellyfinQuickConnect(
 }
 
 
-// ────────────────────────────────────────────────────────────────────────────
-// Summonarr-native sign-in flow (parallel to next-auth)
-//
-// The new credentials/plex/jellyfin/jellyfin-quickconnect route handlers under
-// /api/auth/sign-in/* call signInAndMintSession after the provider-specific
-// authorize() returns a user. It replicates what next-auth's jwt + events.signIn
-// callbacks do today, but produces a Summonarr-controlled JWT we own.
-//
-// The next-auth flow continues to operate unchanged in parallel — its providers
-// still call the same exported authorize* functions. PR 5 will retire the
-// next-auth flow and consumers altogether.
-// ────────────────────────────────────────────────────────────────────────────
+// Session minting. The sign-in route handlers under /api/auth/sign-in/* (and the
+// OIDC callback) call signInAndMintSession after the provider-specific
+// authorize*/findOrCreate* step returns a user; it creates the AuthSession row
+// and signs the session JWT.
 
 export interface SignInResult {
   token: string;
@@ -1139,10 +1128,9 @@ async function runFirstAdminPromotion(
     const self = await tx.user.findUnique({ where: { id: userId }, select: { id: true } });
     if (!self) return false;
     await tx.user.update({ where: { id: userId }, data: { role: "ADMIN", permissions: defaultPermissionsForRole("ADMIN") } });
-    // upsert, not create().catch(): a P2002 from a concurrent setup race (the
-    // /api/auth/register path holds a DIFFERENT advisory lock and can create this
-    // key between our findUnique and create) would abort the transaction and
-    // silently roll back the ADMIN promotion above (guardrail 23). upsert is
+    // upsert, not create().catch(): if some other writer created this key first,
+    // a caught P2002 (unique-violation) error would still abort the transaction
+    // and silently roll back the ADMIN promotion above (guardrail 23). upsert is
     // idempotent and never trips the unique constraint.
     await tx.setting.upsert({
       where: { key: "setup_completed_at" },
@@ -1188,7 +1176,7 @@ export async function signInAndMintSession(params: {
     if (state?.deactivatedAt) throw new AccountDeactivatedError();
   }
 
-  // Build the same token shape next-auth's jwt callback (auth.config.ts) would build.
+  // The claims that go into the session JWT.
   const token: Record<string, unknown> = {
     id: user.id,
     role: (user as { role?: string }).role,

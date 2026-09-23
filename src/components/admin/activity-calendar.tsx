@@ -1,8 +1,7 @@
 "use client";
 
-// GitHub-style 365-day heatmap; data comes from getActivityCalendarUncached()
-// in play-history.ts. Restyled to the Claude Design "Activity Page" handoff:
-// DS-token indigo wash, 11px cells, mono gutter labels, Less→More legend.
+// GitHub-style 365-day heatmap: one small square per day, darker = more plays.
+// The data comes from getActivityCalendarUncached() in play-history.ts.
 
 import { useState } from "react";
 import {
@@ -22,16 +21,16 @@ interface CalendarData {
 // Maps a day's play count to an oklch indigo wash whose opacity scales with
 // intensity (count/max); count 0 renders the near-transparent empty-cell fill.
 function cellBg(count: number, max: number): string {
-  if (count === 0) return "oklch(1 0 0 / 0.025)";
+  if (count === 0) return "color-mix(in oklab, var(--ds-fg) 2.5%, transparent)";
   const intensity = max > 0 ? count / max : 0;
   return `oklch(0.58 0.21 275 / ${(0.12 + intensity * 0.76).toFixed(3)})`;
 }
 
-// `today` arrives as an ISO date string from the server page so SSR and
-// hydration agree on the 365-day window. DO NOT replace with `new Date()`
-// in render — module/render-level Date.now() is the canonical React #418
-// hydration source (server's day vs client's day can disagree across
-// timezones and second-of-the-day rollovers).
+// `today` arrives as an ISO date string from the server page so the server
+// render and the browser's hydration agree on the 365-day window. DO NOT
+// replace it with `new Date()` in render: the server and the browser would
+// read the clock at different moments (and possibly on different days), and
+// React reports that mismatch as hydration error #418 (guardrail 16).
 export function ActivityCalendar({
   data,
   today: todayIso,
@@ -87,7 +86,10 @@ export function ActivityCalendar({
   }
 
   const countMap = new Map(data.map((d) => [d.day, d.count]));
+  // `max` is floored at 1 so the colour maths never divides by zero; `peak`
+  // is the real busiest day, which is 0 when there were no plays at all.
   const max = Math.max(...data.map((d) => d.count), 1);
+  const peak = Math.max(...data.map((d) => d.count), 0);
   const totalPlays = data.reduce((sum, d) => sum + d.count, 0);
   const activeDays = data.filter((d) => d.count > 0).length;
 
@@ -144,8 +146,11 @@ export function ActivityCalendar({
       </p>
       <div className="overflow-x-auto">
         <div
-          role="img"
-          aria-label={`Activity over the last 365 days. ${totalPlays.toLocaleString("en-US")} total plays across ${activeDays} active days. Peak day: ${max} plays.`}
+          // role="img" hides everything inside from screen readers, so it is
+          // only used when the cells are not clickable. Clickable cells need a
+          // "group" so their role="button" stays reachable.
+          role={detailBase ? "group" : "img"}
+          aria-label={`Activity over the last 365 days. ${totalPlays.toLocaleString("en-US")} total plays across ${activeDays} active days. Peak day: ${peak} plays.`}
           style={{ minWidth: 700 }}
         >
           {/* Month labels */}

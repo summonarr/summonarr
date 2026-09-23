@@ -34,8 +34,9 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (target.deactivatedAt) return NextResponse.json({ ok: true }); // idempotent
 
-  // Step-up for local-credential accounts: deletion is irreversible, so require
-  // the current password in the body to confirm it's the account owner and not a
+  // Step-up for local-credential accounts: this signs the user out everywhere and
+  // only an admin can undo it, so require the current password in the body to
+  // confirm it's the account owner and not a
   // ride-along on a hijacked/borrowed session. SSO-provisioned accounts have no
   // local passwordHash to verify against; the session itself is their proof.
   if (target.passwordHash !== null) {
