@@ -196,7 +196,7 @@ test("PIN: a comment documenting the next handler does not arm the handler decla
 test("stripComments preserves `//` inside string literals", () => {
   const src = 'const url = "https://example.com/x"; // trailing note\nconst withAdmin = 1;\n';
   const out = stripComments(src);
-  assert.match(out, /https:\/\/example\.com\/x/);
+  assert.ok(out.includes("https://example.com/x"));
   assert.doesNotMatch(out, /trailing note/);
 });
 
