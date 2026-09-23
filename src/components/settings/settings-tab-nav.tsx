@@ -16,9 +16,8 @@ export type TabId = typeof TABS[number]["id"];
 // Top-level settings tab bar; each tab links to /settings?tab=<id>.
 export function SettingsTabNav({ activeTab }: { activeTab: TabId }) {
   return (
-    // `flex-wrap gap-1` (not `overflow-x-auto`, which cut off "System" with no
-    // scroll affordance at ~440px): the row wraps to two lines on narrow
-    // viewports and stays one row when content fits.
+    // Wraps onto a second line on narrow screens. A sideways-scrolling row
+    // hid the last tab ("System") with no hint that it could scroll.
     <nav
       aria-label="Settings sections"
       className="flex flex-wrap gap-1 max-w-full"

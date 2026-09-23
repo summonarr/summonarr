@@ -136,11 +136,9 @@ export function PlayHistorySettingsForm({
             <Input
               id="polling-interval"
               type="number"
-              // 5 is the shipped default AND the floor the entrypoint clamps to
-              // (`_cron_int "${PLAY_HISTORY_SYNC_INTERVAL:-5}" 5`). A min of 10
-              // rejected the value this field is seeded with on any install that
-              // never saved it, and native validation then blocked the whole
-              // form — no play-history setting could be saved at all.
+              // 5 is both the default and the lowest value the container's
+              // cron loop accepts. A higher min would make the browser reject
+              // the default value and block saving the whole form.
               min={5}
               max={600}
               value={pollingInterval}

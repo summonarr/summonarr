@@ -88,7 +88,7 @@ export function machineIpAllowed(claims: SessionClaims, headers: Headers): boole
 // produced by the refresh logic is silently DISCARDED — the caller has no
 // response object to attach the Set-Cookie to. This is fine for the rare
 // direct callers (dual-auth routes, the play-history export) because the
-// next withAuth-wrapped request will re-run the slide.
+// next withAuth-wrapped request re-signs the token again.
 export async function requireAuth(
   opts: RequireAuthOptions = {},
 ): Promise<SummonarrSession | NextResponse> {
@@ -153,8 +153,9 @@ async function authenticateRequest(
   if (!result) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  // UA-fingerprint check. See matchesStoredFingerprint above for the rationale —
-  // belt-and-suspenders with proxy.ts which the prefetch-header matcher exempts.
+  // UA-fingerprint check. See the matching check in requireAuth above for the
+  // rationale — a second line of defence behind proxy.ts, which skips prefetch
+  // requests entirely.
   // Bearer sessions skip it (app-secure storage, not an ambient browser cookie).
   if (!bearer && !matchesStoredFingerprint(result.claims.uaFingerprint, req.headers.get("user-agent"))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -181,9 +182,9 @@ async function authenticateRequest(
  * `isCronAuthorized`) or plain-text/binary responses (SSE, thumbnails) which
  * stay inline.
  *
- * If verifyAndRefreshSession produces a refreshed JWT (sliding window or
+ * If verifyAndRefreshSession produces a re-signed JWT (for example after a
  * sessionId rotation), the wrapper appends Set-Cookie to the handler's
- * response so the client gets the fresh token transparently.
+ * response so the browser gets the fresh token transparently.
  *
  * Usage:
  *   export const GET = withAdmin(async (req, ctx, session) => { ... });
@@ -200,8 +201,9 @@ export function withAuth<Ctx = unknown>(
     const result = await authenticateRequest(req, opts);
     if (result instanceof NextResponse) return result;
     const response = await handler(req, ctx, result.session);
-    // Thread the slid token back as Set-Cookie for browser sessions only; a
-    // bearer client can't read it and rides its fixed-lifetime token to expiry.
+    // Send the re-signed token back as Set-Cookie for browser sessions only. A
+    // bearer (native) client can't read Set-Cookie, so it keeps using the token
+    // it got at sign-in (guardrail 6b).
     if (result.refreshed && !result.fromBearer) {
       response.headers.append(
         "Set-Cookie",

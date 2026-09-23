@@ -2,11 +2,11 @@
 // /api/admin/audit-log and its /export sibling validate ?action= filters
 // against AUDIT_ACTIONS (a bad filter must 400, not silently fall back to the
 // unfiltered set), and the admin table renders badges from ACTION_LABELS +
-// ACTION_GROUP. The Record<AuditAction, …> typing enforces completeness at
-// compile time, but the unit suite runs strip-only — these runtime pins make
-// sure a schema-side enum addition (prisma generate) can't drift from the
-// maps without failing the suite, and pin the group partition and label
-// uniqueness the filter dropdown relies on.
+// ACTION_GROUP. The Record<AuditAction, …> type already forces every action
+// into the maps at compile time, but the test runner only strips types and
+// never checks them. So these runtime checks catch a new enum value (added
+// in the schema) that was never added to the maps, and they also pin the
+// group split and unique labels that the filter dropdown relies on.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { AuditAction } from "@/generated/prisma";
@@ -22,7 +22,7 @@ const ENUM_VALUES = Object.values(AuditAction).sort();
 test("prisma runtime enum is an identity map (key === value)", () => {
   // Comparing enum constants against DB rows as plain strings is only sound
   // because the generated runtime enum maps every key to itself.
-  assert.ok(Object.keys(AuditAction).length >= 35); // 35 actions as of this writing
+  assert.ok(Object.keys(AuditAction).length >= 35); // sanity floor: catches an empty or truncated enum
   for (const [key, value] of Object.entries(AuditAction)) {
     assert.equal(value, key);
   }

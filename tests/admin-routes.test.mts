@@ -15,7 +15,7 @@
 //     matrix. Here we spot-check that the gate fronts these specific routes.
 //
 // THE HEADLINE — GUARDRAIL 26. Each of user-delete, role-change, play-history
-// delete, Plex terminate, and Jellyfin terminate calls the SWALLOWING `logAudit`
+// delete, cache clear, Plex terminate, and Jellyfin terminate calls the SWALLOWING `logAudit`
 // AFTER its mutation has committed (a bare `void logAudit(...)`), NOT
 // `logAuditOrFail`. We pin it behaviorally: with the audit write STUBBED TO THROW
 // (auditLog.create rejects), the destructive op STILL returns success (200/204),
@@ -23,14 +23,14 @@
 // audit log:` swallow line is logged. Had the route used `await logAuditOrFail`,
 // the throw would propagate and the handler would reject / 500 — so "returns
 // success AND the swallow line fired" is the exact discriminator between the two
-// variants, and the regression that shipped (a 500 on a successful destructive op,
-// whose retry then 404s with no trail or double-applies).
+// variants. The regression that shipped was a 500 on a successful destructive op,
+// whose retry then 404s with no audit trail or applies (and audits) twice.
 //   DB-restore (/api/admin/backup/db-import) is a 6th guardrail-26 route but its
 // success path runs processBackupImport (PBKDF2(600k) decrypt + a destructive
 // TRUNCATE+INSERT transaction), which can't be reached without a real encrypted
 // blob + BACKUP_DB_PASSWORD + a live DB, and processBackupImport is a named ESM
 // import this loader can't stub. We cover its pre-import GATING instead (authz +
-// the 503 config gates) and SKIP the audit-throw assertion — see the report.
+// the 503 config gates) and SKIP the audit-throw assertion.
 //
 // GUARDRAIL 27. The session-revoke route calls revokeSessionById /
 // revokeAllUserSessions (auth.ts), which mark the in-memory force-revoke ledger
@@ -38,10 +38,11 @@
 // route surfaces the failure (rejects) AND leaves NO phantom mark (shouldForceDbCheck
 // stays false) — pinned via the throwing stub + the ledger read.
 //
-// GUARDRAIL 28. Admin user-delete ANONYMIZES; the tx's mediaServerUser.deleteMany
-// throws, so a green delete proves the identity was severed by UNLINK
-// (updateMany userId→null), never a hard delete that would restrict/cascade play
-// history.
+// GUARDRAIL 28 (+ 33). Admin user-delete only DISABLES the account and leaves the
+// MediaServerUser link alone. Only the separate purge unlinks it (updateMany
+// userId→null). The fake tx's mediaServerUser.deleteMany throws, so a green
+// purge proves the link was cut by an unlink, never a hard delete that would
+// take play history with it.
 //
 // No DB, no network, no DNS: globalThis.prisma is a recording fake seeded BEFORE
 // the module graph loads (the sync-routes.test.mts idiom), fetch is scripted per
@@ -692,7 +693,7 @@ test("revoke all: happy path → 200 {revoked:'all'}, the whole-user mark is set
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// GUARDRAIL 28 — user-delete unlinks MediaServerUser, never hard-deletes it
+// GUARDRAIL 28 — user-delete leaves MediaServerUser alone (no unlink, no hard delete)
 // ════════════════════════════════════════════════════════════════════════════
 
 test("user-delete DISABLES only: the MediaServerUser link and the identity both survive", async () => {

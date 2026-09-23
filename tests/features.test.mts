@@ -52,17 +52,16 @@ const VALID_CATEGORIES: readonly FeatureCategory[] = ["pages", "behaviors", "int
 // desyncs the old settings UI from the new toggle (both write the same row).
 const LEGACY_KEYS = ["motdEnabled", "playHistoryEnabled", "trashGuidesEnabled"] as const;
 
-// feature.* keys that deliberately default OFF despite being modern (not
-// pre-Features-tab) flags — because the behavior they gate starts out with no
-// data to show. Distinct from LEGACY_KEYS (which predate the Features tab
-// entirely); this is a narrow, named exception to "every feature.* flag
-// defaults ON", not a second legacy era.
+// Newer feature.* flags that still default OFF, because the page they gate has
+// no data to show on a fresh install. This is a short, named exception to the
+// rule "every feature.* flag defaults ON" — unrelated to LEGACY_KEYS above,
+// which are older than the Features tab.
 const NEW_FEATURE_DEFAULT_OFF_KEYS = ["feature.page.forYou"] as const;
 
 // ── Registry invariants ──────────────────────────────────────────────────
 
 test("FEATURE_KEYS mirrors FEATURE_DEFINITIONS order and every key is unique", () => {
-  assert.ok(FEATURE_DEFINITIONS.length >= 22); // 22 flags as of this writing
+  assert.ok(FEATURE_DEFINITIONS.length >= 22); // loose floor; the exact per-group counts are pinned further down
   assert.deepEqual(
     FEATURE_KEYS,
     FEATURE_DEFINITIONS.map((f) => f.key),

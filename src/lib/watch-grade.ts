@@ -45,9 +45,10 @@
 //     OTHER people watched it since the request (otherViewers, default 2; 0 turns
 //     it off). Others count as play history recorded them: a movie play flagged
 //     watched/completed, or watched episodes reaching the same season share. A
-//     person with several media-server logins counts once, and the requester's
-//     own logins never count. It only ever raises the credit of a request:
-//     grace and coverage still decide whether a request is scored.
+//     person with several media-server logins counts once. The requester's own
+//     logins never change the result: if they watched it, they already have
+//     full credit and others aren't looked at. The rule only ever raises a
+//     request's credit: grace and coverage still decide whether it is scored.
 //   - A user with no linked media-server identity cannot be graded, and neither
 //     can one whose media servers are not being tracked — both say so explicitly
 //     rather than rendering an F for data that was never collected.
@@ -263,7 +264,8 @@ export interface RequestPlayUnit {
 }
 
 // What ONE other person watched of a requested title since the request, as play
-// history recorded it. Never the requester's own plays.
+// history recorded it. The requester's own logins are not filtered out, but
+// they can never make a viewer (see loadOtherViewerWatches in watch-grade-data.ts).
 export interface OtherViewerWatch {
   requestId: string;
   // One key per PERSON: the account the media-server identity belongs to, or the

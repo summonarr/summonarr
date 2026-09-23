@@ -34,10 +34,11 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
   // pair (mirrors vote-actions' dismiss) — it deletes every notification.
   const [confirmingClear, setConfirmingClear] = useState(false);
   const mounted = useHasMounted();
-  // Bumped by any list-wiping op (clearAll). An in-flight removeOne records the
-  // generation at start and skips its whole-list rollback if it changed — else a
-  // failed single-delete could restore a stale list a successful clear-all
-  // already wiped server-side. (Pattern mirrors watch-history-list's filterGen.)
+  // A counter bumped every time the whole list is wiped (clearAll). removeOne
+  // notes the value when it starts; if it changed by the time its delete fails,
+  // it skips putting the row back — otherwise a failed single delete could
+  // resurrect a row that a successful clear-all already removed on the server.
+  // (Same pattern as watch-history-list's filterGen.)
   const listGen = useRef(0);
 
   const anyUnread = items.some((n) => !n.readAt);
@@ -74,7 +75,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     setTotal((t) => Math.max(0, t - 1));
     // Selection via query param — DELETE bodies are stripped by some proxies.
     const res = await fetch(withBasePath(`/api/notifications?ids=${encodeURIComponent(id)}`), { method: "DELETE" }).catch(() => null);
-    // gen changed ⇒ a clear-all landed while this was in flight — don't resurrect it.
+    // If gen changed, a clear-all happened meanwhile — don't bring the row back.
     if ((!res || !res.ok) && gen === listGen.current) {
       setItems((cur) => {
         if (cur.some((n) => n.id === id)) return cur;
@@ -93,7 +94,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     setItems([]);
     setTotal(0);
     setHasMore(false);
-    // Explicit clear-all signal (never "empty body means all").
+    // Ask for "delete all" explicitly with ?all=1 (an empty request never means "all").
     const res = await fetch(withBasePath("/api/notifications?all=1"), { method: "DELETE" }).catch(() => null);
     if (!res || !res.ok) {
       setItems(prevItems);
@@ -122,16 +123,18 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
         setError("Couldn't load more. Tap Load more to retry.");
       }
     } catch {
-      // `if (res.ok)` with no else meant a failed page load did nothing at all:
-      // the spinner stopped, the list was unchanged, and "Load more" sat there
-      // looking like it had simply reached the end.
+      // Always show an error on failure — otherwise a failed load looks the
+      // same as having nothing more to load.
       setError("Couldn't load more. Tap Load more to retry.");
     } finally {
       setLoading(false);
     }
   }
 
-  if (items.length === 0) {
+  // Only show the empty state when there is nothing left to load either. After
+  // removing every loaded row one by one, older notifications may still exist
+  // on the server, and the "Load more" button below must stay reachable.
+  if (items.length === 0 && !hasMore) {
     return (
       <EmptyState
         icon={Bell}

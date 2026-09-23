@@ -1,9 +1,11 @@
-// Unit tests for the E2E push payload encryption (src/lib/push-e2e.ts). The
-// wire format MUST stay byte-compatible with the iOS CryptoKit decryptor
-// (PushCrypto.swift): ECIES over P-256, HKDF-SHA256 (empty salt, fixed info),
-// AES-256-GCM, blob = ephPub(65) || nonce(12) || ct || tag(16). The test
-// decrypts with an independent implementation of that exact recipe, so any
-// drift in curve/encoding/KDF parameters fails here before it bricks devices.
+// Unit tests for the end-to-end push encryption (src/lib/push-e2e.ts). The
+// bytes we send MUST match what the iOS app's decryptor (PushCrypto.swift)
+// expects. The recipe: a throwaway P-256 key pair per message (ECIES), a key
+// derived from the shared secret with HKDF-SHA256 (empty salt, fixed info
+// string), then AES-256-GCM. The blob is laid out as
+// ephemeral public key (65 bytes) + nonce (12) + ciphertext + auth tag (16).
+// The test decrypts with its own independent copy of that recipe, so any
+// change to the format fails here before it breaks real devices.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createECDH, createDecipheriv, hkdfSync } from "node:crypto";
@@ -71,7 +73,7 @@ test("non-ASCII payloads roundtrip byte-exact", () => {
   assert.equal(decryptAsDevice(device, encryptForDevice(device.pubB64, msg)), msg);
 });
 
-// Device keys arrive from client-controlled /api/push registration. A key that
+// Device keys arrive from client-controlled registration (/api/push/apns). A key that
 // passes the up-front shape check (65 bytes, 0x04 marker) but whose X/Y is not
 // a point on P-256 MUST throw from ECDH — never silently emit a blob no device
 // could ever decrypt. Node validates the point in computeSecret and raises

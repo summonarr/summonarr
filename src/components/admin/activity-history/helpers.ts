@@ -34,14 +34,14 @@ export interface HistoryFilterInput {
   grouped: boolean;
 }
 
-// A YYYY-MM-DD day filter is a UTC calendar day. `PlayHistory.startedAt` is a
-// tz-naive UTC column and every day-bucketed aggregate over it groups by its UTC
-// date — including the activity heatmap, whose cells deep-link here as
-// ?from=&to= — so a local-midnight window would sit offset by the admin's UTC
-// offset from the day the cell counted. Returns null for a malformed or
-// impossible date (2026-13-01, or 2026-02-30, which Date silently rolls forward
-// to Mar 2) so the caller drops the filter instead of handing an Invalid Date to
-// toISOString(), which throws.
+// A YYYY-MM-DD day filter means a whole UTC calendar day. `PlayHistory.startedAt`
+// is stored in UTC (with no time zone attached), and every per-day count built
+// from it groups by the UTC date — including the activity heatmap, whose cells
+// link here as ?from=&to=. Using the admin's LOCAL midnight instead would shift
+// the window by their time-zone offset, so it would not match the day the cell
+// counted. Returns null for a malformed or impossible date (2026-13-01, or
+// 2026-02-30, which Date silently rolls forward to Mar 2) so the caller drops
+// the filter instead of passing an Invalid Date to toISOString(), which throws.
 function utcDayBounds(day: string): { start: string; end: string } | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
   if (!m) return null;

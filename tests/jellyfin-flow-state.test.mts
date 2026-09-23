@@ -27,7 +27,8 @@ process.env.NEXTAUTH_SECRET = SECRET;
 
 const QC_SECRET = "AbCdEf123456QuickConnectSecret";
 const QC_HASH = hashQuickConnectSecret(QC_SECRET);
-// The default instance — every existing (pre-Phase-1.5) flow implicitly meant this.
+// The default server instance ("") — flows from before multi-server support
+// implicitly meant this one.
 const QC_INSTANCE = "";
 
 function decodePayload(token: string): Record<string, unknown> {
@@ -128,8 +129,8 @@ test("validly-signed token without a string secretHash verifies to null", async 
 });
 
 test("validly-signed token without a string instance verifies to null", async () => {
-  // Mirrors the secretHash-shape test above, for the instance field added in
-  // Phase 1.5 — a missing or wrong-typed instance must fail closed exactly
+  // Mirrors the secretHash-shape test above, for the instance field added with
+  // multi-server support — a missing or wrong-typed instance must fail closed exactly
   // like a missing/wrong-typed secretHash, not be silently defaulted.
   const key = new TextEncoder().encode(SECRET);
   const missing = await new SignJWT({ secretHash: QC_HASH })

@@ -70,14 +70,13 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   }
 
   // MANAGE_USERS delegates management of OTHER accounts. The `role` and
-  // `permissions` branches each carry their own isSelf gate; these fields are
-  // privilege-bearing too and had none, so a delegate could PATCH their OWN
-  // row to grant themselves request + auto-approve on a RESTRICTED named instance,
-  // visibility into a RESTRICTED Plex/Jellyfin server's library, lift their own
-  // quota to an effectively unlimited value, or raise their own content-rating
-  // cap. Each branch ends in invalidateUserSession(id), which re-signs the JWT
-  // from the DB column, so the self-grant lands on their very next request. Gate
-  // them all in one place, mirroring those branches.
+  // `permissions` branches each carry their own isSelf gate; these fields grant
+  // privileges too. Without this gate a delegate could PATCH their OWN row to
+  // grant themselves access to a RESTRICTED named instance, visibility into a
+  // RESTRICTED Plex/Jellyfin server's library, an effectively unlimited quota,
+  // or a higher content-rating cap. Each branch ends in invalidateUserSession(id),
+  // which re-signs the JWT from the DB, so such a self-grant would take effect on
+  // their very next request.
   if (!callerIsAdmin && isSelf) {
     const selfPrivilegeEdit =
       "maxContentRating" in body ||
@@ -341,12 +340,12 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     return NextResponse.json({ error: "Only an admin can grant or modify admin access" }, { status: 403 });
   }
 
-  // The re-read, the caller-authority gate AND the write all run under ONE hold
-  // of lock 42. Splitting the re-read into its own committed transaction left a
-  // window: a promotion landing between that read and the write made a demotion
-  // of the now-last admin route into the bare-update else branch — no lock, no
-  // count check — dropping the instance to zero admins, and also slipping past
-  // the authority gate. The DELETE handler serializes the same way.
+  // The re-read, the caller-authority gate AND the write all run inside ONE
+  // transaction holding advisory lock 42 (a Postgres lock that makes these
+  // role changes run one at a time). Doing the re-read outside it would leave a
+  // gap: a promotion landing between the read and the write could let the last
+  // admin be demoted without the count check, leaving zero admins. The DELETE
+  // handler serializes the same way.
   const demoting = body.role === "USER" || body.role === "ISSUE_ADMIN";
   const now = new Date().toISOString();
   const newRole = body.role as "ADMIN" | "ISSUE_ADMIN" | "USER";
@@ -355,8 +354,8 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     const fresh = await tx.user.findUnique({ where: { id }, select: { role: true } });
     const freshRole = fresh?.role ?? target.role;
 
-    // A target that is (or became, in the old window) ADMIN stays gated on
-    // caller authority.
+    // A target that is ADMIN now (even if it was promoted after our first read)
+    // still needs a full-admin caller.
     if (!callerIsAdmin && freshRole === "ADMIN") return { kind: "forbidden" as const };
 
     if (demoting && freshRole === "ADMIN") {

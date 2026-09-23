@@ -33,8 +33,9 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
     prisma.setting.findUnique({ where: { key: "downloadAutoDisableNew" }, select: { value: true } }),
   ]);
 
-  // Object shape (was a bare array) so the auto-disable-new-Jellyfin-users flag
-  // travels with the list — the native admin client reads + toggles it.
+  // Returned as an object (not a bare array) so the "auto-disable downloads for
+  // new Jellyfin users" flag travels with the list — the native admin client
+  // reads and toggles it.
   return NextResponse.json({ users, autoDisableNew: autoDisableRow?.value === "true" });
 });
 
@@ -49,10 +50,9 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     }
     const newValue = body.autoDisableNew ? "true" : "false";
 
-    // Audit the privilege-relevant write — this Setting controls whether
-    // newly-discovered Jellyfin users are auto-restricted from downloads.
-    // The /api/settings audit trail doesn't see this write because it lives
-    // on a different route, so audit explicitly here.
+    // Audit this write by hand: the Setting decides whether newly found
+    // Jellyfin users lose download rights, and it is saved here rather than
+    // through /api/settings, so that route's audit trail never sees it.
     const before = await prisma.setting.findUnique({
       where: { key: "downloadAutoDisableNew" },
       select: { value: true },

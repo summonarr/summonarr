@@ -34,9 +34,9 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
         withBasePath(`/api/hidden?tmdbId=${it.tmdbId}&mediaType=${it.mediaType}`),
         { method: "DELETE" },
       );
-      if (!res.ok) restore(); // rollback
+      if (!res.ok) restore();
     } catch {
-      restore(); // rollback
+      restore();
     } finally {
       setRemoving(null);
     }

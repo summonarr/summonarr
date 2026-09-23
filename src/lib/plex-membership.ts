@@ -39,8 +39,8 @@ import { plexSettingKey, mediaInstanceLabel, type MediaInstanceKey } from "@/lib
 // setting.findUnique — getMediaInstances (one findUnique), getPlexConfig (two),
 // and the per-instance AdminEmail read below. Do NOT switch to
 // getSyncableMediaInstances/isMediaInstanceConfigured (they issue findMany):
-// the session-refresh test harness stubs only findUnique, and the Phase-2
-// play-history poller shares the same constraint.
+// the session-refresh test harness stubs only findUnique, and the
+// play-history poller shares the same constraint (guardrail 35).
 
 const ALLOWLIST_TTL_MS = 30 * 60 * 1000; // re-fetch at most every 30 minutes (per instance)
 const RETRY_BACKOFF_MS = 5 * 60 * 1000; // after a failed/empty fetch, wait before retrying (per instance)

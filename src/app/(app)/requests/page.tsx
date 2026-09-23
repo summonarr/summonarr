@@ -41,8 +41,9 @@ export default async function RequestsPage({
   const sort = VALID_SORTS.includes(sortParam as typeof VALID_SORTS[number])
     ? (sortParam as typeof VALID_SORTS[number])
     : "newest";
-  // Prisma `contains` → ILIKE with no ESCAPE clause; strip wildcard
-  // metacharacters and bound the length (search-box DoS, matches /api/votes).
+  // Prisma's `contains` becomes a SQL ILIKE, where % and _ are wildcards.
+  // sanitizeContainsSearch strips those and caps the length so a crafted
+  // search can't make the query slow (same as /api/votes).
   const q = sanitizeContainsSearch((qParam ?? "").trim());
 
   const where: Prisma.MediaRequestWhereInput = {

@@ -20,9 +20,9 @@ export interface OmdbPrewarmResult {
   notFound: number;
   skipped: number;
   // Rejected chains PLUS fulfilled `{ found: false, transient: true }` results.
-  // fetchAndCacheOmdbForTmdb swallows every network/5xx/401/quota failure into a
-  // transient miss, so this counter is the only thing that lets the cron ledger
-  // (`recordCronRun(..., failed === 0)`) turn red on a bad key or an outage.
+  // fetchAndCacheOmdbForTmdb turns every network/5xx/401/quota failure into a
+  // transient miss instead of throwing, so this counter is the only way the cron
+  // history (`recordCronRun(..., failed === 0)`) shows a bad key or an outage.
   failed: number;
   // Set when the in-process OMDB quota lockout cut the run short (mirrors
   // mdblist-prewarm); the unattempted items appear in no counter.
@@ -51,10 +51,9 @@ export async function prewarmOmdbCache(opts: { signal?: AbortSignal } = {}): Pro
   }
 
   const freshKeys = new Set<string>();
-  // Stored imdbIds from the rows this pass is about to refresh: the tmdb→imdb
-  // mapping is effectively immutable, so re-buying it from TMDB for a row that
-  // already carries the id doubled the run's upstream call count. `data` rides
-  // along in the existing freshness read (omdb rows are a handful of bytes).
+  // IMDb ids already stored on the rows this pass will refresh. A title's
+  // TMDB→IMDb id never really changes, so reusing it skips one TMDB call per
+  // item. `data` comes along in the same freshness read (OMDB rows are tiny).
   const imdbIdByKey = new Map<string, string>();
   const omdbKeys = items.map((i) => `omdb:tmdb:${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}`);
   for (let i = 0; i < omdbKeys.length; i += LIBRARY_PAGE_SIZE) {
@@ -64,7 +63,7 @@ export async function prewarmOmdbCache(opts: { signal?: AbortSignal } = {}): Pro
       select: { key: true, cachedAt: true, expiresAt: true, data: true },
     });
     for (const r of existingRows) {
-      // Same 25% remaining-TTL threshold used by tmdb-prewarm to decide whether a row is "fresh enough"
+      // "Fresh enough" = more than 25% of the row's TTL left (same rule as the other prewarms)
       const originalTtlMs = r.expiresAt.getTime() - r.cachedAt.getTime();
       if (r.expiresAt.getTime() - Date.now() > originalTtlMs * 0.25) {
         freshKeys.add(r.key);
@@ -147,15 +146,12 @@ export async function prewarmOmdbCache(opts: { signal?: AbortSignal } = {}): Pro
       })
     );
     for (const r of results) {
-      // A fulfilled promise can still be a {found:false} miss. Count only an
-      // actual rating hit as fetched, and split the misses on `transient`:
-      // fetchAndCacheOmdbForTmdb catches every network/timeout/5xx/401
-      // "Invalid API key"/quota failure and RESOLVES with transient:true (its
-      // only remaining rejection is the getApiKey read before its try), so a
-      // run against a rotated-bad key or an OMDB/TMDB outage used to settle
-      // every item as notFound with failed=0 — and the cron ledger, which
-      // derives ok from `failed === 0`, recorded the fully-failed run green.
-      // Only an authoritative miss (negative-cached upstream) is notFound.
+      // A fulfilled promise can still be a {found:false} miss. Count only a real
+      // rating as fetched, and split misses on `transient`: fetchAndCacheOmdbForTmdb
+      // RESOLVES (does not throw) with transient:true on network/timeout/5xx/bad-key/
+      // quota failures. Counting those as notFound would let a fully failed run
+      // (failed === 0) show as green in the cron history. Only an authoritative
+      // miss (negative-cached upstream) is notFound.
       if (r.status === "fulfilled") {
         if (r.value.found) fetched++;
         else if (r.value.transient) failed++; // omdb.ts already logged the per-item cause

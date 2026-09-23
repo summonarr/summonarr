@@ -193,9 +193,9 @@ function NavLink({ item, active }: { item: NavItem; active: boolean }) {
     <Link
       href={item.href}
       aria-current={active ? "page" : undefined}
-      // ds-hover-tint paints the hover over the inline background (the active
-      // accent-soft stays underneath), replacing the onMouseEnter/Leave
-      // inline-style mutation this used to carry — and gives a focus ring.
+      // ds-hover-tint draws the hover tint on top of the inline background
+      // (so the active highlight stays visible underneath) and adds a
+      // keyboard focus ring.
       className={cn(
         "ds-hover-tint flex items-center gap-2.5 relative text-left w-full font-medium transition-colors",
         !active && "hover:text-[var(--ds-fg)]",

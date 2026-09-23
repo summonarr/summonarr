@@ -15,10 +15,9 @@ export async function POST(request: NextRequest) {
       const retentionDays = await getAuditPiiRetentionDays();
       const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
 
-      // Match the admin DELETE /api/admin/audit-log handler so the cron actually
-      // fulfills the documented 90-day PII promise (previously this only nulled
-      // ipAddress/userAgent and left userName + login-event details intact
-      // forever unless an admin clicked the manual scrub button).
+      // Scrubs the same fields as the admin DELETE /api/admin/audit-log handler:
+      // IP address, user agent and user name on every old row, plus the details
+      // of login/logout events (below), once they pass the retention cutoff.
       const piiResult = await prisma.auditLog.updateMany({
         where: {
           createdAt: { lt: cutoff },

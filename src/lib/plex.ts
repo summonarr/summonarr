@@ -159,8 +159,8 @@ async function plexFetchAllPages<T>(
 ): Promise<void> {
   // Hard ceiling on the walk. `total` comes from the SERVER's reported totalSize, so a
   // hostile or buggy Plex answer that keeps reporting more (or always returns a full
-  // page) span this loop forever, streaming unbounded rows into the caller's accumulator.
-  // The URL is an admin Setting, which makes the host trusted-ish but not infallible.
+  // page) could spin this loop forever, streaming unbounded rows into the caller's
+  // accumulator. The URL is an admin Setting, so the host is mostly trusted, not infallible.
   // 2M items is far beyond any real library and still bounds memory and wall-clock.
   const MAX_ITEMS = 2_000_000;
   const MAX_PAGES = Math.ceil(MAX_ITEMS / PLEX_PAGE_SIZE);

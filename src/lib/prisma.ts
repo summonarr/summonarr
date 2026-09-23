@@ -7,12 +7,10 @@ import { processSingleton } from "@/lib/process-singleton";
 type ExtendedPrismaClient = ReturnType<typeof createPrismaClient>;
 const globalForPrisma = globalThis as unknown as { prisma: ExtendedPrismaClient };
 
-// Single source of truth — see src/lib/settings-sensitive-keys.ts. Previously
-// this list was duplicated in prisma.ts and settings/route.ts; the lists drifted
-// (six dead keys in this file with no counterpart in the writable schema), so
-// any add-a-key change had to remember both spots. `isSensitiveSettingKey` also
-// matches per-instance Radarr/Sonarr secret keys (radarr<Slug>ApiKey/WebhookSecret)
-// which can't be statically enumerated once instance slugs are admin-defined.
+// Which Setting keys hold secrets is decided in ONE place:
+// src/lib/settings-sensitive-keys.ts. Besides its fixed list, it matches the
+// per-instance secret keys by pattern (e.g. radarr<Slug>ApiKey, plex<Slug>AdminToken),
+// because admins invent those instance names at runtime.
 const isSensitiveKey = isSensitiveSettingKey;
 
 // Account columns whose contents are OAuth secrets and must never sit at rest in plaintext.
@@ -121,28 +119,28 @@ export function settingKeysFromDeleteWhere(where: unknown): string[] | null {
   return null;
 }
 
-// Per-row decrypt guard for Setting.value reads. A corrupt/wrong-key row would otherwise
-// throw inside findMany and 500 every page that reads settings (e.g. /settings, /admin/*,
-// the layout's feature-flag fetch). We log the affected key once per occurrence and substitute
-// an empty string so the rest of the result set still flows through.
-//
-// Gated by SENSITIVE_KEYS to mirror the write side — non-sensitive keys (URLs, booleans,
-// feature flags, threshold numbers) are stored plaintext by design, so calling decryptToken
-// on them just emits a noisy "Legacy plaintext value" warning for values that never needed
-// encryption. When the key is unknown (caller used `select: { value: true }` and didn't
-// project `key`), we conservatively fall through to the decrypt path so a sensitive read
-// still works — at the cost of a possible false-positive warning, which is the prior behavior.
-// A caller that selects only the value (`select: { value: true }`) gets a row with
-// no `key`, so the row cannot name itself and the legacy-plaintext / decrypt-failure
-// warnings printed "Setting.?" — naming no row an operator could go and re-save.
-// The query's own `where.key` identifies it in that case. Only a plain string is
-// accepted: a `{ in: [...] }` filter matches many rows and would mislabel them all.
+// Finds the Setting key for a read whose row does not carry one. A caller that
+// selects only the value (`select: { value: true }`) gets a row with no `key`,
+// so warnings would print "Setting.?" and name no row an operator could re-save.
+// The query's own `where.key` names it instead. Only a plain string counts: a
+// `{ in: [...] }` filter matches many rows and would mislabel them all.
 export function settingKeyFromArgs(args: unknown): string | undefined {
   const where = (args as { where?: unknown } | undefined)?.where;
   const key = (where as { key?: unknown } | undefined)?.key;
   return typeof key === "string" ? key : undefined;
 }
 
+// Per-row decrypt guard for Setting.value reads. A corrupt or wrong-key row would
+// otherwise throw inside findMany and turn every page that reads settings into a
+// 500 (e.g. /settings, /admin/*, the layout's feature-flag fetch). Instead we log
+// the key, record it for the settings banner, and return "" so the other rows
+// still come through.
+//
+// Only sensitive keys are decrypted, mirroring the write side: URLs, booleans,
+// flags and numbers are stored as plain text on purpose, and decrypting them
+// would just log a noisy "Legacy plaintext value" warning. When the key is
+// unknown we still try to decrypt, so a sensitive read keeps working at the cost
+// of a possible false warning.
 function safeDecryptSettingValue(key: string | undefined, value: string): string {
   if (typeof key === "string" && !isSensitiveKey(key)) {
     return value;
@@ -174,7 +172,7 @@ function safeDecryptSettingValue(key: string | undefined, value: string): string
 function createPrismaClient() {
   const adapter = new PrismaPg({
     connectionString: process.env.DATABASE_URL,
-    // Small pool — this is a single-tenant app; keeping it low avoids exhausting Postgres connections
+    // Small pool: this is a single-tenant app, and a low cap avoids exhausting Postgres connections.
     max: 5,
   });
 
@@ -288,8 +286,8 @@ function createPrismaClient() {
           return rows;
         },
         async updateMany({ args, query }) {
-          // updateMany sets the same `data` on every matching row, so we can't know the
-          // per-row `key` to consult SENSITIVE_KEYS. Forbid writes that touch `value` and
+          // updateMany sets the same `data` on every matching row, so we can't know each
+          // row's `key` to decide whether it is sensitive. Forbid writes that touch `value` and
           // funnel callers to setting.update / setting.upsert where the extension runs.
           const data = (args as { data?: { value?: unknown } }).data;
           if (data && data.value !== undefined) {
@@ -370,11 +368,11 @@ function createPrismaClient() {
           encryptAccountTokensInPlace(args.update as Record<string, unknown> | undefined);
           return query(args);
         },
-        // updateMany/createMany/deleteMany aren't wrapped by the extension's encrypt path:
-        // they accept arrays of rows or a single `data` payload applied to many. Funnel
-        // callers to the wrapped surface (create / update / upsert) so the encryption
-        // step can't be silently bypassed for an OAuth token refresh batch.
-        // Guards mirror setting.updateMany above. See guardrail 7a.
+        // updateMany/createMany write many rows at once, so they can't be encrypted
+        // reliably. They refuse any token column and send callers to create /
+        // update / upsert, where the encryption above runs — so an OAuth token
+        // refresh batch can't silently store plaintext. Guards mirror
+        // setting.updateMany above. See guardrail 7a.
         async updateMany({ args, query }) {
           const data = (args as { data?: Record<string, unknown> }).data;
           if (data && (data.access_token !== undefined || data.refresh_token !== undefined || data.id_token !== undefined)) {

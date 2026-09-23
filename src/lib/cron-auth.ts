@@ -60,8 +60,8 @@ function isSameOriginRequest(request: NextRequest): boolean {
 // Every cron/sync route funnels through this — accepts an active admin session OR a Bearer CRON_SECRET.
 // These routes are in proxy.ts's isPublicPath(), so the proxy does NOT DB-validate the session;
 // readActiveSummonarrSessionFromRequest() does (bearer-first then cookie, revocation/cutoff/role-demotion
-// honored immediately), not auth() which would trust a revoked admin's JWT until its exp (up to the 7d
-// admin ceiling). A presented-but-wrong Bearer is throttled per IP to bound CRON_SECRET guessing.
+// honored immediately), not auth() which would trust a revoked admin's JWT until it expires. A wrong
+// Bearer is deliberately NOT throttled — see the note in getCronActor below.
 export async function isCronAuthorized(request: NextRequest): Promise<boolean> {
   return (await getCronActor(request)) !== null;
 }
@@ -313,8 +313,8 @@ export interface CronRunEntry {
 // System`). `recent` is what makes a cadence anomaly legible without log
 // archaeology.
 //
-// Single writer per `target` in the normal case, so no coordination required
-// (per CLAUDE.md guardrail 14 on shared state). Two genuinely concurrent
+// Single writer per `target` in the normal case, so no locking is used here.
+// Two genuinely concurrent
 // recorders for one target could interleave the read and lose an entry from the
 // history; that is accepted — this row is observability, and the write below
 // still records the run that just finished either way.

@@ -40,7 +40,7 @@ export const POST = withAdmin(async (_req, _ctx, _session) => {
 export const GET = withAdmin(async (req, _ctx, _session) => {
   const idRaw = req.nextUrl.searchParams.get("id");
   const id = idRaw ? Number(idRaw) : NaN;
-  if (!Number.isFinite(id) || id <= 0) {
+  if (!Number.isInteger(id) || id <= 0) {
     return NextResponse.json({ error: "invalid id" }, { status: 400 });
   }
 
@@ -54,13 +54,12 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     return NextResponse.json({ error: "plex pin poll failed" }, { status: 502 });
   }
 
-  // Returning a Plex authToken on GET is normally avoided (caching/logging risk),
-  // but it's required and safe here. The PIN-claim handshake (client page
-  // src/app/auth/plex/done/page.tsx) polls this GET until the token materializes,
-  // then posts it back to link the account. Plex enforces the ordering: every poll
-  // returns `authToken: null` until the user claims the PIN, so intermediate polls
-  // leak nothing. Cache-Control: no-store keeps the real token out of any cache
-  // once it IS returned.
+  // Returning a Plex authToken from a GET is normally avoided (it can end up in
+  // caches or logs), but it's needed here. The PIN-claim page
+  // (src/app/auth/plex/done/page.tsx) polls this GET until the token appears,
+  // then posts it back to link the account. Plex returns `authToken: null` until
+  // the user claims the PIN, so earlier polls leak nothing, and
+  // Cache-Control: no-store keeps the real token out of any cache.
   const data = (await res.json()) as { authToken?: string | null };
   return NextResponse.json(
     { authToken: data.authToken ?? null },

@@ -19,9 +19,9 @@ RUN --mount=type=cache,target=/root/.npm \
     npm ci --legacy-peer-deps --prefer-offline --no-audit --no-fund
 
 # ── Stage 1b: prisma-gen (runs on native builder platform) ───────────────────
-# Running `prisma generate` under QEMU (when cross-building for a non-native
-# target like linux/arm64 on an amd64 runner) crashes Prisma's schema-engine
-# binary. The generated client is platform-independent JavaScript — we use
+# Running `prisma generate` under QEMU (an emulator used when cross-building,
+# e.g. linux/arm64 on an amd64 machine) crashes Prisma's schema-engine binary.
+# CI builds each arch natively now, but a local cross-build still hits this. The generated client is platform-independent JavaScript — we use
 # @prisma/adapter-pg (Driver Adapter mode), not the native query engine — so
 # it is safe and much faster to generate on $BUILDPLATFORM and copy the
 # output into the target-arch builder stage.
@@ -46,8 +46,8 @@ RUN --mount=type=cache,target=/root/.npm \
 
 COPY prisma ./prisma
 COPY prisma.config.ts ./prisma.config.ts
-# prisma.config.ts asserts DATABASE_URL is defined. `prisma generate` does not
-# connect, but the assertion still fires — provide a dummy to satisfy it.
+# prisma.config.ts reads DATABASE_URL. `prisma generate` never connects, so a
+# dummy value is enough to give the config a well-formed datasource URL.
 ENV DATABASE_URL="postgresql://build:build@localhost:5432/build?schema=public"
 RUN npx prisma generate
 
@@ -83,8 +83,8 @@ RUN rm -rf .next/standalone/node_modules/@img/sharp-libvips-linux-* \
            .next/standalone/node_modules/@img/sharp-linux-*
 
 # ── Stage 3: migrate-deps ─────────────────────────────────────────────────────
-# Install ONLY prisma + dotenv using exact versions from the lockfile.
-# npm resolves the full transitive dep tree (pathe, @prisma/*, jiti, etc.) automatically.
+# Install ONLY what the entrypoint needs at boot (prisma CLI for `db push`,
+# plus dotenv and pg), pinned to the lockfile's exact versions.
 # No build tools needed — prisma has no native addons (engines are pre-compiled binaries).
 FROM node:26.8.2-alpine3.23@sha256:a3024faf41c40992531ecfb00604384665be870a44626afaf181c6d583f89296 AS migrate-deps
 WORKDIR /app
@@ -173,7 +173,8 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 
-# Prisma schema, migrations, and config for migrate deploy at startup
+# Prisma schema + config for the `db push` the entrypoint runs at startup
+# (this project has no migrations directory — guardrail 3).
 COPY --from=builder --chown=nextjs:nodejs /app/prisma ./prisma
 COPY --from=builder --chown=nextjs:nodejs /app/prisma.config.ts ./prisma.config.ts
 
@@ -206,7 +207,7 @@ ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
 # Container health probe — hits the in-app /api/health endpoint. Wide start-period
-# covers cold-start (Next standalone boot + Prisma migrate deploy on first run).
+# covers cold-start (Next standalone boot + the entrypoint's `prisma db push`).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+(process.env.BASE_PATH||'')+'/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
 

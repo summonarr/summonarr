@@ -20,8 +20,9 @@ interface IssueThreadProps {
   variant?: "inline" | "panel";
 }
 
-// Renders an issue's message thread and reply box; live-refreshes on the SSE
-// issuemessage:created event and polls once on mount.
+// Renders an issue's message thread and reply box. Loads the thread once on
+// mount, then reloads it whenever the server's live event stream (SSE) sends
+// an issuemessage:created event for this issue.
 export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
   const [messages, setMessages] = useState<IssueMessageData[]>([]);
   const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -30,8 +31,8 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
   const [sendError, setSendError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  // Guardrail 16: toLocaleString output diverges between SSR and CSR
-  // (locale + timezone resolution). Empty string on the server, fill on mount.
+  // Guardrail 16: toLocaleString can differ between the server render and the
+  // browser (different locale/timezone). Show nothing until mounted in the browser.
   const mounted = useHasMounted();
 
   const loadMessages = useCallback(
@@ -100,7 +101,9 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
         setSendError(data.error ?? "Failed to send");
       } else {
         const msg: IssueMessageData = await res.json();
-        setMessages((prev) => [...prev, msg]);
+        // The server also sends an SSE event for this message, and the silent
+        // reload it triggers can land first — skip the append if it's already here.
+        setMessages((prev) => (prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]));
         setBody("");
         textareaRef.current?.focus();
       }
@@ -162,9 +165,9 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
           <p className="text-xs text-zinc-500 py-2">No messages yet. Start the conversation below.</p>
         )}
         {messages.map((msg) => {
-          // `email` is only selected for admins on GET and never on POST, and
-          // User.name is nullable — so this was `undefined` for a null-named
-          // author and `authorName[0]` below threw, blanking the whole thread.
+          // `name` can be null, and `email` is only sent to admins (never on a
+          // POST reply), so fall back to "Unknown" — `authorName[0]` below
+          // would throw on undefined and blank the whole thread.
           const authorName = msg.author.name ?? msg.author.email ?? "Unknown";
           const isAdmin = msg.fromAdmin;
           return (

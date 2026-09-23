@@ -32,7 +32,8 @@ interface TrashGuidesNavProps {
 
 // Sub-page tabs plus service (Radarr/Sonarr) and instance toggles for the
 // trash-guides admin section; toggles drive the ?service= / ?variant= params.
-// ?variant= carries an instance SLUG ("" default via param absence, "4k", named).
+// ?variant= holds an instance slug such as "4k" or a named instance; the
+// default instance ("") is selected by leaving the param out.
 export function TrashGuidesNav({
   radarrConfigured,
   sonarrConfigured,

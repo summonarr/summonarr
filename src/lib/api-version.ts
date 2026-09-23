@@ -19,7 +19,7 @@
 // v3 is ADDITIVE: MIN_API_VERSION stays 1, so nothing is dropped and no client
 // is locked out. It exists so a native client can ASK whether these routes are
 // here before offering them, instead of advertising a screen that 404s. That is
-// the guardrail-24 posture — feature-gate on the reported version, don't raise
+// the guardrail-25 posture — feature-gate on the reported version, don't raise
 // the floor.
 export const API_VERSION = 3;
 

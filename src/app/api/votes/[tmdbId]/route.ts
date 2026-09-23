@@ -27,11 +27,11 @@ export const DELETE = withAuth(async (
     return NextResponse.json({ error: "mediaType query param must be MOVIE or TV" }, { status: 400 });
   }
 
-  // Re-arm the one-shot threshold-notify gate if removing this vote drops the tally
-  // below the threshold. The notify path (votes POST) creates the
-  // `deletionVoteNotified:` Setting key and swallows the duplicate-key error, so a
-  // stale key left behind here would silently suppress a future genuine re-crossing.
-  // Mirrors the admin dismiss (PATCH below), which clears the key in the same tx.
+  // Re-arm the one-shot threshold alert if removing this vote drops the tally
+  // below the threshold. The notify path (votes POST) only alerts when it is the
+  // first to create the `deletionVoteNotified:` Setting key, so a stale key left
+  // behind here would silently block the alert the next time the title crosses
+  // the threshold. The admin dismiss (PATCH below) clears the key the same way.
   const deleted = await prisma.$transaction(async (tx) => {
     const removed = await tx.deletionVote.deleteMany({
       where: { tmdbId, mediaType, userId: session.user.id },

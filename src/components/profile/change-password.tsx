@@ -10,8 +10,9 @@ interface ChangePasswordProps {
   hasPassword: boolean;
 }
 
-// Set-or-change-password form; when hasPassword the current password is required, and a
-// server `requiresRelogin` response bounces to /login.
+// Form to set or change the password. If the account already has one
+// (hasPassword), the current password is required too. When the server answers
+// `requiresRelogin`, we send the user to /login.
 export function ChangePassword({ hasPassword }: ChangePasswordProps) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword]         = useState("");
@@ -55,16 +56,13 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
       setNewPassword("");
       setConfirmPassword("");
     } catch {
-      // Both awaits above can throw: the fetch on a transport failure, and
-      // res.json() on a 200 carrying a non-JSON body (a reverse proxy erroring
-      // mid-response). Without this the rejection escaped handleSubmit, React
-      // dropped it, and the form just did nothing — error and success were both
-      // cleared on entry, so there was nothing on screen at all.
+      // The fetch can fail on a network error, and res.json() can fail if a
+      // proxy returns a non-JSON body. Without this catch the form would show
+      // nothing at all.
       //
-      // This one matters more than a normal failed save: the route revokes every
-      // session in the same transaction that changes the password. If the write
-      // committed and only the response was lost, the user is already signed out
-      // everywhere while still looking at a page that says nothing happened.
+      // The message mentions sign-out because the server signs out every
+      // session when the password changes. If the change saved but only the
+      // response was lost, the user is already signed out everywhere.
       setError("Network error — please try again. If the change went through, you will be signed out.");
     } finally {
       setSaving(false);

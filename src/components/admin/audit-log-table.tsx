@@ -23,8 +23,9 @@ interface AuditRow {
   provider: string | null;
 }
 
-// ACTION_LABELS + ACTION_GROUP imported from @/lib/audit-actions — single source
-// of truth, typed as Record<AuditAction, ...> so the schema enum drives both.
+// ACTION_LABELS and ACTION_GROUP come from @/lib/audit-actions so every screen
+// shares one list. Both are keyed by the AuditAction type, so adding an action
+// to the schema forces a label and group to be added too.
 const ALL_ACTIONS = Object.keys(ACTION_LABELS);
 
 const GROUP_OPTIONS: { value: AuditGroup | ""; label: string }[] = [
@@ -147,17 +148,14 @@ function AuditLogFilters({
     ? ALL_ACTIONS.filter((a) => ACTION_GROUP[a as AuditAction] === currentGroup)
     : ALL_ACTIONS;
 
-  // Follow the URL on a SOFT navigation (Back/Forward). The inputs seed from the
-  // props once, but a soft nav doesn't remount this component — so after pressing
-  // Back, `userInput` still held the old query while `currentUser` had reverted,
-  // the debounce effect below saw them differ, and 500 ms later it router.push'ed
-  // the stale filter as a NEW history entry. Back was effectively dead on this
-  // page: the list flashed unfiltered and snapped straight back.
+  // Copy the URL value into the text box when the user presses Back/Forward.
+  // That kind of navigation doesn't remount this component, so without this the
+  // box keeps the old text, the debounce below sees it differ from the URL, and
+  // pushes the old filter again — making Back useless on this page.
   //
-  // Skip the prop change our OWN debounce caused, though: the RSC round-trip
-  // lands well after the 500 ms debounce, so overwriting then erases whatever
-  // was typed while it was in flight (and the re-run debounce, now seeing
-  // input === prop, drops the fuller term instead of searching it).
+  // But ignore a URL change that our OWN debounce caused: the server response
+  // arrives after the 500 ms debounce, so copying it back would wipe out
+  // anything typed while it was loading.
   useEffect(() => {
     if (currentUser === userUrlRef.current) return;
     userUrlRef.current = currentUser;
@@ -484,8 +482,9 @@ function formatSummary(action: string, d: Record<string, unknown>): string | nul
     case "REQUEST_APPROVE":
     case "REQUEST_DECLINE":
     case "REQUEST_DELETE":
-      // The batch route logs REQUEST_APPROVE/BATCH_REQUEST_DECLINE with a
-      // {batch, count, ids} shape instead of a single title.
+      // The batch route logs a bulk approve or non-permanent decline under
+      // these same actions, but with a {batch, count, ids} shape instead of a
+      // single title. (A permanent bulk decline has its own case below.)
       if (d.batch) {
         return [
           `Batch: ${d.count ?? "?"} request(s)`,
@@ -556,11 +555,9 @@ function formatSummary(action: string, d: Record<string, unknown>): string | nul
         return `${d.service}: ${(d.instances as unknown[]).length} instance(s)${removed}`;
       }
       if (d.scrubbed != null) return `Scrubbed PII from ${d.scrubbed} row(s)`;
-      // TRaSH sync logs under SETTINGS_CHANGE with a shape of its own
-      // ({refreshed[], applied{count,failures}, errors[], durationMs}). With no
-      // case here it fell to the raw-payload path and spilled the whole
-      // `refreshed` array — several wrapped lines of JSON per row, pushing real
-      // entries off screen.
+      // TRaSH sync also logs under SETTINGS_CHANGE, with its own shape
+      // ({refreshed[], applied{count,failures}, errors[], durationMs}). Summarize
+      // it in one line instead of dumping the whole `refreshed` array as JSON.
       if (Array.isArray(d.refreshed) || d.applied != null) {
         const applied = d.applied as { count?: number; failures?: number; recreated?: number } | undefined;
         const failures = applied?.failures ?? 0;
@@ -718,11 +715,10 @@ function DetailSection({ details, action, expanded }: { details: string | null; 
 
   const summary = formatSummary(action, parsed);
 
-  // Actions with no summary case (cron shapes, anything added later) used to
-  // dump their whole payload inline — `refreshed:[{"service":"RADARR",…` across
-  // several wrapped lines, pushing real entries off screen. Put it behind the
-  // same toggle the diff rows already use, and show a field-name preview
-  // collapsed so the row still says what it is.
+  // Actions with no summary case (cron shapes, anything added later) keep their
+  // raw payload behind the same expand toggle the diff rows use, so long JSON
+  // doesn't push other entries off screen. Collapsed, the row shows just the
+  // field names so it still says what it is.
   const rawEntries = !summary && !hasDiff ? Object.entries(parsed) : [];
   const hasRaw = rawEntries.length > 0;
 
@@ -843,10 +839,9 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
   let currentDate = "";
 
   for (const log of logs) {
-    // Bucket by UTC ISO date so server-rendered (server TZ) and client-rendered (browser TZ)
-    // group structures always agree. The previous toDateString() bucketing produced different
-    // group boundaries between SSR and hydration whenever a row landed near midnight in either
-    // TZ, triggering React #418 hydration mismatches on the keyed group divs.
+    // Group rows by their UTC date. The server and the browser can be in different
+    // time zones, so grouping by local date could split rows near midnight
+    // differently on each side and cause a React #418 hydration mismatch.
     const dateStr = log.createdAt.slice(0, 10);
     if (dateStr !== currentDate) {
       currentDate = dateStr;
@@ -967,10 +962,10 @@ export function AuditLogView({
     if (saved === "timeline" || saved === "table") setViewMode(saved);
   }, []);
 
-  // Bumped whenever a filter navigation replaces the server-rendered page, so an
-  // in-flight loadMore() can tell its response is stale. Without it, a slow
-  // "Load more" landed after this resync and re-appended the PREVIOUS query's rows
-  // beneath the new list, then installed that query's cursor.
+  // A "generation" counter, bumped whenever a filter change brings in a new
+  // server-rendered page. loadMore() remembers the value it started with, so a
+  // slow response for the OLD filter can see it is stale and not append its rows
+  // (or its cursor) under the new list.
   const filterGen = useRef(0);
   useEffect(() => {
     filterGen.current += 1;

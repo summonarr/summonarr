@@ -1,4 +1,4 @@
-// Route-level unit tests for the seven uncovered discovery/read routes:
+// Route-level unit tests for the seven discovery/read routes:
 //   GET /api/browse   /api/home   /api/popular   /api/top-rated
 //   GET /api/upcoming /api/search /api/media/[type]/[tmdbId]
 //
@@ -15,8 +15,9 @@
 //      INTERNALLY from the userId it is handed. Every route must therefore pass
 //      `session.user.id` and nothing else — a caller-supplied ?userId= reaching
 //      that argument would render another user's availability (and, on a
-//      restricted server, leak that it holds the title at all). Asserted on the
-//      real argument each route passes, and probed with a hostile ?userId=.
+//      restricted server, leak that it holds the title at all). Checked by
+//      recording the user id on the per-user reads the enrichment makes, and
+//      probed with a hostile ?userId=.
 //   2. THE PAGE-LEVEL FEATURE FLAGS GATE WITH 403. popular/top-rated/upcoming
 //      each sit behind their own flag, and a disabled page must not still serve
 //      its data to a native client that ignores nav gating.

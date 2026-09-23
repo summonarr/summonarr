@@ -65,6 +65,7 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
     } catch {
       setRefreshState("error");
     }
+    // Clear a success message after 3s; an error stays until the next click.
     setTimeout(() => setRefreshState((s) => (s === "error" ? s : "idle")), 3000);
   }
 

@@ -55,17 +55,18 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
   const [syncRolesMessage, setSyncRolesMessage] = useState("");
   const [tab, setTab] = useState<"core" | "channels" | "roles">("core");
   const mounted = useHasMounted();
-  // What the server holds as far as this form knows, keyed by setting. Starts at
-  // the page-load values and advances on every confirmed save. Diffing against
-  // the `initial*` props alone went stale after the first save (nothing
-  // refreshes them): an already-saved field was re-sent on the next save — which
-  // 429s on the route's 10s per-key cooldown — and editing a field back to its
-  // page-load value read as "no change", so that revert was never written.
+  // The last values we know the server has saved, one entry per setting key.
+  // It starts as the page-load values and is updated after every successful
+  // save. We can't just compare against the `initial*` props: they never
+  // refresh, so after one save an already-saved field would be sent again
+  // (and hit the route's 10s per-key cooldown, a 429), and changing a field
+  // back to its page-load value would look like "no change" and never be saved.
   const savedRef = useRef<Record<string, string> | null>(null);
 
-  // The app's Discord interactions handler lives at /api/interactions (respecting BASE_PATH).
-  // Show the running instance's own origin so admins can paste it straight into the Developer Portal;
-  // fall back to a placeholder pre-mount (window is unavailable during SSR — guardrail 16).
+  // Discord sends slash-command events to /api/interactions (with BASE_PATH added).
+  // Show this site's real address so admins can paste it into the Developer Portal.
+  // Until the component has mounted in the browser we show a placeholder instead,
+  // because `window` doesn't exist during server rendering (guardrail 16).
   const interactionsEndpoint = mounted
     ? `${window.location.origin}${withBasePath("/api/interactions")}`
     : "https://<your-domain>/api/interactions";
@@ -75,11 +76,12 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
     setStatus("saving");
     setMessage("");
 
-    // Send only the fields that differ from what the page loaded. Posting all 16
-    // on every save made a Channels/Roles-tab edit re-register the slash commands
-    // with Discord (the route keyed on the ids' presence), stamped the 10s write
-    // cooldown on every key (so a second tab's save within 10s 429'd), and wrote
-    // an audit row listing 16 "changed" keys with identical before/after values.
+    // Send only the fields that differ from the last saved values. Sending all 16
+    // every time caused three problems: a Channels/Roles edit re-registered the
+    // slash commands with Discord (the route does that whenever the ids are in
+    // the body), every key got the 10s write cooldown (so saving another tab
+    // within 10s failed with 429), and the audit log listed 16 "changed" keys
+    // whose values hadn't changed.
     const fields: Array<[key: string, current: string, initial: string]> = [
       ["discordBotToken", botToken, initialBotToken],
       ["discordClientId", clientId, initialClientId],

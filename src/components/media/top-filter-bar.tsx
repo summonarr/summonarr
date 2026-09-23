@@ -77,11 +77,11 @@ export function TopFilterBar({
   const searchParams = useSearchParams();
   const years = useMemo(() => buildYears(maxYear), [maxYear]);
 
-  // Not-yet-committed filter changes. `searchParams` reflects the COMMITTED
-  // url and router.push is async, so two changes in quick succession rebuilt
-  // the second query string from a snapshot still holding the first filter's
-  // old value and silently reverted it. Same delta reconciliation as
-  // filter-bar.tsx — see the longer note there.
+  // Filter changes we've pushed but the URL hasn't caught up with yet.
+  // `searchParams` only shows the URL as it is NOW, and router.push is async,
+  // so without this two quick changes in a row would build the second URL from
+  // stale params and silently undo the first. Each entry is dropped once the
+  // URL shows it. Same approach as filter-bar.tsx — see the longer note there.
   const pendingRef = useRef<Record<string, string | undefined>>({});
   const committed = searchParams.toString();
 
@@ -278,9 +278,9 @@ function Chip({ label, onRemove }: { label: string; onRemove: () => void }) {
         title={`Remove filter: ${label}`}
         className="ds-hover-tint inline-flex items-center justify-center shrink-0"
         style={{
-          // 24px hit box. The negative margins pull it back to the 12px
-          // footprint the 2px gap + 10px glyph occupied, so the chip keeps its
-          // size and the glyph stays exactly where it was.
+          // A 24px box is easy to tap. The negative margins shrink the space it
+          // takes in the layout back to 12px (a 2px gap + the 10px icon), so
+          // the chip stays the same size and the icon doesn't move.
           width: 24,
           height: 24,
           margin: "-6px -7px -6px -5px",

@@ -128,10 +128,9 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
   // every poll. Report the result so the UI's reachability badge reflects
   // whether Summonarr can actually reach the Plex server (not plex.tv remote
   // access). Fire-and-forget; the persist is deduped + only writes on change.
-  // Reported PER INSTANCE: setPlexReachable addresses that instance's manager,
-  // which writes its own plexSettingKey(instance, "ServerReachable"). Previously
-  // this was gated to the default because the Setting/badge were single-server,
-  // which meant a named server's outage never surfaced anywhere.
+  // Reported PER INSTANCE: setPlexReachable writes that instance's own
+  // plexSettingKey(instance, "ServerReachable"), so a named server's outage
+  // shows up for that server instead of being hidden.
   let sessions;
   try {
     sessions = await getPlexSessions(serverUrl, token);
@@ -164,9 +163,8 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
   const valid = sessions.filter(
     (s) => s.sessionKey && s.accountId && !isPlexSessionRecentlyFinalized(activeSessionId("plex", instance, s.sessionKey)),
   );
-  if (valid.length === 0) {
-    // Still need the cleanup sweep below to finalize any stale rows.
-  }
+  // Even when `valid` is empty we keep going: the cleanup sweep below still has
+  // to finalize stale rows.
 
   // Resolve the admin's Plex user id once per run so we can mark
   // MediaServerUser.isServerAdmin for the server-owner row (Plex sessions
@@ -213,8 +211,8 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
     // PMS reports the SERVER OWNER's sessions with the LOCAL account id "1",
     // never their plex.tv global id — but User.plexUserId (what the subject-id
     // resolver matches) and every MediaServerUser row are keyed by global ids,
-    // so the owner's watches were never auto-attributed and no Plex row ever
-    // earned isServerAdmin (Tautulli special-cases id "1" for the same
+    // so without this the owner's watches are never auto-attributed and no Plex
+    // row ever earns isServerAdmin (Tautulli special-cases id "1" for the same
     // reason). Rewrite it to the cached admin id; when plex.tv was unreachable
     // this tick plexAdminId is null, behavior is unchanged, and the next tick
     // heals.
@@ -359,7 +357,7 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
                 applyFinalTick(existing, now),
                 { skipSSE: true, stoppedAt: now },
               );
-              // Ledger AFTER the write (GR27): a failed record must not ledger-lock
+              // Ledger AFTER the write (guardrail 27): a failed record must not ledger-lock
               // the sessionKey for an hour with no history row — let the next poll
               // re-observe the stall and retry the finalize.
               markPlexSessionFinalized(sessionId, nowMs);
@@ -558,7 +556,7 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
       // don't trigger N refetches per cron tick.
       return recordCompletedSession(applyFinalTick(session, now), { skipSSE: true, stoppedAt: now })
         .then(() => {
-          // Ledger AFTER the write commits (GR27): gate re-create against a racey
+          // Ledger AFTER the write commits (guardrail 27): gate re-create against a racey
           // Plex reappearance only once the PlayHistory row exists, so a failed
           // write doesn't ledger-lock the sessionKey with no row for an hour.
           markPlexSessionFinalized(session.id, nowMs);
@@ -596,7 +594,7 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
 
   // Bulk prefetch: existing ActiveSession rows. Three lookup keys per session — primary id,
   // alternate id (when sessionId !== playSessionId), and the (msUserId, sourceItemId) fallback
-  // that handles webhook-vs-polling PlaySessionId drift.
+  // for when the PlaySessionId changed but it is still the same playback.
   const primaryIds = valid.map((s) => activeSessionId("jellyfin", instance, s.playSessionId));
   const altIds = valid
     .filter((s) => s.sessionId && s.sessionId !== s.playSessionId)
@@ -607,13 +605,13 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
   // update branch REWRITES its `sessionKey` to the current playSessionId. After
   // that the two disagree, so an id-only lookup misses the row — and since
   // ActiveSession is @@unique([source, serverInstance, sessionKey]), the create
-  // branch's createMany({skipDuplicates}) then silently swallowed the conflict
-  // (ON CONFLICT DO NOTHING, no target) and returned "started" for a row that
-  // was never inserted. The next episode got no ActiveSession at all, was never
-  // finalized, and — the poller being the sole Jellyfin writer (guardrail 19) —
-  // that watch was unrecoverable, while the stale row kept the now-playing card
-  // pinned until cleanupStaleSessions reaped it 30 minutes later. Match on the
-  // live sessionKey too so the itemId-change finalize below runs instead.
+  // branch's createMany({skipDuplicates}) would then silently swallow the conflict
+  // (ON CONFLICT DO NOTHING) and report "started" for a row that was never
+  // inserted. The next episode would get no ActiveSession, never be finalized,
+  // and — the poller being the sole Jellyfin writer (guardrail 19) — that watch
+  // would be lost, while the stale row pinned the now-playing card until
+  // cleanupStaleSessions reaped it 30 minutes later. Matching on the live
+  // sessionKey too lets the itemId-change finalize below run instead.
   const allKeys = [...new Set(valid.flatMap((s) => [s.playSessionId, s.sessionId].filter((k): k is string => !!k)))];
   const idRows = allIds.length > 0 || allKeys.length > 0
     ? await prisma.activeSession.findMany({
@@ -644,8 +642,8 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
       return { msUserId: userIds[i], itemId: s.itemId };
     })
     .filter((p): p is { msUserId: string; itemId: string } => !!p && !!p.itemId);
-  // notIn allIds: never hand a row that ANOTHER session in this same snapshot already owns
-  // by id to the fallback. Same account + same item on a second device (living-room TV and
+  // notIn claimedIds: never hand a row that ANOTHER session in this same snapshot already owns
+  // (by id or live sessionKey) to the fallback. Same account + same item on a second device (living-room TV and
   // tablet) otherwise resolves the tablet's new PlaySessionId onto the TV's live row, which
   // rewrites that row instead of creating one — so the second stream never gets an
   // ActiveSession, is never finalized, and (poller being the sole Jellyfin writer, guardrail
@@ -681,7 +679,7 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
         //
         // ORed across both id columns (guardrail 37) — a title in two libraries
         // has an id per copy and only one is the stored `jellyfinItemId`, so a
-        // watch of the other copy used to fall through to "unknown". Rows
+        // watch of the other copy would otherwise resolve to "unknown". Rows
         // predating `jellyfinItemIds` are `[]`, so both branches are needed.
         where: {
           serverInstance: instance,
@@ -753,9 +751,10 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
         ? posterMap.get(`${resolvedTmdbId}:${mediaType}`) ?? null
         : null;
 
-      // The webhook creates sessions keyed by payload.PlaySessionId, which may not match the
-      // Sessions API's PlaySessionId or s.Id for the same playback. Fall back to (userId, itemId)
-      // so we update the existing webhook row instead of creating a duplicate. After a match,
+      // An existing row's id may not match the Sessions API's current PlaySessionId or s.Id
+      // for the same playback (the id changes, and rows from the old, since-removed Jellyfin
+      // webhook were keyed differently). Fall back to (userId, itemId) so we update that row
+      // instead of creating a duplicate. After a match,
       // rewrite the row's sessionKey to the API's playSessionId so subsequent polls find it directly
       // and finalization tracking (seenSessionKeys.has(sessionKey)) stays consistent.
       // The fallback row is single-use: two brand-new streams of the same item by the same
@@ -780,7 +779,7 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
         // create; a 0 placeholder is backfilled once), so without finalizing here the
         // prior item's watch silently merges
         // into the next episode's PlayHistory row. Mirror the Plex ratingKey-change
-        // branch (line 223): force-finalize the previous item, then fall through to
+        // branch in syncPlexSessions: force-finalize the previous item, then fall through to
         // create a fresh row for the new one.
         if (existing.sourceItemId && s.itemId && existing.sourceItemId !== s.itemId) {
           try {
@@ -790,11 +789,10 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
           }
           // Fall through to the create branch below — existing is now finalized.
         } else {
-          // computePlaytimeIncrement gates on the PRIOR state (existing.state). The
-          // hand-rolled version below used to gate on s.state — the new state — so a
-          // session that was paused all interval and started playing in the final ms
-          // got the full wall-clock interval credited. Plex uses the helper in its
-          // branch above; align Jellyfin to it for consistency and correctness.
+          // computePlaytimeIncrement looks at the PRIOR state (existing.state), not
+          // the new one: a session paused for the whole interval that resumed in the
+          // last millisecond must not be credited the full interval as watch time.
+          // The Plex branch uses the same helper.
           const increment = computePlaytimeIncrement(existing, now);
           // CAS on (id, lastSeenAt): mirrors the Plex branch's updateMany above. If the
           // row was deleted/rewritten between our prefetch and this write — an
@@ -922,10 +920,10 @@ async function syncPlayHistory(request: NextRequest) {
 
   if (!(await isPlayHistoryEnabled())) {
     // Tear the SSE streams down rather than just declining to poll. This early return is
-    // BEFORE the reconcile below, so a stream opened while tracking was on stayed open
-    // and kept writing PlayHistory + ActiveSession rows from Plex timeline events — the
-    // admin turned tracking off and history kept accruing. Idempotent; the next enabled
-    // tick re-creates the managers via the normal reconcile.
+    // BEFORE the reconcile below, so a stream opened while tracking was on would stay open
+    // and keep writing PlayHistory + ActiveSession rows from Plex timeline events after the
+    // admin turned tracking off. Idempotent; the next enabled tick re-creates the managers
+    // via the normal reconcile.
     stopAllPlexEventStreams();
     return NextResponse.json({ message: "Play history tracking is disabled" });
   }
@@ -960,9 +958,8 @@ async function syncPlayHistory(request: NextRequest) {
     const syncPromises: Promise<void>[] = [];
 
     if (plexEnabled) {
-      // Fixed single call widened to a loop over every configured Plex server
-      // (multi-server support), mirroring the Jellyfin loop below with ONE
-      // deliberate asymmetry: the instance list comes from getMediaInstances
+      // Loop over every configured Plex server, like the Jellyfin loop below,
+      // with ONE deliberate difference (guardrail 35): the instance list comes from getMediaInstances
       // (a single registry findUnique on `plexInstances`) + a per-instance
       // getPlexConfig read (two findUniques) + the skip-if-unconfigured
       // `continue` below — NOT getSyncableMediaInstances, whose
@@ -1003,9 +1000,8 @@ async function syncPlayHistory(request: NextRequest) {
     }
 
     if (jellyfinEnabled) {
-      // Fixed single call widened to a loop over every configured, connection-
-      // ready Jellyfin server (multi-server support). Sequential resolution of
-      // each instance's config, but the actual session syncs still run
+      // Loop over every configured Jellyfin server. Each server's config is read
+      // one after another, but the session syncs themselves still run
       // concurrently (same syncPromises array as the Plex pass above).
       const jellyfinInstances = await getSyncableMediaInstances("jellyfin");
       for (const instance of jellyfinInstances) {
@@ -1044,10 +1040,9 @@ async function syncPlayHistory(request: NextRequest) {
     // Single batched activity:history-updated after every source loop completes
     // (one entry per configured Plex and Jellyfin instance). recordCompletedSession
     // is called with skipSSE inside each loop to avoid N+1 events. Emit only when
-    // at least one session actually ended. Summed generically over `results`'
-    // current keys (plex, plex:<slug>, jellyfin, jellyfin:<slug>, …) rather than
-    // two hardcoded fields, since both sources now contribute a variable number
-    // of entries.
+    // at least one session actually ended. Summed over every key in `results`
+    // (plex, plex:<slug>, jellyfin, jellyfin:<slug>, …) because each source can
+    // have any number of servers.
     const totalEnded = Object.values(results).reduce((sum: number, r) => {
       const ended = (r as { ended?: unknown } | null)?.ended;
       return sum + (typeof ended === "number" ? ended : 0);
@@ -1086,9 +1081,8 @@ async function syncPlayHistory(request: NextRequest) {
     return NextResponse.json({ error: "Sync failed" }, { status: 500 });
   }
 
-  // Surface degraded runs to withCronRunRecording via the X-Cron-Degraded header
-  // (a failed source previously still recorded ok:true, hiding the outage from
-  // the admin System tab). Status stays 200 — this route runs every 5s from the
+  // Surface degraded runs to withCronRunRecording via the X-Cron-Degraded header,
+  // so a failed source shows up on the admin System tab. Status stays 200 — this route runs every 5s from the
   // entrypoint poller, and a non-2xx during a media-server outage would spam the
   // docker logs with a failure line per tick. Checked generically over `results`'
   // keys (plex, plex:<slug>, jellyfin, jellyfin:<slug>, …) — `results.purged` (a bare number,

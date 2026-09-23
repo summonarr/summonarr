@@ -13,8 +13,8 @@
 //   guard clauses (missing fields, oversized password) refuse with ZERO DB
 //   reads; disableLocalLogin refuses VALID credentials; unknown account and
 //   wrong password refuse identically (audit reason invalid_credentials) and
-//   only a genuine failed verify records an account-bucket hit (the
-//   peek/record split — a success records nothing); a tripped account bucket
+//   only a genuine failed verify keeps an account-bucket hit (each attempt
+//   reserves a hit up front and a success refunds it); a tripped account bucket
 //   refuses BEFORE the user lookup and is keyed on the NORMALIZED email (a
 //   case-variant spray can't dodge it); a tripped per-IP bucket refuses even
 //   correct credentials; the accept returns the full DeviceMeta payload and
@@ -66,8 +66,8 @@
 //
 //   revokeSessionById / revokeAllUserSessions — DB write FIRST, in-memory mark
 //   AFTER commit (guardrail 27: a failed transaction propagates and leaves NO
-//   mark), the sessionsRevokedAt cutoff bumped forward-only to the revoked
-//   row's createdAt, and revoke-all marking every session plus the user.
+//   mark); a single revoke leaves the per-user sessionsRevokedAt cutoff alone,
+//   while revoke-all stamps a fresh cutoff and marks every session plus the user.
 //
 // Owned elsewhere (not re-tested here): scrypt verify matrix
 // (password-hash.test), JWT sign/verify + alg pinning (session-jwt.test),
@@ -873,7 +873,8 @@ test("credentials: correct password authenticates under the NORMALIZED email and
   assert.equal(result._auditIp, untrustedBucketFor(ua));
   assert.equal(result._auditUa, ua);
 
-  // The peek/record split: a successful sign-in leaves the account bucket empty.
+  // The reserve/refund rule: a successful sign-in gives its reserved hit back,
+  // so the account bucket is left empty.
   assert.equal(peekRateLimit(`login-email:${hashAuditEmail("alice@example.com")}`, 1, ACCOUNT_WINDOW_MS), true);
 });
 
@@ -886,7 +887,7 @@ test("credentials: a tripped ACCOUNT bucket refuses before the user lookup, keye
   for (let i = 0; i < 50; i++) recordFailure(key, ACCOUNT_WINDOW_MS);
 
   // The attacker retries with a case variant — normalization maps it onto the
-  // same bucket, and the peek gate refuses BEFORE the password check.
+  // same bucket, and the rate-limit gate refuses BEFORE the password check.
   const result = await authorizeWithCredentials(
     { email: "  SPRAYED@EXAMPLE.COM  ", password: PASSWORD },
     makeReq(chromeUa("spray")),
@@ -1902,8 +1903,9 @@ test("revokeSessionById: deletes the row and marks in-memory only AFTER the comm
   // The cutoff is `iat <= sessionsRevokedAt` and it is per-USER, so anchoring it
   // to one session's createdAt also killed every session minted earlier. Cookie
   // sessions hid that — they are re-signed constantly so their iat is always
-  // newer — but a bearer/native token keeps its sign-in iat for its whole ~1-year
-  // life, so revoking a laptop signed out every iOS device signed in before it.
+  // newer — but a bearer/native token keeps its sign-in iat for its whole (now
+  // indefinite, guardrail 6c) life, so revoking a laptop signed out every iOS
+  // device signed in before it.
   // The bump bought nothing either: the cutoff is only read on the SLOW path,
   // where the AuthSession row-presence check has already rejected the deleted
   // session, and on the FAST path it is never reached at all.
@@ -1974,8 +1976,8 @@ test("revokeAllUserSessions: deletes every row of the user, stamps a fresh cutof
   assert.equal(shouldForceDbCheck("u-other", "sess-b1"), false);
 });
 
-// Consumed but unasserted: normalizeEmail is re-exported from this module for
-// legacy importers — pin that the re-export stays wired to the real impl.
+// auth.ts re-exports normalizeEmail for older importers; pin that the
+// re-export still points at the real implementation.
 test("normalizeEmail re-export stays wired to the NFKC/lowercase/trim canonicalizer", () => {
   assert.equal(normalizeEmail("  Ｕser@Example.COM "), "user@example.com"); // fullwidth U folds via NFKC
 });

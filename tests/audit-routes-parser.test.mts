@@ -13,8 +13,8 @@
 //      next column-0 declaration, a comment documenting the NEXT handler is
 //      attributed to the PREVIOUS one.
 //
-// Fixtures use handler forms that actually occur in this codebase (verified
-// across all 157 route files): direct wrapper calls, curried withPermission,
+// Fixtures use handler forms that actually occur in this codebase's route
+// files: direct wrapper calls, curried withPermission,
 // bare functions with inline isCronAuthorized, local-helper indirection, and the
 // two-statement shared alias in cron/trash-diagnostic. Brace re-exports do NOT
 // occur today — they are the synthetic case the parser must still refuse to

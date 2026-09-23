@@ -137,7 +137,7 @@ test("resolveSingleTvdbToTmdb returns null for invalid ids without touching cach
 });
 
 // ---------------------------------------------------------------------------
-// Guardrail 5 pin — 50 MB response cap + 30s timeout, wired into arrFetch
+// isSeriesDownloadedInSonarr — the webhook's anti-forgery gate (source pins)
 // ---------------------------------------------------------------------------
 
 test("the Sonarr download check cross-verifies the payload's tvdbId and tmdbId against each other", () => {
@@ -151,7 +151,8 @@ test("the Sonarr download check cross-verifies the payload's tvdbId and tmdbId a
   // download (so the check passes) with an arbitrary tmdbId, and an unrelated
   // APPROVED request would flip to AVAILABLE, lose its wanted row, and notify its
   // requester. Two ids naming different series is never legitimate, so it must
-  // return false (skip the flip), not fall through to the tvdb-only verdict.
+  // return the refused "ids-disagree" verdict (skip the flip), not fall through
+  // to the tvdb-only verdict.
   const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
   const fn = source.slice(source.indexOf("export async function isSeriesDownloadedInSonarr"));
   const body = fn.slice(0, fn.indexOf("\n}\n"));
@@ -202,8 +203,8 @@ test("pickSeriesByTmdbId REJECTS a lone row that names a DIFFERENT title — a d
 });
 
 test("the Sonarr download check holds EVERY id to a positive-integer contract, upstream ones included", () => {
-  // Same source-pinning idiom as the test above, for the same reason (DB + network
-  // I/O in the function).
+  // Same source-pinning idiom as the download-check test above, for the same
+  // reason (DB + network I/O in the function).
   //
   // Both payload ids are guarded, but the value Sonarr's own lookup returns used
   // not to be — and it is not merely logged, it can BECOME `tvdbId` and then be

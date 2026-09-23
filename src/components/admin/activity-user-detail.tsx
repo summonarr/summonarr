@@ -1,9 +1,8 @@
 "use client";
 
-// Refined per-user activity screen, ported from the Claude Design handoff
-// (details.jsx → UserDetail), wired to getUserPlayStats(). Relative-time
-// labels are gated behind useHasMounted (guardrail 16): server renders an
-// absolute fallback, the client swaps in "Xd ago" after hydration.
+// Per-user activity screen, fed by getUserPlayStats(). Relative-time labels
+// wait for useHasMounted (guardrail 16): the server renders an absolute date,
+// and the browser swaps in "Xd ago" once the page has hydrated.
 
 import Link from "next/link";
 import { useHasMounted } from "@/hooks/use-has-mounted";
@@ -73,9 +72,9 @@ const STREAM_META: Record<string, { label: string; color: string }> = {
 };
 
 function absTime(iso: string): string {
-  // Pin to UTC so SSR (container TZ) and CSR (browser TZ) produce identical
-  // text — prevents the React #418 hydration mismatch for plays near UTC
-  // midnight when the formatRelativeTime() path is gated behind useHasMounted.
+  // Pin to UTC so the server (container time zone) and the browser (user time
+  // zone) print the same date. Otherwise a play near midnight could render as
+  // different days and cause a React #418 hydration mismatch.
   return new Date(iso).toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
@@ -88,7 +87,8 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
   const when = (iso: string | null) =>
     !iso ? "—" : mounted ? formatRelativeTime(iso) : absTime(iso);
 
-  // Postgres DOW 0=Sun..6=Sat → design heatmap rows are Mon-first.
+  // Postgres day-of-week is 0=Sun..6=Sat; the heatmap rows start on Monday,
+  // so (dow + 6) % 7 shifts Sunday to the last row.
   const heatmapMatrix: number[][] = Array.from({ length: 7 }, () =>
     new Array<number>(24).fill(0),
   );
@@ -105,7 +105,8 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
   }));
 
   const playsByDay = s.playsByDay.map((d) => d.count);
-  const maxTopMedia = s.topMedia[0]?.count ?? 1;
+  // Floor at 1 so a zero count can't divide by zero (NaN bar widths).
+  const maxTopMedia = Math.max(s.topMedia[0]?.count ?? 1, 1);
 
   return (
     <div className="ds-page-enter">

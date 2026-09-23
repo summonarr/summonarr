@@ -22,13 +22,6 @@ function isSecureCookieContext(): boolean {
   return process.env.NODE_ENV === "production";
 }
 
-// Validates a callbackUrl query param so an attacker can't smuggle an open
-// redirect through the OIDC state cookie. Shares safeInternalPath with the
-// callback route and login-form.tsx — the old hand-rolled
-// `startsWith("/") && !startsWith("//")` test was bypassable with an embedded
-// TAB/LF/CR (see src/lib/safe-url.ts). Returns undefined for missing or invalid
-// input — the callback then falls back to "/".
-
 export async function GET(req: NextRequest) {
   if (!checkRateLimit(`oidc-start:${getClientIpKey(req.headers)}`, 20, 5 * 60 * 1000)) {
     return NextResponse.json({ error: "Too many requests — try again later." }, { status: 429 });
@@ -44,6 +37,10 @@ export async function GET(req: NextRequest) {
   }
 
   const redirectUri = getRedirectUri(authUrl);
+  // Validate callbackUrl so an attacker can't smuggle an open redirect through
+  // the OIDC state cookie. safeInternalPath (shared with the callback route and
+  // the login form) returns undefined for missing or unsafe input, and the
+  // callback then falls back to "/".
   const returnTo = safeInternalPath(req.nextUrl.searchParams.get("callbackUrl"));
   // Native clients cannot use the redirect+cookie handshake: this call is made
   // by the app's own HTTP client, while the IdP redirect lands in a separate

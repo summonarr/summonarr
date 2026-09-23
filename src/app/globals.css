@@ -170,7 +170,7 @@
    ──────────────────────────────────────────────────────────────────── */
 
 :root {
-  /* Make Tailwind's font-sans utility use Geist (previously falling back to default stack) */
+  /* Make Tailwind's font-sans utility use Geist instead of the browser's default font stack */
   --font-sans: var(--font-geist-sans);
 
   /* Radii */

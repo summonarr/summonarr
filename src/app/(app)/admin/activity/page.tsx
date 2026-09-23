@@ -27,8 +27,8 @@ import { requireFeature, getFeatureFlags } from "@/lib/features";
 
 export const dynamic = "force-dynamic";
 
-// Period-over-period delta for a KPI cell. Mirrors the old TrendBadge logic
-// so the redesigned strip keeps the same up/down/new semantics.
+// Change versus the previous period for a KPI cell: "new" when the previous
+// period had nothing, otherwise a rounded percentage with an up/down/flat arrow.
 function kpiDelta(
   current: number,
   previous: number,
@@ -219,20 +219,14 @@ export default async function ActivityPage({
   const rewatchedPostersPromise = resolvePosterMap(rewatchedSlice);
   rewatchedPostersPromise.catch(() => {});
 
-  // Parse the persisted Plex reachability snapshot (JSON written by
-  // plex-events.persistReachability) — defensive parse so a malformed row falls
-  // back to null (= "unknown") instead of crashing the page.
+  // Parse the saved Plex reachability snapshot (JSON written by
+  // plex-events.persistReachability). A malformed row falls back to null
+  // (= "unknown") instead of crashing the page.
   //
-  // Only trust the flag when the poller that maintains it is running:
-  // plexServerReachable tracks *local* reachability, written by the 5s poller
-  // (true on getPlexSessions success, false on throw) plus the SSE connect-time
-  // probe. The poller only runs when play-history + Plex source are enabled and
-  // url+token are set (mirrored by doReconcile's `shouldRun`). Otherwise the
-  // value is stale, so gate the badge on the same conditions as its data source.
-  // Resolved PER SERVER. Each instance is gated on its OWN url+token, so an
-  // unconfigured named server contributes no chip rather than inheriting the
-  // default's verdict — and a configured one that goes down is finally visible,
-  // which is the whole point of making this per-instance.
+  // Worked out PER SERVER. Each instance is checked against its OWN url+token,
+  // so an unconfigured named server stays "unknown" (no chip) instead of
+  // borrowing the default server's answer, and a configured one that goes down
+  // gets its own "unreachable" chip.
   const plexSettings = new Map(plexReachableRows.map((r) => [r.key, r.value]));
   const plexReachability = plexInstances.map((inst) => {
     const configured =

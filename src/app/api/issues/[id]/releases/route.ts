@@ -85,8 +85,8 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
   const issue = await prisma.issue.findUnique({ where: { id } });
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  // A RESOLVED issue is closed — don't fire an *arr grab (and the IssueGrab row)
-  // for it. The CAS below only prevents reopening; the upstream grab would still run.
+  // A RESOLVED issue is closed, so don't start a download for it. (The status
+  // update further down re-checks this in case the issue is resolved meanwhile.)
   if (issue.status === "RESOLVED") {
     return NextResponse.json({ error: "Issue is resolved — reopen it before grabbing a release" }, { status: 409 });
   }
@@ -105,11 +105,10 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
     return NextResponse.json({ error: "guid is required" }, { status: 400 });
   }
 
-  // Allowlist GUID characters explicitly. Sonarr/Radarr release guids are opaque tokens from
-  // their indexers — typically URL-safe / base64-shaped — and never legitimately contain control
-  // chars, quotes, brackets, backticks, null bytes, or whitespace. An allowlist is safer than the
-  // previous denylist, which only blocked 7 characters and let backslashes, CRLF, and unicode
-  // bidi controls through.
+  // Only allow characters a real release guid uses. Radarr/Sonarr guids are
+  // URL-like tokens from the indexers and never contain whitespace, quotes,
+  // brackets, backslashes or control characters. Listing what IS allowed is
+  // safer than listing what is not, because nothing unexpected slips through.
   if (guid.length === 0 || guid.length > 500 || !/^[A-Za-z0-9._:/+\-=?&%#@~,!*$]+$/.test(guid)) {
     return NextResponse.json({ error: "Invalid guid format" }, { status: 400 });
   }
@@ -117,11 +116,12 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
     return NextResponse.json({ error: "indexerId must be a positive integer" }, { status: 400 });
   }
 
-  // Claim the issue (CAS → IN_PROGRESS) BEFORE the grab: the findUnique above is
-  // stale, and a concurrent resolve would otherwise still fire an unwanted *arr
-  // download. count 0 ⇒ already resolved → abort. (The grab is an HTTP call, so it
-  // can't go inside a tx; a pre-grab CAS is what prevents it. A failed grab leaving
-  // IN_PROGRESS is fine — an admin attempted it.)
+  // Move the issue to IN_PROGRESS BEFORE the grab, with a compare-and-swap
+  // ("only if it is still not RESOLVED"). The row we read above may be out of
+  // date, and someone may have resolved the issue since; count 0 means they did,
+  // so we stop. The grab is an HTTP call and can't run inside a DB transaction,
+  // so this check up front is what prevents an unwanted download. If the grab
+  // then fails, leaving IN_PROGRESS is fine: an admin did try.
   const claim = await prisma.issue.updateMany({
     where: { id, status: { not: "RESOLVED" } },
     data: { status: "IN_PROGRESS" },
@@ -130,11 +130,9 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
     return NextResponse.json({ error: "Issue is resolved — reopen it before grabbing a release" }, { status: 409 });
   }
   const statusChanged = issue.status !== "IN_PROGRESS";
-  // Announce the flip BEFORE the grab: the row already holds IN_PROGRESS, and the
-  // 422/502 early returns below deliberately leave it there — so every other admin's
-  // list and the reporter's page must learn of it here, exactly like the refetch path
-  // in issues/[id]/route.ts. Only a real change is broadcast (no re-announcing an
-  // already-IN_PROGRESS issue).
+  // Announce the status change now: the row already says IN_PROGRESS, and the
+  // 422/502 returns below leave it that way, so other admins' lists and the
+  // reporter's page need to hear about it here. Only broadcast a real change.
   if (statusChanged) {
     emitSSE({ type: "issue:updated", issueId: id, status: "IN_PROGRESS", userId: issue.reportedBy });
   }
@@ -149,9 +147,8 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
         resolvedTvdbId = await resolveTvdbIdFromTmdbId(issue.tmdbId, instance);
         if (!resolvedTvdbId) return NextResponse.json({ error: "Could not resolve TVDB ID for this series — check Sonarr" }, { status: 422 });
       }
-      // SEASON scope also carries seasonNumber — passing null for SEASON releases
-      // sent the grab to the series default and lost the user-picked season.
-      // Only episodeNumber is EPISODE-scope-only.
+      // Both SEASON and EPISODE issues pass their seasonNumber, so the grab
+      // targets the right season. Only EPISODE issues pass an episodeNumber.
       await grabSeriesRelease(
         resolvedTvdbId,
         guid,
@@ -166,12 +163,11 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
     return NextResponse.json({ error: arrErrorMessage(err) }, { status: 502 });
   }
 
-  // Bookkeeping runs OUTSIDE the arr catch: the grab above is a fired-and-accepted *arr
-  // download, so a failure here must not report 502. IssueGrab.issueId is a required FK,
-  // and the grab is a multi-second HTTP call — a concurrent DELETE /api/issues/[id] makes
-  // this create fail P2003, which previously ran a Prisma error through arrErrorMessage and
-  // told the admin the grab failed. They retry, *arr grabs the same release twice, and no
-  // IssueGrab row exists either time so the completion webhook never matches.
+  // Recording the grab is kept OUTSIDE the try/catch above: Radarr/Sonarr has
+  // already accepted the download, so a failure here must not answer 502 "grab
+  // failed" (the admin would retry and download the same release twice). The
+  // usual cause is the issue being deleted during the grab, which breaks the
+  // IssueGrab -> Issue link (Prisma error P2003).
   let grabId: string | null = null;
   try {
     const grab = await prisma.issueGrab.create({

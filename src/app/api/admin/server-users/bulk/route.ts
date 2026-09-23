@@ -14,7 +14,7 @@ import { logAudit, auditContext } from "@/lib/audit";
 const POLICY_PUSH_CONCURRENCY = 8;
 
 export const POST = withAdmin(async (req, _ctx, session) => {
-  // Bulk policy push fans out to N Jellyfin admin calls per invocation; cap to 5/min per admin
+  // Each call pushes a policy to every Jellyfin user, so cap it at 5 per minute per admin.
   if (!checkRateLimit(`server-users-bulk:${session.user.id}`, 5, 60_000)) {
     return NextResponse.json({ error: "Too many bulk operations — try again later" }, { status: 429 });
   }
@@ -53,13 +53,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     data: { downloadsEnabled },
   });
 
-  // Push PER SERVER. The row set spans every configured Jellyfin instance, but
-  // this used to resolve one config — getJellyfinConfig() with no argument, i.e.
-  // the DEFAULT server — and send every user there. A sourceUserId is only
-  // meaningful on the server that issued it, so a named instance's users were
-  // pushed as unknown ids at the default server (failing, or worse, colliding
-  // with a real id there), while their own server never received the policy at
-  // all even though their Summonarr row had already been updated to say it had.
+  // Push PER SERVER. The rows span every configured Jellyfin server, and a
+  // sourceUserId only means something on the server that issued it — sending
+  // every user to the default server would push unknown (or colliding) ids
+  // there while their own server never got the policy.
   const byInstance = new Map<string, typeof targets>();
   for (const t of targets) {
     const list = byInstance.get(t.serverInstance);
@@ -73,11 +70,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   for (const [instance, users] of byInstance) {
     const { url: jellyfinUrl, apiKey: jellyfinApiKey } = await getJellyfinConfig(instance);
     if (!jellyfinUrl || !jellyfinApiKey) {
-      // Unconfigured (or de-registered) instance: the rows still exist but there
+      // Unconfigured (or de-registered) server: the rows still exist but there
       // is nowhere to push. Deliberately NOT counted as an error — "DB updated,
-      // nothing pushed" is this route pre-existing contract for an unconfigured
-      // server and is pinned by its tests. Warned so it is at least visible that
-      // those users policy never reached a server.
+      // nothing pushed" is this route's existing contract for an unconfigured
+      // server and its tests pin it. The warning makes it visible that these
+      // users' policy never reached a server.
       console.warn(`[server-users/bulk] ${mediaInstanceLabel("jellyfin", instance)} is not configured — ${users.length} user(s) updated in the DB but not pushed.`);
       continue;
     }

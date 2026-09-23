@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-// One-shot migration: copy the legacy webhookSecret value into the four
-// new per-source webhook secret rows (plex/jellyfin/sonarr/radarr) when those
-// rows are not already set. Lets the legacy fallback path in each webhook
-// handler stay backward-compatible until operators flip to per-source secrets.
+// One-shot migration: copy the legacy shared webhookSecret value into the
+// per-source webhook secret rows (sonarr/radarr — see TARGET_KEYS below) when
+// those rows are not already set. The webhook handlers still fall back to the
+// legacy secret, so nothing breaks while operators move to per-source secrets.
 //
 // Standalone — uses only `pg` and Node's built-in `crypto`. No Prisma. Matches
 // the pattern in scripts/encrypt-existing-settings.mjs.

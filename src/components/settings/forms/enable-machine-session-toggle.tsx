@@ -90,12 +90,11 @@ export function EnableMachineSessionToggle({
       </div>
 
       {/*
-        Rendered unconditionally, NOT gated on `enabled`. The server refuses to
-        turn this on while the allowlist is empty, and `toggle()` reverts
-        `enabled` on that rejection — so gating the editor on `enabled` made a
-        fresh install un-enableable: the only place to set the allowlist appeared
-        for a moment and then vanished with the failed toggle. Set the IPs first,
-        then flip the switch.
+        Always shown, even while the switch is off. The server refuses to turn
+        the switch on while the IP list is empty, and `toggle()` then flips the
+        switch back. If this editor only showed while the switch was on, it would
+        vanish along with the failed toggle and a fresh install could never be
+        enabled. So: set the IPs first, then flip the switch.
       */}
       {(
         <div className="mt-3 pl-0.5">
@@ -111,7 +110,7 @@ export function EnableMachineSessionToggle({
             onChange={(e) => setAllowedIps(e.target.value)}
             rows={2}
             spellCheck={false}
-            placeholder="Any IP allowed"
+            placeholder="e.g. 10.0.0.5, 192.168.1.0/24"
             className="w-full rounded-md bg-zinc-900 border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-200 font-mono placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
           <div className="flex items-center gap-2 mt-1.5">

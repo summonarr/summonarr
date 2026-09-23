@@ -20,7 +20,7 @@ export function GithubTokenCard() {
         const data = (await res.json()) as Record<string, string>;
         setMasked(data.trashGithubToken ?? "");
       } catch {
-
+        // Not fatal: without the current value the card just shows no "Configured" tag.
       }
     })();
   }, []);

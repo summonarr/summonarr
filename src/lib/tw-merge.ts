@@ -1,7 +1,12 @@
-// Pragmatic Tailwind-class merger. Replaces `tailwind-merge` for the cases this
-// codebase actually exercises: same-group utilities collapse to the last write,
-// variant prefixes (hover:, dark:, sm:, focus-visible:, group/foo:, …) form
-// independent class spaces.
+// A small Tailwind class merger, used by cn() in place of the `tailwind-merge`
+// package. When two classes set the same thing (say `p-2` and `p-4`), the one
+// written last wins and the other is dropped. Classes with different variant
+// prefixes (hover:, dark:, sm:, focus-visible:, group/foo:, …) never conflict
+// with each other.
+//
+// Each class is matched against the GROUPS table below. The FIRST group whose
+// regex matches wins, so a narrow group must come before a broad "catch-all"
+// group with the same prefix (guardrail 39).
 
 // ── Arbitrary-value shapes ─────────────────────────────────────────────────
 // Tailwind decides what `border-[…]` / `shadow-(--x)` IS from the value text —
@@ -174,9 +179,7 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["font-stretch", /^font-stretch-/],
   ["font", /^font-/],
 
-  // The text-indent property's utility is `indent-*`. This group used to be
-  // spelled `text-indent-*`, which is not a Tailwind class at all — so it
-  // guarded nothing while the real utility had no group.
+  // The text-indent utility is `indent-*` (there is no `text-indent-*` class).
   ["indent", /^-?indent-/],
   ["line-clamp", /^line-clamp-/],
   ["align", /^align-/],
@@ -302,11 +305,8 @@ const GROUPS: Array<readonly [string, RegExp]> = [
   ["outline-color", /^outline-/],
 
   // ring-inset toggles the inset flag rather than setting a width, so it gets
-  // its own group. Bare `ring` IS a width (1px in v4) and now says so: it used
-  // to match no group and merge with ring colours only by accident, because the
-  // unknown-class fallback returns the base string "ring", which happened to
-  // equal the catch-all group's NAME. Renaming that group to ring-color is safe
-  // now, and nothing depends on the coincidence any more.
+  // its own group. Bare `ring` is a width (1px in v4), so ring-w matches it
+  // explicitly instead of relying on the class-name fallback in groupOf.
   ["ring-inset", /^ring-inset$/],
   ["ring-w", rx(String.raw`^ring(?:-\d|-(?:${WIDTH_ARB})|$)`)],
   ["ring-offset-w", rx(String.raw`^ring-offset-(?:\d|${WIDTH_ARB})`)],
@@ -407,7 +407,7 @@ interface Parsed {
 function parseToken(raw: string): Parsed {
   let rest = raw;
   let variants = "";
-  // Collect every variant: prefix
+  // Strip off every leading variant prefix (e.g. `dark:hover:`).
   while (true) {
     const m = rest.match(VARIANT_RE);
     if (!m) break;

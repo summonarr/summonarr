@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2, AlertTriangle, Send } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
@@ -8,8 +8,20 @@ import { withBasePath } from "@/lib/base-path";
 export function AnnounceUpdateButton() {
   const [phase, setPhase] = useState<"idle" | "confirm" | "sending" | "done" | "error">("idle");
   const [summary, setSummary] = useState<string | null>(null);
+  // Timer that clears the result 10s after a send. Kept in a ref so it can be
+  // cancelled — otherwise an old timer could close a confirm box the admin
+  // opened again within those 10 seconds.
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
+
+  function openConfirm() {
+    if (resetTimer.current) clearTimeout(resetTimer.current);
+    setSummary(null);
+    setPhase("confirm");
+  }
 
   async function handleSend() {
+    if (resetTimer.current) clearTimeout(resetTimer.current);
     setPhase("sending");
     setSummary(null);
     try {
@@ -28,7 +40,7 @@ export function AnnounceUpdateButton() {
       setPhase("error");
       setSummary("Failed to send update notice");
     }
-    setTimeout(() => { setPhase("idle"); setSummary(null); }, 10_000);
+    resetTimer.current = setTimeout(() => { setPhase("idle"); setSummary(null); }, 10_000);
   }
 
   if (phase === "confirm") {
@@ -72,7 +84,7 @@ export function AnnounceUpdateButton() {
         <Button
           type="button"
           variant="outline"
-          onClick={() => setPhase("confirm")}
+          onClick={openConfirm}
           disabled={phase === "sending"}
           className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
         >

@@ -10,11 +10,10 @@ import { useNotifications } from "@/components/notifications/notification-store"
 import { notificationHref, timeAgo } from "@/lib/notification-links";
 
 export function NotificationBell() {
-  // Fetching, polling and the SSE reload all live in NotificationStoreProvider
-  // ((app)/layout.tsx). This component used to own them, and so did the mobile
-  // nav's badge — both are mounted at every viewport (the breakpoints are CSS,
-  // not React), so every page load issued two identical GET /api/notifications.
-  // See the note on the store.
+  // Fetching, polling and live (SSE) reloads all happen in the shared
+  // NotificationStoreProvider ((app)/layout.tsx). This bell and the mobile
+  // nav's badge are both on every page, so sharing one store avoids fetching
+  // /api/notifications twice.
   const { items, unread, markAllRead } = useNotifications();
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -24,8 +23,7 @@ export function NotificationBell() {
   // Close on outside click / Escape.
   useEffect(() => {
     if (!open) return;
-    // Move focus into the panel on open so keyboard users land inside it (was
-    // relying on Tab reaching the links after the trigger).
+    // Move focus into the panel on open so keyboard users land inside it.
     (panelRef.current?.querySelector<HTMLElement>("a[href], button") ?? panelRef.current)?.focus();
     function onDoc(e: MouseEvent) {
       const t = e.target as Node;

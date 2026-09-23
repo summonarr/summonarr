@@ -22,11 +22,10 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [errorMessage, setErrorMessage] = useState("");
 
-  // Tracks the PERSISTED key state, not the prop: the prop is derived once by
-  // the server page, and no settings form calls router.refresh(), so after a
-  // Remove + Save the hint and the Remove button would keep describing a key
-  // that no longer exists until a full reload. Re-derived on every confirmed
-  // save below.
+  // Whether a key is SAVED on the server right now. We can't rely on the prop:
+  // it is set once when the page loads and never refreshes, so after Remove +
+  // Save the hint and Remove button would still describe a deleted key until
+  // a full reload. Updated after every successful save below.
   const [keyIsSet, setKeyIsSet] = useState(initialRelayKey.length > 0);
 
   async function handleSave(e: React.FormEvent) {
@@ -35,12 +34,12 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
     setErrorMessage("");
     try {
       const body: Record<string, string> = {
-        // Masked placeholder is skipped server-side; "" clears the key (clearable).
+        // If this is still the masked placeholder the server ignores it; "" deletes the key.
         apnsRelayKey: relayKey,
-        // "" clears the recommendation (clearable).
+        // "" deletes the recommendation.
         recommendedIosBuild: recommendedBuild.trim(),
-        // "" clears the override (clearable) — push falls back to the default
-        // relay, which keeps the "leave blank for the default" hint truthful.
+        // "" deletes the custom URL, so push goes back to the default relay
+        // (which is what the "leave blank for the default" hint promises).
         apnsRelayUrl: relayUrl.trim(),
       };
       const res = await fetch(withBasePath("/api/settings"), {
@@ -51,8 +50,8 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
       if (res.ok && data.ok !== false) {
         setStatus("ok");
-        // The masked placeholder is skipped server-side (key unchanged, still
-        // set); "" is clearable (key removed); anything else is a new key.
+        // Masked placeholder = key left as is (still set); "" = key removed;
+        // anything else = a new key was saved.
         setKeyIsSet(relayKey.length > 0);
       } else {
         setStatus("error");

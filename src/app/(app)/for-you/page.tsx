@@ -33,9 +33,10 @@ const PER_PAGE = 100;
 // Dedicated "For You" page — the full ranked recommendation set behind the
 // home rail (which shows only the top slice). Recommendations are precomputed
 // per user by the warm-recommendations cron (see src/lib/recommendations.ts):
-// seeds come from the last 180 days of watched history plus the watchlist,
-// fanned through TMDB's recommendations/similar, scored by seed weight, and
-// cached in UserRecommendation. This page never calls TMDB.
+// "seeds" (titles the user recently watched, put on their watchlist or
+// requested) are looked up in the stored suggestion graph, scored, and saved
+// in UserRecommendation. This page only reads that stored result — it never
+// calls TMDB.
 //
 // Unlike a plain browse grid it also EXPLAINS itself: the header reports when
 // this user's set was last built and how many of their own titles produced it,
@@ -73,11 +74,10 @@ export default async function ForYouPage({
   const visible = filtered.slice(offset, offset + PER_PAGE);
   const totalPages = Math.max(1, Math.ceil(filtered.length / PER_PAGE));
 
-  // Reads as one sentence about where these picks came from. formatRelativeTime
-  // is called on the SERVER here (this page is force-dynamic and PageHeader is a
-  // server component), so the string is computed once and hydration receives the
-  // identical text — the guardrail-16 hazard is a Date.now() inside a "use
-  // client" render, which this is not.
+  // The subtitle reads as one sentence about where these picks came from.
+  // formatRelativeTime runs on the SERVER here, so the browser receives the
+  // finished text and hydration can't disagree with it (guardrail 16 is about
+  // Date.now() inside a "use client" render, which this is not).
   //
   // The seed counts are taken off `enriched` — the same set the "of N picks"
   // denominator reports — so the sentence describes ONE population throughout.

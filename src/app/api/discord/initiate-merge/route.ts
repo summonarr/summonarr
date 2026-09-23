@@ -32,8 +32,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
     );
   }
 
-  // Rate-limit per (user, target discord id): a single attacker iterating
-  // through victim discord IDs can't share the bucket with their own attempts
+  // A second, tighter limit per (user, target Discord id): at most 3 codes for
+  // the same Discord account every 15 minutes.
   if (!checkRateLimit(`discord-merge-init:${session.user.id}:${discordId}`, 3, 15 * 60 * 1000)) {
     return NextResponse.json(
       { error: "Too many requests — please wait 15 minutes before trying again." },
@@ -58,8 +58,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Discord bot is not configured." }, { status: 503 });
   }
 
-  // 12 hex chars (~48 bits) — bumped from 8 decimal digits (~26 bits) to
-  // resist online guessing within the 10-min window
+  // 6 random bytes = 12 hex characters (~48 bits). Together with the rate
+  // limits, that is far too many to guess in the 10-minute window.
   const code = randomBytes(6).toString("hex").toUpperCase();
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 

@@ -10,17 +10,14 @@ export interface NavItem {
 
 // Scroll-spy sidebar nav: highlights the section nearest the top of <main>.
 //
-// The entries are plain `#id` anchors, NOT buttons that measure and scroll in
-// JS. The previous implementation read getBoundingClientRect() on both the
-// section and <main>, then called main.scrollTo() with a hand-computed offset —
-// which reportedly moved the page a few dozen pixels and stopped. Handing the
-// scroll back to the browser removes the measurement entirely; the offset that
-// JS was applying is now `scroll-margin-top` on `.settings-sections > [id]` in
-// globals.css. It also means these sections have real deep links, survive JS
-// failing to load, and work from the keyboard.
+// The entries are plain `#id` links, so the BROWSER does the scrolling. An
+// older version measured positions and scrolled in JS, and it sometimes
+// stopped short. The gap above each section now comes from `scroll-margin-top`
+// on `.settings-sections > [id]` in globals.css. Plain links also give real
+// deep links and work from the keyboard or without JS.
 //
-// The spy stays: it listens on <main>'s scroll (the (app) layout makes <main>
-// the scroll container) purely to move the active pill.
+// The scroll listener below only moves the highlighted pill. It listens on
+// <main> because the (app) layout makes <main> the scrolling element.
 export function SettingsNav({ items }: { items: NavItem[] }) {
   const [activeId, setActiveId] = useState<string>(items[0]?.id ?? "");
 

@@ -25,9 +25,10 @@ interface QueueEntry {
   resolvers: Array<(data: RatingsPayload | null) => void>;
 }
 
-// 30 ms debounce coalesces ratings requests from all cards that render in a single paint cycle
+// Wait 30 ms before sending, so every card that renders in the same paint cycle
+// shares one batch request.
 const DEBOUNCE_MS = 30;
-// Cap batch size so the POST body stays well within Next.js / Vercel request size limits
+// Must match MAX_BATCH in /api/ratings/batch, which rejects larger batches with a 400.
 const MAX_BATCH = 200;
 
 const queue = new Map<Key, QueueEntry>();

@@ -9,11 +9,10 @@ interface MotdModalProps {
   body: string;
 }
 
-// The dismissal flag is keyed on the announcement's CONTENT, not a fixed
-// literal: a flat key suppresses a newly published or edited MOTD for the rest
-// of the tab session (sessionStorage survives reloads), so the next urgent
-// announcement is never seen by anyone who dismissed the previous one.
-// FNV-1a — a short stable digest, not a security hash.
+// The "dismissed" flag's storage key is built from the announcement's TEXT.
+// With one fixed key, dismissing an old message would also hide any new or
+// edited one for the rest of the tab session. The hash is FNV-1a: a short,
+// stable fingerprint of the text, not a security hash.
 function contentKey(title: string, body: string): string {
   const raw = `${title}\n${body}`;
   let h = 0x811c9dc5;
@@ -25,7 +24,8 @@ function contentKey(title: string, body: string): string {
 }
 
 export function MotdModal({ title, body }: MotdModalProps) {
-  // Effect flips visibility after hydration; initial render matches SSR (null) to avoid hydration mismatch
+  // Starts hidden so the first client render matches the server (which renders
+  // nothing); the effect below shows it after hydration.
   const [visible, setVisible] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);

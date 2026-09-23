@@ -8,9 +8,9 @@ import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 
-// Mirrors the sentinel /api/settings substitutes for a stored secret on read
-// and skips on PATCH (route.ts `MASKED_VALUE`). An untouched form still holds
-// it, so a Test there correctly probes the persisted key.
+// The placeholder /api/settings sends instead of a stored secret, and ignores
+// when it comes back in a PATCH (route.ts `MASKED_VALUE` — keep the two equal).
+// An untouched field still holds it, so Test there checks the saved key.
 const MASKED_VALUE = "••••••••";
 
 export function ApiKeySettingForm({
@@ -29,19 +29,18 @@ export function ApiKeySettingForm({
   help: React.ReactNode;
 }) {
   const [apiKey, setApiKey] = useState(initialApiKey);
-  // The value the server currently holds (as far as this form knows). The
-  // test-ratings probe reads the PERSISTED key (testOmdbConnection & co. call
-  // getApiKey({ fresh: true }) with no argument), so a Test against an edited,
-  // unsaved field would silently validate the OLD key and paint a green
-  // "Connected" beside a mistyped new one. When the field is dirty, Test
-  // saves first and then probes — the same Save & Test shape as arr-form.tsx.
+  // The value the server currently holds (as far as this form knows). The test
+  // endpoint checks the SAVED key, not what's typed in the box — so testing an
+  // edited, unsaved key would check the OLD one and could show "Connected" next
+  // to a mistyped new key. So when the field has unsaved changes, Test saves
+  // first and then tests (the same "Save & Test" approach as arr-form.tsx).
   const [savedKey, setSavedKey] = useState(initialApiKey);
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [testStatus, setTestStatus] = useState<"idle" | "testing" | "ok" | "error">("idle");
   const [testMessage, setTestMessage] = useState("");
 
-  // An empty or masked value is skipped by the PATCH route, so there is
-  // nothing new to persist before a probe.
+  // The server ignores an empty or placeholder value, so in those cases there
+  // is nothing new to save before testing.
   const dirty = apiKey !== savedKey && apiKey.length > 0 && apiKey !== MASKED_VALUE;
 
   async function persistKey(): Promise<boolean> {
@@ -67,8 +66,7 @@ export function ApiKeySettingForm({
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
-    // A green result earned against the previous key must not survive a save
-    // of a different one.
+    // Clear any old test result: it was for the previous key, not the one being saved.
     setTestStatus("idle");
     setTestMessage("");
     await persistKey();

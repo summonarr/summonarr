@@ -1111,9 +1111,9 @@ test("multi-server: two Jellyfin instances reporting the SAME raw playSessionId 
   try {
     // Two unrelated, independently-administered Jellyfin servers can each
     // mint the same low-cardinality PlaySessionId — there's nothing coordinating
-    // them. Before activeSessionId's instance-qualified id format (guardrail:
-    // "two Plex servers reusing the same low-cardinality sessionKey would
-    // collide on both the PK and the unique index"), the second instance's
+    // them. Before activeSessionId's instance-qualified id format (guardrail
+    // 35: two servers reusing the same small sessionKey would collide on both
+    // the primary key and the unique index), the second instance's
     // createMany({skipDuplicates}) would silently no-op onto the first
     // instance's already-created row and that session would never get its own
     // ActiveSession at all.

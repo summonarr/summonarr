@@ -26,15 +26,15 @@ interface SeasonState {
   owned: Set<number>;
 }
 
-// Uses the browser's own locale/timezone (no pinned args), which is only safe
-// post-hydration — the sole call site below gates on `mounted` for exactly
-// this reason (guardrail 16). Do not call this from an SSR-visible spot
-// without also gating it, or the server/client render will disagree.
+// Formats with the browser's own locale, which the server can't know. So it is
+// only safe after hydration (the first client render): the one call site below
+// waits for `mounted` for that reason (guardrail 16). Calling it during the
+// server render would make the server and browser HTML disagree.
 //
-// TMDB's `air_date` is date-only ("2024-03-05"), which `new Date` parses as UTC
-// midnight — formatting it in the viewer's zone showed the PREVIOUS day for
-// everyone west of UTC. A date-only string is therefore formatted in UTC (the
-// same fix as format-release-date.ts); only the locale stays the browser's.
+// TMDB's `air_date` is a bare date ("2024-03-05"), which `new Date` reads as
+// midnight UTC. Showing that in the viewer's time zone gave the PREVIOUS day to
+// everyone west of UTC, so a bare date is formatted in UTC (the same fix as
+// format-release-date.ts). Only the language/locale comes from the browser.
 function formatAirDate(iso: string | null): string | null {
   if (!iso) return null;
   try {
@@ -58,7 +58,8 @@ function formatRuntime(min: number | null): string | null {
   return m === 0 ? `${h}h` : `${h}h ${m}m`;
 }
 
-// Collapsible per-season list; expanding a season lazy-fetches its episodes and library-ownership marks.
+// Collapsible list of seasons. Episodes (and which ones are in the library) are
+// only fetched the first time a season is expanded.
 export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
   const mounted = useHasMounted();
   const [state, setState] = useState<Record<number, SeasonState>>(() => {
@@ -79,9 +80,9 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
       const current = state[seasonNumber];
       if (!current) return;
 
-      // forceReload (the Retry button) skips the collapse + already-loaded
-      // short-circuits and re-runs the fetch below — otherwise Retry, fired from
-      // inside the expanded error panel, just collapsed the panel.
+      // forceReload is used by the Retry button. It skips the two early returns
+      // below (collapse, and "already loaded") and always re-fetches. Without it,
+      // clicking Retry inside the open error panel would just close the panel.
       if (current.expanded && !forceReload) {
         setState((prev) => ({ ...prev, [seasonNumber]: { ...prev[seasonNumber], expanded: false } }));
         return;
@@ -156,10 +157,10 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                 borderRadius: 8,
               }}
             >
-              {/* Hover is the shared inset tint (the old onMouseEnter/onMouseLeave
-                  repaint stuck after a tap on touch). The focus ring is drawn
-                  inset because the row sits inside an overflow-hidden rounded
-                  card that would clip an outer one. */}
+              {/* Hover uses the shared ds-hover-tint class (JS mouse-enter/leave
+                  handlers got stuck "hovered" after a tap on touch screens). The
+                  focus ring is drawn inside the button (negative outlineOffset)
+                  because the card's overflow-hidden would clip one drawn outside. */}
               <button
                 type="button"
                 onClick={() => toggleSeason(season.seasonNumber)}

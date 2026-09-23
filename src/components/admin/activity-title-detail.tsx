@@ -1,8 +1,8 @@
 "use client";
 
-// Refined per-title activity screen, ported from the Claude Design handoff
-// (details.jsx → TitleDetail), wired to getMediaPlayStats(). Relative-time
-// labels gated behind useHasMounted (guardrail 16).
+// Per-title activity screen, drawn from getMediaPlayStats(). "2h ago" style
+// labels only appear after the page has mounted in the browser (useHasMounted),
+// so the server and the first browser render match (guardrail 16).
 
 import Link from "next/link";
 import { useHasMounted } from "@/hooks/use-has-mounted";
@@ -75,9 +75,10 @@ const STREAM_META: Record<string, { label: string; color: string }> = {
 };
 
 function absTime(iso: string): string {
-  // Pin to UTC so SSR (container TZ) and CSR (browser TZ) produce identical
-  // text — prevents the React #418 hydration mismatch for plays near UTC
-  // midnight when the formatRelativeTime() path is gated behind useHasMounted.
+  // Format in UTC so the server (its own time zone) and the browser (the
+  // viewer's time zone) print the same date. Otherwise a play near midnight
+  // could show different days and cause a React #418 hydration error. This is
+  // the text shown before mount, and for the chart's day labels.
   return new Date(iso).toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",

@@ -14,15 +14,15 @@
 // (plex + Remote + AdminToken → plexRemoteAdminToken), matching the camelCase
 // shape settings-sensitive-keys.ts's MEDIA_INSTANCE_SECRET_RE expects.
 //
-// PURE — zero imports so it's unit-testable and usable from client components
+// PURE (no imports, no I/O) so it's unit-testable and usable from client components
 // (the settings UI) as well as server routes. The server-side registry (which
 // reads the configured instances out of Settings) lives in
 // media-instance-registry.ts and delegates key derivation to this module.
 
 export type MediaServerService = "plex" | "jellyfin";
 
-// Instance slug. "" is the default (and, today, only) server for every existing
-// deployment; any other value is a named additional server.
+// Instance slug. "" is the default server (the only one on a single-server
+// deployment); any other value is a named additional server.
 export type MediaInstanceKey = string;
 
 export const DEFAULT_MEDIA_INSTANCE = "";

@@ -75,10 +75,11 @@ interface SplitterState {
 
 // SQL splitter that:
 //   • Splits statements on `;` (skipping `;` inside '...' or $$...$$).
-//   • Routes `-- ... \n` line comments to onComment instead of accumulating
-//     them into the next statement. The previous implementation conflated
-//     comments with the following statement, which silently dropped the
-//     first INSERT after every `-- Table: ...` summary comment in the dump.
+//   • Routes `-- ... \n` line comments to onComment instead of gluing them
+//     onto the next statement (which used to make the first INSERT after every
+//     `-- Table: ...` comment fail validation and be dropped).
+//   • A `$` or `-` at the very end of a chunk is held as "pending" until the
+//     next chunk shows whether it starts `$$` or `--`.
 function feedSqlChunk(
   state: SplitterState,
   chunk: string,
@@ -286,8 +287,8 @@ function isStatementSafe(stmt: string): { ok: true } | { ok: false; reason: stri
   if (insertMatch) {
     // INSERT — verify VALUES clause contains only literals so a malicious
     // dump can't smuggle a sub-SELECT or function call past the allowlist.
-    // Extra belt-and-suspenders: extract the table and require it to be in the
-    // current BACKUP_TABLES (in case a future regex looseness or tampering sneaks past).
+    // Extra safety check: pull out the table name and require it to be in
+    // BACKUP_TABLES, in case the regex above is ever loosened by mistake.
     const tableMatch = /^INSERT INTO "public"\."([^"]+)"/i.exec(stmt);
     if (tableMatch && !BACKUP_TABLES.includes(tableMatch[1] as (typeof BACKUP_TABLES)[number])) {
       return { ok: false, reason: `Blocked INSERT for table not in BACKUP_TABLES: ${tableMatch[1]}` };
@@ -610,9 +611,8 @@ export async function processBackupImport(
 
   // INSERT INTO "public"."<Table>" (...) ...  — capture the table name to attribute
   // conflict-skipped rows in the response summary. Statements are already validated
-  // against the BACKUP_TABLES allowlist (the VALIDATE regex above), so a plain
-  // capturing match suffices here. The group MUST be capturing: a prior (?:...) form
-  // left m[1] undefined, bucketing every skipped row under a single "undefined" key.
+  // against the BACKUP_TABLES allowlist (ALLOWED_PATTERNS above), so a plain
+  // capturing match suffices here. The group MUST be capturing: m[1] is the table name.
   const INSERT_TABLE_RE = /^INSERT INTO "public"\."([^"]+)"/i;
 
   let executed = 0;

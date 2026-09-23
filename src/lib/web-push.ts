@@ -31,12 +31,11 @@ export interface PushSubscription {
   keys: { p256dh: string; auth: string };
 }
 
-// Default store-and-forward window: how long the push service (FCM/autopush/
-// Apple) holds an undeliverable message for an offline device. 24h matches the
-// APNs relay's apns-expiration window — "approved"/"now available" pings are
-// exactly the messages a closed-laptop/backgrounded-phone user expects to see
-// when they come back. (The old default of 60s silently dropped any push to a
-// device offline for more than a minute.)
+// Default TTL: how long the push service (FCM/autopush/Apple) keeps a message
+// for a device that is offline. 24h matches the APNs relay's expiry window, so
+// a user who opens their laptop or phone later still sees "approved"/"now
+// available" pings. (A 60s TTL used to drop pushes to any device offline for
+// more than a minute.)
 const DEFAULT_TTL_SECONDS = 24 * 60 * 60;
 
 export interface SendOptions {
@@ -98,8 +97,9 @@ function hkdfExpand(prk: Uint8Array, info: Uint8Array, len: number): Uint8Array 
 // ---------- DER-encoded ECDSA signature → raw r||s ----------
 
 function derSignatureToRaw(der: Uint8Array): Uint8Array {
-  // Parse: SEQUENCE { INTEGER r, INTEGER s }
-  // 0x30 len 0x02 rlen r... 0x02 slen s...
+  // Node signs ECDSA in DER form: SEQUENCE { INTEGER r, INTEGER s }, i.e. the
+  // bytes 0x30 len 0x02 rlen r... 0x02 slen s... A JWT (ES256) needs the raw
+  // 64-byte form instead: r and s, each left-padded to 32 bytes.
   if (der.length < 8 || der[0] !== 0x30) {
     throw new Error("Invalid DER signature: missing SEQUENCE tag");
   }
@@ -143,8 +143,8 @@ function stripLeadingZeros(buf: Uint8Array): Uint8Array {
 export function generateVapidKeys(): VapidKeys {
   const { publicKey, privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
 
-  // Export the raw 32-byte private scalar from the DER-encoded PKCS#8.
-  // JWK encoding gives us base64url(d) directly, which we re-decode for raw form.
+  // Get the raw 32-byte private key. The JWK export holds it as base64url(d),
+  // so decode that.
   const jwkPriv = privateKey.export({ format: "jwk" }) as { d?: string };
   if (!jwkPriv.d) throw new Error("Failed to extract VAPID private scalar");
   const d = base64UrlDecode(jwkPriv.d);
@@ -242,8 +242,8 @@ function encryptPayload(
   const cek = hkdfExpand(saltPrk, new Uint8Array(Buffer.from("Content-Encoding: aes128gcm\0", "utf8")), 16);
   const nonce = hkdfExpand(saltPrk, new Uint8Array(Buffer.from("Content-Encoding: nonce\0", "utf8")), 12);
 
-  // RFC 8188 §2.2 — single-record padding: payload || 0x02 || zeros
-  // Single record so the last-record delimiter (0x02) is used; no extra zero padding required.
+  // RFC 8188 §2.2 — the whole payload fits in one record, so it ends with the
+  // last-record delimiter byte 0x02. No extra zero padding is needed.
   const padded = Buffer.concat([Buffer.from(payload), Buffer.from([0x02])]);
 
   const cipher = createCipheriv("aes-128-gcm", cek, nonce);

@@ -36,15 +36,16 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
   const router  = useRouter();
   const [revoking, setRevoking] = useState<string | null>(null);
   const [confirmingRevoke, setConfirmingRevoke] = useState<string | null>(null);
-  // Revoking a session OTHER than this one is step-up protected server-side:
-  // credential accounts must re-enter their password, SSO accounts must hold a
-  // recent sign-in. The client used to send neither and ignore res.ok, so every
-  // revoke 401'd and the UI reported success — the device was never signed out.
+  // Signing out ANOTHER device needs extra proof ("step-up") on the server:
+  // password accounts must re-enter their password, and single-sign-on accounts
+  // must have signed in recently. So we check res.ok and ask for the password
+  // when the server says so, instead of assuming the revoke worked.
   const [passwordFor, setPasswordFor] = useState<string | null>(null);
   const [password, setPassword] = useState("");
   const [revokeError, setRevokeError] = useState<string | null>(null);
-  // `formatRelativeTime` and `toLocaleDateString` both diverge between SSR and CSR
-  // (Date.now drift and runtime locale differences). See CLAUDE.md guardrail 16.
+  // `formatRelativeTime` and `toLocaleDateString` give different text on the
+  // server and in the browser (the clock moves on, and the locale can differ),
+  // so they only render once mounted. See CLAUDE.md guardrail 16.
   const mounted = useHasMounted();
 
   async function revoke(sessionId: string, confirmPassword?: string) {
@@ -143,8 +144,8 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
               type="button"
               size="sm"
               variant="ghost"
-              // 36x36 hit area (HIG min) + aria-label so screen readers
-              // announce this destructive (sign-out-device) action.
+              // A 36x36 tap area, plus an aria-label so screen readers say
+              // what this button does (sign that device out).
               aria-label={`Revoke session ${s.deviceLabel ?? `${s.deviceType} device`}${s.ipAddress ? ` from ${s.ipAddress}` : ""}`}
               title="Revoke session"
               className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-9 w-9 p-0 mt-0.5"
@@ -183,8 +184,8 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
           )}
           {!s.isCurrent && passwordFor === s.sessionId && (
             <form
-              // Full row under the device details below `sm` (the row is
-              // flex-wrap) — beside the min-w-0 column it crushed the label.
+              // On small screens this takes a full row below the device details;
+              // squeezed beside them it crushed the device name.
               className="flex items-center gap-1.5 basis-full sm:basis-auto sm:shrink-0 mt-0.5"
               onSubmit={(e) => { e.preventDefault(); if (password) revoke(s.sessionId, password); }}
             >

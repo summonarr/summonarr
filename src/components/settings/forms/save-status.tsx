@@ -1,12 +1,11 @@
 import { CheckCircle, XCircle } from "@/components/icons";
 import type { SaveStatus } from "./shared";
 
-// Shared save-status indicator for the settings forms. Renders the success/
-// error line inside an ARIA live region so screen readers announce the outcome
-// of a save (previously a bare <span>, silent to AT). Success is polite; a
-// failure is assertive so it isn't queued behind other polite updates. Mirrors
-// the create-user-button.tsx pattern. `saving` renders nothing here — the Save
-// button already shows its own "Saving…" spinner.
+// The "Saved" / "Failed to save" line shared by the settings forms. It sits in
+// an ARIA live region so screen readers read the result out loud. Success is
+// "polite" (read when the reader is free); a failure is "assertive" (read right
+// away). Same pattern as create-user-button.tsx. While saving it shows nothing,
+// because the Save button already shows its own "Saving…" spinner.
 export function SaveStatusMessage({
   status,
   okLabel = "Saved",

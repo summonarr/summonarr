@@ -7,17 +7,17 @@ export interface SummonarrSession {
   user: {
     id: string;
     role: string;
-    // Decimal string (from session claim) for permission bitmask. Enables nav
-    // and UI to respect MANAGE_* grants without requiring ADMIN/ISSUE_ADMIN role.
+    // The user's permission flags packed into one number (a "bitmask"), sent as
+    // a decimal string. Lets the nav and UI honour MANAGE_* grants for users
+    // who aren't ADMIN or ISSUE_ADMIN.
     permissions?: string;
     email?: string | null;
     name?: string | null;
     provider?: string;
     mediaServer?: string | null;
   };
-  // sessionId intentionally omitted from the client shape: no client consumer
-  // reads it. Server components that need it use auth() which still carries
-  // the full claims.
+  // sessionId is left out on purpose: nothing in the browser reads it. Server
+  // code that needs it calls auth(), which still has every claim.
   expiresAt?: number;
 }
 
@@ -31,10 +31,10 @@ interface ContextValue {
 
 const Ctx = React.createContext<ContextValue | null>(null);
 
-// initialSession is populated server-side from the Summonarr session cookie
-// (see src/lib/session-server.ts) so consumers don't see a loading flash on
-// first paint. When it's null we still hit /api/auth/me on mount to backfill
-// the session in case one exists that the server-side read didn't surface.
+// The root layout reads the session cookie on the server (see
+// src/lib/session-server.ts) and passes it in as initialSession, so the page
+// doesn't flash a "loading" state on first paint. If it's null we still ask
+// /api/auth/me once on mount, in case a session exists that the server read missed.
 export function SummonarrSessionProvider({
   initialSession,
   children,

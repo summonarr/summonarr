@@ -58,12 +58,12 @@ export function ActivityFilterBar() {
     return pathname === page.href || pathname.startsWith(page.href + "/");
   }
 
-  // The activity and stats pages are `force-dynamic` and read searchParams, and
-  // Next's router-cache `staleTimes.dynamic` defaults to 0, so a `router.push`
-  // to the new URL already fetches a fresh RSC render with the new params. A
-  // trailing refresh here re-rendered the heaviest admin page a second time
-  // per click (and refetched the shared layouts on top) — don't re-add it.
-  // The same holds for the Overview/History tab buttons below.
+  // No `router.refresh()` after the push, on purpose. These pages are
+  // `force-dynamic` and Next does not cache dynamic pages on the client
+  // (`staleTimes.dynamic` defaults to 0), so `router.push` to the new URL
+  // already renders the page fresh on the server. An extra refresh made the
+  // heaviest admin page render twice per click. The same holds for the
+  // Overview/History tab buttons below.
   const setParam = useCallback(
     (key: string, value: string) => {
       const params = new URLSearchParams(searchParams.toString());
@@ -78,11 +78,8 @@ export function ActivityFilterBar() {
     [router, pathname, searchParams],
   );
 
-  // Rejecting an out-of-range value is right; doing it in silence was not.
-  // Previously this was the `if` alone with no `else`, so "-5" or "99999" left
-  // the page on its previous range with no message and the field unchanged —
-  // there was nothing to tell the user their input had been thrown away, so
-  // the natural response was to press Go again.
+  // Every rejected value shows a message. Without one, typing "-5" and pressing
+  // Go would just leave the page unchanged, and the user would not know why.
   const applyCustomDays = () => {
     const trimmed = customValue.trim();
     if (trimmed === "") {

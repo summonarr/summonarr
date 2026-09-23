@@ -3,10 +3,13 @@ import { prisma } from "./prisma";
 import { fetchMdblistBatch, isMdblistQuotaLocked } from "./mdblist";
 import { collectAllLibraryItems, LIBRARY_PAGE_SIZE } from "./library-iterator";
 
+// Titles per MDBList batch request.
 const BATCH_SIZE = 200;
 
+// Safety cap on how many library titles one run will look at.
 const MAX_PREWARM_ITEMS = 200_000;
 
+// The exact stored text of a "not found" cache row (see NOT_FOUND_SENTINEL in mdblist.ts).
 const NOT_FOUND_DATA = JSON.stringify({ _notFound: true });
 
 interface DetailsCacheData {
@@ -47,13 +50,11 @@ export async function prewarmMdblistCache(opts: { force?: boolean; signal?: Abor
   const mdblistKeys = items.map((i) => `mdblist:tmdb:${i.mediaType === "MOVIE" ? "movie" : "tv"}:${i.tmdbId}`);
   for (let i = 0; i < mdblistKeys.length; i += LIBRARY_PAGE_SIZE) {
     const slice = mdblistKeys.slice(i, i + LIBRARY_PAGE_SIZE);
-    // Only NOT_FOUND sentinels are ever deleted (so they get a fresh chance on
-    // the next batch). force=true used to delete VALID rows here too — but the
-    // refetch below can stop at any moment (quota trip, upstream incident), and
-    // a delete-first force run then left every not-yet-refetched title with NO
-    // ratings row at all: a site-wide ratings blackout until the next full run.
-    // Force now bypasses the freshness triage instead, so existing rows keep
-    // serving until each one is overwritten in place.
+    // Only "not found" markers are deleted here, so those titles get a fresh try.
+    // Valid rows are never deleted, even with force=true: the refetch below can
+    // stop early (quota, upstream outage), and deleting first would leave every
+    // title it didn't reach with no ratings at all. Instead, force skips the
+    // freshness check below and each row is overwritten in place.
     const where = { key: { in: slice }, data: NOT_FOUND_DATA };
     const { count } = await prisma.tmdbCache.deleteMany({ where });
     purged += count;
@@ -117,8 +118,8 @@ export async function prewarmMdblistCache(opts: { force?: boolean; signal?: Abor
   const totalPages = Math.max(moviePages, tvPages);
 
   for (let page = 0; page < totalPages; page++) {
-    // See the note in omdb-prewarm: an ignored abort keeps the pass running
-    // lock-free after withAdvisoryLock has already released the lock.
+    // Stop when the advisory lock times out: withAdvisoryLock has already released
+    // the lock, so carrying on would run unprotected (guardrail 41).
     if (opts.signal?.aborted) {
       console.warn(`[mdblist-prewarm] aborted after ${fetched} fetches — the advisory lock timed out`);
       break;

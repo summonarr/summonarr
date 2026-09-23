@@ -10,7 +10,7 @@ async function signOutAndRedirect(callbackUrl: string) {
   try {
     await fetch(withBasePath("/api/auth/sign-out"), { method: "POST", credentials: "include" });
   } catch {
-    // ignore — best-effort
+    // Best-effort: redirect to the login page even if the request failed.
   }
   window.location.href = withBasePath(callbackUrl);
 }
@@ -263,8 +263,7 @@ function NavLink({
         padding: "10px 12px",
         borderRadius: 6,
         background: active ? "var(--ds-accent-soft)" : "transparent",
-        // Inactive text is fg-muted here, in the sidebar and in the bottom
-        // tabs — the three nav implementations used to disagree.
+        // Inactive text is fg-muted, matching the sidebar and bottom tabs.
         color: active ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
         fontSize: 13,
       }}

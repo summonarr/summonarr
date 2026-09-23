@@ -1,14 +1,11 @@
 "use client";
 
-// Shared presentational primitives for the refined Activity dashboard.
-// Ported from the Claude Design "Activity Page" handoff — DS-token styled.
-// Consumed by the Activity dashboard's "use client" section components
-// (activity-sections, -now-playing, -recent-plays, and other activity-* views)
-// and by the server-rendered play detail page (admin/activity/play/[id]),
-// which reuses ActivityCard/SectionHeader/DetailHeader so every Activity
-// detail view shares one card and header composition. Sparkline/AreaChart
-// carry hover state, so this is a client module. Tooltip date labels are precomputed server-side and passed
-// down as `labels` — never derived from Date here (CLAUDE.md guardrail 16).
+// Shared building blocks (cards, headers, charts, tags) for the Activity
+// dashboard. Used by the activity-* client components and by the server-rendered
+// play detail page (admin/activity/play/[id]), so every Activity view shares one
+// look. Sparkline/AreaChart keep hover state, which is why this is a client
+// module. Tooltip date labels are computed on the server and passed in as
+// `labels` — never built from Date here (CLAUDE.md guardrail 16).
 
 import {
   Fragment,
@@ -33,13 +30,11 @@ export function sourceDotColor(source: string): string {
   return source === "plex" ? "var(--ds-plex)" : "var(--ds-jellyfin)";
 }
 
-// `instance` is a media-server instance slug (media-instances.ts). It is
-// appended to the label as ":<slug>" — the same shape mediaInstanceLabel
-// produces ("plex:remote") — and ONLY when non-empty: `serverInstance` is a
-// `@default("")` column, so every pre-multi-server row reads "" and is
-// indistinguishable from "the default server". Omitting it there keeps
-// single-server deployments byte-identical and never mislabels legacy rows.
-// Colour stays keyed off `source`; the slug lives in the text.
+// `instance` is a media-server instance slug (see media-instances.ts). When it
+// is non-empty the tag reads "PLEX:remote", matching mediaInstanceLabel. The
+// default server's slug is "" (also what every older row holds), so it shows
+// just "PLEX" — single-server setups look exactly as they did before.
+// The colour depends only on `source`.
 export function SourceTag({ source, instance }: { source: string; instance?: string }) {
   const isPlex = source === "plex";
   return (
@@ -216,10 +211,10 @@ export function Avatar({
         width: size,
         height: size,
         borderRadius: 999,
-        // No accent → a surface chip, whose letter must follow the theme: the
-        // fixed near-white letter below is only legible on the dark accent
-        // washes callers pass, and on light-theme --ds-bg-3 (L .955) it was
-        // white-on-white.
+        // With no accent this is a plain surface chip, so the letter uses a
+        // theme colour. The fixed near-white letter below is only readable on
+        // the dark accent backgrounds callers pass; on the light theme's
+        // surface it would be white-on-white.
         background: accent ?? "var(--ds-bg-3)",
         display: "inline-flex",
         alignItems: "center",
@@ -426,16 +421,12 @@ export function Sparkline({
           strokeLinecap="round"
           vectorEffect="non-scaling-stroke"
         />
-        {/* hover.i is captured from a mousemove against the data array as it
-            was THEN. Nothing clears it when the array shrinks — the live SSE
-            refresh recomputes a rolling cutoff, so the oldest day drops out
-            while the pointer still rests on the last index, and a filter
-            change can take the series from ~60 points to ~7. The index then
-            reads past the end and `data[hover.i].toLocaleString()` throws
-            during render, which unwinds to the (app) error boundary and
-            blanks the whole activity dashboard. Dropping the tooltip for an
-            out-of-range index is honest; `?? 0` would render a value that
-            was never in the data. */}
+        {/* hover.i was recorded against the data as it was when the mouse
+            moved. A live refresh or filter change can shrink `data` while the
+            pointer stays put, leaving hover.i past the end. Reading
+            data[hover.i] would then crash the whole dashboard, so an
+            out-of-range index simply hides the tooltip (showing `?? 0` would
+            invent a value that was never in the data). */}
         {hover && hover.i < data.length && (
           <>
             <line
@@ -642,16 +633,12 @@ export function AreaChart({
           vectorEffect="non-scaling-stroke"
           strokeLinejoin="round"
         />
-        {/* hover.i is captured from a mousemove against the data array as it
-            was THEN. Nothing clears it when the array shrinks — the live SSE
-            refresh recomputes a rolling cutoff, so the oldest day drops out
-            while the pointer still rests on the last index, and a filter
-            change can take the series from ~60 points to ~7. The index then
-            reads past the end and `data[hover.i].toLocaleString()` throws
-            during render, which unwinds to the (app) error boundary and
-            blanks the whole activity dashboard. Dropping the tooltip for an
-            out-of-range index is honest; `?? 0` would render a value that
-            was never in the data. */}
+        {/* hover.i was recorded against the data as it was when the mouse
+            moved. A live refresh or filter change can shrink `data` while the
+            pointer stays put, leaving hover.i past the end. Reading
+            data[hover.i] would then crash the whole dashboard, so an
+            out-of-range index simply hides the tooltip (showing `?? 0` would
+            invent a value that was never in the data). */}
         {hover && hover.i < data.length && (
           <>
             <line

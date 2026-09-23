@@ -118,7 +118,8 @@ interface PlexConnectFormProps {
   siteUrl: string;
 }
 
-// Plex connection uses PIN-based OAuth; the admin token is stored in the Setting table, not an env var
+// Connects Plex with Plex's PIN sign-in: the admin approves a short code on plex.tv
+// and the resulting admin token is saved in the Setting table (not an env var).
 export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLibraries, siteUrl }: PlexConnectFormProps) {
   const [connectedEmail, setConnectedEmail] = useState(initialEmail);
   const [status, setStatus] = useState<"idle" | "waiting" | "saving" | "error">("idle");
@@ -195,7 +196,8 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
       `&context[device][product]=Summonarr` +
       `&forwardUrl=${forwardUrl}`;
 
-    // PIN state stashed so /auth/plex/done can pick it up after Plex redirects back
+    // Save the PIN details in sessionStorage: this page is about to navigate away,
+    // and /auth/plex/done reads them when Plex sends the browser back.
     try {
       sessionStorage.setItem("plex-redirect-auth", JSON.stringify({
         flow: "settings", pinId, state,
@@ -219,7 +221,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
         return;
       }
     } catch {
-      // fall through to the shared error state below
+      // Handled by the error lines below.
     }
     setError("Failed to disconnect");
     setStatus("error");

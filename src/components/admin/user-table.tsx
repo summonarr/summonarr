@@ -322,7 +322,8 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
         const isSelf = u.id === currentUserId;
         const isBusy = busy?.startsWith(u.id) ?? false;
         const displayName = u.name ?? u.email;
-        const initial = displayName[0].toUpperCase();
+        // `?? "?"` guards an empty name string, where [0] is undefined.
+        const initial = (displayName[0] ?? "?").toUpperCase();
         // Capability badges read the RAW mask (no ADMIN short-circuit) so they
         // reflect explicitly-granted bits; the role badge already implies admin.
         const rawPerms = parsePermissions(u.permissions);

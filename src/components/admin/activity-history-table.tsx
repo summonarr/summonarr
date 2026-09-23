@@ -1,15 +1,13 @@
 "use client";
 
-// Refined History tab, ported from the Claude Design handoff (history.jsx).
-// Visual layer is the design; the data layer (debounced search, server-side
-// filter/sort/paginate against /api/play-history, distinct platform/user
-// fetch, row delete, CSV/JSON export) is preserved from the prior
-// implementation. Relative-time cells are gated behind useHasMounted so SSR
-// and hydration agree (guardrail 16).
+// The admin History tab: a searchable, sortable, paginated table of plays.
+// Filtering, sorting and paging all happen on the server (/api/play-history).
+// Relative-time cells ("3h ago") wait for useHasMounted so the server render
+// and the browser's first render match (guardrail 16).
 //
-// All state lives here; the filter bar, pagination footer, expanded detail
-// row, delete modal, and pure helpers are extracted under ./activity-history/
-// and receive state + callbacks (including the `mounted` flag) via props.
+// All state lives here. The filter bar, pagination footer, expanded detail
+// row, delete modal and pure helpers live under ./activity-history/ and get
+// their state and callbacks (including the `mounted` flag) through props.
 
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
@@ -107,11 +105,11 @@ export function ActivityHistoryTable({
   }, [search]);
 
   useEffect(() => {
-    // AbortController guards against unmount during the in-flight fetch + against
-    // a backend 4xx returning `{ error: "..." }` which (untyped) would crash the
-    // downstream .map/.filter in the dropdown render. Typed parsers narrow the
-    // payload to the array shape the setters expect; non-array responses are
-    // silently dropped (empty dropdown is preferable to a render crash).
+    // Loads the options for the Platform and User dropdowns. The
+    // AbortController cancels the requests if the table unmounts first. Only
+    // an array is accepted: an error reply like `{ error: "..." }` would crash
+    // the dropdown's .map(), so anything else is ignored and the dropdown
+    // just stays empty.
     const ac = new AbortController();
     fetch(withBasePath("/api/play-history?distinct=platforms"), { signal: ac.signal })
       .then((r) => (r.ok ? r.json() : null))
@@ -162,17 +160,13 @@ export function ActivityHistoryTable({
     ],
   );
 
-  // Identity of the last filter set the fetch effect acted on. A filter change
-  // resets the page to 1 — but that decision is made INSIDE the fetch effect,
-  // not in a separate `useEffect(() => setPage(1), [filters])`. With two
-  // effects, both run in the same commit (declaration order), so the fetch
-  // effect saw the NEW filters with the OLD page and issued
-  // `GET /api/play-history?…&page=<old>`; the re-render then aborted it
-  // client-side and sent page 1. The abort never reaches the server, which
-  // had already started the grouped window-function query over the whole
-  // filtered set — one full history query wasted per filter change from any
-  // page other than 1. Folding the reset into the fetch decision makes it
-  // exactly one request.
+  // Remembers the filters the fetch effect last used. When the filters change
+  // we jump back to page 1, and that decision is made INSIDE the fetch effect
+  // on purpose. A separate `useEffect(() => setPage(1), [filters])` would run
+  // in the same render as the fetch, so the fetch would first request the
+  // OLD page with the NEW filters, then cancel it and ask for page 1. The
+  // cancel only happens in the browser — the server still runs the first
+  // (expensive) query. Doing both here sends exactly one request.
   const lastFilterKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -209,6 +203,14 @@ export function ActivityHistoryTable({
         return r.json();
       })
       .then((data) => {
+        // After a delete the current page can end up past the last page
+        // (e.g. removing the only row on the final page). Step back to the new
+        // last page; changing `page` re-runs this effect and fetches it.
+        const lastPage = Math.max(1, data.totalPages ?? 1);
+        if (page > lastPage) {
+          setPage(lastPage);
+          return;
+        }
         setRows(data.items ?? []);
         setTotal(data.total ?? 0);
         setTotalPages(data.totalPages ?? 1);
@@ -422,9 +424,9 @@ export function ActivityHistoryTable({
               ) : (
                 rows.map((r, i) => {
                   const isExpanded = expandedId === r.id;
-                  // Use chain totals when present (grouped mode). Ungrouped
-                  // rows mirror these to single-segment defaults, so the
-                  // expression is safe either way.
+                  // Use the chain total when present (grouped mode). In
+                  // ungrouped mode the API fills it with the row's own value,
+                  // so this works either way.
                   const effectivePlay = r.totalPlayDuration ?? r.playDuration;
                   const pct =
                     r.duration > 0
@@ -448,6 +450,11 @@ export function ActivityHistoryTable({
                           setExpandedId((id) => (id === r.id ? null : r.id))
                         }
                         onKeyDown={(e) => {
+                          // Only react to keys pressed on the row itself. A key
+                          // pressed on the user link or the delete button also
+                          // bubbles up here, and preventDefault() would stop
+                          // that link/button from working from the keyboard.
+                          if (e.target !== e.currentTarget) return;
                           if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
                             setExpandedId((id) => (id === r.id ? null : r.id));
@@ -789,7 +796,6 @@ export function ActivityHistoryTable({
           }}
         />
 
-        {/* Pagination */}
         <HistoryPagination
           page={page}
           setPage={setPage}

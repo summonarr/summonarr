@@ -8,6 +8,8 @@ import { PageHeader } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
 
+// Returns the URL only if it parses and uses https; anything else (bad input,
+// http:, javascript:) becomes null and the method is shown as plain text.
 function safeUrl(v: string): string | null {
   try {
     const u = new URL(v);
@@ -27,8 +29,8 @@ export default async function DonatePage() {
   });
   const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
 
-  // No donation methods configured → page (and its nav link) are hidden. Renders
-  // the 404 so a direct URL visit can't reach an empty Support Us page.
+  // With no donation methods configured, the nav link is hidden and this page
+  // returns a 404, so a direct visit can't land on an empty Support Us page.
   if (!hasDonationLinks(cfg)) notFound();
 
   const methods = [
@@ -38,10 +40,14 @@ export default async function DonatePage() {
       value: cfg.donationPaypal ?? "",
       pillBg: "#ffc439",
       pillColor: "#003087",
+      // The settings form suggests "paypal.me/yourname", so accept that form
+      // too — otherwise it would become "https://paypal.me/paypal.me/yourname".
       href: (v: string) =>
         v.startsWith("http")
           ? safeUrl(v)
-          : safeUrl(`https://paypal.me/${v.replace(/^@/, "")}`),
+          : /^(www\.)?paypal\.me\//i.test(v)
+            ? safeUrl(`https://${v}`)
+            : safeUrl(`https://paypal.me/${v.replace(/^@/, "")}`),
       hint: "Click to donate via PayPal",
     },
     {
@@ -51,7 +57,9 @@ export default async function DonatePage() {
       pillBg: "#3d95ce",
       pillColor: "#000000",
       href: (v: string) =>
-        safeUrl(`https://venmo.com/${v.replace(/^@/, "")}`),
+        v.startsWith("http")
+          ? safeUrl(v)
+          : safeUrl(`https://venmo.com/${v.replace(/^@/, "")}`),
       hint: "Click to pay via Venmo",
     },
     {

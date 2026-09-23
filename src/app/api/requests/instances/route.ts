@@ -10,8 +10,9 @@ export const dynamic = "force-dynamic";
 // GET — the NAMED Radarr/Sonarr instances the CALLER may request a given title
 // on, with that title's per-instance request/availability state. The native
 // mirror of the `namedTargets` the web movie/TV detail pages render as their
-// "Request on <instance>" buttons; both must agree, so all three now share the
-// one resolver (resolveNamedInstanceTargets) rather than restating it.
+// "Request on <instance>" buttons. This route and those two pages must agree, so
+// all three call the one resolver (resolveNamedInstanceTargets) instead of each
+// writing their own copy.
 //
 // Scope is deliberately narrow — NAMED slugs only. The default instance ("") is
 // the plain Request button and "4k" is the dedicated 4K button; both are already

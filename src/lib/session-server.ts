@@ -24,14 +24,16 @@ export async function readSummonarrSession(): Promise<SessionClaims | null> {
 // readSummonarrSession()/auth() (which only verify the JWT signature + exp),
 // this routes through verifyAndRefreshSession so a revoked AuthSession row, a
 // sessionsRevokedAt/passwordChangedAt cutoff, or a role demotion is honored
-// immediately (within the same dbCheckedAt fast-path window proxy.ts uses:
-// 10s for admins). Returns the DB-reconciled claims (role refreshed) or null.
-// Does not persist the refreshed cookie — these callers only need the authz
-// decision. That is also why rotation is disabled: it would kill the token the
-// browser still holds, and there is no way to hand back the replacement, so the
-// "next request re-checks" assumption would become "next request is logged out". Returns null (deny the session
-// path) if the DB check throws, so a DB hiccup falls through to the caller's
-// CRON_SECRET path rather than failing open.
+// promptly (within the same dbCheckedAt fast-path window proxy.ts uses: 10s for
+// admins, 60s for everyone else). Returns the DB-reconciled claims (role
+// refreshed) or null.
+//
+// It does not send back a refreshed cookie — these callers only need the authz
+// decision. That is also why rotation is disabled: rotating would kill the token
+// the browser still holds with no way to hand it the replacement, logging the
+// user out on their next request. Returns null (deny the session path) if the
+// DB check throws, so a DB hiccup falls through to the caller's CRON_SECRET
+// path rather than failing open.
 export async function readActiveSummonarrSession(): Promise<SessionClaims | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get(getSessionCookieName())?.value;

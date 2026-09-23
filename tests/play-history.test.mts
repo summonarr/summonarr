@@ -32,8 +32,10 @@
 //    cross-source table bleed.
 //  - resolveMediaServerUser: advisory-lock serialization (namespace 2020,
 //    31-bit-masked FNV-1a key — Postgres has no (int, bigint) overload),
-//    normalized-email User linking that never links deactivated or
-//    other-server accounts, the dormant serverMachineId binding check
+//    User linking by provider subject id first and normalized email second
+//    (a disabled account still links; purged and other-server accounts never
+//    do; an admin's manual link is never overwritten — guardrails 33/34),
+//    the dormant serverMachineId binding check
 //    (MediaServerMismatchError), and set-only isServerAdmin — an update may
 //    promote false→true but NEVER demote.
 //  - recordCompletedSession: the `${sessionKey}:${startedAt.toISOString()}`

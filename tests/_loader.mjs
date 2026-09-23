@@ -39,8 +39,9 @@ function isFile(p) {
   }
 }
 
-// Try TS-style resolution for an extensionless path: exact file, .ts/.tsx,
-// then directory index (generated Prisma client resolves via index.js).
+// Try TS-style resolution for an extensionless path: .ts, .tsx, the exact
+// path, then a directory index (the generated Prisma client resolves via
+// index.js).
 function resolveTsPath(base) {
   for (const candidate of [
     `${base}.ts`,

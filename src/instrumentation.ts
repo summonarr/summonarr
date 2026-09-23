@@ -1,4 +1,5 @@
-// Runs once at server startup in the Node.js runtime only — safe to use Node APIs and import server-only modules here
+// Next calls register() once at server startup. Everything inside is gated on
+// the Node.js runtime, so it is safe to use Node APIs and server-only modules.
 import { evaluateLocalOnlyStartup } from "@/lib/local-only";
 import { parseAuthUrl } from "@/lib/auth-url";
 
@@ -229,11 +230,6 @@ export async function register() {
       .then(({ prewarmLibraryCache }) => prewarmLibraryCache())
       .catch((err) => console.error("[prewarm] Library cache pre-warm error:", err));
 
-    // Plex SSO identity-binding self-heal: backfill User.plexUserId from plex.tv
-    // so existing Plex users (created before sign-in switched from email-based to
-    // immutable-id-based (provider, plexUserId) matching) aren't locked out on
-    // their next sign-in. See src/lib/plex-user-backfill.ts for the full
-    // rationale. Fire-and-forget — must never block boot.
     // Stamp `purgedAt` on accounts scrubbed before that column existed, and
     // re-disable any that were re-enabled into a zombie. Must run BEFORE the
     // Plex backfill: an un-marked, re-enabled tombstone looks exactly like a
@@ -243,6 +239,12 @@ export async function register() {
       .then(({ markLegacyPurgedAccounts }) => markLegacyPurgedAccounts())
       .catch((err) => console.error("[account-lifecycle] startup error:", err));
 
+    // Plex SSO identity-binding self-heal: backfill User.plexUserId from plex.tv
+    // so existing Plex users (created before sign-in switched from email-based to
+    // immutable-id-based (provider, plexUserId) matching) aren't locked out on
+    // their next sign-in. See src/lib/plex-user-backfill.ts for the full
+    // rationale. Fire-and-forget — must never block boot.
+    //
     // RUN ONCE EVER, not once per boot. The backfill binds User.plexUserId on an
     // EMAIL match — precisely the link authorizeWithPlex deliberately refuses,
     // calling it "the account-takeover surface" and demanding an explicit admin

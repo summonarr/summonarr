@@ -7,19 +7,20 @@ import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2, Trash2, RefreshCw, Copy, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 
-// 24 random bytes as hex — mirrors generateSecret() in forms/webhook-secret-form.tsx (the
-// HD/4K webhook-secret field). Client-only (crypto.getRandomValues); called from
-// event handlers / addInstance, never during SSR.
+// 24 random bytes as a hex string — same as generateSecret() in
+// forms/webhook-secret-form.tsx (the HD/4K webhook-secret field). Browser-only
+// (crypto.getRandomValues), so it is only called from click handlers, never
+// during the server render.
 function generateSecret(): string {
   const bytes = new Uint8Array(24);
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// Admin UI for NAMED Radarr/Sonarr instances (e.g. an "anime" instance). The
-// default and legacy 4K instances keep their own forms above — this manages the
-// extra registry-backed instances via /api/admin/arr-instances. Secrets are
-// write-only: a blank field means "unchanged".
+// Admin UI for extra, NAMED Radarr/Sonarr instances (e.g. an "anime" one). The
+// default and 4K instances have their own forms above; this one manages the
+// extra instances through /api/admin/arr-instances (guardrail 32). Secrets are
+// write-only: the saved value is never shown, and a blank field means "keep it".
 
 const MASKED_VALUE = "••••••••";
 const SLUG_RE = /^[a-z][a-z0-9]{0,23}$/;
@@ -43,17 +44,17 @@ interface InstanceView {
   hasWebhookSecret: boolean;
 }
 
-// Root folders + quality profiles fetched live from a configured instance (same
-// shape as /api/settings/arr-options), so they render as dropdowns like the base
-// Radarr/Sonarr config instead of a typed id. languageProfiles is present only
-// when a Sonarr v3 upstream serves them (v4 removed language profiles).
+// Root folders + quality profiles read live from a configured instance (the
+// shape /api/settings/arr-options returns), so they show as dropdowns instead
+// of fields where you type an id. languageProfiles only appears for Sonarr v3
+// (Sonarr v4 removed language profiles).
 interface ArrOptions {
   rootFolders: { path: string }[];
   qualityProfiles: { id: number; name: string }[];
   languageProfiles?: { id: number; name: string }[];
 }
 
-// Radarr's closed enum for when a movie counts as "available" to search.
+// Radarr's fixed list of choices for when a movie counts as "available" to search for.
 const MINIMUM_AVAILABILITY_OPTIONS = [
   { value: "announced", label: "Announced" },
   { value: "inCinemas", label: "In Cinemas" },
@@ -107,21 +108,25 @@ const isNamed = (slug: string) => slug !== "" && slug !== "4k";
 function ServiceInstances({ service }: { service: ArrService }) {
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [loaded, setLoaded] = useState(false);
-  // A failed initial GET leaves `drafts` empty, which is indistinguishable from
-  // "no instances configured" — and saving that wipes every named instance.
+  // If loading fails, `drafts` stays empty, which looks exactly like "no
+  // instances" — and saving an empty list deletes every named instance. So a
+  // failed load blocks saving.
   const [loadFailed, setLoadFailed] = useState(false);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [message, setMessage] = useState("");
   const [tests, setTests] = useState<Record<string, { version?: string; error?: string }>>({});
   const [copiedHook, setCopiedHook] = useState<number | null>(null);
-  // Index of the draft whose Remove is awaiting confirmation. Indexes shift when
-  // the list changes, so every path that adds/removes/reloads drafts clears it.
+  // Position of the draft whose Remove is waiting for confirmation. Positions
+  // shift when the list changes, so anything that adds, removes or reloads
+  // drafts resets this.
   const [confirmRemove, setConfirmRemove] = useState<number | null>(null);
-  // slug → its live root-folder/quality-profile options ("loading"/"error" while pending/failed).
+  // For each slug: its live root-folder/quality-profile options, or
+  // "loading"/"error" while the fetch is running or after it failed.
   const [optionsBySlug, setOptionsBySlug] = useState<Record<string, ArrOptions | "loading" | "error">>({});
 
-  // Full webhook URL the admin pastes into Radarr/Sonarr. Only rendered inside a
-  // card (loaded state = client-only), so window is always defined here.
+  // Full webhook URL the admin pastes into Radarr/Sonarr (the ?token= form —
+  // guardrail 2). Only shown after loading, which happens in the browser, so
+  // `window` exists; the typeof check is just a safety net.
   const webhookUrl = (secret: string) =>
     `${typeof window !== "undefined" ? window.location.origin : ""}${withBasePath(`/api/webhooks/${service}`)}?token=${encodeURIComponent(secret)}`;
 
@@ -131,14 +136,14 @@ function ServiceInstances({ service }: { service: ArrService }) {
       setCopiedHook(idx);
       setTimeout(() => setCopiedHook(null), 2000);
     } catch {
-      /* clipboard blocked — the URL is visible in the field for manual copy */
+      /* clipboard blocked — the URL is on screen, so it can be copied by hand */
     }
   }
 
-  // Fetch an instance's real root folders + quality profiles from the arr API
-  // (same endpoint the base config uses). Requires the connection to be saved
-  // first — the endpoint reads url+key from Settings — so it runs after load()
-  // and after a successful save(), only for configured instances.
+  // Fetch an instance's real root folders + quality profiles from Radarr/Sonarr
+  // (the same endpoint the main config uses). That endpoint reads the saved URL
+  // and API key, so it only works once the connection is saved: it runs after
+  // load() and after a successful save(), and only for configured instances.
   const fetchOptions = useCallback(async (slug: string) => {
     setOptionsBySlug((prev) => ({ ...prev, [slug]: "loading" }));
     try {
@@ -162,10 +167,10 @@ function ServiceInstances({ service }: { service: ArrService }) {
       setLoadFailed(false);
       setConfirmRemove(null);
     } catch {
-      // Leaving `drafts` empty here used to be silent — and an empty draft list
-      // saves as "remove every named instance", which deletes their (encrypted,
-      // unrecoverable) API keys and webhook secrets. A failed load must never be
-      // mistaken for "the admin has no instances", so block saving and say so.
+      // Saving an empty list means "remove every named instance", which
+      // deletes their API keys and webhook secrets for good (they're encrypted
+      // and can't be recovered). A failed load must never be mistaken for "no
+      // instances", so flag it: saving is disabled and a message is shown.
       setLoadFailed(true);
     } finally {
       setLoaded(true);
@@ -185,8 +190,8 @@ function ServiceInstances({ service }: { service: ArrService }) {
     setDrafts((prev) => [
       ...prev,
       {
-        // Auto-generate the webhook secret so the admin never has to invent one —
-        // they just copy the resulting webhook URL into Radarr/Sonarr.
+        // Create the webhook secret automatically so the admin doesn't have to
+        // make one up — they just copy the webhook URL into Radarr/Sonarr.
         slug: "", name: "", url: "", apiKey: "", rootFolder: "", qualityProfileId: "",
         minimumAvailability: "", languageProfileId: "", webhookSecret: generateSecret(),
         restricted: false, serverAll: false, skipLibraryCheck: false, animeOnly: false,
@@ -204,7 +209,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
   };
 
   async function save() {
-    // Client-side slug validation before hitting the server.
+    // Check slugs here first, before sending anything to the server.
     for (const d of drafts) {
       if (!SLUG_RE.test(d.slug) || d.slug === "hd") {
         setStatus("error");
@@ -231,7 +236,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
       apiKey: d.apiKey ? d.apiKey : d.hasApiKey ? MASKED_VALUE : undefined,
       rootFolder: d.rootFolder,
       qualityProfileId: d.qualityProfileId || null,
-      // null clears the row so an emptied select means "use the service's default".
+      // null deletes the saved value, so an empty dropdown means "use Radarr's/Sonarr's own default".
       ...(service === "radarr" ? { minimumAvailability: d.minimumAvailability || null } : {}),
       ...(service === "sonarr" ? { languageProfileId: d.languageProfileId || null } : {}),
       webhookSecret: d.webhookSecret ? d.webhookSecret : d.hasWebhookSecret ? MASKED_VALUE : undefined,
@@ -257,8 +262,8 @@ function ServiceInstances({ service }: { service: ArrService }) {
         const named = (data.instances ?? []).filter((i) => isNamed(i.slug));
         setDrafts(named.map(toDraft));
         setTests(data.testResults ?? {});
-        // Now that connections are persisted, (re)load each configured instance's
-        // root folders + quality profiles so the dropdowns populate.
+        // The connections are saved now, so (re)load each configured instance's
+        // root folders + quality profiles to fill the dropdowns.
         named.forEach((i) => { if (i.hasApiKey && i.url) fetchOptions(i.slug); });
         setConfirmRemove(null);
         setStatus("ok");
@@ -372,10 +377,10 @@ function ServiceInstances({ service }: { service: ArrService }) {
                     className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">— {label}&apos;s default —</option>
-                    {/* A saved folder the server no longer lists would otherwise
-                        make this controlled select silently display the first
-                        option ("default") while the stale value stays in state —
-                        so surface it explicitly instead of hiding it. */}
+                    {/* If the saved folder is no longer on the server, the select
+                        would silently show the first option ("default") while
+                        still holding the old value — so list it, marked
+                        "not found", instead of hiding it. */}
                     {d.rootFolder && !(opts as ArrOptions).rootFolders.some((f) => f.path === d.rootFolder) && (
                       <option value={d.rootFolder}>{d.rootFolder} (not found on server)</option>
                     )}
@@ -410,9 +415,9 @@ function ServiceInstances({ service }: { service: ArrService }) {
               </div>
             </div>
 
-            {/* Static enum — needs no live options fetch, so it renders as soon
-                as the card exists. Sonarr's language profile below DOES need the
-                fetch (only a v3 upstream serves the list). */}
+            {/* A fixed list, so it shows right away with no fetch. Sonarr's
+                language profile below DOES need the fetch (only Sonarr v3
+                provides that list). */}
             {service === "radarr" && (
               <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
                 <div className="space-y-1.5">
@@ -518,9 +523,8 @@ function ServiceInstances({ service }: { service: ArrService }) {
               {confirmRemove !== idx && (
                 <button
                   type="button"
-                  // A draft that has never been saved has nothing server-side to
-                  // destroy, so discard it straight away and only confirm on a
-                  // persisted instance.
+                  // A never-saved draft has nothing on the server to delete, so
+                  // drop it at once; only ask for confirmation on a saved one.
                   onClick={() => (d.isNew ? removeInstance(idx) : setConfirmRemove(idx))}
                   className="flex items-center gap-1 text-xs text-red-400 hover:text-[var(--ds-danger-hover)]"
                 >
@@ -529,11 +533,10 @@ function ServiceInstances({ service }: { service: ArrService }) {
               )}
             </div>
 
-            {/* Removal lands on Save, not on the click, because the server
-                reconciles the whole instance list. Name what actually goes:
-                the API key and webhook secret are encrypted and cannot be
-                recovered, while requests already routed to this instance are
-                left alone. */}
+            {/* Removal only happens on Save, because the server replaces the
+                whole instance list at once. The message spells out what is
+                lost: the API key and webhook secret are encrypted and can't be
+                recovered. Requests already sent to this instance are kept. */}
             {confirmRemove === idx && (
               <div className="rounded-md border border-red-500/40 bg-red-500/10 p-3 space-y-2">
                 <p className="text-xs text-red-400">

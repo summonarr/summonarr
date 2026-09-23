@@ -64,11 +64,9 @@ function guardedAvailabilityReads(source: string): { line: number; text: string;
       ts.isPropertyAccessExpression(node) &&
       (node.name.text === "plexAvailable" || node.name.text === "jellyfinAvailable")
     ) {
-      // Climb to the nearest enclosing if/loop, collecting the widest
-      // expression the read participates in on the way.
-      // Track the widest EXPRESSION the read participates in — that is what
-      // must carry the visibility flag — while climbing statements to reach the
-      // guard. Climbing must NOT stop at the enclosing statement: in
+      // Climb up the syntax tree to the nearest enclosing `if`, remembering the
+      // widest EXPRESSION the read sits inside — that is what must carry the
+      // visibility flag. Climbing must NOT stop at the enclosing statement: in
       // `if (opts.hideAvailable) { result = result.filter(m => !(…)) }` the
       // filter's own statement never mentions hideAvailable, so stopping there
       // reported the site as unguarded and skipped it.

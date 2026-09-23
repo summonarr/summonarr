@@ -8,19 +8,18 @@ import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-in
 
 // Admin terminate-playback endpoint for Jellyfin. Mirrors the Plex route: it
 // sends the "Stop" playstate command (POST /Sessions/{id}/Playing/Stop), which
-// tears the stream down. The session removal surfaces as an SSE state="stopped"
-// event within ~1s; the normal finalize path writes the PlayHistory row, so we
-// don't write one inline.
+// tears the stream down. The 5s play-history poller then notices the session is
+// gone and its normal finalize path writes the PlayHistory row, so we don't
+// write one here.
 //
 // Body: { sessionKey: string, serverInstance?: string, reason?: string }
 // ActiveSession.sessionKey for Jellyfin holds the PlaySessionId, but Jellyfin's
 // Stop endpoint addresses sessions by the session UUID (Sessions[].Id). We
-// resolve sessionKey → session UUID via a live /Sessions snapshot — which also
-// confirms the session exists and is owned by an account we recognize, so an
-// admin can't POST an arbitrary identifier at the upstream server. serverInstance
-// picks which configured Jellyfin server to resolve against (multi-server
-// support); omitted/absent defaults to the default instance so existing callers
-// (older admin UI builds) are unaffected.
+// look the key up in a live /Sessions snapshot to get that UUID — which also
+// confirms the session really exists, so an admin can't POST an arbitrary
+// identifier at the upstream server. serverInstance picks which configured
+// Jellyfin server to use (multi-server support); when omitted it falls back to
+// the default server so older admin UI builds keep working.
 export const POST = withAdmin(async (req, _ctx, session) => {
   const parsed = await readJsonCapped<{ sessionKey?: unknown; serverInstance?: unknown; reason?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
@@ -60,7 +59,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
 
   // The card's sessionKey is the PlaySessionId; match on that, but also accept
-  // the raw session UUID for robustness against webhook/poll keying differences.
+  // the raw session UUID in case a caller sends that instead.
   const match = sessions.find(
     (s) => s.playSessionId === sessionKey || s.sessionId === sessionKey,
   );

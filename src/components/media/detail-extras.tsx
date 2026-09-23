@@ -44,9 +44,8 @@ export function DetailExtras({ media, mediaType }: { media: TmdbMedia; mediaType
     >
       {hasProviders && (
         <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {/* h3, not h2: these are 11px mono sub-labels, while the page's real
-              h2s (Cast, Seasons, More Like This) are 15px semibold — the
-              heading level should say what the size does. */}
+          {/* h3, not h2: these are small sub-labels, below the page's real
+              section headings (Cast, Seasons, More Like This). */}
           <h3 className="ds-mono" style={{ fontSize: 11, letterSpacing: "0.04em", color: "var(--ds-fg-subtle)", margin: 0, textTransform: "uppercase" }}>
             Where to watch
           </h3>

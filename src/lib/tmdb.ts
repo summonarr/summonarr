@@ -14,7 +14,7 @@ import type {
   Genre, DiscoverFilters, WatchProvider, TmdbSeason, TmdbEpisode,
 } from "./tmdb-types";
 // languageName is the ONE ISO-639 → English display-name helper (the detail
-// pages consume the same export); tmdb.ts used to carry a private duplicate.
+// pages use the same export). Don't add a private copy here.
 import { languageName } from "./tmdb-types";
 
 // Merge a unified ratings payload (fetchUnifiedRatings) onto a media object.
@@ -651,8 +651,7 @@ function migrateKeywordShape(m: TmdbMedia): boolean {
 
 // Suggestion lists feed two consumers with very different appetites, so the
 // cache stores the WIDE list and each caller slices to what it needs.
-//   - detail-page "More like this" rails take SUGGESTIONS_RAIL_LIMIT (18) — the
-//     historical size, so those pages are byte-identical to before;
+//   - detail-page "More like this" rails take SUGGESTIONS_RAIL_LIMIT (18);
 //   - the For You engine takes the whole list, because each seed's tail is what
 //     lets a ranked set reach MAX_STORED_RECOMMENDATIONS_PER_USER (200).
 // Widening costs ZERO extra requests: /similar and /recommendations each return
@@ -736,7 +735,7 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
   if (r.recommendations || r.similar) {
     const seen = new Set<number>([id]);
     const suggestions: TmdbMedia[] = [];
-    // recommendations before similar — same starvation rule (and same :v2 key)
+    // recommendations before similar — same ordering rule (and same :v3 key)
     // as getMovieSuggestions; the two writers must agree on ordering.
     for (const page of [r.recommendations, r.similar]) {
       if (!page) continue;
@@ -832,7 +831,7 @@ export async function getTVDetails(id: number): Promise<TmdbMedia> {
   if (r.recommendations || r.similar) {
     const seen = new Set<number>([id]);
     const suggestions: TmdbMedia[] = [];
-    // recommendations before similar — same starvation rule (and same :v2 key)
+    // recommendations before similar — same ordering rule (and same :v3 key)
     // as getMovieSuggestions; the two writers must agree on ordering.
     for (const page of [r.recommendations, r.similar]) {
       if (!page) continue;
@@ -1101,7 +1100,7 @@ export async function getMovieSuggestions(
   const seen = new Set<number>([id]);
   const result: TmdbMedia[] = [];
   // /recommendations (TMDB's behavior-based engine) is consumed FIRST so the
-  // 18-item cap starves /similar (a crude keyword/genre matcher) rather than
+  // item cap starves /similar (a crude keyword/genre matcher) rather than
   // the reverse. These lists feed the For You engine and the detail-page "More
   // like this" rails; similar-first filled both with genre-adjacent noise
   // whenever /similar alone could satisfy the cap.

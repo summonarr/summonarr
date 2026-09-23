@@ -28,8 +28,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (!checkRateLimit(`admin-trash-refresh:${session.user.id}`, 10, 5 * 60 * 1000)) {
     return NextResponse.json({ error: "Too many refreshes — try again shortly." }, { status: 429 });
   }
-  // Body is optional. Accept missing/empty body silently (UI's "Refresh both" sends none); reject
-  // malformed JSON loudly (typos otherwise silently fall through to "refresh both").
+  // The body is optional: no body means "refresh both" (the UI sends none). But a
+  // body that IS present must be valid JSON, so a typo can't quietly become "refresh both".
   const contentLength = req.headers.get("content-length");
   let body: { service?: unknown } = {};
   if (contentLength && contentLength !== "0") {
@@ -56,12 +56,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       const results: RefreshResult[] = [];
       const errors: string[] = [];
       let schemaDiagnostic: string | null = null;
-      // ONE recursive tree fetch shared by every service in this call — the
-      // ~573 KB GitHub listing is identical for RADARR and SONARR, and the
-      // UI's default "Refresh both" used to pull it back-to-back (2x transfer,
-      // 2x against the GitHub rate budget). Mirrors runTrashSync. A tree-fetch
-      // failure fails every requested service with the same per-service error
-      // line refreshCatalog would have thrown.
+      // Fetch the GitHub file listing ONCE and share it across services — it is
+      // the same for RADARR and SONARR, so fetching it per service would double
+      // the download and the GitHub rate-limit cost. Mirrors runTrashSync. If
+      // the fetch fails, every requested service gets the same error line.
       let sharedTree: TrashTree | null = null;
       try {
         sharedTree = await fetchTrashTree();

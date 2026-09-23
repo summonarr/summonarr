@@ -61,9 +61,9 @@ async function enrichItems(
 ): Promise<LibraryItem[]> {
   if (items.length === 0) return [];
 
-  // Split by mediaType so each predicate is `tmdbId IN [...]` against the
-  // composite (tmdbId, mediaType) index — at LIBRARY_ITEM_CAP=25_000 the prior
-  // wide OR clause was too large for the planner to optimize.
+  // Split by mediaType so each condition is a simple `tmdbId IN [...]` that can
+  // use the (tmdbId, mediaType) index. One OR clause per item would be far too
+  // large for the database to plan well at up to 25,000 items.
   const movieIds = items.filter((i) => i.mediaType === "MOVIE").map((i) => i.tmdbId);
   const tvIds = items.filter((i) => i.mediaType === "TV").map((i) => i.tmdbId);
   const allRequests = await prisma.mediaRequest.findMany({
@@ -126,7 +126,9 @@ async function enrichItems(
             voteAverage: parsed.voteAverage ?? prior?.voteAverage,
           });
         }
-      } catch { }
+      } catch {
+        // A corrupt cache row just leaves this title without a poster/rating.
+      }
     }
   }
 
@@ -417,9 +419,8 @@ export default async function LibraryDiffPage({
   // from Jellyfin" is technically true and completely useless, and it is exactly
   // the render that falls over: measured at ~12MB of HTML and 70k DOM elements
   // for an ordinary 5,000-title library, ~61MB and 350k at the 25,000 cap, plus
-  // the same rows again in the RSC payload. The old gate only caught BOTH sides
-  // being empty, so every single-server deployment — which guardrail 35 notes is
-  // the common shape — walked into it from a first-class nav link.
+  // the same rows again in the RSC payload. Single-server deployments are the
+  // common case (guardrail 35), so we show a short notice instead.
   const oneSided = !plexConfigured || !jellyfinConfigured;
 
   // Start the ARR path-map builds now (external Radarr/Sonarr HTTP, independent

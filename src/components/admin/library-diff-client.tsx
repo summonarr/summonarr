@@ -555,18 +555,17 @@ function FixAllArrButton({ matches }: { matches: ClientBadMatch[] }) {
 
       const wrongItem = arrVerdict === "plex" ? match.plex : match.jellyfin;
       try {
-        // Background job + status poll (guardrail 37a) — each title settles
-        // server-side before the next starts, same serial order as before.
+        // Background job + status poll (guardrail 37a). Titles are fixed one
+        // at a time: each finishes on the server before the next starts.
         await runFixMatch({
           server:        arrVerdict,
           tmdbId:        wrongItem.tmdbId,
           mediaType:     wrongItem.mediaType,
           correctTmdbId: arrTmdbId,
-          // Same instance pinning the per-row FixMatchButton does. Omitted
-          // when empty so a default-instance body stays byte-identical.
-          // Without it the route falls back to the default server and
-          // rewrites ITS library using a ratingKey that belongs to the
-          // named one — the wrong-server remap this phase fixed.
+          // Target the server the wrong item actually lives on, like the
+          // per-row FixMatchButton does. Without it the route would use the
+          // default server and remap the wrong library. Omitted for the
+          // default server so that request body stays unchanged.
           ...(wrongItem.serverInstance ? { serverInstance: wrongItem.serverInstance } : {}),
         });
         done++;
@@ -630,13 +629,11 @@ function ArrFilterButton({
   );
 }
 
-// Cards actually painted per column. Each row is 14 DOM nodes and an <img>,
-// so an unbounded column is measured at ~12MB of HTML and 70k elements for a
-// 5,000-row diff. The cap is applied to the ALREADY-FILTERED array, never to
-// the source: search and the arr/request filters still see every row, so
-// narrowing the search reaches anything the cap hides. A genuine two-server
-// diff is normally in the hundreds — this is a backstop for the transient
-// spike while a newly added second server is still on its first sync.
+// Most cards drawn per column. A 5,000-row diff would otherwise put ~70k
+// elements on the page. The cap is applied AFTER search and filters, so
+// narrowing the search can still reach any row the cap hides. Real diffs are
+// usually in the hundreds; this guards the spike while a newly added second
+// server is still on its first sync.
 const RENDER_CAP = 500;
 
 function DiffColumn({
@@ -879,7 +876,12 @@ export function LibraryDiffClient({
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {filteredBadMatches.map((match) => (
-              <BadMatchCard key={match.relativePath} match={match} />
+              // Server slugs are part of the key: with several servers the same
+              // relative path can appear in more than one bad-match pair.
+              <BadMatchCard
+                key={`${match.plex.serverInstance}:${match.jellyfin.serverInstance}:${match.relativePath}`}
+                match={match}
+              />
             ))}
           </div>
         </section>

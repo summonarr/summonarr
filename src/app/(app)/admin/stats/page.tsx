@@ -110,10 +110,13 @@ export default async function StatsPage() {
   const monthData = requestsByMonth.map((r) => ({ month: r.month, count: Number(r.count) }));
 
   function formatBytes(bytes: number) {
-    if (bytes === 0) return "0 B";
+    // <= 0 also covers a disk reporting more free space than total, where
+    // Math.log would return NaN.
+    if (!(bytes > 0)) return "0 B";
     const k = 1024;
-    const sizes = ["B", "KB", "MB", "GB", "TB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    const sizes = ["B", "KB", "MB", "GB", "TB", "PB"];
+    // Clamp so the index always lands inside `sizes`.
+    const i = Math.max(0, Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1));
     return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
   }
 

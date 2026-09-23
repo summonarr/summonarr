@@ -73,7 +73,9 @@ test("key fingerprint: 16 hex chars, stable for the same key, null when unconfig
   const fp1 = tokenEncryptionKeyFingerprint();
   assert.match(fp1 ?? "", /^[0-9a-f]{16}$/);
   assert.equal(tokenEncryptionKeyFingerprint(), fp1);
-  // Reads the env per call and never throws on a bad key — restore requires care.
+  // The fingerprint reads the env on every call (no caching) and returns null
+  // instead of throwing on a bad key. The key is restored at the end so later
+  // tests still see it.
   delete process.env.TOKEN_ENCRYPTION_KEY;
   assert.equal(tokenEncryptionKeyFingerprint(), null);
   process.env.TOKEN_ENCRYPTION_KEY = "not-hex";

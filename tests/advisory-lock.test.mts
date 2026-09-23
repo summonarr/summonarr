@@ -1,19 +1,21 @@
 // Unit tests for the advisory-lock helper (src/lib/advisory-lock.ts).
-// withAdvisoryLock serializes cron/admin operations that mutate the same
-// external state, holding a Postgres advisory lock on ONE persistent pg
-// connection. The properties pinned here: the lock-id constants (mutual
-// exclusion only works because racing routes share the SAME id — a silent
-// renumber is a behavioural change), the busy fast-path (onBusy, no work, no
-// unlock for a lock never held), the fail-closed read of the try-lock result,
-// the timeout (AbortSignal fires with the timeout error BEFORE the unlock),
-// and that pg_advisory_unlock + client.end always run in the finally paths.
+// withAdvisoryLock makes sure only one cron/admin job that changes the same
+// external state runs at a time. It does this by holding a Postgres advisory
+// lock (a named lock Postgres keeps for us) on ONE dedicated pg connection.
+// What these tests pin:
+//   - the lock-id constants: jobs only exclude each other because racing routes
+//     share the SAME id, so silently renumbering one changes behaviour;
+//   - the busy path: onBusy() runs, the work does not, and we never unlock a
+//     lock we never held;
+//   - an empty try-lock result counts as "not acquired" (fail closed);
+//   - the timeout: the AbortSignal fires with the timeout error BEFORE unlocking;
+//   - pg_advisory_unlock and client.end always run in the finally paths.
 //
-// There is no local DB in the unit suite, so pg's Client prototype is
-// monkey-patched with an in-memory fake: withAdvisoryLock news up its own
-// `new Client(...)` internally, and connect/query/end are prototype methods,
-// so the patch is the one seam that exercises the REAL control flow with zero
-// network/DB. Each test file runs in its own child process — the patch cannot
-// leak into other suites.
+// There is no DB in the unit suite, so pg's Client prototype is replaced with
+// an in-memory fake. withAdvisoryLock creates its own `new Client(...)`, and
+// connect/query/end live on the prototype, so patching the prototype lets the
+// REAL control flow run with no network or DB. Each test file runs in its own
+// child process, so the patch cannot leak into other suites.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { EventEmitter } from "node:events";
@@ -43,7 +45,7 @@ interface ClientProtoMock {
 const calls: Call[] = [];
 let tryLockRows: Array<{ acquired: boolean }> = [{ acquired: true }];
 
-// The client withAdvisoryLock news up internally, captured at connect() so a test
+// The client withAdvisoryLock creates internally, captured at connect() so a test
 // can drive its EventEmitter surface (pg's connection-level 'error' channel).
 let lastClient: EventEmitter | null = null;
 // Assigned via a call rather than `const self = this` — no-this-alias forbids the

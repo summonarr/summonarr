@@ -111,6 +111,7 @@ function SelectField({
       </span>
       <select
         value={value}
+        aria-label={label}
         onChange={(e) => onChange(e.target.value)}
         style={{
           fontFamily: "inherit",
@@ -230,6 +231,7 @@ export function HistoryFilterBar({
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search by title, user, or IP…"
+            aria-label="Search plays"
             style={{
               fontFamily: "inherit",
               fontSize: 12.5,
@@ -282,6 +284,7 @@ export function HistoryFilterBar({
             type="date"
             className={dateInputClass}
             value={fromDate}
+            aria-label="From date"
             onChange={(e) => setFromDate(e.target.value)}
             style={{
               ...inputStyle,
@@ -298,6 +301,7 @@ export function HistoryFilterBar({
             type="date"
             className={dateInputClass}
             value={toDate}
+            aria-label="To date"
             onChange={(e) => setToDate(e.target.value)}
             style={{
               ...inputStyle,

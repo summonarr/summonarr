@@ -7,16 +7,16 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
 import { DetailActionButton } from "./detail-action-button";
 
-// Mirrors MAX_ITEMS in src/app/api/requests/bulk/route.ts. The route answers
-// 400 "Too many items" to an oversized batch BEFORE parsing a single item, so
-// one unchunked POST for a collection with more missing parts than this would
-// request NOTHING. Chunks post sequentially; the route's 10/min per-user rate
-// limit allows 500 items per click, far beyond any TMDB collection.
+// Must match MAX_ITEMS in src/app/api/requests/bulk/route.ts. The route rejects
+// a larger batch outright (400 "Too many items"), so we send the list in
+// chunks of this size, one after another. The route's limit of 10 calls per
+// minute per user still allows 500 items per click — far more than any
+// TMDB collection has.
 const BULK_MAX_ITEMS = 50;
 
-// "Request all (N missing)" for a TMDB collection. The items arrive already
-// enriched with availability flags (attachAllAvailability ran upstream), so the
-// missing set is computed here; the server re-checks authoritatively.
+// "Request All (N)" button for a TMDB collection. The items already carry
+// availability flags from the server, so we work out which are missing here;
+// the server checks again when the request arrives.
 export function CollectionRequestAllButton({
   items,
   canRequest = true,
@@ -28,10 +28,10 @@ export function CollectionRequestAllButton({
   const [state, setState] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [msg, setMsg] = useState("");
 
-  // Excludes only library items, the CALLER's own requests, and blacklisted
-  // titles. Items queued/requested by other users are included on purpose: the
-  // bulk route mirrors their approved status so this user is tracked for the
-  // "now available" notification.
+  // Skip titles already in the library, ones THIS user already requested, and
+  // blacklisted ones. Titles other users requested are included on purpose:
+  // the bulk route copies their status, so this user also gets the "now
+  // available" notification.
   const missing = items.filter(
     (m) => !m.plexAvailable && !m.jellyfinAvailable && !m.requestedByMe && !m.blacklisted,
   );

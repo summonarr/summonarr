@@ -68,8 +68,8 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
   const when = (iso: string | null) =>
     !iso ? "—" : mounted ? formatRelativeTime(iso) : absTime(iso);
 
-  // Postgres DOW 0=Sun..6=Sat → heatmap rows are Mon-first (matches the admin
-  // grid): pgDow (row + 6) % 7.
+  // Postgres numbers weekdays 0=Sun..6=Sat, but the heatmap rows start on
+  // Monday (like the admin grid), so a day lands on row (dow + 6) % 7.
   const heatmapMatrix: number[][] = Array.from({ length: 7 }, () =>
     new Array<number>(24).fill(0),
   );

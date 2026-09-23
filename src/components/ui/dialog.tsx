@@ -4,10 +4,10 @@ import * as React from "react";
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import { cn } from "@/lib/utils";
 
-// Modal dialog primitive. @base-ui's Dialog handles focus trap, focus restore,
-// Escape-to-close, scroll lock, outside-click dismiss, and the role="dialog" /
-// aria-modal / aria-labelledby wiring (the latter via DialogTitle) — none of which
-// the hand-rolled `fixed inset-0` overlays in the app provided.
+// Modal dialog primitive. @base-ui's Dialog handles keeping focus inside the
+// dialog and returning it on close, Escape-to-close, page scroll lock,
+// click-outside-to-close, and the screen-reader roles (DialogTitle supplies the
+// accessible name). Prefer it over a hand-rolled `fixed inset-0` overlay.
 
 function Dialog({ ...props }: DialogPrimitive.Root.Props) {
   return <DialogPrimitive.Root data-slot="dialog" {...props} />;

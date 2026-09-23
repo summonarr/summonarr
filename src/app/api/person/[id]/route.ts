@@ -17,7 +17,9 @@ export const GET = withAuth(async (
 
   const { id } = await params;
   const personId = Number(id);
-  if (!Number.isFinite(personId) || personId <= 0) {
+  // TMDB person ids are whole numbers, so "1.5" or "1e3" is rejected up front
+  // instead of being sent to TMDB.
+  if (!Number.isInteger(personId) || personId <= 0) {
     return NextResponse.json({ error: "Invalid id" }, { status: 400 });
   }
 

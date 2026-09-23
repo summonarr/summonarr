@@ -61,8 +61,9 @@ export default async function IssuesPage({
   const issueType = VALID_ISSUE_TYPES.includes(typeParam as typeof VALID_ISSUE_TYPES[number])
     ? (typeParam as typeof VALID_ISSUE_TYPES[number])
     : null;
-  // Prisma `contains` → ILIKE with no ESCAPE clause; strip wildcard
-  // metacharacters and bound the length (search-box DoS, matches /api/votes).
+  // Prisma's `contains` becomes a SQL ILIKE, where % and _ are wildcards.
+  // sanitizeContainsSearch strips those and caps the length so a crafted
+  // search can't make the query slow (same as /api/votes).
   const q = sanitizeContainsSearch((qParam ?? "").trim());
 
   const where: Prisma.IssueWhereInput = {

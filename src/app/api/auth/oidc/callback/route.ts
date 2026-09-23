@@ -168,11 +168,10 @@ export async function GET(req: NextRequest) {
   // AUTH_URL is guaranteed non-empty by the early guard at the top of GET.
   const base = authUrl;
   // returnTo was already validated at /start and signed into the state cookie,
-  // so re-validating here is belt-and-suspenders — defends against a future
-  // regression in /start. Must use the SAME validator: this redirect also
-  // carries the freshly-minted session cookie, so an off-origin target here is
-  // a post-authentication open redirect (phishing hand-off), and the previous
-  // `startsWith("/") && !startsWith("//")` test let `/\t/evil.com` through.
+  // so re-validating here is a second safety net in case /start ever regresses.
+  // Use the SAME validator: this redirect also carries the new session cookie,
+  // so an off-site target here would be an open redirect right after sign-in
+  // (a phishing hand-off).
   const safeReturn = safeInternalPath(flowState.returnTo) ?? "/";
   // safeInternalPath always returns a root-absolute path, so the BASE_PATH prefix
   // is a plain concatenation (see the note on `basePath` above).

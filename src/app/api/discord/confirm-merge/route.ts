@@ -7,8 +7,9 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { timingSafeEqual } from "crypto";
 import { readJsonCapped } from "@/lib/body-size";
 
-// Bot DM template lives in src/app/api/discord/initiate-merge/route.ts
-// (the 12-char code copy is updated there).
+// Step 2 of linking a Discord account: the user types in the 12-character code
+// the bot sent them by DM (step 1 is discord/initiate-merge, which also holds
+// the DM text).
 
 export const POST = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`discord-merge:${session.user.id}`, 5, 10 * 60 * 1000)) {
@@ -43,11 +44,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
       { status: 400 }
     );
   }
-  // Length-guard on BYTES, not UTF-16 code units: `code` is unvalidated user text, so a
-  // 12-character multibyte submission passes a `.length` comparison against the 12-char
-  // stored code while producing a 24-byte Buffer — timingSafeEqual then throws RangeError
-  // out of this un-try'd expression, turning "Incorrect code" into a 500 (and still burning
-  // one of the 5 rate-limit slots that wipe the pending code).
+  // timingSafeEqual throws if the two buffers differ in length, so compare the
+  // BYTE lengths first. A string length check is not enough: a 12-character
+  // code with non-ASCII letters is more than 12 bytes, and the throw would
+  // turn "Incorrect code" into a 500.
   const expected = Buffer.from(record.code, "utf8");
   const supplied = Buffer.from(code, "utf8");
   if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) {

@@ -20,10 +20,10 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
 
   const { id } = await params;
 
-  // `expectedClaimedBy` is the claim state the CALLER was rendering. Optional:
-  // an absent key (a body-less or `{}` request) keeps the original contract.
-  // `null` is a meaningful expectation — "I saw this unclaimed" — so presence is
-  // tested with `in`, never truthiness.
+  // `expectedClaimedBy` is who the CALLER saw as the claimer. It is optional:
+  // with no body (or `{}`) the claim toggles without that check. `null` is a real
+  // value meaning "I saw this unclaimed", so we test whether the key is present
+  // with `in`, not with a truthiness check.
   const body = await readJsonCappedOr<{ expectedClaimedBy?: unknown }>(req, 8192, {});
   if (body instanceof NextResponse) return body;
   const hasExpectation = "expectedClaimedBy" in body;

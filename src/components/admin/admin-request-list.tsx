@@ -140,19 +140,14 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
     return group.requesters.filter((r) => r.status === "PENDING").map((r) => r.requestId);
   }
 
-  // Rows arrive fresh on every live-event refresh; `selected` did not. An id
-  // whose request stopped being PENDING — another admin approved it, the owner
-  // deleted it — stayed in the set, so the badge and the action buttons went on
-  // counting requests that were no longer actionable. Nothing errored: the batch
-  // route claims each row with `updateMany({ where: { id, status: "PENDING" } })`
-  // and ignores a zero count, so the ghosts were silently skipped and the only
-  // symptom was a wrong number. The exception is the 100-id cap — selection
-  // survives pagination (router.push does not remount this component), so a
-  // few pages of accumulated ghosts can push a real batch over it and 400.
+  // Drop selected ids whose request is no longer PENDING (e.g. another admin
+  // approved it, or its owner deleted it). Without this the "N selected"
+  // count stays wrong, and because the selection survives page changes, stale
+  // ids could pile up and push a real batch over the route's 100-id limit.
   //
-  // Only ids belonging to rows ON THIS PAGE can be judged. An id absent from
-  // `requests` may simply be on another page, and selecting across pages is
-  // deliberate — so absence is not evidence of staleness.
+  // We can only judge ids for rows on THIS page. An id missing from `requests`
+  // may just be on another page (selecting across pages is allowed), so a
+  // missing id is kept.
   useEffect(() => {
     const onPage = new Set(requests.flatMap((g) => g.requesters.map((r) => r.requestId)));
     const pending = new Set(

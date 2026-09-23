@@ -88,13 +88,11 @@ export function unwrapEmbeddedV4(addr: string): string | null {
   return null;
 }
 
-// Detect the IPv6 unspecified address (`::`) in any of its valid notations.
-// The previous regex `/^::?0?$/` only caught `::`, `::0`, and the bogus `:0`/`:`.
-// It missed the fully-expanded form (`0:0:0:0:0:0:0:0`), the zero-padded form
-// (`0000:0000:0000:0000:0000:0000:0000:0000`), and mixed-notation embedded IPv4
-// (`::0.0.0.0`, `::ffff:0.0.0.0`). All of these are valid representations of
-// `::` and must be blocked — letting any through means a user-controlled URL
-// can hit `0.0.0.0` (= "all local interfaces") via IPv6.
+// Detect the IPv6 unspecified address (`::`) in any of its valid notations:
+// `::`, the fully-expanded `0:0:0:0:0:0:0:0`, the zero-padded
+// `0000:…:0000`, and mixed notation with embedded IPv4 (`::0.0.0.0`,
+// `::ffff:0.0.0.0`). All must be blocked — letting any through means a
+// user-controlled URL can hit `0.0.0.0` (= "all local interfaces") via IPv6.
 function isUnspecifiedV6(addr: string): boolean {
   // Reject anything with characters outside the IPv6 alphabet quickly
   if (!/^[0-9a-f:.]+$/i.test(addr)) return false;

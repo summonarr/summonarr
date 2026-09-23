@@ -20,11 +20,9 @@ import { DetailTitleProvider } from "@/components/layout/detail-title";
 import { NotificationStoreProvider } from "@/components/notifications/notification-store";
 
 // One settings read per request, shared by generateMetadata and the layout
-// body. Next memoizes only `fetch()` across those two; a Prisma read is not
-// deduped, so without React `cache` siteTitle was fetched twice on every
-// (app) page render (generate-metadata.md: "React `cache` can be used if
-// `fetch` is unavailable"). The cache is per-request — it does not persist
-// across renders, so a settings change is still picked up on the next page.
+// body. Next only de-duplicates `fetch()` calls between those two, not Prisma
+// reads, so React's `cache` does it here. The cache lives for one request only,
+// so a settings change still shows up on the next page load.
 const LAYOUT_SETTING_KEYS = [
   "motdEnabled", "motdTitle", "motdBody", "siteTitle", "discordInviteUrl",
   "maintenanceEnabled", "maintenanceMessage", "ratingsHiddenSources",
@@ -43,12 +41,13 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
-  // DB-checked login gate. The proxy's matcher (src/proxy.ts) deliberately skips
-  // prefetch requests (next-router-prefetch / purpose=prefetch) and the (app)
-  // pages carry no own login guard, so without this a forged prefetch could
-  // render them unauthenticated (Next guidance: verify auth close to the data,
-  // not the proxy alone — proxy.md / data-security.md). authActive() is
-  // DB-checked, so revocation + role demotion are honored, not just JWT sig+expiry.
+  // DB-checked login gate (guardrail 29). The proxy (src/proxy.ts) skips
+  // prefetch requests, so it can't be the only check. Each page also calls
+  // requireAppSession(), because Next can skip this layout's render on some
+  // client navigations. authActive() checks the database, so a revoked session
+  // or a demoted role is honored, not just the JWT's signature and expiry.
+  // Keep this redirect ABOVE the try/catch below: redirect() works by throwing,
+  // and a catch around it would swallow the redirect.
   const session = await authActive();
   if (!session) redirect("/login");
   const isAdmin = hasPermission(session.user.permissions, Permission.ADMIN);
@@ -63,12 +62,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   let featureFlags: FeatureFlags | undefined;
   let hiddenRatingSources: string[] = [];
   try {
-    // The discordId read is issued alongside the settings/flags reads rather
-    // than serially after them: session.user.id is already known here, and
-    // awaiting it afterwards added one full DB round-trip of latency to every
-    // page render on any deployment with a Discord invite configured. The
-    // trade: deployments WITHOUT an invite now pay one PK lookup they did not
-    // before, in parallel with reads they were already waiting on.
+    // The discordId lookup runs in parallel with the settings/flags reads
+    // instead of after them, saving a full DB round-trip per page. The cost:
+    // sites with no Discord invite do one small extra lookup they don't need.
     const [rows, flags, user] = await Promise.all([
       readLayoutSettings(),
       getFeatureFlags(),
@@ -87,10 +83,11 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     featureFlags        = hasDonationLinks(cfg) ? flags : { ...flags, "feature.page.donate": false };
     userDiscordId       = discordInviteUrl ? (user?.discordId ?? null) : null;
   } catch {
-
+    // A failed settings read keeps the defaults above, so a DB hiccup here
+    // never takes down every page in the app.
   }
 
-  // Admins bypass maintenance mode so they can still manage settings during downtime
+  // Admins bypass maintenance mode so they can still manage settings during downtime.
   if (maintenanceEnabled && !isAdmin) {
     return <MaintenancePage message={maintenanceMessage} />;
   }

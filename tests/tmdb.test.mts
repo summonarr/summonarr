@@ -21,7 +21,7 @@
 //    min-vote gate on top_rated, the today-anchored first_air_date filter on
 //    upcoming TV, cache write under the fixed list key with TTL.DISCOVER, and
 //    the every-page-fulfilled gate: a partial fan-out is SERVED but NOT cached
-//    (unlike trakt.ts, which caches partials), an all-empty result is not
+//    (trakt.ts applies the same gate), an all-empty result is not
 //    cached, and two concurrent cold callers share one fan-out;
 //  - searchMulti: trim + lowercase cache keying, query encoding round-trip
 //    (& ? : survive as one param), include_adult=false, person/junk-id
@@ -65,7 +65,7 @@ import dns from "node:dns/promises";
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32); // prisma.ts pulls in token-crypto
 process.env.TMDB_READ_TOKEN = "test-tmdb-read-token"; // tmdbAuth() reads this at call time
 
-// ── DNS stub (see tests/trakt.test.mts for the rationale) ───────────────────
+// ── DNS stub (see tests/omdb-quota.test.mts for the rationale) ──────────────
 const fakeLookup = async () => [{ address: "93.184.216.34", family: 4 }];
 (dns as { lookup: unknown }).lookup = fakeLookup;
 if ((dns as { lookup: unknown }).lookup !== fakeLookup) {

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { processSingleton } from "./process-singleton";
 
 // In-memory registry for background fix-match runs (guardrail 37a). A remap
 // waits on the media server for minutes — a Jellyfin series identify refreshes
@@ -73,7 +74,11 @@ const MAX_JOBS = 500;
 // loop is sequential and never approaches this.
 const MAX_RUNNING_JOBS = 4;
 
-const jobs = new Map<string, FixMatchJob>();
+// Process-wide (see process-singleton.ts). The POST route that starts a job and
+// the status route that polls it are separate route bundles; a plain module-level
+// Map could give each bundle its own copy, so the status route would answer 404
+// for a job the POST route is still running.
+const jobs = processSingleton("fix-match-jobs:jobs", () => new Map<string, FixMatchJob>());
 
 function prune(now: number): void {
   for (const [id, job] of jobs) {
@@ -91,10 +96,6 @@ function prune(now: number): void {
   }
 }
 
-// Starts `run` detached and returns the job record immediately. A job with the
-// same key that is still running is returned instead of started twice — a
-// double-click or the Fix-all loop must never drive two concurrent remaps of
-// one title.
 // A running job for `key`, or null. Lets the route answer a duplicate submit
 // with `joined: true` so the second admin learns their (possibly different)
 // candidate selection attached to an already-running remap instead of being
@@ -107,6 +108,10 @@ export function findRunningFixMatchJob(key: string): FixMatchJob | null {
   return null;
 }
 
+// Starts `run` detached (in the background) and returns the job record
+// immediately. A job with the same key that is still running is returned
+// instead of started twice — a double-click or the Fix-all loop must never drive
+// two concurrent remaps of one title.
 export function startFixMatchJob(
   key: string,
   run: (report: FixMatchReport) => Promise<FixMatchJobResult>,

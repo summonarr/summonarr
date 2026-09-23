@@ -198,7 +198,8 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   }
 
   if (status === "APPROVED" && existing.status !== "APPROVED") {
-    // CAS on current status prevents double-approve race conditions
+    // CAS (compare-and-swap): the write only lands if the status is still the one
+    // we read, so two admins approving at once can't both succeed.
     const claimed = await prisma.mediaRequest.updateMany({
       where: { id, status: existing.status },
       data: {
@@ -214,7 +215,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         // (it maps undefined → null), so guarding on sanitizedAdminNote would
         // always be true and wipe the stored note on every status transition.
         ...(adminNote !== undefined ? { adminNote: sanitizedAdminNote } : {}),
-        // pendingNotifyAt triggers a 90s download-check notification if the item still isn't in the queue
+        // Arms a download check ~90s from now that warns if the item still isn't in the download queue.
         pendingNotifyAt: new Date(Date.now() + 90_000),
       },
     });
@@ -231,9 +232,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
         // rolled back to PENDING — so it can't count if the title arrives anyway.
         approvedAt: null,
         permanentlyDeclined: permanent === true,
-        // Guard on the RAW body field: sanitizeOptional never returns undefined
-        // (it maps undefined → null), so guarding on sanitizedAdminNote would
-        // always be true and wipe the stored note on every status transition.
+        // Same RAW-field guard as the APPROVED branch above.
         ...(adminNote !== undefined ? { adminNote: sanitizedAdminNote } : {}),
         pendingNotifyAt: null,
       },
@@ -249,9 +248,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       where: { id, status: existing.status },
       data: {
         status: status as ValidStatus,
-        // Guard on the RAW body field: sanitizeOptional never returns undefined
-        // (it maps undefined → null), so guarding on sanitizedAdminNote would
-        // always be true and wipe the stored note on every status transition.
+        // Same RAW-field guard as the APPROVED branch above.
         ...(adminNote !== undefined ? { adminNote: sanitizedAdminNote } : {}),
 
         ...(status === "AVAILABLE" || status === "DECLINED" ? { pendingNotifyAt: null } : {}),

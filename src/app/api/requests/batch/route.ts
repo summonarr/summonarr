@@ -207,12 +207,12 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
   let failures: { id: string; title: string; error: string }[] = [];
 
   if (typedStatus === "APPROVED") {
-    // Re-fetch from the pre-update PENDING set to avoid acting on requests that were already approved
+    // Load the full rows for just the ids THIS call claimed (the claim above
+    // returned only id + requestedBy), so already-approved rows are never re-pushed.
     const approved = await prisma.mediaRequest.findMany({
       where: { id: { in: [...pendingBeforeIds] }, status: "APPROVED" },
     });
 
-    // failedIds is declared at function scope above (reused by the SSE emit).
     await settleLimit(approved, ARR_CONCURRENCY, async (r) => {
       let pushedTvdbId: number | null = null;
       try {
@@ -287,7 +287,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
   if (typedStatus === "DECLINED") {
     // Mirror the APPROVED path: notify only the rows this batch actually transitioned
     // (PENDING → DECLINED), not ids that were already DECLINED before the call — those
-    // were left untouched by updateMany and must not get a duplicate decline ping.
+    // were left untouched by the claim above and must not get a duplicate decline ping.
     const declined = await prisma.mediaRequest.findMany({
       where: { id: { in: [...pendingBeforeIds] }, status: "DECLINED" },
       select: { requestedBy: true, title: true, mediaType: true, tmdbId: true, posterPath: true },

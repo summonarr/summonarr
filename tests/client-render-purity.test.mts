@@ -5,18 +5,18 @@
 // CLAUDE.md by shipped-bug count — SIX distinct React #418 hydration failures
 // have come from this one antipattern (top-filter-bar, activity-history-table,
 // activity-recent-plays, trash-guides/spec-section, activity-calendar, and the
-// year-dropdown logic that bit filter-bar) — and until now it had ZERO test
-// coverage. The only thing watching it was the E2E route crawl
+// year-dropdown logic that bit filter-bar) — and before this file it had no
+// test coverage. The only thing watching it was the E2E route crawl
 // (.github/workflows/e2e.yml), which needs a built app, a live Postgres and a
 // seeded admin, cannot run locally, and only catches a violation on a route it
 // actually reaches with data that actually differs. A module-level
 // `new Date()` that a bundler bakes at BUILD time drifts by days — the crawl
 // runs minutes after the build and can miss it entirely.
 //
-// The failure mode, restated: the value is captured once during SSR and again
-// at hydration. Server and client disagree, React throws #418, and the subtree
-// is thrown away and re-rendered client-side. At module level a bundler may
-// bake the value at build time, widening the drift from milliseconds to days.
+// The failure mode: the value is captured once during SSR (server-side render)
+// and again at hydration (when the browser attaches React to that HTML). The two
+// values disagree, React throws error #418, and the subtree is thrown away and
+// re-rendered in the browser.
 //
 // This sweep parses every client component with the TypeScript compiler (the
 // classic TS 6 already in the tree — the same one `next build` loads) and walks
@@ -298,7 +298,7 @@ const fmt = (h: Hit): string => `${rel(h.file)}:${h.line}  ${h.what}`;
 test("the sweep found a realistic client-component set — a broken walk must not pass vacuously", () => {
   assert.ok(
     clientFiles.length > 100,
-    `only ${clientFiles.length} "use client" files found under src/ — the walk or the directive regex is broken`,
+    `only ${clientFiles.length} "use client" files found under src/ — the walk or the "use client" check is broken`,
   );
   assert.ok(
     clientFiles.some((f) => f.endsWith(".tsx")) && clientFiles.some((f) => f.endsWith(".ts")),

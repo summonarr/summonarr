@@ -1,6 +1,6 @@
 version: 2
 updates:
-  # npm dependencies (Next.js, Prisma, NextAuth, Tailwind, etc.)
+  # npm dependencies (Next.js, Prisma, Tailwind, etc.)
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
@@ -24,7 +24,7 @@ updates:
     ignore:
       # TypeScript 7 is the native-compiler port with a different JS API:
       # ts.Extension & co. are gone and typescript/lib/typescript.js no longer
-      # exists. Next.js 16.2.x probes that file at build time and dies
+      # exists. Next.js 16 probes that file at build time and dies
       # ("please install typescript"), and typescript-eslint crashes loading
       # the package (its own peer range pins typescript <6.1). The root
       # `typescript` therefore MUST stay on 6 until BOTH support TS 7; the
@@ -104,7 +104,9 @@ updates:
     cooldown:
       default-days: 7
 
-  # Docker base image bumps (node:22-alpine, postgres:17-alpine)
+  # Docker base image bumps for the root Dockerfile (the pinned node:*-alpine
+  # image). The postgres image in the compose files is NOT covered here — the
+  # "docker" ecosystem only reads Dockerfiles.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:

@@ -123,16 +123,6 @@ interface TopLevelDecl {
   text: string;
 }
 
-/**
- * Blank out comments, preserving line structure and string contents.
- *
- * Guard detection is a substring test over a declaration's region, so a token
- * merely *named* in prose ("TODO: wrap this in withAdmin") would satisfy it with
- * no guard present. A region also runs to the next column-0 declaration, which
- * means a comment written to document the NEXT handler is attributed to the
- * PREVIOUS one — so an unguarded handler can inherit a mention it does not own.
- * Quotes are tracked so `//` inside a URL literal is not read as a comment.
- */
 /** Characters after which a `/` opens a regex literal rather than dividing. */
 const REGEX_MAY_FOLLOW = new Set([
   "(", ",", "=", ":", "[", "!", "&", "|", "?", "{", "}", ";", "+", "-", "*", "%", "~", "^", "<", ">",
@@ -142,6 +132,16 @@ const REGEX_MAY_FOLLOW = new Set([
 // keyword-led regex fell through to the quote branch.
 const KEYWORD_BEFORE_REGEX = /(?:^|[^\w$])(?:return|typeof|case|in|of|new|delete|void|instanceof|do|else|yield|await)\s*$/;
 
+/**
+ * Blank out comments, preserving line structure and string contents.
+ *
+ * Guard detection searches the text of a declaration's region, so a token
+ * merely *named* in prose ("TODO: wrap this in withAdmin") would satisfy it with
+ * no guard present. A region also runs to the next column-0 declaration, which
+ * means a comment written to document the NEXT handler is attributed to the
+ * PREVIOUS one — so an unguarded handler can inherit a mention it does not own.
+ * Quotes are tracked so `//` inside a URL literal is not read as a comment.
+ */
 export function stripComments(src: string): string {
   let out = "";
   let i = 0;
@@ -271,16 +271,6 @@ export function parseTopLevelDecls(src: string): TopLevelDecl[] {
 }
 
 /**
- * True when `decl`'s own region contains one of `tokens`, or transitively
- * references another top-level declaration in the same file whose region does.
- * The transitive hop covers the two legitimate indirection patterns in this
- * codebase: a local helper that performs the check (`getAuthContext` →
- * `isCronAuthorized` in the cron warm routes) and a shared handler alias
- * (`export const GET = handle` in cron/trash-diagnostic). Cross-FILE
- * indirection is intentionally not followed — a guard hidden in an import is
- * exactly the opacity this audit exists to reject.
- */
-/**
  * True when `text` CALLS `token`, not merely mentions it.
  *
  * A guard is an invocation, so requiring the call shape is both more accurate
@@ -290,10 +280,20 @@ export function parseTopLevelDecls(src: string): TopLevelDecl[] {
  * `isCronAuthorized(`, `timingSafeEqual(` — so nothing legitimate is lost.
  */
 export function callsToken(text: string, token: string): boolean {
-  // Route decl names only ever contain [\w$], but escape defensively regardless.
+  // Guard tokens are plain identifiers, but escape `\` and `$` defensively anyway.
   return new RegExp(`\\b${token.replace(/[\\$]/g, "\\$&")}\\s*\\(`).test(text);
 }
 
+/**
+ * True when `decl`'s own region calls one of `tokens`, or transitively
+ * references another top-level declaration in the same file whose region does.
+ * The transitive hop covers the two legitimate indirection patterns in this
+ * codebase: a local helper that performs the check (`getAuthContext` →
+ * `isCronAuthorized` in the cron warm routes) and a shared handler alias
+ * (`export const GET = handle` in cron/trash-diagnostic). Cross-FILE
+ * indirection is intentionally not followed — a guard hidden in an import is
+ * exactly the opacity this audit exists to reject.
+ */
 export function reachesToken(
   decl: TopLevelDecl,
   tokens: string[],
@@ -356,8 +356,6 @@ function main(): void {
     const route = routePath(file);
     const rel = route.replace(/^\/api\//, "");
 
-    // NextAuth catch-all handler — exported handlers come from the library.
-    if (rel.startsWith("auth/") && file.includes("[...nextauth]")) continue;
     if (isAllowlisted(rel)) continue;
     if (ROUTE_EXCEPTIONS.some((e) => e.route === route)) continue;
 

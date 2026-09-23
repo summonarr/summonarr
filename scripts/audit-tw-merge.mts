@@ -122,6 +122,9 @@ interface Utility {
   group: string | null;
 }
 
+/** Compiles class names to CSS; `null` for a class Tailwind does not recognise. */
+type Compile = (candidates: string[]) => Array<string | null>;
+
 /**
  * Load the installed Tailwind's design system. `__unstable__loadDesignSystem`
  * is the same entry point the official IntelliSense extension uses; it is the
@@ -129,7 +132,6 @@ interface Utility {
  * major upgrade. If it does, this throws loudly rather than silently auditing
  * an empty set — a green run on zero utilities would be worse than a red one.
  */
-type Compile = (candidates: string[]) => Array<string | null>;
 
 async function loadUtilities(): Promise<{ utilities: Utility[]; compile: Compile }> {
   const require_ = createRequire(import.meta.url);
@@ -441,7 +443,8 @@ async function main() {
 
   if (failures.length === 0) {
     console.log(color("  ✓ Every group maps 1:1 onto a real CSS property.\n", COLORS.green));
-    process.exit(0);
+    process.exitCode = 0;
+    return;
   }
 
   console.log(color(`  ✗ ${failures.length} finding(s):\n`, COLORS.red + COLORS.bold));
@@ -458,10 +461,11 @@ async function main() {
       COLORS.dim,
     ),
   );
-  process.exit(1);
+  // exitCode rather than exit(), for the same piped-stdout reason as the --json path.
+  process.exitCode = 1;
 }
 
-// Only run the CLI when invoked directly, so the helpers stay importable.
+// Only run the CLI when this file is executed directly, not when it is imported.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     console.error(color(`\n  tw-merge audit failed to run: ${err instanceof Error ? err.message : err}\n`, COLORS.red));

@@ -8,8 +8,8 @@ import { coalesce } from "@/lib/concurrency";
 
 // Verify-and-refresh for the Summonarr session JWT.
 //
-// Mirrors the load-bearing behaviour of the old next-auth refreshToken()
-// callback in src/lib/auth.ts. On each call:
+// Called on every authenticated request (proxy, api-auth, /api/auth/me,
+// server components). On each call:
 //
 //   1. Cryptographically verify the JWT (sig + exp).
 //   2. Cross-replica revocation: AuthSession row deleted = logged out everywhere.
@@ -202,16 +202,13 @@ export async function verifyAndRefreshSession(
 
     // Privilege change (role OR permissions) → rotate sessionId so a leaked
     // pre-change token cannot be replayed.
-    // ALSO bump sessionsRevokedAt so the old JWT's iat now falls below the cutoff and
-    // refreshToken() on OTHER replicas rejects it within their own dbCheckedAt window.
-    // Without this bump, the rotation only protects requests that go through THIS
-    // replica's verifyAndRefreshSession after the rotation — a cached old token can
-    // keep refreshing on a different replica for up to 60s (10s for admin) and would
-    // pass the new sessionId check (which the row carries) because we don't verify
-    // the JWT's sessionId against anything beyond cryptographic integrity.
-    // Tracks whether this verify rotated sessionId. The signing path below uses
-    // it to force the new JWT's iat past the cutoff we just stamped, so the
-    // freshly-minted token doesn't fail its own cutoff check when rotation
+    // ALSO bump sessionsRevokedAt past the old JWT's iat, so the cutoff check
+    // above rejects the old token on EVERY replica at its next DB check. Without
+    // the bump, only this replica would know about the rotation.
+    //
+    // rotationCutoffSec records the cutoff we stamped (null = no rotation). The
+    // signing path below uses it to force the new JWT's iat past that cutoff, so
+    // the freshly-minted token doesn't fail its own cutoff check when rotation
     // happens in the same wall-clock second as the original sign-in.
     let rotationCutoffSec: number | null = null;
     const privilegeChanged =

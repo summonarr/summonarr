@@ -15,9 +15,7 @@
 // (availability is a union across the configured servers of a type), so there's
 // no serverAll/autoRoute/skipLibraryCheck routing metadata to carry here.
 //
-// `restricted` is the one access field, added by the per-user server-visibility
-// grants feature (anticipated by this comment's earlier revision — it landed as
-// exactly the additive JSON-shape change predicted, no schema migration). A
+// `restricted` is the one access field (per-user server-visibility grants). A
 // restricted server's library contributes availability ONLY for users granted
 // `view` on it (User.mediaServerGrants → canViewMediaInstance in
 // permissions.ts); the union is then per-viewer rather than global. The
@@ -25,8 +23,8 @@
 // byte-identical-default rule means a single-server deployment must never be
 // able to observe this generalization.
 //
-// Impure (reads Setting) — the pure key derivation lives in media-instances.ts
-// and is re-used here.
+// This module reads the database. The pure key-naming helpers live in
+// media-instances.ts and are reused here.
 
 import { prisma } from "./prisma";
 import { type MediaInstanceKey, type MediaServerService, DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug, plexSettingKey, jellyfinSettingKey } from "./media-instances";

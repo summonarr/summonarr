@@ -626,9 +626,9 @@ test("plex { full: true } → /all fetch and a full replace: deleteMany + repopu
   assert.equal(BATCH_TX_TIMEOUT, 30_000);
   assert.deepEqual(tx.ops, [
     { model: "$executeRaw", method: "raw", args: "SELECT pg_advisory_xact_lock(2001, 1)" },
-    // Default-instance-scoped (multi-server, Phase 2): this route only syncs the
-    // default ("") Plex server, so its full replace must leave any named
-    // instance's rows alone — an unscoped delete would wipe them.
+    // Scoped to the instance being resynced — the default ("") here, since the
+    // body names no instance. An unscoped delete would also wipe every named
+    // server's rows.
     { model: "plexLibraryItem", method: "deleteMany", args: { where: { mediaType: "MOVIE", serverInstance: "" } } },
     { model: "plexLibraryItem", method: "deleteMany", args: { where: { mediaType: "TV", serverInstance: "" } } },
     {
@@ -1022,12 +1022,10 @@ test("jellyfin { full: true } → NO MinDateLastSaved; wholesale deleteMany + re
   assert.equal(tx.timeout, BATCH_TX_TIMEOUT);
   assert.deepEqual(tx.ops, [
     { model: "$executeRaw", method: "raw", args: "SELECT pg_advisory_xact_lock(2001, 2)" },
-    // Default-instance-scoped (multi-server, Phase 1 fix): this route only syncs
-    // the default ("") Jellyfin server, so its full replace must leave any named
-    // instance's rows alone — the pre-fix unscoped deleteMany wiped them and
-    // repopulated only the default's (availability flicker until the next
-    // orchestrator run). Still an unconditional delete of that instance's rows,
-    // inside the same tx as the repopulate.
+    // Scoped to the instance being resynced — the default ("") here, since the
+    // body names no instance. An unscoped delete would wipe every named server's
+    // rows and repopulate only this one's. It still deletes ALL of this
+    // instance's rows, inside the same transaction as the repopulate.
     { model: "jellyfinLibraryItem", method: "deleteMany", args: { where: { serverInstance: "" } } },
     {
       model: "jellyfinLibraryItem",
@@ -1099,10 +1097,10 @@ test("a failed full-replace insert propagates out of the SHARED transaction (rol
   assert.equal(ledgerFor("jellyfin-sync")?.ok, false);
 });
 
-// ── multi-server safety: the per-source routes are default-instance-only ────
-// Named additional Plex/Jellyfin instances sync exclusively via the /api/sync
-// orchestrator's per-instance fan-out; these routes touch ONLY the default ("")
-// instance's rows, so an admin Resync can never clobber a named instance.
+// ── multi-server safety: a Resync touches only the instance it names ────────
+// With no `instance` in the body these routes resync the default ("") server,
+// and every read and delete stays on that server's rows, so an admin Resync can
+// never clobber a different (named) server.
 
 test("multi-server safety: BOTH routes' full-replace deletes are scoped to the default instance — a named instance's rows survive the admin Resync", async () => {
   configurePlex();
@@ -1133,7 +1131,7 @@ test("multi-server safety: BOTH routes' full-replace deletes are scoped to the d
 test("multi-server safety: the plex dedupe clone's prior-mapping lookup is default-instance-scoped (agreement with the orchestrator's dedupe)", async () => {
   configurePlex();
   // ONE item carrying TWO tmdb guids — genuine conflation within the batch — so
-  // the clone's prior-mapping DB read fires. full:true keeps that read the ONLY
+  // the shared dedupe's prior-mapping DB read (plex-dedupe.ts) fires. full:true keeps that read the ONLY
   // plexLibraryItem.findMany (recentOnly's already-present check would add more).
   respond = plexMovieResponder([
     { ratingKey: "rk-dup", type: "movie", title: "Conflated", Guid: [{ id: "tmdb://601" }, { id: "tmdb://602" }] },

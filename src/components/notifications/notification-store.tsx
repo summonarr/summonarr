@@ -15,17 +15,15 @@ import { useLiveEvents } from "@/hooks/use-live-events";
 
 // ONE notifications poll for the whole app.
 //
-// The desktop bell (<NotificationBell>, inside the lg-only <Header>) and the
-// mobile nav's badge (<NotificationsLink>, inside the lg:hidden <MobileNav>)
-// both render the same data, and BOTH are mounted at every viewport — the
-// breakpoint hiding one of them is CSS, not React, so the hidden one still runs
-// its effects. They each fetched /api/notifications independently, so every
-// page produced two identical GETs, and at 1372px one of them was for a
-// component nobody could see. The same doubling applied to the visibility
-// refresh and to the SSE-triggered reload.
+// The desktop bell (<NotificationBell>) and the mobile nav's badge
+// (<NotificationsLink>) show the same data, and BOTH are mounted at every screen
+// size — CSS hides one, but its React effects still run. When each fetched on
+// its own, every page made two identical requests (and two timers, two live
+// event listeners).
 //
-// Owning the state here collapses that to one fetch, one interval, one SSE
-// subscription. Deliberately a context, not a state library (guardrail 9).
+// Keeping the state here means one fetch, one timer and one live-event
+// listener for both. It's a plain React context on purpose, not a state
+// library (guardrail 9).
 
 export interface NotificationItem {
   id: string;
@@ -121,14 +119,13 @@ export function NotificationStoreProvider({ children }: { children: ReactNode })
   );
 
   const markAllRead = useCallback(async () => {
-    // Optimistic clear of BOTH the badge and the rows, then persist. The bell
-    // panel paints each row off `readAt`, so zeroing `unread` alone left every
-    // row highlighted as unread for up to POLL_MS after the badge had already
-    // gone (the two disagreed for a minute). Track the exact rows this call
-    // flips so the rollback restores their read state alone — a whole-list
-    // snapshot would repaint rows a concurrent reload already replaced.
-    // (Mirrors notification-list.tsx's markAllRead.) Event handler, not render,
-    // so the timestamp here is fine under guardrail 16.
+    // Update the screen first ("optimistic"), then tell the server. Clear BOTH
+    // the badge count and each row's `readAt` — the bell panel colours rows by
+    // `readAt`, so clearing only the count left rows looking unread for up to a
+    // minute. We remember exactly which rows we flipped so a failure can undo
+    // just those, without disturbing rows a reload has replaced meanwhile.
+    // (Same as notification-list.tsx's markAllRead.) This runs in a click
+    // handler, not during render, so calling `new Date()` is fine (guardrail 16).
     const flipped = new Set(items.filter((n) => !n.readAt).map((n) => n.id));
     const prevUnread = unread;
     setUnread(0);

@@ -23,8 +23,8 @@ export function DisableLocalLoginToggle({ initialDisabled }: { initialDisabled: 
       });
       const data: { ok: boolean } = await res.json().catch(() => ({ ok: false }));
       if (!data.ok) {
-        // Roll back the optimistic toggle so the switch doesn't show a state the
-        // server rejected (or a network error never persisted).
+        // The switch was flipped before the server answered. Flip it back so it
+        // doesn't show a setting the server rejected or never saved.
         setDisabled(prev);
         setStatus("error");
       } else {

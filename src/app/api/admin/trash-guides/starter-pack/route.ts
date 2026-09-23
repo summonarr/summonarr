@@ -21,7 +21,8 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
   } catch (err) {
     const schemaDiagnostic = describeSchemaError(err);
     if (schemaDiagnostic) {
-      // TrashSpec table doesn't exist yet (schema not migrated); return empty list with hint instead of 500
+      // The TrashSpec table doesn't exist yet (schema not pushed): return the
+      // curated list with no specs plus a hint, instead of a 500.
       const emptyItems = STARTER_PACK.map((item) => ({ item, spec: null, application: null }));
       return NextResponse.json({ items: emptyItems, schemaDiagnostic });
     }

@@ -1,4 +1,6 @@
-
+// In-process delayed follow-up jobs: a timer per job, then a small worker pool
+// so a burst of jobs cannot all run at once. Limits are tunable via the
+// DELAYED_JOBS_MAX_* env vars; a missing or invalid value uses the default.
 
 const num = (v: string | undefined, d: number) => {
   const n = v ? parseInt(v, 10) : NaN;

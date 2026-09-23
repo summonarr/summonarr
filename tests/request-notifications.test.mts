@@ -28,9 +28,12 @@
 //     a later identical set polls fresh), and gives up after 24 probes WITHOUT
 //     burning the once-only CAS;
 //   - notifyRequestStatusChange: returns void synchronously, writes the in-app
-//     inbox row unconditionally, and fans out discord/push/email per status —
-//     the email leg reading exactly the per-status pref column (emailOnApproved/
-//     emailOnAvailable/emailOnDeclined) and staying silent when it's off.
+//     inbox row regardless of the user's prefs, and fans out discord/push/email
+//     per status — the email leg reading exactly the per-status pref column
+//     (emailOnApproved/emailOnAvailable/emailOnDeclined) and staying silent when
+//     it's off;
+//   - disabled accounts (guardrail 33): a deactivated requester gets nothing on
+//     any channel, on both the single-request path and the batch CAS path.
 //
 // No DB, network, or DNS: prisma.setting/user/notification/pushSubscription are
 // shadowed in-memory and $queryRaw captures the CAS statement

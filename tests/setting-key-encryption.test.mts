@@ -3,9 +3,9 @@
 // against hand-written strings.
 //
 // Why this file exists: tests/settings-sensitive-keys.test.mts pins the static
-// SETTINGS_SENSITIVE_KEYS array, and that is where its coverage stops. Neither
-// ARR_INSTANCE_SECRET_RE nor MEDIA_INSTANCE_SECRET_RE nor isSensitiveSettingKey
-// itself is exercised anywhere — yet those two regexes are the ENTIRE encryption
+// SETTINGS_SENSITIVE_KEYS array, and that is where its coverage stops. Outside
+// this file, neither ARR_INSTANCE_SECRET_RE nor MEDIA_INSTANCE_SECRET_RE nor
+// isSensitiveSettingKey itself is exercised — yet those two regexes are the ENTIRE encryption
 // gate for admin-defined instance slugs, which by construction cannot be
 // enumerated in the static list (guardrails 32 and 35 both say so explicitly).
 //

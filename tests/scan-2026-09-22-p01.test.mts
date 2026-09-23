@@ -2,10 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { stripComments } from "../scripts/audit-routes.mts";
 
-// The keyword check ran against the emitted text, which still carries the space
-// between `return` and the `/`, so a bare `$` anchor never matched. A
-// keyword-led regex literal holding a quote then opened a phantom string, and
-// the comment after it survived — a prose mention of a guard read as a guard.
+// stripComments must tell a regex literal (`return /x/`) apart from a division.
+// It used to check for a keyword right before the `/` with a `$` anchor, but the
+// text it checked still had the space after `return`, so the check never matched.
+// A quote inside that regex was then read as the start of a string, and the
+// `//` comment after it was kept — so a comment merely mentioning a guard like
+// withAdmin( was counted as a real guard by the route audit.
 test("a regex literal after `return ` is recognised, so the trailing comment is stripped", () => {
   const src = 'function f(x) {\n  return /[\'"]/.test(x); // withAdmin(\n}\n';
   const out = stripComments(src);

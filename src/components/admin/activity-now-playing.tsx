@@ -618,8 +618,9 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
   );
 }
 
-// Live "Now playing" grid: seeds from server-rendered sessions, then updates
-// from activity:sessions / plex:reachability SSE pushes.
+// Live "Now playing" grid. It starts from the sessions the server rendered,
+// then updates from activity:sessions / plex:reachability messages on the SSE
+// stream (server-sent events: the server's one-way live push to the browser).
 export function ActivityNowPlaying({
   initialSessions,
   source,
@@ -640,7 +641,8 @@ export function ActivityNowPlaying({
   const [sessions, setSessions] =
     useState<ActiveSessionLive[]>(initialSessions);
   const [connected, setConnected] = useState(false);
-  // Keyed by instance slug so one server's event can never overwrite another's.
+  // One entry per Plex server. An SSE event only updates the entry whose
+  // `instance` slug matches, so one server's news never overwrites another's.
   const [reachability, setReachability] = useState(plexReachability);
 
   useLiveEvents((event) => {

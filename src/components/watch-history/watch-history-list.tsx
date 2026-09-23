@@ -89,13 +89,12 @@ export function WatchHistoryList({
       return;
     }
     const ac = new AbortController();
-    // Every filter change starts a new generation. loadMore() captures the value
-    // at click time and drops its response if the filters moved on — otherwise a
-    // slow "Load more" landed AFTER a filter switch and appended the old query's
-    // rows (movies under a TV-filtered list), overwrote `total` with the pre-filter
-    // count, and installed the PREVIOUS query's cursor so later pages walked the
-    // wrong result set. The filter fetch itself is abort-guarded; this one can't be
-    // (its rows are appended, not replaced), so it needs the generation check.
+    // Every filter change starts a new generation. loadMore() remembers the value
+    // at click time and drops its response if the filters moved on. Without that,
+    // a slow "Load more" finishing AFTER a filter switch would append the old
+    // query's rows (movies under a TV filter), overwrite `total`, and install the
+    // old query's cursor. The filter fetch below is cancelled with an
+    // AbortController instead; loadMore isn't, so it needs this check.
     filterGen.current += 1;
     setRefreshing(true);
     setError(null);
@@ -160,9 +159,9 @@ export function WatchHistoryList({
         setLoadError("Couldn't load more. Tap Load more to retry.");
       }
     } catch {
-      // `if (res.ok)` with no else and no catch meant a failed page silently did
-      // nothing — same generation guard as the success path, so a superseded
-      // request cannot report its failure over the current one.
+      // A network failure shows the retry hint too. Same generation guard as the
+      // success path, so a superseded request can't report its failure over the
+      // current one.
       if (filterGen.current === myGen) setLoadError("Couldn't load more. Tap Load more to retry.");
     } finally {
       setLoadingMore(false);

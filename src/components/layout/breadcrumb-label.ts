@@ -3,9 +3,8 @@ import { adminNavItems, userNavItems, type NavItem } from "@/lib/nav-items";
 export type Crumb = { label: string; href?: string };
 
 // Last-resort label for a route the nav list doesn't know: Title-Case the last
-// path segment ("watch-history" → "Watch History"). Anything is better than
-// the literal "—" this used to render, which was verified live on
-// /notifications — a page with a real name that just isn't a nav item.
+// path segment ("watch-history" → "Watch History"), so the header shows a real
+// name instead of a bare "—".
 function titleCaseSegment(pathname: string): string | null {
   const segment = pathname.split("/").filter(Boolean).pop();
   if (!segment) return null;
@@ -28,12 +27,10 @@ function titleCaseSegment(pathname: string): string | null {
  * Matches against the flat nav list first; detail routes (/movie/[id],
  * /tv/[id], /person/[id]) get a two-segment crumb so users see where they are.
  *
- * `detailTitle` is the title of the thing being viewed, supplied by the detail
- * page through DetailTitleProvider. Without it the last crumb read the literal
- * "Detail" — accurate but useless, with the actual title sitting right below it
- * in the hero. It stays the fallback for the first render (the context starts
- * null on both server and client, so hydration matches) and for any detail
- * route that doesn't publish one.
+ * `detailTitle` is the title of the thing being viewed (e.g. the movie name),
+ * supplied by the detail page through DetailTitleProvider. Until it arrives the
+ * last crumb falls back to "Detail"/"Person" — that is also what the first
+ * render shows on both server and browser, so hydration matches.
  */
 export function breadcrumbFor(pathname: string, detailTitle?: string | null): Crumb[] {
   if (pathname.startsWith("/movie/")) {

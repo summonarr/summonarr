@@ -21,8 +21,9 @@
 // that is the whole point of asserting on the raw upsert arg.
 //
 // ── Division of labour (owned elsewhere; NOT re-pinned here) ──────────────────
-//   - tests/settings-sensitive-keys.test.mts OWNS isSensitiveSettingKey and the
-//     SETTINGS_SENSITIVE_KEYS list (which keys are classified sensitive). Here we
+//   - tests/settings-sensitive-keys.test.mts OWNS the SETTINGS_SENSITIVE_KEYS
+//     list and tests/setting-key-encryption.test.mts OWNS isSensitiveSettingKey
+//     (together: which keys are classified sensitive). Here we
 //     pin only the ROUTE's *use* of that classification: sensitive values are
 //     masked on GET and pass through as raw plaintext on PATCH.
 //   - tests/token-crypto.test.mts OWNS encryptToken/decryptToken (incl. the
@@ -38,7 +39,7 @@
 // safeFetchAdminConfigured's SSRF stack short-circuits on isIP with no lookup.
 // Admin sessions are REAL jose JWTs over in-memory AuthSession/User rows; claims
 // mirror the rows so the privilege-rotation path never fires. Bearer transport
-// skips the UA-fingerprint check and the sliding Set-Cookie, keeping responses clean.
+// skips the UA-fingerprint check and the refreshed-token Set-Cookie, keeping responses clean.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
@@ -174,7 +175,7 @@ const MASK = "••••••••";
 let seq = 0;
 
 // Mint a real signed session JWT backed by an in-memory User + AuthSession row.
-// Bearer transport (returned header): skips UA-fingerprint + sliding Set-Cookie,
+// Bearer transport (returned header): skips UA-fingerprint + refreshed-token Set-Cookie,
 // while the DB-checked auth still runs in full. Claims mirror the row (role +
 // perms "0"), so verifyAndRefreshSession never rotates.
 async function mintSession(role: string): Promise<{ userId: string; header: Record<string, string> }> {
@@ -573,14 +574,7 @@ test("PATCH: an emptied library selection is WRITTEN for BOTH media servers", as
   }
 });
 
-
-// ---------------------------------------------------------------------------
-// The machine-session guard. POST /api/auth/machine-session mints a fully
-// privileged ADMIN session for any caller holding CRON_SECRET, and its own IP
-// check only applies when the allowlist is non-empty — so "feature on + empty
-// allowlist" means any IP can mint an admin session. This guard exists to make
-// that state unreachable, and had no test coverage at all.
-// ---------------------------------------------------------------------------
+// ── watch-grade settings: cross-field checks against the stored values ──────
 
 test("PATCH: the watch-grade window and grace are validated as a PAIR, against the merged stored values", async () => {
   const { header } = await mintSession("ADMIN");
@@ -620,6 +614,14 @@ test("PATCH: letter cutoffs must stay strictly descending against the STORED val
     assert.equal(upsertFor(key).length, 1, key);
   }
 });
+
+// ---------------------------------------------------------------------------
+// The machine-session guard. POST /api/auth/machine-session mints a fully
+// privileged ADMIN session for any caller holding CRON_SECRET, and its own IP
+// check only applies when the allowlist is non-empty — so "feature on + empty
+// allowlist" means any IP can mint an admin session. This guard exists to make
+// that state unreachable.
+// ---------------------------------------------------------------------------
 
 test("machine-session: enabling with an empty allowlist is refused", async () => {
   const admin = await mintSession("ADMIN");

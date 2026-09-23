@@ -8,10 +8,8 @@ import { verifySessionJwt } from "@/lib/session-jwt";
 import { revokeSessionById } from "@/lib/auth";
 import { logAudit } from "@/lib/audit";
 
-// Summonarr-native sign-out. Fully revokes the session server-side (deletes the
-// AuthSession row AND bumps the user's sessionsRevokedAt cutoff so a captured
-// copy of the JWT can't ride the fast-path cache window) and clears both
-// Summonarr session cookie variants.
+// Sign-out. Revokes the session on the server (deletes its AuthSession row) and
+// clears both Summonarr session cookie variants in the browser.
 export async function POST(req: NextRequest) {
   // Bearer (native clients) preferred over the cookie (browsers) so a native
   // sign-out revokes the session server-side, not just client-side.
@@ -21,13 +19,11 @@ export async function POST(req: NextRequest) {
   if (token) {
     const claims = await verifySessionJwt(token);
     if (claims?.sessionId) {
-      // Full revoke (not just a row delete): marks the session force-revoked in
-      // the in-process ledger AND bumps the user's sessionsRevokedAt cutoff, so a
-      // separately-captured copy of this JWT is rejected immediately instead of
-      // surviving the dbCheckedAt fast-path window (up to 60s) after logout.
-      // Best-effort server-side revoke: revokeSessionById no longer swallows its
-      // error, but a DB failure here must NOT block the local sign-out (cookie
-      // clearing) below. Catch, log, and continue clearing cookies.
+      // revokeSessionById deletes the row and also marks the session as
+      // force-revoked in memory, so a copied JWT is rejected on its very next
+      // request instead of riding the short "recently DB-checked" fast path.
+      // It throws on a DB failure; we catch it here because a failed server-side
+      // revoke must not stop the cookie clearing below.
       try {
         await revokeSessionById(claims.sessionId);
       } catch (err) {

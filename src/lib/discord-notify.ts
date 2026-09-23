@@ -346,7 +346,8 @@ async function chunkSequential(
   }
 }
 
-// Discord rate-limits DM channel creation; serialise DMs through a queue to avoid 429s when notifying many users
+// Discord rate-limits opening DM channels, so DMs go out one at a time through
+// this queue (600 ms apart) to avoid 429 "too many requests" errors.
 const dmQueue: Array<() => Promise<void>> = [];
 let dmQueueRunning = false;
 
@@ -511,7 +512,7 @@ export async function notifyAdminsIssueMessage(title: string, userName: string, 
         discordId: { not: null },
         notifyOnIssue: true,
         // A disabled account keeps its Discord link (guardrail 33), so without
-        // this it keeps getting DM'd about every new issue.
+        // this it would keep getting pinged about every issue message.
         deactivatedAt: null,
         ...idFilter,
       },

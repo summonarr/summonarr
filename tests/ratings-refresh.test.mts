@@ -12,8 +12,9 @@
 //     a miss already held a stale OMDB row (every title, on an MDBList-less
 //     instance);
 //   - the verdict pass (blocking:true, one call per 200 titles) still handed
-//     those refreshes to after(), and Next starts every after() callback of a
-//     request together once the response closes.
+//     those refreshes to after() (Next's "run this once the response is sent"
+//     hook), and Next starts every after() callback of a request together, with
+//     no limit, once the response closes (guardrail 31a).
 //
 // Pinned here, each mutation-verified: with deferToAfter:false the refresh runs
 // before the call returns and never exceeds OMDB_FALLBACK_CONCURRENCY upstream

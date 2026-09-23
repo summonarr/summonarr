@@ -111,7 +111,9 @@ export default async function RecentlyAddedPage() {
         const parsed = JSON.parse(row.data) as { poster_path?: string | null; posterPath?: string | null };
         const path = parsed.poster_path ?? parsed.posterPath ?? null;
         posterByKey.set(row.key, posterUrl(path, "w342"));
-      } catch { }
+      } catch {
+        // A corrupt cache row just means this title shows no poster.
+      }
     }
     items = items.map((i) => ({
       ...i,
@@ -165,7 +167,6 @@ export default async function RecentlyAddedPage() {
                       <p className="text-zinc-500 text-[10px] text-center leading-tight">{item.title}</p>
                     </div>
                   )}
-                  {}
                   <div className="absolute top-1.5 right-1.5 flex gap-1">
                     {item.sources.plex && (
                       <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-[var(--ds-plex)] text-black">
@@ -178,7 +179,6 @@ export default async function RecentlyAddedPage() {
                       </span>
                     )}
                   </div>
-                  {}
                 </div>
                 <div className="min-w-0">
                   <Link href={activityHref} className="text-xs font-medium text-zinc-100 hover:text-indigo-400 transition-colors truncate block">

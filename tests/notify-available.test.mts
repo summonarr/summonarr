@@ -4,7 +4,8 @@
 // Postgres's UPDATE … RETURNING; what CAN regress in JS — and what these tests
 // pin — is the statement's shape and the winner-filter contract:
 //
-//  - exactly ONE statement (the TOCTOU fix: no snapshot-then-update pair),
+//  - exactly ONE statement (the TOCTOU fix — a check-then-act race — so no
+//    separate snapshot-then-update pair),
 //  - the WHERE always includes `notifiedAvailable = false` (the CAS predicate),
 //  - markAvailable adds the status flip AND the PENDING/APPROVED guard (without
 //    it, a claim would resurrect a row an admin DECLINED mid-run — a terminal

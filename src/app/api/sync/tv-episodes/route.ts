@@ -8,7 +8,7 @@ import { getJellyfinTVEpisodes, type JellyfinTVEpisodeData } from "@/lib/jellyfi
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { isCronAuthorized, replaceEpisodeCacheForSource, withCronRunRecording } from "@/lib/cron-auth";
 
-// 5-minute timeout: fetching episodes for large TV libraries can be slow
+// Allow up to 5 minutes: fetching every episode of a large TV library is slow.
 export const maxDuration = 300;
 
 export async function POST(request: NextRequest) {
@@ -23,10 +23,9 @@ export async function POST(request: NextRequest) {
 // TVEpisodeCache has no serverInstance column — episodes are TMDB-anchored and
 // every server of one type accumulates into a single `source` namespace — so the
 // only correct write is a whole-table replace built from the UNION of all of
-// them. This route used to read the DEFAULT server alone and then delete that
-// whole namespace, so on a multi-server install the admin's "Sync TV Episodes"
-// button destroyed every other server's episode rows and took per-episode
-// availability with them.
+// them. Reading only the DEFAULT server and then replacing the whole namespace
+// would destroy every other server's episode rows (and their per-episode
+// availability) on a multi-server install.
 //
 // The union is ALL-OR-NOTHING, mirroring the orchestrator's gate (guardrail 35):
 // if any configured instance's fetch fails, its episodes are missing from the
@@ -146,8 +145,8 @@ async function rewrite(
   source: "plex" | "jellyfin",
   episodes: Array<PlexTVEpisodeData | JellyfinTVEpisodeData>,
 ): Promise<void> {
-  // Staged load + short atomic swap; the helper takes the same advisory lock this
-  // site used to take inline (2002,1 plex / 2002,2 jellyfin).
+  // The helper loads the new rows first, then swaps them in with one short
+  // transaction under advisory lock 2002,1 (plex) / 2002,2 (jellyfin).
   await replaceEpisodeCacheForSource(source, episodes);
 }
 

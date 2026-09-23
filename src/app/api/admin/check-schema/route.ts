@@ -24,8 +24,10 @@ const EXPECTED: Record<string, string[]> = {
   SonarrAvailableItem: ["tmdbId","arrInstance"],
 };
 
-// Requires both an admin session (withAdmin) AND a cron bearer token to
-// prevent accidental exposure — the inline isCronAuthorized check stays.
+// withAdmin requires an admin session. The extra isCronAuthorized check does
+// NOT demand the cron token too: for an admin it re-checks the session and, for
+// a cookie session, adds a same-origin + device-fingerprint check. A bare
+// `Bearer <CRON_SECRET>` never gets this far — withAdmin rejects it first (401).
 export const GET = withAdmin(async (request, _ctx, _session) => {
   if (!(await isCronAuthorized(request))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });

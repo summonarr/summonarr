@@ -81,11 +81,10 @@ export default async function AdminIssuesPage({
     : "OPEN";
 
   const [allIssues, statusCounts, radarrInstances, sonarrInstances] = await Promise.all([
-    // Filtered in SQL, not in JS. Fetching 500 rows across ALL statuses and
-    // then filtering in memory meant that past 500 issues the tab counts (which
-    // come from an uncapped groupBy) described rows the list could not contain —
-    // a tab reading "620" over a list missing the older ones. Applying the
-    // status here spends the whole budget on the tab actually being viewed.
+    // Filter by status in SQL, not in JS. If we fetched 500 rows of every
+    // status and filtered afterwards, a busy tab could show a count of "620"
+    // over a list missing its older issues. Filtering here spends the whole
+    // 500-row budget on the tab being viewed.
     prisma.issue.findMany({
       where: filter === "ALL" ? undefined : { status: filter },
       include: {
@@ -124,20 +123,13 @@ export default async function AdminIssuesPage({
     });
   }
 
-  // Every media type, and sourced from allIssues rather than the FILTERED
-  // groups. Two bugs in one line: filtering to TV left plexSet/jellyfinSet empty
-  // for every movie, so Fix Match told the admin "This item is not in any synced
-  // library" — directly under the movie's own Plex/Jellyfin file path, which the
-  // same dialog fetches separately and displays. Every movie WRONG_MATCH issue
-  // was unfixable from this page, and the obvious reading is that library sync
-  // is broken. /admin/page.tsx builds the equivalent sets with no mediaType
-  // filter.
+  // Which listed titles are in the Plex / Jellyfin library. Built for every
+  // media type (movies AND TV) — if a title is missing from these sets, Fix
+  // Match wrongly tells the admin "This item is not in any synced library".
   //
-  // selectedIssue is unioned in because allIssues is status-filtered in SQL: a
-  // deep link (the issue-reply email/push carries ?selected=<id> with no filter)
-  // resolves through the findUnique fallback above and is absent from the list,
-  // so its pair would never be queried and the side panel would report the same
-  // "not in any synced library".
+  // selectedIssue is added too: a deep link (?selected=<id> from an issue-reply
+  // email or push) can point at an issue that is not in the current tab's list,
+  // and its side panel needs the same library check.
   const allLibraryPairs = [...new Map(
     [...allIssues, ...(selectedIssue ? [selectedIssue] : [])]
       .map((i) => [`${i.tmdbId}:${i.mediaType}`, { tmdbId: i.tmdbId, mediaType: i.mediaType }])
@@ -161,9 +153,8 @@ export default async function AdminIssuesPage({
     { label: "Open", value: "OPEN", count: countFor("OPEN") },
     { label: "In Progress", value: "IN_PROGRESS", count: countFor("IN_PROGRESS") },
     { label: "Resolved", value: "RESOLVED", count: countFor("RESOLVED") },
-    // Sum of the uncapped groupBy, not allIssues.length — the array is capped,
-    // so the old expression made "All" disagree with its own three tabs at
-    // exactly 501 issues.
+    // Sum of the uncapped groupBy, not allIssues.length — the list is capped
+    // at ISSUE_LIST_CAP, so its length would undercount a large table.
     { label: "All", value: "ALL", count: statusCounts.reduce((n, c) => n + c._count.status, 0) },
   ];
 

@@ -17,8 +17,9 @@
 // then run this and retry the push. The four Radarr/Sonarr cache tables self-heal
 // (fully replaced every sync) so their backfill is a convenience.
 //
-// Idempotent — ADD COLUMN IF NOT EXISTS + only backfills rows still at "". Safe to
-// re-run; a run after a future release drops is4k is a clean no-op.
+// Idempotent — the column is only added when it is missing, and only rows still
+// at "" are backfilled. Safe to re-run; once a future release drops is4k, the
+// backfill step is skipped.
 //
 // Standalone — uses only `pg`. No Prisma, no crypto (arrInstance is not secret).
 // Mirrors scripts/migrate-role-permissions.mjs.

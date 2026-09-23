@@ -33,8 +33,10 @@ export interface NavItem {
   href: string;
   label: string;
   icon: IconComponent;
+  // Match only this exact path when highlighting the active item (not sub-paths).
   exact?: boolean;
-
+  // Marks items picked for a phone bottom tab bar (at most 5). No layout
+  // component reads this flag today; tests/nav-items.test.mts checks the set.
   mobileBottomBar?: boolean;
   section: "browse" | "personal" | "admin";
 }
@@ -139,15 +141,11 @@ export function getVisibleAdminItems(roleOrPerms?: string | { role?: string; per
   const role = typeof roleOrPerms === "string" ? roleOrPerms : roleOrPerms?.role;
   const raw = typeof roleOrPerms === "object" && roleOrPerms !== null ? roleOrPerms.permissions : undefined;
   const stored = raw == null ? 0n : typeof raw === "string" ? parsePermissions(raw) : raw;
-  // Resolve through effectivePermissions rather than re-deriving its convention
-  // here. It owns both halves: a stored mask of 0n means "never seeded" and falls
-  // back to the role preset, and role ADMIN always contributes the superbit. The
-  // previous inline version consulted the role ONLY when the mask was zero, so an
-  // ADMIN row carrying any other non-zero bits — reachable via the permissions
-  // editor in /api/admin/users/[id], which can write an arbitrary mask over an
-  // existing ADMIN — resolved without the ADMIN bit and got NO admin nav at all.
-  // Not live today (claimsToSession normalizes before every current call site),
-  // but the {role, permissions} signature invites passing a raw User row.
+  // Let effectivePermissions apply the rules instead of copying them here: a
+  // stored mask of 0n means "never set" and falls back to the role's preset, and
+  // role ADMIN always adds the ADMIN bit. That second rule matters when a raw
+  // User row is passed in — an ADMIN whose mask was edited to other bits must
+  // still see the admin nav.
   const perms = role ? effectivePermissions(role, stored) : stored;
   return adminNavItems.filter((item) =>
     // An unmapped destination is ADMIN-only — fail CLOSED. This is deliberately

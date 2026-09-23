@@ -1,4 +1,4 @@
-// Route-level unit tests for the seven uncovered authentication routes:
+// Route-level unit tests for seven authentication routes:
 //   POST /api/auth/sign-in/credentials
 //   POST /api/auth/sign-in/plex
 //   POST /api/auth/plex/start

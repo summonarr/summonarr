@@ -44,7 +44,8 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
   const [error, setError]             = useState<string | null>(null);
   const [confirmingRevoke, setConfirmingRevoke] = useState<string | null>(null);
   const [confirmingRevokeAll, setConfirmingRevokeAll] = useState(false);
-  // Guardrail 16: formatRelativeTime uses Date.now() and toLocaleDateString varies by locale
+  // Guardrail 16: formatRelativeTime reads Date.now() and toLocaleDateString
+  // depends on locale, so both render only after mount to avoid a hydration mismatch.
   const mounted = useHasMounted();
   const titleId = `sessions-modal-title-${u.id}`;
   const closeBtnRef = useRef<HTMLButtonElement>(null);
@@ -57,7 +58,11 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
     fetch(withBasePath(`/api/admin/users/${u.id}/sessions`))
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((data: AdminAuthSession[]) => setSessions(Array.isArray(data) ? data : []))
-      .catch(() => setSessions([]))
+      .catch(() => {
+        // Say so: an empty list here would read as "no active sessions".
+        setSessions([]);
+        setError("Could not load sessions.");
+      })
       .finally(() => setLoading(false));
   }, [u.id]);
 
@@ -72,10 +77,8 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
         body:    JSON.stringify({ sessionId }),
       });
       if (!res.ok) {
-        // A failed revoke reported only to the devtools console, so the row
-        // stayed in the list with no explanation and the admin was left unsure
-        // whether the device had actually been signed out. That is the wrong
-        // thing to be unsure about.
+        // Show why it failed, so the admin knows the device may still be
+        // signed in rather than guessing from a row that didn't disappear.
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
         setError(data?.error ?? `Could not revoke session (${res.status})`);
         return;
@@ -128,7 +131,6 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
         className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 w-80 lg:w-96 xl:w-[460px] shadow-2xl flex flex-col max-h-[80vh] outline-none"
         onClick={(e) => e.stopPropagation()}
       >
-        {}
         <div className="flex items-center justify-between mb-1">
           <h3
             id={titleId}
@@ -149,7 +151,6 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
         </div>
         <p className="text-xs text-zinc-500 mb-4 truncate">{displayName}</p>
 
-        {}
         {error && (
           <p role="alert" aria-live="assertive" className="text-xs text-red-400 mb-2">
             {error}
@@ -163,7 +164,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
             </div>
           )}
 
-          {!loading && sessions.length === 0 && (
+          {!loading && sessions.length === 0 && !error && (
             <p className="text-xs text-zinc-500 py-4 text-center">No active sessions.</p>
           )}
 
@@ -238,7 +239,6 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
           ))}
         </div>
 
-        {}
         {!loading && sessions.length > 0 && (
           <div className="mt-4 pt-3 border-t border-zinc-800">
             {!confirmingRevokeAll ? (

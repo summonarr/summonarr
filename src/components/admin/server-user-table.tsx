@@ -156,15 +156,10 @@ function DownloadToggle({
   const [loading, setLoading] = useState(false);
   const [optimistic, setOptimistic] = useState(enabled);
 
-  // Re-sync when the server-rendered value changes. useState's initializer runs
-  // only at first mount, and router.refresh() deliberately preserves client
-  // state while the row key (u.id) keeps this instance alive — so "Disable all"
-  // flipped the database AND the Jellyfin server while every toggle on screen
-  // went on rendering the value it read at mount. The footer count beside them
-  // reads straight from the refreshed props, so the two elements visibly
-  // contradicted each other: "3 users with downloads disabled" above three
-  // switches all showing green. The user's own click is unaffected — the prop
-  // arrives matching what they already set, so this is a no-op there.
+  // Follow the server value when it changes. useState only reads `enabled`
+  // on first mount, and router.refresh() keeps component state, so without
+  // this a bulk "Disable all" would leave every switch showing its old value.
+  // After the admin's own click the new prop already matches, so it's a no-op.
   useEffect(() => {
     setOptimistic(enabled);
   }, [enabled]);
@@ -363,11 +358,12 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
 export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }: ServerUserTableProps) {
   const [search, setSearch] = useState("");
 
-  const filtered = search.trim()
+  const query = search.trim().toLowerCase();
+  const filtered = query
     ? users.filter(
         (u) =>
-          u.username.toLowerCase().includes(search.toLowerCase()) ||
-          (u.email ?? "").toLowerCase().includes(search.toLowerCase()),
+          u.username.toLowerCase().includes(query) ||
+          (u.email ?? "").toLowerCase().includes(query),
       )
     : users;
 
@@ -498,11 +494,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
         </table>
       </div>
 
-      {/* Both numbers describe the same set. They used to disagree: the total
-          came from the unfiltered `users` while the disabled count came from
-          the SEARCH-FILTERED `jellyfinUsers`, so filtering to audit who has
-          downloads disabled showed the full user count beside a count of only
-          the matching rows — an admin reading "1" while 12 actually existed. */}
+      {/* Both counts use the same search-filtered set, so they always agree. */}
       <p className="text-[11px] text-zinc-500">
         {filtered.length} server {filtered.length === 1 ? "user" : "users"}
         {search.trim() && ` of ${users.length}`}

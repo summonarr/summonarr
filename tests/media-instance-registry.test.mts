@@ -1,14 +1,14 @@
 // Unit tests for the server-side Plex/Jellyfin instance registry
 // (src/lib/media-instance-registry.ts): how the configured-instance list is
 // assembled from the JSON registry Setting + the synthesized default entry.
-// A regression here mis-lists instances, which mis-scopes the sync fan-out
-// once later phases wire it up.
+// A regression here mis-lists instances, which makes the sync loop over the
+// wrong set of servers.
 //
-// Impurity: prisma.setting.findUnique (registry JSON) + findMany (per-instance
-// connection-field presence). No local DB here, so we shadow the `setting`
-// delegate on the shared extended client with an in-memory stub (same pattern
-// as tests/arr-instance-registry.test.mts / jellyfin-config.test.mts). No DB
-// or network touched.
+// DB reads: prisma.setting.findUnique (the registry JSON) + findMany (which
+// connection fields are filled in per instance). There is no local DB, so the
+// `setting` model is replaced with an in-memory stub (same pattern as
+// tests/arr-instance-registry.test.mts / jellyfin-config.test.mts). No DB or
+// network is touched.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { prisma } from "../src/lib/prisma.ts";

@@ -17,9 +17,9 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { getUserRecommendations } from "@/lib/recommendations";
 import { getFeatureFlags } from "@/lib/features";
 
-// Native-client mirror of the curated Discover home — src/app/(app)/page.tsx.
-// Returns the same trending heroes + 6 rails the web renders. Keep the rail
-// set, sizes, and dedupe/projection logic in sync with that page.
+// The home feed for native clients, mirroring the web home page
+// (src/app/(app)/page.tsx): the trending "featured" titles plus the same rails
+// the web shows. Keep the rail list, sizes and filtering in sync with that page.
 const RAIL_SIZE = 14;
 const RAIL_OVERFETCH = 20;
 
@@ -71,7 +71,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
   }
 
   const hideAvailable = request.nextUrl.searchParams.get("hideAvailable") === "1";
-  // Per-user server visibility for the hideAvailable gate.
+  // Which servers (Plex / Jellyfin) this user is shown, for the hideAvailable filter.
   const { showPlex, showJellyfin } = getBadgeVisibility(session);
 
   try {

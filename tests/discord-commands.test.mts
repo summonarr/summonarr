@@ -21,7 +21,8 @@
 //   - the `/link` token option admits a genuine 32-char generate-link token
 //   - the full command set (names/descriptions/options/choices) matches an
 //     explicit literal, so a rename or a dropped option can't pass silently
-//   - neither route file declares max_length itself — both must import the module
+//   - neither route file declares max_length itself — both must register through
+//     the shared putDiscordCommands helper (src/lib/discord-register.ts)
 //
 // Division of labour (owned elsewhere; NOT re-pinned here):
 //   - tests/discord-routes.test.mts OWNS register-commands' auth, 400-on-missing-

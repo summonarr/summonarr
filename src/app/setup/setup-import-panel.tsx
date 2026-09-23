@@ -38,8 +38,13 @@ export function SetupImportPanel() {
   const [progress, setProgress] = useState<ChunkedUploadProgress | null>(null);
   const [result, setResult] = useState<ImportResult>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // The header check below is async. If the user picks a second file before the
+  // first check finishes, this ref lets the stale check see it is out of date
+  // and drop its answer instead of overwriting the newer file's state.
+  const pickedFileRef = useRef<File | null>(null);
 
   async function handleFileChange(f: File | null) {
+    pickedFileRef.current = f;
     setFile(f);
     setResult(null);
     setProgress(null);
@@ -48,11 +53,13 @@ export function SetupImportPanel() {
     if (!f) return;
     try {
       const isEnc = await isEncryptedFile(f);
+      if (pickedFileRef.current !== f) return;
       setEncrypted(isEnc);
       const kb = (f.size / 1024).toFixed(1);
       const mb = (f.size / (1024 * 1024)).toFixed(1);
       setSize(f.size > 1024 * 1024 ? `${mb} MB` : `${kb} KB`);
     } catch {
+      if (pickedFileRef.current !== f) return;
       setResult({ ok: false, error: "Could not read file" });
     }
   }
@@ -81,7 +88,7 @@ export function SetupImportPanel() {
     }
 
     const data = outcome.data as ImportResult & { ok: boolean };
-    setResult({ ok: data.ok, summary: data.summary, errors: data.errors, warning: data.warning });
+    setResult({ ok: data.ok, summary: data.summary, errors: data.errors, error: data.error, warning: data.warning });
     if (data.ok) {
       setTimeout(() => {
         window.location.href = withBasePath("/login");
@@ -90,6 +97,7 @@ export function SetupImportPanel() {
   }
 
   function clearFile() {
+    pickedFileRef.current = null;
     setFile(null);
     setEncrypted(null);
     setSize(null);
@@ -119,6 +127,14 @@ export function SetupImportPanel() {
       </div>
 
       <div
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => {
+          // Without preventDefault the browser would open the dropped file itself.
+          e.preventDefault();
+          if (importing) return;
+          const dropped = e.dataTransfer.files?.[0];
+          if (dropped) void handleFileChange(dropped);
+        }}
         className={`flex flex-col items-center justify-center gap-2 px-4 py-6 rounded-lg border border-dashed text-center transition-colors ${dropBorder} ${
           file ? "bg-zinc-950" : "bg-transparent"
         }`}
@@ -173,12 +189,13 @@ export function SetupImportPanel() {
           type="button"
           size="sm"
           variant="outline"
+          disabled={importing}
           onClick={() => fileInputRef.current?.click()}
         >
           Choose file
         </Button>
         {file && (
-          <Button type="button" size="sm" variant="outline" onClick={clearFile}>
+          <Button type="button" size="sm" variant="outline" disabled={importing} onClick={clearFile}>
             Clear
           </Button>
         )}

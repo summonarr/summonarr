@@ -1,6 +1,6 @@
-// Unit tests for the READ half of per-user media-server visibility: the two
-// entry points added to src/lib/media-visibility.ts for callers that don't hold
-// a SummonarrSession, plus the two user-facing decisions that are easiest to get
+// Unit tests for the READ half of per-user media-server visibility: the
+// src/lib/media-visibility.ts entry points for callers that don't hold a
+// SummonarrSession, plus the user-facing decisions that are easiest to get
 // subtly wrong.
 //
 // Background: a Plex/Jellyfin server can be marked `restricted`, and then its
@@ -25,7 +25,10 @@
 //     never watch — and silently drop it from the bulk create;
 //   - POST /api/votes's "Media is not in any library" 422 gate is per-grant: the
 //     granted voter gets through, the ungranted one is refused, on identical DB
-//     state.
+//     state;
+//   - the TVEpisodeCache gate (visibleEpisodeSourcesFor/From) never reports a
+//     source held only on a server the viewer can't see;
+//   - the bulk route's permission check accepts the granular request bits.
 //
 // Harness: the two route handlers are withAuth/withPermission-wrapped (guardrail
 // 6a), so they're invoked as real route functions with a NextRequest carrying a
@@ -505,14 +508,13 @@ test("TVEpisodeCache gate: the provider preference still narrows, and never wide
 
 // ── the bulk route's door check ─────────────────────────────────────────────
 
-// REQUEST_MOVIE / REQUEST_TV NARROW the REQUEST umbrella rather than depending
-// on it (Overseerr semantics), and the permissions modal renders all three as
-// independent checkboxes — so REQUEST_MOVIE|REQUEST_TV with no umbrella bit is
-// an ordinary mask an admin can produce in two clicks. The route-level gate
-// demanded the umbrella and 403'd it, while the single-request route created
-// the row and the UI showed the button, because both use the umbrella-aware
-// canRequest. Nothing exercised the gate negatively: the only existing bulk
-// tests use an ADMIN caller, who passes via the superbit.
+// REQUEST_MOVIE / REQUEST_TV NARROW the REQUEST "umbrella" bit rather than
+// depending on it (Overseerr semantics), and the permissions modal shows all
+// three as separate checkboxes — so REQUEST_MOVIE|REQUEST_TV with no umbrella
+// bit is an ordinary mask an admin can set in two clicks. The bulk route once
+// demanded the umbrella and 403'd that mask, while the single-request route
+// (and the UI) accepted it. The other bulk tests use an ADMIN caller, who
+// passes via the ADMIN bit, so they can't catch that.
 test("bulk accepts a caller granted only the GRANULAR request bits", async () => {
   const granular = makeUser("granular", {
     role: "USER",

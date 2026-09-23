@@ -14,8 +14,9 @@ export type AvailableNotificationClaim<T> = {
 /**
  * Atomically flips `notifiedAvailable: true` on the candidate set (WHERE
  * notifiedAvailable=false) and returns the subset whose row was actually
- * flipped — collapses the snapshot-then-CAS pattern into a single statement
- * so the previous TOCTOU between findMany() and updateMany() is closed.
+ * flipped. This is a compare-and-swap (CAS): read-check-write happen in ONE
+ * SQL statement, so no other writer can slip in between a separate read and
+ * write (guardrail 14).
  *
  * Multiple paths (orchestrator, per-source sync routes, webhooks) can
  * concurrently flip `notifiedAvailable` for overlapping request sets. The

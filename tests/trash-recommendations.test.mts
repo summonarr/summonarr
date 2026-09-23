@@ -1,15 +1,17 @@
 // Registry pins for STARTER_PACK (src/lib/trash-recommendations.ts) — the
 // curated TRaSH-Guides starter set shown at the top of the admin TRaSH page.
-// Each entry is a *match descriptor* resolved against the local TrashSpec
-// cache (resolveCurated tries match.trashId, then match.slug, then an exact
-// then partial case-insensitive name match). These pins guard the properties
-// resolution depends on: every entry must carry at least one exact-match
-// candidate (trashId/slug) plus a name for the rename-resilience fallback,
-// (service, kind) is the effective registry key (the two NAMING entries
-// deliberately share the pseudo-id "default", so trashId alone is NOT unique),
-// and the identity strings must not drift — a silently-edited trashId/slug
-// would make the starter pack render as "not synced" against a healthy cache.
-// The trash-validators payload guards are not applicable here: these are match
+// Each entry is a *match descriptor*: it is looked up in the local TrashSpec
+// cache by resolveCurated, which tries match.trashId, then an exact
+// case-insensitive name match, then a partial name match that must be unique.
+// match.slug is informational only (it appears in the "missing" report) and is
+// never used for the lookup.
+// These pins guard what that lookup depends on: every entry carries a name for
+// the rename-tolerant fallback, (service, kind) is the real registry key (the
+// two NAMING entries deliberately share the pseudo-id "default", so trashId
+// alone is NOT unique), and the identity strings must not drift — a silently
+// edited trashId or name would make the starter pack show as "not synced"
+// even though the cache is healthy.
+// The trash-validators payload checks don't apply here: these are match
 // descriptors, not upstream payloads.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -61,7 +63,8 @@ test("every entry carries a match with an exact candidate AND a name fallback", 
   for (const item of STARTER_PACK) {
     const match = item.match;
     assert.ok(match, `${item.label}: match is required — resolveCurated returns null without one`);
-    // At least one exact-match candidate feeds resolveCurated's trashId loop.
+    // At least one identity string. Note only trashId is actually queried —
+    // a slug-only entry (Sonarr's quality profile) resolves by name alone.
     assert.ok(
       Boolean(match.trashId) || Boolean(match.slug),
       `${item.label}: needs a trashId or slug exact-match candidate`,
@@ -71,8 +74,8 @@ test("every entry carries a match with an exact candidate AND a name fallback", 
       typeof match.name === "string" && match.name.trim().length > 0,
       `${item.label}: needs a non-empty match.name for the rename-resilience fallback`,
     );
-    // Whatever candidates exist must be non-empty strings — "" would query for
-    // a blank trashId and can never match a cached spec.
+    // Whatever identity strings exist must be non-empty — a blank trashId can
+    // never match a cached spec.
     for (const candidate of [match.trashId, match.slug]) {
       if (candidate !== undefined) {
         assert.ok(candidate.trim().length > 0, `${item.label}: empty match candidate`);

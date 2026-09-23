@@ -5,12 +5,13 @@ import { Button } from "@/components/ui/button";
 import { XCircle, Loader2, RefreshCw, RefreshCcw, Trash2, Database } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 
-// ── Cache Management ─────────────────────────────────────────────────────────
-// Per-source clear + refetch controls, plus a combined "Clear & Refetch All".
+// Cache Management: a Clear and a Refetch button for each metadata source, plus
+// one "Clear & Refetch All" button.
 //
-// Each source maps to a DELETE /api/admin/clear-cache?source=<id> (clear) and a POST warm route
-// (refetch). TMDB details cache (movie:/tv: keys) holds the bulk of metadata — country, language,
-// keywords, watch providers, genres — and previously had a warm button but no clear button.
+// "Clear" calls DELETE /api/admin/clear-cache?source=<id>. "Refetch" POSTs to the
+// source's warm route, which re-downloads data for the whole library. The TMDB
+// details cache holds most of the metadata (country, language, keywords, watch
+// providers, genres).
 
 type CacheSourceId = "tmdb" | "mdblist" | "omdb";
 
@@ -19,7 +20,8 @@ interface CacheSourceDef {
   label: string;
   description: string;
   warmUrl: string;
-  // MDBList accepts { force } to also purge NOT_FOUND sentinels before refetching.
+  // Extra JSON body for the warm route. MDBList takes { force: true } to also
+  // delete its saved "not found" markers first, so those titles are retried.
   warmBody?: Record<string, unknown>;
 }
 
@@ -47,9 +49,9 @@ const CACHE_SOURCES: CacheSourceDef[] = [
 
 type WarmResult = { fetched?: number; skipped?: number; total?: number; failed?: number; purged?: number; cleared?: number; error?: string };
 
-// A clear also resets the tables that hold denormalized copies of the same
-// upstream data — the grid-metadata table and the recommendation graph — so the
-// count of cache rows alone under-reports what the button did.
+// A clear also resets other tables that keep copies of the same data (the grid
+// metadata table and the "For You" recommendation graph), so the cache-row count
+// alone would under-report what the button did.
 type ClearResult = WarmResult & { coreCleared?: number; edgesCleared?: number; verdictsCleared?: number };
 
 function summarizeClear(d: ClearResult): string {
@@ -169,12 +171,13 @@ export function CacheManagementPanel() {
     const out: string[] = [];
     let anyError = false;
 
-    // Clear every source in one pass, then refetch each. Refetch routes keep their own cooldown
-    // guards; a 429 surfaces as a per-source line rather than aborting the whole run.
+    // Clear every source with one request, then refetch each source in turn.
+    // Each refetch route has its own cooldown; if one answers 429 (too many
+    // requests) it just shows as a failed line and the rest still run.
     try {
       const clearRes = await fetch(withBasePath("/api/admin/clear-cache?source=all"), { method: "DELETE" });
-      const clearData: WarmResult = await clearRes.json().catch(() => ({}));
-      if (clearRes.ok) out.push(`Cleared ${clearData.cleared ?? 0} cache entries`);
+      const clearData: ClearResult = await clearRes.json().catch(() => ({}));
+      if (clearRes.ok) out.push(summarizeClear(clearData));
       else { anyError = true; out.push(`Clear failed: ${clearData.error ?? clearRes.status}`); }
     } catch {
       anyError = true;

@@ -44,9 +44,9 @@
 // is scripted (relay hosts + a TEST-NET-3 web endpoint respond; anything else
 // throws), and dns/promises.lookup is stubbed so the safe-fetch SSRF resolver
 // never leaves the process. PushSubscription secret fields are built with the
-// REAL encryptToken (the one legitimate call-site outside the prisma
-// extension — guardrail 7a) so the decrypt-at-send contract is exercised for
-// real. Dynamic imports keep the stubs ahead of the module graph (the
+// REAL encryptToken (the same call the push routes make, since the prisma
+// extension does not cover that table — guardrail 7a) so the decrypt-at-send
+// contract is exercised for real. Dynamic imports keep the stubs ahead of the module graph (the
 // trakt.test pattern).
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -963,8 +963,8 @@ test("sendAppUpdateNoticeToAllIos: every iOS device across users, {sent, failed}
   // The deactivatedAt filter is the point, not incidental: a disabled account
   // keeps its PushSubscription rows (guardrail 33), so without it a removed user
   // is told to update an app they can no longer sign into. Every sibling fan-out
-  // in push.ts carries the same clause; this broadcast was the one that did not,
-  // and this assertion previously pinned its absence.
+  // in push.ts carries the same clause; this broadcast used to be the one that
+  // did not.
   assert.deepEqual(subQueries[0]?.where, { platform: "ios", user: { deactivatedAt: null } });
   assert.equal(relayCalls.length, 3);
   assert.deepEqual(counts, { sent: 1, failed: 2 }); // unregistered + 500 both count as failed

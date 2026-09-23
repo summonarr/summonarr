@@ -1,5 +1,5 @@
 // Structural invariants of prisma/schema.prisma — the schema facts that
-// guardrails 19, 28, 32 and 35 depend on, none of which any compiler, linter or
+// guardrails 19, 28, 32, 35 and 37 depend on, none of which any compiler, linter or
 // existing test checks.
 //
 // Why a schema test at all: this project is schema-first (guardrail 3). There is
@@ -346,16 +346,8 @@ test("the raw-SQL layer's hardcoded table names all exist as models", () => {
   );
 });
 
-// ── guardrail 37: the second Jellyfin item id column ────────────────────────
+// ── Json columns vs. db-export ──────────────────────────────────────────────
 //
-// One title can sit in several libraries on ONE server (Anime vs TV, HD vs 4K,
-// an accidental double-import) and each copy carries its own Jellyfin item id,
-// but @@id([tmdbId, mediaType, serverInstance]) allows exactly one row. Before
-// jellyfinItemIds the losing copies' ids were simply lost, so a watch filed
-// under one resolved to no title and the episodes filed under it vanished from
-// TVEpisodeCache. Dropping this column back out is a `db push` away and nothing
-// else in the tree would fail.
-
 // db-export's escapeSQL decides between a Postgres ARRAY literal ('{a,b}') and
 // a JSON literal ('["a","b"]') by asking Array.isArray(value) — it has no
 // column type at hand. Prisma hands back a JS array for BOTH a scalar-list
@@ -399,6 +391,16 @@ test("no Json column may hold a top-level array — db-export discriminates arra
     );
   }
 });
+
+// ── guardrail 37: the second Jellyfin item id column ────────────────────────
+//
+// One title can sit in several libraries on ONE server (Anime vs TV, HD vs 4K,
+// an accidental double-import) and each copy carries its own Jellyfin item id,
+// but @@id([tmdbId, mediaType, serverInstance]) allows exactly one row. Before
+// jellyfinItemIds the losing copies' ids were simply lost, so a watch filed
+// under one resolved to no title and the episodes filed under it vanished from
+// TVEpisodeCache. Dropping this column back out is a `db push` away and nothing
+// else in the tree would fail.
 
 test("guardrail 37: JellyfinLibraryItem keeps jellyfinItemIds alongside jellyfinItemId, defaulted so db push can add it to a populated table", () => {
   const m = model("JellyfinLibraryItem");

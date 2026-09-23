@@ -50,7 +50,7 @@ export function titleResolveKey(title: string, mediaType: string | null | undefi
 }
 
 // The distinct (title, mediaType) pairs still needing a tmdbId, in first-seen
-// order. Empty/whitespace titles are dropped — nothing could match them.
+// order. Empty titles are dropped — nothing could match them.
 export function collectUnmappedPairs(items: readonly TitleEntry[]): UnmappedTitlePair[] {
   const seen = new Set<string>();
   const out: UnmappedTitlePair[] = [];

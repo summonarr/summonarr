@@ -33,10 +33,11 @@
 // owns the TTL bucket values used as pass-through witnesses here.
 //
 // Ordering notes: the OMDB quota lockout is module-global with no reset
-// export, and this file's clock (Date-only mock timers) is advanced exactly
-// once — in the failure-isolation test, past omdb.ts's 30s getApiKey memo —
-// so the two lockout tests run LAST: the mid-run-stop test trips the lockout
-// and the locked-at-start test rides it.
+// export, so test order matters. The mocked clock (Date only) moves twice:
+// the failure-isolation test steps past omdb.ts's 30s getApiKey memo, and the
+// final abort test jumps past the 1h lockout. The two lockout tests run just
+// before that final test: the mid-run-stop test trips the lockout and the
+// locked-at-start test relies on it still being set.
 //
 // No DB or network: setting/tmdbCache and the library delegates are shadowed
 // in-memory (tests/_helpers.mts), globalThis.fetch is scripted per host, and
@@ -409,7 +410,7 @@ test("a TMDB external_ids outage (503) is transient too: failed, not notFound, n
   assert.ok(!cacheRows.has("omdb:tmdb:movie:771"));
 });
 
-// ── quota lockout (LAST — module-global state, clock never advances) ────────
+// ── quota lockout (order-sensitive — module-global state; see header) ───────
 
 test("a quota trip mid-run stops the batch loop: later batches are never issued and unattempted items appear in NO counter", async () => {
   tables.plex = Array.from({ length: 15 }, (_, i): Row => ({ tmdbId: 801 + i, mediaType: "MOVIE" }));

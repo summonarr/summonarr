@@ -1,6 +1,7 @@
 
 
-// Fingerprint captures only browser family / OS / device class — no raw UA string is stored, avoiding PII retention
+// A coarse summary of a User-Agent: browser family, OS and device class only.
+// The raw UA string is never stored, so no identifying detail is kept.
 export interface UaFingerprint {
 
   browser: string;
@@ -25,7 +26,9 @@ export function extractUaFingerprint(ua: string): UaFingerprint {
       ? "mobile"
       : "desktop";
 
-  // Chromium-derived browsers (Edge, Opera) must be tested before Chrome because their UAs also contain "Chrome/"
+  // Chromium-based browsers (Edge, Opera, Yandex, Samsung) are tested before
+  // Chrome because their UAs also contain "Chrome/". Chrome is tested before
+  // Safari for the same reason (Chrome's UA also contains "Safari/").
   const browser =
     /Edg\//i.test(ua)              ? "edge"
     : /OPR\//i.test(ua)            ? "opera"
@@ -53,12 +56,13 @@ export function serializeFingerprint(fp: UaFingerprint): string {
   return `${fp.browser}:${fp.os}:${fp.device}`;
 }
 
-// Compares the current request's UA against the stored fingerprint on a session's
-// claims. "machine:"-prefixed fingerprints (issued by /api/auth/machine-session)
-// are bound to CRON_SECRET, not a browser UA, so they're skipped. Returns false on
-// mismatch (caller should deny), true on match or no-fingerprint-on-claims. Bearer
-// sessions are NOT handled here — the caller decides to skip for bearer (the JWT
-// lives in app-secure storage, not an ambiently-replayed cookie).
+// Checks whether this request's UA matches the fingerprint saved in the session.
+// Returns false on a mismatch (the caller should deny) and true on a match or
+// when the session has no fingerprint. "machine:" fingerprints (from
+// /api/auth/machine-session) are tied to CRON_SECRET, not a browser, so they
+// always pass. Bearer (native app) sessions are skipped by the CALLER, not here:
+// their token lives in the app's secure storage, not in a cookie the browser
+// sends automatically (guardrail 6b).
 export function matchesStoredFingerprint(
   storedFp: string | undefined,
   currentUa: string | null,

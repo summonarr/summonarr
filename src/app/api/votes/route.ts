@@ -290,6 +290,13 @@ export const POST = withAuth(async (req, _ctx, session) => {
               notifyAdminsDeletionVoteThresholdPush(data),
             ]);
           });
+        } else {
+          // The race wiped the votes, so give the claim back. Left in place, the
+          // key would block the alert when the title genuinely reaches the
+          // threshold again. Best-effort: the vote is already saved.
+          await prisma.setting
+            .deleteMany({ where: { key: claimKey } })
+            .catch((err) => console.warn("[votes] releasing threshold claim failed:", err));
         }
       }
     }

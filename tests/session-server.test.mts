@@ -13,7 +13,9 @@
 //   - the result is DB-RECONCILED via verifyAndRefreshSession, not JWT-only:
 //     a deleted AuthSession row (revocation), a deactivated user, and an
 //     expired/tampered JWT all yield null, and a DB role change surfaces in
-//     the returned claims (with the sessionId rotated);
+//     the returned claims (for a bearer token the sessionId is also rotated;
+//     the cookie path deliberately never rotates, since this reader cannot
+//     hand a replacement cookie back to the browser);
 //   - fail-closed plumbing: no token ⇒ null with zero DB reads, and a THROWING
 //     DB read ⇒ null (the caller then falls through to its CRON_SECRET path)
 //     — never an exception.
@@ -330,7 +332,8 @@ test("a throwing DB read → null, never an exception (callers fall through to C
 // ── DB reconciliation ───────────────────────────────────────────────────────
 
 test("a DB role change surfaces in the returned claims, with the sessionId rotated", async () => {
-  // Token says USER; the DB says ISSUE_ADMIN (promoted after sign-in).
+  // Token says USER; the DB says ISSUE_ADMIN (promoted after sign-in). Sent as
+  // a bearer on purpose: only the bearer path rotates the sessionId.
   const { sessionId, token } = await mintSession({ role: "USER", dbRole: "ISSUE_ADMIN" });
   const claims = await readActiveSummonarrSessionFromRequest(
     makeReq({ authorization: `Bearer ${token}` }),

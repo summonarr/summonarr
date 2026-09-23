@@ -153,7 +153,8 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
   }
 
   useEffect(() => {
-    // Sync client ID with the server-assigned value so SSR and client stay in agreement
+    // Adopt the server-assigned Plex client ID (if any) so the browser and the
+    // server identify this device to Plex with the same ID.
     let cancelled = false;
     fetch(withBasePath("/api/auth/plex/client-id"), { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))

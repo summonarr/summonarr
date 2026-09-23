@@ -75,7 +75,7 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
   await prisma.$transaction([
     // Stamp passwordChangedAt + sessionsRevokedAt so that any still-valid session
     // JWT issued before this change is invalidated everywhere: the session-refresh
-    // path (auth.ts) treats a token whose issue time predates these cutoffs as
+    // path (session-refresh.ts) treats a token whose issue time predates these cutoffs as
     // revoked, so the change takes effect across all replicas without needing
     // server-local session state. The deleteMany below removes the per-device
     // AuthSession rows; the cutoffs are the DB-checked backstop for any JWT that

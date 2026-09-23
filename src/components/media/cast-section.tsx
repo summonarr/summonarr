@@ -9,10 +9,10 @@ interface CastSectionProps {
   cast: CastMember[];
 }
 
-// Cast grid; each member links to their /person/[id] page (filmography with
-// availability badges + inline requesting). This replaced the old in-place modal
-// — the page is deep-linkable, shareable, and roomier for a full filmography.
-// (Next's configured basePath auto-prefixes the Link href, so no withBasePath here.)
+// Cast grid; each member links to their /person/[id] page (their filmography,
+// with availability badges and request buttons).
+// (Next's basePath setting prefixes <Link> hrefs automatically, so no
+// withBasePath is needed here.)
 export function CastSection({ cast }: CastSectionProps) {
   return (
     <section className="ds-detail-section">
@@ -23,9 +23,11 @@ export function CastSection({ cast }: CastSectionProps) {
         Cast
       </h2>
       <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-12 2xl:grid-cols-16 gap-3">
-        {cast.map((member) => (
+        {cast.map((member, i) => (
           <Link
-            key={member.id}
+            // TMDB lists an actor once per role, so one person can appear
+            // twice (e.g. playing twins). The id alone would repeat as a key.
+            key={`${member.id}-${i}`}
             href={`/person/${member.id}`}
             className="flex flex-col items-center text-center group rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
             style={{ gap: 6, padding: 4, color: "var(--ds-fg)", textDecoration: "none" }}

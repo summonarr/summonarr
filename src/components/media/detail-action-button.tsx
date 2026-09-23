@@ -3,16 +3,15 @@
 import type { ButtonHTMLAttributes, CSSProperties, HTMLAttributes } from "react";
 import { cn } from "@/lib/utils";
 
-// One style for every action on the movie/TV detail pages — request, 4K,
-// named-instance, watchlist, hide, trailer, report, vote — and for the inert
-// state pills that stand in for them ("Available in 4K", "Not available to
-// request"). Eight private copies of a 34px / 13px / radius-6 button had
-// drifted (32px here, 12px there, `rounded-lg text-sm` in one) and none had a
-// hover state: hover was either absent or painted by onMouseEnter/onMouseLeave,
-// which sticks after a tap on touch. Backgrounds are inline tokens, so the
-// hover affordance is `ds-hover-tint` (an inset tint + focus-visible ring — the
-// only thing that beats an inline background); the pointer cursor comes from
-// the global `button:not(:disabled)` rule, so never add `cursor-pointer` here.
+// One shared style for every action button on the movie/TV detail pages
+// (request, 4K, watchlist, hide, trailer, report, vote, …) and for the
+// non-clickable status pills shown in their place ("Available in 4K").
+// Keeping it in one place stops the copies drifting apart.
+//
+// Backgrounds are inline styles, and a CSS :hover class can't override an
+// inline background, so hover uses `ds-hover-tint` (an inset tint plus a
+// keyboard focus ring). The pointer cursor comes from a global
+// `button:not(:disabled)` rule, so never add `cursor-pointer` here.
 
 export type DetailActionVariant =
   | "primary" // accent CTA
@@ -29,8 +28,8 @@ const VARIANT_STYLE: Record<DetailActionVariant, CSSProperties> = {
   primary: { background: "var(--ds-accent)", color: "var(--ds-accent-fg)", border: "1px solid transparent" },
   secondary: { background: "var(--ds-bg-2)", color: "var(--ds-fg)", border: "1px solid var(--ds-border)" },
   ghost: { background: "transparent", color: "var(--ds-fg-muted)", border: "1px solid var(--ds-border)" },
-  // --ds-on-status flips per theme: white on the L .55 light-theme danger
-  // fill, dark on the L .65 dark-theme one (where white is ~3.3:1).
+  // --ds-on-status is the readable text colour on a status fill: white in
+  // the light theme, dark in the dark theme (where white text is too faint).
   danger: { background: "var(--ds-danger)", color: "var(--ds-on-status)", border: "1px solid transparent" },
   "accent-soft": {
     background: "var(--ds-accent-soft)",

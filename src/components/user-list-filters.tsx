@@ -13,7 +13,8 @@ export function FilterPills({
   param: string;
   active: string;
   options: Array<{ value: string; label: string; count?: number }>;
-
+  // Other query params to carry over when a pill is clicked. Everything else
+  // (e.g. the page number) is dropped.
   preserve?: string[];
 }) {
   const router = useRouter();
@@ -35,19 +36,13 @@ export function FilterPills({
     [router, pathname, searchParams, param, preserve],
   );
 
-  // `flex-wrap gap-1` (not `overflow-x-auto`) so pills wrap to a second row on
-  // narrow viewports instead of being clipped off-screen with no visual cue.
-  // Wider viewports where the row fits are unaffected — wrap only kicks in when
-  // content exceeds the container width.
+  // `flex-wrap` lets the pills wrap to a second row on narrow screens instead
+  // of being clipped off-screen.
   //
-  // `w-fit` keeps the box tight to its pills instead of stretching. It pairs
-  // with the SearchBox change below: every caller sits this next to a
-  // <SearchBox> inside a `flex items-center gap-3`, and that box used to be
-  // `w-full` even in the row layout. A wrapping flex container's min-content
-  // width is ONE PILL, so the w-full sibling could crush this to a single-pill
-  // column — Newest/Oldest stacked vertically at 1372px, and the 6-pill type
-  // filter on /issues wrapped 4-then-2. Deliberately NOT `shrink-0`: the wrap
-  // still has to work when the row genuinely doesn't fit.
+  // `w-fit` keeps the box as wide as its pills. Callers put this beside a
+  // <SearchBox> in a flex row, and a wrapping flex box can shrink to ONE pill
+  // wide, so a greedy sibling could squeeze the pills into a vertical stack.
+  // Not `shrink-0`, so it can still wrap when the row truly doesn't fit.
   return (
     <div
       className="flex flex-wrap gap-1 max-w-full w-fit"
@@ -73,7 +68,6 @@ export function FilterPills({
               fontSize: 12,
               background: isActive ? "var(--ds-bg-3)" : "transparent",
               color: isActive ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-              cursor: "pointer",
             }}
           >
             {opt.label}
@@ -125,9 +119,8 @@ export function SearchBox({
   }
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // The pending timer closes over the pathname captured when it was scheduled,
-  // so one that survives unmount router.push()es back to the route the user just
-  // left (and adds a bogus history entry). Same cleanup as live-refresh.tsx.
+  // Cancel a pending search on unmount. Otherwise the timer would still fire
+  // and navigate back to the page the user just left.
   useEffect(
     () => () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -150,16 +143,12 @@ export function SearchBox({
     [router, pathname, searchParams, param, preserve],
   );
 
-  // The debounced timer must read the LATEST `push`, not the one from the
-  // render that armed it. `push` closes over `searchParams`, so a timer holding
-  // the keystroke-time identity replays a stale snapshot of every `preserve`d
-  // param: type "abc" (timer armed with ?status=PENDING), click the APPROVED
-  // pill inside the 350ms window (FilterPills pushes ?status=APPROVED), then
-  // the timer fires push("abc") from the old snapshot → ?status=PENDING&q=abc,
-  // silently undoing the pill click. Routing through a ref that tracks the
-  // current identity makes the eventual URL the combined intent
-  // (?status=APPROVED&q=abc). Synced in an effect (not during render) to stay
-  // clear of react-hooks' ref-write-in-render rule.
+  // The debounce timer (typing waits 350ms before searching) must call the
+  // LATEST `push`, because `push` captures the current URL params. Example:
+  // type "abc" while on ?status=PENDING, then click the APPROVED pill before
+  // the timer fires. An old `push` would bring back ?status=PENDING and undo
+  // the click; the latest one gives ?status=APPROVED&q=abc. The ref is updated
+  // in an effect because React's lint rules forbid writing refs during render.
   const pushRef = useRef(push);
   useEffect(() => {
     pushRef.current = push;
@@ -178,11 +167,9 @@ export function SearchBox({
     push("");
   }
 
-  // Full width only when the parent row has collapsed to a column (below `sm`).
-  // In the row layout `w-full` made this demand 100% of the line, which is what
-  // squeezed the sibling FilterPills into a vertical stack — see the note on
-  // that component. `sm:w-auto` lets the row size to its content instead, with
-  // a floor so the input stays usable and a cap so it can't sprawl.
+  // Full width only on small screens, where the parent row stacks into a
+  // column. From `sm` up it sizes to its content (with a min and max width), so
+  // it doesn't squeeze the FilterPills beside it — see the note there.
   return (
     <div className="relative w-full sm:w-auto sm:min-w-[12rem] sm:max-w-xs">
       <div

@@ -12,15 +12,12 @@ type TestState = "idle" | "sending" | "ok" | "error";
 
 const SW_READY_TIMEOUT_MS = 10_000;
 
-// Two instances of this component are mounted on EVERY page at EVERY viewport:
-// (app)/layout renders both <Header> and <MobileNav> unconditionally and hides
-// one with CSS, not with a React gate. A third appears while the mobile drawer
-// is open. Each kept its own useState and read the browser exactly once, at its
-// own mount — so subscribing in one left the others showing an unsubscribed
-// bell, and unsubscribing left them showing an enabled bell above a Send-test
-// button that now answers 404. A shared store would be the obvious fix and is
-// exactly what guardrail 9 rules out, so: one window event, and every instance
-// re-reads the browser when it fires.
+// Several copies of this component are on the page at once: the desktop
+// Header and the MobileNav are both always rendered (CSS hides one), and the
+// mobile drawer adds a third while open. So that they all agree, whichever
+// copy subscribes or unsubscribes fires this window event, and every copy
+// re-reads the browser's subscription when it hears it. (A shared state
+// library would also work, but guardrail 9 rules that out.)
 const PUSH_CHANGED_EVENT = "summonarr:push-changed";
 
 /** Reject a promise that may never settle. `serviceWorker.ready` is one. */
@@ -67,7 +64,12 @@ export function PushNotifications() {
       navigator.serviceWorker
         .getRegistration(withBasePath("/"))
         .then((reg) => reg?.pushManager.getSubscription() ?? null)
-        .then((sub) => setState(sub ? "subscribed" : "unsubscribed"))
+        .then((sub) => {
+          // Another copy changed the subscription, so any error this copy
+          // was showing is out of date.
+          setError(null);
+          setState(sub ? "subscribed" : "unsubscribed");
+        })
         .catch(() => { });
     };
     window.addEventListener(PUSH_CHANGED_EVENT, onChanged);
@@ -76,7 +78,7 @@ export function PushNotifications() {
 
   useEffect(() => {
     if (state === "naming") {
-      // Defer focus by one tick so the input is mounted before focus is called
+      // Wait one tick so the input exists before we focus it.
       setTimeout(() => inputRef.current?.focus(), 0);
     }
   }, [state]);
@@ -98,13 +100,10 @@ export function PushNotifications() {
       }
       const { publicKey } = await res.json() as { publicKey: string };
 
-      // `navigator.serviceWorker.ready` never rejects — it simply never settles
-      // when there is no active registration for this scope, and the register()
-      // failure in the mount effect above is swallowed into "unsubscribed",
-      // which still renders the Enable button. So a failed registration parked
-      // this await forever, `finally` never ran, and `busy` stayed true — which
-      // does not just disable the naming form's Enable button but the main bell
-      // button too, for the life of the page, with no error shown anywhere.
+      // `navigator.serviceWorker.ready` never rejects: if the service worker
+      // failed to register it just waits forever. Without a timeout, `finally`
+      // would never run and `busy` would stay true, leaving the bell disabled
+      // for the life of the page with no error shown.
       const reg = await withTimeout(navigator.serviceWorker.ready, SW_READY_TIMEOUT_MS);
       const sub = await reg.pushManager.subscribe({
         userVisibleOnly: true,
@@ -118,12 +117,10 @@ export function PushNotifications() {
         body: JSON.stringify({ endpoint: json.endpoint, keys: json.keys, label: label.trim() || undefined }),
       });
       if (!subscribeRes.ok) {
-        // Hand the browser subscription back. Keeping it means the browser
-        // holds a live push subscription that the server has no row for: no
-        // push can ever arrive, yet the mount effect reads getSubscription() and
-        // reports "subscribed" on every later visit. The everyday cause is
-        // mundane — the push feature flag being off answers 403 — so this is
-        // not a rare path.
+        // The server refused (commonly a 403 because the push feature flag
+        // is off), so undo the browser-side subscription too. Otherwise the
+        // browser would keep a subscription the server doesn't know about,
+        // and the bell would wrongly show "subscribed" on every later visit.
         await sub.unsubscribe().catch(() => { });
         const data = (await subscribeRes.json().catch(() => null)) as { error?: string } | null;
         setError(data?.error ?? `Could not enable notifications (${subscribeRes.status})`);
@@ -134,9 +131,9 @@ export function PushNotifications() {
       setState("subscribed");
       window.dispatchEvent(new Event(PUSH_CHANGED_EVENT));
     } catch {
-      // Same reasoning as above: anything that threw after subscribe() resolved
-      // leaves an orphan, and unsubscribing an already-dead subscription is
-      // harmless.
+      // Same reasoning as above: if anything threw after the browser
+      // subscribed, undo that subscription. Unsubscribing one that is already
+      // gone is harmless.
       await navigator.serviceWorker
         .getRegistration(withBasePath("/"))
         .then((r) => r?.pushManager.getSubscription())
@@ -179,7 +176,8 @@ export function PushNotifications() {
     setBusy(true);
     setError(null);
     try {
-      const reg = await navigator.serviceWorker.ready;
+      // Same never-settles guard as subscribe(); a timeout lands in the catch.
+      const reg = await withTimeout(navigator.serviceWorker.ready, SW_READY_TIMEOUT_MS);
       const sub = await reg.pushManager.getSubscription();
       if (sub) {
         await fetch(withBasePath("/api/push/subscribe"), {
@@ -201,16 +199,16 @@ export function PushNotifications() {
   if (!mounted || state === "loading") return null;
 
   if (state === "unsupported") {
-    // Icon button — 32x32 hit area + aria-label so VoiceOver/TalkBack announce
-    // purpose (title alone is unreliable on mobile).
+    // 32x32 icon button. The aria-label lets screen readers (VoiceOver,
+    // TalkBack) announce it; a `title` alone is unreliable on mobile.
     return (
       <button
         disabled
         aria-label="Push notifications not supported"
         title="Push notifications are not supported in this browser"
         className="ds-tap inline-flex items-center justify-center cursor-not-allowed shrink-0"
-        // fg-disabled, not zinc-700: that shade is a SURFACE token (--ds-bg-3)
-        // after the palette remap, so the icon vanished into the header.
+        // fg-disabled, not zinc-700: zinc-700 is a background colour in this
+        // theme, so the icon would vanish into the header.
         style={{ width: 32, height: 32, borderRadius: 6, color: "var(--ds-fg-disabled)" }}
       >
         <BellOff className="w-4 h-4" />
@@ -277,9 +275,12 @@ export function PushNotifications() {
         <button
           onClick={unsubscribe}
           disabled={busy}
-          aria-label="Disable desktop notifications"
-          title="Disable desktop notifications"
-          className="ds-tap inline-flex items-center justify-center text-indigo-400 hover:text-indigo-300 transition-colors disabled:opacity-50 shrink-0"
+          // A failed unsubscribe keeps this state, so show its error here.
+          aria-label={error ?? "Disable desktop notifications"}
+          title={error ?? "Disable desktop notifications"}
+          className={`ds-tap inline-flex items-center justify-center transition-colors disabled:opacity-50 shrink-0 ${
+            error ? "text-red-400" : "text-indigo-400 hover:text-indigo-300"
+          }`}
           style={{ width: 32, height: 32, borderRadius: 6 }}
         >
           <Bell className="w-4 h-4" />
@@ -300,12 +301,9 @@ export function PushNotifications() {
     );
   }
 
-  // This control is a 32px icon in a header — there is nowhere to put a line of
-  // error text. So a failure tints the bell and moves the reason into the
-  // tooltip and the accessible name, matching how the Send-test button already
-  // signals its own failures. Previously a rejected subscribe (a 403 because
-  // the push feature flag is off is the common one) just snapped back to the
-  // plain bell, saying nothing at all.
+  // This control is a 32px icon with no room for error text, so a failure
+  // turns the bell red and puts the reason in its tooltip and accessible name
+  // (the same way the Send-test button signals its failures).
   return (
     <button
       onClick={() => { setError(null); setState("naming"); }}

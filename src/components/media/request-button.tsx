@@ -120,6 +120,11 @@ export function RequestButton({
   // loaded; profileId==="" ⇒ use the server default.
   const [profiles, setProfiles] = useState<{ id: number; name: string }[] | null>(null);
   const [profileId, setProfileId] = useState<number | "">("");
+  // The route answers 200 { alreadyAvailable: true } and creates NOTHING when
+  // the title is already in a library this viewer can see (or, for
+  // auto-approvers, already downloaded by Radarr/Sonarr). Same handling as
+  // Request4kButton: show it as available, not as a request that doesn't exist.
+  const [foundAvailable, setFoundAvailable] = useState(false);
 
   function loadProfiles() {
     if (!canChooseProfile || profiles !== null) return;
@@ -154,6 +159,12 @@ export function RequestButton({
         const data = await res.json().catch(() => ({}));
         setErrorMsg(data.error ?? "Something went wrong");
         setState("error");
+        return;
+      }
+      const body = (await res.json().catch(() => null)) as { alreadyAvailable?: boolean } | null;
+      if (body?.alreadyAvailable) {
+        setFoundAvailable(true);
+        setState("idle");
         return;
       }
       setState("requested");
@@ -205,7 +216,7 @@ export function RequestButton({
   }
 
   const isAvailable =
-    (showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable);
+    (showPlex && plexAvailable) || (showJellyfin && jellyfinAvailable) || foundAvailable;
   const isDone = state === "requested" || state === "duplicate";
   // Only the viewer's OWN request replaces the CTA. A title queued by someone
   // else (arrPending) stays requestable: the server mirrors the approved status
@@ -260,6 +271,12 @@ export function RequestButton({
           <Tv2 style={{ width: 14, height: 14 }} />
           Available on Jellyfin
         </div>
+      )}
+      {foundAvailable && (
+        <DetailActionStatus variant="accent-soft" style={{ width: "fit-content" }}>
+          <Check style={{ width: 14, height: 14 }} />
+          Already available
+        </DetailActionStatus>
       )}
       {arrPending && (
         <div

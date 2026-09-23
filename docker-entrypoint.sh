@@ -23,8 +23,8 @@ export DATABASE_URL="postgresql://summonarr:${ENCODED_PASSWORD}@postgres:5432/su
 echo "Deduplicating PlayHistory before schema sync..."
 node --input-type=module <<'DEDUP_EOF'
 const { DATABASE_URL } = process.env;
-// Remove duplicate PlayHistory rows with the same (source, sourceSessionId),
-// keeping the most recently written one. Ordered by createdAt: `id` is a cuid2
+// Remove duplicate PlayHistory rows that share the table's unique key (worked
+// out below), keeping the most recently written one. Ordered by createdAt: `id` is a cuid2
 // (random letter + hash), so it is NOT time-sortable and only breaks ties
 // deterministically. Idempotent — safe to run every start.
 // Skips cleanly on a fresh DB where the table hasn't been created yet.
@@ -307,9 +307,10 @@ echo "Starting Summonarr..."
 
 # ── Background cron loop ───────────────────────────────────────────────────────
 # Runs sync jobs inside this container so a separate cron container isn't needed.
-# Uses Node's built-in fetch so the secret never appears in the process list.
-# Exits non-zero when the call did not succeed (non-2xx or fetch threw) so the
-# scheduler can hold the job for a short retry instead of waiting a full interval.
+# The call is made from a small Node script (not curl) so the secret travels in
+# an env var and never appears in the process list.
+# Exits non-zero when the call did not succeed (non-2xx or the request threw) so
+# the scheduler can hold the job for a short retry instead of waiting a full interval.
 # NOTE: node:http, NOT fetch — deliberately.
 #
 # `fetch` is undici, whose default `headersTimeout` is 300s. Response headers
@@ -373,13 +374,9 @@ try {
 JSEOF
 }
 
-# Compute the next-run timestamp for a job: full interval on success, a short
-# retry window on failure so a transient outage doesn't skip the job for an
-# entire (possibly 24h) interval.
-
 # Internal loopback base for every cron POST. Honours PORT exactly like the
 # readiness probe below and the Dockerfile HEALTHCHECK already do — the URLs
-# hardcoded :3000, so running with a custom PORT pointed all eleven crons at a
+# hardcoded :3000, so running with a custom PORT pointed every cron at a
 # dead port while both health probes kept reporting healthy.
 CRON_BASE="http://localhost:${PORT:-3000}${BASE_PATH}"
 

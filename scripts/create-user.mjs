@@ -2,11 +2,11 @@
 // Create a local-credentials user from the host or container.
 //
 // Summonarr closes public self-registration after the first user (the /setup
-// admin), and there is no admin "create user" action — after setup, new accounts
-// only arrive via OAuth (Plex/Jellyfin/OIDC). This script fills that gap: it
-// inserts a username/password user directly, e.g. a demo account for Apple App
-// Review (reviewers can't complete your Plex/Jellyfin OAuth, so they need local
-// credentials) on a publicly reachable dev/demo instance.
+// admin). After that, a username/password account can only be made by a
+// signed-in admin (Admin → Users → "Create user"). This script does the same
+// thing from the shell, with no sign-in needed — handy for a fresh instance or
+// a demo account for Apple App Review (reviewers can't complete your
+// Plex/Jellyfin OAuth, so they need local credentials).
 //
 // It seeds `permissions` from the role preset (a raw insert would otherwise leave
 // permissions = 0 = a user who can't even request) and marks setup as complete so

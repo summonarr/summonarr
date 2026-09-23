@@ -47,10 +47,12 @@ const envOrigins: ReadonlySet<string> = (() => {
   return trusted;
 })();
 
+// Fallback used only when no AUTH_URL / AUTH_TRUSTED_ORIGIN is set: trust the
+// request's own origin.
 const trustedOriginsCache = new Map<string, ReadonlySet<string>>();
-// The key is derived from the Host header — client-controlled — so an
-// unbounded map is a slow OOM under a rotating-Host loop. The entries are
-// trivially recomputable, so wholesale clearing loses nothing.
+// The key comes from the Host header, which the client controls, so the map is
+// capped: otherwise a stream of random Host values would grow it forever. The
+// entries are cheap to rebuild, so clearing it all at once loses nothing.
 const TRUSTED_ORIGINS_CACHE_MAX = 512;
 
 function buildTrustedOrigins(selfOrigin: string): ReadonlySet<string> {
@@ -108,8 +110,8 @@ function clearedCookieResponse(redirectTo: URL): Response {
 export async function proxy(request: NextRequest) {
   // Local-only mode: when TRUST_PROXY is not "true" we cannot read the real
   // client IP, so we refuse any request whose Host header is not a
-  // loopback/RFC1918 address. Footgun-prevention for misconfigured public
-  // deployments — see src/lib/local-only.ts.
+  // loopback/private-network (RFC1918) address. This protects a public
+  // deployment that forgot to set TRUST_PROXY — see src/lib/local-only.ts.
   if (!trustProxy && !isLocalHost(request.headers.get("host"))) {
     return NextResponse.json(
       {
@@ -206,10 +208,9 @@ export async function proxy(request: NextRequest) {
     }
   }
 
-  // Resolve session for the gating + role checks below. Public paths still
-  // pass through verifyAndRefreshSession so the cookie gets refreshed even
-  // when visiting /login — keeps the slide alive while a logged-in user
-  // navigates around the public surface.
+  // Resolve the session for the gating + role checks below. Public paths are
+  // verified too, so a signed-in user browsing /login etc. still gets any
+  // re-signed cookie (e.g. after a role change rotated the session).
   // Prefer the bearer token (native clients) over the cookie (browsers); the
   // two never coexist for one principal, and resolving the bearer first means a
   // forged cookie can never ride a CSRF-exempt bearer request.
@@ -323,7 +324,8 @@ export async function proxy(request: NextRequest) {
     }
   }
 
-  // Nonce is propagated via x-nonce request header; server components read it to stamp inline scripts
+  // A fresh random nonce per request. It is passed on in the x-nonce request
+  // header, and server components read it to stamp their inline scripts.
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
   // `next dev` ONLY. React's development build calls eval() to reconstruct
   // server-side error stacks in the browser, and Turbopack's HMR runtime
@@ -371,14 +373,12 @@ export async function proxy(request: NextRequest) {
   if (refreshResult?.refreshed) {
     if (bearerToken) {
       // Bearer transport: rewrite the FORWARDED Authorization header. This is
-      // purely server-internal — the client keeps the token it sent, is handed
-      // no replacement (no Set-Cookie, no token in a body), and still rides its
-      // original fixed-lifetime token to expiry, so guardrail 6b's "no sliding
-      // refresh for bearer clients" is preserved. Without this a bearer request
-      // paid the full DB-checked verify TWICE: `dbCheckedAt` is stamped only by
-      // the re-sign here and reached the downstream verifier only via the cookie
-      // rewrite below, so a bearer token could never carry the claim and could
-      // never take the fast path.
+      // purely server-internal — the client is handed no replacement (no
+      // Set-Cookie, no token in a body) and keeps presenting the token it
+      // signed in with, so guardrail 6b's "no refresh for bearer clients" holds.
+      // Without this a bearer request paid the full DB-checked verify TWICE:
+      // `dbCheckedAt` is only stamped by the re-sign here, so a bearer token
+      // that was never rewritten could never take the fast path.
       requestHeaders.set(
         "authorization",
         `Bearer ${refreshResult.refreshed.token}`,
@@ -398,10 +398,10 @@ export async function proxy(request: NextRequest) {
   // GET /api/config/compat; this is a coarse integer, never the marketing version.
   response.headers.set("X-Summonarr-Api", String(API_VERSION));
 
-  // Carry the refreshed JWT through to the client whenever verifyAndRefresh
-  // produced one — sliding window or sessionId rotation or dbCheckedAt bump.
-  // Only for cookie sessions: a bearer client can't read Set-Cookie, so it
-  // rides its original fixed-lifetime token until expiry, then re-authenticates.
+  // Send the re-signed JWT back to the browser whenever verifyAndRefreshSession
+  // produced one (a sessionId rotation or a dbCheckedAt bump). Cookie sessions
+  // only: a bearer client can't read Set-Cookie, so it keeps presenting the
+  // token it was given at sign-in (guardrails 6b/6c).
   if (refreshResult?.refreshed && !bearerToken) {
     response.headers.append(
       "Set-Cookie",

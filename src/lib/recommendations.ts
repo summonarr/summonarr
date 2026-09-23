@@ -28,14 +28,11 @@ export type { QualityVerdict } from "@/lib/recommendation-quality";
 // UserRecommendation by the warm-recommendations cron. getUserRecommendations is
 // the only live-request-path read — it never calls TMDB.
 //
-// What is PER-USER here and what is not is the load-bearing split. A seed's
-// suggestion list and a candidate's quality verdict are properties of the TITLE,
-// identical for every account, and they used to be re-derived inside each user's
-// pass anyway — up to ~148 suggestion blob reads (or live TMDB calls) and a
-// 300-title MDBList/OMDB pass, per user, per cycle. Both are now precomputed once
-// for the whole server by refreshRecommendationGraph, which the cron runs BEFORE
-// this fan-out, so a user's pass is: their own seeds, two indexed graph reads,
-// and arithmetic.
+// The key split is what is PER-USER and what is not. A seed's suggestion list
+// and a candidate's quality verdict belong to the TITLE and are the same for
+// every account, so refreshRecommendationGraph works them out once for the
+// whole server, BEFORE this per-user pass. A user's pass is then just: pick
+// their seeds, two indexed graph reads, and arithmetic.
 //
 // There is NO live fallback. This file makes no upstream call at all — not to
 // TMDB, not to MDBList/OMDB — and the scheduling is what makes that safe rather
@@ -129,13 +126,14 @@ const ACTIVE_USER_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 // so the shelf carries more variety (flatter weights spread the reason slots
 // across more seeds) at the cost of steering a little less on what the viewer is
 // watching right now. That responsiveness is otherwise protected only here:
-// selection is recency-FIRST, but once the 200 seeds are chosen this decay is
-// the sole thing still ranking recent taste above old.
+// selection is recency-FIRST, but once the seeds are chosen this decay is the
+// only thing still ranking recent taste above old.
 //
 // NOTE this is NOT the same knob as SEED_RECENCY_WINDOW_MS above, which happens
 // to share a name and used to share a value. That one only bounds the first
-// query — the all-time top-up makes the selected set "the 200 most recently
-// played distinct titles" regardless of it — so widening THAT changes nothing.
+// query — the all-time top-up makes the selected set "the MAX_WATCH_HISTORY_SEEDS
+// most recently played distinct titles" regardless of it — so widening THAT
+// changes nothing.
 //
 // This replaces weighting by POSITION IN THE SEED LIST, which was ordered
 // count-first — so a movie watched once last week ranked below a show binged
@@ -420,21 +418,13 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
   // recently played MAX_WATCH_HISTORY_SEEDS titles": the window returns the
   // newest of them, and the top-up extends backwards past 180 days only when a
   // quiet viewer has not filled the slots.
+  // The window just keeps the common query small.
   //
-  // (The window predates the ordering change, when it was load-bearing against
-  // a different failure: count-first selection let a years-old 200-episode
-  // binge own every slot while films — one row each — never seeded at all.
-  // Ordering by recency addresses that at the source; the window now just
-  // bounds the common query.)
-  //
-  // Windowed rows come FIRST, then the remaining slots TOP UP from all-time
-  // history. A busy user with only 2-3 recent watches used to seed from just
-  // those (all-time fired only at exactly zero windowed rows), so their pool
-  // was thin; old favorites now fill the tail slots — at the taper's lower
-  // weights, so they can never outrank recent taste. A fully dormant household
-  // (zero windowed rows) degenerates to pure all-time seeding, the same
-  // fallback as before: seeds.length === 0 is a CONCLUSIVE empty to the
-  // caller, which would clear an established shelf. The exclusion set
+  // Windowed rows come FIRST, then any remaining slots are TOPPED UP from
+  // all-time history, so a user with only a few recent watches still gets a
+  // full pool. Older titles get lower recency weights, so they rarely outrank
+  // recent taste. A fully dormant household (zero windowed rows) seeds purely
+  // from all-time history. The exclusion set
   // (buildExclusionSet) stays all-time on purpose: an old watch must still
   // never come back as a "new" recommendation.
   const groupHistory = (windowed: boolean, take: number) =>
@@ -448,11 +438,9 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
         ...(windowed ? { startedAt: { gte: new Date(Date.now() - SEED_RECENCY_WINDOW_MS) } } : {}),
       },
       _count: { tmdbId: true },
-      // NOTE the orderBy below is RECENCY-first. It used to be count-first,
-      // which did not select "what you have been watching" but "what you have
-      // the most rows for" — and because PlayHistory writes one row per
-      // episode, that meant long series crowded out every film regardless of
-      // when either was watched. Play count still matters, but as a weight
+      // NOTE the orderBy below is RECENCY-first, not count-first. PlayHistory
+      // has one row per episode, so ordering by count would let long series
+      // crowd out every film. Play count still matters, but as a weight
       // (countFactor) rather than as the selection key.
       // title rides along in the aggregate so naming the seed ("Because you
       // watched X") costs no second query. PlayHistory.title is the show/movie
@@ -523,8 +511,7 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       // PlayHistory.title is NOT NULL, but _max over an empty group is typed
       // nullable; fall back to the id so a reason is never a blank string.
       title: r._max.title ?? `TMDB #${r.tmdbId}`,
-      // Both were already being fetched to ORDER the groups; they now also
-      // weight them, which is the whole point of the rework.
+      // Fetched to ORDER the groups; also used to weight each seed.
       lastAt: r._max.startedAt,
       count: r._count.tmdbId,
     }));
@@ -567,23 +554,21 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
   ];
 }
 
-// Wider than "the chosen seeds" on purpose: an already-known title elsewhere on
-// a long watchlist (past the top-5 seeded) or an old watch (past the top-10
-// seeded) must not leak back in as a "new" recommendation.
-// Mirrors getUserHiddenSet's bound (hidden.ts): HiddenItem accumulates without
-// limit, and this runs inside the cron fan-out AND on every /for-you render.
+// Cap on hidden items read per user. Mirrors getUserHiddenSet's bound
+// (hidden.ts): HiddenItem grows without limit, and this runs inside the cron
+// AND on every /for-you render.
 const MAX_EXCLUSION_HIDDEN = 10_000;
 
 // Every title the user already KNOWS about, as candidateKeys. One reader shared
 // by the compute-time exclusion AND the read-time drift filter, so the two can
 // never disagree about what "already known" means — a title excluded at compute
 // but not at read (or vice versa) either wastes a stored slot or resurfaces
-// something the user acted on. Covers:
-//   - the full watchlist and all watched history (the original set);
-//   - HiddenItem — "not interested" clicks. These were only removed at render
-//     time by attachAllAvailability, so every hide permanently killed one of
-//     the stored slots and matchTier was assigned to cards nobody ever saw.
-//     Read DIRECTLY rather than via getUserHiddenSet: that helper lowercases
+// something the user acted on. It is wider than the chosen seeds on purpose:
+// a watchlist entry or old watch that didn't make the seed list must still
+// never come back as a "new" recommendation. Covers:
+//   - the full watchlist and all watched history;
+//   - HiddenItem — "not interested" clicks, so a hidden title never takes up
+//     a stored slot. Read DIRECTLY rather than via getUserHiddenSet: that helper lowercases
 //     its keys to match attach-all's TMDB casing, while candidateKey uses the
 //     Prisma enum casing — reusing it would silently never match anything;
 //   - the user's own OPEN requests (PENDING/APPROVED) — recommending a title
@@ -603,13 +588,10 @@ async function collectKnownTitleKeys(userId: string, linkedServerUserIds: string
     prisma.watchlistItem.findMany({ where: { userId }, select: { tmdbId: true, mediaType: true } }),
     linkedServerUserIds.length === 0
       ? Promise.resolve([])
-      : // groupBy, not findMany + distinct. Prisma applies `distinct` CLIENT-side
-        // — verified by capturing the emitted SQL, which is byte-identical with
-        // and without it — so every watch row crossed the wire and was deduped
-        // in Node. Only the distinct pairs are ever used, and a heavy viewer has
-        // thousands of rows collapsing to a few hundred titles. groupBy compiles
-        // to a real GROUP BY, so Postgres does the dedup. The result shape is
-        // the same {tmdbId, mediaType}, so the consumers below are unchanged.
+      : // groupBy, not findMany + distinct: Prisma applies `distinct` in Node,
+        // after fetching every row. groupBy becomes a real SQL GROUP BY, so
+        // Postgres collapses a heavy viewer's thousands of rows to distinct
+        // titles before sending them.
         prisma.playHistory.groupBy({
           by: ["tmdbId", "mediaType"],
           where: {
@@ -705,12 +687,9 @@ async function buildExclusionSet(userId: string, linkedServerUserIds: string[], 
 // user's stored shelf. Full coverage is authoritative and needs no threshold;
 // this is the tolerance below it.
 //
-// It exists because removing the live fallback moved the failure mode: a partial
-// build is now the way a shelf can silently get worse, and the old
-// "conclusive = at least one suggestion arrived" rule was satisfied by a SINGLE
-// answering seed — a documented gap even before the graph, when a partial TMDB
-// outage could fully replace a shelf from whatever fraction happened to answer.
-// Coverage is measurable now, so the rule can actually be written down.
+// Why a threshold at all: a partial graph build is how a shelf could silently
+// get worse. Requiring "at least one suggestion arrived" is not enough, since a
+// single answering seed would satisfy it during an outage.
 //
 // Not 1.0, deliberately: one permanently-failing source (a TMDB id that 500s
 // forever) would otherwise freeze that user's shelf for good. At 0.8 a single
@@ -796,11 +775,9 @@ export async function computeRecommendationsForUser(
     collectAbandonedTitleKeys(linkedServerUserIds, Date.now()),
   ]);
 
-  // The fan-out is SERVER-WIDE and it is the ONLY source of suggestions: one pair
-  // of indexed reads returns every edge out of every seed this user holds,
-  // precomputed by refreshRecommendationGraph for the whole instance. This is the
-  // query this file used to issue ~148 times per user, per cycle, for lists that
-  // were identical for everybody.
+  // The graph is the ONLY source of suggestions: one pair of indexed reads
+  // returns every edge out of every seed this user holds, precomputed by
+  // refreshRecommendationGraph for the whole instance.
   //
   // A read failure here is not recoverable by trying somewhere else — there is
   // nowhere else. It surfaces as zero coverage, which `conclusive` below turns
@@ -828,12 +805,9 @@ export async function computeRecommendationsForUser(
   // third lets the quality prior's TMDB term see the vote count it gates on,
   // and the fourth holds each seed's contribution until the corroboration
   // decay-sum below collapses them into the score. All are dropped before the
-  // candidates are returned; none has a column. voteCount earned its place by
-  // being ABSENT: applyQualityPrior used to rebuild TmdbMedia without it, so
-  // the (voteCount >= 50) gate read 0 for every candidate and TMDB's own score
-  // silently never participated in the prior at all. It matters more now, not
-  // less: the graph's stored verdict is TMDB-free, so this is the ONLY place
-  // the TMDB term's vote count can come from (withTmdbTerm).
+  // candidates are returned; none has a column. voteCount matters because the
+  // graph's stored verdict leaves TMDB out, so this is the ONLY place the TMDB
+  // term's vote count can come from (withTmdbTerm).
   const scored = new Map<string, RecommendationCandidate & { reasonWeight: number; language?: string; voteCount: number; contributions: number[] }>();
   // Weighted language tally, accumulated in the same pass that scores.
   const languageWeight = new Map<string, number>();
@@ -874,8 +848,8 @@ export async function computeRecommendationsForUser(
         existing.contributions.push(contribution);
         existing.seedCount++;
         // Keep the STRONGEST contribution as the reason, not the first one
-        // encountered — seeds are no longer visited in weight order at all, so
-        // first-wins would name an essentially arbitrary title. Comparing
+        // encountered — seeds are not visited in weight order, so first-wins
+        // would name an essentially arbitrary title. Comparing
         // CONTRIBUTION rather than raw seed weight is deliberate: a slightly
         // weaker seed that ranks this title first is a better explanation than a
         // strong seed that had it 40th. Ties keep the incumbent.
@@ -1065,10 +1039,7 @@ async function buildFallbackCandidates(
 // One indexed read, no upstream call. A verdict is a property of the title, so
 // refreshRecommendationGraph has already resolved one for every candidate it has
 // reached; a candidate it has NOT reached simply carries no opinion and keeps its
-// relevance rank. That is a graceful, self-correcting degradation — the ranking
-// is still relevance-correct, and the title gains its verdict on a later run —
-// whereas the live lookup this replaced put an unbounded MDBList/OMDB pass on
-// every user of every cycle for an answer that never varied between them.
+// relevance rank. It self-corrects: the title gains its verdict on a later run.
 //
 // The TMDB term of the prior is deliberately NOT part of the stored verdict:
 // qualityScoreOf gates it on the candidate's own vote count, which rides on the
@@ -1104,9 +1075,10 @@ async function applyQualityPrior(shortlist: (RecommendationCandidate & { languag
   }
 }
 
-// Who the cron bothers computing for. authSessions.lastSeenAt (not a fresh
-// lastActiveAt column, and not PlayHistory recency — a rich-but-dormant
-// account shouldn't burn TMDB calls every cycle) tracks genuine recent app use.
+// Who the cron computes for: enabled accounts that used the app recently,
+// judged by authSessions.lastSeenAt. PlayHistory recency is deliberately not
+// used — an account that only watches but never opens the app shouldn't cost
+// work every cycle.
 async function getActiveUserIds(): Promise<string[]> {
   const cutoff = new Date(Date.now() - ACTIVE_USER_WINDOW_MS);
   const rows = await prisma.user.findMany({
@@ -1364,11 +1336,9 @@ export function summarizeRecommendationSeeds(items: TmdbMedia[]): Recommendation
   return { watchHistorySeeds, watchlistSeeds, requestSeeds };
 }
 
-// Read path — called directly by home/route.ts and page.tsx. Re-filters the
-// cache against CURRENT WatchlistItem + watched-PlayHistory state so drift
-// between a 6-12h cron cycle and the page load never surfaces something the
-// user has since watchlisted or watched. HiddenItem needs no handling here —
-// attachAllAvailability already removes it downstream for every rail.
+// Read path for the stored shelf. Re-filters it against the user's CURRENT
+// state (see collectKnownTitleKeys) so nothing they have acted on since the
+// last 12h cron run shows up.
 export async function getUserRecommendations(userId: string): Promise<TmdbMedia[]> {
   const cached = await prisma.userRecommendation.findMany({
     where: { userId },

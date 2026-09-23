@@ -1,9 +1,10 @@
 // Route-level unit tests for the issue-report API:
 //   POST /api/issues                 — file an issue (the reporter chokepoint)
 //   GET  /api/issues                 — the reporter-scoped vs. MANAGE_ISSUES list
-//   PATCH /api/issues/[id]           — status transitions (withIssueAdmin)
+//   PATCH /api/issues/[id]           — status transitions + refetch (withIssueAdmin)
 //   POST  /api/issues/[id]/messages  — thread replies (withAuth + ownership)
 //   POST  /api/issues/[id]/releases  — the "Replace" grab (withIssueAdmin, IssueGrab)
+//   POST  /api/issues/[id]/claim     — claim / release an issue for an admin
 //
 // What THIS file pins (contracts none of the leaf tests reach):
 //   - guardrail 6a: the wrappers gate every handler. POST/GET /api/issues and

@@ -64,11 +64,12 @@ export function IssueActions({
   const [panel, setPanel] = useState<"resolve" | "delete" | "replace" | null>(null);
   const [resolution, setResolution] = useState("");
 
-  // `instances` is the CONFIGURED set (getSyncableArrInstances), default first — so
-  // on an install whose default *arr is unconfigured the "" slug is absent entirely
-  // and every refetch/replace/grab aimed at it hits a server that does not exist.
-  // Derived rather than seeded because the same component instance is reused when
-  // the selected issue switches between MOVIE (radarr) and TV (sonarr).
+  // `instances` lists only the CONFIGURED Radarr/Sonarr servers, default first.
+  // If the default server isn't configured, the "" slug is missing from the list,
+  // so we fall back to the first real entry instead of aiming at a server that
+  // doesn't exist. This is computed on every render (not stored once) because the
+  // same component is reused when the selected issue switches between a movie
+  // (Radarr) and a TV show (Sonarr).
   const instanceOptions = instances ?? [];
   const [pickedInstance, setPickedInstance] = useState<string | null>(null);
   const instance =
@@ -81,10 +82,10 @@ export function IssueActions({
   const [showRejected, setShowRejected] = useState(false);
   const [releaseFilter, setReleaseFilter] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
-  // Sequence token for the interactive-search fetch. Two instance switches leave two searches in
-  // flight (indexer latency differs wildly per instance), and without this the LAST one to resolve
-  // wins the release list regardless of which instance is selected — grabRelease() would then send
-  // one instance's guid/indexerId to another instance, whose indexer ids are a different numbering.
+  // Counter that numbers each release search. Switching instances twice can leave two
+  // searches running at once, and whichever finishes LAST would otherwise win — even if
+  // it belongs to the instance no longer selected. grabRelease() would then send one
+  // server's release ids to a different server. Only the newest search may write state.
   const releaseReqRef = useRef(0);
 
   async function triggerRefetch() {
@@ -99,12 +100,10 @@ export function IssueActions({
         // re-search the 4K instance, not the default. "" when there is one instance.
         body: JSON.stringify({ refetch: true, instance }),
       });
-      // res.ok has to be checked FIRST. Success was keyed purely on the absence
-      // of an `arrError` field, and the one failure that sets that field is
-      // returned as HTTP 200 — so every genuine error status (503 maintenance,
-      // 401/403, 404, 400 bad instance, 413 oversized body) arrived with no
-      // arrError and rendered a green "Search triggered". The single path the
-      // client checked was the only one the server did not report as an error.
+      // Check res.ok FIRST. The server reports two kinds of failure: a normal
+      // error status (503, 401/403, 404, 400, 413) with no `arrError` field,
+      // and a Radarr/Sonarr failure sent as HTTP 200 WITH `arrError`. Looking
+      // only for `arrError` would show a green "Search triggered" for the first kind.
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
         setArrError(data.message ?? data.error ?? `Search failed (${res.status})`);
@@ -153,6 +152,7 @@ export function IssueActions({
 
   async function deleteIssue() {
     setLoading("delete");
+    setArrError(null);
     try {
       const res = await fetch(withBasePath(`/api/issues/${issueId}`), { method: "DELETE" });
       if (!res.ok) {
@@ -195,11 +195,9 @@ export function IssueActions({
         if (first) setSelectedGuid(first.guid);
       }
     } catch {
-      // Same staleness guard as every other write in this function — a
-      // superseded search must not report its failure over the current one.
-      // Without a catch the dialog sat on the empty `setReleases([])` from entry
-      // and read "No releases found", which is a different claim from "the
-      // search never completed".
+      // Report the failure (only if this is still the latest search). Otherwise the
+      // dialog would show the empty list and say "No releases found", which is a
+      // different claim from "the search never completed".
       if (reqId === releaseReqRef.current) {
         setArrError("Network error — please try again.");
         setPanel(null);

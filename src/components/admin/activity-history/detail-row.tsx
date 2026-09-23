@@ -23,13 +23,14 @@ export function DetailRow({
   colSpan: number;
   mounted: boolean;
 }) {
-  // Mirror the row body's grouping-aware effective values: when this PlayHistory
-  // is a chain representative, EVERY duration/timestamp cell reflects the whole
-  // chain — watch time, paused time, and the started/stopped span — not just
-  // the newest segment the representative row happens to be. In ungrouped mode
-  // the API mirrors these into single-segment defaults, so the expression is
-  // uniform. (The table's Date column deliberately stays the representative's
-  // own startedAt: it is the grouped sort key; the panel spans the chain.)
+  // A "chain" is one viewing that was paused and resumed across several
+  // sittings (segments). When grouping is on, the table shows one row per
+  // chain, and every duration/timestamp in this panel covers the WHOLE chain —
+  // watch time, paused time, first start and last stop — not just the newest
+  // segment that row stands for. With grouping off the API fills the chain
+  // fields with the row's own values, so the same code works in both modes.
+  // (The table's Started column still shows the row's own startedAt on
+  // purpose: that is what the grouped list is sorted by.)
   const effectivePlay = play.totalPlayDuration ?? play.playDuration;
   const effectivePaused = play.totalPausedDuration ?? play.pausedDuration;
   const startedAt = play.firstStartedAt ?? play.startedAt;

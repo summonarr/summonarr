@@ -93,8 +93,8 @@ export default async function VotesPage({
   ]);
   const totalPages = Math.max(1, Math.ceil(Number(count) / PAGE_SIZE));
 
-  // Batched lookup: 1 query total (was 3×PAGE_SIZE = up to 120 round-trips/render,
-  // then 2). Split by mediaType so each becomes a `tmdbId: { in: [...] }`
+  // Batched lookup: one query for the whole page instead of several per title.
+  // Split by mediaType so each becomes a `tmdbId: { in: [...] }`
   // predicate that the planner can serve from the composite (tmdbId, mediaType)
   // PK efficiently. The rows carry `userId`, so "did the viewer vote on this"
   // is derived in memory instead of re-reading the same row set filtered to
@@ -145,7 +145,10 @@ export default async function VotesPage({
       mediaType: g.mediaType as "MOVIE" | "TV",
       title: representative?.title ?? "",
       posterPath: representative?.posterPath ?? null,
-      voteCount: g._count.id,
+      // `votes` holds EVERY vote for this title (groupWhere ignores the
+      // mine/q filters), so its length is the real total. g._count.id is
+      // filtered: under "My votes only" it is always 1. Mirrors /api/votes.
+      voteCount: votes.length || g._count.id,
       userVoted: votes.some((v) => v.userId === session.user.id),
       reasons: reasons.map((v) => ({ reason: v.reason!, userName: v.user.name ?? "Anonymous" })),
     };

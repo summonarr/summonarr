@@ -26,7 +26,8 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 import { stripComments, parseTopLevelDecls, findUnmodeledMethodExports } from "./audit-routes.mts";
 
-/** Every method with a handler anywhere in this tree. No PUT/HEAD/OPTIONS exists. */
+/** Every HTTP method a route file can export. No route uses PUT/HEAD/OPTIONS today,
+ *  but they are listed so a future one is still checked. */
 const HTTP_METHODS = new Set(["GET", "POST", "PATCH", "PUT", "DELETE", "HEAD", "OPTIONS"]);
 
 const COLORS = {
@@ -109,8 +110,8 @@ const EXCEPTIONS: Array<{ route: string; reason: string }> = [
 /**
  * Individual operations left undocumented on a path that IS otherwise
  * documented. Deliberately separate from EXCEPTIONS: that list excepts a whole
- * path, and several of its 41 entries cover paths carrying two or three methods
- * each, so folding methods into it would inflate it to ~55 entries and lose the
+ * path, and several of its entries cover paths carrying two or three methods
+ * each, so folding methods into it would make it much longer and lose the
  * "this entire surface is undocumented" meaning it currently carries.
  *
  * Empty today, and that is the point — all six operations this check was

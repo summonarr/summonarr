@@ -38,7 +38,7 @@ services:
     image: ghcr.io/summonarr/summonarr:${SUMMONARR_VERSION:-latest}
     container_name: summonarr
     restart: unless-stopped
-    # Defense-in-depth hardening — see audit S10-F10.
+    # Defense-in-depth hardening (extra safety layers in case something else fails).
     # no-new-privileges blocks setuid/setgid escalation; cap_drop ALL strips
     # every Linux capability (Node doesn't need any). tmpfs /tmp routes all
     # short-lived temp writes (mkdtemp from import-session, upload buffers,
@@ -56,7 +56,7 @@ services:
       - "3001:3000"
     environment:
       PORT: "3000"
-      # AUTH_URL (set in .env.local) pins the app's public base URL so auth flows and
+      # AUTH_URL (set in .env) pins the app's public base URL so auth flows and
       # redirects don't rely on the incoming Host/X-Forwarded-Host header, eliminating
       # the host-header injection risk behind a reverse proxy.
       SYNC_INTERVAL: "${SYNC_INTERVAL:-3600}"

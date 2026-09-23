@@ -55,7 +55,7 @@ function tripQuotaLockout(reason: string) {
 }
 
 // ── Transport circuit breaker ──────────────────────────────────────────────
-// Every tripQuotaLockout call site above requires a RESPONSE — a 429, or a body
+// Every tripQuotaLockout call site in this file requires a RESPONSE — a 429, or a body
 // whose Error names a limit. A request that never gets one (connection refused,
 // a host that blackholes, broken IPv6 in the container) therefore tripped
 // nothing, and isOmdbQuotaLocked() stayed false no matter how comprehensively
@@ -183,7 +183,7 @@ export async function getOmdbRatings(imdbId: string, _releaseDate?: string | nul
         tripQuotaLockout(`HTTP 429 for ${imdbId}`);
       } else {
         // OMDB's key layer sends "Request limit reached!" as HTTP 401 + JSON body
-        // (see the module header) — parse the body defensively and run the SAME
+        // (see isOmdbTransientError) — parse the body defensively and run the SAME
         // quota discrimination as the 200-path, or real daily exhaustion never
         // trips the lockout and every quota defense keyed off it stays inert.
         // Invalid-key deliberately still doesn't lock (see isOmdbQuotaErrorMessage).
@@ -193,7 +193,7 @@ export async function getOmdbRatings(imdbId: string, _releaseDate?: string | nul
         }
       }
       // Transient upstream failure (5xx/429/401/etc.) — throw so the caller does
-      // NOT write a 24h NOT_FOUND sentinel for it. Genuine "no OMDB entry" is only
+      // NOT write a NOT_FOUND sentinel (a "no such title" cache entry) for it. Genuine "no OMDB entry" is only
       // the Response!=="True" branch below.
       throw new Error(`OMDB API returned ${res.status} for ${sanitizeForLog(imdbId)}`);
     }
@@ -212,7 +212,7 @@ export async function getOmdbRatings(imdbId: string, _releaseDate?: string | nul
       // OMDB signals quota exhaustion and bad keys as HTTP 200 with Response="False"
       // and an Error string ("Request limit reached!", "Invalid API key!"). Those are
       // transient/config conditions, not a genuine "no such title" — throw so the caller
-      // does NOT negative-cache them for 24h. Only a real not-found caches the sentinel.
+      // does NOT negative-cache them. Only a real not-found caches the sentinel.
       // Rate/quota errors additionally trip the lockout (invalid-key deliberately doesn't).
       if (isOmdbQuotaErrorMessage(data.Error)) {
         tripQuotaLockout(`${data.Error} for ${imdbId}`);
@@ -234,12 +234,12 @@ export async function getOmdbRatings(imdbId: string, _releaseDate?: string | nul
       metacritic:     mc,
     };
   } catch (err) {
-
     const reason = err instanceof SafeFetchError ? err.reason : (err instanceof Error ? err.message : String(err));
     if (isTransportFailure(err)) noteTransportFailure(reason);
     console.error(`[omdb] fetch failed for ${sanitizeForLog(imdbId)}: ${sanitizeForLog(reason)}`);
-    // Transient (network/timeout/SSRF) — propagate so fetchAndCacheOmdbForTmdb's
-    // catch returns without negative-caching a title that may exist.
+    // Every failure here (network/timeout/SSRF, or a transient error thrown
+    // above) propagates, so fetchAndCacheOmdbForTmdb's catch returns without
+    // negative-caching a title that may exist.
     throw err;
   }
 }
@@ -275,8 +275,8 @@ export type OmdbResult =
 // second time (the remap self-heal below). Outcomes beyond a resolved id keep
 // their pre-existing semantics exactly: "noAuth" = no TMDB token (non-transient
 // miss, no negative-cache), "gone" = TMDB 404 (authoritative — the tmdbId
-// doesn't exist for this media type; left transient, a blocking ratings batch
-// of bogus ids could be replayed indefinitely on the shared read token),
+// doesn't exist for this media type, so it IS negative-cached; left transient,
+// a blocking ratings batch of bogus ids would re-hit TMDB on every load),
 // "transient" = any other non-OK.
 type ImdbResolve =
   | { kind: "id"; imdbId: string | null }
@@ -352,7 +352,7 @@ export async function fetchAndCacheOmdbForTmdb(
       // The hinted id is authoritatively unknown to OMDB (a transient failure
       // would have thrown) — either a stale stored id or a rare imdb-id remap.
       // Re-resolve live ONCE before negative-caching so the remap self-heals
-      // instead of tombstoning the title for 24h on the strength of a hint.
+      // instead of negative-caching ("tombstoning") the title on the strength of a hint.
       const resolved = await resolveImdbIdViaTmdb(tmdbId, mediaType);
       if (resolved.kind !== "id") return settleResolve(resolved);
       omdbRatings = resolved.imdbId && resolved.imdbId !== imdbId
@@ -376,7 +376,6 @@ export async function fetchAndCacheOmdbForTmdb(
     await setCache(cacheKey, ratings, libraryDetailsTtl(releaseDate));
     return { found: true, data: ratings };
   } catch (err) {
-
     const msg = err instanceof SafeFetchError
       ? `${err.reason}: ${err.message}`
       : err instanceof Error ? err.message : String(err);

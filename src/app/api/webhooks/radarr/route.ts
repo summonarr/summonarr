@@ -333,8 +333,8 @@ export async function POST(req: NextRequest) {
         });
         // "failed" → reset notifiedAt for retry on the next webhook tick.
         // "skipped-no-subs" / "skipped-no-keys" → leave notifiedAt set
-        // (retrying won't help; no subs/keys are missing operator-side), but
-        // log so an operator can wire up email/Discord backstop notification.
+        // (retrying won't help: the admin has no push subscription or keys set
+        // up), but log so an operator can wire up an email/Discord backstop.
         if (outcome === "failed") {
           await prisma.issueGrab.update({
             where: { id: grab.id, notifiedAt: now },

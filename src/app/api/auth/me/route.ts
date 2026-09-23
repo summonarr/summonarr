@@ -55,9 +55,9 @@ function applyPrivacyHeaders(res: NextResponse): NextResponse {
 }
 
 // Session source for the client-side SummonarrSessionProvider. Reads the
-// Summonarr session cookie, runs the verify+refresh pipeline (revocation
-// check + sliding window + role refresh), returns the session and threads
-// any refreshed JWT back as Set-Cookie.
+// session (bearer token or cookie), runs the verify+refresh pipeline
+// (revocation check, sign-in deadline, role refresh), returns the session, and
+// sends any re-signed JWT back to browsers as Set-Cookie.
 export async function GET(req: NextRequest) {
   // Bearer (native clients) preferred over the cookie (browsers).
   const bearer = parseBearerToken(req.headers.get("authorization"));
@@ -77,16 +77,13 @@ export async function GET(req: NextRequest) {
   if (!bearer && !matchesStoredFingerprint(result.claims.uaFingerprint, req.headers.get("user-agent"))) {
     return applyPrivacyHeaders(NextResponse.json({ session: null }, { status: 401 }));
   }
-  // A machine session carries a mint-time IP allowlist snapshotted into its
-  // claims, and every OTHER authenticated surface re-checks it per request —
-  // authActive (auth.ts) and the withAuth/withAdmin wrappers both do. This route
-  // enforced the fingerprint but not the allowlist, so a leaked machine token
-  // replayed from a disallowed address was refused everywhere except here, where
-  // it still returned the impersonated identity: id, role and permission bitmask.
-  // Applies to bearer sessions too — unlike the fingerprint check above, which
-  // bearer clients deliberately skip, the allowlist is exactly what binds a
-  // machine token to its permitted addresses.
-  // Absent/empty allowlist ⇒ true, so ordinary user sessions are unaffected.
+  // A machine session carries the IP allowlist that was in force when it was
+  // minted, and every other authenticated surface re-checks it per request
+  // (authActive and the withAuth/withAdmin wrappers). Check it here too, or a
+  // leaked machine token used from a disallowed address could still read the
+  // impersonated identity (id, role, permissions) from this route.
+  // Unlike the fingerprint check above, this applies to bearer sessions as well.
+  // No allowlist ⇒ true, so ordinary user sessions are unaffected.
   if (!machineIpAllowed(result.claims, req.headers)) {
     return applyPrivacyHeaders(NextResponse.json({ session: null }, { status: 401 }));
   }

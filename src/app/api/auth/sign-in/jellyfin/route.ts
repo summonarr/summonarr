@@ -18,22 +18,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Username and password required" }, { status: 400 });
   }
 
-  // `instance` is optional so existing (older, single-server) clients that
-  // never send it keep signing into the default server exactly as before.
-  // URL-only check (not getSyncableMediaInstances, which also requires an API
-  // key) — sign-in has never needed the API key, only the best-effort email
-  // backfill in findOrCreateJellyfinUser does, and that already degrades
-  // gracefully when it's absent. Requiring it here too would 503 a deployment
-  // that pre-Phase-1.5 could sign into just fine.
+  // `instance` is optional so older single-server clients that never send it
+  // keep signing into the default server exactly as before.
+  // The config check below needs only the server URL (not the API key, which
+  // getSyncableMediaInstances would also require): sign-in itself never uses
+  // the API key. Only the best-effort email backfill in findOrCreateJellyfinUser
+  // does, and that already copes when it's missing.
   const instance = typeof body.instance === "string" ? body.instance : DEFAULT_MEDIA_INSTANCE;
-  // Validate the slug the way every other instance-consuming route does (the
-  // QuickConnect initiate route, both terminate routes, the fix-match trio).
-  // Not a security hole — the value only ever reaches a parameterized Setting
-  // key and is never persisted — but instanceKeySegment upper-cases the first
-  // character only, so "Remote" derives the SAME jellyfinRemoteUrl/ApiKey config
-  // and passes the gate below, while the membership lookup downstream queries
-  // `serverInstance: "Remote"` and matches no MediaServerUser row. That refuses
-  // a legitimate first-time user of that server: it fails closed, but wrongly.
+  // Validate the slug like every other route that takes an instance. Setting
+  // keys only upper-case the slug's first letter, so "Remote" would load the
+  // SAME config as "remote" and pass the check below, while the membership
+  // lookup later searches `serverInstance: "Remote"` and finds no row — wrongly
+  // refusing a real user of that server.
   if (!isValidMediaInstanceSlug(instance)) {
     return NextResponse.json({ error: "Invalid server" }, { status: 400 });
   }

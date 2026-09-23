@@ -2,8 +2,8 @@ import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@/generated/prisma";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 
-// Build a `tmdbId IN […]` clause per mediaType — replaces the prior wide `OR: items.map(...)`
-// pattern which the planner couldn't serve from the composite (tmdbId, mediaType) index.
+// Build one `tmdbId IN […]` clause per media type. Postgres can answer this
+// from the (tmdbId, mediaType) index; one OR branch per item could not.
 // Exported for unit tests.
 export function buildMediaTypeWhere(items: TmdbMedia[]): Prisma.MediaRequestWhereInput | null {
   const movieIds = items.filter((i) => i.mediaType === "movie").map((i) => i.id);
@@ -22,10 +22,10 @@ export async function attachRequestedStatus(items: TmdbMedia[], userId?: string)
   const baseWhere = buildMediaTypeWhere(items);
   if (!baseWhere) return items;
 
-  // Scope to the default instance (arrInstance:"") so a request against a non-default
-  // instance (4K/named) does not mark the primary "requested" flag used for the default
-  // CTAs/grids, and vice-versa. (Detail pages query the instance explicitly; each
-  // instance carries its own requested/pending state.) Matches unique (tmdbId, mediaType, requestedBy, arrInstance).
+  // Only look at the default instance (arrInstance ""). A request made on a 4K
+  // or named instance must not light up the main "requested" flag that the
+  // grids and default request buttons use. Detail pages query each instance
+  // separately, since each instance has its own requested/pending state.
   const [globalRows, mineRows] = await Promise.all([
     prisma.mediaRequest.findMany({
       where: { status: { not: "DECLINED" }, arrInstance: "", ...baseWhere },

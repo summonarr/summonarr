@@ -119,7 +119,7 @@ export async function getVisibleServerInstances(
 
 // Same resolver for a caller holding a bare user id instead of a session — the
 // attachAllAvailability chokepoint, which every discovery list funnels through
-// and which already carries `userId` (not the session) through its 28 call
+// and which already carries `userId` (not the session) through its many call
 // sites. Threading a session down instead would mean editing all of them.
 //
 // Unlike the session form this cannot read the ADMIN bit for free, so a

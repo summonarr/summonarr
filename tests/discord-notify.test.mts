@@ -24,8 +24,11 @@
 //     scope and NEVER thrown to the caller — approve/decline routes must not
 //     500 because Discord hiccuped. The admin fan-out isolates per-recipient
 //     failures.
-//   - assignDiscordRolesOnLink maps provider (synthetic @jellyfin.local email)
-//     and app role to the configured role ids, skipping invalid snowflakes.
+//   - ROLE SYNC: assignDiscordRolesOnLink maps provider (synthetic
+//     @jellyfin.local email) and app role to the configured role ids. It grants
+//     (PUT) the roles the user should have and revokes (DELETE) every other role
+//     Summonarr manages. revokeDiscordRolesOnUnlink removes all managed roles.
+//     Both skip invalid snowflakes (a snowflake is Discord's numeric id format).
 //
 // No DB or network: prisma.setting/prisma.user are shadowed in-memory
 // (tests/_helpers.mts), globalThis.fetch is scripted, and dns/promises.lookup

@@ -25,6 +25,9 @@
 //      returns a non-null SummonarrSession or redirects, and the dead branches
 //      obscured that guarantee (one of them minted a request token for the
 //      empty user id).
+//
+// The last test applies rule 3's "no nullable session" check to the
+// notifications page too, which had the same dead fallback branch.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

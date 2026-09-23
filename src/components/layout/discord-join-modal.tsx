@@ -15,10 +15,10 @@ export function DiscordJoinModal({ inviteUrl }: DiscordJoinModalProps) {
   const href = safeExternalHref(inviteUrl);
   if (dismissed || !href) return null;
 
-  // bg-indigo-600 resolves to --ds-accent, so every foreground here must be
-  // --ds-accent-fg (dark on amber/emerald/cyan/mono, light on indigo/rose) —
-  // a raw indigo-200 read as unreadable on the light-fg accents. Hover states
-  // are opacity, not a second colour, for the same reason.
+  // bg-indigo-600 is remapped to the user's accent colour (--ds-accent), so all
+  // text and icons here use --ds-accent-fg, the colour picked to stay readable
+  // on that accent (guardrail 42). Hover uses opacity rather than a second
+  // colour, which could clash with some accents.
   return (
     <div className="flex items-center gap-3 bg-indigo-600 px-4 py-2 text-sm text-[var(--ds-accent-fg)]">
       <span className="flex-1">

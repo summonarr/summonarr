@@ -1,4 +1,4 @@
-// Route-level unit tests for the six uncovered settings sub-routes:
+// Route-level unit tests for six settings sub-routes:
 //   POST/DELETE /api/settings/plex             rotate / clear the Plex admin token
 //   GET         /api/settings/webhook-urls     the copy-button token reveal
 //   GET         /api/settings/arr-options      root folders + quality profiles

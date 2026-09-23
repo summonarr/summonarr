@@ -53,7 +53,8 @@ async function describePlexSignInFailure(res: Response): Promise<string> {
   return `Plex sign-in failed (${res.status}${detail ? ` — ${detail}` : ""}). Contact the server owner if this persists.`;
 }
 
-// Landing page for the Plex PIN-based OAuth redirect; polls plex.tv until the PIN is claimed
+// Landing page after the Plex PIN sign-in redirect. It polls until the user has
+// approved the PIN, then finishes either a login or the admin Settings connect.
 export default function PlexDonePage() {
   const [message, setMessage] = useState("Completing Plex sign-in…");
   // Every failure branch below used to swap the message and leave the spinner

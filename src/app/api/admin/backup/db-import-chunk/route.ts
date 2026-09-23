@@ -7,17 +7,17 @@ import {
   processBackupImport,
   MAX_CIPHERTEXT_BYTES,
 } from "@/lib/backup-import";
-
-// Per-chunk hard cap matches the sibling /api/setup/import-chunk route. Without
-// this an admin-or-attacker-with-admin-creds could send a single oversized chunk
-// and OOM Node before the arrayBuffer() resolved.
-const MAX_CHUNK_BYTES = 32 * 1024 * 1024;
 import {
   startSession,
   appendChunk,
   getSessionStream,
   clearSession,
 } from "@/lib/import-session";
+
+// Per-chunk size cap, the same as the sibling /api/setup/import-chunk route.
+// Without it, one huge chunk could run the server out of memory (OOM) while
+// req.arrayBuffer() reads it in.
+const MAX_CHUNK_BYTES = 32 * 1024 * 1024;
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";

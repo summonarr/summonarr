@@ -3,11 +3,10 @@
 import { Wrench, X } from "@/components/icons";
 import { useState } from "react";
 
-// Admin-only strip shown while maintenance mode is on (non-admins get
-// MaintenancePage instead). Same warning pattern as the login page's
-// maintenance notice: a warning-tinted surface, ordinary --ds-fg text, and the
-// warning colour reserved for the icon — the old yellow-on-yellow text was a
-// raw palette shade the token sweep never mapped.
+// Admin-only strip shown while maintenance mode is on (non-admins see
+// MaintenancePage instead). Styled like the login page's maintenance notice:
+// a warning-tinted background, normal text colour, and the warning colour only
+// on the icon so the text stays readable in both themes.
 export function MaintenanceBanner({ message }: { message?: string }) {
   const [dismissed, setDismissed] = useState(false);
   if (dismissed) return null;

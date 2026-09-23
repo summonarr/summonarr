@@ -1,8 +1,8 @@
 import { cn } from "@/lib/utils";
 import { forwardRef } from "react";
 
-// py-2.5 + explicit min-h-11 (44 px) so filter selects clear Apple HIG. py-2.5
-// alone with text-sm lands at 42 px, so the explicit min-height guarantees 44.
+// min-h-11 (44px) meets Apple's recommended minimum tap-target size. The
+// padding alone (py-2.5 with text-sm) only reaches 42px, hence the min-height.
 export const StyledSelect = forwardRef<HTMLSelectElement, React.SelectHTMLAttributes<HTMLSelectElement>>(
   function StyledSelect({ className, children, ...props }, ref) {
     return (

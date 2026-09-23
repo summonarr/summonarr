@@ -271,8 +271,8 @@ function buildSqlStream(
 
       await writer.close();
     } catch (err) {
-      // Errors the readable side with the same reason `controller.error` used to,
-      // so the download fails loudly instead of truncating silently.
+      // Abort the stream with the error so the download fails loudly
+      // instead of ending early and looking like a complete (but truncated) file.
       await writer.abort(err).catch(() => {});
     } finally {
       clearTimeout(timeout);

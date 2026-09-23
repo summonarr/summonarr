@@ -209,7 +209,7 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
         ))}
       </div>
 
-      {/* Top 5 */}
+      {/* Top titles list */}
       {w.topTitles.length > 0 && (
         <div style={{ background: "var(--ds-bg-2)", border: "1px solid var(--ds-border)", borderRadius: 14, padding: 18 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ds-fg)", marginBottom: 14 }}>

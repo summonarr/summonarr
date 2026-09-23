@@ -80,6 +80,9 @@ export function StarterPackCard({
     () => items.filter((i) => i.spec && i.item.recommended).map((i) => i.spec!.id),
     [items],
   );
+  // Pre-select the recommended specs, but only when the set of available specs
+  // actually changes. A reload after Apply returns the same set, so the admin's
+  // own picks are kept.
   useEffect(() => {
     const key = resolvedIds.slice().sort().join(",");
     if (key !== lastResolvedKeyRef.current) {
@@ -142,6 +145,7 @@ export function StarterPackCard({
       setRefreshState("error");
       setRefreshError({ errors: [err instanceof Error ? err.message : String(err)] });
     }
+    // Clear a success message after 3s; an error stays until the next click.
     setTimeout(() => setRefreshState((s) => (s === "error" ? s : "idle")), 3000);
   }
 

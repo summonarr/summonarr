@@ -2,9 +2,8 @@ import { cn } from "@/lib/utils";
 
 // Shared in-page section heading: title, optional mono subtitle under it, and an
 // optional right-aligned slot (a "See all" link, a "1–36 of 200" range label).
-// One definition for the discover rails, /popular and /top, which carried three
-// byte-identical copies. No hooks, so server and client components can both
-// render it.
+// Used by the discover rails, /popular and /top. It has no hooks, so both server
+// and client components can render it.
 export function SectionHeader({
   title,
   subtitle,

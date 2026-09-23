@@ -56,10 +56,13 @@ function CopyRow({
   );
 }
 
-// The ?token= query param is the only auth option because Radarr/Sonarr webhook UIs have no header field.
-// HD rows prefer the per-source secret and fall back to the legacy shared secret (matching how the
-// webhook handler resolves tokens). The 4K rows point at the SAME endpoint with the 4K instance's own
-// secret — the handler uses secret-as-discriminator to set is4k — and only appear once that secret is set.
+// Placeholder row for a 4K instance that is configured but has no webhook secret yet.
+//
+// About the URLs below: the token rides in a ?token= query param because the Radarr/Sonarr
+// webhook screens have no field for custom headers (guardrail 2). The default rows use the
+// per-service secret and fall back to the legacy shared one, the same way the webhook handler
+// does. The 4K rows point at the SAME endpoint with the 4K instance's own secret; the handler
+// works out which instance fired by which secret matched (guardrail 32).
 function SecretNeededRow({ label }: { label: string }) {
   return (
     <div className="space-y-1">
@@ -143,7 +146,7 @@ export function WebhookUrls({
       )}
       {noHdSecret && (
         <p className="text-xs text-amber-500">
-          No secret token set — webhook endpoints are unauthenticated. Set a token above.
+          No secret token set — Radarr/Sonarr webhook calls will be rejected until you set a token above.
         </p>
       )}
       <p className="text-xs text-zinc-500">

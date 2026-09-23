@@ -59,10 +59,6 @@ export function DiscoverHero({
 
   const detailPath =
     media.mediaType === "movie" ? `/movie/${media.id}` : `/tv/${media.id}`;
-  // media.trailerUrl is UNTRUSTED (MDBList `raw.trailer`) — gate it through
-  // safeExternalHref so a `javascript:`/`data:` URL can't become a clickable
-  // href (XSS). Matches the sibling TrailerButton. The YouTube fallback is a
-  // hardcoded https URL and needs no gate.
   // Same "available" reading as MediaCard/AvailabilityBadges: a copy on a
   // server whose badges this viewer doesn't see must not suppress the Queued /
   // Requested chips (the raw flags hid them while showing no Plex chip either).
@@ -70,6 +66,10 @@ export function DiscoverHero({
     (showPlex && media.plexAvailable) ||
     (showJellyfin && media.jellyfinAvailable)
   );
+  // media.trailerUrl is UNTRUSTED (MDBList `raw.trailer`) — gate it through
+  // safeExternalHref so a `javascript:`/`data:` URL can't become a clickable
+  // href (XSS). Matches the sibling TrailerButton. The YouTube fallback is a
+  // hardcoded https URL and needs no gate.
   const trailerHref =
     safeExternalHref(media.trailerUrl) ??
     (media.trailerKey

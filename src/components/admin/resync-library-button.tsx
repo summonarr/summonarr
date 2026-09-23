@@ -34,13 +34,9 @@ export function ResyncLibraryButton({
     setStatus("loading");
     setResult(null);
     try {
-      // Call only the servers that exist. This used to POST to both
-      // unconditionally and then fold the two answers into one `??` chain, so
-      // the FIRST error won — and on a single-server deployment that error was
-      // always the other server's `400 {"error":"… not configured"}`. The
-      // configured server had just rewritten its whole library and the admin
-      // was shown a red failure naming a server they do not run, with no counts
-      // and no refresh.
+      // Call only the servers that are configured. Calling an absent one just
+      // returns "not configured", which used to show up as a red failure for a
+      // server the admin doesn't even run (guardrail 36).
       //
       // The booleans come from the page rather than from probing, so an absent
       // server costs no request at all. They describe the DEFAULT instance,

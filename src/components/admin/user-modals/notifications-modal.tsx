@@ -60,9 +60,9 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
       }
       router.refresh();
     } catch {
-      // A transport failure rejects instead of returning a response, so it
-      // skipped the rollback above entirely and left the switch showing a
-      // preference the server never stored.
+      // A network failure throws instead of returning a response, so the
+      // rollback above never runs. Undo the optimistic flip here too, or the
+      // switch would show a preference the server never stored.
       setPrefs(prevPrefs);
       setError("Network error — please try again.");
     } finally {

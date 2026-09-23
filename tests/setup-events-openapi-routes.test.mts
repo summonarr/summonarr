@@ -1,4 +1,4 @@
-// Route-level unit tests for the last four uncovered routes:
+// Route-level unit tests for four more routes:
 //   POST        /api/setup/import        first-run restore from a backup
 //   POST/DELETE /api/setup/import-chunk  its chunked sibling
 //   GET         /api/events              the SSE stream
@@ -496,7 +496,7 @@ test("the spec documents the routes this suite covers", async () => {
   const token = await mintSession({ role: "ADMIN", permissions: Permission.ADMIN });
   const spec = await (await getSpec(`${COOKIE}=${token}`)).json();
   // Path keys are RELATIVE to the declared server base, so they carry no /api
-  // prefix — asserting on "/api/requests" would silently pass nothing.
+  // prefix. Checking for "/api/requests" would never match anything.
   assert.deepEqual(spec.servers?.[0]?.url, "/api");
   const paths = Object.keys(spec.paths);
   for (const p of ["/requests", "/search", "/notifications"]) {

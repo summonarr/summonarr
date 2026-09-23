@@ -12,9 +12,10 @@
 //    strings, while letterboxd/MAL/Ebert pass through unrounded. IMDb rating
 //    uses a `!= null` gate (an explicit 0 is data → "0"), but IMDb votes uses
 //    a truthiness gate (0 votes is absence, not a count worth showing).
+//    Negative values are "no score" sentinels and always read as null.
 //
-// parseBatchItem is pure (no fetch, no prisma) — importing it drags in the
-// mdblist module, which the suite already loads via omdb-availability.
+// parseBatchItem is pure: it makes no network or database calls, so these
+// tests just feed it objects and check what comes back.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseBatchItem } from "../src/lib/mdblist.ts";

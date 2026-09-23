@@ -1,4 +1,5 @@
-// Route-level unit tests for the three uncovered /api/requests/* routes:
+// Route-level unit tests for the three /api/requests/* routes that change an
+// existing request:
 //   PATCH        /api/requests/batch             bulk approve / decline
 //   PATCH/DELETE /api/requests/[id]              single-request transitions + cancel
 //   GET          /api/requests/quality-profiles  the approve/request profile picker
@@ -7,16 +8,16 @@
 // that MUTATE an existing request, and every one of their sharp edges is a race
 // or a data-loss bug the code comments already name:
 //
-//   1. EVERY TRANSITION IS A COMPARE-AND-SWAP ON THE CURRENT STATUS. batch claims
-//      its rows with ONE `updateManyAndReturn({ where: { id: { in }, status:
-//      "PENDING" }})` — a single UPDATE … RETURNING whose per-row status predicate
-//      is re-checked at write time — and drives every side effect off the rows it
-//      returned. (It used to be one updateMany per id: same CAS, up to 100
-//      sequential round-trips per click, plus a third findMany to learn the
-//      owners the RETURNING clause now carries.) The older shared
-//      findMany-then-updateMany snapshot let two concurrent calls both act on
-//      the same request and double-push it to ARR. requests/[id] does
-//      the same against `existing.status` and answers 409 when the row moved
+//   1. EVERY TRANSITION IS A COMPARE-AND-SWAP ON THE CURRENT STATUS. (A
+//      compare-and-swap, or CAS, only writes a row if it still has the status we
+//      expect, so two racing callers can't both win.) batch claims its rows with
+//      ONE `updateManyAndReturn({ where: { id: { in }, status: "PENDING" }})` —
+//      a single UPDATE … RETURNING that re-checks each row's status at write
+//      time — and drives every side effect off the rows it returned. (It used to
+//      be one updateMany per id: up to 100 sequential round-trips per click.)
+//      An even older read-then-update snapshot let two concurrent calls both act
+//      on the same request and double-push it to ARR. requests/[id] does the
+//      same against `existing.status` and answers 409 when the row changed
 //      underneath it, because its transition-table check ran on a stale read.
 //   2. THE adminNote GUARD IS ON THE **RAW** BODY FIELD. sanitizeOptional maps
 //      undefined → null, so guarding on the sanitized value is always truthy and

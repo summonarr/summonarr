@@ -237,14 +237,14 @@ test("a MEANINGFUL trailing slash on the path is preserved — only a bare origi
 });
 
 test("link-local is blocked across the whole fe80::/10, not just the fe80: hextet", async () => {
-  // Link-local is fe80::–febf::. The guard matched only the literal `fe80:`
-  // hextet, leaving fe81–febf allowed in BOTH policies while the file header and
-  // CLAUDE.md both claim link-local is blocked outright.
+  // Link-local is fe80::–febf::. An older guard matched only the literal `fe80:`
+  // hextet (one 16-bit group of an IPv6 address), which left fe81–febf allowed in
+  // BOTH policies even though link-local is supposed to be blocked outright.
   for (const addr of ["fe80::1", "fe81::1", "fe90::1", "fea0::1", "febf::1"]) {
     assert.equal(isSafeAddrForAdmin(addr), false, `${addr} must be blocked (admin mode)`);
     assert.equal(await verifyResolvedHost(addr), false, `${addr} must be blocked (user mode)`);
   }
-  // The neighbouring site-local range stays blocked, and fe7f/fec0 boundaries hold.
+  // Just above the range, deprecated site-local (fec0::) stays blocked too.
   assert.equal(isSafeAddrForAdmin("fec0::1"), false);
   // Just below the range is a normal global address and must still pass.
   assert.equal(isSafeAddrForAdmin("fe7f::1"), true);

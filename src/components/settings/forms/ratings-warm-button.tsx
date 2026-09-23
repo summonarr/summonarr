@@ -24,8 +24,12 @@ export function RatingsWarmButton() {
         }),
       ]);
 
-      const omdbData: { fetched?: number; skipped?: number; total?: number; failed?: number; error?: string } = await omdbRes.json();
-      const mdblistData: MdblistWarmData = await mdblistRes.json();
+      // A reply that isn't JSON (e.g. a reverse proxy's timeout page on a long
+      // warm) becomes an error line for that source instead of throwing.
+      const omdbData: { fetched?: number; skipped?: number; total?: number; failed?: number; error?: string } =
+        await omdbRes.json().catch(() => ({ error: `Request failed (HTTP ${omdbRes.status})` }));
+      const mdblistData: MdblistWarmData =
+        await mdblistRes.json().catch(() => ({ error: `Request failed (HTTP ${mdblistRes.status})` }));
 
       const omdbErr    = omdbData.error;
       const mdblistErr = mdblistData.error;

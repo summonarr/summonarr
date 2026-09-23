@@ -20,9 +20,10 @@
 //   (413 header fast-path, 413 chunked post-read, 400 malformed) is pinned hard.
 //
 //   POST /api/auth/sign-out (src/app/api/auth/sign-out/route.ts) — full
-//   server-side revoke. Pinned: a cookie sign-out deletes the AuthSession row and
-//   bumps sessionsRevokedAt (via revokeSessionById — internals owned by
-//   auth.test.mts) and writes the AUTH_LOGOUT audit; bearer-FIRST resolution (a
+//   server-side revoke. Pinned: a cookie sign-out deletes the AuthSession row
+//   but does NOT stamp the per-user sessionsRevokedAt cutoff (via
+//   revokeSessionById — internals owned by auth.test.mts) and writes the
+//   AUTH_LOGOUT audit; bearer-FIRST resolution (a
 //   bearer sign-out revokes the bearer's session, never the cookie's — no
 //   fallback); GUARDRAIL 6b — the response appends ONLY cleared cookies (no
 //   sliding-refresh token a native client couldn't read) plus no-store headers;
@@ -549,13 +550,13 @@ test("sign-out (cookie): fully revokes the session server-side and clears both c
   assert.equal(res.status, 200);
   assert.deepEqual(await bodyOf(res), { ok: true });
 
-  // The server-side revoke actually happened: the AuthSession row is gone and
-  // the AuthSession row is gone — which is what the slow path checks first.
+  // The server-side revoke actually happened: the AuthSession row is gone, and
+  // the row's presence is what the slow (DB-checked) session path checks first.
   assert.equal(authSessions.has("sess-co"), false, "the AuthSession row must be deleted");
   // Signing out ONE device must not stamp the per-user cutoff: it is compared as
   // `iat <= cutoff`, so it would also kill every session minted earlier — invisible
   // for cookies (re-signed constantly) but fatal for bearer tokens, which keep their
-  // sign-in iat for a year. Row-presence already rejects this session.
+  // sign-in iat forever (guardrail 6c). Row-presence already rejects this session.
   assert.equal(users[0].sessionsRevokedAt, null, "a single sign-out must not stamp a per-user cutoff");
 
   // Both Summonarr cookie variants are cleared (Max-Age=0), plus no-store headers.

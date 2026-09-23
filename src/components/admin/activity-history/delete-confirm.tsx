@@ -21,9 +21,10 @@ export function DeleteConfirm({
   return (
     <div
       role="dialog"
-      // Same gate as the disabled Cancel button: dismissing mid-DELETE unmounted
-      // the dialog, so a failure the parent reported afterwards had nowhere to
-      // render and the admin was left believing the play was deleted.
+      // Clicking the dark backdrop closes the dialog, except while the delete
+      // is running (the Cancel button is disabled then too). Closing it early
+      // would leave no place to show an error if the delete then failed, and
+      // the admin would wrongly believe the play was deleted.
       onClick={deleting ? undefined : onCancel}
       style={{
         position: "fixed",
@@ -72,11 +73,10 @@ export function DeleteConfirm({
             {row.mediaServerUser.username}
           </span>{" "}
           will be permanently removed from history.
-          {/* Say how many rows go. A grouped row is one VIEWING that was paused
-              and resumed, so "the play record" can mean several database rows —
-              and play history cannot be restored from inside the app at all
-              (guardrail 19: the live poller is its only writer). An admin
-              deleting several sittings at once should be told so first. */}
+          {/* Say how many rows will go. A grouped row is one VIEWING that was
+              paused and resumed, so it can stand for several database rows.
+              Deleted play history cannot be rebuilt (guardrail 19: the live
+              poller is its only writer), so warn before deleting several. */}
           {(row.segmentCount ?? 1) > 1 && (
             <>
               {" "}

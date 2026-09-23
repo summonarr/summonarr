@@ -30,15 +30,15 @@
 //      requester counts as someone else. The requester's own logins never make
 //      a viewer — by construction, not by a filter: flagged plays of theirs give
 //      the request full credit, and (pin 7) full-credit requests are never read.
-//   8. THE PREVIEW judges what a save would: stored values for keys the body
-//      leaves out, defaults for blank ones, the same bounds and cross-field
-//      rules — and grades every requester under both the stored and the proposed
-//      settings. ADMIN only, like the settings route it sits beside.
 //   7. THE AUDIENCE IS READ ONLY WHERE IT CAN MATTER — scored requests short of
 //      full credit — as ONE ROW PER IDENTITY AND SEASON built from play history's
 //      own watched/completed flags, never per episode. That is what keeps the
 //      Users page (a thousand accounts, a year of requests) from pulling every
 //      viewer × every episode of every popular show on each render.
+//   8. THE PREVIEW judges what a save would: stored values for keys the body
+//      leaves out, defaults for blank ones, the same bounds and cross-field
+//      rules — and grades every requester under both the stored and the proposed
+//      settings. ADMIN only, like the settings route it sits beside.
 //   9. ONLY APPROVED REQUESTS, PER TITLE. A library sync marks a PENDING request
 //      AVAILABLE when its title arrives, so AVAILABLE isn't enough: a request
 //      counts when it, or any request for the same title on the same instance,

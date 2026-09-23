@@ -1,5 +1,3 @@
-
-
 import { prisma } from "./prisma";
 import { safeFetchTrusted } from "./safe-fetch";
 import { arrFetch, ArrResponseError, getArrCfg, type ArrCfg, type ArrVariant } from "./arr";
@@ -762,7 +760,7 @@ function formatArrError(err: unknown): string {
         return `${err.status} — ${String(msg).slice(0, 500)}`;
       }
     } catch {
-
+      // Body isn't JSON — fall through and show the raw text instead.
     }
     return `${err.status} — ${body.replace(/\s+/g, " ").slice(0, 500)}`;
   }
@@ -960,7 +958,7 @@ export async function applyCustomFormats(
   } catch (err) {
     // Can't read existing CFs → can't tell new from existing, so a blind POST in
     // the loop below would create duplicates. Fail the whole batch instead of
-    // guessing (also satisfies GR7: surface the error).
+    // guessing, and log a warning so the failure is visible.
     console.warn("[trash] failed to prefetch remote customformat list:", err instanceof Error ? err.message : err);
     return mapLimit(specs, RECORD_APPLY_CONCURRENCY, (spec) =>
       recordApply(spec, { ok: false, error: "Could not read existing custom formats from the *arr instance" }, arrInstance),
@@ -981,12 +979,10 @@ export async function applyCustomFormats(
       // arrPutOrRecreate transparently recovers if the resource was deleted in the Arr UI between
       // Summonarr's last apply and now (PUT → 404 → POST).
       const remoteId = spec.applications[0]?.remoteId ?? remoteByName.get(payload.name) ?? null;
-      // No-op skip: the cron re-applies every enabled spec each run (drift
-      // repair), which used to mean N identical PUTs per run — the compare data
-      // was already downloaded above and discarded. When the remote CF's
-      // projection matches what we'd PUT, record success against the known id
-      // and skip the write; any drift (including remote rows missing fields)
-      // still PUTs exactly as before.
+      // No-op skip: the cron re-applies every enabled spec each run to repair
+      // drift (changes made by hand in Radarr/Sonarr). When the remote CF already
+      // matches what we'd PUT, record success against the known id and skip the
+      // write. Any difference (including remote rows missing fields) still PUTs.
       if (remoteId) {
         const remoteRow = remoteById.get(remoteId);
         // Only trust equality when the remote row actually CARRIES its
@@ -1052,7 +1048,7 @@ export async function applyCustomFormatGroups(
   });
   const cfSpecIdByTrashId = new Map(memberSpecs.map((s) => [s.trashId, s.id]));
 
-  // Apply every member CF in one batch — applyCustomFormats handles dedup of remoteIds
+  // Apply every member CF in one batch. The Set means a CF shared by several groups is applied once.
   const allCfSpecIds = [...new Set(memberSpecs.map((s) => s.id))];
   const cfResults = allCfSpecIds.length > 0 ? await applyCustomFormats(service, allCfSpecIds, variant) : [];
   const cfResultByTrashId = new Map(cfResults.map((r) => [r.trashId, r]));
@@ -1263,8 +1259,8 @@ interface RemoteFormatItem {
   score: number;
 }
 
-// One-per-batch remote state for buildProfileBody — applyQualityProfiles used
-// to refetch all three per profile spec inside one batch.
+// Remote Radarr/Sonarr state that buildProfileBody needs, fetched once per
+// batch by applyQualityProfiles and shared by every profile in it.
 interface ProfileBuildRemotes {
   schema: Record<string, unknown>;
   remoteLanguages: Array<{ id: number; name: string }>;
@@ -1428,11 +1424,9 @@ async function buildProfileBody(
   let language: { id: number; name: string } | undefined;
   const wantLang = (profile.language ?? "").toLowerCase();
   // Fallback ids (used only when GET /api/v3/language failed) must match
-  // Radarr's Language.cs pseudo-languages: Any = -1, Original = -2. The id is
-  // authoritative (name is display-only — Radarr stores/compares the int), so
-  // the previously swapped constants persisted the OPPOSITE language: "Any"
-  // (accept every release, language gate off) where TRaSH said Original, and
-  // vice versa.
+  // Radarr's Language.cs pseudo-languages: Any = -1, Original = -2. Radarr
+  // stores and compares the id, not the name, so swapping them would silently
+  // save the OPPOSITE setting ("Any" turns the language filter off entirely).
   if (wantLang === "original" || wantLang === "") {
     language = remoteLanguages.find((l) => l.name.toLowerCase() === "original") ?? { id: -2, name: "Original" };
   } else if (wantLang === "any") {
@@ -1475,7 +1469,7 @@ export async function applyQualityProfiles(
     remoteByName = new Map(remote.map((r) => [r.name, r.id]));
   } catch (err) {
     // Can't read existing quality profiles → a blind POST below would duplicate
-    // them. Fail the whole batch instead of guessing (also satisfies GR7).
+    // them. Fail the whole batch instead of guessing, and log a warning.
     console.warn("[trash] failed to prefetch remote qualityprofile list:", err instanceof Error ? err.message : err);
     return mapLimit(specs, RECORD_APPLY_CONCURRENCY, (spec) =>
       recordApply(spec, { ok: false, error: "Could not read existing quality profiles from the *arr instance" }, arrInstance),
@@ -1688,10 +1682,10 @@ export async function runTrashSync(): Promise<TrashSyncResult> {
   if (map.trashSyncQualityProfiles !== "false") enabledKinds.push("QUALITY_PROFILE");
   if (map.trashSyncQualitySizes !== "false") enabledKinds.push("QUALITY_SIZE");
 
-  // Apply each configured instance independently. The default ("") pass mirrors the original
-  // behaviour; every named/4K instance is a no-op unless an admin has created applications for its
-  // slug (only possible once that instance is configured), so single-instance deployments behave
-  // identically. We fan out per service so a service's specs only target that service's instances.
+  // Apply each configured instance independently. A named/4K instance does nothing unless an admin
+  // has created applications for its slug (only possible once that instance is configured), so a
+  // single-instance deployment only ever runs the default ("") pass. We loop per service so a
+  // service's specs only target that service's instances.
   const applied: ApplyResult[] = [];
   for (const service of services) {
     const arrService = service === "RADARR" ? "radarr" : "sonarr";

@@ -12,7 +12,10 @@ export async function mergeDiscordIntoWebAccount(
 ): Promise<MergeResult> {
 
   const result = await prisma.$transaction(async (tx) => {
-    // Per-discordUserId advisory lock prevents duplicate merges if the user clicks the link button twice rapidly
+    // Per-Discord-user advisory lock (a Postgres lock held until the transaction ends)
+    // so two fast clicks of the link button can't run the merge twice at once.
+    // The key is built from the first 7 characters of the id, so unrelated users
+    // can occasionally share a key — that only makes one wait, never breaks anything.
     const lockId = BigInt("0x" + Buffer.from(discordUserId).subarray(0, 7).toString("hex"));
     await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock($1::bigint)`, lockId);
 

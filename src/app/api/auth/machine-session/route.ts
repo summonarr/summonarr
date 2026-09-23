@@ -133,12 +133,10 @@ export async function POST(req: NextRequest) {
   // The `permissions` claim is REQUIRED, not optional. verifyAndRefreshSession
   // compares the claim against the DB mask and treats any difference as a
   // privilege change: it rotates AuthSession.sessionId AND bumps the user's
-  // `sessionsRevokedAt` to iat+1. Omitting the claim made it read as "0" while a
-  // real admin's column is 1 (defaultPermissionsForRole("ADMIN")), so EVERY
-  // machine session tripped that path on its very first use — which (a) 401'd the
-  // caller, because the token still names the pre-rotation sessionId, and (b) set
-  // sessionsRevokedAt past every existing token's iat, silently logging the
-  // impersonated admin out of every other device. Mirrors signInAndMintSession.
+  // `sessionsRevokedAt`. A missing claim reads as "0", which never matches a
+  // real admin's mask, so every machine session would trip that path on first
+  // use — 401ing the caller AND signing the impersonated admin out of every
+  // other device. Mirrors signInAndMintSession.
   const token = await signSessionJwt(
     {
       id: user.id,

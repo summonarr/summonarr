@@ -21,7 +21,7 @@ async function signOutAndRedirect(callbackUrl: string) {
   try {
     await fetch(withBasePath("/api/auth/sign-out"), { method: "POST", credentials: "include" });
   } catch {
-    // ignore — best-effort
+    // Best-effort: redirect to the login page even if the request failed.
   }
   window.location.href = withBasePath(callbackUrl);
 }
@@ -60,10 +60,9 @@ export function SearchBar({
   // Keyboard-highlighted option (-1 = none). Mouse hover shares the same
   // state so the highlight visual has a single source of truth.
   const [activeIndex, setActiveIndex] = useState(-1);
-  // Per-instance option-id base — the SearchBar mounts twice (desktop header
-  // + mobile sheet), so ids must not collide for aria-activedescendant. The
-  // listbox id derives from the same base for the same reason: a fixed
-  // "header-search-results" was duplicated in the DOM by the second mount.
+  // Unique id prefix per SearchBar. It is mounted twice (desktop header and
+  // mobile sheet), so fixed ids would appear twice in the page and confuse
+  // screen readers (aria-activedescendant / aria-controls point at them).
   const optionIdBase = useId();
   const listboxId = `${optionIdBase}-listbox`;
   const containerRef = useRef<HTMLDivElement>(null);
@@ -147,7 +146,10 @@ export function SearchBar({
           setActiveIndex(-1);
         }
       } finally {
-        setLoading(false);
+        // Only the newest request may clear the spinner. An aborted older
+        // request finishes after its replacement has started, and would
+        // otherwise hide the spinner while the new search is still loading.
+        if (abortRef.current === controller) setLoading(false);
       }
     }, 350);
 
@@ -293,9 +295,8 @@ export function SearchBar({
                   key={value}
                   type="button"
                   // preventDefault on mousedown keeps focus in the search input
-                  // (no blur/close); the actual filter change is on onClick so
-                  // keyboard users (Enter/Space on the focused button) can toggle
-                  // it too — onMouseDown alone was mouse-only.
+                  // so the results stay open. The filter itself changes in
+                  // onClick, which keyboard users (Enter/Space) can trigger too.
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => setFilter(value)}
                   className="inline-flex items-center gap-1 font-medium transition-colors"
@@ -426,20 +427,17 @@ export function Header() {
   const { session } = useSummonarrSession();
   const role = session?.user?.role;
   const permsStr = session?.user?.permissions;
-  // The avatar menu's Settings entry used to render for EVERY signed-in user, but
-  // /settings is ADMIN-only and redirects everyone else to "/" — so most users had
-  // a dead item in their own menu. Resolved through the shared nav resolver rather
-  // than a local ADMIN check so it follows the page's gate if that ever changes.
+  // Show "Settings" only to users who can actually open /settings (anyone else
+  // is redirected away). We ask the shared nav resolver instead of checking
+  // for ADMIN here, so this stays in step with the page's own gate.
   const canOpenSettings = getVisibleAdminItems(permsStr ? { role, permissions: permsStr } : role)
     .some((i) => i.href === "/settings");
-  // Shared with MobileNav and the server surfaces. This copy already read the
-  // permission bits, but still keyed on `provider` rather than `mediaServer` —
-  // which are different fields for a credentials or OIDC sign-in, where
-  // mediaServer comes from the admin-set User column.
+  // Same Plex/Jellyfin badge rule as MobileNav and the server pages. It keys
+  // on the user's `mediaServer`, not the sign-in `provider` — the two differ
+  // for a local-password or OIDC account.
   const { showPlex, showJellyfin } = getClientBadgeVisibility(session?.user);
-  // `image` isn't part of SummonarrSession yet — claims are kept slim. Avatar
-  // falls back to initials when image is absent, which is the existing
-  // behaviour for credentials/plex/jellyfin users who never had it set anyway.
+  // `image` isn't part of SummonarrSession (the session is kept slim), so this
+  // is normally undefined and the avatar shows the user's initials instead.
   const sessionUserImage = (session?.user as { image?: string | null } | undefined)?.image;
   const initials = session?.user?.name
     ?.split(" ")

@@ -1,7 +1,8 @@
 import { createCipheriv, createDecipheriv, randomBytes, createHash } from "crypto";
 import { processSingleton } from "./process-singleton";
 
-// Version prefix lets us detect whether a stored value is encrypted or plaintext (legacy passthrough)
+// Every encrypted value starts with this prefix, so a stored value without it is known
+// to be old plaintext (see decryptToken).
 const ENC_PREFIX = "enc:v1:";
 
 export class TokenCryptoConfigError extends Error {
@@ -88,9 +89,9 @@ export function encryptToken(plaintext: string): string {
 }
 
 export function decryptToken(value: string, label: string = "unknown row"): string {
-  // Legacy plaintext passthrough: rows written before encryption was rolled out, and rows for
-  // keys not in the SENSITIVE_KEYS list, are stored verbatim. Surface a labelled warning so an
-  // operator can identify which row still needs re-saving.
+  // Legacy plaintext passthrough: a secret saved before encryption was rolled out is still
+  // stored as plain text. Return it as-is, and log a labelled warning so an operator can
+  // tell which row still needs re-saving.
   if (!value.startsWith(ENC_PREFIX)) {
     warnLegacyPlaintextOnce(label);
     return value;

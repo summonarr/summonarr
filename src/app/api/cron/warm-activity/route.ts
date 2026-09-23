@@ -19,28 +19,21 @@ export async function POST(request: NextRequest) {
       try {
         ({ warmed } = await warmActivityCache());
       } catch (err) {
-        // A throw used to skip the ledger write altogether, so the row kept the
-        // last SUCCESSFUL run — the dashboard stayed green and only the ageing
-        // "Last Run" timestamp hinted anything was wrong.
+        // Record the failed run before re-throwing. Otherwise the cron history
+        // would still show the last successful run and look healthy.
         await recordCronRun("activity", Date.now() - startTime, false);
         throw err;
       }
 
       const durationMs = Date.now() - startTime;
 
-      // `lastRunAt` observability — written for both admin and cron triggers
-      // (cf. /settings?tab=system). Stored in Setting, not AuditLog, so cron
-      // runs don't flood the audit table.
-            // `ok` is derived, not assumed. Two ways a warm used to write green:
-      // a throw skipped this line entirely and left the PREVIOUS success
-      // standing, and a run that completed while reporting failures wrote an
-      // affirmative success anyway. The cron table reads `ok === false` to show
-      // Error, and the container reschedules a failing job every
-      // CRON_RETRY_INTERVAL (300s) — so a job broken for a week showed a green
-      // tick while being retried 12x an hour.
+      // Save this run to the cron history (Admin -> Settings -> System) for
+      // both admin and cron triggers. It is kept in the Setting table, not
+      // AuditLog, so scheduled runs don't flood the audit log. This warm has no
+      // partial-failure count: it either finishes (ok) or throws (handled above).
       await recordCronRun("activity", durationMs);
 
-      // Skip audit log for automated cron runs to avoid flooding the audit table
+      // Only manual (admin) runs get an audit row, so scheduled runs don't flood the table.
       if (authCtx.trigger !== "cron") {
         await logAudit({
           userId: authCtx.userId,

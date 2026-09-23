@@ -67,8 +67,9 @@ test("dangerous tags are removed entirely; text content is kept as inert prose",
 });
 
 test("adversarial nested markup cannot reassemble into a tag (loop-until-stable)", () => {
-  // The CodeQL single-pass hazard: removing the inner <script> must not leave
-  // a re-formed executable tag behind. Exact current output pinned.
+  // The hazard CodeQL (a code scanner) flags for one-pass strippers: removing
+  // the inner <script> must not leave a freshly re-formed tag behind. Exact
+  // current output pinned.
   assert.equal(stripTrashHtml("<scr<script>ipt>alert(1)</script>"), "ipt>alert(1)");
   assert.ok(!stripTrashHtml("<scr<script>ipt>alert(1)</script>").includes("<script"));
   assert.equal(stripTrashHtml("<<script>script>alert(1)<</script>/script>"), "script>alert(1)/script>");
@@ -124,7 +125,7 @@ test("degenerate angle brackets never throw and pass through as text", () => {
 test("prose spanning < … > is eaten as a tag — strip is deliberately lossy (pinned)", () => {
   // "< 1080p and bitrate >" matches <[^>]+> and vanishes. By design: the
   // sanitizer fails CLOSED (over-strips) rather than open. Real HTML payloads
-  // encode a literal less-than as &lt;, which decodes fine (next tests).
+  // encode a literal less-than as &lt;, which decodes fine (next assertion).
   assert.equal(stripTrashHtml("resolution < 1080p and bitrate > 8000"), "resolution 8000");
   assert.equal(stripTrashHtml("resolution &lt; 1080p and bitrate &gt; 8000"), "resolution < 1080p and bitrate > 8000");
 });
