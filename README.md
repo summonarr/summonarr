@@ -178,6 +178,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 - Every page now shows a loading placeholder shaped like the page itself instead of the Discover grid, and every list page uses the same empty-state message.
 - The 404, error and maintenance pages share one layout; breadcrumbs cover Notifications, person pages and My Stats → Wrapped; the admin Activity sub-pages share one header and tab bar.
 - All settings toggles use one shared switch.
+- Runtime image moved to Node 26.9.0 (Alpine 3.23), and React updated to 19.3.0.
 
 **Fixed**
 
