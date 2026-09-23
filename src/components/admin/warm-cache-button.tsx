@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Loader2, Flame } from "@/components/icons";
@@ -16,8 +16,14 @@ export function WarmCacheButton({ uncachedCount }: WarmCacheButtonProps) {
   const router = useRouter();
   const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [result, setResult] = useState<string | null>(null);
+  // Cancellable end-of-run reset (same shape as the sibling sync buttons): a
+  // prior run's timer landing mid-run flipped "loading" back to "idle", so the
+  // spinner vanished and the button re-enabled while the warm was still going.
+  const resetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(resetTimer.current), []);
 
   async function handleWarm() {
+    clearTimeout(resetTimer.current);
     setStatus("loading");
     setResult(null);
     try {
@@ -35,7 +41,8 @@ export function WarmCacheButton({ uncachedCount }: WarmCacheButtonProps) {
       setStatus("error");
       setResult("Request failed");
     }
-    setTimeout(() => setStatus("idle"), 8000);
+    clearTimeout(resetTimer.current);
+    resetTimer.current = setTimeout(() => setStatus("idle"), 8000);
   }
 
   if (uncachedCount === 0 && status === "idle") {

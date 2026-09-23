@@ -155,7 +155,16 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
         return;
       }
       const data: { arrError?: string } = await res.json().catch(() => ({}));
-      if (data.arrError) setArrError(data.arrError);
+      if (data.arrError) {
+        setArrError(data.arrError);
+        // A failed Radarr/Sonarr push rolls the approval back to PENDING
+        // server-side (single and batch alike). currentStatus then never
+        // changes, so the reset effect above never fires and the optimistic
+        // APPROVED would mask the real PENDING row — hiding Approve/Decline and
+        // offering a Re-push the route refuses ("only valid for APPROVED").
+        // Drop the optimistic value and let the refreshed server status render.
+        setOptimisticStatus(null);
+      }
       setShowDeclineNote(false);
       setDeclineNote("");
       setShowProfilePicker(false);

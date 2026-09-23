@@ -1200,7 +1200,15 @@ export async function warmRecommendationsCache(opts: { signal?: AbortSignal } = 
   // ── Phase 3: compute and store, per user ─────────────────────────────────
   // One transaction PER USER, not one spanning all users — bounds the blast
   // radius of a single user's failure and keeps any one lock/timeout small.
+  //
+  // Guardrail 41: once the advisory lock has timed out, the build above has
+  // already stopped (it observes the same signal), and the fan-out must too —
+  // withAdvisoryLock has released the lock, so every remaining per-user pass
+  // would run lock-free beside the next cron's copy. Each task checks the
+  // signal before it starts; a skipped user keeps their stored shelf, exactly
+  // as an inconclusive compute does.
   const results = await settleLimit(plans, USER_CONCURRENCY, async ({ userId, plan }) => {
+    if (opts.signal?.aborted) return null;
     const { candidates, conclusive } = await computeRecommendationsForUser(userId, plan);
     // NEVER let an inconclusive run replace good rows with nothing. The write below
     // is delete-then-insert, so an empty `candidates` produced by an incomplete
@@ -1239,7 +1247,9 @@ export async function warmRecommendationsCache(opts: { signal?: AbortSignal } = 
       console.error("[recommendations] per-user compute/write failed:", r.reason);
     }
   }
-  if (usersSkipped > 0) {
+  if (opts.signal?.aborted) {
+    console.warn(`[recommendations] aborted — the advisory lock timed out; ${usersSkipped} user(s) kept their existing recommendations`);
+  } else if (usersSkipped > 0) {
     console.warn(
       `[recommendations] kept the existing recommendations for ${usersSkipped}/${userIds.length} user(s) — ` +
         "the graph could not cover enough of their seeds for the result to be trusted. Nothing was cleared.",

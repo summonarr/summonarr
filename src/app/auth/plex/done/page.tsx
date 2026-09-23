@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { AlertTriangle, Loader2 } from "@/components/icons";
@@ -188,7 +188,17 @@ export default function PlexDonePage() {
     window.location.href = withBasePath("/settings");
   }
 
+  // One-shot guard. The effect below CONSUMES the stashed flow state (removeItem)
+  // and starts a 120s poll, so it must not run twice — and under React Strict Mode
+  // (on by default for the App Router in `next dev`) every effect is set up, torn
+  // down and set up again on mount. The second pass found the key already removed
+  // and bounced to /login while the first pass's poll was still running, so Plex
+  // sign-in could never complete in development. The ref survives that remount.
+  const startedRef = useRef(false);
+
   useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
     const stored = sessionStorage.getItem("plex-redirect-auth");
 
     if (!stored) {

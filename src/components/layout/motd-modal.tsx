@@ -32,14 +32,25 @@ export function MotdModal({ title, body }: MotdModalProps) {
   const titleId = "motd-modal-title";
   const sessionKey = contentKey(title, body);
 
+  // sessionStorage throws (SecurityError) when site data is blocked, and an
+  // effect that throws takes the whole (app) layout down to its error
+  // boundary. Unreadable storage just means "not dismissed yet".
   useEffect(() => {
     if (!body) return;
-    if (sessionStorage.getItem(sessionKey)) return;
+    try {
+      if (sessionStorage.getItem(sessionKey)) return;
+    } catch {
+      // fall through and show it
+    }
     setVisible(true);
   }, [body, sessionKey]);
 
   const dismiss = useCallback(() => {
-    sessionStorage.setItem(sessionKey, "1");
+    try {
+      sessionStorage.setItem(sessionKey, "1");
+    } catch {
+      // dismissal just won't persist across reloads
+    }
     setVisible(false);
   }, [sessionKey]);
 

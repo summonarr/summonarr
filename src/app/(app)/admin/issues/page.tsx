@@ -241,23 +241,15 @@ export default async function AdminIssuesPage({
         </p>
       )}
 
-      {groups.length === 0 ? (
-        <div
-          className="text-center ds-mono"
-          style={{
-            padding: "40px 20px",
-            background: "var(--ds-bg-1)",
-            border: "1px dashed var(--ds-border)",
-            borderRadius: 8,
-            fontSize: 12,
-            color: "var(--ds-fg-subtle)",
-          }}
-        >
-          No issues in this category.
-        </div>
+      {/* A deep-linked `?selected=` issue (issue-reply email/push, no filter)
+          resolves through the findUnique fallback even when the default tab is
+          empty — keep the grid so its side panel still renders. */}
+      {groups.length === 0 && !selectedIssue ? (
+        <EmptyIssues />
       ) : (
         <div className="xl:grid xl:grid-cols-[1fr_480px] xl:gap-6 xl:items-start">
           <div className="min-w-0">
+            {groups.length === 0 && <EmptyIssues />}
             <div className="flex flex-col gap-3">
               {groups.map(({ representative: issue, count, reporterNames }) => {
                 const poster = posterUrl(issue.posterPath, "w342");
@@ -622,6 +614,24 @@ export default async function AdminIssuesPage({
           </aside>
         </div>
       )}
+    </div>
+  );
+}
+
+function EmptyIssues() {
+  return (
+    <div
+      className="text-center ds-mono"
+      style={{
+        padding: "40px 20px",
+        background: "var(--ds-bg-1)",
+        border: "1px dashed var(--ds-border)",
+        borderRadius: 8,
+        fontSize: 12,
+        color: "var(--ds-fg-subtle)",
+      }}
+    >
+      No issues in this category.
     </div>
   );
 }

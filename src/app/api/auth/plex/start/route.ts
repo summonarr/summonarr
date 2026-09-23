@@ -39,11 +39,18 @@ export async function POST(req: NextRequest) {
 
   let body: Record<string, unknown> = {};
   if (raw.byteLength > 0) {
+    let decoded: unknown;
     try {
-      body = JSON.parse(new TextDecoder().decode(raw)) as Record<string, unknown>;
+      decoded = JSON.parse(new TextDecoder().decode(raw));
     } catch {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
+    // A valid-JSON non-object (`null`, a bare number) would otherwise throw on
+    // the property reads below and 500 this unauthenticated route.
+    if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) {
+      return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    }
+    body = decoded as Record<string, unknown>;
   }
 
   const clientId =

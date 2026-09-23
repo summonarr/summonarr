@@ -64,14 +64,24 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
   }
   async function removeOne(id: string) {
     const gen = listGen.current;
-    const prev = items;
+    // Restore only THIS row on failure. A whole-list snapshot resurrected any
+    // other row removed (successfully, server-side) while this delete was in
+    // flight — the same reason markAllRead tracks its own rows.
+    const index = items.findIndex((n) => n.id === id);
+    if (index === -1) return;
+    const removed = items[index];
     setItems((cur) => cur.filter((n) => n.id !== id));
     setTotal((t) => Math.max(0, t - 1));
     // Selection via query param — DELETE bodies are stripped by some proxies.
     const res = await fetch(withBasePath(`/api/notifications?ids=${encodeURIComponent(id)}`), { method: "DELETE" }).catch(() => null);
+    // gen changed ⇒ a clear-all landed while this was in flight — don't resurrect it.
     if ((!res || !res.ok) && gen === listGen.current) {
-      // A clear-all landed while this was in flight — don't resurrect the list.
-      setItems(prev);
+      setItems((cur) => {
+        if (cur.some((n) => n.id === id)) return cur;
+        const next = [...cur];
+        next.splice(Math.min(index, next.length), 0, removed);
+        return next;
+      });
       setTotal((t) => t + 1);
     }
   }

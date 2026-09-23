@@ -177,10 +177,15 @@ export default async function ActivityPage({
     isPlayHistoryEnabled(),
     isSourceEnabled("plex"),
     prisma.$queryRawUnsafe<
-      { id: string; username: string; source: string; hours: number | null }[]
+      { id: string; username: string; source: string; hours: number | null; plays: bigint }[]
     >(
+      // `plays` is computed HERE, per row, with the same `watched = true` rule as
+      // getPlayHistoryStats' topUsers. Looking it up from topUsers instead read 0
+      // for anyone outside the per-source top 10 by PLAY COUNT — exactly the
+      // few-long-plays viewer a watch-time leaderboard surfaces ("42h · 0 plays").
       `WITH user_hours AS (
-         SELECT m."id", m."username", m."source", (COALESCE(SUM(p."playDuration"), 0) / 3600.0)::float8 AS hours
+         SELECT m."id", m."username", m."source", (COALESCE(SUM(p."playDuration"), 0) / 3600.0)::float8 AS hours,
+                COUNT(*) FILTER (WHERE p."watched" = true)::bigint AS plays
          FROM "PlayHistory" p JOIN "MediaServerUser" m ON m."id" = p."mediaServerUserId"
          WHERE p."startedAt" >= $1${fpJoin.sql}
          GROUP BY m."id", m."username", m."source"
@@ -188,7 +193,7 @@ export default async function ActivityPage({
          SELECT *, ROW_NUMBER() OVER (PARTITION BY "source" ORDER BY "hours" DESC) AS rn
          FROM user_hours
        )
-       SELECT "id", "username", "source", "hours"
+       SELECT "id", "username", "source", "hours", "plays"
        FROM ranked
        WHERE rn <= 10
        ORDER BY "hours" DESC`,
@@ -620,13 +625,12 @@ export default async function ActivityPage({
     if (d.count > 0) activeDays++;
   }
 
-  const playsById = new Map(stats.topUsers.map((u) => [u.id, u.count]));
   const leaderUsers = watchTimeLeaderboard.slice(0, 8).map((u, i) => ({
     id: u.id,
     username: u.username,
     source: u.source,
     hours: u.hours ?? 0,
-    plays: playsById.get(u.id) ?? 0,
+    plays: Number(u.plays),
     rank: i + 1,
   }));
   const rewatchedPosters = await rewatchedPostersPromise;

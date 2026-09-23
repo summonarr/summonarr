@@ -274,19 +274,21 @@ export default async function PopularOnServerPage({
       </div>
 
       {!hasAny ? (
-        sort === "trending" ? (
-          <EmptyState
-            icon={TrendingUp}
-            title="No plays in the last 30 days"
-            description="Nothing was played in this window."
-            cta={{ href: buildHref({ sort: "plays" }), label: "Switch to Most Played" }}
-          />
-        ) : page > 1 ? (
+        // Page overflow first: a past-the-end ?page= on the trending sort is
+        // not "nothing was played in 30 days".
+        page > 1 ? (
           <EmptyState
             icon={Film}
             title="No more results on this page"
             description="Try going back to the first page."
             cta={{ href: buildHref({}), label: "Back to page 1" }}
+          />
+        ) : sort === "trending" ? (
+          <EmptyState
+            icon={TrendingUp}
+            title="No plays in the last 30 days"
+            description="Nothing was played in this window."
+            cta={{ href: buildHref({ sort: "plays" }), label: "Switch to Most Played" }}
           />
         ) : (
           <EmptyState

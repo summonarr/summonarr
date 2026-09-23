@@ -282,7 +282,9 @@ export default async function TopRatedPage({
               <SectionHeader
                 title="Movies"
                 right={
-                  totalMovieCount > 0 ? (
+                  // Gated on this page's slice too: past the shorter
+                  // section's last page it would read "37–20 of 20".
+                  totalMovieCount > 0 && movies.length > 0 ? (
                     <RangeLabel>
                       {`${offset + 1}–${Math.min(offset + movies.length, totalMovieCount)} of ${totalMovieCount}`}
                     </RangeLabel>
@@ -312,7 +314,9 @@ export default async function TopRatedPage({
               <SectionHeader
                 title="TV Shows"
                 right={
-                  totalTvCount > 0 ? (
+                  // Gated on this page's slice too: past the shorter
+                  // section's last page it would read "37–20 of 20".
+                  totalTvCount > 0 && tv.length > 0 ? (
                     <RangeLabel>
                       {`${offset + 1}–${Math.min(offset + tv.length, totalTvCount)} of ${totalTvCount}`}
                     </RangeLabel>

@@ -374,7 +374,15 @@ export async function attachRatingsUnified(
 
   return items.map((item) => {
     const fresh = fetched.get(fetchedKey(item));
-    if (fresh) return fresh.source === "mdblist" ? applyMdblist(item, fresh.data) : applyOmdb(item, fresh.data);
+    if (fresh) {
+      if (fresh.source === "omdb") return applyOmdb(item, fresh.data);
+      // Per-FIELD parity with mergeWarm: a miss is admitted to the MDBList batch
+      // even when a warm OMDB row exists, so a fresh MDBList hit carrying only
+      // Trakt/Letterboxd-style fields must not blank the IMDb/RT/Metacritic
+      // values that OMDB row already holds.
+      const warmOmdb = warm.byOmdb.get(omdbKey(item));
+      return applyMdblist(item, warmOmdb ? overlayOmdb(fresh.data, warmOmdb) : fresh.data);
+    }
     return mergeWarm(item, warm);
   });
 }

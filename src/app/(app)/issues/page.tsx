@@ -184,15 +184,22 @@ export default async function IssuesPage({
         </div>
       )}
 
-      {total === 0 ? (
+      {issues.length === 0 ? (
+        // Key on the paged slice, not `total` (same as /requests): `?page=9`
+        // with 3 issues has total=3 and issues=[], and the pager is hidden when
+        // totalPages <= 1, so a past-the-end page rendered an empty list with
+        // no way back.
         <EmptyState
           icon={MessageSquare}
-          title={hasFilters ? "No matching issues" : "No issues reported"}
+          title={total > 0 ? "Nothing on this page" : hasFilters ? "No matching issues" : "No issues reported"}
           description={
-            hasFilters
-              ? "No issues match these filters."
-              : "Use the Report Issue button on any movie or TV show page."
+            total > 0
+              ? "No more issues on this page."
+              : hasFilters
+                ? "No issues match these filters."
+                : "Use the Report Issue button on any movie or TV show page."
           }
+          cta={total > 0 ? { href: buildHref({ page: 1, selected: "" }), label: "Back to page 1" } : undefined}
         />
       ) : (
         <div className="xl:grid xl:grid-cols-[1fr_480px] xl:gap-6 xl:items-start">

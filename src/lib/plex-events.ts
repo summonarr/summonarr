@@ -25,6 +25,7 @@ import { getPlexSessions } from "./plex";
 import { triggerFullSync } from "./internal-trigger";
 import { DEFAULT_MEDIA_INSTANCE, activeSessionId, mediaInstanceLabel, parseActiveSessionId, plexSettingKey, type MediaInstanceKey } from "./media-instances";
 import { getMediaInstances } from "./media-instance-registry";
+import { processSingleton } from "./process-singleton";
 
 // Plex sometimes keeps a quit session in /status/sessions for up to 30 min
 // (mobile/TV clients that close without a clean Stop). When the playhead has
@@ -43,7 +44,16 @@ export const PLEX_STALL_THRESHOLD_MS = 60_000;
 // plumbing for the same no-bleed property the instance-qualified ids already
 // give. In-memory: persists across polls inside the same Node process; a
 // restart loses the ledger but Plex has usually dropped the session by then.
-const recentlyFinalizedPlexSessions = new Map<string, number>();
+//
+// Process-wide, not module-scope (see process-singleton.ts): this module is
+// compiled into BOTH the instrumentation chunk (the boot-time reconcile) and the
+// 5s poller's route chunk, each with its own module instance. A plain Map gave
+// the SSE managers started at boot a ledger the poller never read, so a stop
+// they finalized left the poller free to re-create the ghost row.
+const recentlyFinalizedPlexSessions = processSingleton(
+  "plex-events:recentlyFinalized",
+  () => new Map<string, number>(),
+);
 const RECENTLY_FINALIZED_TTL_MS = 60 * 60 * 1000;
 
 export function markPlexSessionFinalized(id: string, nowMs: number = Date.now()): void {
@@ -954,7 +964,17 @@ class PlexEventStreamManager {
 // Created lazily by the map reconcile below; removed ONLY when the slug
 // leaves the registry — a manager whose slug remains but whose connection
 // Settings were cleared stops itself via its own doReconcile shouldRun check.
-const managers = new Map<MediaInstanceKey, PlexEventStreamManager>();
+//
+// Process-wide for the same reason as the ledger above. With a per-chunk map the
+// boot reconcile (instrumentation chunk) and the poller (route chunk) each ran
+// their OWN manager per instance: two SSE streams per server, and the boot set
+// was never reconciled again — it kept streaming against the boot-time URL/token
+// after a settings change and kept writing play history after tracking was
+// switched off, because stopAllPlexEventStreams only reached the poller's map.
+const managers = processSingleton(
+  "plex-events:managers",
+  () => new Map<MediaInstanceKey, PlexEventStreamManager>(),
+);
 
 // Module-level mirror of the per-manager reconcile coalescing (same do-while
 // shape): the boot hook (instrumentation.ts) and the 5s poller both call
@@ -962,8 +982,9 @@ const managers = new Map<MediaInstanceKey, PlexEventStreamManager>();
 // otherwise race the create/stop decision for a slug. Per-manager reconciles
 // WITHIN one pass still run concurrently — this guard is only about map
 // passes.
-let mapReconciling = false;
-let mapReconcilePending = false;
+// Process-wide alongside `managers` — a per-chunk guard could not coalesce a
+// boot pass with a poller pass over the one shared map.
+const mapReconcile = processSingleton("plex-events:mapReconcile", () => ({ running: false, pending: false }));
 
 async function reconcileManagerMap(): Promise<void> {
   // Registry read: exactly one setting.findUnique (key "plexInstances"); the
@@ -1019,18 +1040,18 @@ export function stopAllPlexEventStreams(): void {
 }
 
 export async function reconcilePlexEventStream(): Promise<void> {
-  if (mapReconciling) {
-    mapReconcilePending = true;
+  if (mapReconcile.running) {
+    mapReconcile.pending = true;
     return;
   }
-  mapReconciling = true;
+  mapReconcile.running = true;
   try {
     do {
-      mapReconcilePending = false;
+      mapReconcile.pending = false;
       await reconcileManagerMap();
-    } while (mapReconcilePending);
+    } while (mapReconcile.pending);
   } finally {
-    mapReconciling = false;
+    mapReconcile.running = false;
   }
 }
 

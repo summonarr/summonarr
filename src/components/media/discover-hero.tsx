@@ -63,6 +63,13 @@ export function DiscoverHero({
   // safeExternalHref so a `javascript:`/`data:` URL can't become a clickable
   // href (XSS). Matches the sibling TrailerButton. The YouTube fallback is a
   // hardcoded https URL and needs no gate.
+  // Same "available" reading as MediaCard/AvailabilityBadges: a copy on a
+  // server whose badges this viewer doesn't see must not suppress the Queued /
+  // Requested chips (the raw flags hid them while showing no Plex chip either).
+  const isAvailable = !!(
+    (showPlex && media.plexAvailable) ||
+    (showJellyfin && media.jellyfinAvailable)
+  );
   const trailerHref =
     safeExternalHref(media.trailerUrl) ??
     (media.trailerKey
@@ -152,8 +159,7 @@ export function DiscoverHero({
               Jellyfin
             </span>
           )}
-          {!media.plexAvailable &&
-            !media.jellyfinAvailable &&
+          {!isAvailable &&
             media.arrPending && (
               <span
                 className="ds-chip ds-chip-pending"
@@ -188,8 +194,7 @@ export function DiscoverHero({
               4K Queued
             </span>
           )}
-          {!media.plexAvailable &&
-            !media.jellyfinAvailable &&
+          {!isAvailable &&
             media.requested && (
               <span
                 className="ds-chip ds-chip-accent"

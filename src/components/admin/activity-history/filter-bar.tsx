@@ -15,8 +15,12 @@ const inputStyle: React.CSSProperties = {
   color: "var(--ds-fg)",
   border: "1px solid var(--ds-border)",
   borderRadius: 6,
-  colorScheme: "dark",
 };
+
+// The native date picker's indicator follows `color-scheme`, which must track
+// the app theme: a fixed `dark` drew a white calendar icon on the light theme's
+// white field. `dark:` keys off the <html class="dark"> the theme toggles.
+const dateInputClass = "dark:[color-scheme:dark]";
 
 function SegGroup<T extends string>({
   label,
@@ -276,6 +280,7 @@ export function HistoryFilterBar({
         >
           <input
             type="date"
+            className={dateInputClass}
             value={fromDate}
             onChange={(e) => setFromDate(e.target.value)}
             style={{
@@ -291,6 +296,7 @@ export function HistoryFilterBar({
           </span>
           <input
             type="date"
+            className={dateInputClass}
             value={toDate}
             onChange={(e) => setToDate(e.target.value)}
             style={{

@@ -463,7 +463,12 @@ export function ActivityRecentPlays({
                                   padding: "1px 5px",
                                   borderRadius: 999,
                                   background: "color-mix(in oklab, var(--ds-fg) 6%, transparent)",
-                                  color: sourceDotColor(p.source),
+                                  // Brand colours are fills; as text they are
+                                  // 2.0–2.5:1 on light surfaces (guardrail 42).
+                                  color:
+                                    p.source === "plex"
+                                      ? "var(--ds-plex-text)"
+                                      : "var(--ds-jellyfin-text)",
                                   letterSpacing: "0.04em",
                                   flexShrink: 0,
                                 }}

@@ -137,7 +137,10 @@ interface TopLevelDecl {
 const REGEX_MAY_FOLLOW = new Set([
   "(", ",", "=", ":", "[", "!", "&", "|", "?", "{", "}", ";", "+", "-", "*", "%", "~", "^", "<", ">",
 ]);
-const KEYWORD_BEFORE_REGEX = /(?:^|[^\w$])(?:return|typeof|case|in|of|new|delete|void|instanceof|do|else|yield|await)$/;
+// `\s*` before the anchor is load-bearing: `out` carries the whitespace between
+// the keyword and the `/` (`return /x/`), so a bare `$` never matched and every
+// keyword-led regex fell through to the quote branch.
+const KEYWORD_BEFORE_REGEX = /(?:^|[^\w$])(?:return|typeof|case|in|of|new|delete|void|instanceof|do|else|yield|await)\s*$/;
 
 export function stripComments(src: string): string {
   let out = "";

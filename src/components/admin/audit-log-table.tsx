@@ -301,7 +301,7 @@ function AuditLogFilters({
             type="date"
             value={currentDateFrom}
             onChange={(e) => navigate({ dateFrom: e.target.value })}
-            className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 [color-scheme:dark]"
+            className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:[color-scheme:dark]"
           />
         </div>
         <div className="flex items-center gap-1.5">
@@ -311,7 +311,7 @@ function AuditLogFilters({
             type="date"
             value={currentDateTo}
             onChange={(e) => navigate({ dateTo: e.target.value })}
-            className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 [color-scheme:dark]"
+            className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:[color-scheme:dark]"
           />
         </div>
         <Input
@@ -957,7 +957,13 @@ export function AuditLogView({
   const mounted = useHasMounted();
 
   useEffect(() => {
-    const saved = localStorage.getItem("audit-log-view");
+    // Storage access throws (SecurityError) with site data blocked or in some
+    // private windows; a throw here unwinds to the error boundary and blanks
+    // the page over a cosmetic preference.
+    let saved: string | null = null;
+    try {
+      saved = localStorage.getItem("audit-log-view");
+    } catch {}
     if (saved === "timeline" || saved === "table") setViewMode(saved);
   }, []);
 
@@ -975,7 +981,9 @@ export function AuditLogView({
 
   function handleViewModeChange(mode: "table" | "timeline") {
     setViewMode(mode);
-    localStorage.setItem("audit-log-view", mode);
+    try {
+      localStorage.setItem("audit-log-view", mode);
+    } catch {}
   }
 
   async function loadMore() {

@@ -190,7 +190,17 @@ export default async function VotesPage({
         </div>
       </div>
 
-      {items.length === 0 ? (
+      {items.length === 0 && Number(count) > 0 ? (
+        // Past the last page (same as /requests): the pager is hidden when
+        // totalPages <= 1, so "no votes yet" there would be both wrong and a
+        // dead end.
+        <EmptyState
+          icon={Trash2}
+          title="Nothing on this page"
+          description="No more votes on this page."
+          cta={{ href: "/votes", label: "Back to page 1" }}
+        />
+      ) : items.length === 0 ? (
         <EmptyState
           icon={Trash2}
           title={hasFilters ? "No matching votes" : "No deletion votes yet"}

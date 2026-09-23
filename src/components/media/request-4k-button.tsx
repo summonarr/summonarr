@@ -33,6 +33,11 @@ export function Request4kButton({
     requested ? "requested" : "idle",
   );
   const [msg, setMsg] = useState("");
+  // The route answers 200 { alreadyAvailable: true } and creates NOTHING when
+  // this instance's available cache already holds the title (auto-approvers
+  // only) — reading that as "requested" showed "4K Requested" for a request
+  // that does not exist.
+  const [foundAvailable, setFoundAvailable] = useState(false);
 
   async function submit() {
     setState("loading");
@@ -53,6 +58,12 @@ export function Request4kButton({
         setState("error");
         return;
       }
+      const body = (await res.json().catch(() => null)) as { alreadyAvailable?: boolean } | null;
+      if (body?.alreadyAvailable) {
+        setFoundAvailable(true);
+        setState("idle");
+        return;
+      }
       setState("requested");
       toast({ title: "Requested in 4K", variant: "success" });
     } catch {
@@ -62,7 +73,7 @@ export function Request4kButton({
   }
 
   // Availability wins over request state — once the 4K copy is fetched there's nothing to request.
-  if (available) {
+  if (available || foundAvailable) {
     return (
       <DetailActionStatus variant="accent-soft">
         <Check style={{ width: 14, height: 14 }} />

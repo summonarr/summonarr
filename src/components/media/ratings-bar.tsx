@@ -149,6 +149,9 @@ export function RatingsBar({
           rel="noopener noreferrer"
           className="flex items-center gap-0.5 group"
           title="IMDb rating"
+          // MediaCard is a role="button" div that navigates on click; without
+          // this, opening IMDb in a new tab also pushed the card's detail page.
+          onClick={(e) => e.stopPropagation()}
         >
           <span className={`font-bold ${textSm}`} style={IMDB_LABEL_STYLE}>IMDb</span>
           <span className={`font-semibold text-zinc-100 ${textSm}`}>{imdbRating}</span>

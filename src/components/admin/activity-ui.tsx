@@ -203,7 +203,7 @@ export function Poster({
 
 export function Avatar({
   letter,
-  accent = "var(--ds-bg-3)",
+  accent,
   size = 22,
 }: {
   letter: string;
@@ -216,13 +216,17 @@ export function Avatar({
         width: size,
         height: size,
         borderRadius: 999,
-        background: accent,
+        // No accent → a surface chip, whose letter must follow the theme: the
+        // fixed near-white letter below is only legible on the dark accent
+        // washes callers pass, and on light-theme --ds-bg-3 (L .955) it was
+        // white-on-white.
+        background: accent ?? "var(--ds-bg-3)",
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
         fontSize: Math.round(size * 0.46),
         fontWeight: 600,
-        color: "oklch(0.96 0 0 / 0.9)",
+        color: accent ? "oklch(0.96 0 0 / 0.9)" : "var(--ds-fg-muted)",
         flexShrink: 0,
         textTransform: "uppercase",
       }}

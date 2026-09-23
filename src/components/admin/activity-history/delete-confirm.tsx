@@ -21,7 +21,10 @@ export function DeleteConfirm({
   return (
     <div
       role="dialog"
-      onClick={onCancel}
+      // Same gate as the disabled Cancel button: dismissing mid-DELETE unmounted
+      // the dialog, so a failure the parent reported afterwards had nowhere to
+      // render and the admin was left believing the play was deleted.
+      onClick={deleting ? undefined : onCancel}
       style={{
         position: "fixed",
         inset: 0,

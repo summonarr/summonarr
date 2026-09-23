@@ -119,11 +119,16 @@ export default async function PlayDetailPage({
 
   let posterPath: string | null = null;
   if (play.tmdbId) {
-    const cacheKeys = [`movie:${play.tmdbId}:details`, `tv:${play.tmdbId}:details`];
+    // The play's OWN media type first: TMDB numbers movies and TV separately, so
+    // a show can share its id with a cached movie, and findMany has no defined
+    // order — first-row-wins rendered whichever of the two came back first.
+    const own = `${isTV ? "tv" : "movie"}:${play.tmdbId}:details`;
+    const other = `${isTV ? "movie" : "tv"}:${play.tmdbId}:details`;
     const cacheRows = await prisma.tmdbCache.findMany({
-      where: { key: { in: cacheKeys } },
-      select: { data: true },
+      where: { key: { in: [own, other] } },
+      select: { key: true, data: true },
     });
+    cacheRows.sort((a, b) => (a.key === own ? 0 : 1) - (b.key === own ? 0 : 1));
     for (const row of cacheRows) {
       try {
         const parsed = JSON.parse(row.data) as { posterPath?: string | null; poster_path?: string | null };

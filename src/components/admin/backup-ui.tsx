@@ -184,11 +184,22 @@ function DbImportSection() {
     setResult(null);
     setProgress({ uploaded: 0, total: file.size, phase: "upload" });
 
-    const outcome = await uploadInChunks({
-      file,
-      endpoint: withBasePath("/api/admin/backup/db-import-chunk"),
-      onProgress: setProgress,
-    });
+    // uploadInChunks folds fetch failures into an "error" outcome, but it can
+    // still throw before its own try (crypto.randomUUID is undefined outside a
+    // secure context — a plain-HTTP LAN deployment). Unguarded, that rejection
+    // left `importing` true forever: a spinner with no way to retry.
+    let outcome: Awaited<ReturnType<typeof uploadInChunks>>;
+    try {
+      outcome = await uploadInChunks({
+        file,
+        endpoint: withBasePath("/api/admin/backup/db-import-chunk"),
+        onProgress: setProgress,
+      });
+    } catch (err) {
+      setImporting(false);
+      setResult({ ok: false, error: err instanceof Error ? err.message : "Upload failed" });
+      return;
+    }
 
     setImporting(false);
 

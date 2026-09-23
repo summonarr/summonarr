@@ -682,7 +682,10 @@ export async function authorizeWithCredentials(
   // regardless of the limit. checkRateLimit checks and pushes in one step; the hit is
   // refunded on a successful login so the original intent still holds (the account
   // bucket counts real failed verifications, not successful sign-ins).
-  const accountAllowed = checkRateLimit(accountKey, accountLimit, accountWindowMs);
+  // Short-circuited on an IP rejection: that attempt never reaches the verify, so
+  // reserving (and never refunding) an account slot for it would charge the
+  // account bucket for an attempt it never judged.
+  const accountAllowed = ipAllowed && checkRateLimit(accountKey, accountLimit, accountWindowMs);
 
   if (!ipAllowed || !accountAllowed) {
     void logAudit({ userId: "anonymous", userName: "anonymous", action: "AUTH_LOGIN_FAILED", target: "auth:login", ipAddress: ip, userAgent: ua, provider: "credentials", details: { reason: "rate_limited", emailHash } });

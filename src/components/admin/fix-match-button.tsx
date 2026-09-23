@@ -472,7 +472,12 @@ export function FixMatchButton({
   if (phase === "conflated") {
     return (
       <div className="flex flex-col gap-0.5">
-        <span className="text-[10px] text-yellow-400 font-medium">DB updated — Plex display unchanged</span>
+        {/* A Jellyfin job warns too (some copies of the title failed to
+            re-match, or an identical job was already running) — the Plex
+            metadata-merge headline would misdescribe it. */}
+        <span className="text-[10px] text-yellow-400 font-medium">
+          {server === "plex" ? "DB updated — Plex display unchanged" : "DB updated — see note"}
+        </span>
         <span className="text-[9px] text-zinc-500 leading-tight max-w-[200px]">{errorMsg}</span>
       </div>
     );

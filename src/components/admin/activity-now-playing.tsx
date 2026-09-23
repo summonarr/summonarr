@@ -325,7 +325,7 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
                       borderRadius: 6,
                       fontSize: 12,
                       background: "var(--ds-danger, #c44)",
-                      color: "oklch(0.98 0 0)",
+                      color: "var(--ds-on-status)",
                       border: "1px solid transparent",
                     }}
                   >

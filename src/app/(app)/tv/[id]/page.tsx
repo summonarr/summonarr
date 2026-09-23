@@ -315,10 +315,14 @@ export default async function TVDetailPage({
             {media.nextEpisodeAirDate && (
               <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
                 Next episode:{" "}
+                {/* TMDB air dates are date-only ("YYYY-MM-DD"), which Date parses
+                    as UTC midnight — format in UTC too, or a server running west
+                    of UTC renders the day before (same fix as formatDigitalRelease). */}
                 {new Date(media.nextEpisodeAirDate).toLocaleDateString("en-US", {
                   month: "short",
                   day: "numeric",
                   year: "numeric",
+                  timeZone: "UTC",
                 })}
               </div>
             )}

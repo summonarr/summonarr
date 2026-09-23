@@ -5,6 +5,7 @@ import { normalizeEmail } from "./email-normalize";
 import { posterUrl } from "./tmdb-types";
 import { resolvePosterPathMap, posterPathKey } from "./poster-cache";
 import { DELIVERED_KBPS_SQL } from "./bitrate";
+import { processSingleton } from "./process-singleton";
 import type { ActiveSession, MediaType } from "@/generated/prisma";
 
 // Postgres GROUP BY day omits zero-play days; the AreaChart needs an entry per
@@ -65,7 +66,15 @@ async function loadSettings(): Promise<Record<SettingKey, string | null>> {
   }
 }
 
-const activityCache = new Map<string, { data: unknown; expiresAt: number }>();
+// Process-wide (see process-singleton.ts): this module is compiled into the
+// route chunks that FINALIZE sessions and delete history (and call
+// clearActivityCache) and separately into the page chunks that READ the stats.
+// A per-chunk Map meant the invalidation never reached the admin pages, which
+// kept serving pre-finalize/pre-delete aggregates for the full TTL.
+const activityCache = processSingleton(
+  "play-history:activityCache",
+  () => new Map<string, { data: unknown; expiresAt: number }>(),
+);
 const STATS_TTL = 5 * 60 * 1000;
 const CALENDAR_TTL = 30 * 60 * 1000;
 const REWATCHED_TTL = 10 * 60 * 1000;
@@ -1396,7 +1405,11 @@ const MAX_POPULAR_PAGE = 100;
 // Hard ceiling on distinct cached (mediaType, sort, page, limit) combinations so the
 // map can't grow without bound (belt-and-suspenders alongside the page/limit clamps).
 const MAX_POPULAR_CACHE_ENTRIES = 2_000;
-const popularCache = new Map<string, { data: PopularResult; expiresAt: number }>();
+// Process-wide for the same reason as activityCache — clearActivityCache flushes it.
+const popularCache = processSingleton(
+  "play-history:popularCache",
+  () => new Map<string, { data: PopularResult; expiresAt: number }>(),
+);
 
 // Popularity counts *completed arcs*, not raw sessions. An "arc" is a run of consecutive
 // sessions on the same (user, tmdbId, season, episode) that hasn't been broken by either

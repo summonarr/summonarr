@@ -16,6 +16,18 @@ export type ChunkedUploadOutcome =
   | { kind: "complete"; ok: boolean; data: Record<string, unknown> }
   | { kind: "error"; status: number | null; error: string };
 
+// crypto.randomUUID only exists in secure contexts, so a plain-HTTP LAN or
+// local-only deployment has none. getRandomValues is available everywhere;
+// build the same v4 shape the import-session UUID_RE accepts.
+function newUploadId(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const hex = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export async function uploadInChunks(opts: {
   file: File;
   endpoint: string;
@@ -23,7 +35,7 @@ export async function uploadInChunks(opts: {
   onProgress?: (p: ChunkedUploadProgress) => void;
 }): Promise<ChunkedUploadOutcome> {
   const { file, endpoint, chunkSize = DEFAULT_CHUNK_SIZE, onProgress } = opts;
-  const uploadId = crypto.randomUUID();
+  const uploadId = newUploadId();
   const totalChunks = Math.ceil(file.size / chunkSize);
   onProgress?.({ uploaded: 0, total: file.size, phase: "upload" });
 

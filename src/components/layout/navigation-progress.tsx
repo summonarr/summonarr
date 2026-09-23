@@ -28,6 +28,12 @@ export function NavigationProgress() {
   const completionTimeouts = useRef<ReturnType<typeof setTimeout>[]>([]);
   // Seeded with the mount URL so the completion effect does not run on mount.
   const prevUrl = useRef(url);
+  // window.location's path + query as of the last committed navigation, so a
+  // popstate that only moves between hash entries (the settings side-nav is
+  // plain `#id` anchors) can be told apart from a real Back/Forward. Without it
+  // Back after an anchor jump started the bar, nothing committed, and it sat at
+  // 85% until the stall timeout. Read in effects only (guardrail 16).
+  const committedLocation = useRef<string | null>(null);
 
   const clearCompletionTimeouts = () => {
     for (const id of completionTimeouts.current) clearTimeout(id);
@@ -120,12 +126,21 @@ export function NavigationProgress() {
       start();
     };
 
+    // Back/forward: the URL changes with no click to observe. A hash-only
+    // entry change commits no router navigation, so it must not start the bar
+    // (same reasoning as the hash-only click guard above).
+    const onPopState = () => {
+      const here = window.location.pathname + window.location.search;
+      if (committedLocation.current !== null && here === committedLocation.current) return;
+      start();
+    };
+
+    committedLocation.current = window.location.pathname + window.location.search;
     document.addEventListener("click", onDocumentClick, true);
-    // Back/forward: the URL changes with no click to observe.
-    window.addEventListener("popstate", start);
+    window.addEventListener("popstate", onPopState);
     return () => {
       document.removeEventListener("click", onDocumentClick, true);
-      window.removeEventListener("popstate", start);
+      window.removeEventListener("popstate", onPopState);
     };
   }, [start]);
 
@@ -133,6 +148,7 @@ export function NavigationProgress() {
   useEffect(() => {
     if (url === prevUrl.current) return;
     prevUrl.current = url;
+    committedLocation.current = window.location.pathname + window.location.search;
 
     stop();
 

@@ -361,11 +361,15 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
 
     if (demoting && freshRole === "ADMIN") {
       // Atomic row count under the lock: never demote the last active admin.
+      // A DISABLED admin is already outside that count, so demoting it can never
+      // reduce the active-admin total — without the first disjunct it was refused
+      // as "the last admin" whenever exactly one OTHER active admin existed.
       const rowsAffected = await tx.$executeRaw`
         UPDATE "User" SET role = ${newRole}, permissions = ${defaultPermissionsForRole(newRole)}, "updatedAt" = ${now}
         WHERE id = ${id}
         AND role = 'ADMIN'
-        AND (SELECT COUNT(*) FROM "User" WHERE role = 'ADMIN' AND "deactivatedAt" IS NULL) > 1
+        AND ("deactivatedAt" IS NOT NULL
+             OR (SELECT COUNT(*) FROM "User" WHERE role = 'ADMIN' AND "deactivatedAt" IS NULL) > 1)
       `;
       return rowsAffected === 0 ? { kind: "last-admin" as const } : { kind: "ok" as const };
     }

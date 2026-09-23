@@ -251,13 +251,17 @@ const spec = {
     "/popular": {
       get: {
         tags: ["Discovery"],
-        summary: "Popular movies or TV",
+        summary: "Most-played movies and TV on the connected media servers",
         parameters: [
-          { name: "mediaType", in: "query", schema: { type: "string", enum: ["movie", "tv"] } },
+          { name: "mediaType", in: "query", schema: { type: "string", enum: ["movies", "tv"] }, description: "Restrict to one type (note the plural \"movies\"); omitted returns both" },
           { name: "page", in: "query", schema: { type: "integer", default: 1 } },
-          { name: "sort", in: "query", schema: { type: "string" } },
+          { name: "sort", in: "query", schema: { type: "string", enum: ["trending", "plays", "viewers"], default: "trending" } },
         ],
-        responses: { "200": { description: "Popular results with availability enrichment" } },
+        responses: {
+          "200": { description: "{ movies, tv, totalMovies, totalTv, totalPages, page, sort, rankOffset } with availability enrichment" },
+          "403": { description: "feature.page.popular is disabled" },
+          "429": { description: "Rate limited (30 req/min per user)" },
+        },
       },
     },
     "/upcoming": {
@@ -545,11 +549,10 @@ const spec = {
                 required: ["tmdbId", "mediaType", "issueType"],
                 properties: {
                   tmdbId: { type: "integer" },
-                  tvdbId: { type: "integer" },
                   mediaType: { $ref: "#/components/schemas/MediaType" },
                   issueType: { $ref: "#/components/schemas/IssueType" },
                   scope: { $ref: "#/components/schemas/IssueScope" },
-                  note: { type: "string", maxLength: 2000 },
+                  note: { type: "string", maxLength: 1000 },
                   seasonNumber: { type: "integer" },
                   episodeNumber: { type: "integer" },
                 },
@@ -558,7 +561,10 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Created issue", content: { "application/json": { schema: { $ref: "#/components/schemas/Issue" } } } },
+          "201": { description: "Created issue (tvdbId is resolved server-side from tmdbId, never taken from the body)", content: { "application/json": { schema: { $ref: "#/components/schemas/Issue" } } } },
+          "400": { description: "Validation error" },
+          "403": { description: "feature.page.issues is disabled" },
+          "422": { description: "Title could not be verified with TMDB, or is not in a library the caller can see" },
         },
       },
     },
@@ -826,7 +832,7 @@ const spec = {
             },
           },
         },
-        responses: { "200": { description: "Map of TMDB ID → ratings" } },
+        responses: { "200": { description: "{ ratings } — a map keyed \"<type>:<tmdbId>\" (e.g. \"movie:603\") → ratings; titles with no ratings are omitted" } },
       },
     },
 
@@ -1094,9 +1100,9 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Password updated" },
-          "400": { description: "Validation error" },
-          "401": { description: "Wrong current password" },
+          "200": { description: "Password updated ({ ok, requiresRelogin }) — every session is revoked" },
+          "400": { description: "Validation error, or wrong current password" },
+          "403": { description: "SSO account — local passwords are not available" },
         },
       },
     },
@@ -1195,13 +1201,27 @@ const spec = {
             "application/json": {
               schema: {
                 type: "object",
-                required: ["subscription"],
-                properties: { subscription: { type: "object", description: "PushSubscription JSON" } },
+                required: ["endpoint", "keys"],
+                description: "The browser PushSubscription JSON fields at the top level (not wrapped).",
+                properties: {
+                  endpoint: { type: "string", maxLength: 2048 },
+                  keys: {
+                    type: "object",
+                    required: ["p256dh", "auth"],
+                    properties: { p256dh: { type: "string" }, auth: { type: "string" } },
+                  },
+                  label: { type: "string", maxLength: 100 },
+                },
               },
             },
           },
         },
-        responses: { "200": { description: "Subscription registered" } },
+        responses: {
+          "200": { description: "Subscription registered" },
+          "400": { description: "Missing fields, or an endpoint that is not a recognized push service" },
+          "403": { description: "feature.integration.push is disabled" },
+          "409": { description: "Endpoint already registered to another user" },
+        },
       },
       delete: {
         tags: ["Push"],
@@ -1212,13 +1232,13 @@ const spec = {
             "application/json": {
               schema: {
                 type: "object",
-                required: ["endpoint"],
-                properties: { endpoint: { type: "string" } },
+                description: "Either the subscription row id (device-management UI) or the push endpoint.",
+                properties: { id: { type: "string" }, endpoint: { type: "string" } },
               },
             },
           },
         },
-        responses: { "200": { description: "Subscription removed" } },
+        responses: { "200": { description: "Subscription removed" }, "400": { description: "Neither id nor a valid endpoint supplied" } },
       },
     },
     "/push/test": {
@@ -2337,7 +2357,12 @@ const spec = {
             },
           },
         },
-        responses: { "200": { description: "Updated settings" } },
+        responses: {
+          "200": { description: "{ ok: true, ...connectivity test results }" },
+          "400": { description: "Validation error" },
+          "422": { description: "A connectivity test failed — the write was rolled back ({ ok: false, ...test results })" },
+          "429": { description: "Rate limited, or a key was modified within its 10s cooldown" },
+        },
       },
     },
     "/settings/arr-options": {
@@ -2471,12 +2496,17 @@ const spec = {
       },
       delete: {
         tags: ["Notifications"],
-        summary: "Delete notifications (specific ids, or all when omitted)",
-        requestBody: {
-          required: false,
-          content: { "application/json": { schema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } } } } } },
+        summary: "Delete notifications (specific ids via ?ids=, or all via ?all=1)",
+        description:
+          "Selection is by QUERY PARAMETER, never the body (DELETE bodies are stripped by some proxies). A request with neither `ids` nor `all=1` is a 400, never a wipe.",
+        parameters: [
+          { name: "ids", in: "query", schema: { type: "string" }, description: "Comma-separated notification ids (max 500)" },
+          { name: "all", in: "query", schema: { type: "string", enum: ["1"] }, description: "Set to 1 to clear every notification" },
+        ],
+        responses: {
+          "200": { description: "{ ok, unreadCount }" },
+          "400": { description: "Neither ids nor all=1 supplied" },
         },
-        responses: { "200": { description: "{ ok, unreadCount }" } },
       },
     },
     "/watchlist": {
@@ -2546,7 +2576,7 @@ const spec = {
           { name: "type", in: "path", required: true, schema: { type: "string", enum: ["movie", "tv"] } },
           { name: "tmdbId", in: "path", required: true, schema: { type: "integer" } },
         ],
-        responses: { "200": { description: "Title detail with availability + suggestions" }, "422": { description: "Could not load this title" }, "429": { description: "Rate limited" } },
+        responses: { "200": { description: "Title detail with availability + suggestions" }, "400": { description: "Invalid type or tmdbId" }, "502": { description: "Could not load this title" }, "429": { description: "Rate limited" } },
       },
     },
     "/config/public": {
@@ -2629,7 +2659,13 @@ const spec = {
           required: true,
           content: { "application/json": { schema: { type: "object", required: ["items"], properties: { items: { type: "array", items: { type: "object", properties: { tmdbId: { type: "integer" }, mediaType: { $ref: "#/components/schemas/MediaType" } } } }, onBehalfOfUserId: { type: "string", nullable: true } } } } },
         },
-        responses: { "200": { description: "Per-item results" } },
+        responses: {
+          "201": { description: "{ results, created } — per-item results; at least one item reached the create phase" },
+          "200": { description: "{ results, created: 0 } — every item was skipped before the create phase" },
+          "400": { description: "Validation error" },
+          "403": { description: "Not permitted (on-behalf without REQUEST_ON_BEHALF, or a target with more permissions than the caller)" },
+          "429": { description: "Rate limited, or the target's quota would be exceeded" },
+        },
       },
     },
     "/requests/quality-profiles": {

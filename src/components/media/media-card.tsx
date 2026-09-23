@@ -206,6 +206,10 @@ function MediaCardImpl({
   // mismatch is the canonical React #418 source on /movies, /tv, /, /popular,
   // /upcoming, and /tv/[id]. Don't change this back to <button>.
   function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    // Only the card itself. Enter/Space on a nested control (Request, Confirm,
+    // the overlay action, the IMDb link) bubbles here, and preventDefault would
+    // cancel that control's own activation and navigate to the detail page.
+    if (e.target !== e.currentTarget) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       handleCardClick();

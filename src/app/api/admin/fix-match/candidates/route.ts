@@ -295,15 +295,19 @@ async function resolveArrConfirmation(
       const arrCfg = { url: arrUrlRow.value.replace(/\/$/, ""), apiKey: arrKeyRow.value };
       // Fold Windows separators first (as file-info does): without it the
       // dirname regex strips nothing off a backslash path, so the filename
-      // stays on folderPath and every pathMatches() below reads false.
-      const folderPath = nodePath.posix.normalize(filePath.replace(/\\/g, "/").replace(/\/[^/]+$/, ""));
+      // stays on the path and every pathMatches() below reads false.
+      // The library path ITSELF, not its parent: a Jellyfin series row's Path is
+      // the series folder (Plex's is an episode file), so its parent is the
+      // library root, which equals no Sonarr series path. A path at or under the
+      // arr folder covers a movie file, an episode file and a series folder alike.
+      const libraryPath = nodePath.posix.normalize(filePath.replace(/\\/g, "/").replace(/\/$/, ""));
       const endpoint   = mediaType === "MOVIE" ? "movie" : "series";
 
       type ArrMovie = { tmdbId?: number; path?: string; hasFile?: boolean; statistics?: { episodeFileCount?: number } };
 
       const pathMatches = (arrPathRaw: string | undefined): boolean => {
-        const arrPath = nodePath.posix.normalize((arrPathRaw ?? "").replace(/\\/g, "/"));
-        return !!arrPath && !!folderPath && (arrPath === folderPath || folderPath.startsWith(arrPath + "/"));
+        const arrPath = nodePath.posix.normalize((arrPathRaw ?? "").replace(/\\/g, "/").replace(/\/$/, ""));
+        return !!arrPath && !!libraryPath && (arrPath === libraryPath || libraryPath.startsWith(arrPath + "/"));
       };
 
       // Radarr's movie list honors ?tmdbId= server-side. Sonarr's series list

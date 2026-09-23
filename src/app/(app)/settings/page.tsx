@@ -440,8 +440,10 @@ export default async function SettingsPage({
           role="alert"
           style={{
             padding: 16,
-            background: "rgba(239, 68, 68, 0.08)",
-            border: "1px solid rgba(239, 68, 68, 0.35)",
+            // Theme tokens, not raw rgba/hex: the old #fca5a5 text was a
+            // dark-theme pink that read ~1.8:1 on the light theme (guardrail 42).
+            background: "color-mix(in oklab, var(--ds-danger) 8%, transparent)",
+            border: "1px solid color-mix(in oklab, var(--ds-danger) 35%, transparent)",
             borderRadius: 10,
             marginBottom: 16,
           }}
@@ -454,8 +456,8 @@ export default async function SettingsPage({
                 width: 22,
                 height: 22,
                 borderRadius: 999,
-                background: "rgba(239, 68, 68, 0.18)",
-                color: "#fca5a5",
+                background: "color-mix(in oklab, var(--ds-danger) 18%, transparent)",
+                color: "var(--ds-danger)",
                 display: "inline-flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -467,7 +469,7 @@ export default async function SettingsPage({
               !
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <h3 style={{ fontSize: 14, fontWeight: 600, color: "#fca5a5", margin: 0 }}>
+              <h3 style={{ fontSize: 14, fontWeight: 600, color: "var(--ds-danger)", margin: 0 }}>
                 {decryptFailures.length === 1
                   ? "1 saved setting could not be decrypted"
                   : `${decryptFailures.length} saved settings could not be decrypted`}

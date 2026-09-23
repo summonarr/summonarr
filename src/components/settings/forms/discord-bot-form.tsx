@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -55,6 +55,13 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
   const [syncRolesMessage, setSyncRolesMessage] = useState("");
   const [tab, setTab] = useState<"core" | "channels" | "roles">("core");
   const mounted = useHasMounted();
+  // What the server holds as far as this form knows, keyed by setting. Starts at
+  // the page-load values and advances on every confirmed save. Diffing against
+  // the `initial*` props alone went stale after the first save (nothing
+  // refreshes them): an already-saved field was re-sent on the next save — which
+  // 429s on the route's 10s per-key cooldown — and editing a field back to its
+  // page-load value read as "no change", so that revert was never written.
+  const savedRef = useRef<Record<string, string> | null>(null);
 
   // The app's Discord interactions handler lives at /api/interactions (respecting BASE_PATH).
   // Show the running instance's own origin so admins can paste it straight into the Developer Portal;
@@ -91,7 +98,11 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
       ["discordAdminRoleId", adminRoleId, initialAdminRoleId],
       ["discordIssueAdminRoleId", issueAdminRoleId, initialIssueAdminRoleId],
     ];
-    const changed = Object.fromEntries(fields.filter(([, current, initial]) => current !== initial).map(([key, current]) => [key, current]));
+    if (savedRef.current === null) {
+      savedRef.current = Object.fromEntries(fields.map(([key, , initial]) => [key, initial]));
+    }
+    const saved = savedRef.current;
+    const changed = Object.fromEntries(fields.filter(([key, current]) => current !== saved[key]).map(([key, current]) => [key, current]));
     if (Object.keys(changed).length === 0) {
       setMessage("No changes to save");
       setStatus("ok");
@@ -109,6 +120,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
 
       if (res.ok && data.ok) {
+        Object.assign(saved, changed);
         setMessage("Saved · Restart the bot for changes to take effect");
         setStatus("ok");
       } else {

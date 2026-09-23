@@ -30,10 +30,21 @@ interface SeasonState {
 // post-hydration — the sole call site below gates on `mounted` for exactly
 // this reason (guardrail 16). Do not call this from an SSR-visible spot
 // without also gating it, or the server/client render will disagree.
+//
+// TMDB's `air_date` is date-only ("2024-03-05"), which `new Date` parses as UTC
+// midnight — formatting it in the viewer's zone showed the PREVIOUS day for
+// everyone west of UTC. A date-only string is therefore formatted in UTC (the
+// same fix as format-release-date.ts); only the locale stays the browser's.
 function formatAirDate(iso: string | null): string | null {
   if (!iso) return null;
   try {
-    return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(iso);
+    return new Date(iso).toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      ...(dateOnly ? { timeZone: "UTC" } : {}),
+    });
   } catch {
     return iso;
   }

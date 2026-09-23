@@ -97,6 +97,7 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
 
     if (arrUrlRow?.value && arrKeyRow?.value) {
       const arrBaseUrl = arrUrlRow.value.replace(/\/$/, "");
+      const fullPath   = path.posix.normalize(filePath.replace(/\\/g, "/").replace(/\/$/, ""));
       const folderPath = path.posix.normalize(filePath.replace(/\\/g, "/").replace(/\/[^/]+$/, ""));
       const endpoint   = mediaType === "MOVIE" ? "movie" : "series";
 
@@ -106,13 +107,19 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
       // warm map's basename match first and only fetch on a miss. Read-only —
       // never write the key from this default-instance-only path.
       try {
-        const folderName = folderPath.split("/").pop();
-        const cached = folderName
+        // A Jellyfin SERIES row's Path is the series folder itself (not a file
+        // inside it), so for TV its own basename is the Sonarr folder name too.
+        const names = [folderPath.split("/").pop(), ...(mediaType === "TV" ? [fullPath.split("/").pop()] : [])]
+          .filter((n): n is string => !!n);
+        const cached = names.length > 0
           ? await getCache<[string, number][]>(`arr:${endpoint === "movie" ? "radarr" : "sonarr"}:paths:name`)
           : null;
         if (cached?.length) {
-          const hit = new Map(cached).get(folderName!);
-          if (hit != null) arrTmdbId = hit;
+          const map = new Map(cached);
+          for (const n of names) {
+            const hit = map.get(n);
+            if (hit != null) { arrTmdbId = hit; break; }
+          }
         }
       } catch { }
 
@@ -126,7 +133,10 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
           for (const item of items) {
             if (!item.tmdbId || !item.path) continue;
             const normPath = path.posix.normalize(item.path.replace(/\\/g, "/").replace(/\/$/, ""));
-            if (normPath === folderPath || folderPath.startsWith(normPath + "/")) {
+            // Match on the path itself, not only its parent: a Jellyfin series
+            // Path IS the series folder, so its parent is the library root and
+            // never equals (or sits under) any Sonarr series path.
+            if (normPath === fullPath || fullPath.startsWith(normPath + "/")) {
               arrTmdbId = item.tmdbId;
               break;
             }

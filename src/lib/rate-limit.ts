@@ -1,4 +1,4 @@
-
+import { processSingleton } from "./process-singleton";
 
 if (process.env.TRUST_PROXY !== "true") {
   console.warn(
@@ -13,17 +13,25 @@ interface RateLimitEntry {
   expiresAt: number;
 }
 
-const windows = new Map<string, RateLimitEntry>();
+// Process-wide (see process-singleton.ts). This module is compiled into every
+// server chunk that imports it — over a dozen — and a module-scope Map gave each
+// its own buckets, so a key checked from two routes (setup-import:<ip> on both
+// import routes, play-history-mine:<user> on two) got a separate budget per
+// chunk instead of the one limit the call sites state.
+const windows = processSingleton("rate-limit:windows", () => {
+  const map = new Map<string, RateLimitEntry>();
+  // Registered once with the map — one sweeper per process, not per chunk.
+  // .unref() so this timer doesn't prevent Node from exiting during tests or graceful shutdown
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of map) {
+      if (entry.expiresAt < now) map.delete(key);
+    }
+  }, 60_000).unref();
+  return map;
+});
 
 const MAX_KEYS = 100_000;
-
-// .unref() so this timer doesn't prevent Node from exiting during tests or graceful shutdown
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of windows) {
-    if (entry.expiresAt < now) windows.delete(key);
-  }
-}, 60_000).unref();
 
 // Sliding-window rate limiter: records a hit for `key` and returns false once
 // `limit` hits fall within `windowMs`. Bounded by MAX_KEYS via LRU eviction.
