@@ -196,8 +196,9 @@ test("PIN: a comment documenting the next handler does not arm the handler decla
 test("stripComments preserves `//` inside string literals", () => {
   const src = 'const url = "https://example.com/x"; // trailing note\nconst withAdmin = 1;\n';
   const out = stripComments(src);
-  assert.ok(out.includes("https://example.com/x"));
-  assert.doesNotMatch(out, /trailing note/);
+  // Exact comparison: the string literal (with its `//`) survives, the real
+  // trailing comment is gone, and line breaks are kept.
+  assert.equal(out, 'const url = "https://example.com/x"; \nconst withAdmin = 1;\n');
 });
 
 test("stripComments keeps line structure so column-0 anchoring still works", () => {
