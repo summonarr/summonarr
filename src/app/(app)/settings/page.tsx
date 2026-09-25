@@ -1040,7 +1040,7 @@ export default async function SettingsPage({
                     { label: "Movies",    value: metrics.movieRequests },
                     { label: "TV Shows",  value: metrics.tvRequests },
                   ].map(({ label, value }) => (
-                    <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
+                    <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
                       <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString()}</p>
                     </div>
@@ -1057,7 +1057,7 @@ export default async function SettingsPage({
                     { label: "Issue Admins",   value: metrics.issueAdminUsers },
                     { label: "Discord Linked", value: metrics.discordLinkedUsers },
                   ].map(({ label, value }) => (
-                    <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
+                    <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
                       <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString()}</p>
                     </div>
@@ -1074,7 +1074,7 @@ export default async function SettingsPage({
                     { label: "In Progress", value: metrics.inProgressIssues },
                     { label: "Resolved",    value: metrics.resolvedIssues },
                   ].map(({ label, value }) => (
-                    <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
+                    <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
                       <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString()}</p>
                     </div>
@@ -1108,7 +1108,7 @@ export default async function SettingsPage({
                     { label: "Sonarr Available",      value: metrics.sonarrAvailable.toLocaleString() },
                     { label: "Deletion Votes",        value: metrics.deletionVotes.toLocaleString() },
                   ].map(({ label, value }) => (
-                    <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
+                    <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
                       <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value}</p>
                     </div>
@@ -1134,7 +1134,7 @@ export default async function SettingsPage({
                       { label: "TV Shows",         value: metrics.tmdbCoreTv.toLocaleString() },
                       { label: "Library Coverage", value: libTotal > 0 ? `~${coveragePct}%` : "—", dim: total === 0 },
                     ].map(({ label, value, dim }) => (
-                      <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
+                      <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
                         <p className="text-xs text-zinc-500 mb-1">{label}</p>
                         <p className={`text-xl font-semibold tabular-nums ${dim ? "text-zinc-500" : "text-zinc-100"}`}>{value}</p>
                       </div>
@@ -1153,7 +1153,7 @@ export default async function SettingsPage({
                     { label: "Current Shares",     value: metrics.currentShares !== null ? metrics.currentShares.toLocaleString() : "—" },
                     { label: "Discord Search Cache", value: metrics.discordCacheEntries.toLocaleString() },
                   ].map(({ label, value }) => (
-                    <div key={label} className="bg-zinc-800 rounded-lg px-4 py-3">
+                    <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
                       <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value}</p>
                     </div>

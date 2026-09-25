@@ -7,6 +7,7 @@ export function KpiStrip({
   customFormatsTotal,
   drift,
   loading,
+  failed = false,
 }: {
   profilesAvailable: number;
   profilesApplied: number;
@@ -14,7 +15,19 @@ export function KpiStrip({
   customFormatsTotal: number;
   drift: number;
   loading: boolean;
+  // The status fetch failed — show "—" rather than zeros, which would read as
+  // an all-clear (a green "0 diffs / In sync with upstream").
+  failed?: boolean;
 }) {
+  if (failed && !loading) {
+    const kpis = ["Profiles available", "Applied to instance", "Custom formats", "Drift"].map((label) => ({
+      label,
+      value: "—",
+      hint: "Status unavailable",
+      tint: "var(--ds-fg-muted)",
+    }));
+    return <KpiGrid kpis={kpis} />;
+  }
   const kpis = [
     {
       label: "Profiles available",
@@ -42,6 +55,10 @@ export function KpiStrip({
     },
   ];
 
+  return <KpiGrid kpis={kpis} />;
+}
+
+function KpiGrid({ kpis }: { kpis: { label: string; value: string; hint: string; tint: string }[] }) {
   return (
     <div className="grid grid-cols-2 sm:grid-cols-4" style={{ gap: 10 }}>
       {kpis.map((k) => (

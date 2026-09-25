@@ -286,15 +286,15 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
   return (
     <div className="space-y-4">
       {connectedEmail ? (
-        <div className="flex items-center justify-between rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-3">
-          <div className="flex items-center gap-2 text-sm">
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-3">
+          <div className="flex items-center gap-2 text-sm min-w-0">
             <CheckCircle className="w-4 h-4 text-green-400 shrink-0" />
-            <span className="text-zinc-300">Connected as <span className="text-zinc-100 font-medium">{connectedEmail}</span></span>
+            <span className="text-zinc-300 min-w-0 truncate" title={connectedEmail}>Connected as <span className="text-zinc-100 font-medium">{connectedEmail}</span></span>
           </div>
           <button
             onClick={handleDisconnect}
             disabled={status === "saving"}
-            className="flex items-center gap-1 text-xs text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-50"
+            className="shrink-0 flex items-center gap-1 text-xs text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-50"
           >
             <Unlink className="w-3 h-3" />
             Disconnect

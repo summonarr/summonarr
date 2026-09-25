@@ -231,6 +231,17 @@ function DbImportSection() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div
+        onDragOver={(e) => {
+          // Without preventDefault the browser's own drop runs and navigates
+          // away to (or downloads) the dropped file.
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          const dropped = e.dataTransfer.files[0];
+          if (dropped) void handleFileChange(dropped);
+        }}
         style={{
           border: `1px dashed ${dropBorder}`,
           borderRadius: 8,
@@ -306,7 +317,7 @@ function DbImportSection() {
 
       <div className="flex items-center gap-2 flex-wrap">
         <label
-          className="ds-tap inline-flex items-center gap-1.5 font-medium transition-colors cursor-pointer"
+          className="ds-tap inline-flex items-center gap-1.5 font-medium transition-colors cursor-pointer focus-within:ring-2 focus-within:ring-ring"
           style={{
             padding: "5px 12px",
             fontSize: 12,
@@ -321,7 +332,10 @@ function DbImportSection() {
             type="file"
             accept=".enc"
             onChange={(e) => handleFileChange(e.target.files?.[0] ?? null)}
-            className="hidden"
+            // sr-only, not hidden: display:none drops the input from the tab
+            // order and a <label> can't take focus, so keyboard users could
+            // never open the chooser.
+            className="sr-only"
           />
         </label>
         {file && <SecondaryButton onClick={clearFile}>Clear</SecondaryButton>}

@@ -345,7 +345,7 @@ function CandidateRow({
             </span>
           )}
           {!candidate.tmdbId && !candidate.imdbId && (
-            <span className="text-xs font-mono text-zinc-700 truncate" title={candidate.guid}>{hash}</span>
+            <span className="text-xs font-mono text-zinc-500 truncate" title={candidate.guid}>{hash}</span>
           )}
         </div>
 
@@ -423,8 +423,9 @@ export function FixMatchButton({
       // pre-multi-server one (the route defaults an absent param to "").
       if (serverInstance) params.set("serverInstance", serverInstance);
       const res = await fetch(withBasePath(`/api/admin/fix-match/candidates?${params}`));
-      const json = await res.json() as CandidatesResponse & { error?: string };
-      if (!res.ok) throw new Error(json.error ?? `HTTP ${res.status}`);
+      // A reverse proxy's HTML 502/504 is not JSON — report the status, not a parser error.
+      const json = await res.json().catch(() => null) as (CandidatesResponse & { error?: string }) | null;
+      if (!res.ok || !json) throw new Error(json?.error ?? `HTTP ${res.status}`);
       setCandidates(json);
       setPhase("selecting");
     } catch (err) {
@@ -519,8 +520,8 @@ export function FixMatchButton({
         </button>
         {phase === "error" && (
           <>
-            <span className="text-[9px] text-red-400 leading-tight">{errorMsg}</span>
-            <button onClick={reset} className="text-[9px] text-zinc-500 hover:text-zinc-300 text-left">Dismiss</button>
+            <span className="text-[11px] text-red-400 leading-tight">{errorMsg}</span>
+            <button onClick={reset} className="text-[11px] text-zinc-500 hover:text-zinc-300 text-left">Dismiss</button>
           </>
         )}
       </div>

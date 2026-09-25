@@ -26,6 +26,10 @@ interface BrowseGridProps {
   // otherwise a TMDB outage would also show the misleading "TMDB token not
   // configured" message next to the error banner.
   failed?: boolean;
+  // True only when the server knows TMDB_READ_TOKEN is unset. An empty
+  // unfiltered grid on a configured instance (a bookmarked `?page=N` past the
+  // end, an empty upstream page) must not blame the token.
+  tokenMissing?: boolean;
 }
 
 
@@ -39,6 +43,7 @@ export function BrowseGrid({
   showJellyfin,
   maxYear,
   failed,
+  tokenMissing,
 }: BrowseGridProps) {
   const searchParams = useSearchParams();
   const pathname = usePathname();
@@ -145,11 +150,22 @@ export function BrowseGrid({
               description="Try removing one or two filters to see more."
               cta={{ href: pathname, label: "Clear filters" }}
             />
-          ) : (
+          ) : tokenMissing ? (
             <EmptyState
               icon={AlertTriangle}
               title="TMDB token not configured"
               description="Set TMDB_READ_TOKEN in your environment to enable discovery."
+            />
+          ) : (
+            <EmptyState
+              icon={Filter}
+              title="No results on this page"
+              description={
+                currentPage > 1
+                  ? "This page is past the end of the results."
+                  : "TMDB returned nothing here — try again later."
+              }
+              cta={currentPage > 1 ? { href: pathname, label: "Back to page 1" } : undefined}
             />
           )
         ) : (

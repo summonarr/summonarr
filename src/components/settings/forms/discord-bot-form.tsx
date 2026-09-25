@@ -142,10 +142,11 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
         <button
           type="button"
           onClick={() => setGuideOpen((v) => !v)}
+          aria-expanded={guideOpen}
           className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-zinc-300 hover:bg-zinc-800 transition-colors"
         >
           <span>Setup guide</span>
-          <ChevronDown className={`w-4 h-4 text-zinc-500 transition-transform duration-200 ${guideOpen ? "rotate-180" : ""}`} />
+          <ChevronDown aria-hidden className={`w-4 h-4 text-zinc-500 transition-transform duration-200 ${guideOpen ? "rotate-180" : ""}`} />
         </button>
 
         {guideOpen && (
@@ -210,7 +211,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                 Go back to <span className="text-zinc-300">General Information</span> in the Developer Portal.
                 Set the <span className="text-zinc-300">Interactions Endpoint URL</span> to:
               </p>
-              <code className="block bg-zinc-900 border border-zinc-700 rounded px-3 py-2 text-xs font-mono text-zinc-300 mt-1">
+              <code className="block break-all bg-zinc-900 border border-zinc-700 rounded px-3 py-2 text-xs font-mono text-zinc-300 mt-1">
                 {interactionsEndpoint}
               </code>
               <p className="text-zinc-500 text-xs mt-1">
@@ -277,11 +278,28 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
         )}
       </div>
 
-      <div className="flex gap-1 border-b border-zinc-800">
+      <div
+        role="tablist"
+        aria-label="Discord bot settings"
+        className="flex gap-1 border-b border-zinc-800"
+        onKeyDown={(e) => {
+          if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+          e.preventDefault();
+          const tabs = ["core", "channels", "roles"] as const;
+          const i = tabs.indexOf(tab);
+          const next = tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+          setTab(next);
+          e.currentTarget.querySelector<HTMLButtonElement>(`[data-tab="${next}"]`)?.focus();
+        }}
+      >
         {(["core", "channels", "roles"] as const).map((t) => (
           <button
             key={t}
             type="button"
+            role="tab"
+            data-tab={t}
+            aria-selected={tab === t}
+            tabIndex={tab === t ? 0 : -1}
             onClick={() => setTab(t)}
             className={`px-4 py-2 text-sm font-medium capitalize transition-colors border-b-2 -mb-px ${
               tab === t

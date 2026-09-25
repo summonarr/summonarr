@@ -247,7 +247,7 @@ function AuditLogFilters({
           ))}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => navigate({ hideCron: currentHideCron ? "" : "1" })}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
@@ -436,7 +436,7 @@ function ScrubPiiButton() {
 
   if (confirming) {
     return (
-      <div className="flex items-center gap-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
         <span className="text-xs text-zinc-300">Redact IP, device & names on old rows?</span>
         <button
           onClick={runScrub}
@@ -455,7 +455,7 @@ function ScrubPiiButton() {
   }
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       <button
         onClick={() => setConfirming(true)}
         disabled={busy}
@@ -468,7 +468,7 @@ function ScrubPiiButton() {
         <span
           role={result.kind === "err" ? "alert" : "status"}
           aria-live={result.kind === "err" ? "assertive" : "polite"}
-          className={`text-xs ${result.kind === "err" ? "text-red-400" : "text-green-400"}`}
+          className={`basis-full text-xs ${result.kind === "err" ? "text-red-400" : "text-green-400"}`}
         >
           {result.text}
         </span>
@@ -876,7 +876,7 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
                           <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${actionInfo.color}`}>
                             {actionInfo.label}
                           </span>
-                          <span className="text-xs text-zinc-500 font-mono">{log.target}</span>
+                          <span className="text-xs text-zinc-500 font-mono break-all">{log.target}</span>
                         </div>
                         <span className="text-xs text-zinc-500" title={mounted ? new Date(log.createdAt).toLocaleString("en-US") : undefined}>
                           {mounted ? relativeTime(log.createdAt) : ""}
@@ -888,9 +888,9 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
                       </div>
 
                       {(log.ipAddress || log.provider || log.userAgent) && (
-                        <div className="flex items-center gap-3 mt-2 text-[11px] text-zinc-500">
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2 text-[11px] text-zinc-500">
                           {log.ipAddress && (
-                            <span className="flex items-center gap-1">
+                            <span className="flex min-w-0 items-center gap-1 break-all">
                               <Globe size={10} /> {log.ipAddress}
                             </span>
                           )}

@@ -28,9 +28,19 @@ export function PaginationBar({ currentPage, totalPages }: PaginationBarProps) {
   const end = Math.min(totalPages, currentPage + 2);
   for (let i = start; i <= end; i++) pages.push(i);
 
+  // Below `sm` the full ±2 window (plus first/last jumps and two ellipses)
+  // is ~358px — wider than a 375px phone's content box. Narrow it to ±1 there
+  // with CSS, not a width read (render must match SSR). A neighbour adjacent
+  // to page 1 / the last page stays, or the row would skip a number with no
+  // ellipsis to say so.
+  const hideOnMobile = (p: number) =>
+    Math.abs(p - currentPage) === 2 &&
+    p > 2 &&
+    p < totalPages - 1;
+
   return (
     <div
-      className="flex items-center justify-center mt-8"
+      className="flex flex-wrap items-center justify-center mt-8"
       style={{ gap: 4 }}
     >
       <PagerButton href={hasPrev ? buildHref(currentPage - 1) : undefined} ariaLabel="Previous page">
@@ -61,7 +71,11 @@ export function PaginationBar({ currentPage, totalPages }: PaginationBarProps) {
             {p}
           </PagerButton>
         ) : (
-          <PagerButton key={p} href={buildHref(p)}>
+          <PagerButton
+            key={p}
+            href={buildHref(p)}
+            className={hideOnMobile(p) ? "max-sm:hidden" : undefined}
+          >
             {p}
           </PagerButton>
         ),
@@ -97,7 +111,9 @@ function PagerButton({
   active,
   children,
   ariaLabel,
+  className: extraClassName,
 }: {
+  className?: string;
   href?: string;
   active?: boolean;
   children: React.ReactNode;
@@ -123,8 +139,9 @@ function PagerButton({
     fontWeight: 500,
     transition: "all 120ms var(--ds-ease)",
   };
-  const className =
-    "inline-flex items-center justify-center font-medium";
+  const className = `inline-flex items-center justify-center font-medium${
+    extraClassName ? ` ${extraClassName}` : ""
+  }`;
 
   if (href) {
     // Only the navigable variant gets hover feedback — the active page and the

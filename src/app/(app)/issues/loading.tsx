@@ -34,7 +34,7 @@ export default function Loading() {
             </div>
           ))}
         </div>
-        <aside className="hidden xl:block sticky top-6 h-[calc(100vh-3rem)]">
+        <aside className="hidden xl:block sticky top-6 h-[calc(100dvh-52px-3rem)]">
           <div className="h-full" style={{ ...SKELETON_CARD, borderRadius: 8, padding: 18 }}>
             <div className="flex items-start" style={{ gap: 14 }}>
               <Bar w={56} h={84} r={4} />

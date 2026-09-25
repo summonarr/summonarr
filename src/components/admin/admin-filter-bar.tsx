@@ -66,7 +66,8 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentT
               key={tab.value}
               type="button"
               onClick={() => navigate(tab.value, currentSort, currentType)}
-              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 font-medium transition-colors"
+              aria-pressed={active}
+              className="ds-hover-tint inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 font-medium transition-colors"
               style={{
                 padding: "5px 12px",
                 borderRadius: 6,
@@ -114,7 +115,8 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentT
                 key={tab.value}
                 type="button"
                 onClick={() => navigate(currentStatus, currentSort, tab.value)}
-                className="inline-flex items-center whitespace-nowrap shrink-0 font-medium transition-colors"
+                aria-pressed={active}
+                className="ds-hover-tint inline-flex items-center whitespace-nowrap shrink-0 font-medium transition-colors"
                 style={{
                   padding: "5px 12px",
                   borderRadius: 6,
@@ -134,6 +136,7 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentT
         <select
           value={currentSort}
           onChange={(e) => navigate(currentStatus, e.target.value, currentType)}
+          aria-label="Sort requests"
           className="focus:outline-none focus:ring-1"
           style={{
             padding: "5px 10px",

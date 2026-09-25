@@ -32,9 +32,11 @@ const SPINNER_ON = {
   warning: "text-[var(--ds-on-status)]",
 } as const
 
+// The ON offset leaves the same inset as OFF on the other side: track width −
+// knob − off-inset (sm 32−12−2, md 36−16−2 = 18px; lg 44−16−4 = 24px).
 const SIZES = {
-  sm: { track: "h-4 w-8", knob: "h-3 w-3", spinner: "h-3 w-3", on: "translate-x-4", off: "translate-x-0.5" },
-  md: { track: "h-5 w-9", knob: "h-4 w-4", spinner: "h-3.5 w-3.5", on: "translate-x-4", off: "translate-x-0.5" },
+  sm: { track: "h-4 w-8", knob: "h-3 w-3", spinner: "h-3 w-3", on: "translate-x-[18px]", off: "translate-x-0.5" },
+  md: { track: "h-5 w-9", knob: "h-4 w-4", spinner: "h-3.5 w-3.5", on: "translate-x-[18px]", off: "translate-x-0.5" },
   lg: { track: "h-6 w-11", knob: "h-4 w-4", spinner: "h-4 w-4", on: "translate-x-6", off: "translate-x-1" },
 } as const
 

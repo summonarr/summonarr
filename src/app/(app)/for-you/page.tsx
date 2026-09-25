@@ -208,22 +208,27 @@ export default async function ForYouPage({
       ) : (
         <div className="ds-media-grid">
           {visible.map((media) => (
-            <MediaCard
-              key={`${media.mediaType}-${media.id}`}
-              media={media}
-              showPlex={showPlex}
-              showJellyfin={showJellyfin}
-              size="md"
-              caption={<RecommendationReason media={media} />}
-              overlayAction={
-                <NotInterestedButton
-                  tmdbId={media.id}
-                  mediaType={media.mediaType === "movie" ? "MOVIE" : "TV"}
-                  title={media.title}
-                  posterPath={media.posterPath}
-                />
-              }
-            />
+            // The not-interested button sits in MediaCard's top-left corner,
+            // exactly where the availability chips go, and is always visible
+            // at touch widths. .ds-ranked-card shifts the chips clear of a
+            // top-left overlay (it was written for /popular's rank badge).
+            <div key={`${media.mediaType}-${media.id}`} className="ds-ranked-card relative">
+              <MediaCard
+                media={media}
+                showPlex={showPlex}
+                showJellyfin={showJellyfin}
+                size="md"
+                caption={<RecommendationReason media={media} />}
+                overlayAction={
+                  <NotInterestedButton
+                    tmdbId={media.id}
+                    mediaType={media.mediaType === "movie" ? "MOVIE" : "TV"}
+                    title={media.title}
+                    posterPath={media.posterPath}
+                  />
+                }
+              />
+            </div>
           ))}
         </div>
       )}
@@ -302,7 +307,7 @@ function RecommendationReason({ media }: { media: TmdbMedia }) {
         style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", lineHeight: 1.4 }}
         title={
           others > 0
-            ? `${lead} ${why.title}, plus ${others} other title${others === 1 ? "" : "s"} you’ve seen`
+            ? `${lead} ${why.title}, plus ${others} other title${others === 1 ? "" : "s"} of yours`
             : `${lead} ${why.title}`
         }
       >

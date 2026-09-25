@@ -440,19 +440,21 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
             border: "1px solid var(--ds-border)",
           }}
         >
-          <input
-            type="checkbox"
-            checked={allPendingSelected}
-            onChange={toggleAll}
-            className="w-4 h-4"
-            style={{ accentColor: "var(--ds-accent)" }}
-          />
-          <span
-            className="ds-mono"
-            style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
-          >
-            Select all pending ({allPendingIds.length})
-          </span>
+          <label className="flex items-center" style={{ gap: 12, padding: "4px 0" }}>
+            <input
+              type="checkbox"
+              checked={allPendingSelected}
+              onChange={toggleAll}
+              className="w-4 h-4"
+              style={{ accentColor: "var(--ds-accent)" }}
+            />
+            <span
+              className="ds-mono"
+              style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
+            >
+              Select all pending ({allPendingIds.length})
+            </span>
+          </label>
         </div>
       )}
 
@@ -482,7 +484,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
           return (
             <div
               key={group.groupKey}
-              className="flex items-start"
+              className="flex flex-wrap sm:flex-nowrap items-start"
               style={{
                 gap: 14,
                 padding: 14,
@@ -496,13 +498,18 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 style={{ paddingTop: 2, width: 20 }}
               >
                 {pendingIds.length > 0 ? (
-                  <input
-                    type="checkbox"
-                    checked={groupAllPendingSelected}
-                    onChange={() => toggleGroup(group)}
-                    className="w-4 h-4"
-                    style={{ accentColor: "var(--ds-accent)" }}
-                  />
+                  // The label pads the 16px box out to a ~32px touch target
+                  // without moving it (the negative margin cancels the padding).
+                  <label className="flex items-center justify-center" style={{ padding: 8, margin: -8 }}>
+                    <input
+                      type="checkbox"
+                      checked={groupAllPendingSelected}
+                      onChange={() => toggleGroup(group)}
+                      aria-label={`Select ${group.title}`}
+                      className="w-4 h-4"
+                      style={{ accentColor: "var(--ds-accent)" }}
+                    />
+                  </label>
                 ) : (
                   <span style={{ width: 16 }} />
                 )}
@@ -547,11 +554,11 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 >
                   <span className="truncate">{group.title}</span>
                   <ExternalLink
-                    className="shrink-0 transition-opacity"
+                    aria-hidden
+                    className="shrink-0 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 transition-opacity"
                     style={{
                       width: 12,
                       height: 12,
-                      opacity: 0,
                       color: "var(--ds-fg-subtle)",
                     }}
                   />
@@ -752,14 +759,18 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 </Chip>
               </div>
 
-              <RequestActions
-                requestId={representativeId}
-                currentStatus={group.aggregateStatus}
-                mediaType={group.mediaType}
-                arrInstance={representativeInstance}
-                existingAdminNote={representativeAdminNote}
-                groupPendingIds={pendingIds.length > 1 ? pendingIds : undefined}
-              />
+              {/* Below sm the actions take their own row: their approve/decline
+                  panels are 208–224px wide and would crush the title column. */}
+              <div className="flex justify-end basis-full sm:basis-auto sm:shrink-0">
+                <RequestActions
+                  requestId={representativeId}
+                  currentStatus={group.aggregateStatus}
+                  mediaType={group.mediaType}
+                  arrInstance={representativeInstance}
+                  existingAdminNote={representativeAdminNote}
+                  groupPendingIds={pendingIds.length > 1 ? pendingIds : undefined}
+                />
+              </div>
             </div>
           );
         })}

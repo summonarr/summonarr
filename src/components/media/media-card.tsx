@@ -1,6 +1,7 @@
 "use client";
 
 import Image from "next/image";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   Film,
@@ -21,6 +22,7 @@ import { cn } from "@/lib/utils";
 import { useState, useEffect, memo } from "react";
 import { requestRatings, type RatingsPayload } from "@/lib/client/ratings-batcher";
 import { withBasePath } from "@/lib/base-path";
+import { useToast } from "@/components/ui/toast";
 
 type LiveRatings = RatingsPayload;
 
@@ -63,6 +65,7 @@ function MediaCardImpl({
   overlayAction,
 }: MediaCardProps) {
   const router = useRouter();
+  const { toast } = useToast();
   const poster = posterUrl(media.posterPath, "w342");
   const [reqState, setReqState] = useState<RequestState>("idle");
   const [liveRatings, setLiveRatings] = useState<LiveRatings | null>(null);
@@ -127,10 +130,24 @@ function MediaCardImpl({
         } else {
           setReqState("requested");
         }
+      } else if (res.status === 409) {
+        setReqState("requested");
       } else {
-        setReqState(res.status === 409 ? "requested" : "error");
+        // Surface the server's reason (quota, permission, instance errors) —
+        // the bubble alone only ever said "Retry", and only on hover. A 4xx is
+        // a decision, not a blip, so the card returns to idle instead of
+        // offering a retry that will fail the same way; only a 5xx/429 keeps
+        // the "Retry" state.
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        toast({
+          title: data?.error ?? `Couldn’t request ${media.title} — try again`,
+          variant: "error",
+        });
+        const transient = res.status >= 500 || res.status === 429;
+        setReqState(transient ? "error" : "idle");
       }
     } catch {
+      toast({ title: "Network error — please try again", variant: "error" });
       setReqState("error");
     }
   }
@@ -198,34 +215,21 @@ function MediaCardImpl({
     );
   };
 
-  // The card uses a <div> rather than <button> because it contains nested
-  // <button> elements (Request/Confirm/Cancel/View). Browsers' HTML parser
-  // does not allow <button> inside <button>; it auto-closes the outer button
-  // when it sees a nested one, lifting the inner buttons up to the body level
-  // — and the resulting parsed DOM no longer matches what React rendered. That
-  // mismatch is the canonical React #418 source on /movies, /tv, /, /popular,
-  // /upcoming, and /tv/[id]. Don't change this back to <button>.
-  function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
-    // Only the card itself. Enter/Space on a nested control (Request, Confirm,
-    // the overlay action, the IMDb link) bubbles here, and preventDefault would
-    // cancel that control's own activation and navigate to the detail page.
-    if (e.target !== e.currentTarget) return;
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      handleCardClick();
-    }
-  }
+  // The card is a plain <div>, NOT a <button> and NOT role="button": it
+  // contains nested interactive controls (Request/Confirm/Cancel/View, the
+  // overlay action, the IMDb link). A real <button> can't nest buttons (the
+  // HTML parser auto-closes it — the canonical React #418 source on /movies,
+  // /tv, /, /popular, /upcoming and /tv/[id]), and role="button" makes every
+  // child presentational, so screen readers flattened the card to one button
+  // and the nested controls became unreachable. The mouse click-anywhere
+  // target stays on the div; keyboard and assistive tech reach the detail page
+  // through the real link on the title below.
   return (
     <div
-      role="button"
-      tabIndex={0}
       onClick={handleCardClick}
-      onKeyDown={handleKeyDown}
-      aria-label={media.title}
       className={cn(
         "group relative flex flex-col w-full overflow-hidden text-left cursor-pointer",
-        "ds-card-lift focus-visible:outline-none",
-        "focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]",
+        "ds-card-lift",
         className,
       )}
       style={{
@@ -326,7 +330,13 @@ function MediaCardImpl({
               onClick={handleBubbleClick}
               type="button"
               aria-label={bubbleLabel()}
-              className="ds-tap pointer-events-auto inline-flex items-center gap-1.5 font-semibold transition-colors"
+              // Clickable only while the overlay is revealed. The overlay is
+              // opacity-0 until hover/focus, and a transparent-but-live button
+              // swallowed touch taps on the poster's bottom-centre (no hover
+              // on touch to reveal it first — Tailwind gates group-hover on
+              // `(hover: hover)`), opening a request prompt nobody saw.
+              // Keyboard focus is unaffected by pointer-events.
+              className="ds-tap pointer-events-none group-hover:pointer-events-auto group-focus-within:pointer-events-auto inline-flex items-center gap-1.5 font-semibold transition-colors"
               style={{
                 padding: "5px 12px",
                 borderRadius: 999,
@@ -354,8 +364,14 @@ function MediaCardImpl({
             puts its own overlay in this corner shift them clear — /popular's
             rank badge sits at exactly these coordinates (top-1.5/left-1.5 is
             6px, the same inset it uses) and, being z-10, covered the Plex
-            glyph on every ranked card. See .ds-ranked-card in globals.css. */}
-        <div data-media-chips className="absolute top-1.5 left-1.5 flex flex-col gap-1">
+            glyph on every ranked card. See .ds-ranked-card in globals.css.
+            An overlayAction shares this corner too, so with one present the
+            stack starts below it (26px control + its 36px hit area + inset). */}
+        <div
+          data-media-chips
+          className="absolute top-1.5 left-1.5 flex flex-col gap-1"
+          style={overlayAction ? { top: 38 } : undefined}
+        >
           {showPlex && media.plexAvailable && (
             <span
               className="ds-chip ds-chip-plex"
@@ -493,7 +509,31 @@ function MediaCardImpl({
           )}
           style={{ color: "var(--ds-fg)", lineHeight: 1.3 }}
         >
-          {media.title}
+          {/* The card's keyboard / screen-reader entry point (see the root
+              comment). stopPropagation: the root div's click handler would
+              otherwise navigate a second time. */}
+          {onClick ? (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onClick(media);
+              }}
+              className="text-left rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+              style={{ font: "inherit", color: "inherit", background: "none", border: 0, padding: 0 }}
+            >
+              {media.title}
+            </button>
+          ) : (
+            <Link
+              href={detailPath}
+              onClick={(e) => e.stopPropagation()}
+              className="rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+              style={{ color: "inherit" }}
+            >
+              {media.title}
+            </Link>
+          )}
         </p>
         <div
           className="ds-mono flex items-center gap-1.5 flex-wrap"

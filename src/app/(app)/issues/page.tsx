@@ -16,7 +16,7 @@ import { PaginationBar } from "@/components/media/pagination-bar";
 import { requireFeature } from "@/lib/features";
 import type { Prisma } from "@/generated/prisma";
 import { Chip, EmptyState, PageHeader } from "@/components/ui/design";
-import { ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL, ISSUE_TYPE_LABELS } from "@/lib/status-labels";
+import { ISSUE_DATE_FORMAT, ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL, ISSUE_TYPE_LABELS } from "@/lib/status-labels";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
 
 export const dynamic = "force-dynamic";
@@ -161,7 +161,7 @@ export default async function IssuesPage({
             ]}
             preserve={["type", "q", "selected"]}
           />
-          <div className="flex items-center gap-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
             <FilterPills
               param="type"
               active={issueType ?? ""}
@@ -298,7 +298,7 @@ export default async function IssuesPage({
                               color: "var(--ds-fg-subtle)",
                             }}
                           >
-                            {new Date(issue.updatedAt).toLocaleDateString()}
+                            {ISSUE_DATE_FORMAT.format(new Date(issue.updatedAt))}
                           </span>
                         </div>
                         {issue.note && (
@@ -371,7 +371,7 @@ export default async function IssuesPage({
             </Suspense>
           </div>
 
-          <aside className="hidden xl:block sticky top-6 h-[calc(100vh-3rem)]">
+          <aside className="hidden xl:block sticky top-6 h-[calc(100dvh-52px-3rem)]">
             {selectedIssue ? (
               <div
                 className="h-full flex flex-col overflow-hidden"
@@ -457,7 +457,7 @@ export default async function IssuesPage({
                         }}
                       >
                         Reported{" "}
-                        {new Date(selectedIssue.createdAt).toLocaleDateString()}
+                        {ISSUE_DATE_FORMAT.format(new Date(selectedIssue.createdAt))}
                       </p>
                     </div>
                   </div>

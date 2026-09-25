@@ -71,7 +71,7 @@ export function KpiStrip({ kpis }: { kpis: Kpi[] }) {
                 className="ds-mono uppercase"
                 style={{
                   fontSize: 9.5,
-                  color: "var(--ds-fg-disabled)",
+                  color: "var(--ds-fg-subtle)",
                   letterSpacing: "0.1em",
                   whiteSpace: "nowrap",
                   overflow: "hidden",
@@ -219,7 +219,7 @@ export function AnalyticsRow({
               justifyContent: "space-between",
               marginTop: 8,
               fontSize: 9.5,
-              color: "var(--ds-fg-disabled)",
+              color: "var(--ds-fg-subtle)",
             }}
           >
             {axisLabels.map((l, i) => (
@@ -335,7 +335,7 @@ export function Leaderboards({
                     width: 16,
                     textAlign: "right",
                     fontSize: 10.5,
-                    color: "var(--ds-fg-disabled)",
+                    color: "var(--ds-fg-subtle)",
                     fontVariantNumeric: "tabular-nums",
                   }}
                 >
@@ -391,7 +391,7 @@ export function Leaderboards({
                       }}
                     >
                       {u.hours.toFixed(1)}h{" "}
-                      <span style={{ color: "var(--ds-fg-disabled)" }}>
+                      <span style={{ color: "var(--ds-fg-subtle)" }}>
                         · {u.plays} plays
                       </span>
                     </span>
@@ -445,7 +445,7 @@ export function Leaderboards({
                     width: 16,
                     textAlign: "right",
                     fontSize: 10.5,
-                    color: "var(--ds-fg-disabled)",
+                    color: "var(--ds-fg-subtle)",
                   }}
                 >
                   {m.rank.toString().padStart(2, "0")}
@@ -495,7 +495,7 @@ export function Leaderboards({
                         className="ds-mono"
                         style={{
                           fontSize: 9,
-                          color: "var(--ds-fg-disabled)",
+                          color: "var(--ds-fg-subtle)",
                           letterSpacing: "0.06em",
                           flexShrink: 0,
                         }}
@@ -513,7 +513,7 @@ export function Leaderboards({
                       }}
                     >
                       {m.plays}{" "}
-                      <span style={{ color: "var(--ds-fg-disabled)" }}>
+                      <span style={{ color: "var(--ds-fg-subtle)" }}>
                         · {m.viewers} viewers
                       </span>
                     </span>

@@ -11,6 +11,7 @@ import {
   Clock,
   CheckCircle,
   Play,
+  ChevronRight,
 } from "@/components/icons";
 import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
 import { safeExternalHref } from "@/lib/safe-url";
@@ -295,8 +296,8 @@ export function DiscoverHero({
               border: 0,
             }}
           >
-            <Play style={{ width: 14, height: 14 }} />
             View details
+            <ChevronRight style={{ width: 14, height: 14 }} />
           </Link>
           {trailerHref && (
             <a

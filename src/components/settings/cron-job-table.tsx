@@ -40,10 +40,20 @@ const RUNS_PER_HOUR_WARN_AT = 4;
 export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
   const [jobs, setJobs] = useState(initialJobs);
   const [running, setRunning] = useState<Set<string>>(new Set());
+  // Why the last MANUAL run of each job failed. Kept client-side only: the
+  // server-rendered rows carry no reason, so scheduled failures show none.
+  const [runErrors, setRunErrors] = useState<Record<string, string>>({});
   const mounted = useHasMounted();
 
   async function triggerJob(endpoint: string, name: string) {
     setRunning((prev) => new Set(prev).add(name));
+    const setRunError = (message: string | null) =>
+      setRunErrors((prev) => {
+        const next = { ...prev };
+        if (message) next[name] = message;
+        else delete next[name];
+        return next;
+      });
     try {
       const res = await fetch(withBasePath(endpoint), { method: "POST" });
       const data = await res.json() as { ok?: boolean; skipped?: unknown; durationMs?: number; error?: string };
@@ -54,6 +64,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
       // failure. Real failures come back as a non-2xx status (e.g. upcoming's
       // 502) or as an `error` field on a 200 (a partly failed sync).
       const succeeded = res.ok && !data.error;
+      setRunError(succeeded ? null : typeof data.error === "string" && data.error ? data.error : `HTTP ${res.status}`);
 
       setJobs((prev) =>
         prev.map((j) =>
@@ -71,6 +82,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
         ),
       );
     } catch {
+      setRunError("Network error or unreadable response");
       setJobs((prev) =>
         prev.map((j) =>
           j.name === name
@@ -149,9 +161,14 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                     </span>
                   )}
                   {job.lastStatus === "error" && (
-                    <span className="flex items-center gap-1 text-red-400 text-xs">
-                      <XCircle className="w-3.5 h-3.5" /> Error
-                    </span>
+                    <>
+                      <span className="flex items-center gap-1 text-red-400 text-xs" title={runErrors[job.name]}>
+                        <XCircle className="w-3.5 h-3.5" /> Error
+                      </span>
+                      {runErrors[job.name] && (
+                        <div className="text-[11px] text-zinc-500 mt-0.5 max-w-48 break-words">{runErrors[job.name]}</div>
+                      )}
+                    </>
                   )}
                   {job.lastStatus === null && (
                     <span className="flex items-center gap-1 text-zinc-500 text-xs">

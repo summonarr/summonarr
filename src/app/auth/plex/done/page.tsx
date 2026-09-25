@@ -61,10 +61,15 @@ export default function PlexDonePage() {
   // running with no way out but the browser's Back button. `failed` stops the
   // spinner and surfaces a link back to /login; the success path is untouched.
   const [failed, setFailed] = useState(false);
+  // Which flow failed decides the way out: a login failure goes back to
+  // /login, but the settings flow is a signed-in admin connecting Plex, so
+  // sending them to the login page would strand them away from the retry.
+  const [failedFlow, setFailedFlow] = useState<"login" | "settings">("login");
   const searchParams = useSearchParams();
 
-  function fail(text: string) {
+  function fail(text: string, flow: "login" | "settings" = "login") {
     setMessage(text);
+    setFailedFlow(flow);
     setFailed(true);
   }
 
@@ -169,7 +174,7 @@ export default function PlexDonePage() {
     }
 
     if (!authToken) {
-      fail("Connection timed out. Please go back and try again.");
+      fail("Connection timed out. Please go back and try again.", "settings");
       return;
     }
 
@@ -182,7 +187,7 @@ export default function PlexDonePage() {
       });
       if (!res.ok) throw new Error();
     } catch {
-      fail("Failed to save Plex connection. Please try again.");
+      fail("Failed to save Plex connection. Please try again.", "settings");
       return;
     }
 
@@ -224,7 +229,7 @@ export default function PlexDonePage() {
     // session was tampered with; an absent URL state means the redirect was forged.
     const urlState = searchParams.get("state");
     if (!auth.state || !urlState || urlState !== auth.state) {
-      fail("Sign-in failed: state mismatch. Please try again.");
+      fail("Sign-in failed: state mismatch. Please try again.", auth.flow === "settings" ? "settings" : "login");
       return;
     }
 
@@ -255,7 +260,7 @@ export default function PlexDonePage() {
       </p>
       {failed && (
         <Link
-          href="/login"
+          href={failedFlow === "settings" ? "/settings" : "/login"}
           className="ds-tap ds-hover-tint inline-flex items-center justify-center font-medium mt-3"
           style={{
             background: "var(--ds-bg-2)",
@@ -267,7 +272,7 @@ export default function PlexDonePage() {
             padding: "0 20px",
           }}
         >
-          Back to sign in
+          {failedFlow === "settings" ? "Back to settings" : "Back to sign in"}
         </Link>
       )}
     </div>

@@ -85,17 +85,18 @@ export function EmailForm({
   return (
     <form onSubmit={handleSave} className="space-y-4">
       <div className="space-y-1.5">
-        <Label>Backend</Label>
-        <div className="inline-flex rounded-lg border border-zinc-700 bg-zinc-800 p-1 text-sm">
+        <Label id="email-backend-label">Backend</Label>
+        <div role="group" aria-labelledby="email-backend-label" className="inline-flex rounded-lg border border-zinc-700 bg-zinc-800 p-1 text-sm">
           {(["smtp", "resend"] as const).map((b) => (
             <button
               key={b}
               type="button"
+              aria-pressed={backend === b}
               onClick={() => { setBackend(b); setStatus("idle"); }}
               className={
                 "px-3 py-1.5 rounded-md transition-colors " +
                 (backend === b
-                  ? "bg-zinc-700 text-zinc-100"
+                  ? "bg-[var(--ds-accent)] text-[var(--ds-accent-fg)]"
                   : "text-zinc-400 hover:text-zinc-200")
               }
             >

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Trash2, Loader2, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { DetailActionButton } from "@/components/media/detail-action-button";
+import { useToast } from "@/components/ui/toast";
 
 interface Props {
   tmdbId: number;
@@ -15,6 +16,7 @@ interface Props {
 
 export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted }: Props) {
   const router = useRouter();
+  const { toast } = useToast();
   const [state, setState] = useState<"idle" | "reason" | "loading" | "voted">(alreadyVoted ? "voted" : "idle");
   const [reason, setReason] = useState("");
 
@@ -31,9 +33,11 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
         router.refresh();
       } else {
         setState("idle");
+        toast({ title: "Couldn't record your vote", variant: "error" });
       }
     } catch {
       setState("idle");
+      toast({ title: "Couldn't record your vote", variant: "error" });
     }
   }
 
@@ -43,18 +47,26 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
       const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "DELETE" });
       if (res.ok) {
         setState("idle");
+        toast({ title: "Vote removed", variant: "success" });
         router.refresh();
       } else {
         setState("voted");
+        toast({ title: "Couldn't remove your vote", variant: "error" });
       }
     } catch {
       setState("voted");
+      toast({ title: "Couldn't remove your vote", variant: "error" });
     }
   }
 
   if (state === "voted") {
     return (
-      <DetailActionButton variant="danger-soft" onClick={handleUnvote}>
+      <DetailActionButton
+        variant="danger-soft"
+        onClick={handleUnvote}
+        title="Remove your delete vote"
+        aria-label="Voted to Delete (click to remove your vote)"
+      >
         <Check style={{ width: 14, height: 14 }} />
         Voted to Delete
       </DetailActionButton>

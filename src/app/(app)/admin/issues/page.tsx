@@ -14,7 +14,8 @@ import { IssueFixMatchButton } from "@/components/admin/issue-fix-match-button";
 import { LiveRefresh } from "@/components/live-refresh";
 import { requireFeature } from "@/lib/features";
 import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
-import { Chip, PageHeader } from "@/components/ui/design";
+import { Chip, EmptyState, PageHeader } from "@/components/ui/design";
+import { LocalDateText } from "@/components/local-date";
 import { ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL, ISSUE_TYPE_LABELS } from "@/lib/status-labels";
 
 const SCOPE_LABELS: Record<string, string> = {
@@ -74,6 +75,7 @@ export default async function AdminIssuesPage({
   await requireFeature("feature.page.issues");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_ISSUES)) redirect("/");
+  const currentUserId = session.user.id;
 
   const { filter: rawFilter, selected: selectedId } = await searchParams;
   const filter: FilterValue = VALID_FILTERS.includes(rawFilter as FilterValue)
@@ -162,6 +164,120 @@ export default async function AdminIssuesPage({
     return `/admin/issues?filter=${filter}&selected=${id}`;
   }
 
+  const selectedInList = selectedIssue != null && groups.some((g) => g.representative.id === selectedIssue.id);
+
+  // Below xl the side panel is hidden, so the selected issue's claim control
+  // (and, for a deep link to an issue outside this tab, the whole issue) is
+  // rendered inline instead. `standalone` = the issue has no card in the list:
+  // show its header, actions and thread too; otherwise the card above already
+  // carries those and this adds only the claim state.
+  function renderMobileDetail(standalone: boolean) {
+    if (!selectedIssue) return null;
+    const sel = selectedIssue;
+    const key = `${sel.tmdbId}:${sel.mediaType}`;
+    return (
+      <div
+        className="xl:hidden"
+        style={{
+          marginTop: standalone ? 0 : 6,
+          marginBottom: standalone ? 16 : 0,
+          padding: 12,
+          background: "var(--ds-bg-2)",
+          border: "1px solid var(--ds-border)",
+          borderRadius: 8,
+        }}
+      >
+        {standalone && (
+          <>
+            <div className="flex items-center flex-wrap" style={{ gap: 6 }}>
+              <p className="font-semibold" style={{ fontSize: 14, color: "var(--ds-fg)", margin: 0 }}>
+                {sel.title}
+              </p>
+              <Chip tone={ISSUE_STATUS_TONE[sel.status]}>{ISSUE_STATUS_LABEL[sel.status]}</Chip>
+              <Chip>{ISSUE_TYPE_LABELS[sel.issueType] ?? sel.issueType}</Chip>
+            </div>
+            <p className="ds-mono" style={{ marginTop: 4, fontSize: 10.5, color: "var(--ds-fg-subtle)" }}>
+              Reported by {sel.user.name ?? sel.user.email} ·{" "}
+              <LocalDateText iso={sel.createdAt.toISOString()} />
+            </p>
+            {sel.note && (
+              <p
+                className="whitespace-pre-wrap"
+                style={{
+                  marginTop: 8,
+                  padding: "6px 10px",
+                  borderRadius: 4,
+                  background: "var(--ds-bg-1)",
+                  fontSize: 12,
+                  color: "var(--ds-fg-muted)",
+                }}
+              >
+                {sel.note}
+              </p>
+            )}
+            {sel.resolution && (
+              <p
+                className="italic"
+                style={{
+                  marginTop: 6,
+                  fontSize: 12,
+                  color: "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))",
+                }}
+              >
+                Resolution: {sel.resolution}
+              </p>
+            )}
+          </>
+        )}
+        {sel.claimedBy && (
+          <p
+            className="ds-mono"
+            style={{ marginTop: standalone ? 4 : 0, marginBottom: 8, fontSize: 10.5, color: "var(--ds-accent-text)" }}
+          >
+            Claimed by {sel.claimedUser?.name ?? sel.claimedUser?.email ?? "unknown"}
+          </p>
+        )}
+        <div className="flex items-center flex-wrap" style={{ gap: 8, marginTop: standalone ? 10 : 0 }}>
+          {standalone && sel.issueType === "WRONG_MATCH" && (
+            <IssueFixMatchButton
+              issueId={sel.id}
+              tmdbId={sel.tmdbId}
+              mediaType={sel.mediaType}
+              title={sel.title}
+              onPlex={plexSet.has(key)}
+              onJellyfin={jellyfinSet.has(key)}
+              isAdmin={true}
+            />
+          )}
+          <IssueClaimButton
+            issueId={sel.id}
+            claimedBy={sel.claimedBy}
+            claimerName={sel.claimedUser?.name ?? sel.claimedUser?.email ?? null}
+            currentUserId={currentUserId}
+          />
+          {standalone && (
+            <IssueActions
+              issueId={sel.id}
+              currentStatus={sel.status}
+              mediaType={sel.mediaType}
+              tvdbId={sel.tvdbId}
+              scope={sel.scope}
+              seasonNumber={sel.seasonNumber}
+              episodeNumber={sel.episodeNumber}
+              libraryConfirmed={plexSet.has(key) || jellyfinSet.has(key)}
+              instances={instancesFor(sel.mediaType)}
+            />
+          )}
+        </div>
+        {standalone && (
+          <div style={{ marginTop: 12 }}>
+            <IssueThread issueId={sel.id} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="ds-page-enter">
       <LiveRefresh
@@ -193,7 +309,8 @@ export default async function AdminIssuesPage({
             <Link
               key={tab.value}
               href={`?filter=${tab.value}`}
-              className="inline-flex items-center gap-1.5 whitespace-nowrap font-medium transition-colors"
+              aria-current={active ? "page" : undefined}
+              className="ds-hover-tint inline-flex items-center gap-1.5 whitespace-nowrap font-medium transition-colors"
               style={{
                 padding: "5px 12px",
                 borderRadius: 6,
@@ -240,6 +357,7 @@ export default async function AdminIssuesPage({
       ) : (
         <div className="xl:grid xl:grid-cols-[1fr_480px] xl:gap-6 xl:items-start">
           <div className="min-w-0">
+            {selectedIssue && !selectedInList && renderMobileDetail(true)}
             {groups.length === 0 && <EmptyIssues />}
             <div className="flex flex-col gap-3">
               {groups.map(({ representative: issue, count, reporterNames }) => {
@@ -248,11 +366,12 @@ export default async function AdminIssuesPage({
                 return (
                   <div
                     key={issue.id}
-                    className={isSelected ? "xl:ring-1 xl:ring-indigo-500/30 xl:rounded-lg" : undefined}
+                    className={isSelected ? "ring-1 ring-indigo-500/30 rounded-lg" : undefined}
                   >
                     <IssueCardShell
                       issueId={issue.id}
                       messageCount={issue._count.messages}
+                      initialOpen={isSelected}
                     >
                       <div className="relative w-10 h-14 shrink-0 rounded bg-zinc-700 overflow-hidden mt-0.5">
                         {poster ? (
@@ -316,7 +435,7 @@ export default async function AdminIssuesPage({
                               : `by ${issue.user.name ?? issue.user.email}`}
                           </span>
                           {" · "}
-                          {new Date(issue.createdAt).toLocaleDateString()}
+                          <LocalDateText iso={issue.createdAt.toISOString()} />
                         </p>
                         {issue.note && (
                           <p
@@ -385,13 +504,14 @@ export default async function AdminIssuesPage({
                         />
                       </div>
                     </IssueCardShell>
+                    {isSelected && renderMobileDetail(false)}
                   </div>
                 );
               })}
             </div>
           </div>
 
-          <aside className="hidden xl:block sticky top-6 h-[calc(100vh-3rem)]">
+          <aside className="hidden xl:block sticky top-6 h-[calc(100dvh-52px-3rem)]">
             {selectedIssue ? (
               <div
                 className="h-full flex flex-col overflow-hidden"
@@ -487,7 +607,7 @@ export default async function AdminIssuesPage({
                       >
                         Reported by{" "}
                         {selectedIssue.user.name ?? selectedIssue.user.email} ·{" "}
-                        {new Date(selectedIssue.createdAt).toLocaleDateString()}
+                        <LocalDateText iso={selectedIssue.createdAt.toISOString()} />
                       </p>
                       {selectedIssue.claimedBy && (
                         <p
@@ -610,19 +730,5 @@ export default async function AdminIssuesPage({
 }
 
 function EmptyIssues() {
-  return (
-    <div
-      className="text-center ds-mono"
-      style={{
-        padding: "40px 20px",
-        background: "var(--ds-bg-1)",
-        border: "1px dashed var(--ds-border)",
-        borderRadius: 8,
-        fontSize: 12,
-        color: "var(--ds-fg-subtle)",
-      }}
-    >
-      No issues in this category.
-    </div>
-  );
+  return <EmptyState icon={MessageSquare} title="No issues in this category." />;
 }

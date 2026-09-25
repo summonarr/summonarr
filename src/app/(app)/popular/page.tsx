@@ -217,6 +217,9 @@ export default async function PopularOnServerPage({
                 aria-current={isActive ? "page" : undefined}
                 className="ds-hover-tint inline-flex items-center whitespace-nowrap font-medium"
                 style={{
+                  // 32px hit area: these segments are the page's only controls
+                  // at phone width, and 5px padding alone left them ~26px tall.
+                  minHeight: 32,
                   padding: "5px 12px",
                   borderRadius: 6,
                   fontSize: 12,
@@ -253,6 +256,9 @@ export default async function PopularOnServerPage({
                 aria-current={isActive ? "page" : undefined}
                 className="ds-hover-tint inline-flex items-center whitespace-nowrap font-medium"
                 style={{
+                  // 32px hit area: these segments are the page's only controls
+                  // at phone width, and 5px padding alone left them ~26px tall.
+                  minHeight: 32,
                   padding: "5px 12px",
                   borderRadius: 6,
                   fontSize: 12,

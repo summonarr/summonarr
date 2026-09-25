@@ -48,6 +48,18 @@ export function ActivityFilterBar() {
   const [customValue, setCustomValue] = useState(!isPreset ? currentDays : "");
   const [customError, setCustomError] = useState<string | null>(null);
 
+  // The component is not remounted on a same-route navigation (browser Back
+  // from ?days=45 to ?days=7), so the Custom highlight and input would keep
+  // their old values. Re-derive them from the URL whenever `days` changes
+  // (React's "adjust state during render" pattern, no effect needed).
+  const [syncedDays, setSyncedDays] = useState(currentDays);
+  if (syncedDays !== currentDays) {
+    setSyncedDays(currentDays);
+    setShowCustom(!isPreset && currentDays !== "30");
+    setCustomValue(!isPreset ? currentDays : "");
+    setCustomError(null);
+  }
+
   function isSubPageActive(page: typeof SUB_PAGES[0]): boolean {
     if (page.href === "/admin/activity" && page.exact) {
       return pathname === "/admin/activity" && !currentTab;
@@ -112,6 +124,7 @@ export function ActivityFilterBar() {
               <button
                 key={page.label}
                 onClick={() => router.push(`/admin/activity?tab=${page.tab}`)}
+                aria-current={active ? "page" : undefined}
                 className={`inline-flex items-center min-h-8 px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                   active
                     ? "bg-zinc-800 text-zinc-100"
@@ -127,6 +140,7 @@ export function ActivityFilterBar() {
               <button
                 key={page.label}
                 onClick={() => router.push("/admin/activity")}
+                aria-current={active ? "page" : undefined}
                 className={`inline-flex items-center min-h-8 px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                   active
                     ? "bg-zinc-800 text-zinc-100"
@@ -141,6 +155,7 @@ export function ActivityFilterBar() {
             <Link
               key={page.label}
               href={page.href}
+              aria-current={active ? "page" : undefined}
               className={`inline-flex items-center min-h-8 px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                 active
                   ? "bg-zinc-800 text-zinc-100"
@@ -156,27 +171,33 @@ export function ActivityFilterBar() {
       {/* Filters */}
       {showFilters && (
         <div className="flex flex-wrap items-center gap-4">
-          <div className="flex items-center gap-1">
+          <div className="flex flex-wrap items-center gap-1">
             <span className="text-xs text-zinc-500 mr-1">Period</span>
             <div className="flex rounded-lg border border-zinc-700 overflow-hidden">
-              {DATE_RANGES.map((r) => (
+              {DATE_RANGES.map((r) => {
+                const selected =
+                  !showCustom && (currentDays === r.value || (r.value === "30" && !searchParams.has("days")));
+                return (
                 <button
+                  aria-pressed={selected}
                   key={r.value}
                   onClick={() => {
                     setShowCustom(false);
                     setParam("days", r.value === "30" ? "" : r.value);
                   }}
                   className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
-                    !showCustom && (currentDays === r.value || (r.value === "30" && !searchParams.has("days")))
+                    selected
                       ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
                       : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
                   }`}
                 >
                   {r.label}
                 </button>
-              ))}
+                );
+              })}
               <button
                 onClick={() => setShowCustom(true)}
+                aria-pressed={showCustom}
                 className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                   showCustom
                     ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
@@ -187,7 +208,7 @@ export function ActivityFilterBar() {
               </button>
             </div>
             {showCustom && (
-              <div className="flex items-center gap-1 ml-1">
+              <div className="flex flex-wrap items-center gap-1 ml-1">
                 <input
                   type="number"
                   min={1}
@@ -219,7 +240,7 @@ export function ActivityFilterBar() {
                   <span
                     id="activity-custom-days-error"
                     role="alert"
-                    className="text-xs text-red-400 whitespace-nowrap"
+                    className="text-xs text-red-400"
                   >
                     {customError}
                   </span>
@@ -235,6 +256,7 @@ export function ActivityFilterBar() {
                 <button
                   key={s.value}
                   onClick={() => setParam("source", s.value)}
+                  aria-pressed={currentSource === s.value}
                   className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                     currentSource === s.value
                       ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
@@ -254,6 +276,7 @@ export function ActivityFilterBar() {
                 <button
                   key={t.value}
                   onClick={() => setParam("mediaType", t.value)}
+                  aria-pressed={currentMediaType === t.value}
                   className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                     currentMediaType === t.value
                       ? "bg-indigo-600 text-[var(--ds-accent-fg)]"

@@ -27,6 +27,9 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
   const [reason, setReason] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [searching, setSearching] = useState(false);
+  // True once a search has come back successfully, so an empty result list can
+  // say "no matches" instead of rendering nothing at all.
+  const [searched, setSearched] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
 
@@ -36,9 +39,11 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
     e.preventDefault();
     if (!query.trim()) {
       setResults([]);
+      setSearched(false);
       return;
     }
     setSearching(true);
+    setSearched(false);
     setError("");
     try {
       const res = await fetch(withBasePath(`/api/search?q=${encodeURIComponent(query.trim())}`));
@@ -50,6 +55,7 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
         setError((data as { error?: string } | null)?.error ?? "Search failed — try again");
         return;
       }
+      setSearched(true);
       if (Array.isArray(data)) {
         setResults(
           data
@@ -196,6 +202,12 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
             borderRadius: 6,
           }}
         />
+
+        {searched && !searching && results.length === 0 && (
+          <p role="status" style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>
+            No matching titles
+          </p>
+        )}
 
         {results.length > 0 && (
           <div className="flex flex-col" style={{ gap: 4 }}>

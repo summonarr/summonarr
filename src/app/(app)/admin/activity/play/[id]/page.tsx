@@ -40,12 +40,16 @@ function formatBitrate(raw: number | null, source: string | null): string {
   return `${Math.round(kbps)} kbps`;
 }
 
+// Server component: formatting here uses the Node process's zone, so pin it to
+// UTC and say so (matching the calendar's "days in UTC" label) rather than
+// render an unlabelled time in whatever zone the container happens to run.
 function formatTs(d: Date | null): string {
   if (!d) return "—";
-  return d.toLocaleString("en-US", {
+  return `${d.toLocaleString("en-US", {
     month: "short", day: "numeric", year: "numeric",
     hour: "numeric", minute: "2-digit", hour12: true,
-  });
+    timeZone: "UTC",
+  })} UTC`;
 }
 
 function LabeledValue({ label, value, mono = false }: { label: string; value: React.ReactNode; mono?: boolean }) {

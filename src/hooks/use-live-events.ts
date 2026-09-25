@@ -5,6 +5,8 @@ import { withBasePath } from "@/lib/base-path";
 
 export type LiveEvent =
   | { type: "connected" }
+  // Client-synthesized (never sent by the server): the shared stream errored.
+  | { type: "disconnected" }
   | { type: "request:new"; requestId: string }
   | { type: "request:updated"; requestId: string; status: string }
   | { type: "request:deleted"; requestId: string }
@@ -82,6 +84,7 @@ function ensureEventSource() {
     }
   };
   es.onerror = () => {
+    for (const sub of subscribers) sub({ type: "disconnected" });
     // CONNECTING → the browser is auto-retrying a transient drop; nothing to do.
     // CLOSED → permanent failure (an HTTP-error/wrong-MIME reconnect — e.g. the
     // server tore the stream down at the reauth tick and the reconnect got a

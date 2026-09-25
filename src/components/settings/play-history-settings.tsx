@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -40,10 +40,15 @@ export function PlayHistorySettingsForm({
   const [pollingInterval, setPollingInterval] = useState(initialPollingInterval);
   const [retentionDays, setRetentionDays] = useState(initialRetentionDays);
   const [status, setStatus] = useState<SaveStatus>("idle");
+  const [error, setError] = useState<string | null>(null);
+  const enabledId = useId();
+  const plexId = useId();
+  const jellyfinId = useId();
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setStatus("saving");
+    setError(null);
     try {
       const res = await fetch(withBasePath("/api/settings"), {
         method: "PATCH",
@@ -59,19 +64,26 @@ export function PlayHistorySettingsForm({
           playHistoryRetentionDays: retentionDays,
         }),
       });
-      const data: { ok: boolean } = await res.json();
-      setStatus(data.ok ? "ok" : "error");
+      const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      if (res.ok && data?.ok) {
+        setStatus("ok");
+        // Only the success tick fades; an error stays until the next save.
+        setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
+      } else {
+        setError(data?.error ?? `Save failed (${res.status})`);
+        setStatus("error");
+      }
     } catch {
+      setError("Network error — please try again");
       setStatus("error");
     }
-    setTimeout(() => setStatus("idle"), 3000);
   }
 
   return (
     <form onSubmit={handleSave} className="space-y-5">
       <div className="flex items-center gap-3">
-        <Switch size="lg" checked={enabled} onCheckedChange={() => setEnabled(!enabled)} />
-        <Label className="cursor-pointer" onClick={() => setEnabled(!enabled)}>
+        <Switch id={enabledId} size="lg" checked={enabled} onCheckedChange={() => setEnabled(!enabled)} />
+        <Label htmlFor={enabledId} className="cursor-pointer">
           Enable play history tracking
         </Label>
       </div>
@@ -80,12 +92,12 @@ export function PlayHistorySettingsForm({
         <>
           <div className="space-y-3 pl-1">
             <div className="flex items-center gap-3">
-              <Switch checked={plexEnabled} onCheckedChange={() => setPlexEnabled(!plexEnabled)} />
-              <span className="text-sm text-zinc-300">Plex</span>
+              <Switch id={plexId} aria-label="Track Plex play history" checked={plexEnabled} onCheckedChange={() => setPlexEnabled(!plexEnabled)} />
+              <Label htmlFor={plexId} className="cursor-pointer text-sm text-zinc-300">Plex</Label>
             </div>
             <div className="flex items-center gap-3">
-              <Switch checked={jellyfinEnabled} onCheckedChange={() => setJellyfinEnabled(!jellyfinEnabled)} />
-              <span className="text-sm text-zinc-300">Jellyfin</span>
+              <Switch id={jellyfinId} aria-label="Track Jellyfin play history" checked={jellyfinEnabled} onCheckedChange={() => setJellyfinEnabled(!jellyfinEnabled)} />
+              <Label htmlFor={jellyfinId} className="cursor-pointer text-sm text-zinc-300">Jellyfin</Label>
             </div>
           </div>
 
@@ -176,7 +188,8 @@ export function PlayHistorySettingsForm({
           Save
         </Button>
         {status === "ok" && <CheckCircle className="w-4 h-4 text-green-500" />}
-        {status === "error" && <XCircle className="w-4 h-4 text-red-500" />}
+        {status === "error" && <XCircle className="w-4 h-4 shrink-0 text-red-500" aria-hidden="true" />}
+        {status === "error" && error && <span role="alert" className="text-xs text-red-400">{error}</span>}
       </div>
     </form>
   );

@@ -138,11 +138,7 @@ export function MotdModal({ title, body }: MotdModalProps) {
         <p className="text-zinc-300 text-sm leading-relaxed whitespace-pre-wrap">{body}</p>
 
         <div className="mt-6 flex justify-end">
-          <Button
-            data-motd-primary
-            onClick={dismiss}
-            className="bg-indigo-600 hover:bg-indigo-500"
-          >
+          <Button data-motd-primary onClick={dismiss}>
             Got it
           </Button>
         </div>

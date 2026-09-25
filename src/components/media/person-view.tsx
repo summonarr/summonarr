@@ -163,6 +163,7 @@ export function PersonView({
                   key={val}
                   type="button"
                   onClick={() => setFilter(val)}
+                  aria-pressed={active}
                   className="ds-mono ds-hover-tint"
                   style={{
                     fontSize: 12,

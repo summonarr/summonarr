@@ -19,9 +19,11 @@ const ACCENT_SWATCH: Record<Accent, string> = {
   emerald: "oklch(0.68 0.16 158)",
   cyan: "oklch(0.72 0.13 220)",
   rose: "oklch(0.66 0.21 15)",
-  // The dark-theme value ([data-accent="mono"] in globals.css); the picker
-  // sits in both themes' header and a mid-grey read as neither.
-  mono: "oklch(0.97 0 0)",
+  // Mono FLIPS with the theme ([data-accent="mono"] in globals.css: near-white
+  // in dark, near-black in light), so the swatch is split between the two
+  // values. A single value previews the opposite of the pick in one theme and
+  // reads as an empty circle on that theme's menu surface.
+  mono: "linear-gradient(135deg, oklch(0.97 0 0) 50%, oklch(0.18 0 0) 50%)",
 };
 
 const ACCENT_LABEL: Record<Accent, string> = {

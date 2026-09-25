@@ -87,7 +87,7 @@ export default async function ProfilePage() {
               >
                 <User style={{ width: 18, height: 18 }} />
               </div>
-              <div>
+              <div className="min-w-0">
                 {user?.name && (
                   <p
                     className="font-semibold"
@@ -101,6 +101,7 @@ export default async function ProfilePage() {
                   </p>
                 )}
                 <p
+                  className="break-all"
                   style={{
                     fontSize: 12,
                     color: "var(--ds-fg-muted)",
@@ -153,8 +154,8 @@ export default async function ProfilePage() {
         </div>
 
         <div
-          className="flex flex-col lg:mt-0"
-          style={{ gap: 20, marginTop: 20 }}
+          className="flex flex-col mt-5 lg:mt-0"
+          style={{ gap: 20 }}
         >
           <ProfileCard
             title="Notification Preferences"

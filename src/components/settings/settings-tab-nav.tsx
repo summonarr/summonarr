@@ -35,7 +35,9 @@ export function SettingsTabNav({ activeTab }: { activeTab: TabId }) {
             key={id}
             href={`/settings?tab=${id}`}
             aria-current={active ? "page" : undefined}
-            className="inline-flex items-center whitespace-nowrap font-medium transition-colors"
+            // min-h-9 (36px) keeps each tab a comfortable tap target on
+            // phones, where the bar wraps into two tightly packed rows.
+            className="inline-flex items-center min-h-9 whitespace-nowrap font-medium transition-colors"
             style={{
               padding: "5px 14px",
               borderRadius: 6,

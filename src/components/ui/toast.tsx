@@ -23,22 +23,57 @@ export function useToast(): ToastContextValue {
 }
 
 const AUTO_DISMISS_MS = 4000;
+// Errors carry a reason the user may need to read in full (a failed Radarr
+// push, say), and there's no way to get a toast back once it's gone.
+const ERROR_AUTO_DISMISS_MS = 10000;
+
+function dismissAfter(variant: ToastVariant): number {
+  return variant === "error" ? ERROR_AUTO_DISMISS_MS : AUTO_DISMISS_MS;
+}
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const idRef = useRef(0);
+  // Pending auto-dismiss timers by toast id, so a manual dismiss clears its
+  // timer and hovering/focusing a toast can pause it.
+  const timersRef = useRef(new Map<number, ReturnType<typeof setTimeout>>());
 
-  const dismiss = useCallback((id: number) => {
-    setToasts((cur) => cur.filter((t) => t.id !== id));
+  const clearTimer = useCallback((id: number) => {
+    const handle = timersRef.current.get(id);
+    if (handle !== undefined) {
+      clearTimeout(handle);
+      timersRef.current.delete(id);
+    }
   }, []);
+
+  const dismiss = useCallback(
+    (id: number) => {
+      clearTimer(id);
+      setToasts((cur) => cur.filter((t) => t.id !== id));
+    },
+    [clearTimer],
+  );
+
+  // (Re)starts the full countdown. Resuming after a pause restarts it rather
+  // than tracking the remainder — the reader just finished looking at it.
+  const startTimer = useCallback(
+    (id: number, variant: ToastVariant) => {
+      clearTimer(id);
+      timersRef.current.set(
+        id,
+        setTimeout(() => dismiss(id), dismissAfter(variant)),
+      );
+    },
+    [clearTimer, dismiss],
+  );
 
   const toast = useCallback(
     ({ title, variant = "info" }: { title: string; variant?: ToastVariant }) => {
       const id = ++idRef.current;
       setToasts((cur) => [...cur, { id, title, variant }]);
-      setTimeout(() => dismiss(id), AUTO_DISMISS_MS);
+      startTimer(id, variant);
     },
-    [dismiss],
+    [startTimer],
   );
 
   // Memoized so consumers don't re-render every time the toast list changes.
@@ -61,6 +96,16 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
           <div
             key={t.id}
             role={t.variant === "error" ? "alert" : "status"}
+            onPointerEnter={() => clearTimer(t.id)}
+            onPointerLeave={(e) => {
+              if (!e.currentTarget.contains(document.activeElement)) startTimer(t.id, t.variant);
+            }}
+            onFocus={() => clearTimer(t.id)}
+            onBlur={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null) && !e.currentTarget.matches(":hover")) {
+                startTimer(t.id, t.variant);
+              }
+            }}
             className="pointer-events-auto flex items-start gap-2.5 ds-page-enter"
             style={{
               padding: "10px 12px",

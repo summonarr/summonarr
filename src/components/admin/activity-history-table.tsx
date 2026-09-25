@@ -219,7 +219,9 @@ export function ActivityHistoryTable({
       .catch((err) => {
         if (err.name === "AbortError") return;
         console.error("[activity-history]", err);
-        setError(err instanceof Error ? err.message : "Failed to load");
+        // The raw status lands in the console above; the table shows copy an
+        // admin can act on, with a Retry beside it.
+        setError("Couldn't load play history.");
         setLoading(false);
       });
 
@@ -404,7 +406,23 @@ export function ActivityHistoryTable({
                       color: "var(--ds-danger)",
                     }}
                   >
-                    {error}
+                    <div role="alert">{error}</div>
+                    <button
+                      type="button"
+                      className="ds-hover-tint"
+                      onClick={() => setReloadToken((t) => t + 1)}
+                      style={{
+                        marginTop: 10,
+                        fontSize: 12,
+                        padding: "5px 12px",
+                        borderRadius: 6,
+                        background: "transparent",
+                        border: "1px solid var(--ds-border)",
+                        color: "var(--ds-fg-muted)",
+                      }}
+                    >
+                      Retry
+                    </button>
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
@@ -602,7 +620,7 @@ export function ActivityHistoryTable({
                                 className="ds-mono"
                                 style={{
                                   fontSize: 10.5,
-                                  color: "var(--ds-fg-disabled)",
+                                  color: "var(--ds-fg-subtle)",
                                   whiteSpace: "nowrap",
                                   overflow: "hidden",
                                   textOverflow: "ellipsis",

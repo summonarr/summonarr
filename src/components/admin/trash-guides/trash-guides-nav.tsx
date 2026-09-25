@@ -125,7 +125,7 @@ export function TrashGuidesNav({
               href={`${page.href}${queryWithParams}`}
               className={`px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors ${
                 active
-                  ? "bg-zinc-800 text-zinc-100"
+                  ? "bg-zinc-700 text-zinc-100"
                   : "text-zinc-500 hover:text-zinc-300"
               }`}
             >
@@ -158,7 +158,7 @@ export function TrashGuidesNav({
                       <span className={active ? "text-[var(--ds-accent-fg)] ml-1" : "text-zinc-500 ml-1"}>· {s.suffix}</span>
                     </span>
                     {!cfg && (
-                      <span className="text-[10px] text-amber-400">(not configured)</span>
+                      <span className={`text-[10px] ${active ? "text-[var(--ds-accent-fg)]" : "text-amber-400"}`}>(not configured)</span>
                     )}
                   </button>
                 );

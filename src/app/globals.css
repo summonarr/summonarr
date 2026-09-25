@@ -306,6 +306,13 @@
      the right foreground for all six accents at once. */
   --primary: var(--ds-accent);
   --primary-foreground: var(--ds-accent-fg);
+  /* shadcn's focus `--ring` was a neutral grey (L .708 in light): as the
+     `focus-visible:ring-ring/50` glow on a white surface it was ~1.4:1 and the
+     `border-ring` edge ~2.2:1, both under the 3:1 non-text minimum, so a
+     keyboard user in light mode could barely see which Button/Input had
+     focus. The accent TEXT token is tuned ≥4.5:1 against every surface in
+     both themes, so the solid `border-ring` edge now clears 3:1 everywhere. */
+  --ring: var(--ds-accent-text);
 
   /* Accent (was indigo): align every indigo shade to the DS accent.
      All `bg-indigo-*`, `text-indigo-*`, `border-indigo-*`, `ring-indigo-*`
@@ -531,7 +538,8 @@ a:focus-visible > .ds-chip-link { color: var(--ds-fg); border-color: var(--ds-ac
    MediaCard already puts its Plex/Jellyfin availability chips — identical
    coordinates, and the rank badge wins on z-index, so it clipped the label on
    every card in the grid. Push the chips clear of the badge instead of moving
-   the rank somewhere less legible. */
+   the rank somewhere less legible. /for-you reuses the class for the same
+   reason: its top-left "not interested" button sits on the chips too. */
 .ds-ranked-card [data-media-chips] { left: 2rem; }
 
 /* ───── Settings section anchors ─────
@@ -591,7 +599,7 @@ a:focus-visible > .ds-chip-link { color: var(--ds-fg); border-color: var(--ds-ac
 @media (max-width: 899px) {
   .resp-grid-2 { grid-template-columns: 1fr !important; }
   .resp-kpi    { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
-  .resp-kpi > div { border-right: none !important; }
+  .resp-kpi > div { border-right: none !important; border-bottom: 1px solid var(--ds-border) !important; }
   .resp-kpi > div:nth-child(odd) { border-right: 1px solid var(--ds-border) !important; }
   .resp-kpi > div:nth-last-child(-n+2) { border-bottom: none !important; }
 }

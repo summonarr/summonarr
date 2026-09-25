@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Plus, Check, Loader2, Ban } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useToast } from "@/components/ui/toast";
@@ -29,6 +30,7 @@ export function Request4kButton({
   blacklisted?: boolean;
 }) {
   const { toast } = useToast();
+  const router = useRouter();
   const [state, setState] = useState<"idle" | "loading" | "requested" | "error">(
     requested ? "requested" : "idle",
   );
@@ -62,10 +64,12 @@ export function Request4kButton({
       if (body?.alreadyAvailable) {
         setFoundAvailable(true);
         setState("idle");
+        router.refresh();
         return;
       }
       setState("requested");
       toast({ title: "Requested in 4K", variant: "success" });
+      router.refresh();
     } catch {
       setMsg("Network error — please try again");
       setState("error");

@@ -4,9 +4,8 @@ import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import Link from "next/link";
 import Image from "next/image";
-import { Card } from "@/components/ui/card";
 import { posterUrl } from "@/lib/tmdb-types";
-import { PageHeader } from "@/components/ui/design";
+import { PageHeader, EmptyState } from "@/components/ui/design";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
 import { Film, Tv2 } from "@/components/icons";
 import { formatRelativeTimeWithDateFallback } from "@/lib/relative-time";
@@ -136,9 +135,12 @@ export default async function RecentlyAddedPage() {
       <ActivityFilterBar />
 
       {items.length === 0 ? (
-        <Card className="bg-zinc-900 border-zinc-800 p-8 text-center">
-          <p className="text-zinc-500 text-sm">No recently added items found. Run a library sync first.</p>
-        </Card>
+        <EmptyState
+          icon={Film}
+          title="No recently added items"
+          description="Run a library sync first."
+          cta={{ href: "/admin/library", label: "Go to Library" }}
+        />
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
           {items.map((item, i) => {

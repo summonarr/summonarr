@@ -256,7 +256,7 @@ export function ActivityStatsRedesign({
                     justifyContent: "space-between",
                     marginTop: 6,
                     fontSize: 9.5,
-                    color: "var(--ds-fg-disabled)",
+                    color: "var(--ds-fg-subtle)",
                   }}
                 >
                   {axisLabels(t.days).map((l, i) => (
@@ -579,7 +579,7 @@ export function ActivityStatsRedesign({
                 justifyContent: "space-between",
                 marginTop: 6,
                 fontSize: 9.5,
-                color: "var(--ds-fg-disabled)",
+                color: "var(--ds-fg-subtle)",
               }}
             >
               {[0, 6, 12, 18, 23].map((h) => (
@@ -643,7 +643,7 @@ function Empty() {
     <div
       style={{
         fontSize: 12,
-        color: "var(--ds-fg-disabled)",
+        color: "var(--ds-fg-subtle)",
         padding: "20px 0",
         textAlign: "center",
       }}
@@ -692,7 +692,7 @@ function LbRow({
           width: 16,
           textAlign: "right",
           fontSize: 10.5,
-          color: "var(--ds-fg-disabled)",
+          color: "var(--ds-fg-subtle)",
           fontVariantNumeric: "tabular-nums",
         }}
       >
@@ -754,7 +754,7 @@ function LbRow({
           >
             {primary}
             {secondary && (
-              <span style={{ color: "var(--ds-fg-disabled)" }}>
+              <span style={{ color: "var(--ds-fg-subtle)" }}>
                 {" "}
                 · {secondary}
               </span>

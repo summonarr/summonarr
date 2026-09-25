@@ -532,7 +532,7 @@ export function IssueActions({
                                 {rel.seeders}S
                               </span>
                             )}
-                            <span className="text-xs text-zinc-700">{formatAge(rel.age * 24)}</span>
+                            <span className="text-xs text-zinc-500">{formatAge(rel.age * 24)}</span>
                           </div>
                           {rel.rejected && rel.rejections.length > 0 && (
                             <p className="text-xs text-amber-400 mt-0.5 truncate">{rel.rejections[0]}</p>

@@ -305,7 +305,7 @@ function ChartTooltipDetail({
         >
           <span
             className="ds-mono uppercase"
-            style={{ fontSize: 8.5, letterSpacing: "0.06em", color: "var(--ds-fg-disabled)" }}
+            style={{ fontSize: 8.5, letterSpacing: "0.06em", color: "var(--ds-fg-subtle)" }}
           >
             {r.label}
           </span>
@@ -485,7 +485,7 @@ export function Sparkline({
               style={{
                 fontSize: 9,
                 letterSpacing: "0.08em",
-                color: "var(--ds-fg-disabled)",
+                color: "var(--ds-fg-subtle)",
                 marginBottom: 2,
               }}
             >
@@ -699,7 +699,7 @@ export function AreaChart({
               style={{
                 fontSize: 9,
                 letterSpacing: "0.08em",
-                color: "var(--ds-fg-disabled)",
+                color: "var(--ds-fg-subtle)",
                 marginBottom: 2,
               }}
             >
@@ -800,7 +800,7 @@ export function HourHeatmap({
       <div
         className="ds-mono"
         title="Hours are bucketed in UTC"
-        style={{ fontSize: 7.5, color: "var(--ds-fg-disabled)", alignSelf: "end", lineHeight: 1 }}
+        style={{ fontSize: 7.5, color: "var(--ds-fg-subtle)", alignSelf: "end", lineHeight: 1 }}
       >
         UTC
       </div>
@@ -810,7 +810,7 @@ export function HourHeatmap({
           className="ds-mono"
           style={{
             fontSize: 8.5,
-            color: "var(--ds-fg-disabled)",
+            color: "var(--ds-fg-subtle)",
             textAlign: "center",
             lineHeight: 1,
           }}
@@ -824,7 +824,7 @@ export function HourHeatmap({
             className="ds-mono"
             style={{
               fontSize: 9.5,
-              color: "var(--ds-fg-disabled)",
+              color: "var(--ds-fg-subtle)",
               lineHeight: `${cell}px`,
               textAlign: "right",
               paddingRight: 6,
@@ -838,6 +838,7 @@ export function HourHeatmap({
               <div
                 key={c}
                 title={`${DAYS[r]} ${c}:00 — ${v} plays`}
+                aria-label={clickable ? `${DAYS[r]} ${c}:00 UTC, ${v} plays` : undefined}
                 role={clickable ? "button" : undefined}
                 tabIndex={clickable ? 0 : undefined}
                 onClick={clickable ? (e) => openCell(e.currentTarget, r, c, v) : undefined}
@@ -859,7 +860,7 @@ export function HourHeatmap({
                   background:
                     v === 0
                       ? "color-mix(in oklab, var(--ds-fg) 2.5%, transparent)"
-                      : `oklch(0.58 0.21 275 / ${(0.1 + (v / max) * 0.76).toFixed(3)})`,
+                      : `color-mix(in oklab, var(--ds-accent) ${(10 + (v / max) * 76).toFixed(1)}%, transparent)`,
                 }}
               />
             );
@@ -1175,7 +1176,7 @@ export function KeyVal({ k, v }: { k: string; v: ReactNode }) {
         className="ds-mono uppercase"
         style={{
           fontSize: 9,
-          color: "var(--ds-fg-disabled)",
+          color: "var(--ds-fg-subtle)",
           letterSpacing: "0.08em",
         }}
       >
@@ -1263,7 +1264,7 @@ export function HorizontalBars({
       <div
         style={{
           fontSize: 12,
-          color: "var(--ds-fg-disabled)",
+          color: "var(--ds-fg-subtle)",
           padding: "20px 0",
           textAlign: "center",
         }}
@@ -1406,7 +1407,7 @@ export function StreamTypeBars({
                 }}
               >
                 {r.count.toLocaleString("en-US")}{" "}
-                <span style={{ color: "var(--ds-fg-disabled)" }}>· {pct}%</span>
+                <span style={{ color: "var(--ds-fg-subtle)" }}>· {pct}%</span>
               </span>
             </div>
           );
@@ -1477,7 +1478,7 @@ export function MiniKpi({
         className="ds-mono uppercase"
         style={{
           fontSize: 9.5,
-          color: "var(--ds-fg-disabled)",
+          color: "var(--ds-fg-subtle)",
           letterSpacing: "0.1em",
         }}
       >
@@ -1542,7 +1543,7 @@ export function HeaderStat({
         className="ds-mono uppercase"
         style={{
           fontSize: 9.5,
-          color: "var(--ds-fg-disabled)",
+          color: "var(--ds-fg-subtle)",
           letterSpacing: "0.1em",
         }}
       >
@@ -1663,17 +1664,16 @@ export function Th({
   return (
     <th
       scope="col"
-      onClick={onSort}
+      aria-sort={onSort ? (active ? (dir === "asc" ? "ascending" : "descending") : "none") : undefined}
       style={{
         textAlign: align,
         padding: "10px 11px",
         fontSize: 9.5,
         fontWeight: 500,
-        color: active ? "var(--ds-fg)" : "var(--ds-fg-disabled)",
+        color: active ? "var(--ds-fg)" : "var(--ds-fg-subtle)",
         letterSpacing: "0.08em",
         textTransform: "uppercase",
         borderBottom: "1px solid var(--ds-border)",
-        cursor: onSort ? "pointer" : "default",
         whiteSpace: "nowrap",
         userSelect: "none",
         width,
@@ -1681,18 +1681,27 @@ export function Th({
       }}
     >
       {onSort ? (
-        <span
+        <button
+          type="button"
+          onClick={onSort}
           style={{
             display: "inline-flex",
             alignItems: "center",
             gap: 4,
             justifyContent: align === "right" ? "flex-end" : "flex-start",
             width: "100%",
+            padding: 0,
+            border: 0,
+            background: "transparent",
+            color: "inherit",
+            font: "inherit",
+            letterSpacing: "inherit",
+            textTransform: "inherit",
           }}
         >
           <span>{label}</span>
           <SortIcon active={!!active} dir={dir} />
-        </span>
+        </button>
       ) : (
         label
       )}

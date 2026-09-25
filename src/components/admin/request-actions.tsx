@@ -262,6 +262,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             value={replyText}
             onChange={(e) => setReplyText(e.target.value.slice(0, 500))}
             placeholder="Admin reply (visible to user)"
+            aria-label="Admin reply to requester"
             rows={2}
             autoFocus
             className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
@@ -425,10 +426,13 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           value={declineNote}
           onChange={(e) => setDeclineNote(e.target.value)}
           placeholder="Reason (optional)"
+          aria-label="Decline reason"
           rows={2}
           className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
         />
-        <div className="flex items-center gap-2">
+        {/* Wraps inside the fixed-width column: the three buttons need ~380px,
+            and a non-wrapping row spilled left over the request's title. */}
+        <div className="flex flex-wrap items-center justify-end gap-2">
           <Button
             size="sm"
             variant="outline"
@@ -572,10 +576,12 @@ export function SyncButton() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const [isError, setIsError] = useState(false);
 
   async function handleSync() {
     setLoading(true);
     setResult(null);
+    setIsError(false);
     try {
       // ONE call. /api/sync already does a full Jellyfin sync of every server,
       // so a second call to /api/sync/jellyfin would only repeat work and race
@@ -598,6 +604,7 @@ export function SyncButton() {
         return;
       }
       if (!res.ok) {
+        setIsError(true);
         setResult(data.error ?? `Sync failed (${res.status})`);
         return;
       }
@@ -619,9 +626,11 @@ export function SyncButton() {
         if (failed.has(source)) parts.push(`${source} failed`);
       }
 
+      setIsError(failed.size > 0);
       setResult(parts.length > 0 ? parts.join(" · ") : "No media servers configured");
       router.refresh();
     } catch {
+      setIsError(true);
       setResult("Sync failed");
     } finally {
       setLoading(false);
@@ -640,7 +649,15 @@ export function SyncButton() {
         <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
         {loading ? "Syncing…" : "Sync now"}
       </Button>
-      {result && <span role="status" aria-live="polite" className="text-xs text-zinc-400">{result}</span>}
+      {result && (
+        <span
+          role={isError ? "alert" : "status"}
+          aria-live={isError ? "assertive" : "polite"}
+          className={`text-xs ${isError ? "text-red-400" : "text-zinc-400"}`}
+        >
+          {result}
+        </span>
+      )}
     </div>
   );
 }

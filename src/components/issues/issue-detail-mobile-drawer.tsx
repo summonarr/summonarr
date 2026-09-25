@@ -16,7 +16,7 @@ import { Chip } from "@/components/ui/design";
 import { IssueThread } from "@/components/issues/issue-thread";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { useMediaQuery } from "@/hooks/use-media-query";
-import { ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL, ISSUE_TYPE_LABELS } from "@/lib/status-labels";
+import { ISSUE_DATE_FORMAT, ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL, ISSUE_TYPE_LABELS } from "@/lib/status-labels";
 
 export interface IssueDrawerPayload {
   id: string;
@@ -171,7 +171,7 @@ export function IssueDetailMobileDrawer({ selectedIssue, closeHref }: Props) {
                         color: "var(--ds-fg-subtle)",
                       }}
                     >
-                      Reported {mounted ? new Date(issue.createdAt).toLocaleDateString() : ""}
+                      Reported {mounted ? ISSUE_DATE_FORMAT.format(new Date(issue.createdAt)) : ""}
                     </p>
                   </div>
                   <DrawerClose

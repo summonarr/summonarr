@@ -124,7 +124,7 @@ export function DetailRow({
           className="ds-mono uppercase"
           style={{
             fontSize: 9.5,
-            color: "var(--ds-fg-disabled)",
+            color: "var(--ds-fg-subtle)",
             letterSpacing: "0.1em",
             marginBottom: 10,
           }}
@@ -152,7 +152,7 @@ export function DetailRow({
                 className="ds-mono uppercase"
                 style={{
                   fontSize: 9,
-                  color: "var(--ds-fg-disabled)",
+                  color: "var(--ds-fg-subtle)",
                   letterSpacing: "0.08em",
                 }}
               >

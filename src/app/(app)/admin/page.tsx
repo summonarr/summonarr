@@ -10,7 +10,8 @@ import { getArrInstances } from "@/lib/arr-instance-registry";
 import { SyncButton } from "@/components/admin/request-actions";
 import { AdminRequestList, type GroupedRequestRow, type Requester, type MediaRatings } from "@/components/admin/admin-request-list";
 import { AdminFilterBar } from "@/components/admin/admin-filter-bar";
-import { PageHeader, StatCard } from "@/components/ui/design";
+import { EmptyState, PageHeader, StatCard } from "@/components/ui/design";
+import { ClipboardList } from "@/components/icons";
 import { getWatchGradeSummaries } from "@/lib/watch-grade-data";
 
 export const dynamic = "force-dynamic";
@@ -264,21 +265,14 @@ export default async function AdminPage({
       />
 
       {total === 0 ? (
-        <div
-          className="text-center ds-mono"
-          style={{
-            padding: "40px 20px",
-            background: "var(--ds-bg-1)",
-            border: "1px dashed var(--ds-border)",
-            borderRadius: 8,
-            fontSize: 12,
-            color: "var(--ds-fg-subtle)",
-          }}
-        >
-          {statusFilter
-            ? `No ${statusFilter.toLowerCase()} requests.`
-            : "No requests yet."}
-        </div>
+        <EmptyState
+          icon={ClipboardList}
+          title={
+            statusFilter
+              ? `No ${statusFilter.toLowerCase()} requests.`
+              : "No requests yet."
+          }
+        />
       ) : (
         <AdminRequestList
           requests={rows}

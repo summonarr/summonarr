@@ -20,15 +20,28 @@ export interface HiddenGridItem {
 export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] }) {
   const [items, setItems] = useState(initialItems);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   async function unhide(it: HiddenGridItem) {
     const key = `${it.tmdbId}:${it.mediaType}`;
     setRemoving(key);
+    setError(null);
     setItems((cur) => cur.filter((x) => `${x.tmdbId}:${x.mediaType}` !== key)); // optimistic
     // Roll back only THIS item — restoring a stale whole-list snapshot would
     // resurrect other items whose concurrent DELETE already succeeded.
-    const restore = () =>
-      setItems((cur) => (cur.some((x) => `${x.tmdbId}:${x.mediaType}` === key) ? cur : [...cur, it]));
+    // Re-insert at its original position (relative to the initial order) rather
+    // than appending, so a failed unhide doesn't look like a reorder.
+    const order = (x: HiddenGridItem) =>
+      initialItems.findIndex((y) => y.tmdbId === x.tmdbId && y.mediaType === x.mediaType);
+    const restore = () => {
+      setItems((cur) => {
+        if (cur.some((x) => `${x.tmdbId}:${x.mediaType}` === key)) return cur;
+        const at = order(it);
+        const idx = cur.findIndex((x) => order(x) > at);
+        return idx === -1 ? [...cur, it] : [...cur.slice(0, idx), it, ...cur.slice(idx)];
+      });
+      setError(`Couldn't unhide “${it.title}”. Please try again.`);
+    };
     try {
       const res = await fetch(
         withBasePath(`/api/hidden?tmdbId=${it.tmdbId}&mediaType=${it.mediaType}`),
@@ -57,6 +70,12 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
   }
 
   return (
+    <>
+    {error && (
+      <p role="alert" className="text-red-400" style={{ fontSize: 13, marginBottom: 12 }}>
+        {error}
+      </p>
+    )}
     <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))" }}>
       {items.map((it) => {
         const key = `${it.tmdbId}:${it.mediaType}`;
@@ -112,5 +131,6 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
         );
       })}
     </div>
+    </>
   );
 }

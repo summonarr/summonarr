@@ -16,7 +16,9 @@ interface Props {
 export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
   const router = useRouter();
   const { toast } = useToast();
-  const [loading, setLoading] = useState(false);
+  // Which action is in flight: both buttons disable, only the clicked one spins.
+  const [pending, setPending] = useState<"unvote" | "dismiss" | null>(null);
+  const loading = pending !== null;
 
   const [voted, setVoted] = useState(userVoted);
   const [dismissed, setDismissed] = useState(false);
@@ -24,7 +26,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
 
   async function handleUnvote() {
     if (loading) return;
-    setLoading(true);
+    setPending("unvote");
     setVoted(false);
     try {
       const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "DELETE" });
@@ -39,13 +41,13 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
       setVoted(true);
       toast({ title: "Couldn't remove your vote", variant: "error" });
     } finally {
-      setLoading(false);
+      setPending(null);
     }
   }
 
   async function handleDismiss() {
     if (loading) return;
-    setLoading(true);
+    setPending("dismiss");
     setDismissed(true);
     setConfirmingDismiss(false);
     try {
@@ -61,7 +63,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
       setDismissed(false);
       toast({ title: "Couldn't dismiss the votes", variant: "error" });
     } finally {
-      setLoading(false);
+      setPending(null);
     }
   }
 
@@ -80,7 +82,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
           disabled={loading}
           className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-indigo-500/50 bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 transition-colors disabled:opacity-50"
         >
-          {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <ThumbsUp className="w-3 h-3" />}
+          {pending === "unvote" ? <Loader2 className="w-3 h-3 animate-spin" /> : <ThumbsUp className="w-3 h-3" />}
           Voted
         </button>
       )}
@@ -90,7 +92,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
           disabled={loading}
           className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-red-500/50 bg-red-600/10 text-red-400 hover:bg-red-600/20 transition-colors disabled:opacity-50"
         >
-          {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+          {pending === "dismiss" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
           Dismiss
         </button>
       )}
@@ -102,7 +104,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
             className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-50"
             autoFocus
           >
-            {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+            {pending === "dismiss" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
             Confirm dismiss
           </button>
           <button

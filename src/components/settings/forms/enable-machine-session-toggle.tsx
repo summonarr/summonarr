@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
@@ -15,6 +15,14 @@ export function EnableMachineSessionToggle({
 }) {
   const [enabled, setEnabled] = useState(initialEnabled);
   const [status, setStatus] = useState<SaveStatus>("idle");
+  const [error, setError] = useState<string | null>(null);
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const titleId = useId();
+  const descId = useId();
+
+  useEffect(() => () => {
+    if (resetTimer.current) clearTimeout(resetTimer.current);
+  }, []);
 
   const [allowedIps, setAllowedIps] = useState(initialAllowedIps);
   const [savedAllowedIps, setSavedAllowedIps] = useState(initialAllowedIps);
@@ -26,24 +34,28 @@ export function EnableMachineSessionToggle({
     const prev = enabled;
     setEnabled(next);
     setStatus("saving");
+    setError(null);
+    if (resetTimer.current) clearTimeout(resetTimer.current);
     try {
       const res = await fetch(withBasePath("/api/settings"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enableMachineSession: next ? "true" : "false" }),
       });
-      const data: { ok: boolean } = await res.json().catch(() => ({ ok: false }));
-      if (!data.ok) {
+      const data: { ok?: boolean; error?: string } = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
         setEnabled(prev);
+        setError(data.error ?? "Failed to save");
         setStatus("error");
       } else {
         setStatus("ok");
+        resetTimer.current = setTimeout(() => setStatus("idle"), 3000);
       }
     } catch {
       setEnabled(prev);
+      setError("Failed to save");
       setStatus("error");
     }
-    setTimeout(() => setStatus("idle"), 3000);
   }
 
   async function saveAllowedIps() {
@@ -76,16 +88,27 @@ export function EnableMachineSessionToggle({
     <div className="py-3 border-t border-zinc-800">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <p className="text-sm font-medium text-zinc-200">Machine session API</p>
-          <p className="text-xs text-zinc-500 mt-0.5">
+          <p id={titleId} className="text-sm font-medium text-zinc-200">Machine session API</p>
+          <p id={descId} className="text-xs text-zinc-500 mt-0.5">
             Allow <code className="text-zinc-400">POST /api/auth/machine-session</code> to issue short-lived admin sessions via <code className="text-zinc-400">CRON_SECRET</code>. Used for automated screenshot capture and headless browser access.
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {status === "saving" && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500" />}
           {status === "ok"     && <CheckCircle className="w-3.5 h-3.5 text-green-400" />}
-          {status === "error"  && <XCircle className="w-3.5 h-3.5 text-red-400" />}
-          <Switch checked={enabled} onCheckedChange={toggle} />
+          {status === "error"  && (
+            <span role="alert" className="flex max-w-xs items-center gap-1 text-right text-xs text-red-400">
+              <XCircle className="w-3.5 h-3.5" aria-hidden />
+              {error}
+            </span>
+          )}
+          <Switch
+            checked={enabled}
+            onCheckedChange={toggle}
+            disabled={status === "saving"}
+            aria-labelledby={titleId}
+            aria-describedby={descId}
+          />
         </div>
       </div>
 

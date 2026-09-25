@@ -25,7 +25,7 @@ export function ActivityWarmButton() {
       };
 
       if (res.ok) {
-        setMessage({ text: `Warmed ${data.warmed} entries`, type: "success" });
+        setMessage({ text: typeof data.warmed === "number" ? `Warmed ${data.warmed} entries` : "Cache warmed", type: "success" });
         setCooldown(120);
       } else {
         setMessage({
@@ -34,9 +34,9 @@ export function ActivityWarmButton() {
         });
         if (data.retryAfter) setCooldown(data.retryAfter);
       }
-    } catch (err) {
+    } catch {
       setMessage({
-        text: err instanceof Error ? err.message : "Unknown error",
+        text: "Couldn't reach the server — try again",
         type: "error",
       });
     } finally {
@@ -69,11 +69,13 @@ export function ActivityWarmButton() {
           {loading ? "Warming…" : "Warm cache"}
         </span>
       </button>
-      {message && (
-        <span className={`text-xs ${message.type === "success" ? "text-green-400" : "text-red-400"}`}>
-          {message.text}
-        </span>
-      )}
+      <span
+        role="status"
+        aria-live="polite"
+        className={`text-xs ${message?.type === "success" ? "text-green-400" : "text-red-400"}`}
+      >
+        {message?.text}
+      </span>
       {cooldown > 0 && <span className="text-xs text-zinc-500">{cooldown}s</span>}
     </div>
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useCallback, useEffect, type KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
 import {
   ShieldCheck,
@@ -81,7 +81,7 @@ function QuotaRow({
   onDays,
   onBlurLimit,
   onBlurDays,
-  disabled,
+  noun,
 }: {
   label: string;
   limit: string;
@@ -90,8 +90,18 @@ function QuotaRow({
   onDays: (v: string) => void;
   onBlurLimit: () => void;
   onBlurDays: () => void;
-  disabled: boolean;
+  // "Movie" / "TV" — names the inputs, which otherwise only carry placeholders.
+  noun: string;
 }) {
+  // Enter commits the field the same way leaving it does. The inputs are never
+  // disabled while another field saves: that knocked keyboard focus out of the
+  // field the admin had just tabbed into.
+  const commitOnEnter = (commit: () => void) => (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commit();
+    }
+  };
   return (
     <div className="flex items-center gap-2 py-1.5">
       <span className="text-xs text-zinc-300 w-10 shrink-0">{label}</span>
@@ -100,10 +110,11 @@ function QuotaRow({
         min={0}
         inputMode="numeric"
         placeholder="limit"
+        aria-label={`${noun} request limit`}
         value={limit}
-        disabled={disabled}
         onChange={(e) => onLimit(e.target.value)}
         onBlur={onBlurLimit}
+        onKeyDown={commitOnEnter(onBlurLimit)}
         className="w-16 rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-200 disabled:opacity-50"
       />
       <span className="text-[10px] text-zinc-500">per</span>
@@ -112,16 +123,20 @@ function QuotaRow({
         min={1}
         inputMode="numeric"
         placeholder="days"
+        aria-label={`${noun} quota window in days`}
         value={days}
-        disabled={disabled}
         onChange={(e) => onDays(e.target.value)}
         onBlur={onBlurDays}
+        onKeyDown={commitOnEnter(onBlurDays)}
         className="w-16 rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-200 disabled:opacity-50"
       />
       <span className="text-[10px] text-zinc-500">days</span>
     </div>
   );
 }
+
+type QuotaField = "movieQuotaLimit" | "movieQuotaDays" | "tvQuotaLimit" | "tvQuotaDays";
+const QUOTA_FIELDS: readonly QuotaField[] = ["movieQuotaLimit", "movieQuotaDays", "tvQuotaLimit", "tvQuotaDays"];
 
 export function PermissionsModal({
   u,
@@ -151,14 +166,36 @@ export function PermissionsModal({
     tvQuotaLimit: u.tvQuotaLimit?.toString() ?? "",
     tvQuotaDays: u.tvQuotaDays?.toString() ?? "",
   });
+  // The last value sent (or loaded) per quota field. Compared against instead of
+  // the `u` prop, which stays stale until router.refresh lands — so an Enter
+  // followed by a blur, or a close right after either, doesn't PATCH twice.
+  const committedQuota = useRef<Record<QuotaField, number | null>>({
+    movieQuotaLimit: u.movieQuotaLimit ?? null,
+    movieQuotaDays: u.movieQuotaDays ?? null,
+    tvQuotaLimit: u.tvQuotaLimit ?? null,
+    tvQuotaDays: u.tvQuotaDays ?? null,
+  });
+  // Saves every uncommitted quota edit. Refreshed after each render so the
+  // close handler below can stay stable for useModalA11y (which re-runs its
+  // focus-in effect whenever onClose changes) yet still see the latest text.
+  const flushQuotaRef = useRef<() => void>(() => {});
+  const [confirmReset, setConfirmReset] = useState(false);
   const [maxRating, setMaxRating] = useState<string>(u.maxContentRating ?? "");
   const titleId = `perm-modal-title-${u.id}`;
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const isSuperAdmin = (perms & Permission.ADMIN) !== 0n;
 
+  // Closing (Escape, the X, or the backdrop) unmounts the quota inputs without
+  // firing their onBlur, which silently dropped a value just typed. Flush any
+  // uncommitted quota edit first; saveQuota no-ops for unchanged fields.
+  const handleClose = useCallback(() => {
+    flushQuotaRef.current();
+    onClose();
+  }, [onClose]);
+
   // Focus-in + Tab-trap + Escape + focus-restore for this hand-rolled overlay.
-  useModalA11y(dialogRef, onClose, closeBtnRef);
+  useModalA11y(dialogRef, handleClose, closeBtnRef);
 
   // Every change in this modal works the same way: update local state first
   // (an "optimistic" update), PATCH the one field that changed, and call
@@ -209,6 +246,7 @@ export function PermissionsModal({
   }
 
   function applyPreset() {
+    setConfirmReset(false);
     const prev = perms;
     const next = PRESETS[u.role] ?? PRESETS.USER;
     setPerms(next);
@@ -235,10 +273,7 @@ export function PermissionsModal({
     await patchUser({ mediaServerGrants: next }, () => setMediaGrants(prev));
   }
 
-  async function saveQuota(
-    field: "movieQuotaLimit" | "movieQuotaDays" | "tvQuotaLimit" | "tvQuotaDays",
-    raw: string,
-  ) {
+  async function saveQuota(field: QuotaField, raw: string) {
     const trimmed = raw.trim();
     const value = trimmed === "" ? null : Math.max(0, Math.floor(Number(trimmed)));
     if (value !== null && !Number.isFinite(value)) return;
@@ -246,13 +281,21 @@ export function PermissionsModal({
     // check just tabbing through the four inputs would send four PATCHes — each
     // writing a no-op audit row and using up the 20-per-minute rate limit
     // shared with the permission checkboxes above.
-    if (value === (u[field] ?? null)) return;
+    const prev = committedQuota.current[field];
+    if (value === prev) return;
+    committedQuota.current[field] = value;
     // Rollback restores the server's value, not the typed text: the server
     // refused, so what it holds is still what it held before.
-    await patchUser({ [field]: value }, () =>
-      setQuota((q) => ({ ...q, [field]: u[field]?.toString() ?? "" })),
-    );
+    await patchUser({ [field]: value }, () => {
+      committedQuota.current[field] = prev;
+      setQuota((q) => ({ ...q, [field]: prev?.toString() ?? "" }));
+    });
   }
+  useEffect(() => {
+    flushQuotaRef.current = () => {
+      for (const field of QUOTA_FIELDS) void saveQuota(field, quota[field]);
+    };
+  });
 
   async function saveMaxRating(value: string) {
     const prev = maxRating;
@@ -264,7 +307,7 @@ export function PermissionsModal({
   const groups = show4k ? [...PERMISSION_GROUPS, PERMISSION_GROUP_4K] : PERMISSION_GROUPS;
 
   return (
-    <div role="presentation" className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+    <div role="presentation" className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={handleClose}>
       <div
         ref={dialogRef}
         tabIndex={-1}
@@ -283,8 +326,8 @@ export function PermissionsModal({
             ref={closeBtnRef}
             type="button"
             aria-label="Close"
-            onClick={onClose}
-            className="text-zinc-500 hover:text-zinc-100 transition-colors"
+            onClick={handleClose}
+            className="-m-2 inline-flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-100 transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
@@ -298,15 +341,39 @@ export function PermissionsModal({
           </div>
         ) : (
           <>
-            <div className="flex justify-end mb-2">
-              <button
-                type="button"
-                onClick={applyPreset}
-                disabled={saving}
-                className="text-[11px] text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
-              >
-                Reset to {roleLabel[u.role]} preset
-              </button>
+            {/* Resetting replaces every custom grant at once, so it asks first —
+                the same Confirm/Cancel pair the table uses for Disable. */}
+            <div className="flex items-center justify-end gap-1.5 mb-2">
+              {confirmReset ? (
+                <>
+                  <span className="text-[11px] text-zinc-400">Replace all permissions?</span>
+                  <button
+                    type="button"
+                    onClick={applyPreset}
+                    disabled={saving}
+                    autoFocus
+                    className="rounded-md px-2 py-1 text-[11px] font-medium bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-50"
+                  >
+                    Reset
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmReset(false)}
+                    className="rounded-md px-2 py-1 text-[11px] text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmReset(true)}
+                  disabled={saving}
+                  className="rounded-md px-2 py-1 text-[11px] text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
+                >
+                  Reset to {roleLabel[u.role]} preset
+                </button>
+              )}
             </div>
             {groups.map((g) => (
               <div key={g.title} className="mb-3">
@@ -396,7 +463,7 @@ export function PermissionsModal({
                 onDays={(v) => setQuota((q) => ({ ...q, movieQuotaDays: v }))}
                 onBlurLimit={() => saveQuota("movieQuotaLimit", quota.movieQuotaLimit)}
                 onBlurDays={() => saveQuota("movieQuotaDays", quota.movieQuotaDays)}
-                disabled={saving}
+                noun="Movie"
               />
               <QuotaRow
                 label="TV"
@@ -406,7 +473,7 @@ export function PermissionsModal({
                 onDays={(v) => setQuota((q) => ({ ...q, tvQuotaDays: v }))}
                 onBlurLimit={() => saveQuota("tvQuotaLimit", quota.tvQuotaLimit)}
                 onBlurDays={() => saveQuota("tvQuotaDays", quota.tvQuotaDays)}
-                disabled={saving}
+                noun="TV"
               />
             </div>
 

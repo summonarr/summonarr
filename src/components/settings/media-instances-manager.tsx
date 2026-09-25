@@ -215,6 +215,10 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
   // shift whenever the list changes, so every path that adds/removes/replaces
   // drafts clears this.
   const [confirmRemove, setConfirmRemove] = useState<number | null>(null);
+  // Edits since the last load/save. Refresh replaces every draft with the
+  // server copy, so while this is set it asks before discarding them.
+  const [dirty, setDirty] = useState(false);
+  const [confirmRefresh, setConfirmRefresh] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -224,6 +228,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       const named = (data[service] ?? []).filter((i) => isNamed(i.slug));
       setDrafts(named.map((v) => toDraft(v, service)));
       setConfirmRemove(null);
+      setDirty(false);
       setLoadFailed(false);
     } catch {
       // An empty draft list saves as "remove every named instance", which
@@ -231,6 +236,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       // never look like "the admin has no instances": block saving and say so.
       setLoadFailed(true);
     } finally {
+      setConfirmRefresh(false);
       setLoaded(true);
     }
   }, [service]);
@@ -241,6 +247,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
 
   const update = (idx: number, patch: Partial<Draft>) => {
     setDrafts((prev) => prev.map((d, i) => (i === idx ? { ...d, ...patch } : d)));
+    setDirty(true);
     setStatus("idle");
   };
 
@@ -255,12 +262,14 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       { slug: "", name: "", url: "", token: "", adminEmail: "", restrictSignIn: true, restricted: false, hasToken: false, isNew: true, libraries: "", moviePathStripPrefix: "", tvPathStripPrefix: "" },
     ]);
     setConfirmRemove(null);
+    setDirty(true);
     setStatus("idle");
   };
 
   const removeInstance = (idx: number) => {
     setDrafts((prev) => prev.filter((_, i) => i !== idx));
     setConfirmRemove(null);
+    setDirty(true);
     setStatus("idle");
   };
 
@@ -323,6 +332,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
         const named = (data.instances ?? []).filter((i) => isNamed(i.slug));
         setDrafts(named.map((v) => toDraft(v, service)));
         setConfirmRemove(null);
+        setDirty(false);
         setTests(data.testResults ?? {});
         setStatus("ok");
         setMessage("Saved");
@@ -590,16 +600,24 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
         );
       })}
 
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <Button type="button" variant="outline" onClick={addInstance} className="border-zinc-600 text-zinc-300 hover:text-zinc-100 h-8 px-3 text-xs">
           + Add {label} server
         </Button>
         <Button type="button" onClick={save} disabled={status === "saving" || loadFailed} className="bg-indigo-600 hover:bg-indigo-500 h-8 px-3 text-xs">
           {status === "saving" ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Saving…</> : "Save & Test"}
         </Button>
-        <button type="button" onClick={load} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-100"><RefreshCw className="w-3 h-3" />Refresh</button>
-        {status === "ok" && <span className="text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4" />{message}</span>}
-        {status === "error" && <span className="text-sm text-red-400 flex items-center gap-1.5"><XCircle className="w-4 h-4" />{message}</span>}
+        {confirmRefresh ? (
+          <span className="flex items-center gap-2 text-xs text-zinc-400">
+            Discard unsaved changes?
+            <button type="button" onClick={load} className="text-red-400 hover:underline font-medium">Discard</button>
+            <button type="button" onClick={() => setConfirmRefresh(false)} className="text-zinc-500 hover:text-zinc-100">Cancel</button>
+          </span>
+        ) : (
+          <button type="button" onClick={() => (dirty ? setConfirmRefresh(true) : load())} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-100"><RefreshCw className="w-3 h-3" />Refresh</button>
+        )}
+        {status === "ok" && <span className="min-w-0 text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4 shrink-0" />{message}</span>}
+        {status === "error" && <span className="min-w-0 break-words text-sm text-red-400 flex items-center gap-1.5"><XCircle className="w-4 h-4 shrink-0" />{message}</span>}
       </div>
       {loadFailed && (
         <p className="text-sm text-red-400 flex items-center gap-1.5">

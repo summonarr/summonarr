@@ -36,6 +36,16 @@ function DeviceIcon({ deviceType }: { deviceType: string }) {
   return                              <Monitor     className="w-3.5 h-3.5 shrink-0 text-zinc-400" />;
 }
 
+function deviceName(s: AdminAuthSession): string {
+  return s.deviceLabel ?? `${s.deviceType.charAt(0).toUpperCase() + s.deviceType.slice(1)} device`;
+}
+
+// Names the device (and IP when known) so each row's icon-only revoke control
+// is distinguishable to a screen reader.
+function sessionLabel(s: AdminAuthSession): string {
+  return s.ipAddress ? `${deviceName(s)} (${s.ipAddress})` : deviceName(s);
+}
+
 export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
   const [sessions, setSessions]       = useState<AdminAuthSession[]>([]);
   const [loading, setLoading]         = useState(true);
@@ -144,7 +154,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
             type="button"
             aria-label="Close"
             onClick={onClose}
-            className="text-zinc-500 hover:text-zinc-100 transition-colors"
+            className="-m-2 inline-flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-100 transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
@@ -177,7 +187,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                 <DeviceIcon deviceType={s.deviceType} />
                 <div className="min-w-0 space-y-0.5">
                   <p className="text-xs text-zinc-200 truncate">
-                    {s.deviceLabel ?? `${s.deviceType.charAt(0).toUpperCase() + s.deviceType.slice(1)} device`}
+                    {deviceName(s)}
                   </p>
                   <div className="flex items-center gap-3 flex-wrap">
                     {s.ipAddress && (
@@ -203,7 +213,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                 <div className="flex items-center gap-1.5 shrink-0 mt-0.5">
                   <button
                     type="button"
-                    aria-label="Confirm revoke this session"
+                    aria-label={`Confirm revoke session: ${sessionLabel(s)}`}
                     disabled={revoking === s.sessionId || revokingAll}
                     onClick={() => revoke(s.sessionId)}
                     autoFocus
@@ -215,7 +225,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                   </button>
                   <button
                     type="button"
-                    aria-label="Cancel revoke this session"
+                    aria-label={`Cancel revoke session: ${sessionLabel(s)}`}
                     disabled={revoking === s.sessionId || revokingAll}
                     onClick={() => setConfirmingRevoke(null)}
                     className="rounded-md px-2 py-1 text-[10px] text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors disabled:opacity-40"
@@ -228,9 +238,9 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                   type="button"
                   disabled={revoking === s.sessionId || revokingAll}
                   onClick={() => setConfirmingRevoke(s.sessionId)}
-                  aria-label="Revoke this session"
-                  className="shrink-0 mt-0.5 text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-40"
-                  title="Revoke this session"
+                  aria-label={`Revoke session: ${sessionLabel(s)}`}
+                  className="shrink-0 -m-1.5 inline-flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-40"
+                  title={`Revoke session: ${sessionLabel(s)}`}
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>

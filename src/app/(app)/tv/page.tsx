@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { getTVGenres, getWatchProviders, type DiscoverFilters, type TmdbMedia } from "@/lib/tmdb";
 import { requireAppSession } from "@/lib/require-app-session";
 import { runBrowseQuery } from "@/lib/browse-query";
+import { tmdbAuth } from "@/lib/tmdb-auth";
 import { LiveRefresh } from "@/components/live-refresh";
 import { BrowseGrid } from "@/components/media/browse-grid";
 import { PageHeader } from "@/components/ui/design";
@@ -49,7 +50,14 @@ export default async function TVPage({
   // user asked for); the grid used to render this line itself and pull it up
   // under the header with a negative margin.
   const hasFilters = !!(genreId || keywordId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider || hideAvailable);
-  const subtitle = hasFilters ? `${items.length} results` : "Popular right now";
+  // `items` is ONE TMDB page (~20), not the result set — see movies/page.tsx.
+  const subtitle = !hasFilters
+    ? "Popular right now"
+    : failed
+      ? "Filtered results"
+      : totalPages > 1
+        ? `Page ${Math.min(page, totalPages)} of ${totalPages}`
+        : `${items.length} result${items.length === 1 ? "" : "s"}`;
 
   return (
     <div className="ds-page-enter">
@@ -65,6 +73,7 @@ export default async function TVPage({
         showJellyfin={showJellyfin}
         maxYear={new Date().getUTCFullYear() + 1}
         failed={failed}
+        tokenMissing={tmdbAuth() === null}
       />
     </div>
   );

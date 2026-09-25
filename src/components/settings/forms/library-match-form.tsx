@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -21,11 +21,12 @@ function applyPrefix(path: string, prefix: string): string {
 }
 
 function LibraryMatchMediaBlock({
-  mediaLabel, data, prefix, onChangePrefix, placeholder,
+  serverLabel, mediaLabel, data, prefix, onChangePrefix, placeholder,
 }: {
-  mediaLabel: string; data: MediaSampleData | null;
+  serverLabel: string; mediaLabel: string; data: MediaSampleData | null;
   prefix: string; onChangePrefix: (v: string) => void; placeholder: string;
 }) {
+  const inputId = useId();
   return (
     <div className="space-y-2">
       <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{mediaLabel}</p>
@@ -50,8 +51,10 @@ function LibraryMatchMediaBlock({
       )}
 
       <div className="space-y-1">
-        <Label className="text-xs text-zinc-400">Additional prefix to strip</Label>
+        <Label htmlFor={inputId} className="text-xs text-zinc-400">Additional prefix to strip</Label>
         <Input
+          id={inputId}
+          aria-label={`${serverLabel} ${mediaLabel.toLowerCase()} prefix to strip`}
           value={prefix}
           onChange={(e) => onChangePrefix(e.target.value)}
           placeholder={placeholder}
@@ -84,20 +87,20 @@ function LibraryMatchServerBlock({
   label: string; accent: string; data: ServerSamples | null;
   moviePrefix: string; tvPrefix: string;
   onChangeMoviePrefix: (v: string) => void; onChangeTvPrefix: (v: string) => void;
-  loading: boolean; loadError: string;
+  loading: boolean; loadError: boolean;
 }) {
   return (
     <div className="space-y-4">
       <p className={`text-xs font-semibold uppercase tracking-wide ${accent}`}>{label}</p>
 
-      {!data && !loading && (
+      {!data && !loading && !loadError && (
         <p className="text-xs text-zinc-500 italic">Click &quot;Load examples&quot; to see sample paths.</p>
       )}
-      {loadError && <p className="text-xs text-red-400">{loadError}</p>}
 
       {data && (
         <div className="space-y-5">
           <LibraryMatchMediaBlock
+            serverLabel={label}
             mediaLabel="Movies"
             data={data.movie}
             prefix={moviePrefix}
@@ -106,6 +109,7 @@ function LibraryMatchServerBlock({
           />
           <div className="border-t border-zinc-800" />
           <LibraryMatchMediaBlock
+            serverLabel={label}
             mediaLabel="TV Shows"
             data={data.tv}
             prefix={tvPrefix}
@@ -117,6 +121,8 @@ function LibraryMatchServerBlock({
     </div>
   );
 }
+
+const LOAD_SAMPLES_FALLBACK = "Couldn't load sample paths — check that Plex/Jellyfin are configured and reachable.";
 
 interface LibraryMatchFormProps {
   initialPlexMoviePrefix:     string;
@@ -146,12 +152,18 @@ export function LibraryMatchForm({
     setLoadError("");
     try {
       const res = await fetch(withBasePath("/api/admin/library-sample-paths"));
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        // Surface the route's own { error } when it sent one; otherwise a
+        // bare "HTTP 500" tells the admin nothing they can act on.
+        const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
+        setLoadError(typeof body?.error === "string" && body.error ? body.error : LOAD_SAMPLES_FALLBACK);
+        return;
+      }
       const data = await res.json() as { plex: ServerSamples; jellyfin: ServerSamples };
       setPlex(data.plex);
       setJellyfin(data.jellyfin);
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : "Failed to load");
+    } catch {
+      setLoadError(LOAD_SAMPLES_FALLBACK);
     } finally {
       setLoading(false);
     }
@@ -202,20 +214,22 @@ export function LibraryMatchForm({
         </Button>
       </div>
 
+      {loadError && <p role="alert" className="text-xs text-red-400">{loadError}</p>}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <LibraryMatchServerBlock
           label="Plex" accent="text-yellow-400"
           data={plex}
           moviePrefix={plexMoviePrefix} tvPrefix={plexTvPrefix}
           onChangeMoviePrefix={onChangePlexMoviePrefix} onChangeTvPrefix={onChangePlexTvPrefix}
-          loading={loading} loadError={loadError}
+          loading={loading} loadError={loadError !== ""}
         />
         <LibraryMatchServerBlock
           label="Jellyfin" accent="text-purple-400"
           data={jellyfin}
           moviePrefix={jellyfinMoviePrefix} tvPrefix={jellyfinTvPrefix}
           onChangeMoviePrefix={onChangeJellyfinMoviePrefix} onChangeTvPrefix={onChangeJellyfinTvPrefix}
-          loading={loading} loadError={loadError}
+          loading={loading} loadError={loadError !== ""}
         />
       </div>
 

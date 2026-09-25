@@ -69,7 +69,11 @@ export function WarmCacheButton({ uncachedCount }: WarmCacheButtonProps) {
         }
       </Button>
       {result && (
-        <span className={`text-xs ${status === "error" ? "text-red-400" : "text-zinc-400"}`}>
+        <span
+          role={status === "error" ? "alert" : "status"}
+          aria-live={status === "error" ? "assertive" : "polite"}
+          className={`text-xs ${status === "error" ? "text-red-400" : "text-zinc-400"}`}
+        >
           {result}
         </span>
       )}

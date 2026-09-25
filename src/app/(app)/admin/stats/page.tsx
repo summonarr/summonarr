@@ -236,11 +236,11 @@ export default async function StatsPage() {
           <div className="flex flex-col" style={{ gap: 6 }}>
             {topRequesters.map((u, i) => (
               <div
-                key={u.email}
+                key={`${u.name ?? ""}:${u.email}`}
                 className="flex items-center justify-between"
-                style={{ fontSize: 13 }}
+                style={{ fontSize: 13, gap: 12 }}
               >
-                <div className="flex items-center" style={{ gap: 12 }}>
+                <div className="flex items-center min-w-0" style={{ gap: 12 }}>
                   <span
                     className="ds-mono text-right"
                     style={{
@@ -251,12 +251,12 @@ export default async function StatsPage() {
                   >
                     {i + 1}.
                   </span>
-                  <span style={{ color: "var(--ds-fg)" }}>
+                  <span className="truncate" style={{ color: "var(--ds-fg)" }} title={u.name ?? u.email}>
                     {u.name ?? u.email}
                   </span>
                 </div>
                 <span
-                  className="ds-mono"
+                  className="ds-mono shrink-0"
                   style={{
                     color: "var(--ds-fg-muted)",
                     fontVariantNumeric: "tabular-nums",

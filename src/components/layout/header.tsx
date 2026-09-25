@@ -56,6 +56,9 @@ export function SearchBar({
   const [filter, setFilter] = useState<MediaFilter>("all");
   const [results, setResults] = useState<TmdbMedia[]>([]);
   const [loading, setLoading] = useState(false);
+  // True when the last search failed (non-OK response or network error), so
+  // the dropdown says so instead of claiming the title doesn't exist.
+  const [searchFailed, setSearchFailed] = useState(false);
   const [open, setOpen] = useState(false);
   // Keyboard-highlighted option (-1 = none). Mouse hover shares the same
   // state so the highlight visual has a single source of truth.
@@ -121,6 +124,7 @@ export function SearchBar({
     abortRef.current?.abort();
     if (!query.trim()) {
       setResults([]);
+      setSearchFailed(false);
       setActiveIndex(-1);
       setOpen(false);
       return;
@@ -138,12 +142,15 @@ export function SearchBar({
         // non-array body doesn't blow up the debounced handler.
         const data: unknown = res.ok ? await res.json() : null;
         setResults(Array.isArray(data) ? (data as TmdbMedia[]).slice(0, 8) : []);
+        setSearchFailed(!res.ok || !Array.isArray(data));
         setActiveIndex(-1);
         setOpen(true);
       } catch (err) {
         if ((err as Error).name !== "AbortError") {
           setResults([]);
+          setSearchFailed(true);
           setActiveIndex(-1);
+          setOpen(true);
         }
       } finally {
         // Only the newest request may clear the spinner. An aborted older
@@ -299,11 +306,15 @@ export function SearchBar({
                   // onClick, which keyboard users (Enter/Space) can trigger too.
                   onMouseDown={(e) => e.preventDefault()}
                   onClick={() => setFilter(value)}
+                  aria-pressed={isActive}
                   className="inline-flex items-center gap-1 font-medium transition-colors"
                   style={{
-                    padding: "2px 10px",
-                    borderRadius: 4,
-                    fontSize: 11,
+                    // The full variant is the mobile search sheet: give the
+                    // chips a touch-sized target there.
+                    padding: variant === "full" ? "0 14px" : "2px 10px",
+                    minHeight: variant === "full" ? 32 : undefined,
+                    borderRadius: variant === "full" ? 6 : 4,
+                    fontSize: variant === "full" ? 13 : 11,
                     background: isActive ? "var(--ds-accent-soft)" : "transparent",
                     color: isActive ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
                   }}
@@ -324,7 +335,7 @@ export function SearchBar({
                 color: "var(--ds-fg-subtle)",
               }}
             >
-              No matches
+              {searchFailed ? "Search is unavailable. Try again." : "No matches"}
             </div>
           ) : (
             results.map((media, i) => {
@@ -471,7 +482,10 @@ export function Header() {
                 style={{
                   fontSize: 13,
                   fontWeight: last ? 500 : 400,
-                  color: last ? "var(--ds-fg)" : "var(--ds-fg-muted)",
+                  // A linked crumb inherits from its <Link>, which owns the
+                  // muted base AND the hover colour; an inline colour here
+                  // would beat the Link's hover and the crumb would never react.
+                  color: last ? "var(--ds-fg)" : c.href ? undefined : "var(--ds-fg-muted)",
                 }}
               >
                 {c.label}
@@ -493,7 +507,7 @@ export function Header() {
                 {c.href && !last ? (
                   <Link
                     href={c.href}
-                    className="hover:text-[var(--ds-fg)] transition-colors"
+                    className="text-[var(--ds-fg-muted)] hover:text-[var(--ds-fg)] transition-colors"
                   >
                     {content}
                   </Link>
@@ -555,6 +569,8 @@ export function Header() {
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-56">
             <div
+              className="truncate min-w-0"
+              title={session?.user?.name ?? session?.user?.email ?? undefined}
               style={{
                 padding: "6px 8px",
                 fontSize: 13,

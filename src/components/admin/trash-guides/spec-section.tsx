@@ -51,6 +51,7 @@ export function SpecSection({
   const mounted = useHasMounted();
   const [specs, setSpecs] = useState<SpecStatus[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [details, setDetails] = useState<Map<string, SpecDetail>>(new Map());
@@ -65,11 +66,18 @@ export function SpecSection({
   const load = useCallback(async () => {
     try {
       const res = await fetch(withBasePath(`/api/admin/trash-guides/status?service=${service.toLowerCase()}&variant=${encodeURIComponent(variant)}`));
-      const data = (await res.json()) as { specs?: SpecStatus[] };
-      setSpecs(data.specs ?? []);
+      const data = (await res.json().catch(() => ({}))) as { specs?: SpecStatus[]; error?: string };
+      if (!res.ok) {
+        setSpecs([]);
+        setLoadError(data.error ?? `HTTP ${res.status}`);
+      } else {
+        setSpecs(data.specs ?? []);
+        setLoadError(null);
+      }
       setLoaded(true);
-    } catch {
+    } catch (err) {
       setSpecs([]);
+      setLoadError(err instanceof Error ? err.message : String(err));
       setLoaded(true);
     }
   }, [service, variant]);
@@ -273,6 +281,7 @@ export function SpecSection({
           ))}
           <input
             type="search"
+            aria-label="Search specs"
             placeholder="Search name or trash_id…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -295,6 +304,8 @@ export function SpecSection({
           <p className="text-sm text-zinc-500 italic flex items-center gap-2">
             <Loader2 className="w-4 h-4 animate-spin" /> Loading specs…
           </p>
+        ) : loadError ? (
+          <p className="text-sm text-red-400">Couldn&apos;t load specs: {loadError}</p>
         ) : specsHere.length === 0 ? (
           <p className="text-sm text-zinc-500 italic">No specs pulled yet — click Refresh Catalog on the Settings tab.</p>
         ) : filtered.length === 0 ? (
