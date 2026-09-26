@@ -19,6 +19,10 @@
 //     {t, b} and the deep link u (which may carry a tmdbId and must never
 //     reach the relay in cleartext). An encrypt failure falls back to the
 //     generic payload; a relay "unregistered" prunes the row; 5xx/401 keep it;
+//     a relay 400 (its payload validation) gets its own server-bug log line;
+//   - the relay's validation contract: every APNS_ALERTS entry and every
+//     cleartext `url` a helper sends passes the relay's rules (a violation
+//     makes the relay 400 a whole category, silently, for every iOS device);
 //   - the web (VAPID) branch: stored Setting keys are the ones on the wire,
 //     p256dh/auth are decrypted via token-crypto, 410 prunes silently while
 //     other failures log and keep, and missing VAPID keys skip web WITHOUT
@@ -137,6 +141,7 @@ const {
   notifyAdminGrabCompletedPush,
   notifyAdminsManualInteractionRequiredPush,
   notifyUserIssueMessagePush,
+  notifyUserIssueResolvedPush,
   notifyUserRequestApprovedPush,
   notifyUserRequestDeclinedPush,
   notifyUsersRequestsAvailablePush,
@@ -144,6 +149,7 @@ const {
   notifyUsersRequestsDeclinedPush,
   buildVapidContact,
   invalidateApnsRelayCache,
+  APNS_ALERTS,
 } = await import("../src/lib/push.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
@@ -603,6 +609,129 @@ test("relay outcomes: 'unregistered' prunes exactly that row; 500 and 401 keep t
   // Transient/auth failures are logged with their relay-supplied detail.
   assert.ok(errors.some((e) => e.includes("APNs relay HTTP 500") && e.includes("relay exploded")), errors.join("\n"));
   assert.ok(errors.some((e) => e.includes("401") && e.includes("apnsRelayKey")), errors.join("\n"));
+});
+
+test("a relay 400 logs as a payload-validation rejection with the relay's error — a server bug, not transient; the row is kept", async () => {
+  userRows = [{ id: "u-400", pushOnApproved: true }];
+  const row = iosSub("u-400", "token-400");
+  subRows = [row];
+  relayRespond = () => jsonResponse({ error: "payload.aps.alert.title contains a forbidden character" }, 400);
+
+  await notifyUserRequestApprovedPush({ userId: "u-400", title: "Dune", mediaType: "MOVIE" });
+
+  assert.equal(relayCalls.length, 1);
+  assert.deepEqual(subDeletes, []); // a 400 is our fault, never the device's
+  assert.equal(errors.length, 1, errors.join("\n"));
+  assert.match(errors[0], /^\[push\] APNs relay rejected the payload \(400: payload\.aps\.alert\.title contains a forbidden character\)/);
+  assert.ok(errors[0].includes("server bug") && errors[0].includes('"approved"'), errors[0]);
+  assert.ok(!errors[0].includes("APNs relay HTTP 400"), "a 400 must not read as the generic transient line");
+});
+
+// ── relay validation contract ───────────────────────────────────────────────
+// Mirrors the relay's payload rules (summonarr-push-relay). A cleartext alert or
+// url that breaks one is answered 400 for the whole category, so that category
+// silently stops reaching every iOS device. These pin the static inputs.
+
+const ALERT_TITLE_MAX = 60;
+const ALERT_BODY_MAX = 120;
+// C0 + DEL + C1 controls, then the bidi / zero-width / separator characters the
+// relay refuses. \n is the one exception, and only in a body.
+const FORBIDDEN_ALERT_CHAR = /[\u0000-\u001F\u007F-\u009F\u061C\u200B\u200E\u200F\u2028-\u202E\u2060\u2066-\u2069\uFEFF]/u;
+
+function alertViolations(field: "title" | "body", text: string): string[] {
+  const out: string[] = [];
+  const max = field === "title" ? ALERT_TITLE_MAX : ALERT_BODY_MAX;
+  if ([...text].length > max) out.push(`${field} longer than ${max} chars`);
+  if (text.length === 0) out.push(`${field} empty`);
+  const scanned = field === "body" ? text.replaceAll("\n", "") : text;
+  const bad = [...scanned].filter((c) => FORBIDDEN_ALERT_CHAR.test(c));
+  if (bad.length) {
+    out.push(`${field} has forbidden char(s) ${bad.map((c) => `U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}`).join(", ")}`);
+  }
+  return out;
+}
+
+function relayUrlViolations(url: string): string[] {
+  const out: string[] = [];
+  if (url.length > 200) out.push("longer than 200 chars");
+  if (!/^[\x21-\x7E]+$/.test(url)) out.push("not all visible ASCII (0x21-0x7E)");
+  if (!url.startsWith("/") || url.startsWith("//")) out.push('must start with a single "/"');
+  if (url.includes("\\")) out.push("contains a backslash");
+  return out;
+}
+
+test("the relay-rule checkers themselves reject what the relay rejects (so the pins below can't pass vacuously)", () => {
+  assert.deepEqual(alertViolations("title", "New request"), []);
+  assert.deepEqual(alertViolations("body", "line one\nline two"), []); // \n allowed in a body
+  assert.notDeepEqual(alertViolations("title", "line one\nline two"), []); // …never in a title
+  for (const c of ["\u0000", "\u0009", "\u001F", "\u007F", "\u0085", "\u009F", "\u061C", "\u200B", "\u200E", "\u200F", "\u2028", "\u2029", "\u202A", "\u202E", "\u2060", "\u2066", "\u2069", "\uFEFF"]) {
+    assert.notDeepEqual(alertViolations("body", `ok${c}ok`), [], `U+${c.codePointAt(0)!.toString(16)} must be refused`);
+  }
+  assert.deepEqual(alertViolations("title", "x".repeat(60)), []);
+  assert.notDeepEqual(alertViolations("title", "x".repeat(61)), []);
+  assert.deepEqual(alertViolations("body", "x".repeat(120)), []);
+  assert.notDeepEqual(alertViolations("body", "x".repeat(121)), []);
+  // "—" and "!" are ordinary characters the relay accepts.
+  assert.deepEqual(alertViolations("body", "Test notification — push is working!"), []);
+
+  assert.deepEqual(relayUrlViolations("/issues?selected=abc"), []);
+  for (const bad of ["", "issues", "//evil.example", "/a\\b", "/a b", "/caf\u00E9", "/" + "a".repeat(200)]) {
+    assert.notDeepEqual(relayUrlViolations(bad), [], JSON.stringify(bad));
+  }
+});
+
+test("every APNS_ALERTS entry satisfies the relay's alert rules", () => {
+  const entries = Object.entries(APNS_ALERTS);
+  assert.ok(entries.length >= 12, "APNS_ALERTS unexpectedly small — is the export the real table?");
+  const problems = entries.flatMap(([category, alert]) =>
+    [...alertViolations("title", alert.title), ...alertViolations("body", alert.body)].map((v) => `${category}: ${v}`),
+  );
+  assert.deepEqual(problems, []);
+});
+
+test("every cleartext url a helper sends passes the relay's url rules — every category covered", async () => {
+  const issueAdmin: UserMeta = { role: "ADMIN", permissions: 0n, notifyOnIssue: true };
+  userRows = [{ id: "u-all", pushOnApproved: true, pushOnDeclined: true, pushOnAvailable: true }];
+  subRows = [iosSub("u-all", "token-all", { user: issueAdmin })];
+  // A real Issue id is cuid2 (schema.prisma: @default(cuid(2))) — 24 lowercase
+  // alphanumerics; it rides the cleartext url verbatim.
+  const issueId = "k8x2m9q4r7t1v3w5y6z0a2b4";
+
+  for (const id of [issueId, undefined]) {
+    await notifyAdminsNewRequestPush({ title: "Dune", mediaType: "MOVIE", requestedBy: "alice", requestId: "req_1" });
+    await notifyUserIssueMessagePush({ userId: "u-all", title: "Dune", body: "hi", issueId: id });
+    await notifyUserIssueResolvedPush({ userId: "u-all", title: "Dune", resolution: "fixed", issueId: id });
+    await notifyAdminsIssueMessagePush({ title: "Dune", userName: "alice", body: "hi", issueId: id });
+    await notifyAdminsNewIssuePush({ title: "Dune", issueType: "PLAYBACK", reportedBy: "alice", issueId: id });
+  }
+  await notifyAdminGrabCompletedPush({ userId: "u-all", title: "Dune", scope: "MOVIE", issueId });
+  await notifyAdminsManualInteractionRequiredPush({ service: "Radarr", title: "Dune" });
+  await notifyAdminsDeletionVoteThresholdPush({ title: "Dune", mediaType: "MOVIE", voteCount: 5, tmdbId: 438631 });
+  await notifyUserRequestApprovedPush({ userId: "u-all", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 });
+  await notifyUserRequestDeclinedPush({ userId: "u-all", title: "Dune", mediaType: "MOVIE" });
+  const batch = [{ requestedBy: "u-all", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 }];
+  await notifyUsersRequestsAvailablePush(batch);
+  await notifyUsersRequestsApprovedPush(batch);
+  await notifyUsersRequestsDeclinedPush(batch);
+  await sendApnsTestToUser("u-all");
+  await sendAppUpdateNoticeToAllIos();
+
+  // Coverage is derived, not asserted by hand: a new category with no sender
+  // exercised here fails this line until the test learns to send it.
+  assert.deepEqual(
+    [...new Set(relayCalls.map((c) => c.body.collapseId))].sort(),
+    Object.keys(APNS_ALERTS).sort(),
+  );
+  const urls = [...new Set(relayCalls.map((c) => c.body.payload.url ?? "<missing>"))];
+  assert.ok(urls.includes(`/issues?selected=${issueId}`), urls.join(" "));
+  const problems = urls.flatMap((u) => relayUrlViolations(u).map((v) => `${u}: ${v}`));
+  assert.deepEqual(problems, []);
+  // The cleartext alert on the wire is exactly the table entry, so the table
+  // pin above is the whole alert contract.
+  for (const c of relayCalls) {
+    assert.deepEqual(c.body.payload.aps?.alert, APNS_ALERTS[c.body.collapseId as keyof typeof APNS_ALERTS]);
+  }
+  assert.deepEqual(errors, []);
 });
 
 // ── web (VAPID) branch ──────────────────────────────────────────────────────
