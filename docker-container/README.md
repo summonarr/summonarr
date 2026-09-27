@@ -326,6 +326,7 @@ On an internet-facing deployment (`TRUST_PROXY=true`) the pre-auth restore is th
 iOS notifications are delivered through an APNs relay (default `summonapns.gadgetusaf.com`). Notification **content** is end-to-end encrypted once a device registers its public key, but the relay always receives the device's **APNs token** in clear.
 
 - For privacy-sensitive deployments, **self-host the relay** and point `apnsRelayUrl` (Admin → Settings) at it. It must be **HTTPS** (the setting now validates this).
+- Set `apnsRelayKey` (Admin → Settings) if the relay issues you one. Beyond authenticating this server, a key gives it **its own per-device rate-limit budget** on the relay, so another server pushing to the same device can't exhaust yours. Give **each server a distinct key** — servers sharing a key share one budget.
 - Or leave iOS push disabled if you don't use the iOS app.
 
 ### Move secrets to file mounts
