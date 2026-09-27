@@ -91,8 +91,8 @@ const pkg = {
   private: true,
   dependencies,
   // Carry overrides verbatim so `npm ci` validates the pruned tree against
-  // the same override set the lockfile was resolved with (e.g. hono and
-  // @hono/node-server under @prisma/dev).
+  // the same override set the lockfile was resolved with (e.g. mysql2 and
+  // deepmerge-ts under prisma).
   ...(rootPkg.overrides ? { overrides: rootPkg.overrides } : {}),
 };
 

@@ -111,7 +111,8 @@ jobs:
       # caps/timeouts/allowlist, and webhook replay protection at runtime.
       # Blocking — a regression in these foundations is a security defect.
       # Requires an alias-aware TS runner (the script imports src/lib/* via the
-      # @/* path alias), so it runs under `tsx` rather than bare `node`.
+      # @/* path alias), so it runs under node with tests/_loader.mjs, the same
+      # loader the unit suite uses.
       - name: Security smoke test
         run: npm run smoke:security
 

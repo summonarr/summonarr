@@ -20,7 +20,7 @@
     "audit:openapi": "node scripts/audit-openapi.mts",
     "audit:tw-merge": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/audit-tw-merge.mts",
     "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tests/_loader.mjs --test tests/*.test.mts",
-    "smoke:security": "tsx scripts/smoke-test-security.ts",
+    "smoke:security": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tests/_loader.mjs scripts/smoke-test-security.ts",
     "licenses:generate": "node scripts/generate-licenses.mts",
     "licenses:check": "node scripts/generate-licenses.mts --check",
     "postinstall": "node scripts/patch-eslint-plugin-react.mjs"
@@ -39,18 +39,12 @@
   },
   "overrides": {
     "@babel/core": "^7.29.6",
-    "defu": ">=6.1.5",
-    "find-my-way": "^9.7.0",
-    "@hono/node-server": "^2.0.5",
     "brace-expansion@5": "^5.0.9",
     "minimatch": {
       "brace-expansion": "^5.0.9"
     },
     "fast-uri": "^3.1.6",
-    "hono": "^4.12.27",
     "postcss": "^8.5.18",
-    "sharp": "^0.35.4",
-    "valibot": "^1.4.2",
     "nanoid": "^3.3.18",
     "deepmerge-ts": "^8.0.1",
     "mysql2": "^3.23.1",
@@ -69,7 +63,6 @@
     "playwright": "^1.63.0",
     "tailwindcss": "^4.3.1",
     "tsgo": "npm:typescript@^7.0.2",
-    "tsx": "^4.23.15",
     "typescript": "^6"
   }
 }

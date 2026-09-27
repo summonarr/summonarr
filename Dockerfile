@@ -95,7 +95,7 @@ COPY scripts/prune-lockfile.mjs ./scripts/prune-lockfile.mjs
 # prisma + dotenv + pg, hash-pinned: prune-lockfile.mjs carves them plus
 # their transitive closure out of the repo lockfile so `npm ci` installs the
 # vetted resolutions instead of re-resolving at build time (OpenSSF
-# Scorecard: Pinned-Dependencies). Overrides (hono, @hono/node-server, …)
+# Scorecard: Pinned-Dependencies). Overrides (mysql2, deepmerge-ts, …)
 # come from the root package.json automatically — the previous inline copy
 # of that list had already drifted from it. These node_modules ship into the
 # runner image, so build-time resolution here was a real supply-chain gap.
