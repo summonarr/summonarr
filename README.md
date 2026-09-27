@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.27.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.27.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,21 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.27.1
+
+**Changed**
+
+- **Accessibility across the app.** Switches, inputs and icon buttons have accessible names; selected filters, tabs and sort headers announce their state instead of showing it by colour alone; sortable table headers and the backup restore file picker work from the keyboard; the keyboard focus ring is visible in the light theme.
+- Media cards: keyboard and screen-reader users open a title through its real title link, and buttons inside the card are reachable again. A failed request from a card now shows the server's reason.
+- Error messages stay on screen for 10 seconds and pause while hovered. Settings toggles, votes, "Load more" and the cache warm-up buttons show a visible error when they fail instead of failing silently.
+- The Activity "Live" badge turns off when the live connection drops.
+- Low-contrast text (disabled-grey used for real content) and the Discover filter bar's selected segment were made easier to read; activity heatmaps follow your accent colour.
+
+**Fixed**
+
+- On phones (375px wide), filter bars, action rows and pagers wrap instead of running off the screen; dropdowns no longer make iOS zoom in; Admin → Issues is usable on narrow screens.
+- iOS push notifications: alerts and deep links are always shaped the way the push relay accepts, so no notification is rejected for a too-long title or body. A relay rejection is now logged with the relay's reason.
 
 ### v0.27.0
 
@@ -731,7 +746,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.27.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.27.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
