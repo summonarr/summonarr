@@ -265,8 +265,13 @@ function BulkBar({
   const router = useRouter();
   const [loading, setLoading] = useState<"disable" | "enable" | null>(null);
   const [error, setError] = useState(false);
+  // A bulk write overwrites every per-user setting and can't be undone (the
+  // opposite button restores a uniform state, not the previous mix), so each
+  // one asks first — the same inline confirm as the library Resync button.
+  const [confirming, setConfirming] = useState<"disable" | "enable" | null>(null);
 
   async function bulk(downloadsEnabled: boolean) {
+    setConfirming(null);
     setLoading(downloadsEnabled ? "enable" : "disable");
     setError(false);
     try {
@@ -287,11 +292,38 @@ function BulkBar({
     }
   }
 
+  if (confirming) {
+    const enable = confirming === "enable";
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-zinc-300">
+          {enable ? "Enable" : "Disable"} downloads for every {label} user?
+        </span>
+        <button
+          onClick={() => bulk(enable)}
+          className={`px-2 py-0.5 text-xs rounded border transition-colors ${
+            enable
+              ? "border-green-800/40 bg-green-500/10 text-green-400 hover:bg-green-500/20"
+              : "border-red-800/40 bg-red-500/10 text-red-400 hover:bg-red-500/20"
+          }`}
+        >
+          {enable ? "Enable all" : "Disable all"}
+        </button>
+        <button
+          onClick={() => setConfirming(null)}
+          className="px-2 py-0.5 text-xs rounded border border-zinc-700 text-zinc-400 hover:text-zinc-100 transition-colors"
+        >
+          Cancel
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="flex items-center gap-2">
       <span className="text-xs text-zinc-500">{label}:</span>
       <button
-        onClick={() => bulk(false)}
+        onClick={() => setConfirming("disable")}
         disabled={loading !== null}
         className="flex items-center gap-1 px-2 py-0.5 text-xs rounded border border-red-800/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
       >
@@ -299,7 +331,7 @@ function BulkBar({
         Disable all
       </button>
       <button
-        onClick={() => bulk(true)}
+        onClick={() => setConfirming("enable")}
         disabled={loading !== null}
         className="flex items-center gap-1 px-2 py-0.5 text-xs rounded border border-green-800/40 bg-green-500/10 text-green-400 hover:bg-green-500/20 transition-colors disabled:opacity-50"
       >
@@ -381,7 +413,10 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
       return (
         <tr key={u.id} className="border-b border-zinc-800/50 last:border-0 hover:bg-zinc-800/20 transition-colors">
           {/* Avatar + name */}
-          <td className="py-2.5 pl-4 pr-3">
+          {/* max-w-0 + w-full is what lets `truncate` below engage in an
+              auto-layout table: without a width bound a long email widened
+              the table past its wrapper and clipped the Downloads column. */}
+          <td className="py-2.5 pl-4 pr-3 max-w-0 w-full">
             <div className="flex items-center gap-2.5 min-w-0">
               {/* Plex/Jellyfin avatar URL comes from an arbitrary upstream host (can't be
                   added to next/image remotePatterns up front); the shared Avatar falls back
@@ -410,6 +445,15 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
                 {u.email && (
                   <span className="text-[11px] text-zinc-500 truncate block">{u.email}</span>
                 )}
+                {/* The Source and Linked-account columns are hidden on narrow
+                    screens; stack them here so a phone can still tell Plex from
+                    Jellyfin and fix a row's attribution. */}
+                <div className="md:hidden mt-1 flex flex-wrap items-center gap-1.5">
+                  <Badge className={`sm:hidden text-[10px] ${sourceStyles[source] ?? ""}`}>
+                    {mediaInstanceLabel(source, u.serverInstance)}
+                  </Badge>
+                  <LinkPicker row={u} accounts={accounts} />
+                </div>
               </div>
             </div>
           </td>
@@ -472,12 +516,13 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
       <input
         type="search"
         placeholder="Filter by username or email…"
+        aria-label="Filter server users"
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         className="w-full sm:w-72 rounded-lg border border-zinc-700 bg-zinc-800/60 px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
       />
 
-      <div className="rounded-xl border border-zinc-800 overflow-hidden">
+      <div className="rounded-xl border border-zinc-800 overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-zinc-800 bg-zinc-900/60">
@@ -490,6 +535,13 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
           <tbody className="bg-zinc-900/30">
             {renderGroup(plexUsers, "plex")}
             {renderGroup(jellyfinUsers, "jellyfin")}
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={4} className="py-6 px-4 text-center text-sm text-zinc-500">
+                  No users match &ldquo;{search.trim()}&rdquo;.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

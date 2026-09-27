@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { useToast } from "@/components/ui/toast";
 import {
   Plus,
@@ -81,6 +82,17 @@ export const ON_BEHALF_MESSAGES: Record<string, string> = {
   error: "Request failed — try again",
 };
 
+// Outcomes that mean the on-behalf request did NOT go through — shown in the
+// danger colour like every other request button's error line. The already-*
+// outcomes are neutral (nothing failed; there was simply nothing to do).
+const ON_BEHALF_FAILURES = new Set([
+  "skipped-declined",
+  "no-permission",
+  "blacklisted",
+  "rating-blocked",
+  "error",
+]);
+
 // Pure: resolves the status line from the bulk response. `result` is the first
 // item's outcome; `created` is the fallback for an older server whose response
 // carries no `results` array.
@@ -109,12 +121,17 @@ export function RequestButton({
   blacklisted = false,
 }: RequestButtonProps) {
   const { toast } = useToast();
+  const router = useRouter();
   const [state, setState] = useState<State>(requested ? "duplicate" : "idle");
   const [note, setNote] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const [obUsers, setObUsers] = useState<{ id: string; name: string | null; email: string }[]>([]);
   const [obUserId, setObUserId] = useState("");
   const [obMsg, setObMsg] = useState("");
+  const [obMsgError, setObMsgError] = useState(false);
+  // The picker's user list: "loading" while the fetch is in flight, "error"
+  // when it failed — an empty select alone read as "there are no users".
+  const [obUsersState, setObUsersState] = useState<"idle" | "loading" | "error">("idle");
   const [obSubmitting, setObSubmitting] = useState(false);
   // Request-time quality profile (REQUEST_ADVANCED). profiles===null ⇒ not yet
   // loaded; profileId==="" ⇒ use the server default.
@@ -165,10 +182,13 @@ export function RequestButton({
       if (body?.alreadyAvailable) {
         setFoundAvailable(true);
         setState("idle");
+        router.refresh();
         return;
       }
       setState("requested");
       toast({ title: `Requested “${title}”`, variant: "success" });
+      // Re-render the server-side hero (availability badges, Queued state).
+      router.refresh();
     } catch {
       setErrorMsg("Network error — please try again");
       setState("error");
@@ -177,14 +197,20 @@ export function RequestButton({
 
   function openOnBehalf() {
     setObMsg("");
+    setObMsgError(false);
     setState("onbehalf");
-    if (obUsers.length === 0) {
+    if (obUsers.length === 0 && obUsersState !== "loading") {
+      setObUsersState("loading");
       fetch(withBasePath("/api/requests/users"))
-        .then((r) => (r.ok ? r.json() : { users: [] }))
-        .then((d: { users?: { id: string; name: string | null; email: string }[] }) =>
-          setObUsers(d.users ?? []),
-        )
-        .catch(() => {});
+        .then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        })
+        .then((d: { users?: { id: string; name: string | null; email: string }[] }) => {
+          setObUsers(d.users ?? []);
+          setObUsersState("idle");
+        })
+        .catch(() => setObUsersState("error"));
     }
   }
 
@@ -192,6 +218,7 @@ export function RequestButton({
     if (!obUserId) return;
     setObSubmitting(true);
     setObMsg("");
+    setObMsgError(false);
     try {
       const res = await fetch(withBasePath("/api/requests/bulk"), {
         method: "POST",
@@ -205,11 +232,15 @@ export function RequestButton({
       } = await res.json().catch(() => ({}));
       if (!res.ok) {
         setObMsg(data.error ?? "Something went wrong");
+        setObMsgError(true);
         return;
       }
+      const result = data.results?.[0]?.result;
       setObMsg(onBehalfMessage(data.results?.[0]?.result, data.created));
+      setObMsgError(result !== undefined && ON_BEHALF_FAILURES.has(result));
     } catch {
       setObMsg("Network error — please try again");
+      setObMsgError(true);
     } finally {
       setObSubmitting(false);
     }
@@ -395,6 +426,11 @@ export function RequestButton({
 
           {state === "onbehalf" && (
             <div className="flex flex-col gap-2 w-full max-w-sm">
+              {obUsersState === "error" ? (
+                <p className="ds-mono" role="alert" style={{ fontSize: 11, color: "var(--ds-danger)", margin: 0 }}>
+                  Couldn&apos;t load users — try again
+                </p>
+              ) : (
               <select
                 value={obUserId}
                 onChange={(e) => setObUserId(e.target.value)}
@@ -409,13 +445,16 @@ export function RequestButton({
                   borderRadius: 6,
                 }}
               >
-                <option value="">Select a user…</option>
+                <option value="">
+                  {obUsersState === "loading" ? "Loading users…" : "Select a user…"}
+                </option>
                 {obUsers.map((u) => (
                   <option key={u.id} value={u.id}>
                     {u.name ?? u.email}
                   </option>
                 ))}
               </select>
+              )}
               <div className="flex items-center gap-2">
                 <DetailActionButton
                   variant="primary"
@@ -436,6 +475,7 @@ export function RequestButton({
                     setState("idle");
                     setObUserId("");
                     setObMsg("");
+                    setObMsgError(false);
                   }}
                 >
                   <X style={{ width: 14, height: 14 }} />
@@ -443,7 +483,14 @@ export function RequestButton({
                 </DetailActionButton>
               </div>
               {obMsg && (
-                <p className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", margin: 0 }}>
+                <p
+                  className="ds-mono"
+                  style={{
+                    fontSize: 11,
+                    color: obMsgError ? "var(--ds-danger)" : "var(--ds-fg-subtle)",
+                    margin: 0,
+                  }}
+                >
                   {obMsg}
                 </p>
               )}

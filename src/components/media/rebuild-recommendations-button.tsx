@@ -37,7 +37,9 @@ export function RebuildRecommendationsButton() {
     setMessage(null);
     try {
       const res = await fetch(withBasePath("/api/cron/warm-recommendations"), { method: "POST" });
-      const data = (await res.json()) as {
+      // A reverse proxy can answer a slow rebuild with an HTML 502/504 page, so
+      // a body that isn't JSON must not surface as a parser error.
+      const data = (await res.json().catch(() => ({}))) as {
         error?: string;
         skipped?: boolean;
         reason?: string;
@@ -55,7 +57,17 @@ export function RebuildRecommendationsButton() {
         return;
       }
       if (!res.ok || data.error) {
-        setMessage({ text: data.error ?? "Rebuild failed", type: "error" });
+        // A gateway timeout (502/504 from the proxy, not our JSON) says nothing
+        // about the job itself, which may still be running server-side.
+        const gatewayTimeout = !data.error && (res.status === 502 || res.status === 504);
+        setMessage({
+          text:
+            data.error ??
+            (gatewayTimeout
+              ? "Lost contact with the server; the rebuild may still be running"
+              : `Rebuild failed (HTTP ${res.status})`),
+          type: "error",
+        });
         setCooldown(30);
         return;
       }
@@ -71,12 +83,12 @@ export function RebuildRecommendationsButton() {
       // grid only changes on a server re-render. Nothing else on the page would
       // trigger one — LiveRefresh listens for request events, not this.
       router.refresh();
-    } catch (err) {
+    } catch {
       // A rebuild on a large library can outlive a reverse proxy's timeout
       // (~60-100s) while still completing server-side, so a transport failure
       // must not claim the job failed — say what is actually known.
       setMessage({
-        text: err instanceof Error ? `Lost contact: ${err.message}` : "Lost contact with the server",
+        text: "Lost contact with the server; the rebuild may still be running",
         type: "error",
       });
       setCooldown(60);

@@ -5,6 +5,7 @@
 // date range, export buttons, and the segmented/select filter row. All state
 // lives in the parent ActivityHistoryTable; this receives values + setters.
 
+import { useId } from "react";
 import type { MediaServerUserOption } from "./types";
 
 const inputStyle: React.CSSProperties = {
@@ -33,19 +34,23 @@ function SegGroup<T extends string>({
   setValue: (v: T) => void;
   options: { value: T; label: string }[];
 }) {
+  const labelId = useId();
   return (
     <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
       <span
+        id={labelId}
         className="ds-mono uppercase"
         style={{
           fontSize: 9.5,
-          color: "var(--ds-fg-disabled)",
+          color: "var(--ds-fg-subtle)",
           letterSpacing: "0.08em",
         }}
       >
         {label}
       </span>
       <div
+        role="group"
+        aria-labelledby={labelId}
         style={{
           display: "inline-flex",
           padding: 2,
@@ -57,6 +62,8 @@ function SegGroup<T extends string>({
         {options.map((o) => (
           <button
             key={o.value}
+            type="button"
+            aria-pressed={value === o.value}
             onClick={() => setValue(o.value)}
             style={{
               padding: "3px 10px",
@@ -103,7 +110,7 @@ function SelectField({
         className="ds-mono uppercase"
         style={{
           fontSize: 9.5,
-          color: "var(--ds-fg-disabled)",
+          color: "var(--ds-fg-subtle)",
           letterSpacing: "0.08em",
         }}
       >
@@ -196,9 +203,16 @@ export function HistoryFilterBar({
     >
       <div
         className="resp-history-bar"
-        style={{ display: "flex", alignItems: "center", gap: 10 }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          // Search, dates, counter and export buttons are all nowrap; on a
+          // phone their combined width exceeds the viewport, so wrap.
+          flexWrap: "wrap",
+        }}
       >
-        <div style={{ position: "relative", flex: "0 1 360px" }}>
+        <div style={{ position: "relative", flex: "1 1 240px", maxWidth: 360 }}>
           <svg
             width="13"
             height="13"
@@ -232,6 +246,7 @@ export function HistoryFilterBar({
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search by title, user, or IP…"
             aria-label="Search plays"
+            className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             style={{
               fontFamily: "inherit",
               fontSize: 12.5,
@@ -241,7 +256,6 @@ export function HistoryFilterBar({
               color: "var(--ds-fg)",
               border: "1px solid var(--ds-border)",
               borderRadius: 8,
-              outline: "none",
             }}
           />
           {search && (

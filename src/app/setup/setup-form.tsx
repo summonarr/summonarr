@@ -38,6 +38,7 @@ export function SetupForm() {
       const data = await res.json();
       if (!res.ok) {
         setError(data.error ?? "Registration failed");
+        setLoading(false);
         return;
       }
 
@@ -57,10 +58,12 @@ export function SetupForm() {
         return;
       }
 
+      // Both success paths above navigate away, so loading is cleared only on
+      // failure — resetting it in a finally re-enabled the button mid-navigation
+      // and a second click re-POSTed /api/auth/register.
       window.location.href = withBasePath("/");
     } catch {
       setError("Something went wrong, please try again");
-    } finally {
       setLoading(false);
     }
   }
@@ -114,7 +117,11 @@ export function SetupForm() {
         />
       </div>
 
-      {error && <p className="text-sm text-red-400">{error}</p>}
+      {error && (
+        <p role="alert" aria-live="assertive" className="text-sm text-red-400">
+          {error}
+        </p>
+      )}
 
       <Button
         type="submit"

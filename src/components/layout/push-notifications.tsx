@@ -232,8 +232,11 @@ export function PushNotifications() {
 
   if (state === "naming") {
     return (
+      // min-w-0 + a shrinkable input: in the 375px mobile top bar this form
+      // sits beside the menu/search/notification controls, and a fixed-width
+      // row ran past the right edge. Controls stay h-8 (tap-target floor).
       <form
-        className="flex items-center gap-1.5"
+        className="flex min-w-0 items-center gap-1.5"
         onSubmit={(e) => {
           e.preventDefault();
           subscribe(deviceName);
@@ -247,11 +250,12 @@ export function PushNotifications() {
           placeholder="Device name (e.g. Work Mac)"
           maxLength={100}
           aria-label="Device name"
-          className="h-7 w-40 text-xs md:text-xs"
+          className="w-40 shrink text-xs md:text-xs"
         />
         <Button
           type="submit"
           size="sm"
+          className="h-8 shrink-0"
           disabled={busy}
           aria-label="Enable push notifications for this device"
         >
@@ -261,6 +265,7 @@ export function PushNotifications() {
           type="button"
           size="sm"
           variant="ghost"
+          className="h-8 shrink-0"
           onClick={() => { setState("unsubscribed"); setDeviceName(""); }}
         >
           Cancel

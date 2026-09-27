@@ -100,7 +100,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
             type="button"
             aria-label="Close"
             onClick={onClose}
-            className="text-zinc-500 hover:text-zinc-100 transition-colors"
+            className="-m-2 inline-flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-100 transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
@@ -109,7 +109,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
 
         {u.discordId ? (
           <div className="mb-3">
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-indigo-400 mb-1 flex items-center gap-1.5">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-1.5">
               <MessageCircle className="w-3 h-3" /> Discord
             </p>
             <AdminToggleRow label="Request Approved" checked={prefs.notifyOnApproved} onChange={() => toggle("notifyOnApproved")} disabled={saving} />
@@ -120,7 +120,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
           <p className="text-xs text-zinc-500 mb-3 italic">Discord not linked — no Discord notifications</p>
         )}
 
-        <div>
+        <div className="mt-3">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-1.5">
             <Mail className="w-3 h-3" /> Email
           </p>
@@ -129,7 +129,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
           <AdminToggleRow label="Request Declined" checked={prefs.emailOnDeclined} onChange={() => toggle("emailOnDeclined")} disabled={saving} />
         </div>
 
-        <div>
+        <div className="mt-3">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-1.5">
             <Smartphone className="w-3 h-3" /> Push
           </p>
@@ -139,7 +139,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
         </div>
 
         <div className="mt-3">
-          <p className="text-[10px] font-semibold uppercase tracking-wider text-yellow-400 mb-1 flex items-center gap-1.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-1.5">
             <AlertTriangle className="w-3 h-3" /> Issues
           </p>
           <AdminToggleRow label="New Issues & Replies" checked={prefs.notifyOnIssue} onChange={() => toggle("notifyOnIssue")} disabled={saving} />

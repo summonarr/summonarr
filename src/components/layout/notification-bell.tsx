@@ -16,6 +16,9 @@ export function NotificationBell() {
   // /api/notifications twice.
   const { items, unread, markAllRead } = useNotifications();
   const [open, setOpen] = useState(false);
+  // Opening marks everything read (optimistically, before the panel paints),
+  // so the unread tint keys off the ids that were unread AT OPEN, not readAt.
+  const [unreadAtOpen, setUnreadAtOpen] = useState<ReadonlySet<string>>(() => new Set());
   const panelRef = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const mounted = useHasMounted();
@@ -46,6 +49,7 @@ export function NotificationBell() {
 
   async function toggle() {
     const next = !open;
+    if (next) setUnreadAtOpen(new Set(items.filter((n) => !n.readAt).map((n) => n.id)));
     setOpen(next);
     // Opening marks everything read.
     if (next && unread > 0) await markAllRead();
@@ -128,9 +132,10 @@ export function NotificationBell() {
                     role="menuitem"
                     onClick={() => setOpen(false)}
                     // The unread tint is a class, not an inline style, so the
-                    // hover class can win over it.
+                    // hover class can win over it. accent-soft, not bg-2: bg-2
+                    // is white on this bg-1 panel in the light theme.
                     className={`flex gap-2.5 transition-colors hover:bg-[var(--ds-bg-3)] ${
-                      n.readAt ? "" : "bg-[var(--ds-bg-2)]"
+                      unreadAtOpen.has(n.id) || !n.readAt ? "bg-[var(--ds-accent-soft)]" : ""
                     }`}
                     style={{
                       padding: "10px 12px",

@@ -30,7 +30,9 @@ function TokenLinkFlow() {
     setError(null);
     try {
       const res = await fetch(withBasePath("/api/discord/generate-link"), { method: "POST" });
-      const data = (await res.json()) as { token?: string; expiresAt?: string; error?: string };
+      // A proxy 502/504 answers with an HTML page (or nothing), and a bare
+      // res.json() would surface the raw SyntaxError text to the user.
+      const data = (await res.json().catch(() => ({}))) as { token?: string; expiresAt?: string; error?: string };
       if (!res.ok) throw new Error(data.error ?? "Failed to generate token");
       if (!data.token || !data.expiresAt) throw new Error("Malformed server response");
       setToken(data.token);
@@ -109,8 +111,8 @@ function WebMergeFlow() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ discordId: discordId.trim() }),
       });
-      const data = (await res.json()) as { error?: string };
-      if (!res.ok) throw new Error(data.error ?? "Failed to send code");
+      const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+      if (!res.ok) throw new Error(data.message ?? data.error ?? "Failed to send code");
       setStep("code-sent");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong");
@@ -131,7 +133,7 @@ function WebMergeFlow() {
       // `message` first: several routes answer { error: "<slug>", message: "<sentence>" },
       // and rendering `error` alone showed the raw machine code — e.g. literally
       // "rate_limit" instead of "Too many attempts. Wait 10 minutes and try again."
-      const data = (await res.json()) as { migrated?: number; error?: string; message?: string };
+      const data = (await res.json().catch(() => ({}))) as { migrated?: number; error?: string; message?: string };
       if (!res.ok) throw new Error(data.message ?? data.error ?? "Verification failed");
       setMigrated(data.migrated ?? 0);
       setStep("done");
@@ -176,6 +178,7 @@ function WebMergeFlow() {
               value={discordId}
               onChange={(e) => { setDiscordId(e.target.value.replace(/\D/g, "")); setError(null); }}
               placeholder="123456789012345678"
+              aria-label="Discord user ID"
               className="flex-1 min-w-0 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm font-mono text-zinc-100 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500"
             />
             <button
@@ -201,6 +204,7 @@ function WebMergeFlow() {
               value={code}
               onChange={(e) => { setCode(e.target.value.replace(/[^a-fA-F0-9]/g, "").toUpperCase().slice(0, 12)); setError(null); }}
               placeholder="A1B2C3D4E5F6"
+              aria-label="Verification code"
               maxLength={12}
               className="w-48 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm font-mono text-zinc-100 placeholder-zinc-600 text-center tracking-widest focus:outline-none focus:ring-1 focus:ring-indigo-500"
             />

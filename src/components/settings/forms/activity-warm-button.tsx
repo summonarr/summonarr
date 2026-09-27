@@ -32,7 +32,7 @@ export function ActivityWarmButton() {
       setStatus("error");
       setResult("Request failed");
     }
-    resetTimer.current = setTimeout(() => setStatus("idle"), 10000);
+    resetTimer.current = setTimeout(() => { setStatus("idle"); setResult(null); }, 10000);
   }
 
   return (

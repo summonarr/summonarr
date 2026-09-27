@@ -3,6 +3,13 @@
 // Modal confirmation for deleting a single play record. Pure presentation —
 // the parent owns the deleting/error state and the DELETE call.
 
+import {
+  Dialog,
+  DialogBackdrop,
+  DialogPopup,
+  DialogPortal,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import type { HistoryRow } from "./types";
 
 export function DeleteConfirm({
@@ -19,46 +26,41 @@ export function DeleteConfirm({
   onCancel: () => void;
 }) {
   return (
-    <div
-      role="dialog"
-      // Clicking the dark backdrop closes the dialog, except while the delete
-      // is running (the Cancel button is disabled then too). Closing it early
-      // would leave no place to show an error if the delete then failed, and
-      // the admin would wrongly believe the play was deleted.
-      onClick={deleting ? undefined : onCancel}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "oklch(0 0 0 / 0.5)",
-        backdropFilter: "blur(2px)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 60,
+    <Dialog
+      open
+      onOpenChange={(next) => {
+        // Escape and backdrop clicks close the dialog, except while the delete
+        // is running (the Cancel button is disabled then too). Closing it early
+        // would leave no place to show an error if the delete then failed, and
+        // the admin would wrongly believe the play was deleted.
+        if (!next && !deleting) onCancel();
       }}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: 360,
-          padding: 18,
-          background: "var(--ds-bg-1)",
-          border: "1px solid var(--ds-border-strong)",
-          borderRadius: 10,
-          boxShadow: "var(--ds-shadow-lg)",
-        }}
-      >
-        <div
+      <DialogPortal>
+        <DialogBackdrop />
+        <DialogPopup
+          style={{
+            width: 360,
+            maxWidth: "calc(100vw - 32px)",
+            padding: 18,
+            background: "var(--ds-bg-1)",
+            border: "1px solid var(--ds-border-strong)",
+            borderRadius: 10,
+            boxShadow: "var(--ds-shadow-lg)",
+          }}
+        >
+        <DialogTitle
           style={{
             fontSize: 13,
             fontWeight: 600,
             color: "var(--ds-fg)",
+            margin: 0,
             marginBottom: 6,
             letterSpacing: "-0.01em",
           }}
         >
           Delete this play?
-        </div>
+        </DialogTitle>
         <div
           style={{
             fontSize: 12,
@@ -103,6 +105,7 @@ export function DeleteConfirm({
         )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button
+            type="button"
             className="ds-hover-tint"
             onClick={onCancel}
             disabled={deleting}
@@ -119,6 +122,7 @@ export function DeleteConfirm({
             Cancel
           </button>
           <button
+            type="button"
             className="ds-hover-tint"
             onClick={onConfirm}
             disabled={deleting}
@@ -137,7 +141,8 @@ export function DeleteConfirm({
             {deleting ? "Deleting…" : "Delete"}
           </button>
         </div>
-      </div>
-    </div>
+        </DialogPopup>
+      </DialogPortal>
+    </Dialog>
   );
 }

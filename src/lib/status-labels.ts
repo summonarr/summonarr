@@ -40,3 +40,12 @@ export const ISSUE_TYPE_LABELS: Record<string, string> = {
   WRONG_MATCH: "Wrong match",
   OTHER: "Other",
 };
+
+// Fixed locale + timezone so the desktop issues list/pane (server-rendered) and
+// the mobile issue drawer (client) print the same date for the same issue.
+export const ISSUE_DATE_FORMAT = new Intl.DateTimeFormat("en-US", {
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+  timeZone: "UTC",
+});

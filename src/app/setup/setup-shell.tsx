@@ -74,6 +74,10 @@ function TabButton({
           ? "text-[var(--ds-fg)] bg-zinc-900"
           : "text-zinc-400 bg-zinc-950 hover:text-zinc-200"
       }`}
+      // bg-zinc-900 vs bg-zinc-950 is a ~1.5% lightness step in the light
+      // theme, so the selected tab also carries an accent underline that reads
+      // in both themes.
+      style={active ? { boxShadow: "inset 0 -2px 0 var(--ds-accent)" } : undefined}
     >
       {children}
     </button>

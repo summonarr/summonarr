@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { CheckCircle, Clock, Loader2, Play, RefreshCw, XCircle } from "@/components/icons";
 import type { ActionState, ApplyResult, TrashSettings } from "./types";
 import { withBasePath } from "@/lib/base-path";
+import { RefreshErrorBanner } from "./banners";
 
 interface SyncSettingsCardProps {
   initialSettings: TrashSettings;
@@ -19,6 +20,8 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
   const [refreshState, setRefreshState] = useState<ActionState>("idle");
   const [syncState, setSyncState] = useState<ActionState>("idle");
   const [syncSkipped, setSyncSkipped] = useState(false);
+  const [refreshSkipped, setRefreshSkipped] = useState(false);
+  const [refreshError, setRefreshError] = useState<{ errors: string[]; schemaDiagnostic?: string } | null>(null);
 
   async function patchSettings(partial: Partial<TrashSettings>) {
     setSaveState("running");
@@ -47,23 +50,39 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
 
   async function handleRefresh() {
     setRefreshState("running");
+    setRefreshSkipped(false);
+    setRefreshError(null);
     try {
       const res = await fetch(withBasePath(`/api/admin/trash-guides/refresh`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
+      // 409 = the trash lock is held: nothing ran, so like Sync Now's skipped
+      // state it is neither a success nor a failure.
       if (res.status === 409) {
-        setRefreshState("error");
-        setTimeout(() => setRefreshState("idle"), 3000);
+        setRefreshState("idle");
+        setRefreshSkipped(true);
+        setTimeout(() => setRefreshSkipped(false), 3000);
         return;
       }
-      const data = (await res.json()) as { ok?: boolean; errors?: string[] };
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        errors?: string[];
+        schemaDiagnostic?: string;
+      };
       const hasErrors = !res.ok || !data.ok || (data.errors && data.errors.length > 0);
       setRefreshState(hasErrors ? "error" : "ok");
+      if (hasErrors) {
+        setRefreshError({
+          errors: data.errors && data.errors.length > 0 ? data.errors : [`HTTP ${res.status}`],
+          schemaDiagnostic: data.schemaDiagnostic,
+        });
+      }
       onAfterAction?.([]);
-    } catch {
+    } catch (err) {
       setRefreshState("error");
+      setRefreshError({ errors: [err instanceof Error ? err.message : String(err)] });
     }
     // Clear a success message after 3s; an error stays until the next click.
     setTimeout(() => setRefreshState((s) => (s === "error" ? s : "idle")), 3000);
@@ -177,8 +196,21 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
         {refreshState === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />Refresh failed</span>}
         {syncState === "ok"    && <span className="text-xs text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />Sync complete</span>}
         {syncState === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />Sync failed</span>}
+        {refreshSkipped && <span className="text-xs text-amber-400 flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" />Refresh already running — try again shortly</span>}
         {syncSkipped && <span className="text-xs text-amber-400 flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" />Already running — try again shortly</span>}
       </div>
+
+      {refreshError && (
+        <div className="mt-4">
+          <RefreshErrorBanner
+            error={refreshError}
+            onDismiss={() => {
+              setRefreshError(null);
+              setRefreshState("idle");
+            }}
+          />
+        </div>
+      )}
     </Card>
   );
 }

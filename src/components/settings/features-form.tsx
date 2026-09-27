@@ -151,7 +151,9 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
             else next[key] = message;
             return next;
           });
-          scheduleStatusClear(key);
+          // A failure stays on screen (icon + message) until the next toggle
+          // of this switch; only the success tick fades.
+          if (success) scheduleStatusClear(key);
         }
       }
     } finally {
@@ -234,12 +236,16 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
                     {feature.note && (
                       <p className="text-xs text-amber-400 mt-1">{feature.note}</p>
                     )}
+                    {status === "error" && errorByKey[feature.key] && (
+                      <p role="alert" className="text-xs text-red-400 mt-1">{errorByKey[feature.key]}</p>
+                    )}
                   </div>
                   <div className="flex items-center gap-2 shrink-0 pt-0.5">
                     {status === "saving" && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500" />}
                     {status === "ok" && <CheckCircle className="w-3.5 h-3.5 text-green-400" />}
                     {status === "error" && (
                       <XCircle
+                        role="img"
                         className="w-3.5 h-3.5 text-red-400"
                         aria-label={errorByKey[feature.key] ?? "Save failed"}
                       />

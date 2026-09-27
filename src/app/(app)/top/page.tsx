@@ -15,7 +15,7 @@ import { LiveRefresh } from "@/components/live-refresh";
 import { prisma } from "@/lib/prisma";
 import { requireFeature } from "@/lib/features";
 import { PageHeader, EmptyState, SectionHeader } from "@/components/ui/design";
-import { Filter, Film, Tv, type IconComponent } from "@/components/icons";
+import { AlertTriangle, Filter, Film, Tv, type IconComponent } from "@/components/icons";
 
 const PER_PAGE = 36;
 
@@ -161,6 +161,9 @@ export default async function TopRatedPage({
 
   const filterOpts = { hideAvailable, showPlex, showJellyfin, minImdb, minVotes, fromYear, toYear };
   const hasFilters = !!(hideAvailable || minImdb || minVotes || fromYear || toYear);
+  // Retry target for the unfiltered empty state: the page the user is on, as-is.
+  const currentQuery = new URLSearchParams(sp).toString();
+  const retryHref = currentQuery ? `/top?${currentQuery}` : "/top";
 
   const [
     rawTmdbMovies, rawTmdbTV,
@@ -272,7 +275,7 @@ export default async function TopRatedPage({
       </Suspense>
 
       {bothEmpty ? (
-        sectionEmptyState(showMovies ? Film : Tv, page, hasFilters)
+        sectionEmptyState(showMovies ? Film : Tv, page, hasFilters, retryHref)
       ) : (
         <>
           {showMovies && (
@@ -292,7 +295,7 @@ export default async function TopRatedPage({
                 }
               />
               {movies.length === 0 ? (
-                sectionEmptyState(Film, page, hasFilters)
+                sectionEmptyState(Film, page, hasFilters, retryHref)
               ) : (
                 <div className="ds-media-grid">
                   {movies.map((media) => (
@@ -324,7 +327,7 @@ export default async function TopRatedPage({
                 }
               />
               {tv.length === 0 ? (
-                sectionEmptyState(Tv, page, hasFilters)
+                sectionEmptyState(Tv, page, hasFilters, retryHref)
               ) : (
                 <div className="ds-media-grid">
                   {tv.map((media) => (
@@ -364,20 +367,33 @@ function RangeLabel({ children }: { children: React.ReactNode }) {
 
 // The per-section (and, when both are empty, per-page) empty state. `icon`
 // only matters past page 1 — the filters case always shows the filter glyph.
-function sectionEmptyState(icon: IconComponent, page: number, hasFilters: boolean) {
-  return page > 1 ? (
-    <EmptyState
-      icon={icon}
-      title="No more results on this page"
-      description="Try going back to the first page."
-      cta={{ href: "/top", label: "Back to page 1" }}
-    />
-  ) : (
+// With no filter set, an empty page 1 means the sources came back empty (each
+// fetch swallows its outage into []), so it must not blame filters the user
+// never applied.
+function sectionEmptyState(icon: IconComponent, page: number, hasFilters: boolean, retryHref: string) {
+  if (page > 1) {
+    return (
+      <EmptyState
+        icon={icon}
+        title="No more results on this page"
+        description="Try going back to the first page."
+        cta={{ href: "/top", label: "Back to page 1" }}
+      />
+    );
+  }
+  return hasFilters ? (
     <EmptyState
       icon={Filter}
       title="No results match these filters"
       description="Try removing one or two filters to see more."
-      {...(hasFilters ? { cta: { href: "/top", label: "Clear filters" } } : {})}
+      cta={{ href: "/top", label: "Clear filters" }}
+    />
+  ) : (
+    <EmptyState
+      icon={AlertTriangle}
+      title="Couldn’t load top-rated titles"
+      description="The rating sources returned nothing. Please try again shortly."
+      cta={{ href: retryHref, label: "Retry" }}
     />
   );
 }

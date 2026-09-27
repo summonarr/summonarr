@@ -136,7 +136,13 @@ type ApnsCategory =
 // never see them; the app loads the real details on tap from the user's own
 // server. Web Push keeps its rich text (it goes to the user's browser vendor,
 // not our relay) — only the iOS branch swaps in these generics.
-const APNS_ALERTS: Record<ApnsCategory, { title: string; body: string }> = {
+//
+// These strings are the ONLY cleartext alert text the relay ever sees, and the
+// relay validates them: title ≤60 / body ≤120 chars, no control or bidi/zero-
+// width characters, and a newline only in the body. A string that breaks a rule
+// makes the relay answer 400 for that whole category, so tests/push.test.mts
+// pins every entry against those rules — edit them there first.
+export const APNS_ALERTS: Record<ApnsCategory, { title: string; body: string }> = {
   new_request: { title: "New request", body: "A new request needs review" },
   approved: { title: "Request approved", body: "Open Summonarr to see details" },
   declined: { title: "Request declined", body: "Open Summonarr to see details" },
@@ -267,11 +273,22 @@ async function sendApns(subscription: PushRow, payload: PushPayload): Promise<bo
       const detail = [errBody?.error, errBody?.reason, errBody?.apnsReason]
         .filter((v): v is string => typeof v === "string" && v.length > 0)
         .join("; ");
-      if (res.status === 401) {
+      if (res.status === 400) {
+        // The relay's payload validation refused what we sent. That is never
+        // transient: this category will fail for every device until the code
+        // changes, so say so plainly instead of reading like a relay hiccup.
+        console.error(
+          `[push] APNs relay rejected the payload (400: ${errBody?.error ?? "no error given"}) — the relay's validation refused it; this is a Summonarr server bug (category "${payload.category}"), not a transient failure`,
+        );
+      } else if (res.status === 401) {
         console.error(
           `[push] APNs relay rejected auth (401${detail ? `: ${detail}` : ""}) — set/verify the apnsRelayKey setting`,
         );
       } else if (res.status === 429) {
+        // Deliberately dropped, not retried. The relay's budget is per device
+        // (scoped to this server's apnsRelayKey when one is set), so a batch hitting it would schedule one detached
+        // retry per job into the same exhausted budget, and nothing would track
+        // or bound those timers. A lost alert is recovered by opening the app.
         const retryAfter = res.headers.get("retry-after");
         console.error(
           `[push] APNs relay rate-limited (429${detail ? `: ${detail}` : ""})${retryAfter ? ` — retry after ${retryAfter}s` : ""}`,

@@ -79,7 +79,7 @@ export function CollectionRequestAllButton({
   }
 
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       {/* sm (32px): it sits in the collection heading row, not the action row. */}
       <DetailActionButton
         variant={state === "done" ? "accent-soft" : "primary"}

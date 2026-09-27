@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { XCircle, Loader2, RefreshCw, RefreshCcw, Trash2, Database } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
@@ -74,10 +74,15 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
   const [busy, setBusy] = useState<null | "clear" | "refetch">(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  // Kept in a ref so a new action cancels the previous action's timer (which
+  // would otherwise wipe the newer result early) and unmount cancels it too.
+  const msgTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (msgTimer.current) clearTimeout(msgTimer.current); }, []);
 
   async function doClear() {
     setBusy("clear");
     setConfirmClear(false);
+    if (msgTimer.current) clearTimeout(msgTimer.current);
     setMsg(null);
     try {
       const res = await fetch(withBasePath(`/api/admin/clear-cache?source=${source.id}`), { method: "DELETE" });
@@ -88,11 +93,12 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
       setMsg({ kind: "err", text: "Request failed" });
     }
     setBusy(null);
-    setTimeout(() => setMsg(null), 8000);
+    msgTimer.current = setTimeout(() => setMsg(null), 8000);
   }
 
   async function doRefetch() {
     setBusy("refetch");
+    if (msgTimer.current) clearTimeout(msgTimer.current);
     setMsg(null);
     try {
       const res = await fetch(withBasePath(source.warmUrl), {
@@ -107,7 +113,7 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
       setMsg({ kind: "err", text: "Request failed" });
     }
     setBusy(null);
-    setTimeout(() => setMsg(null), 10000);
+    msgTimer.current = setTimeout(() => setMsg(null), 10000);
   }
 
   return (
@@ -163,8 +169,11 @@ export function CacheManagementPanel() {
   const [status, setStatus] = useState<"idle" | "running" | "done" | "error">("idle");
   const [confirmAll, setConfirmAll] = useState(false);
   const [lines, setLines] = useState<string[]>([]);
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
 
   async function runAll() {
+    if (resetTimer.current) clearTimeout(resetTimer.current);
     setStatus("running");
     setConfirmAll(false);
     setLines([]);
@@ -203,7 +212,7 @@ export function CacheManagementPanel() {
     }
 
     setStatus(anyError ? "error" : "done");
-    setTimeout(() => { setStatus("idle"); setLines([]); }, 15000);
+    resetTimer.current = setTimeout(() => { setStatus("idle"); setLines([]); }, 15000);
   }
 
   return (

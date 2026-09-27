@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { Copy, Check } from "@/components/icons";
+import { Copy, Check, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 
 function CopyRow({
@@ -21,10 +21,20 @@ function CopyRow({
   const [copied, setCopied] = useState(false);
   const [revealed, setRevealed] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
+  // True while the token fetch is in flight: shows a spinner and blocks repeat
+  // clicks, each of which would otherwise fire another token fetch.
+  const [pending, setPending] = useState(false);
 
   async function copy() {
+    if (pending) return;
     setFailed(false);
-    const url = resolveCopyUrl ? await resolveCopyUrl() : (copyUrl ?? null);
+    setPending(true);
+    let url: string | null;
+    try {
+      url = resolveCopyUrl ? await resolveCopyUrl() : (copyUrl ?? null);
+    } finally {
+      setPending(false);
+    }
     if (!url) {
       setFailed(true);
       setTimeout(() => setFailed(false), 2500);
@@ -47,8 +57,17 @@ function CopyRow({
       <p className="text-xs font-medium text-zinc-400">{label}</p>
       <div className="flex items-center gap-2 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2">
         <span className="flex-1 font-mono text-xs text-zinc-300 truncate">{revealed ?? displayUrl}</span>
-        <button onClick={copy} className="shrink-0 text-zinc-500 hover:text-zinc-100 transition-colors" aria-label="Copy">
-          {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
+        <button
+          type="button"
+          onClick={copy}
+          disabled={pending}
+          aria-busy={pending || undefined}
+          className="shrink-0 p-2 -m-2 text-zinc-500 hover:text-zinc-100 transition-colors disabled:opacity-50"
+          aria-label={`Copy ${label}`}
+        >
+          {pending
+            ? <Loader2 className="w-4 h-4 animate-spin" />
+            : copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
         </button>
       </div>
       {failed && <p className="text-xs text-amber-500">Couldn’t load the token — try again.</p>}

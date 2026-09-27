@@ -166,6 +166,10 @@ function ServiceInstances({ service }: { service: ArrService }) {
       named.forEach((i) => { if (i.hasApiKey && i.url) fetchOptions(i.slug); });
       setLoadFailed(false);
       setConfirmRemove(null);
+      // Test results are keyed by slug and describe the config as it was at
+      // the last Save & Test — stale once the instances are reloaded.
+      setTests({});
+      setStatus("idle");
     } catch {
       // Saving an empty list means "remove every named instance", which
       // deletes their API keys and webhook secrets for good (they're encrypted
@@ -364,7 +368,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                 <div className="flex items-center justify-between">
                   <Label htmlFor={`${service}-${idx}-folder`}>Root Folder <span className="text-zinc-500">(optional)</span></Label>
                   {optsReady && (
-                    <button type="button" onClick={() => fetchOptions(d.slug)} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-100">
+                    <button type="button" onClick={() => fetchOptions(d.slug)} className="flex items-center gap-1 min-h-8 px-2 -my-2 -mr-2 text-xs text-zinc-500 hover:text-zinc-100">
                       <RefreshCw className="w-3 h-3" />Refresh
                     </button>
                   )}
@@ -485,7 +489,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                 <div className="space-y-1">
                   <div className="flex items-center gap-2 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2">
                     <span className="flex-1 font-mono text-xs text-zinc-300 truncate">{webhookUrl(d.webhookSecret)}</span>
-                    <button type="button" onClick={() => copyHook(idx, d.webhookSecret)} className="shrink-0 text-zinc-500 hover:text-zinc-100 transition-colors" aria-label="Copy webhook URL">
+                    <button type="button" onClick={() => copyHook(idx, d.webhookSecret)} className="shrink-0 p-2 -m-2 text-zinc-500 hover:text-zinc-100 transition-colors" aria-label="Copy webhook URL">
                       {copiedHook === idx ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
                     </button>
                   </div>
@@ -526,7 +530,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                   // A never-saved draft has nothing on the server to delete, so
                   // drop it at once; only ask for confirmation on a saved one.
                   onClick={() => (d.isNew ? removeInstance(idx) : setConfirmRemove(idx))}
-                  className="flex items-center gap-1 text-xs text-red-400 hover:text-[var(--ds-danger-hover)]"
+                  className="flex items-center gap-1 min-h-8 px-2 -my-2 -mr-2 text-xs text-red-400 hover:text-[var(--ds-danger-hover)]"
                 >
                   <Trash2 className="w-3.5 h-3.5" />Remove
                 </button>
@@ -568,17 +572,19 @@ function ServiceInstances({ service }: { service: ArrService }) {
         );
       })}
 
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <Button type="button" variant="outline" onClick={addInstance} className="border-zinc-600 text-zinc-300 hover:text-zinc-100 h-8 px-3 text-xs">
           + Add {label} instance
         </Button>
-        <Button type="button" onClick={save} disabled={status === "saving" || loadFailed} className="bg-indigo-600 hover:bg-indigo-500 h-8 px-3 text-xs">
+        <Button type="button" onClick={save} disabled={status === "saving" || loadFailed} className="h-8 px-3 text-xs">
           {status === "saving" ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Saving…</> : "Save & Test"}
         </Button>
-        <button type="button" onClick={load} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-100"><RefreshCw className="w-3 h-3" />Refresh</button>
-        {status === "ok" && <span className="text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4" />{message}</span>}
-        {status === "error" && <span className="text-sm text-red-400 flex items-center gap-1.5"><XCircle className="w-4 h-4" />{message}</span>}
+        <button type="button" onClick={load} className="flex items-center gap-1 min-h-8 px-2 text-xs text-zinc-500 hover:text-zinc-100"><RefreshCw className="w-3 h-3" />Refresh</button>
       </div>
+      {/* On its own line so a long save error wraps instead of running off
+          the card beside the buttons at phone width. */}
+      {status === "ok" && <p className="text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4 shrink-0" />{message}</p>}
+      {status === "error" && <p className="text-sm text-red-400 flex items-center gap-1.5"><XCircle className="w-4 h-4 shrink-0" />{message}</p>}
       {loadFailed && (
         <p className="text-sm text-red-400 flex items-center gap-1.5">
           <XCircle className="w-4 h-4 shrink-0" />

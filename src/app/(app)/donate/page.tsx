@@ -161,7 +161,7 @@ export default async function DonatePage() {
                 </p>
                 <p
                   className="ds-mono"
-                  style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0 }}
+                  style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0, wordBreak: "break-all" }}
                 >
                   {m.value}
                 </p>

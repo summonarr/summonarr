@@ -199,7 +199,10 @@ export function StarterPackCard({
 
   return (
     <div className="space-y-4">
-      <Card className="bg-gradient-to-br from-indigo-900/40 to-zinc-900 border-indigo-500/30 p-6">
+      <Card
+        className="border-indigo-500/30 p-6"
+        style={{ background: "linear-gradient(135deg, color-mix(in oklab, var(--ds-accent) 12%, var(--ds-bg-1)), var(--ds-bg-1))" }}
+      >
         <div className="flex items-start justify-between gap-4 mb-4 flex-wrap">
           <div className="flex items-start gap-3">
             <div className="w-10 h-10 rounded-lg bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center shrink-0">
@@ -214,7 +217,7 @@ export function StarterPackCard({
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               type="button"
               onClick={handleRefresh}

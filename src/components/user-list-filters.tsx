@@ -60,9 +60,14 @@ export function FilterPills({
             key={opt.value || "_all"}
             type="button"
             onClick={() => onSelect(opt.value)}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 font-medium transition-colors"
+            aria-pressed={isActive}
+            // `ds-hover-tint`: the background is inline, so a :hover background
+            // rule can't beat it (guardrail 42). minHeight keeps the tap target
+            // at 32px.
+            className="ds-hover-tint inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 font-medium"
             style={{
               padding: "5px 12px",
+              minHeight: 32,
               borderRadius: 6,
               border: 0,
               fontSize: 12,
@@ -191,6 +196,7 @@ export function SearchBox({
           value={value}
           onChange={handleChange}
           placeholder={placeholder}
+          aria-label={placeholder}
           className="flex-1 min-w-0 bg-transparent border-0 outline-none"
           style={{ fontSize: 13, color: "var(--ds-fg)" }}
         />

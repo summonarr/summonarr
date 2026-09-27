@@ -77,7 +77,7 @@ export function HistoryPagination({
           className="ds-mono"
           style={{
             fontSize: 10.5,
-            color: "var(--ds-fg-disabled)",
+            color: "var(--ds-fg-subtle)",
             marginLeft: 6,
             fontVariantNumeric: "tabular-nums",
             whiteSpace: "nowrap",
@@ -166,8 +166,10 @@ function PageBtn({
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       disabled={disabled}
+      aria-current={active ? "page" : undefined}
       className="ds-mono"
       style={{
         minWidth: 26,

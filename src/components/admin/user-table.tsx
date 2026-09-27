@@ -153,7 +153,7 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, name
         aria-label="User actions"
         aria-haspopup="true"
         aria-expanded={open}
-        className="h-7 w-7 flex items-center justify-center rounded-md border border-zinc-700 text-zinc-400 hover:text-zinc-100 hover:border-zinc-500 transition-colors"
+        className="h-8 w-8 flex items-center justify-center rounded-md border border-zinc-700 text-zinc-400 hover:text-zinc-100 hover:border-zinc-500 transition-colors"
       >
         <MoreHorizontal className="w-4 h-4" />
       </button>
@@ -256,7 +256,10 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, name
 export function UserTable({ users, currentUserId, has4k, namedInstances, mediaInstances }: UserTableProps) {
   const router = useRouter();
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // A failed row action, kept with the user it belongs to so it renders under
+  // that row — a single banner above a long list was off-screen for anyone
+  // working further down it, and didn't say which user it was about.
+  const [error, setError] = useState<{ id: string; message: string } | null>(null);
   // Inline confirm state, keyed by user id. "disable" is reversible; "purge"
   // is not, so they confirm separately and never share a button.
   const [confirming, setConfirming] = useState<{ id: string; kind: "disable" | "purge" } | null>(null);
@@ -273,12 +276,12 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
       });
       const data = (await res.json().catch(() => null)) as { error?: string } | null;
       if (!res.ok || data?.error) {
-        setError(data?.error ?? `Request failed (${res.status})`);
+        setError({ id, message: data?.error ?? `Request failed (${res.status})` });
         return;
       }
       router.refresh();
     } catch {
-      setError("Network error — please try again");
+      setError({ id, message: "Network error — please try again" });
     } finally {
       setBusy(null);
     }
@@ -301,12 +304,12 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
       });
       const data = (await res.json().catch(() => null)) as { error?: string } | null;
       if (!res.ok || data?.error) {
-        setError(data?.error ?? `Request failed (${res.status})`);
+        setError({ id, message: data?.error ?? `Request failed (${res.status})` });
         return;
       }
       router.refresh();
     } catch {
-      setError("Network error — please try again");
+      setError({ id, message: "Network error — please try again" });
     } finally {
       setBusy(null);
     }
@@ -314,10 +317,6 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
 
   return (
     <div className="flex flex-col gap-1.5">
-      {error && (
-        <p className="text-sm text-red-400 px-1 mb-1">{error}</p>
-      )}
-
       {users.map((u) => {
         const isSelf = u.id === currentUserId;
         const isBusy = busy?.startsWith(u.id) ?? false;
@@ -330,9 +329,11 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
         const showAutoApprove = (rawPerms & AUTO_APPROVE_MASK) !== 0n;
         const showNoQuota = (rawPerms & Permission.QUOTA_UNLIMITED) !== 0n;
 
+        const rowError = error?.id === u.id ? error.message : null;
+
         return (
+          <div key={u.id}>
           <div
-            key={u.id}
             className="flex items-center transition-colors"
             style={{
               gap: 12,
@@ -354,10 +355,14 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
               {initial}
             </div>
 
+            {/* Below sm the badge cluster drops under the name/meta lines instead
+                of taking a fixed slice of the row, which left ~30-60px for the
+                name on a 375px phone. */}
+            <div className="flex-1 min-w-0 flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
             <div className="flex-1 min-w-0">
               <div className="flex items-center flex-wrap" style={{ gap: 6 }}>
                 <span
-                  className="font-medium truncate"
+                  className="font-medium truncate min-w-0 max-w-full"
                   style={{ fontSize: 13, color: "var(--ds-fg)" }}
                 >
                   {displayName}
@@ -468,6 +473,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                 </Badge>
               )}
             </div>
+            </div>
 
             {isBusy ? (
               <Loader2
@@ -479,7 +485,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                 }}
               />
             ) : isSelf ? (
-              <div className="w-7 shrink-0" />
+              <div className="w-8 shrink-0" />
             ) : confirming?.id === u.id ? (
               <div className="flex items-center gap-1.5 shrink-0">
                 <button
@@ -520,6 +526,12 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                 mediaInstances={mediaInstances}
               />
             )}
+          </div>
+          {rowError && (
+            <p role="alert" className="text-xs text-red-400 px-4 pt-1">
+              {displayName}: {rowError}
+            </p>
+          )}
           </div>
         );
       })}

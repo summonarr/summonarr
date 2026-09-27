@@ -105,6 +105,7 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
         </div>
         <p className="text-xs text-zinc-500">
           Sent as a Bearer token on every relay request when the relay requires auth (8–200 characters, no spaces).
+          A key also gives this server its own per-device rate-limit budget on the relay, so use a distinct key for each server.
           {keyIsSet && " A key is currently set — click Remove and Save to clear it."}
         </p>
       </div>

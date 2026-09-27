@@ -613,7 +613,9 @@ function ArrFilterButton({
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
+      aria-pressed={active}
       className="ds-tap font-medium transition-colors"
       style={{
         padding: "5px 12px",
@@ -810,6 +812,7 @@ export function LibraryDiffClient({
         <input
           type="search"
           placeholder="Search title or path…"
+          aria-label="Search title or path"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="focus:outline-none"

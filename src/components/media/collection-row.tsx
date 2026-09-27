@@ -23,7 +23,7 @@ export function CollectionRow({
   if (others.length === 0) return null;
   return (
     <section className="ds-detail-section">
-      <div className="flex items-center justify-between gap-3" style={{ margin: "0 0 12px" }}>
+      <div className="flex flex-wrap items-center justify-between gap-3" style={{ margin: "0 0 12px" }}>
         <h2
           className="font-semibold"
           style={{

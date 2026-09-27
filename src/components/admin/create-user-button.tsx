@@ -91,7 +91,11 @@ export function CreateUserButton() {
       >
         <DialogPortal>
           <DialogBackdrop />
-          <DialogPopup className="p-6">
+          <DialogPopup>
+            {/* The popup caps at the viewport and clips overflow, so the body
+                scrolls itself — otherwise a short viewport (landscape phone,
+                on-screen keyboard) hides the submit button. */}
+            <div className="min-h-0 flex-1 overflow-y-auto p-6">
             <DialogTitle>Create local user</DialogTitle>
             <p className="mt-1 text-sm text-zinc-400">
               A username/password account. Registration is otherwise closed after the first user.
@@ -164,12 +168,13 @@ export function CreateUserButton() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit" size="sm" disabled={!canSubmit} className="gap-1.5 bg-indigo-700 hover:bg-indigo-600">
+                <Button type="submit" size="sm" disabled={!canSubmit} className="gap-1.5">
                   {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
                   Create user
                 </Button>
               </div>
             </form>
+            </div>
           </DialogPopup>
         </DialogPortal>
       </Dialog>

@@ -73,7 +73,9 @@ export function WatchGradeChip({
         title={description}
         aria-label={`${description}. Show the breakdown for ${userLabel}`}
         aria-haspopup="dialog"
-        className={`ds-chip ${letter ? LETTER_CHIP[letter] : ""}`}
+        // The pseudo-element widens the hit area to ~32px tall without
+        // changing the chip's 16px visual size (it sits in dense rows).
+        className={`ds-chip relative after:absolute after:-inset-2 ${letter ? LETTER_CHIP[letter] : ""}`}
         style={{ cursor: "pointer", padding: "0 6px", fontSize: 10, lineHeight: "16px" }}
       >
         {text}
@@ -237,7 +239,7 @@ export function WatchGradeModal({
             type="button"
             aria-label="Close"
             onClick={onClose}
-            className="text-zinc-500 hover:text-zinc-100 transition-colors"
+            className="p-1.5 -m-1.5 rounded text-zinc-500 hover:text-zinc-100 transition-colors"
           >
             <X className="w-4 h-4" />
           </button>

@@ -276,7 +276,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
                       width: 16,
                       textAlign: "right",
                       fontSize: 10.5,
-                      color: "var(--ds-fg-disabled)",
+                      color: "var(--ds-fg-subtle)",
                     }}
                   >
                     {(i + 1).toString().padStart(2, "0")}
@@ -327,7 +327,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
                               className="ds-mono"
                               style={{
                                 fontSize: 9,
-                                color: "var(--ds-fg-disabled)",
+                                color: "var(--ds-fg-subtle)",
                                 letterSpacing: "0.06em",
                                 flexShrink: 0,
                               }}
@@ -404,7 +404,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
             <div
               style={{
                 fontSize: 12,
-                color: "var(--ds-fg-disabled)",
+                color: "var(--ds-fg-subtle)",
                 padding: "20px 0",
                 textAlign: "center",
               }}
@@ -471,7 +471,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
             <div
               style={{
                 fontSize: 12,
-                color: "var(--ds-fg-disabled)",
+                color: "var(--ds-fg-subtle)",
                 padding: "20px 0",
                 textAlign: "center",
               }}
@@ -531,7 +531,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
                           className="ds-mono"
                           style={{
                             fontSize: 10,
-                            color: "var(--ds-fg-disabled)",
+                            color: "var(--ds-fg-subtle)",
                           }}
                         >
                           S{String(p.seasonNumber).padStart(2, "0")} · E
@@ -550,7 +550,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
                     >
                       {p.resolution ?? "—"}
                       {p.videoCodec && (
-                        <span style={{ color: "var(--ds-fg-disabled)" }}>
+                        <span style={{ color: "var(--ds-fg-subtle)" }}>
                           {" "}
                           · {p.videoCodec}
                         </span>

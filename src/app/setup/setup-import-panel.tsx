@@ -187,15 +187,15 @@ export function SetupImportPanel() {
         />
         <Button
           type="button"
-          size="sm"
           variant="outline"
+          className="min-h-11"
           disabled={importing}
           onClick={() => fileInputRef.current?.click()}
         >
           Choose file
         </Button>
         {file && (
-          <Button type="button" size="sm" variant="outline" disabled={importing} onClick={clearFile}>
+          <Button type="button" variant="outline" className="min-h-11" disabled={importing} onClick={clearFile}>
             Clear
           </Button>
         )}

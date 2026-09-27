@@ -293,6 +293,7 @@ export function OpenApiViewer() {
         value={filter}
         onChange={(e) => setFilter(e.target.value)}
         placeholder="Filter endpoints by path or summary…"
+        aria-label="Filter endpoints"
         style={{
           width: "100%",
           padding: "0.5rem 0.75rem",
@@ -352,8 +353,10 @@ export function OpenApiViewer() {
                     <button
                       type="button"
                       onClick={() => toggle(key)}
+                      aria-expanded={isOpen}
                       style={{
                         display: "flex",
+                        flexWrap: "wrap",
                         alignItems: "center",
                         gap: "0.6rem",
                         width: "100%",
@@ -380,7 +383,7 @@ export function OpenApiViewer() {
                       >
                         {method}
                       </span>
-                      <code style={{ fontSize: 13, color: "var(--ds-fg)" }}>{path}</code>
+                      <code style={{ fontSize: 13, color: "var(--ds-fg)", minWidth: 0, overflowWrap: "anywhere" }}>{path}</code>
                       <span
                         style={{
                           fontSize: 12,

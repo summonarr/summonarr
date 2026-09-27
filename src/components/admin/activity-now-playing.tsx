@@ -455,7 +455,7 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
             <SourceTag source={s.source} instance={serverInstance} />
             <span
               className="ds-mono"
-              style={{ fontSize: 9.5, color: "var(--ds-fg-disabled)" }}
+              style={{ fontSize: 9.5, color: "var(--ds-fg-subtle)" }}
             >
               {paused
                 ? "PAUSED"
@@ -647,6 +647,7 @@ export function ActivityNowPlaying({
 
   useLiveEvents((event) => {
     if (event.type === "connected") setConnected(true);
+    if (event.type === "disconnected") setConnected(false);
     if (event.type === "activity:sessions") {
       setSessions((prev) => {
         // SSE payloads omit posterUrl to stay small — carry the prior value.

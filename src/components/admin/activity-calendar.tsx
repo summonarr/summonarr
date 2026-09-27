@@ -18,12 +18,14 @@ interface CalendarData {
   count: number;
 }
 
-// Maps a day's play count to an oklch indigo wash whose opacity scales with
-// intensity (count/max); count 0 renders the near-transparent empty-cell fill.
+// Maps a day's play count to an accent wash whose strength scales with
+// intensity (count/max), so the heatmap follows the chosen accent. Count 0
+// renders a faint fg tint — strong enough (7%) to keep the grid visible on the
+// white light-theme card, where 2.5% was ~1.05:1 and vanished.
 function cellBg(count: number, max: number): string {
-  if (count === 0) return "color-mix(in oklab, var(--ds-fg) 2.5%, transparent)";
+  if (count === 0) return "color-mix(in oklab, var(--ds-fg) 7%, transparent)";
   const intensity = max > 0 ? count / max : 0;
-  return `oklch(0.58 0.21 275 / ${(0.12 + intensity * 0.76).toFixed(3)})`;
+  return `color-mix(in oklab, var(--ds-accent) ${(12 + intensity * 76).toFixed(1)}%, transparent)`;
 }
 
 // `today` arrives as an ISO date string from the server page so the server
@@ -217,7 +219,7 @@ export function ActivityCalendar({
                     return (
                       <div
                         key={day.date}
-                        title={`${day.date}: ${day.count} plays`}
+                        title={`${day.date}: ${day.count} ${day.count === 1 ? "play" : "plays"}`}
                         role={clickable ? "button" : undefined}
                         tabIndex={clickable ? 0 : undefined}
                         onClick={

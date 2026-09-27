@@ -388,6 +388,8 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
     <div className="space-y-5">
       {hasExternalProviders && (
         <div
+          role="group"
+          aria-label="Sign-in method"
           className="flex gap-1"
           style={{
             padding: 2,
@@ -658,8 +660,12 @@ function ProviderTab({
   return (
     <button
       type="button"
+      aria-pressed={active}
       onClick={onClick}
-      className="flex-1 font-medium transition-colors"
+      // min-w-0 + truncate: with all four providers on a 375px phone a long
+      // single-word OIDC_DISPLAY_NAME ("Authentik") otherwise pushes the strip
+      // past the card's border, since flex items default to min-width:auto.
+      className="flex-1 min-w-0 truncate font-medium transition-colors"
       style={{
         // Padding alone landed at ~43.5px (just under 44), so an explicit
         // minHeight guarantees Apple HIG tap-target compliance.

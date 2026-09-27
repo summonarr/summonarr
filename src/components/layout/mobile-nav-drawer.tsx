@@ -67,7 +67,13 @@ export function MobileNavDrawer({
   }, [pathname, onOpenChange]);
 
   function isActive(href: string, exact?: boolean) {
-    return exact ? pathname === href : pathname.startsWith(href);
+    if (exact) return pathname === href;
+    // Detail routes are singular (/movie/123) while the list is plural
+    // (/movies), so a bare prefix match lit "TV Shows" on /tv/123 but nothing
+    // on a movie page. Match the movie detail route explicitly, as the bottom
+    // tab bar (mobile-nav.tsx) does.
+    if (href === "/movies" && pathname.startsWith("/movie/")) return true;
+    return pathname.startsWith(href);
   }
 
   return (
@@ -189,12 +195,12 @@ export function MobileNavDrawer({
                 target="_blank"
                 rel="noopener noreferrer"
                 title="Summonarr is free software (AGPL-3.0). View the source and fork it on GitHub."
-                className="flex items-center gap-2 opacity-50 hover:opacity-80 transition-opacity"
+                className="flex items-center gap-2 text-[var(--ds-fg-subtle)] hover:text-[var(--ds-fg-muted)] transition-colors"
               >
                 <GitFork className="h-3 w-3 shrink-0" />
                 <span
                   className="ds-mono"
-                  style={{ fontSize: 10, color: "var(--ds-fg-subtle)" }}
+                  style={{ fontSize: 10 }}
                 >
                   Fork me on GitHub
                 </span>
@@ -204,13 +210,13 @@ export function MobileNavDrawer({
                 target="_blank"
                 rel="noopener noreferrer"
                 title="This product uses the TMDB API but is not endorsed or certified by TMDB."
-                className="flex items-center gap-2 opacity-50 hover:opacity-80 transition-opacity"
+                className="flex items-center gap-2 text-[var(--ds-fg-subtle)] hover:text-[var(--ds-fg-muted)] transition-colors"
               >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={withBasePath("/tmdb-logo.svg")} alt="TMDB" className="h-3 w-auto" />
                 <span
                   className="ds-mono"
-                  style={{ fontSize: 10, color: "var(--ds-fg-subtle)" }}
+                  style={{ fontSize: 10 }}
                 >
                   Data via TMDB
                 </span>

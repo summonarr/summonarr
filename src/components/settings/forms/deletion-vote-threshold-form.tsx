@@ -4,13 +4,15 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
+import { Loader2 } from "@/components/icons";
+import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
 
 export function DeletionVoteThresholdForm({ initialThreshold }: { initialThreshold: string }) {
   const [threshold, setThreshold] = useState(initialThreshold);
   const [status, setStatus] = useState<SaveStatus>("idle");
+  const [error, setError] = useState("Failed to save");
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
@@ -21,9 +23,11 @@ export function DeletionVoteThresholdForm({ initialThreshold }: { initialThresho
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ deletionVoteThreshold: threshold }),
       });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      setError(data.error ?? "Failed to save");
       setStatus(res.ok && data.ok !== false ? "ok" : "error");
     } catch {
+      setError("Failed to save");
       setStatus("error");
     }
     setTimeout(() => setStatus("idle"), 3000);
@@ -50,8 +54,7 @@ export function DeletionVoteThresholdForm({ initialThreshold }: { initialThresho
         <Button type="submit" size="sm" disabled={status === "saving"}>
           {status === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save"}
         </Button>
-        {status === "ok" && <CheckCircle className="w-4 h-4 text-green-400" />}
-        {status === "error" && <XCircle className="w-4 h-4 text-red-400" />}
+        <SaveStatusMessage status={status} errorLabel={error} />
       </div>
     </form>
   );

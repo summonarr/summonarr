@@ -121,7 +121,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
             style={{
               fontSize: 10,
               letterSpacing: "0.14em",
-              color: "var(--ds-fg-disabled)",
+              color: "var(--ds-fg-subtle)",
               whiteSpace: "nowrap",
             }}
           >
@@ -227,7 +227,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
                     width: 16,
                     textAlign: "right",
                     fontSize: 10.5,
-                    color: "var(--ds-fg-disabled)",
+                    color: "var(--ds-fg-subtle)",
                   }}
                 >
                   {(i + 1).toString().padStart(2, "0")}
@@ -281,7 +281,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
                       }}
                     >
                       {v.count}{" "}
-                      <span style={{ color: "var(--ds-fg-disabled)" }}>
+                      <span style={{ color: "var(--ds-fg-subtle)" }}>
                         · {v.hours.toFixed(1)}h
                       </span>
                     </span>
@@ -310,7 +310,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
               <div
                 style={{
                   fontSize: 12,
-                  color: "var(--ds-fg-disabled)",
+                  color: "var(--ds-fg-subtle)",
                   padding: "20px 0",
                   textAlign: "center",
                 }}
@@ -498,7 +498,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
                       >
                         {p.resolution ?? "—"}
                         {p.videoCodec && (
-                          <span style={{ color: "var(--ds-fg-disabled)" }}>
+                          <span style={{ color: "var(--ds-fg-subtle)" }}>
                             {" "}
                             · {p.videoCodec}
                           </span>

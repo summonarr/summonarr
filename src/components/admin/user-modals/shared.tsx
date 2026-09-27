@@ -3,6 +3,7 @@
 import type { MediaServerGrants } from "@/lib/permissions";
 import type { UserSource } from "@/lib/user-source";
 import type { WatchGradeSummary } from "@/lib/watch-grade";
+import { useId } from "react";
 import { Switch } from "@/components/ui/switch";
 
 // A named (non-default, non-4K) Radarr/Sonarr instance eligible for per-user
@@ -87,10 +88,11 @@ export const roleLabel: Record<User["role"], string> = {
 };
 
 export function AdminToggleRow({ label, checked, onChange, disabled }: { label: string; checked: boolean; onChange: () => void; disabled: boolean }) {
+  const labelId = useId();
   return (
     <div className="flex items-center justify-between py-2 border-b border-zinc-800 last:border-0">
-      <span className="text-xs text-zinc-300">{label}</span>
-      <Switch size="sm" checked={checked} disabled={disabled} onCheckedChange={onChange} />
+      <span id={labelId} className="text-xs text-zinc-300">{label}</span>
+      <Switch size="sm" checked={checked} disabled={disabled} onCheckedChange={onChange} aria-labelledby={labelId} />
     </div>
   );
 }

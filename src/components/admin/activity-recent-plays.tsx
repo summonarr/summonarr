@@ -69,7 +69,7 @@ const TH: React.CSSProperties = {
   padding: "9px 14px",
   fontSize: 9.5,
   fontWeight: 500,
-  color: "var(--ds-fg-disabled)",
+  color: "var(--ds-fg-subtle)",
   letterSpacing: "0.08em",
   borderBottom: "1px solid var(--ds-border)",
   whiteSpace: "nowrap",
@@ -117,7 +117,7 @@ function DetailRow({ play }: { play: RecentPlay }) {
                 className="ds-mono uppercase"
                 style={{
                   fontSize: 9,
-                  color: "var(--ds-fg-disabled)",
+                  color: "var(--ds-fg-subtle)",
                   letterSpacing: "0.08em",
                 }}
               >
@@ -160,6 +160,7 @@ export function ActivityRecentPlays({
   const [loading, setLoading] = useState(false);
   const [hasMore, setHasMore] = useState(initialPlays.length >= 20);
   const [page, setPage] = useState(1);
+  const [loadError, setLoadError] = useState(false);
   const mounted = useHasMounted();
 
   // When a stream finishes, ActivityLiveRefresher calls router.refresh(). That
@@ -176,6 +177,7 @@ export function ActivityRecentPlays({
 
   const loadMore = async () => {
     setLoading(true);
+    setLoadError(false);
     try {
       const nextPage = page + 1;
       const filterParams = new URLSearchParams();
@@ -190,7 +192,10 @@ export function ActivityRecentPlays({
       if (mediaType) filterParams.set("mediaType", mediaType);
       if (startDateIso) filterParams.set("startDate", startDateIso);
       const res = await fetch(withBasePath(`/api/play-history?${filterParams.toString()}`));
-      if (!res.ok) return;
+      if (!res.ok) {
+        setLoadError(true);
+        return;
+      }
       type PlayHistoryApiItem = Omit<RecentPlay, "username" | "userSource" | "userThumb"> & {
         mediaServerUser?: { username?: string | null; source?: string | null; thumbUrl?: string | null } | null;
       };
@@ -242,6 +247,7 @@ export function ActivityRecentPlays({
       // onClick does not await loadMore, so a network error must be caught
       // here or it becomes an unhandled promise rejection.
       console.error("[activity-recent-plays] load more failed:", err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -497,7 +503,7 @@ export function ActivityRecentPlays({
                             className="ds-mono"
                             style={{
                               fontSize: 10.5,
-                              color: "var(--ds-fg-disabled)",
+                              color: "var(--ds-fg-subtle)",
                               marginTop: 1,
                               overflow: "hidden",
                               textOverflow: "ellipsis",
@@ -588,10 +594,21 @@ export function ActivityRecentPlays({
           <div
             style={{
               display: "flex",
+              flexWrap: "wrap",
               justifyContent: "center",
+              alignItems: "center",
+              gap: 10,
               padding: "14px 0 18px",
             }}
           >
+            {loadError && !loading && (
+              <span
+                role="alert"
+                style={{ fontSize: 11.5, color: "var(--ds-danger)" }}
+              >
+                Couldn&apos;t load more plays — retry
+              </span>
+            )}
             <button
               onClick={loadMore}
               disabled={loading}

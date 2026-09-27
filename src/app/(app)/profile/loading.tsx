@@ -36,7 +36,7 @@ export default function Loading() {
           <Card lines={3} button />
           <Card lines={2} />
         </div>
-        <div className="flex flex-col lg:mt-0" style={{ gap: 20, marginTop: 20 }}>
+        <div className="flex flex-col mt-5 lg:mt-0" style={{ gap: 20 }}>
           <Card lines={5} />
           <Card lines={2} />
         </div>

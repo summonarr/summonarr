@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { AlertTriangle, Loader2, X, ChevronDown } from "@/components/icons";
+import { AlertTriangle, CheckCircle, Loader2, X, ChevronDown } from "@/components/icons";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import type { TVAvailabilityResponse, TVSeasonInfo } from "@/app/api/tv-availability/route";
 import { withBasePath } from "@/lib/base-path";
@@ -377,14 +377,14 @@ export function ReportIssueButton({
                     height: 40,
                     marginBottom: 12,
                     background:
-                      "color-mix(in oklab, var(--ds-warning) 12%, transparent)",
+                      "color-mix(in oklab, var(--ds-success) 12%, transparent)",
                   }}
                 >
-                  <AlertTriangle
+                  <CheckCircle
                     style={{
                       width: 20,
                       height: 20,
-                      color: "var(--ds-warning)",
+                      color: "var(--ds-success)",
                     }}
                   />
                 </div>

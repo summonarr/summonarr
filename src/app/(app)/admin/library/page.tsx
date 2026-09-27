@@ -8,7 +8,8 @@ import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
 import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button";
 import { TTL, getCache, setCache } from "@/lib/tmdb-cache";
 import { LibraryDiffClient, type DiffItem, type ClientBadMatch } from "@/components/admin/library-diff-client";
-import { PageHeader } from "@/components/ui/design";
+import { EmptyState, PageHeader } from "@/components/ui/design";
+import { Library } from "@/components/icons";
 import {
   DEFAULT_MEDIA_INSTANCE,
   isValidMediaInstanceSlug,
@@ -356,7 +357,8 @@ function TypeTab({
   return (
     <Link
       href={href}
-      className="inline-flex items-center whitespace-nowrap font-medium transition-colors"
+      aria-current={active ? "page" : undefined}
+      className="ds-hover-tint inline-flex items-center whitespace-nowrap font-medium transition-colors"
       style={{
         padding: "5px 12px",
         borderRadius: 6,
@@ -790,29 +792,16 @@ export default async function LibraryDiffPage({
       )}
 
       {oneSided ? (
-        <div
-          className="text-center ds-mono"
-          style={{
-            padding: "40px 20px",
-            background: "var(--ds-bg-1)",
-            border: "1px dashed var(--ds-border)",
-            borderRadius: 8,
-            fontSize: 12,
-            color: "var(--ds-fg-subtle)",
-          }}
-        >
-          {!plexConfigured && !jellyfinConfigured
-            ? "Neither Plex nor Jellyfin has been synced yet."
-            : `Only ${plexConfigured ? "Plex" : "Jellyfin"} has been synced — a library diff needs both servers.`}{" "}
-          <Link
-            href="/admin"
-            className="hover:underline"
-            style={{ color: "var(--ds-accent-text)" }}
-          >
-            Run a sync
-          </Link>{" "}
-          first.
-        </div>
+        <EmptyState
+          icon={Library}
+          title={
+            !plexConfigured && !jellyfinConfigured
+              ? "Neither Plex nor Jellyfin has been synced yet"
+              : `Only ${plexConfigured ? "Plex" : "Jellyfin"} has been synced`
+          }
+          description="A library diff needs both servers. Run a sync first."
+          cta={{ href: "/admin", label: "Run a sync" }}
+        />
       ) : (
         <>
           <div

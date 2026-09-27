@@ -43,6 +43,27 @@ export function HeatmapCellPopover({
   const [error, setError] = useState<string | null>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const movedFocusRef = useRef(false);
+
+  // The popover is portaled to the end of <body>, so without this a keyboard
+  // user would have to tab through the whole page to reach its links. Move
+  // focus in once it is placed (a visibility:hidden element can't take focus),
+  // and hand it back to whatever opened it on close.
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const popover = ref.current;
+    return () => {
+      const active = document.activeElement;
+      const focusInside = !active || active === document.body || (popover?.contains(active) ?? false);
+      if (focusInside && opener?.isConnected) opener.focus();
+    };
+  }, []);
+  useEffect(() => {
+    if (!pos || movedFocusRef.current) return;
+    movedFocusRef.current = true;
+    closeRef.current?.focus();
+  }, [pos]);
 
   // Lazy-fetch the clicked cell's detail. queryString is stable (set once in the
   // parent's click handler), so this fires once per opened cell.
@@ -133,10 +154,11 @@ export function HeatmapCellPopover({
         </span>
         <button
           type="button"
+          ref={closeRef}
           onClick={onClose}
           aria-label="Close"
           className="inline-flex items-center justify-center rounded-full"
-          style={{ width: 22, height: 22, background: "transparent", border: 0, color: "var(--ds-fg-muted)", cursor: "pointer" }}
+          style={{ width: 32, height: 32, margin: "-6px -8px -6px 0", background: "transparent", border: 0, color: "var(--ds-fg-muted)", cursor: "pointer" }}
         >
           <X style={{ width: 13, height: 13 }} />
         </button>
@@ -144,7 +166,7 @@ export function HeatmapCellPopover({
 
       <div style={{ padding: "10px 12px" }}>
         {error ? (
-          <p style={{ color: "var(--ds-fg-danger, #c44)", margin: 0 }}>{error}</p>
+          <p style={{ color: "var(--ds-danger)", margin: 0 }}>{error}</p>
         ) : !detail ? (
           <div
             className="ds-mono flex items-center"
@@ -333,7 +355,7 @@ function Stat({ value, unit, big }: { value: string; unit: string; big?: boolean
       <span style={{ fontSize: big ? 20 : 14, fontWeight: 600, lineHeight: 1, color: "var(--ds-fg)" }}>
         {value}
       </span>
-      <span className="ds-mono" style={{ fontSize: 9, color: "var(--ds-fg-disabled)", marginTop: 2 }}>
+      <span className="ds-mono" style={{ fontSize: 10, color: "var(--ds-fg-subtle)", marginTop: 2 }}>
         {unit}
       </span>
     </div>
@@ -345,7 +367,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     <div>
       <p
         className="ds-mono"
-        style={{ fontSize: 8.5, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--ds-fg-disabled)", margin: "0 0 4px" }}
+        style={{ fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--ds-fg-subtle)", margin: "0 0 4px" }}
       >
         {title}
       </p>

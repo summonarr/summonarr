@@ -58,6 +58,7 @@ export function GithubTokenCard() {
       <div className="flex items-center gap-2">
         <input
           type="password"
+          aria-label="GitHub personal access token"
           value={value}
           onChange={(e) => setValue(e.target.value)}
           placeholder={masked ? "Replace stored token…" : "ghp_… or github_pat_…"}

@@ -4,7 +4,8 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
+import { Loader2 } from "@/components/icons";
+import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
 
@@ -65,12 +66,7 @@ export function AuditRetentionForm({ initialDays }: { initialDays: string }) {
         <Button type="submit" size="sm" disabled={status === "saving"}>
           {status === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save"}
         </Button>
-        {status === "ok" && <CheckCircle className="w-4 h-4 text-green-400" />}
-        {status === "error" && (
-          <span className="flex items-center gap-1.5 text-sm text-red-400">
-            <XCircle className="w-4 h-4" />{error}
-          </span>
-        )}
+        <SaveStatusMessage status={status} errorLabel={error} />
       </div>
     </form>
   );

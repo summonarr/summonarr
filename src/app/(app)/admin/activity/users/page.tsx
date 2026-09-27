@@ -132,8 +132,9 @@ export default async function UsersActivityPage({
         <input type="hidden" name="sort" value={sort} />
         <input type="hidden" name="dir" value={dir} />
         <input
-          type="text"
+          type="search"
           name="search"
+          aria-label="Search users by username"
           defaultValue={search ?? ""}
           placeholder="Search by username…"
           className="w-full max-w-xs px-3 py-1.5 text-sm bg-zinc-800 border border-zinc-700 rounded-lg text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-[var(--ds-accent-ring)]"

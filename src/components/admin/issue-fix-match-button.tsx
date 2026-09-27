@@ -534,7 +534,7 @@ export function IssueFixMatchButton({
                   <span className="text-xs font-semibold text-zinc-500 w-16 shrink-0">
                     {mediaType === "MOVIE" ? "Radarr" : "Sonarr"}
                   </span>
-                  <span className="text-xs text-emerald-600">matches current — may be a different issue</span>
+                  <span className="text-xs text-emerald-400">matches current — may be a different issue</span>
                 </div>
               )}
             </div>

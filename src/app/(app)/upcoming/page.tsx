@@ -142,17 +142,29 @@ export default async function UpcomingPage({
             cta={{ href: "/upcoming", label: "Retry" }}
           />
         ) : raw.length === 0 ? (
+          // The TMDB helpers swallow outages into [] and an empty cache plus an
+          // empty answer lands here too, so this can't be blamed on the token.
           <EmptyState
             icon={AlertTriangle}
-            title="TMDB token not configured"
-            description="Set TMDB_READ_TOKEN in your environment to enable discovery."
+            title="Upcoming titles unavailable"
+            description="TMDB returned nothing. If you’re an admin, check that TMDB_READ_TOKEN is set."
+            cta={{ href: "/upcoming", label: "Retry" }}
           />
-        ) : (
+        ) : hideAvailable ? (
           <EmptyState
             icon={Calendar}
             title="No upcoming titles to show"
             description="Everything upcoming is already available on your servers."
             cta={{ href: "/upcoming", label: "Show available titles" }}
+          />
+        ) : (
+          // raw had titles but none survived enrichment: the user has hidden
+          // every one of them.
+          <EmptyState
+            icon={Calendar}
+            title="No upcoming titles to show"
+            description="You’ve hidden every upcoming title."
+            cta={{ href: "/hidden", label: "Manage hidden titles" }}
           />
         )
       ) : (
