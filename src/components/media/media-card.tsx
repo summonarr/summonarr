@@ -456,10 +456,12 @@ function MediaCardImpl({
 
         {/* Top-left: caller-supplied action (e.g. /for-you's "not interested").
             Fades in with hover like the request overlay, but stays visible while
-            focused so it is reachable by keyboard and always present on touch,
-            where there is no hover state to reveal it. */}
+            focused so it is reachable by keyboard and always present on any
+            device without hover. Keyed on (hover: none), NOT a width: an iPad in
+            landscape is wider than any breakpoint and still has no hover, so a
+            width gate left the control transparent but tappable there. */}
         {overlayAction && (
-          <div className="absolute top-1.5 left-1.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-[1024px]:opacity-100">
+          <div className="absolute top-1.5 left-1.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
             {overlayAction}
           </div>
         )}
@@ -498,7 +500,10 @@ function MediaCardImpl({
       {/* Card body */}
       <div
         className={cn(
-          "flex flex-col gap-1.5 shrink-0",
+          // grow + the ratings row's mt-auto pin the ratings to the card's
+          // bottom edge, so a row of cards whose bodies differ in height (a
+          // one-line title, a caption) still lines its ratings up.
+          "flex flex-col gap-1.5 grow shrink-0",
           size === "md" ? "p-3 pb-4" : "p-2.5",
         )}
       >
@@ -551,7 +556,7 @@ function MediaCardImpl({
         </div>
         {caption}
         <div
-          className={size === "md" ? "flex flex-col gap-1 mt-0.5" : "min-h-[34px] flex items-start"}
+          className={size === "md" ? "flex flex-col gap-1 mt-auto" : "min-h-[34px] flex items-start mt-auto"}
         >
           <RatingsBar
             imdbRating={liveRatings?.imdbRating ?? media.imdbRating}

@@ -1,5 +1,6 @@
 "use client";
 
+import { useId, useState, useTransition } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 
 // Labelled group of pill buttons backed by one URL search param. Generalized out
@@ -30,27 +31,48 @@ export function PillFilter<V extends string>({
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const labelId = useId();
+  // The page behind a pill is force-dynamic and re-enriches its whole set on
+  // every change, so a click can take a moment to land. Show the chosen pill
+  // as selected straight away and mark the group busy until the new render
+  // arrives — otherwise the click reads as ignored.
+  const [isPending, startTransition] = useTransition();
+  const [pendingValue, setPendingValue] = useState<{ v: V | undefined } | null>(null);
+  const shown = isPending && pendingValue ? pendingValue.v : active;
 
   function select(value: V | undefined) {
+    if (value === active && !isPending) return;
     const params = new URLSearchParams(searchParams.toString());
     if (value === undefined) params.delete(param);
     else params.set(param, value);
     params.delete("page");
     const qs = params.toString();
-    router.push(qs ? `${pathname}?${qs}` : pathname);
+    setPendingValue({ v: value });
+    startTransition(() => {
+      router.push(qs ? `${pathname}?${qs}` : pathname);
+    });
   }
 
   return (
-    <div className="inline-flex items-center gap-2">
+    <div
+      role="group"
+      aria-labelledby={labelId}
+      aria-busy={isPending || undefined}
+      className="inline-flex items-center gap-2"
+    >
       <span
+        id={labelId}
         className="ds-mono shrink-0"
         style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", textTransform: "uppercase", letterSpacing: "0.06em" }}
       >
         {label}
       </span>
-      <div className="inline-flex items-center gap-1.5 flex-wrap">
+      <div
+        className="inline-flex items-center gap-1.5 flex-wrap transition-opacity"
+        style={{ opacity: isPending ? 0.7 : 1 }}
+      >
         {options.map((opt) => {
-          const isActive = active === opt.value;
+          const isActive = shown === opt.value;
           return (
             <button
               key={opt.label}

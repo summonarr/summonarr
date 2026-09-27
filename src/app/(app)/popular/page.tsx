@@ -364,7 +364,10 @@ function MediaGrid({
   return (
     <div className="ds-media-grid">
       {items.map((media) => (
-        <div key={`${media.mediaType}-${media.id}`} className="ds-ranked-card relative">
+        // flex-col + the card's grow: the grid stretches this wrapper, not the
+        // card, so without them each card stopped at its own content height and
+        // a row's cards (and their stats lines) ended at different heights.
+        <div key={`${media.mediaType}-${media.id}`} className="ds-ranked-card relative flex flex-col">
           <div
             className="ds-mono absolute z-10 flex items-center justify-center font-bold"
             style={{
@@ -386,6 +389,7 @@ function MediaGrid({
             showPlex={showPlex}
             showJellyfin={showJellyfin}
             size="md"
+            className="grow"
           />
           <div
             className="ds-mono flex flex-wrap items-center"

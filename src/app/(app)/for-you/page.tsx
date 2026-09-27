@@ -113,25 +113,54 @@ export default async function ForYouPage({
             .filter(Boolean)
             .join(" · ")
         : [
-            `${filtered.length} of ${enriched.length} picks`,
+            // "200 of 200 picks" says nothing the plain count doesn't.
+            filtered.length === enriched.length
+              ? `${enriched.length} picks`
+              : `${filtered.length} of ${enriched.length} picks`,
             seedParts.length > 0 ? `built from ${seedList}` : null,
             computedAt ? `updated ${formatRelativeTime(computedAt)}` : null,
           ]
             .filter(Boolean)
             .join(" · ");
 
+  // "Back to page 1" keeps the reader's filters — only the page resets.
+  const firstPageParams = new URLSearchParams();
+  if (type) firstPageParams.set("type", type);
+  if (availability) firstPageParams.set("filter", availability);
+  if (sort !== "match") firstPageParams.set("sort", sort);
+  const firstPageHref = firstPageParams.toString() ? `/for-you?${firstPageParams}` : "/for-you";
+
+  const isAdmin = session.user.role === "ADMIN";
+
   return (
     <div className="ds-page-enter">
-      <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
+      {/* Only the events that can bring a title BACK onto this shelf. A title
+          the viewer has a PENDING/APPROVED request for is excluded from it, so
+          refreshing on their own request:new (or its APPROVED follow-up) made
+          the card they had just requested vanish and reflowed the grid. A
+          decline, an AVAILABLE flip or a deletion is what changes the shelf. */}
+      <LiveRefresh
+        on={["request:updated", "request:deleted"]}
+        updatedStatuses={["DECLINED", "AVAILABLE"]}
+      />
 
-      {/* Admin-only, and cosmetic: the real gate is the endpoint, which resolves
-          an admin session through getCronActor and 401s anything else. The role
-          here comes from requireAppSession (DB-checked), so a demotion hides it
-          on the next render rather than after the JWT expires. */}
+      {/* The rebuild control is admin-only, and cosmetic: the real gate is the
+          endpoint, which resolves an admin session through getCronActor and
+          401s anything else. The role here comes from requireAppSession
+          (DB-checked), so a demotion hides it on the next render rather than
+          after the JWT expires. It sits inline after "updated N ago" rather than
+          as a header action — see the component for why. */}
       <PageHeader
         title="For You"
-        subtitle={subtitle}
-        right={session.user.role === "ADMIN" ? <RebuildRecommendationsButton /> : undefined}
+        subtitle={
+          isAdmin ? (
+            <>
+              {subtitle} · <RebuildRecommendationsButton />
+            </>
+          ) : (
+            subtitle
+          )
+        }
       />
 
       {enriched.length > 0 && (
@@ -150,7 +179,8 @@ export default async function ForYouPage({
           </Suspense>
           <Suspense>
             <PillFilter
-              label="Show"
+              // Not "Show": beside "Type: TV Shows" it read as the TV filter.
+              label="Library"
               param="filter"
               active={availability}
               options={[
@@ -182,14 +212,14 @@ export default async function ForYouPage({
           <EmptyState
             icon={Sparkles}
             title="No recommendations yet"
-            description="Picks are built from your watch history and watchlist and refresh on a schedule — watch or watchlist a few titles and check back soon."
+            description="Picks are built from what you watch, add to your watchlist and request, and refresh on a schedule — do any of those for a few titles and check back soon."
           />
         ) : page > 1 ? (
           <EmptyState
             icon={Filter}
             title="No more results on this page"
             description="Try going back to the first page."
-            cta={{ href: "/for-you", label: "Back to page 1" }}
+            cta={{ href: firstPageHref, label: "Back to page 1" }}
           />
         ) : (
           <EmptyState
@@ -208,27 +238,28 @@ export default async function ForYouPage({
       ) : (
         <div className="ds-media-grid">
           {visible.map((media) => (
-            // The not-interested button sits in MediaCard's top-left corner,
-            // exactly where the availability chips go, and is always visible
-            // at touch widths. .ds-ranked-card shifts the chips clear of a
-            // top-left overlay (it was written for /popular's rank badge).
-            <div key={`${media.mediaType}-${media.id}`} className="ds-ranked-card relative">
-              <MediaCard
-                media={media}
-                showPlex={showPlex}
-                showJellyfin={showJellyfin}
-                size="md"
-                caption={<RecommendationReason media={media} />}
-                overlayAction={
-                  <NotInterestedButton
-                    tmdbId={media.id}
-                    mediaType={media.mediaType === "movie" ? "MOVIE" : "TV"}
-                    title={media.title}
-                    posterPath={media.posterPath}
-                  />
-                }
-              />
-            </div>
+            // The card is the grid item itself, with no wrapper: the grid
+            // stretches its items, and a wrapper took the stretch while the
+            // card stopped at its own content height — ragged rows. The
+            // not-interested button sits in the poster's top-left corner, where
+            // the availability chips go; MediaCard moves the chips down below
+            // it whenever overlayAction is set, so nothing else is needed here.
+            <MediaCard
+              key={`${media.mediaType}-${media.id}`}
+              media={media}
+              showPlex={showPlex}
+              showJellyfin={showJellyfin}
+              size="md"
+              caption={<RecommendationReason media={media} rankedOrder={sort === "match"} />}
+              overlayAction={
+                <NotInterestedButton
+                  tmdbId={media.id}
+                  mediaType={media.mediaType === "movie" ? "MOVIE" : "TV"}
+                  title={media.title}
+                  posterPath={media.posterPath}
+                />
+              }
+            />
           ))}
         </div>
       )}
@@ -270,28 +301,37 @@ function MatchTierChip({ tier }: { tier: NonNullable<TmdbMedia["matchTier"]> }) 
 // The "why" under a card, with the strength band above it. Both are optional and
 // independent: a row written before the reason columns existed still gets a chip
 // (rank is always known), and an unbanded pick still gets its reason line.
-function RecommendationReason({ media }: { media: TmdbMedia }) {
+//
+// `rankedOrder` is true under Best Match. There the grid's ORDER already says
+// how strongly each pick ranks, so only "Top match" renders: with both bands the
+// top third of the shelf — about two-thirds of page 1 — carried a chip, and a
+// label on most cards labels nothing. Under Newest / Highest rated the order no
+// longer carries the ranking, so both bands come back.
+function RecommendationReason({ media, rankedOrder }: { media: TmdbMedia; rankedOrder: boolean }) {
   const why = media.recommendedBecause;
+  const tier = media.matchTier === "strong" && rankedOrder ? undefined : media.matchTier;
   if (!why) {
     // A cold-start fallback pick says what it is. Deliberately NOT a match
     // chip and NOT a "Because you…" line — it was picked for everyone.
     if (media.fromTrendingFallback) {
       return (
-        <p className="ds-mono m-0" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", lineHeight: 1.4 }}>
+        <p className="ds-mono m-0" style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", lineHeight: 1.4 }}>
           Popular right now
         </p>
       );
     }
-    return media.matchTier ? (
+    return tier ? (
       <div className="flex">
-        <MatchTierChip tier={media.matchTier} />
+        <MatchTierChip tier={tier} />
       </div>
     ) : null;
   }
 
+  // Every lead names what the viewer DID with the seed. "On your watchlist: X"
+  // read as if the recommended title itself were on the watchlist.
   const lead =
     why.source === "WATCHLIST"
-      ? "On your watchlist:"
+      ? "Because you watchlisted"
       : why.source === "REQUEST"
         ? "Because you requested"
         : "Because you watched";
@@ -299,22 +339,29 @@ function RecommendationReason({ media }: { media: TmdbMedia }) {
   // included — so the "+N more" is the corroborating remainder.
   const others = why.seedCount - 1;
 
+  // Only the seed TITLE is clamped, in its own block: clamping the whole
+  // sentence let a long lead ("Because you watchlisted" wraps on a phone) or a
+  // long title eat the line the seed's name needed, and cut "+ 3 more" to
+  // "+ 3…". The clamped text stays whole in the DOM, so a screen reader still
+  // hears all of it.
   return (
     <div className="flex flex-col gap-1 items-start">
-      {media.matchTier && <MatchTierChip tier={media.matchTier} />}
+      {tier && <MatchTierChip tier={tier} />}
       <p
-        className="ds-mono m-0 line-clamp-2"
-        style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", lineHeight: 1.4 }}
-        title={
-          others > 0
-            ? `${lead} ${why.title}, plus ${others} other title${others === 1 ? "" : "s"} of yours`
-            : `${lead} ${why.title}`
-        }
+        className="ds-mono m-0"
+        style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", lineHeight: 1.4 }}
+        title={`${lead} ${why.title}`}
       >
         {lead}{" "}
-        <span style={{ color: "var(--ds-fg-muted)" }}>{why.title}</span>
-        {others > 0 && <span> + {others} more</span>}
+        <span className="line-clamp-2" style={{ color: "var(--ds-fg)" }}>
+          {why.title}
+        </span>
       </p>
+      {others > 0 && (
+        <p className="ds-mono m-0" style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", lineHeight: 1.4 }}>
+          + {others} more of yours
+        </p>
+      )}
     </div>
   );
 }

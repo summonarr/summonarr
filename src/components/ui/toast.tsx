@@ -4,13 +4,26 @@ import { createContext, useCallback, useContext, useMemo, useRef, useState } fro
 import { Check, AlertTriangle, Bell, X } from "@/components/icons";
 
 type ToastVariant = "success" | "error" | "info";
+/** One inline button (e.g. "Undo"). Clicking it runs `onClick` and dismisses
+    the toast. A toast carrying an action gets the longer error-length timeout,
+    so there is time to reach it. */
+interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
 interface ToastItem {
   id: number;
   title: string;
   variant: ToastVariant;
+  action?: ToastAction;
+}
+interface ToastInput {
+  title: string;
+  variant?: ToastVariant;
+  action?: ToastAction;
 }
 interface ToastContextValue {
-  toast: (t: { title: string; variant?: ToastVariant }) => void;
+  toast: (t: ToastInput) => void;
 }
 
 const ToastContext = createContext<ToastContextValue | null>(null);
@@ -27,8 +40,8 @@ const AUTO_DISMISS_MS = 4000;
 // push, say), and there's no way to get a toast back once it's gone.
 const ERROR_AUTO_DISMISS_MS = 10000;
 
-function dismissAfter(variant: ToastVariant): number {
-  return variant === "error" ? ERROR_AUTO_DISMISS_MS : AUTO_DISMISS_MS;
+function dismissAfter(variant: ToastVariant, hasAction = false): number {
+  return variant === "error" || hasAction ? ERROR_AUTO_DISMISS_MS : AUTO_DISMISS_MS;
 }
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
@@ -57,21 +70,21 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   // (Re)starts the full countdown. Resuming after a pause restarts it rather
   // than tracking the remainder — the reader just finished looking at it.
   const startTimer = useCallback(
-    (id: number, variant: ToastVariant) => {
+    (id: number, variant: ToastVariant, hasAction = false) => {
       clearTimer(id);
       timersRef.current.set(
         id,
-        setTimeout(() => dismiss(id), dismissAfter(variant)),
+        setTimeout(() => dismiss(id), dismissAfter(variant, hasAction)),
       );
     },
     [clearTimer, dismiss],
   );
 
   const toast = useCallback(
-    ({ title, variant = "info" }: { title: string; variant?: ToastVariant }) => {
+    ({ title, variant = "info", action }: ToastInput) => {
       const id = ++idRef.current;
-      setToasts((cur) => [...cur, { id, title, variant }]);
-      startTimer(id, variant);
+      setToasts((cur) => [...cur, { id, title, variant, action }]);
+      startTimer(id, variant, !!action);
     },
     [startTimer],
   );
@@ -98,12 +111,12 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
             role={t.variant === "error" ? "alert" : "status"}
             onPointerEnter={() => clearTimer(t.id)}
             onPointerLeave={(e) => {
-              if (!e.currentTarget.contains(document.activeElement)) startTimer(t.id, t.variant);
+              if (!e.currentTarget.contains(document.activeElement)) startTimer(t.id, t.variant, !!t.action);
             }}
             onFocus={() => clearTimer(t.id)}
             onBlur={(e) => {
               if (!e.currentTarget.contains(e.relatedTarget as Node | null) && !e.currentTarget.matches(":hover")) {
-                startTimer(t.id, t.variant);
+                startTimer(t.id, t.variant, !!t.action);
               }
             }}
             className="pointer-events-auto flex items-start gap-2.5 ds-page-enter"
@@ -139,6 +152,27 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
               )}
             </span>
             <span style={{ flex: 1, minWidth: 0 }}>{t.title}</span>
+            {t.action && (
+              <button
+                type="button"
+                onClick={() => {
+                  t.action?.onClick();
+                  dismiss(t.id);
+                }}
+                className="ds-hover-tint shrink-0 font-semibold rounded-md"
+                // Same negative-margin trick as the dismiss button: a 28px-tall
+                // hit box that doesn't grow the row.
+                style={{
+                  minHeight: 28,
+                  margin: "-5px 0",
+                  padding: "0 8px",
+                  fontSize: 13,
+                  color: "var(--ds-accent-text)",
+                }}
+              >
+                {t.action.label}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => dismiss(t.id)}

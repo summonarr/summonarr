@@ -29,6 +29,24 @@ export function NotInterestedButton({
   const { toast } = useToast();
   const [loading, setLoading] = useState(false);
 
+  // The button is always visible on touch, in the poster corner, so a stray tap
+  // is easy — and the card leaves the grid on the refresh that follows. Undo is
+  // the same DELETE the /hidden page's un-hide button sends.
+  async function undo() {
+    try {
+      const qs = new URLSearchParams({ tmdbId: String(tmdbId), mediaType });
+      const res = await fetch(withBasePath(`/api/hidden?${qs}`), { method: "DELETE" });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        toast({ title: data.error ?? "Couldn’t undo that — unhide it from Hidden", variant: "error" });
+        return;
+      }
+      router.refresh();
+    } catch {
+      toast({ title: "Network error — unhide it from Hidden", variant: "error" });
+    }
+  }
+
   async function hide(e: React.MouseEvent) {
     // The whole card is a click target that navigates to the detail page; without
     // this the hide would also push a route.
@@ -44,7 +62,11 @@ export function NotInterestedButton({
       // 409 = already hidden. The desired end state holds either way, so it is
       // a success for this button (same reading as HideButton).
       if (res.ok || res.status === 409) {
-        toast({ title: `Hidden — "${title}" won’t be suggested again`, variant: "success" });
+        toast({
+          title: `Hidden — "${title}" won’t be suggested again`,
+          variant: "success",
+          action: { label: "Undo", onClick: () => void undo() },
+        });
         router.refresh();
       } else {
         const data = await res.json().catch(() => ({}));
