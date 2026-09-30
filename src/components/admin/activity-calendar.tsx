@@ -74,7 +74,10 @@ export function ActivityCalendar({
     });
     let viewPlaysHref: string | undefined;
     if (detailBase.historyPath) {
-      const hp = new URLSearchParams({ tab: "history", from: date, to: date });
+      // watched=true: the cell count and the popover count only watched plays,
+      // so the history table must open on the same filter or it lists more rows
+      // than the number that was clicked.
+      const hp = new URLSearchParams({ tab: "history", from: date, to: date, watched: "true" });
       if (detailBase.source) hp.set("source", detailBase.source);
       if (detailBase.mediaType) hp.set("mediaType", detailBase.mediaType);
       viewPlaysHref = `${detailBase.historyPath}?${hp.toString()}`;

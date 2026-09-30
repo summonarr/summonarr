@@ -268,7 +268,10 @@ export type OmdbResult =
   // `transient` marks a failure that is NOT an authoritative "no ratings" (network/timeout,
   // 5xx, quota/auth error) so callers must not pin a null/not-found into a long-lived cache.
   // `quotaExhausted` additionally flags the in-process quota lockout (mirrors MdblistResult).
-  | { found: false; keyConfigured: boolean; quotaExhausted?: boolean; transient?: boolean };
+  // `tmdbUnconfigured` marks the no-TMDB-token miss: neither transient nor negative-cached,
+  // but not an authoritative absence either — the prewarm counts it as `failed` so a
+  // missing TMDB_READ_TOKEN can't read as a green run in the cron history.
+  | { found: false; keyConfigured: boolean; quotaExhausted?: boolean; transient?: boolean; tmdbUnconfigured?: true };
 
 // The tmdbId→imdbId resolve, isolated so fetchAndCacheOmdbForTmdb can run it
 // zero times (a caller-supplied known id), once (the normal cold path), or a
@@ -330,7 +333,7 @@ export async function fetchAndCacheOmdbForTmdb(
   try {
     // Maps every non-"id" resolve outcome to its (pre-existing) OmdbResult.
     const settleResolve = async (r: Exclude<ImdbResolve, { kind: "id" }>): Promise<OmdbResult> => {
-      if (r.kind === "noAuth") return { found: false, keyConfigured: true };
+      if (r.kind === "noAuth") return { found: false, keyConfigured: true, tmdbUnconfigured: true };
       if (r.kind === "gone") {
         await setCache(cacheKey, NOT_FOUND_SENTINEL, omdbNegativeTtl(releaseDate));
         return { found: false, keyConfigured: true };

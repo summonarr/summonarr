@@ -3,10 +3,6 @@ import { prisma } from "@/lib/prisma";
 import {
   getRadarrWantedTmdbIds,
   getSonarrWantedTmdbIds,
-  isMovieDownloadingInRadarr,
-  isSeriesDownloadingInSonarr,
-  getMovieReleaseInfo,
-  getSeriesFirstAired,
   addMovieToRadarr,
   addSeriesToSonarr,
 } from "@/lib/arr";
@@ -18,7 +14,8 @@ import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { getMediaInstances, getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { DEFAULT_MEDIA_INSTANCE, plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
 import { syncDownloadPolicies } from "@/lib/download-policy";
-import { notifyUsersRequestsAvailable, notifyUserAwaitingRelease, notifyUserDownloadPending } from "@/lib/discord-notify";
+import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
+import { runDownloadCheck } from "@/lib/download-check";
 import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, replaceEpisodeCacheForSource, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
@@ -290,73 +287,6 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
     marked = arrUnpinned.length;
   }
 
-  const now = new Date();
-  const overdue = approved.filter((r) => r.pendingNotifyAt && r.pendingNotifyAt <= now && !arrNotify.find((n) => n.id === r.id));
-
-  // Guardrail 33: account removal DISABLES rather than scrubs, so a removed user keeps
-  // a live Discord link and would still be DMed. Suppression is documented as living at
-  // exactly two chokepoints — claimAvailableNotificationWinners (batch "now available")
-  // and notifyRequestStatusChange (single approve/decline/available) — and this
-  // "awaiting release" / "download pending" backstop is a THIRD requester-facing path
-  // that goes through neither. One batched read, not a per-request lookup.
-  const disabledRequesters = new Set<string>();
-  if (overdue.length > 0) {
-    const rows = await prisma.user.findMany({
-      where: { id: { in: [...new Set(overdue.map((r) => r.requestedBy))] }, deactivatedAt: { not: null } },
-      select: { id: true },
-    });
-    for (const r of rows) disabledRequesters.add(r.id);
-  }
-
-  await runConcurrent(overdue, async (req) => {
-    try {
-      const downloading = req.mediaType === "MOVIE"
-        ? await isMovieDownloadingInRadarr(req.tmdbId, req.arrInstance)
-        : await isSeriesDownloadingInSonarr(req.tmdbId, req.arrInstance);
-      // null = couldn't read the queue. Don't clear pendingNotifyAt — leave it so a
-      // later tick re-checks once the queue API recovers. Only a confirmed `true`
-      // clears the backstop.
-      if (downloading !== false) {
-        if (downloading === true) {
-          await prisma.mediaRequest.update({ where: { id: req.id }, data: { pendingNotifyAt: null } });
-        }
-        return;
-      }
-      let released = true;
-      let soonestReleaseDate: string | null = null;
-      if (req.mediaType === "MOVIE") {
-        const info = await getMovieReleaseInfo(req.tmdbId);
-        if (info) {
-          const futureDates = [info.digitalRelease, info.physicalRelease].filter((d): d is string => !!d && new Date(d) > now);
-          const pastDates   = [info.digitalRelease, info.physicalRelease].filter((d): d is string => !!d && new Date(d) <= now);
-          if (pastDates.length === 0 && futureDates.length > 0) {
-            released = false;
-            soonestReleaseDate = futureDates.sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
-          }
-        }
-      } else {
-        const firstAired = await getSeriesFirstAired(req.tmdbId, req.arrInstance);
-        if (firstAired && new Date(firstAired) > now) {
-          released = false;
-          soonestReleaseDate = firstAired;
-        }
-      }
-      await prisma.mediaRequest.update({ where: { id: req.id }, data: { pendingNotifyAt: null } });
-      // The backstop is CONSUMED for a disabled requester, not deferred: pendingNotifyAt
-      // is cleared above and the DM is dropped. That mirrors notify-available's
-      // deliberate claim-burn — re-enabling an account must not replay a backlog of
-      // stale "your download is pending" messages about requests long since resolved.
-      if (disabledRequesters.has(req.requestedBy)) return;
-      if (!released) {
-        await notifyUserAwaitingRelease(req.requestedBy, req.title, req.mediaType, soonestReleaseDate);
-      } else {
-        await notifyUserDownloadPending(req.requestedBy, req.title, req.mediaType);
-      }
-    } catch (err) {
-      console.error("[sync] pendingNotifyAt check failed for", req.id, err);
-    }
-  });
-
   notifyUsersRequestsAvailable(arrNotify).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
   notifyUsersRequestsAvailablePush(arrNotify).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
   void notifyUsersRequestsAvailableEmail(arrNotify, "sync");
@@ -484,6 +414,10 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
   // Only the rows still APPROVED after the first pass are reconsidered, and only against a
   // cache the current run successfully rewrote.
   const stillApprovedForMark = approved.filter((r) => !arrNotify.find((n) => n.id === r.id));
+  // Hoisted for the overdue backstop below: a file on disk in the FRESH cache means
+  // the download finished, whether or not this pass flipped the row.
+  let freshMovieSet = new Set<string>();
+  let freshTvSet    = new Set<string>();
   const secondMovieTmdbIds = stillApprovedForMark.filter((r) => r.mediaType === "MOVIE" && radarrEnabled && radarrSyncSucceeded).map((r) => r.tmdbId);
   const secondTvTmdbIds    = stillApprovedForMark.filter((r) => r.mediaType === "TV"    && sonarrEnabled && sonarrSyncSucceeded).map((r) => r.tmdbId);
   if (secondMovieTmdbIds.length > 0 || secondTvTmdbIds.length > 0) {
@@ -495,8 +429,8 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
         ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: secondTvTmdbIds } } })
         : Promise.resolve([]),
     ]);
-    const freshMovieSet = new Set(freshMovieRows.map((r) => vkey(r.tmdbId, r.arrInstance)));
-    const freshTvSet    = new Set(freshTvRows.map((r) => vkey(r.tmdbId, r.arrInstance)));
+    freshMovieSet = new Set(freshMovieRows.map((r) => vkey(r.tmdbId, r.arrInstance)));
+    freshTvSet    = new Set(freshTvRows.map((r) => vkey(r.tmdbId, r.arrInstance)));
     const nowAvailableSecond = stillApprovedForMark.filter((r) =>
       r.mediaType === "MOVIE"
         ? radarrEnabled && radarrSyncSucceeded && freshMovieSet.has(vkey(r.tmdbId, r.arrInstance))
@@ -533,6 +467,45 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
       }
     }
   }
+
+  // The pendingNotifyAt BACKSTOP ("did the approval actually start downloading?").
+  // It runs AFTER the Radarr/Sonarr refresh and the second marking pass, never
+  // before: "not in the download queue" is only "never started" when the title is
+  // also not on disk, and a title that imported since the last tick is absent from
+  // the queue AND from the run-start cache. Checked earlier, it DMed "hasn't
+  // started downloading" moments before the second pass DMed "now available".
+  // A row whose (tmdbId, arrInstance) is in EITHER available cache is skipped —
+  // that covers the pinned users the ARR passes deliberately leave APPROVED.
+  // Each row goes through runDownloadCheck, which re-reads status (a row this run
+  // flipped AVAILABLE is dropped) and CONSUMES the backstop with a CAS, so a sweep
+  // overlapping a still-running 90s job for the same row DMs once, not twice. It
+  // also applies guardrail 33 (a disabled requester's backstop is consumed, no DM).
+  const now = new Date();
+  const overdue = approved.filter((r) => {
+    if (!r.pendingNotifyAt || r.pendingNotifyAt > now) return false;
+    if (arrNotify.some((n) => n.id === r.id)) return false;
+    const key = vkey(r.tmdbId, r.arrInstance);
+    return r.mediaType === "MOVIE"
+      ? !availableMovieSet.has(key) && !freshMovieSet.has(key)
+      : !availableTvSet.has(key) && !freshTvSet.has(key);
+  });
+  await runConcurrent(overdue, async (req) => {
+    try {
+      await runDownloadCheck(
+        {
+          requestId: req.id,
+          tmdbId: req.tmdbId,
+          mediaType: req.mediaType as "MOVIE" | "TV",
+          arrInstance: req.arrInstance,
+          requestedBy: req.requestedBy,
+          title: req.title,
+        },
+        { consumeWhenDownloading: true },
+      );
+    } catch (err) {
+      console.error("[sync] pendingNotifyAt check failed for", req.id, err);
+    }
+  });
 
   // Re-push APPROVED requests that never made it into Radarr/Sonarr. The approve-time push
   // can fail when the title has no Radarr/TheTVDB metadata yet (common for not-yet-released

@@ -46,7 +46,18 @@ export interface DownloadCheckTarget {
  * (`notifyUserAwaitingRelease`). Throws on DB/upstream failure — callers going
  * through `scheduleDownloadCheck` get that logged and swallowed.
  */
-export async function runDownloadCheck(target: DownloadCheckTarget): Promise<void> {
+export interface DownloadCheckOptions {
+  /**
+   * Consume the backstop (CAS-clear pendingNotifyAt, no DM) when the title is
+   * confirmed in the download queue. The orchestrator's overdue sweep sets it:
+   * it is the LAST follow-up, so a confirmed-healthy download retires it rather
+   * than re-polling the queue on every tick. The ~90s prompt job leaves it off so
+   * a still-downloading row stays armed for that sweep.
+   */
+  consumeWhenDownloading?: boolean;
+}
+
+export async function runDownloadCheck(target: DownloadCheckTarget, opts: DownloadCheckOptions = {}): Promise<void> {
   const { requestId, tmdbId, mediaType, arrInstance, requestedBy, title } = target;
 
   const current = await prisma.mediaRequest.findUnique({
@@ -61,7 +72,15 @@ export async function runDownloadCheck(target: DownloadCheckTarget): Promise<voi
   // Skip on true (downloading) and null (queue unreadable) — only a confirmed
   // "not downloading" fires the pending notify. Returning leaves pendingNotifyAt
   // set so the orchestrator backstop retries.
-  if (downloading !== false) return;
+  if (downloading !== false) {
+    if (downloading === true && opts.consumeWhenDownloading) {
+      await prisma.mediaRequest.updateMany({
+        where: { id: requestId, status: "APPROVED", pendingNotifyAt: { not: null } },
+        data: { pendingNotifyAt: null },
+      });
+    }
+    return;
+  }
 
   const now = new Date();
   let released = true;
@@ -111,8 +130,11 @@ export async function runDownloadCheck(target: DownloadCheckTarget): Promise<voi
   // id-only predicate let every one of them read count === 1 and DM in turn.
   // count === 0 therefore means the row is gone OR the backstop was already
   // consumed by an earlier job / the sweep; either way abort without a DM.
+  // `status: "APPROVED"` re-asserts the gate read above: a webhook or the sync's
+  // AVAILABLE flip can land during the queue/release polls (the download just
+  // imported), and a "hasn't started downloading" DM about it would be false.
   const cleared = await prisma.mediaRequest.updateMany({
-    where: { id: requestId, pendingNotifyAt: { not: null } },
+    where: { id: requestId, status: "APPROVED", pendingNotifyAt: { not: null } },
     data: { pendingNotifyAt: null },
   });
   if (cleared.count === 0) return;

@@ -161,9 +161,17 @@ export const GET = withAuth(async (request, _ctx, session) => {
   const sortParam = sp.get("sortBy");
   const sortBy: SortBy = validSorts.has(sortParam as SortBy) ? (sortParam as SortBy) : "imdb";
   const page = parsePageParam(sp);
-  const show4k = await getShow4kVisibility(session);
+  const [show4k, plexEnabled, jellyfinEnabled] = await Promise.all([
+    getShow4kVisibility(session),
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+  ]);
 
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  // Integration flags passed explicitly — they default to TRUE when omitted.
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, {
+    plex: plexEnabled,
+    jellyfin: jellyfinEnabled,
+  });
   const filterOpts = { hideAvailable, showPlex, showJellyfin, minImdb, minVotes, fromYear, toYear };
 
   try {

@@ -322,14 +322,15 @@ test("triage: a fresh row skips; sub-threshold-but-UNEXPIRED rows are genuinely 
   assert.ok(!cacheUpserts.some((u) => u.key === "omdb:tmdb:movie:700"));
 });
 
-test("no TMDB read token: cold items degrade to notFound with zero fetches and zero cache writes", async () => {
+test("no TMDB read token: cold items count as FAILED (not notFound) with zero fetches and zero cache writes", async () => {
   tables.plex = [{ tmdbId: 720, mediaType: "MOVIE" }];
   delete process.env.TMDB_READ_TOKEN;
   try {
-    // fetchAndCacheOmdbForTmdb returns { found:false, keyConfigured:true }
+    // fetchAndCacheOmdbForTmdb returns { found:false, keyConfigured:true, tmdbUnconfigured:true }
     // without fetching or caching when the TMDB token is missing (a config
-    // gap, not an authoritative absence) — the prewarm counts it notFound.
-    assert.deepEqual(await prewarmOmdbCache(), { total: 1, fetched: 0, notFound: 1, skipped: 0, failed: 0 });
+    // gap, not an authoritative absence) — the prewarm counts it failed, so
+    // recordCronRun(..., failed === 0) can't record the broken config as green.
+    assert.deepEqual(await prewarmOmdbCache(), { total: 1, fetched: 0, notFound: 0, skipped: 0, failed: 1 });
     assert.equal(fetchCalls.length, 0);
     assert.equal(cacheUpserts.length, 0);
   } finally {

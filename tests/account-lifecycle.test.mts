@@ -95,6 +95,7 @@ const baseTx = {
   hiddenItem: { deleteMany: record("hiddenItem", "deleteMany") },
   notification: { deleteMany: record("notification", "deleteMany") },
   userRecommendation: { deleteMany: record("userRecommendation", "deleteMany") },
+  verificationToken: { deleteMany: record("verificationToken", "deleteMany") },
   user: {
     findUnique: async (args: unknown) => {
       ops.push({ op: "user.findUnique", args });
@@ -148,6 +149,7 @@ const PURGE_OPS = [
   "hiddenItem.deleteMany",
   "notification.deleteMany",
   "userRecommendation.deleteMany",
+  "verificationToken.deleteMany",
   "user.updateMany",
 ];
 
@@ -350,6 +352,15 @@ test("the tombstone email is unique per user id and sits on the unroutable .inva
   for (const email of [first, second]) {
     assert.match(email, /^deleted-user-(one|two)@deleted\.invalid$/);
   }
+});
+
+test("purge drops the user's pending notification-email verification tokens (their identifier carries the address)", async () => {
+  // Left behind, a confirm link clicked inside its TTL would write the personal
+  // address back onto the scrubbed row.
+  await purgeUserDataInTx(purgeTx, ID, NOW);
+  assert.deepEqual(opArgs("verificationToken.deleteMany"), {
+    where: { identifier: { startsWith: `notif-email:${ID}:` } },
+  });
 });
 
 // ── purged-row detection (the pre-`purgedAt` migration gap) ─────────────────

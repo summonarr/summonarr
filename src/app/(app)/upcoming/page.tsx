@@ -9,7 +9,7 @@ import { HideAvailableToggle } from "@/components/media/hide-available-toggle";
 import { requireAppSession } from "@/lib/require-app-session";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
-import { requireFeature } from "@/lib/features";
+import { isFeatureEnabled, requireFeature } from "@/lib/features";
 import { LiveRefresh } from "@/components/live-refresh";
 import { PageHeader, EmptyState } from "@/components/ui/design";
 import { PaginationBar } from "@/components/media/pagination-bar";
@@ -49,9 +49,18 @@ export default async function UpcomingPage({
   searchParams: Promise<Record<string, string>>;
 }) {
   await requireFeature("feature.page.upcoming");
-  const [sp, session] = await Promise.all([searchParams, requireAppSession()]);
+  const [sp, session, plexEnabled, jellyfinEnabled] = await Promise.all([
+    searchParams,
+    requireAppSession(),
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+  ]);
   const hideAvailable = sp.hideAvailable === "1";
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  // Integration flags passed explicitly — they default to TRUE when omitted.
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, {
+    plex: plexEnabled,
+    jellyfin: jellyfinEnabled,
+  });
   const raw: TmdbMedia[] = [];
   let loadFailed = false;
   try {

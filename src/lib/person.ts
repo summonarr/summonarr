@@ -3,6 +3,7 @@ import { getPersonDetails } from "@/lib/tmdb";
 import type { PersonDetails, TmdbMedia } from "@/lib/tmdb-types";
 import { attachRatingsUnified } from "@/lib/omdb-availability";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
+import { isFeatureEnabled } from "@/lib/features";
 import { generateRequestToken } from "@/lib/request-token";
 import { getBlacklistSet, blacklistKey } from "@/lib/blacklist";
 import { getVisibleServerInstances } from "@/lib/media-visibility";
@@ -20,8 +21,18 @@ export async function getEnrichedPerson(
   personId: number,
   session: SummonarrSession,
 ): Promise<PersonDetails> {
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
-  const person = await getPersonDetails(personId);
+  // Integration flags passed explicitly (they default to TRUE when omitted), so a
+  // disabled integration's leftover library rows badge nothing here — matching
+  // the movie/TV detail pages.
+  const [person, plexEnabled, jellyfinEnabled] = await Promise.all([
+    getPersonDetails(personId),
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+  ]);
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, {
+    plex: plexEnabled,
+    jellyfin: jellyfinEnabled,
+  });
   if (person.credits.length === 0) return person;
 
   const orClause = person.credits.map((c) => ({

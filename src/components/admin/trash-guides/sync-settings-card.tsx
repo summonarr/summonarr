@@ -68,6 +68,7 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
       }
       const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
+        error?: string;
         errors?: string[];
         schemaDiagnostic?: string;
       };
@@ -75,7 +76,7 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
       setRefreshState(hasErrors ? "error" : "ok");
       if (hasErrors) {
         setRefreshError({
-          errors: data.errors && data.errors.length > 0 ? data.errors : [`HTTP ${res.status}`],
+          errors: data.errors && data.errors.length > 0 ? data.errors : [data.error ?? `HTTP ${res.status}`],
           schemaDiagnostic: data.schemaDiagnostic,
         });
       }

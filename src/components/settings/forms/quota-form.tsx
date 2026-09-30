@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -18,9 +18,13 @@ export function QuotaForm({ initialLimit, initialPeriod }: QuotaFormProps) {
   const [limit, setLimit] = useState(initialLimit);
   const [period, setPeriod] = useState(initialPeriod || "week");
   const [status, setStatus] = useState<SaveStatus>("idle");
+  // An earlier save's idle timer must not fire into a later save (it would
+  // re-enable Save mid-flight or clear the new result early).
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    if (idleTimer.current) clearTimeout(idleTimer.current);
     setStatus("saving");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
@@ -33,7 +37,7 @@ export function QuotaForm({ initialLimit, initialPeriod }: QuotaFormProps) {
     } catch {
       setStatus("error");
     }
-    setTimeout(() => setStatus("idle"), 3000);
+    idleTimer.current = setTimeout(() => setStatus("idle"), 3000);
   }
 
   return (

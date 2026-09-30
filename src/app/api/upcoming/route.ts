@@ -44,8 +44,16 @@ export const GET = withAuth(async (request, _ctx, session) => {
   }
 
   const hideAvailable = request.nextUrl.searchParams.get("hideAvailable") === "1";
-  // Per-user server visibility for the hideAvailable gate.
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  // Per-user server visibility for the hideAvailable gate — with the integration
+  // flags, which default to TRUE when omitted.
+  const [plexEnabled, jellyfinEnabled] = await Promise.all([
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+  ]);
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, {
+    plex: plexEnabled,
+    jellyfin: jellyfinEnabled,
+  });
   const raw: TmdbMedia[] = [];
 
   try {

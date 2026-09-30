@@ -16,15 +16,19 @@ export function OverviewKpis({ service, refreshKey = 0 }: OverviewKpisProps) {
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     try {
-      const res = await fetch(withBasePath(`/api/admin/trash-guides/status?service=${service.toLowerCase()}`));
+      const res = await fetch(withBasePath(`/api/admin/trash-guides/status?service=${service.toLowerCase()}`), { signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as { specs?: SpecStatus[] };
+      // A superseded request (service switched / refreshKey bumped) must not
+      // overwrite the newer one's KPIs or flip loading off early.
+      if (signal?.aborted) return;
       setSpecs(data.specs ?? []);
       setFailed(false);
     } catch {
+      if (signal?.aborted) return;
       setSpecs([]);
       setFailed(true);
     }
@@ -32,7 +36,9 @@ export function OverviewKpis({ service, refreshKey = 0 }: OverviewKpisProps) {
   }, [service]);
 
   useEffect(() => {
-    void load();
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => controller.abort();
   }, [load, refreshKey]);
 
   const profilesAvailable = specs.filter((s) => s.kind === "QUALITY_PROFILE").length;

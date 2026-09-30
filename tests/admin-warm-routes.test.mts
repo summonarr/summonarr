@@ -216,7 +216,7 @@ type WarmRoute = {
 };
 const WARMS: WarmRoute[] = [
   { name: "activity-warm", path: "/api/admin/activity-warm", cooldownKey: "lastActivityWarmAt", lockId: null, POST: activityWarm.POST },
-  { name: "library-warm", path: "/api/admin/library-warm", cooldownKey: "lastLibraryWarmAt", lockId: null, POST: libraryWarm.POST },
+  { name: "library-warm", path: "/api/admin/library-warm", cooldownKey: "lastLibraryWarmAt", lockId: AL.WARM_LIBRARY_LOCK_ID, POST: libraryWarm.POST },
   { name: "mdblist-warm", path: "/api/admin/mdblist-warm", cooldownKey: "lastMdblistWarmAt", lockId: AL.WARM_MDBLIST_LOCK_ID, POST: mdblistWarm.POST },
   { name: "omdb-warm", path: "/api/admin/omdb-warm", cooldownKey: "lastOmdbWarmAt", lockId: AL.WARM_OMDB_LOCK_ID, POST: omdbWarm.POST },
 ];
@@ -415,9 +415,28 @@ for (const w of LOCKING_WARMS) {
   });
 }
 
-test("the two quota-bearing warms use DISTINCT lock ids from each other", () => {
+test("the locking warms use DISTINCT lock ids from each other", () => {
   const ids = LOCKING_WARMS.map((w) => w.lockId);
   assert.equal(new Set(ids).size, ids.length);
+});
+
+test("library-warm threads the lock's AbortSignal into the walk (guardrail 41)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/app/api/admin/library-warm/route.ts", import.meta.url), "utf8");
+  assert.match(src, /withAdvisoryLock\(\s*WARM_LIBRARY_LOCK_ID,\s*async \(signal\)/);
+  assert.match(src, /prewarmLibraryCache\(\{ signal \}\)/);
+});
+
+test("the boot-time library prewarm takes the warm-library cron's lock and observes its signal", async () => {
+  // Otherwise a boot walk still running when the entrypoint's first
+  // warm-library cron fires lets that cron start a second full walk beside it.
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/instrumentation.ts", import.meta.url), "utf8");
+  const at = src.indexOf('import("@/lib/tmdb-prewarm")');
+  assert.ok(at > 0, "boot prewarm not found");
+  const block = src.slice(at, at + 600);
+  assert.match(block, /withAdvisoryLock\(\s*WARM_LIBRARY_LOCK_ID,\s*\(signal\) => prewarmLibraryCache\(\{ signal \}\)/);
+  assert.equal((src.match(/prewarmLibraryCache\(\)/g) ?? []).length, 0, "an unlocked, signal-less prewarmLibraryCache() call remains");
 });
 
 test("the non-locking warms take no advisory lock at all", async () => {

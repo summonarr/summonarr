@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -22,10 +22,17 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
   const [issues, setIssues] = useState(initialIssues);
   const [maxPushSubscriptions, setMaxPushSubscriptions] = useState(initialMaxPushSubscriptions);
   const [status, setStatus] = useState<SaveStatus>("idle");
+  // An earlier save's idle timer must not fire into a later save (it would
+  // re-enable Save mid-flight or hide the new result early).
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+  }, []);
   const [message, setMessage] = useState("");
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    if (idleTimer.current) clearTimeout(idleTimer.current);
     setStatus("saving");
     setMessage("");
     try {
@@ -49,7 +56,7 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
     } catch {
       setStatus("error");
     }
-    setTimeout(() => setStatus("idle"), 3000);
+    idleTimer.current = setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
   }
 
   return (

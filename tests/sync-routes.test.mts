@@ -882,14 +882,59 @@ test("jellyfin recentOnly with a small windowed series set fetches episodes PER 
     "the episode fetch must be ParentId-scoped to the windowed series, not a library-wide Episode walk",
   );
 
-  // The downstream write contract is unchanged: tmdbId-scoped delete + insert.
+  // Episode-tuple-scoped delete + insert (never a tmdbId-wide delete — see the
+  // multi-library test below).
   const epOps = transactions.flatMap((t) => t.ops).filter((o) => o.model === "tVEpisodeCache");
   assert.deepEqual(
     epOps.map((o) => ({ method: o.method, args: o.args })),
     [
-      { method: "deleteMany", args: { where: { source: "jellyfin", tmdbId: { in: [1399] } } } },
+      { method: "deleteMany", args: { where: { source: "jellyfin", OR: [{ tmdbId: 1399, seasonNumber: 1, episodeNumber: { in: [1] } }] } } },
       { method: "createMany", args: { data: [{ source: "jellyfin", tmdbId: 1399, seasonNumber: 1, episodeNumber: 1 }], skipDuplicates: true } },
     ],
+  );
+});
+
+test("jellyfin recentOnly episode refresh deletes ONLY the episodes it re-inserts — another library copy's seasons survive (guardrail 37)", async () => {
+  // The MinDateLastSaved window returns only the copy of a show saved in the last
+  // 2h. A show split across two libraries (copy A: seasons 1-2, old; copy B:
+  // season 3, recent) yields only copy B's episodes here, so a tmdbId-wide delete
+  // wiped seasons 1-2 from TVEpisodeCache until the next full rebuild.
+  configureJellyfin();
+  respond = (url) => {
+    if (url.pathname !== "/Items") throw new Error(`unexpected Jellyfin fetch ${url}`);
+    switch (url.searchParams.get("IncludeItemTypes")) {
+      case "Movie":
+        return okJson({ Items: [], TotalRecordCount: 0 });
+      case "Series":
+        return okJson({
+          Items: [{ Id: "jf-show-b", Name: "Show One", ProviderIds: { Tmdb: "1399" } }],
+          TotalRecordCount: 1,
+        });
+      case "Episode":
+        return okJson({
+          Items: [
+            { SeriesId: "jf-show-b", ParentIndexNumber: 3, IndexNumber: 1 },
+            { SeriesId: "jf-show-b", ParentIndexNumber: 3, IndexNumber: 2 },
+          ],
+          TotalRecordCount: 2,
+        });
+      default:
+        throw new Error(`unexpected Jellyfin fetch ${url}`);
+    }
+  };
+
+  const res = await postJellyfinSync(jfReq({ headers: AS_CRON })); // no body ⇒ recentOnly
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+
+  const deletes = transactions
+    .flatMap((t) => t.ops)
+    .filter((o) => o.model === "tVEpisodeCache" && o.method === "deleteMany");
+  assert.equal(deletes.length, 1);
+  assert.deepEqual(
+    deletes[0].args,
+    { where: { source: "jellyfin", OR: [{ tmdbId: 1399, seasonNumber: 3, episodeNumber: { in: [1, 2] } }] } },
+    "the recentOnly delete must be scoped to the re-inserted episode tuples, never the whole tmdbId",
   );
 });
 

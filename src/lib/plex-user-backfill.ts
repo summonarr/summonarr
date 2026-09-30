@@ -155,11 +155,22 @@ export async function runPlexUserBackfillIfNeeded(): Promise<void> {
         });
         bound++;
       } catch (err) {
-        // A unique-violation race with a concurrent live sign-in is fine — that
-        // user got bound by the auth flow first. Anything else is not: swallowing
-        // it left the user in neither `bound` nor `unmatched`, so nothing warned
-        // and the marker stamped over a failure nobody could see.
-        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") continue;
+        // A unique violation is NOT a benign race: candidates have a null
+        // plexUserId and Plex sign-in never binds an email-matched row, so a
+        // P2002 means a DIFFERENT User row already owns this plex id. Retrying
+        // cannot fix that, so it doesn't hold the marker back — but it must be
+        // named, or the account stays unbound with no operator signal.
+        if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+          console.warn(
+            `[plex-backfill] Could not bind ${u.email} (${u.id}) to Plex account ${plexId}: another user already ` +
+              "holds that plexUserId. Plex sign-in for that account resolves to the other user; merge or fix the " +
+              "duplicate by hand.",
+          );
+          continue;
+        }
+        // Anything else: swallowing it left the user in neither `bound` nor
+        // `unmatched`, so nothing warned and the marker stamped over a failure
+        // nobody could see.
         console.warn(
           `[plex-backfill] Binding ${u.email} failed:`,
           err instanceof Error ? err.message : String(err),

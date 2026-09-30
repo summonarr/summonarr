@@ -19,7 +19,8 @@ export interface OmdbPrewarmResult {
   // these were negative-cached. A transient failure NEVER lands here — see `failed`.
   notFound: number;
   skipped: number;
-  // Rejected chains PLUS fulfilled `{ found: false, transient: true }` results.
+  // Rejected chains PLUS fulfilled `{ found: false, transient: true }` results
+  // and `tmdbUnconfigured` misses (no TMDB token — nothing fetched or cached).
   // fetchAndCacheOmdbForTmdb turns every network/5xx/401/quota failure into a
   // transient miss instead of throwing, so this counter is the only way the cron
   // history (`recordCronRun(..., failed === 0)`) shows a bad key or an outage.
@@ -155,6 +156,9 @@ export async function prewarmOmdbCache(opts: { signal?: AbortSignal } = {}): Pro
       if (r.status === "fulfilled") {
         if (r.value.found) fetched++;
         else if (r.value.transient) failed++; // omdb.ts already logged the per-item cause
+        // No TMDB token: nothing was fetched or negative-cached, so it is not an
+        // authoritative miss — count it failed so the misconfiguration shows up.
+        else if (r.value.tmdbUnconfigured) failed++;
         else notFound++;
       } else { failed++; console.warn("[omdb-prewarm] item failed:", r.reason); }
     }

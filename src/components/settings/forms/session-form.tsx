@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -20,9 +20,16 @@ export function SessionForm({ initialDefaultDuration, initialMobileDuration, ini
   const [mobileDuration,  setMobileDuration]  = useState(initialMobileDuration);
   const [maxDuration,     setMaxDuration]     = useState(initialMaxDuration);
   const [status, setStatus] = useState<SaveStatus>("idle");
+  // An earlier save's idle timer must not fire into a later save (it would
+  // re-enable Save mid-flight or hide the new result early).
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+  }, []);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    if (idleTimer.current) clearTimeout(idleTimer.current);
     setStatus("saving");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
@@ -39,7 +46,7 @@ export function SessionForm({ initialDefaultDuration, initialMobileDuration, ini
     } catch {
       setStatus("error");
     }
-    setTimeout(() => setStatus("idle"), 3000);
+    idleTimer.current = setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
   }
 
   return (

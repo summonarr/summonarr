@@ -115,6 +115,10 @@ export function isValidIpOrCidr(token: string): boolean {
   if (fam === 0) return false;
   if (!/^\d{1,3}$/.test(prefixStr)) return false;
   const prefix = Number(prefixStr);
+  // An IPv4-mapped base is matched as IPv4 (isIpAllowed subtracts the 96
+  // mapping bits), so a prefix that cuts into those bits has no v4 meaning.
+  const parsed = ipToBigInt(addr);
+  if (fam === 6 && parsed?.bits === 32) return prefix >= 96 && prefix <= 128;
   return prefix >= 0 && prefix <= (fam === 4 ? 32 : 128);
 }
 
@@ -143,8 +147,15 @@ export function isIpAllowed(clientIp: string, allowlist: string[]): boolean {
     // match every same-family client. Fail closed like the validator.
     const prefixText = entry.slice(slash + 1);
     if (!/^\d{1,3}$/.test(prefixText)) continue;
-    const prefix = Number(prefixText);
+    let prefix = Number(prefixText);
     if (!target || target.bits !== client.bits) continue;
+    // A mapped-v6 base (::ffff:a.b.c.d/N) was folded to 32 bits, so its prefix
+    // still counts the 96 mapping bits — drop them, and skip one that cuts into
+    // them (the validator refuses it; a hand-edited row fails closed).
+    if (target.bits === 32 && isIP(entry.slice(0, slash)) === 6) {
+      if (prefix < 96) continue;
+      prefix -= 96;
+    }
     if (!Number.isInteger(prefix) || prefix < 0 || prefix > target.bits) continue;
     const shift = BigInt(target.bits - prefix);
     if (client.value >> shift === target.value >> shift) return true;

@@ -41,6 +41,13 @@ export const PATCH = withIssueAdmin(async (
   if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   if (refetch) {
+    // Refuse a RESOLVED issue BEFORE contacting Radarr/Sonarr, as the sibling Replace
+    // flow (issues/[id]/releases) does. The post-search status CAS below only avoids
+    // flipping the status back — by then the search has already queued a download for
+    // a closed issue (a stale tab, a native client, a direct API call).
+    if (issue.status === "RESOLVED") {
+      return NextResponse.json({ error: "Issue is resolved — reopen it before refetching" }, { status: 409 });
+    }
     // Which Radarr/Sonarr instance holds the copy this issue is about. Issue has no
     // arrInstance column — the same title can sit on several instances — so the caller
     // names it, exactly as the sibling Replace flow does (issues/[id]/releases). Absent
@@ -118,9 +125,15 @@ export const PATCH = withIssueAdmin(async (
     return NextResponse.json({ error: "resolution must not be empty" }, { status: 400 });
   }
 
-  const updateData: { status?: ValidStatus; resolution?: string } = {};
+  const updateData: { status?: ValidStatus; resolution?: string | null } = {};
   if (status) updateData.status = status as ValidStatus;
   if (sanitizedResolution != null) updateData.resolution = sanitizedResolution;
+  // Reopening (RESOLVED → OPEN/IN_PROGRESS) clears the old resolution, matching the
+  // reporter-reply reopen in the messages route. Otherwise a later re-resolve with no
+  // new note falls back to `issue.resolution` and re-announces the EARLIER fix.
+  if (sanitizedResolution == null && issue.status === "RESOLVED" && status && status !== "RESOLVED") {
+    updateData.resolution = null;
+  }
 
   // Compare-and-swap on status when a status change is requested. The resolution-only
   // update path is not gated — overwriting resolution text concurrently is a benign

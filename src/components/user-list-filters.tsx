@@ -117,10 +117,19 @@ export function SearchBox({
   const searchParams = useSearchParams();
   const [value, setValue] = useState(initial);
 
+  // The last value this box pushed to the URL. When our own debounced push
+  // lands late (a slow RSC round-trip), `initial` becomes that value while the
+  // user may already have typed more; resyncing then would drop those
+  // keystrokes. So resync only when the URL changed from OUTSIDE (back/forward,
+  // a pill click, a link) — i.e. to something other than what we pushed.
+  const [lastPushed, setLastPushed] = useState(initial);
   const [prevInitial, setPrevInitial] = useState(initial);
   if (initial !== prevInitial) {
     setPrevInitial(initial);
-    setValue(initial);
+    if (initial !== lastPushed) {
+      setLastPushed(initial);
+      setValue(initial);
+    }
   }
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -163,12 +172,16 @@ export function SearchBox({
     const next = e.target.value;
     setValue(next);
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => pushRef.current(next), 350);
+    debounceRef.current = setTimeout(() => {
+      setLastPushed(next);
+      pushRef.current(next);
+    }, 350);
   }
 
   function handleClear() {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     setValue("");
+    setLastPushed("");
     push("");
   }
 

@@ -416,19 +416,22 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // skipLibraryCheck above — an instance the requester can't reach doesn't block them.
   const skipLibraryCheck = instance.skipLibraryCheck;
   const visible = await getVisibleServerInstances(session);
-  const [plexItem, jellyfinItem, arrAvailable] = await Promise.all([
+  // The instance's *arr-available cache is read for every requester: an auto-approver
+  // treats a hit as already-here, and the mirror branch below needs it as the only
+  // evidence (short of a visible library copy, which already returned) that an AVAILABLE
+  // peer's status is true for THIS requester too.
+  const [plexItem, jellyfinItem, arrHasInstance] = await Promise.all([
     skipLibraryCheck
       ? Promise.resolve(null)
       : prisma.plexLibraryItem.findFirst({ where: { tmdbId, mediaType, serverInstance: { in: visible.plex } } }),
     skipLibraryCheck
       ? Promise.resolve(null)
       : prisma.jellyfinLibraryItem.findFirst({ where: { tmdbId, mediaType, serverInstance: { in: visible.jellyfin } } }),
-    isAutoApprove
-      ? mediaType === "MOVIE"
-        ? prisma.radarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: instanceSlug } } }).then(r => r !== null)
-        : prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: instanceSlug } } }).then(r => r !== null)
-      : Promise.resolve(false),
+    mediaType === "MOVIE"
+      ? prisma.radarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: instanceSlug } } }).then(r => r !== null)
+      : prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: instanceSlug } } }).then(r => r !== null),
   ]);
+  const arrAvailable = isAutoApprove && arrHasInstance;
   // Check BOTH libraries — a Jellyfin-only install has no PlexLibraryItem rows, so
   // a Plex-only check let users re-request titles already in their Jellyfin library
   // (skipped for skipLibraryCheck instances, same reasoning as Plex above).
@@ -507,14 +510,21 @@ export const POST = withAuth(async (req, _ctx, session) => {
         select: { status: true },
       });
       if (greenlit) {
+        // An AVAILABLE peer is copied only when the title is available to THIS requester:
+        // the peer may have been marked off a restricted server this requester holds no
+        // grant for (guardrail 35). No visible library copy exists (that returned above),
+        // so the instance's *arr-available cache is the remaining evidence — the same
+        // ungated signal the sync's arr marking pass uses. Otherwise mirror APPROVED and
+        // let the grant-gated sync marking pass promote (and notify) it.
+        const mirrorStatus = greenlit.status === "AVAILABLE" && !arrHasInstance ? "APPROVED" : greenlit.status;
         createdRequest = await tx.mediaRequest.create({
           data: {
             ...baseData,
-            status: greenlit.status,
+            status: mirrorStatus,
             // Mirror an already-AVAILABLE title's availability timestamp so this
             // row matches the original's shape (the sync's "now available" pass
             // and availability sorts read availableAt).
-            ...(greenlit.status === "AVAILABLE" ? { availableAt: new Date() } : {}),
+            ...(mirrorStatus === "AVAILABLE" ? { availableAt: new Date() } : {}),
           },
         });
         createdBranch = "mirror-approved";

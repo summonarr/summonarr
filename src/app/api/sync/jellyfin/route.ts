@@ -120,11 +120,10 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
   const seriesItemIdToTmdbId = buildSeriesItemIdIndex(tvIds);
 
   // Fire-and-forget: episode cache is best-effort and must not block the main library write.
-  // On recentOnly, scope deletes to the series we're about to repopulate so unrelated cached
-  // episodes survive (the recentOnly tv filter is a 2h window, not the whole library).
+  // On recentOnly, deletes are scoped to the exact episodes being re-inserted (see below) so
+  // unrelated cached episodes survive (the recentOnly tv filter is a 2h window, not the whole
+  // library).
   const episodeRecentOnly = recentOnly;
-  // Deduped: a duplicated series contributes one entry per item id.
-  const tmdbIdsBeingReplaced = Array.from(new Set(seriesItemIdToTmdbId.values()));
   // Decided BEFORE the fetch, like the Plex twin: bailing out inside the .then()
   // still page-walked every Episode in the library first, then threw the whole
   // result away on any multi-server install.
@@ -164,8 +163,25 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
         // wholesale rewrite from another runner.
         await prisma.$transaction(async (tx) => {
           await tx.$executeRaw`SELECT pg_advisory_xact_lock(2002, 2)`;
-          if (tmdbIdsBeingReplaced.length > 0) {
-            await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", tmdbId: { in: tmdbIdsBeingReplaced } } });
+          // Scoped to the exact (tmdbId, season, episode) tuples about to be re-inserted,
+          // NOT to the whole tmdbId: the MinDateLastSaved window returns only the library
+          // copies of a show saved in the last 2h, so a copy in another library (guardrail
+          // 37) contributes no episodes here — a tmdbId-wide delete wiped its seasons until
+          // the next full rebuild. Removed episodes are the full path's job.
+          const bySeason = new Map<string, { tmdbId: number; seasonNumber: number; episodeNumbers: number[] }>();
+          for (const e of episodes) {
+            const key = `${e.tmdbId}:${e.seasonNumber}`;
+            const group = bySeason.get(key);
+            if (group) group.episodeNumbers.push(e.episodeNumber);
+            else bySeason.set(key, { tmdbId: e.tmdbId, seasonNumber: e.seasonNumber, episodeNumbers: [e.episodeNumber] });
+          }
+          const seasonScopes = Array.from(bySeason.values()).map((g) => ({
+            tmdbId: g.tmdbId,
+            seasonNumber: g.seasonNumber,
+            episodeNumber: { in: g.episodeNumbers },
+          }));
+          if (seasonScopes.length > 0) {
+            await tx.tVEpisodeCache.deleteMany({ where: { source: "jellyfin", OR: seasonScopes } });
           }
           if (episodes.length > 0) {
             await batchCreateMany(tx.tVEpisodeCache, episodes.map((e) => ({ source: "jellyfin" as const, ...e })));

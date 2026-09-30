@@ -23,6 +23,14 @@ import { ActivityWarmButton } from "@/components/admin/activity-warm-button";
 import { ActivityLiveRefresher } from "@/components/admin/activity-live-refresher";
 import { posterUrl } from "@/lib/tmdb-types";
 import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
+import {
+  addTitleResolutions,
+  collectUnmappedPairs,
+  lookupTitleResolution,
+  titleWhereDisjuncts,
+  toActivityMediaType,
+  type TitleResolveMap,
+} from "@/lib/activity-title-resolve";
 import { requireFeature, getFeatureFlags } from "@/lib/features";
 
 export const dynamic = "force-dynamic";
@@ -61,6 +69,7 @@ export default async function ActivityPage({
     tab?: string;
     from?: string;
     to?: string;
+    watched?: string;
   }>;
 }) {
   await requireFeature("feature.admin.activity");
@@ -71,7 +80,7 @@ export default async function ActivityPage({
   const showActiveSessions   = featureFlags["feature.behavior.activeSessions"] !== false;
   const showActivityCalendar = featureFlags["feature.behavior.activityCalendar"] !== false;
 
-  const { days: daysParam, source: sourceParam, mediaType: mediaTypeParam, tab, from: fromParam, to: toParam } = await searchParams;
+  const { days: daysParam, source: sourceParam, mediaType: mediaTypeParam, tab, from: fromParam, to: toParam, watched: watchedParam } = await searchParams;
   const isHistoryTab = tab === "history";
   const days = Math.min(Math.max(parseInt(daysParam ?? "30", 10) || 30, 1), 3650);
   const source = sourceParam && ["plex", "jellyfin"].includes(sourceParam) ? sourceParam : undefined;
@@ -81,6 +90,7 @@ export default async function ActivityPage({
   const isYmd = (v?: string) => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
   const fromDate = isYmd(fromParam) ? fromParam : undefined;
   const toDate = isYmd(toParam) ? toParam : undefined;
+  const initialWatched = watchedParam === "true" || watchedParam === "false" ? watchedParam : undefined;
 
   // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
   const periodCutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
@@ -95,13 +105,14 @@ export default async function ActivityPage({
         />
         <ActivityFilterBar />
         <ActivityHistoryTable
-          key={`ht-${days}-${source ?? ""}-${mediaType ?? ""}-${fromDate ?? ""}-${toDate ?? ""}`}
+          key={`ht-${days}-${source ?? ""}-${mediaType ?? ""}-${fromDate ?? ""}-${toDate ?? ""}-${initialWatched ?? ""}`}
           source={source}
           mediaType={mediaType}
           days={days}
           startDateIso={periodCutoff.toISOString()}
           initialFromDate={fromDate}
           initialToDate={toDate}
+          initialWatched={initialWatched}
         />
       </div>
     );
@@ -255,6 +266,7 @@ export default async function ActivityPage({
   });
 
   const resolvedTmdb: Record<string, { tmdbId: number; mediaType: string }> = {};
+  const titleResolved: TitleResolveMap = {};
   const sessionsNeedingTmdb = activeSessions.filter((s: typeof activeSessions[0]) => s.tmdbId == null);
 
   if (sessionsNeedingTmdb.length > 0) {
@@ -326,17 +338,21 @@ export default async function ActivityPage({
       (s: typeof sessionsNeedingTmdb[0]) => !(s.sourceItemId && resolvedTmdb[`item:${s.serverInstance}:${s.sourceItemId}`]),
     );
     if (stillNeedTitle.length > 0) {
-      const titles = [...new Set(stillNeedTitle.map((s: typeof stillNeedTitle[0]) => s.title))];
-      const titleMatches = await prisma.playHistory.findMany({
-        where: { title: { in: titles }, tmdbId: { not: null } },
-        distinct: ["title"],
-        orderBy: { startedAt: "desc" },
-        select: { title: true, tmdbId: true, mediaType: true },
-      });
-      for (const h of titleMatches) {
-        if (h.tmdbId != null) {
-          resolvedTmdb[`title:${h.title}`] = { tmdbId: h.tmdbId, mediaType: h.mediaType ?? "TV" };
-        }
+      // Keyed on (title, mediaType) through activity-title-resolve, never the
+      // bare title: a TV session titled "Fargo" must not pick up the MOVIE
+      // "Fargo"'s tmdbId, because the backfill below PERSISTS the answer.
+      const titlePairs = collectUnmappedPairs(stillNeedTitle);
+      if (titlePairs.length > 0) {
+        const titleMatches = await prisma.playHistory.findMany({
+          where: {
+            tmdbId: { not: null },
+            OR: titleWhereDisjuncts(titlePairs),
+          },
+          distinct: ["title", "mediaType"],
+          orderBy: { startedAt: "desc" },
+          select: { title: true, tmdbId: true, mediaType: true },
+        });
+        addTitleResolutions(titleResolved, titleMatches);
       }
     }
   }
@@ -350,13 +366,15 @@ export default async function ActivityPage({
     // That is worse than the collision it replaced: the title fallback matches across
     // media types, and its answer is then PERSISTED to ActiveSession by the backfill
     // below — so a wrong id became durable.
-    const resolved =
-      (s.sourceItemId ? resolvedTmdb[`item:${s.serverInstance}:${s.sourceItemId}`] : undefined)
-      ?? resolvedTmdb[`title:${s.title}`];
+    const byItem = s.sourceItemId ? resolvedTmdb[`item:${s.serverInstance}:${s.sourceItemId}`] : undefined;
+    if (byItem) return { ...s, effectiveTmdbId: byItem.tmdbId, effectiveMediaType: byItem.mediaType };
+    // Title fallback: matched on (title, mediaType), and the session's own known
+    // type is never overwritten by the resolution (activity-title-resolve rule).
+    const byTitle = lookupTitleResolution(titleResolved, s.title, s.mediaType);
     return {
       ...s,
-      effectiveTmdbId: resolved?.tmdbId ?? null,
-      effectiveMediaType: resolved?.mediaType ?? s.mediaType,
+      effectiveTmdbId: byTitle?.tmdbId ?? null,
+      effectiveMediaType: toActivityMediaType(s.mediaType) ?? byTitle?.mediaType ?? s.mediaType,
     };
   });
 

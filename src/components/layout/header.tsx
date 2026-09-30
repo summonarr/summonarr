@@ -122,13 +122,23 @@ export function SearchBar({
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     abortRef.current?.abort();
+    // Detach the aborted request so its `finally` can't clear the pending
+    // state this query sets below.
+    abortRef.current = null;
     if (!query.trim()) {
       setResults([]);
       setSearchFailed(false);
+      setLoading(false);
       setActiveIndex(-1);
       setOpen(false);
       return;
     }
+
+    // Pending from the moment the query changes, not from when the debounced
+    // fetch starts — otherwise the 350ms window renders "No matches" (or the
+    // previous query's "Search is unavailable") for a search that hasn't run.
+    setLoading(true);
+    setSearchFailed(false);
 
     debounceRef.current = setTimeout(async () => {
       abortRef.current?.abort();

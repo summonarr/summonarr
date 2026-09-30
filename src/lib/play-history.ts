@@ -983,9 +983,12 @@ export async function getPlayStatsForServerUsers(ids: string[]) {
     totalWatchTimeHours: Math.round(Number(totalWatchTime[0]?.hours ?? 0) * 10) / 10,
     recentPlays,
     topMedia: topMedia.map((r) => ({ title: r.title, tmdbId: r.tmdbId, mediaType: r.mediaType, posterPath: r.posterPath, count: Number(r.count) })),
+    // Rolling `now - 90d` cutoff spans 91 UTC calendar days (both edges
+    // partial) — pad to 91 so the oldest edge's rows aren't dropped, as
+    // getPlayHistoryStatsUncached does with `seriesDays = days + 1`.
     playsByDay: padDailySeries(
       playsByDay.map((r) => ({ day: r.day, count: Number(r.count), hours: Math.round(r.hours * 100) / 100 })),
-      90,
+      91,
       (day) => ({ day, count: 0, hours: 0 }),
     ),
     platformBreakdown: platformBreakdown.map((r) => ({ platform: r.platform ?? "Unknown", count: Number(r.count) })),

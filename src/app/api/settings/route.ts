@@ -646,6 +646,19 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     "discordAdminRoleId",
     "discordIssueAdminRoleId",
     "discordAutoApproveRoles",
+    // Core Discord app ids. A blank guild id is the documented switch from
+    // guild-scoped to GLOBAL command registration (the registration below reads
+    // "" as null); a blank client id / public key turns the bot off (registration
+    // skips, /api/interactions answers 503). Without clearability the form
+    // reported "Saved" while the old id stayed live and could never be removed.
+    "discordGuildId",
+    "discordClientId",
+    "discordPublicKey",
+    // Blank = fall back to window.location.origin / AUTH_URL, which every
+    // reader already does with `||`. Otherwise a wrong public URL (an old
+    // domain feeding the Plex forwardUrl and email links) could only be
+    // replaced, never removed, while the form still said "Saved".
+    "siteUrl",
     // /api/config publishes these to every visitor, so removing a payment
     // handle (a Zelle phone/email is personal data) has to actually remove it.
     "donationPaypal",

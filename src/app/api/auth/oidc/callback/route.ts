@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { AccountDeactivatedError, findOrCreateOidcUser, PROVIDER_REBIND_REQUIRED, PROVIDER_SETUP_REQUIRED, signInAndMintSession, buildDeviceMeta, normalizeEmail } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import {
+  buildOidcExchangeUrl,
   exchangeOidcCode,
   isNativeOidcState,
   isOidcConfigured,
@@ -113,7 +114,13 @@ export async function GET(req: NextRequest) {
 
   let claims;
   try {
-    claims = await exchangeOidcCode(new URL(req.url), flowState);
+    // Rebuild the exchange URL from the SIGNED redirectUri, not req.url — see
+    // buildOidcExchangeUrl for why the request's own origin cannot be trusted
+    // to match the redirect_uri sent at /start.
+    claims = await exchangeOidcCode(
+      buildOidcExchangeUrl(flowState, req.nextUrl.searchParams),
+      flowState,
+    );
   } catch (err) {
     console.error("[oidc/callback] code exchange failed:", err instanceof Error ? err.message : err);
     return loginErrorRedirect(req, "oidc_exchange_failed");

@@ -63,10 +63,13 @@ export function SpecSection({
   const [confirmingForget, setConfirmingForget] = useState<string | null>(null);
   const [rowError, setRowError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     try {
-      const res = await fetch(withBasePath(`/api/admin/trash-guides/status?service=${service.toLowerCase()}&variant=${encodeURIComponent(variant)}`));
+      const res = await fetch(withBasePath(`/api/admin/trash-guides/status?service=${service.toLowerCase()}&variant=${encodeURIComponent(variant)}`), { signal });
       const data = (await res.json().catch(() => ({}))) as { specs?: SpecStatus[]; error?: string };
+      // A superseded request (service/variant switched) must not overwrite
+      // the newer selection's specs.
+      if (signal?.aborted) return;
       if (!res.ok) {
         setSpecs([]);
         setLoadError(data.error ?? `HTTP ${res.status}`);
@@ -76,6 +79,7 @@ export function SpecSection({
       }
       setLoaded(true);
     } catch (err) {
+      if (signal?.aborted) return;
       setSpecs([]);
       setLoadError(err instanceof Error ? err.message : String(err));
       setLoaded(true);
@@ -83,7 +87,9 @@ export function SpecSection({
   }, [service, variant]);
 
   useEffect(() => {
-    void load();
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => controller.abort();
   }, [load]);
 
   const specsHere = useMemo(

@@ -112,3 +112,42 @@ test("already-mapped entries pass through untouched and first writer wins per ke
   const mapped = { title: "Fargo", tmdbId: 999, mediaType: "TV" as const };
   assert.equal(resolveUnmappedEntry(mapped, map), mapped);
 });
+
+// The main admin activity page's ActiveSession title fallback used to query
+// PlayHistory with `distinct: ["title"]` and key the answer on `title:<title>`,
+// so a TV session "Fargo" picked up the MOVIE "Fargo"'s tmdbId AND type — and
+// the fire-and-forget backfill persisted both to ActiveSession (then PlayHistory
+// at finalize). Structural pin: the page must go through this module.
+test("admin activity page's session title fallback is (title, mediaType)-scoped", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/app/(app)/admin/activity/page.tsx", import.meta.url), "utf8");
+  assert.match(src, /from "@\/lib\/activity-title-resolve"/);
+  assert.match(src, /titleWhereDisjuncts\(/);
+  assert.match(src, /lookupTitleResolution\(titleResolved, s\.title, s\.mediaType\)/);
+  assert.doesNotMatch(src, /distinct:\s*\["title"\]/);
+  assert.doesNotMatch(src, /`title:\$\{/);
+  // The session's own known type wins over the title resolution's.
+  assert.match(src, /toActivityMediaType\(s\.mediaType\) \?\? byTitle\?\.mediaType/);
+});
+
+test("a TV ActiveSession-shaped entry keeps its type and is not linked to the same-titled movie", () => {
+  const map: TitleResolveMap = {};
+  addTitleResolutions(map, [MOVIE_FARGO]);
+  const session = { title: "Fargo", tmdbId: null, mediaType: "TV" };
+  assert.equal(lookupTitleResolution(map, session.title, session.mediaType), undefined);
+  const out = resolveUnmappedEntry(session, map);
+  assert.equal(out.tmdbId, null);
+  assert.equal(out.mediaType, "TV");
+});
+
+// Calendar cell counts are watched=true only; the "View these plays" deep link
+// must carry that filter and the page must seed the history table with it.
+test("calendar 'View these plays' link carries watched=true and the page seeds it", async () => {
+  const { readFileSync } = await import("node:fs");
+  const cal = readFileSync(new URL("../src/components/admin/activity-calendar.tsx", import.meta.url), "utf8");
+  assert.match(cal, /tab: "history", from: date, to: date, watched: "true"/);
+  const page = readFileSync(new URL("../src/app/(app)/admin/activity/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /initialWatched=\{initialWatched\}/);
+  const table = readFileSync(new URL("../src/components/admin/activity-history-table.tsx", import.meta.url), "utf8");
+  assert.match(table, /useState<"" \| "true" \| "false">\(initialWatched \?\? ""\)/);
+});

@@ -107,6 +107,8 @@ const {
   addSeriesToSonarr,
   getSeriesFirstAired,
   isSeriesDownloadedInSonarr,
+  isSeriesDownloadingInSonarr,
+  isSeriesWantedInSonarr,
   pickSeriesByTvdbCrossRef,
   resolveTmdbToTvdb,
 } = await import("../src/lib/arr.ts");
@@ -298,6 +300,32 @@ test("webhook verify: stays Sonarr-sourced — a WRONG TMDB cross-reference can'
   assert.deepEqual(verdict, { downloaded: true, episodeFileCount: 8, episodeCount: 8 });
   assert.equal(lookups("tvdb:").length, 0, "the verify never consults the cross-reference");
   assert.ok(!warns.some((w) => w.includes("payload ids disagree")));
+});
+
+// ═══ live wanted / downloading verdicts ══════════════════════════════════════
+
+test("wanted: a PARTLY downloaded series is wanted — same guardrail-14a rule as the sync writer", async () => {
+  tmdbLookup = [dropRow()];
+  const lib = (files: number) => (tvdbId: string | null) =>
+    tvdbId === String(TVDB)
+      ? [{ tvdbId: TVDB, status: "continuing", seasons: [{ seasonNumber: 1, monitored: true, statistics: { episodeFileCount: files, episodeCount: 24 } }] }]
+      : [];
+  seriesLibrary = lib(5);
+  assert.equal(await isSeriesWantedInSonarr(TMDB), true, "5 of 24 aired episodes is still wanted");
+  seriesLibrary = lib(24);
+  assert.equal(await isSeriesWantedInSonarr(TMDB), false, "a complete series is not wanted");
+  seriesLibrary = lib(0);
+  assert.equal(await isSeriesWantedInSonarr(TMDB), true);
+  seriesLibrary = () => [];
+  assert.equal(await isSeriesWantedInSonarr(TMDB), false, "a series not in the library is not wanted");
+});
+
+test("downloading: an UNRESOLVABLE series is unknown (null), never a confident 'not in queue'", async () => {
+  // tmdb lookup misses, and TMDB's cross-reference is unavailable (no credential,
+  // nothing cached) — callers must defer, not fire a "download pending" notify.
+  tmdbLookup = [];
+  assert.equal(await isSeriesDownloadingInSonarr(TMDB), null);
+  assert.equal(calls.filter((c) => c.url.pathname === "/api/v3/queue").length, 0);
 });
 
 // ═══ structure ══════════════════════════════════════════════════════════════

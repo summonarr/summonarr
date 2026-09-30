@@ -65,6 +65,7 @@ const {
   applyQualitySizes,
   applyQualityProfiles,
   applySpecs,
+  resolveRemoteId,
   runTrashSync,
   listSpecs,
   getSpecDetail,
@@ -815,6 +816,52 @@ test("PUT 404 recovers with a POST recreate and surfaces the recreated flag", as
   const post = fetchCalls.find((c) => c.method === "POST")!;
   assert.equal("id" in (JSON.parse(post.body!) as object), false);
   assert.equal(findApp(spec.id, "")!.remoteId, 88);
+});
+
+test("a stored remoteId now naming a DIFFERENT live CF is never PUT over; a same-name CF under a new id wins", async () => {
+  configureRadarr();
+  // Arr was reset: id 5 now belongs to an unrelated CF, and "A" was re-imported as id 12.
+  const moved = seedSpec({
+    service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-a", name: "A",
+    payload: { trash_id: "cf-a", name: "A" },
+  });
+  seedApp(moved.id, "", { remoteId: 5 });
+  // Stored id 6 now names an unrelated CF and "B" exists nowhere → POST, not PUT /6.
+  const reused = seedSpec({
+    service: "RADARR", kind: "CUSTOM_FORMAT", trashId: "cf-b", name: "B",
+    payload: { trash_id: "cf-b", name: "B" },
+  });
+  seedApp(reused.id, "", { remoteId: 6 });
+  respond = router({
+    [`GET ${RADARR}/api/v3/customformat`]: () =>
+      json([{ id: 5, name: "Unrelated" }, { id: 6, name: "Other" }, { id: 12, name: "A" }]),
+    [`PUT ${RADARR}/api/v3/customformat/12`]: () => json({ id: 12 }),
+    [`POST ${RADARR}/api/v3/customformat`]: () => json({ id: 13 }),
+  });
+
+  const results = await applyCustomFormats("RADARR", [moved.id, reused.id]);
+  assert.deepEqual(
+    results.map((r) => [r.trashId, r.ok, r.remoteId]),
+    [["cf-a", true, 12], ["cf-b", true, 13]],
+  );
+  assert.deepEqual(
+    fetchCalls.filter((c) => c.method !== "GET").map(callKey),
+    [`PUT ${RADARR}/api/v3/customformat/12`, `POST ${RADARR}/api/v3/customformat`],
+  );
+  assert.equal(findApp(moved.id, "")!.remoteId, 12);
+  assert.equal(findApp(reused.id, "")!.remoteId, 13);
+});
+
+test("resolveRemoteId trusts a stored id only while its live row carries the spec's name", () => {
+  const byId = new Map([[1, "A"], [2, "Other"], [9, "B"]]);
+  const byName = new Map([["A", 1], ["Other", 2], ["B", 9]]);
+  assert.equal(resolveRemoteId(1, "A", byId, byName), 1); // stored + matching name
+  assert.equal(resolveRemoteId(2, "B", byId, byName), 9); // stored id reused → name match wins
+  assert.equal(resolveRemoteId(2, "C", byId, byName), null); // stored id reused, no name match → POST
+  assert.equal(resolveRemoteId(77, "C", byId, byName), 77); // stored id gone → PUT/404/recreate
+  assert.equal(resolveRemoteId(77, "B", byId, byName), 9); // stored id gone, same name elsewhere
+  assert.equal(resolveRemoteId(null, "B", byId, byName), 9);
+  assert.equal(resolveRemoteId(undefined, "C", byId, byName), null);
 });
 
 test("a failed remote-CF prefetch fails the whole batch instead of blind-POSTing duplicates", async () => {

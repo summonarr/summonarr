@@ -3,6 +3,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 
 // Cache "sources" map to TmdbCache key prefixes — plus, below, the derived
 // tables that hold denormalized copies of the same upstream data (TmdbMediaCore,
@@ -102,13 +103,16 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
     //     (guardrail 40) — full coverage, so the run is conclusive and it
     //     REPLACES every shelf with a fallback one.
     // The second is much worse than doing nothing, which is why the unstamp and
-    // the delete share a transaction and the unstamp goes first.
+    // the delete share a transaction and the unstamp goes first. Both statements
+    // are unbounded over graph-sized tables (up to ~800k edge rows), so the tx
+    // takes BATCH_TX_TIMEOUT (guardrail 4) — under Prisma's 5s default a large
+    // graph rolled back with P2028 and 500'd a half-applied clear.
     await prisma.$transaction(async (tx) => {
       await tx.recommendationTitle.updateMany({
         data: { suggestionsRefreshedAt: null, suggestionCount: 0 },
       });
       edgesCleared = (await tx.titleSuggestion.deleteMany({})).count;
-    });
+    }, { timeout: BATCH_TX_TIMEOUT });
   }
 
   if (resetRatings) {

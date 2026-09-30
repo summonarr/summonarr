@@ -463,6 +463,12 @@ async function describeUnconfirmedJellyfinMatch(opts: {
 // unconfirmed apply (did the server revert to it?), never sent to Jellyfin.
 // `background` = running as a job (guardrail 37a): nothing waits on an HTTP
 // request, so the confirmation window can be as long as the cascade needs.
+// `siblingItemIds` = the OTHER copies of this title (guardrail 37). The
+// path/tmdb fallback search must never resolve to one of them: a sibling that
+// was already remapped reports the correct tmdbId, and accepting it would
+// "confirm" THIS copy without ever reading it — the unfixed copy is then
+// dropped from `jellyfinItemIds` with no partial warning, and the next sync can
+// elect it and revert the correction.
 async function fixJellyfinMatch(
   itemId: string,
   correctTmdbId: number,
@@ -472,6 +478,7 @@ async function fixJellyfinMatch(
   previousTmdbId: number,
   background: boolean,
   report?: FixMatchReport,
+  siblingItemIds: ReadonlySet<string> = new Set(),
 ): Promise<{ newItemId: string; baseUrl: string; apiKey: string }> {
   // Strip itemId to UUID-safe chars to break taint from a DB-read string before
   // it's interpolated into any admin-token URL below.
@@ -619,7 +626,9 @@ async function fixJellyfinMatch(
         ).catch(() => null);
         if (findRes?.ok) {
           const findJson = await findRes.json() as { Items?: Array<{ Id?: string; ProviderIds?: Record<string, string>; Path?: string }> };
-          const items = findJson.Items ?? [];
+          const items = (findJson.Items ?? []).filter(
+            (i) => !(i.Id && siblingItemIds.has(i.Id.replace(/[^0-9a-f-]/gi, ""))),
+          );
           const byPath = items.find((i) => i.Path === filePath);
           const byTmdb = items.find((i) => {
             const pid = i.ProviderIds?.Tmdb ?? i.ProviderIds?.tmdb;
@@ -796,9 +805,17 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
       // metadata refreshes is how these calls start timing out.
       const applied: Array<Awaited<ReturnType<typeof fixJellyfinMatch>>> = [];
       const failedCopies: string[] = [];
+      const safeCopyIds = targetItemIds.map((id) => id.replace(/[^0-9a-f-]/gi, ""));
       for (const targetId of targetItemIds) {
+        // The row's filePath belongs to the canonical copy (`jellyfinItemId`) —
+        // it is written from the same winning item. Handing it to another copy
+        // pointed that copy's fallback search at the canonical one, so only the
+        // canonical copy gets it; the others confirm by reading themselves.
+        const copyPath = targetId === item?.jellyfinItemId ? (item?.filePath ?? null) : null;
+        const safeTarget = targetId.replace(/[^0-9a-f-]/gi, "");
+        const siblings = new Set(safeCopyIds.filter((id) => id !== safeTarget));
         try {
-          applied.push(await fixJellyfinMatch(targetId, correctTmdbId, mediaType, serverInstance, item?.filePath ?? null, tmdbId, opts.background, opts.report));
+          applied.push(await fixJellyfinMatch(targetId, correctTmdbId, mediaType, serverInstance, copyPath, tmdbId, opts.background, opts.report, siblings));
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           console.error("[fix-match]", `jellyfin copy ${targetId} failed:`, msg);

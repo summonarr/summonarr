@@ -240,6 +240,7 @@ export default async function AdminIssuesPage({
         <div className="flex items-center flex-wrap" style={{ gap: 8, marginTop: standalone ? 10 : 0 }}>
           {standalone && sel.issueType === "WRONG_MATCH" && (
             <IssueFixMatchButton
+              key={sel.id}
               issueId={sel.id}
               tmdbId={sel.tmdbId}
               mediaType={sel.mediaType}
@@ -250,6 +251,7 @@ export default async function AdminIssuesPage({
             />
           )}
           <IssueClaimButton
+            key={sel.id}
             issueId={sel.id}
             claimedBy={sel.claimedBy}
             claimerName={sel.claimedUser?.name ?? sel.claimedUser?.email ?? null}
@@ -257,6 +259,7 @@ export default async function AdminIssuesPage({
           />
           {standalone && (
             <IssueActions
+              key={sel.id}
               issueId={sel.id}
               currentStatus={sel.status}
               mediaType={sel.mediaType}
@@ -271,7 +274,7 @@ export default async function AdminIssuesPage({
         </div>
         {standalone && (
           <div style={{ marginTop: 12 }}>
-            <IssueThread issueId={sel.id} />
+            <IssueThread key={sel.id} issueId={sel.id} />
           </div>
         )}
       </div>
@@ -665,6 +668,7 @@ export default async function AdminIssuesPage({
                       const key = `${selectedIssue.tmdbId}:${selectedIssue.mediaType}`;
                       return (
                         <IssueFixMatchButton
+                          key={selectedIssue.id}
                           issueId={selectedIssue.id}
                           tmdbId={selectedIssue.tmdbId}
                           mediaType={selectedIssue.mediaType}
@@ -676,12 +680,14 @@ export default async function AdminIssuesPage({
                       );
                     })()}
                     <IssueClaimButton
+                      key={selectedIssue.id}
                       issueId={selectedIssue.id}
                       claimedBy={selectedIssue.claimedBy}
                       claimerName={selectedIssue.claimedUser?.name ?? selectedIssue.claimedUser?.email ?? null}
                       currentUserId={session.user.id}
                     />
                     <IssueActions
+                      key={selectedIssue.id}
                       issueId={selectedIssue.id}
                       currentStatus={selectedIssue.status}
                       mediaType={selectedIssue.mediaType}
@@ -694,7 +700,7 @@ export default async function AdminIssuesPage({
                     />
                   </div>
                 </div>
-                <IssueThread issueId={selectedIssue.id} variant="panel" />
+                <IssueThread key={selectedIssue.id} issueId={selectedIssue.id} variant="panel" />
               </div>
             ) : (
               <div

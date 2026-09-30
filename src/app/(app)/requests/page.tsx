@@ -11,6 +11,7 @@ import { PaginationBar } from "@/components/media/pagination-bar";
 import type { Prisma } from "@/generated/prisma";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
+import { isFeatureEnabled } from "@/lib/features";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { Chip, EmptyState, PageHeader } from "@/components/ui/design";
@@ -83,7 +84,15 @@ export default async function RequestsPage({
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
 
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  const [plexEnabled, jellyfinEnabled] = await Promise.all([
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+  ]);
+  // Integration flags passed explicitly — they default to TRUE when omitted.
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, {
+    plex: plexEnabled,
+    jellyfin: jellyfinEnabled,
+  });
   const availabilityStubs: TmdbMedia[] = requests.map((r) => ({
     id: r.tmdbId,
     mediaType: r.mediaType === "MOVIE" ? "movie" : "tv",

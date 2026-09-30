@@ -71,11 +71,14 @@ export const GET = withAuth(async (request, _ctx, session) => {
   }
 
   const hideAvailable = request.nextUrl.searchParams.get("hideAvailable") === "1";
-  // Which servers (Plex / Jellyfin) this user is shown, for the hideAvailable filter.
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
-
   try {
     const flags = await getFeatureFlags();
+    // Which servers (Plex / Jellyfin) this user is shown, for the hideAvailable
+    // filter — with the integration flags, which default to TRUE when omitted.
+    const { showPlex, showJellyfin } = getBadgeVisibility(session, {
+      plex: flags["feature.integration.plex"],
+      jellyfin: flags["feature.integration.jellyfin"],
+    });
 
     const [
       trendingRes,

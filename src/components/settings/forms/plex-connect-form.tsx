@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -27,6 +27,12 @@ function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage
     () => new Set(initialSelected.split(",").map((k) => k.trim()).filter(Boolean))
   );
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  // An earlier save's idle timer must not fire into a later save (it would
+  // re-enable Save mid-flight or hide the new result early).
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+  }, []);
 
   function toggle(key: string) {
     setSelected((prev) => {
@@ -38,6 +44,7 @@ function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage
   }
 
   async function handleSave() {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
     setSaveStatus("saving");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
@@ -50,7 +57,7 @@ function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage
     } catch {
       setSaveStatus("error");
     }
-    setTimeout(() => setSaveStatus("idle"), 3000);
+    idleTimer.current = setTimeout(() => setSaveStatus((s) => (s === "ok" ? "idle" : s)), 3000);
   }
 
   return (
@@ -258,7 +265,8 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
     if (result.ok) {
       setLibrariesCount(result.count);
       setServerStatus("ok");
-      setTimeout(() => setServerStatus("idle"), 4000);
+      // Only clear an "ok" — a later Save & Test may already be in flight.
+      setTimeout(() => setServerStatus((s) => (s === "ok" ? "idle" : s)), 4000);
     } else {
       setServerErrorMessage(result.error ?? "Could not connect to Plex server");
       setServerStatus("error");

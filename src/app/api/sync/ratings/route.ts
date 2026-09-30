@@ -9,7 +9,10 @@ import type { TmdbMedia } from "@/lib/tmdb-types";
 
 const BATCH = 5;
 
-async function warmBatch(items: TmdbMedia[]): Promise<{ warmed: number; skipped: number; quotaExhausted: boolean }> {
+async function warmBatch(
+  items: TmdbMedia[],
+  signal: AbortSignal,
+): Promise<{ warmed: number; skipped: number; quotaExhausted: boolean }> {
   let warmed = 0;
   let skipped = 0;
   // Once MDBList reports its daily quota is exhausted, every further request just
@@ -18,6 +21,10 @@ async function warmBatch(items: TmdbMedia[]): Promise<{ warmed: number; skipped:
   let quotaExhausted = false;
 
   for (let i = 0; i < items.length && !quotaExhausted; i += BATCH) {
+    // Guardrail 41: once withAdvisoryLock's timeout aborts, lock 2008 is released,
+    // so continuing would run lock-free beside the next cron's fresh copy. Stop at
+    // the batch boundary and return (never throw — the race has already settled).
+    if (signal.aborted) break;
     const batch = items.slice(i, i + BATCH);
     // The underlying MDBList/OMDB getters warm both ratings caches as a side effect;
     // the unified helper applies the same MDBList-first / OMDB-on-any-miss policy as
@@ -63,7 +70,7 @@ export async function POST(request: NextRequest) {
 
   return withCronRunRecording("ratings-sync", () => withAdvisoryLock(
     2008,
-    async () => {
+    async (signal) => {
       const startTime = Date.now();
 
       const [trending, popularMovies, popularTV, topMovies, topTV] = await Promise.all([
@@ -106,6 +113,7 @@ export async function POST(request: NextRequest) {
           if (r.expiresAt.getTime() - Date.now() > originalTtlMs * 0.25) freshMdblist.add(r.key);
         }
         for (const type of ["movie", "tv"] as const) {
+          if (signal.aborted) break;
           const stale = all
             .filter((m) => m.mediaType === type && !freshMdblist.has(mdblistKeyFor(m)))
             .map((m) => ({ id: m.id, releaseDate: m.releaseDate }));
@@ -115,7 +123,7 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      const { warmed, skipped, quotaExhausted } = await warmBatch(all);
+      const { warmed, skipped, quotaExhausted } = await warmBatch(all, signal);
       const durationMs = Date.now() - startTime;
 
       return NextResponse.json({ total: all.length, warmed, skipped, quotaExhausted, durationMs });

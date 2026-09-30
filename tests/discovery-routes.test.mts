@@ -439,6 +439,70 @@ test("home: DOES read recommendations when feature.page.forYou is on", async () 
   );
 });
 
+// ── integration flags reach the hideAvailable gate ──────────────────────────
+// getBadgeVisibility defaults both integrations to TRUE when omitted. A disabled
+// integration's sync arm is skipped, so its old library rows stay behind — and a
+// route that omitted the flags hid titles "available" only on the switched-off
+// server, while /movies and /tv (browse-query.ts) showed them.
+async function mintAdmin(): Promise<string> {
+  const { Permission } = await import("../src/lib/permissions.ts");
+  seq++;
+  const userId = `admin-${seq}`;
+  const sessionId = `sess-${seq}`;
+  const permissions = Permission.ADMIN.toString();
+  usersById.set(userId, {
+    id: userId, name: `Admin ${seq}`, email: `admin-${seq}@example.com`, role: "ADMIN",
+    permissions: Permission.ADMIN, mediaServer: null, sessionsRevokedAt: null, passwordChangedAt: null,
+    deactivatedAt: null, notificationEmail: null, mediaServerGrants: null, maxContentRating: null,
+  });
+  sessionRows.add(sessionId);
+  const iat = Math.floor(Date.now() / 1000);
+  return signSessionJwt(
+    { id: userId, role: "ADMIN", permissions, provider: "credentials", sessionId, expiresAt: iat + 86_400 },
+    { expiresInSeconds: 7_200, iat },
+  );
+}
+
+for (const [name, call, idsOf] of [
+  ["upcoming", (t: string) => inScope(() => upcoming.GET(mk("/api/upcoming", t, "?hideAvailable=1"), undefined)),
+    (b: unknown) => (b as { items: { id: number }[] }).items.map((i) => i.id)],
+  ["home", (t: string) => inScope(() => home.GET(mk("/api/home", t, "?hideAvailable=1"), undefined)),
+    (b: unknown) => (b as { carousels: { id: string; items: { id: number }[] }[] }).carousels
+      // An emptied rail is dropped from the payload, so absent reads as [].
+      .find((c) => c.id === "popular-movies")?.items.map((i) => i.id) ?? []],
+  ["top-rated", (t: string) => inScope(() => topRated.GET(mk("/api/top-rated", t, "?hideAvailable=1"), undefined)),
+    (b: unknown) => (b as { movies: { id: number }[] }).movies.map((i) => i.id)],
+] as const) {
+  test(`${name}: hideAvailable ignores a DISABLED integration's leftover library rows`, async () => {
+    const { shadowPrismaModel: shadow } = await import("./_helpers.mts");
+    shadow(prisma, "plexLibraryItem", {
+      findMany: async (args: { where?: { mediaType?: string; tmdbId?: { in?: number[] } } } = {}) =>
+        args.where?.mediaType === "MOVIE" && args.where.tmdbId?.in?.includes(603) ? [{ tmdbId: 603 }] : [],
+      findFirst: async () => null, findUnique: async () => null, count: async () => 0,
+    });
+    try {
+      const token = await mintAdmin();
+      // Enabled: the Plex row makes 603 available, so hideAvailable drops it.
+      const on = await call(token);
+      assert.equal(on.status, 200);
+      assert.ok(!idsOf(await on.json()).includes(603), "603 should be hidden while Plex is enabled");
+      // Disabled: the leftover row must not hide it.
+      settings.set("feature.integration.plex", "false");
+      invalidateFeatureFlagCache();
+      const off = await call(token);
+      assert.equal(off.status, 200);
+      assert.ok(idsOf(await off.json()).includes(603), "a disabled Plex integration still hid 603");
+    } finally {
+      settings.delete("feature.integration.plex");
+      invalidateFeatureFlagCache();
+      shadow(prisma, "plexLibraryItem", {
+        findMany: async (args: unknown) => { rec("plexLibraryItem.findMany", args); return []; },
+        findFirst: async () => null, findUnique: async () => null, count: async () => 0,
+      });
+    }
+  });
+}
+
 // ── 3: per-user rate limits ──────────────────────────────────────────────────
 
 for (const route of ROUTES) {

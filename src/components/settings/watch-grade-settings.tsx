@@ -80,11 +80,13 @@ export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, str
       setStatus("ok");
       // The preview's "Now" row described the settings just replaced.
       setPreview(null);
+      // Only clear a success: an error keeps its icon beside its message, and
+      // a later save's "saving" must not be clobbered by this timer.
+      setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
     } catch {
       setError("Network error — please try again");
       setStatus("error");
     }
-    setTimeout(() => setStatus("idle"), 3000);
   }
 
   async function handlePreview() {

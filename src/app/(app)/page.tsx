@@ -112,7 +112,13 @@ export default async function DiscoverPage({
 }) {
   const [sp, session, flags] = await Promise.all([searchParams, requireAppSession(), getFeatureFlags()]);
   const hideAvailable = sp.hideAvailable === "1";
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  // Integration flags passed explicitly: they default to TRUE when omitted, which
+  // left a disabled integration's leftover library rows driving these rails while
+  // the /movies and /tv pages they link to (browse-query.ts) ignored them.
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, {
+    plex: flags["feature.integration.plex"],
+    jellyfin: flags["feature.integration.jellyfin"],
+  });
   const vis = { showPlex, showJellyfin };
   const upcomingEnabled = flags["feature.page.upcoming"];
   const topEnabled = flags["feature.page.top"];

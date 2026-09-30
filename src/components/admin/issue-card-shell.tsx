@@ -52,7 +52,7 @@ export function IssueCardShell({ issueId, messageCount, initialOpen = false, chi
       {/* Mobile-only expandable thread panel */}
       {threadOpen && (
         <div className="xl:hidden">
-          <IssueThread issueId={issueId} />
+          <IssueThread key={issueId} issueId={issueId} />
         </div>
       )}
     </div>

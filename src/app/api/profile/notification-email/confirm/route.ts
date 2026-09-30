@@ -115,7 +115,13 @@ export async function POST(req: Request) {
   try {
     // updateMany (not update): a since-deleted account no-ops instead of throwing;
     // the email value is never reflected into the HTML (avoids any injection).
-    await prisma.user.updateMany({ where: { id: parsed.userId }, data: { notificationEmail: parsed.email } });
+    // Scoped to a still-active, never-purged row: a link clicked after the account
+    // was disabled or purged must not write a personal address back onto it
+    // (guardrail 33 — a purge's scrub would otherwise be partly undone).
+    await prisma.user.updateMany({
+      where: { id: parsed.userId, deactivatedAt: null, purgedAt: null },
+      data: { notificationEmail: parsed.email },
+    });
   } catch (err) {
     console.error("[notif-email] confirm update failed:", err instanceof Error ? err.message : err);
     return resultPage("Something went wrong", "We couldn't save your verified email. Try again from your profile.", false);

@@ -99,7 +99,7 @@ export function MasterDbFillButton({
     setPhase("phase2");
     try {
       const warmRes = await fetch(withBasePath("/api/admin/library-warm"), { method: "POST" });
-      const warmData = (await warmRes.json().catch(() => ({}))) as { fetched?: number; backfilled?: number; skipped?: number; error?: string };
+      const warmData = (await warmRes.json().catch(() => ({}))) as { fetched?: number; backfilled?: number; skipped?: number; failed?: number; error?: string };
       if (!warmRes.ok || warmData.error) {
         setPhase("error");
         setSummary(warmData.error ?? `TMDB warm failed (${warmRes.status})`);
@@ -112,14 +112,17 @@ export function MasterDbFillButton({
       const fetched    = warmData.fetched    ?? 0;
       const backfilled = warmData.backfilled ?? 0;
       const skipped    = warmData.skipped    ?? 0;
+      const failed     = warmData.failed     ?? 0;
       const tmdbParts: string[] = [];
       if (fetched    > 0) tmdbParts.push(`${fetched.toLocaleString("en-US")} fetched`);
       if (backfilled > 0) tmdbParts.push(`${backfilled.toLocaleString("en-US")} backfilled`);
       if (skipped    > 0) tmdbParts.push(`${skipped.toLocaleString("en-US")} already cached`);
+      if (failed     > 0) tmdbParts.push(`${failed.toLocaleString("en-US")} failed`);
       parts.push(`TMDB: ${tmdbParts.join(", ") || "0 items"}`);
-      // A summary that names a failed server must not render green — the two
-      // together read as "this worked" over the top of "this did not".
-      setPhase(libraryDegraded ? "error" : "done");
+      // A summary that names a failed server or failed TMDB items must not
+      // render green — the two together read as "this worked" over the top of
+      // "this did not".
+      setPhase(libraryDegraded || failed > 0 ? "error" : "done");
       setSummary(parts.join(" · "));
     } catch {
       setPhase("error");

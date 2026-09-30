@@ -12,7 +12,7 @@ import { requireAppSession } from "@/lib/require-app-session";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
-import { requireFeature } from "@/lib/features";
+import { isFeatureEnabled, requireFeature } from "@/lib/features";
 import Link from "next/link";
 import { Suspense } from "react";
 import { PageHeader, EmptyState, SectionHeader } from "@/components/ui/design";
@@ -50,9 +50,18 @@ export default async function PopularOnServerPage({
   searchParams: Promise<Record<string, string>>;
 }) {
   await requireFeature("feature.page.popular");
-  const [sp, session] = await Promise.all([searchParams, requireAppSession()]);
+  const [sp, session, plexEnabled, jellyfinEnabled] = await Promise.all([
+    searchParams,
+    requireAppSession(),
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+  ]);
   if (!session) return null;
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  // Integration flags passed explicitly — they default to TRUE when omitted.
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, {
+    plex: plexEnabled,
+    jellyfin: jellyfinEnabled,
+  });
   const [show4k, playHistoryEnabled] = await Promise.all([
     getShow4kVisibility(session),
     isPlayHistoryEnabled(),

@@ -492,7 +492,7 @@ export default async function IssuesPage({
                     </p>
                   )}
                 </div>
-                <DesktopIssueThread issueId={selectedIssue.id} />
+                <DesktopIssueThread key={selectedIssue.id} issueId={selectedIssue.id} />
               </div>
             ) : (
               <EmptyState

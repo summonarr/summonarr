@@ -704,14 +704,34 @@ function formatSummary(action: string, d: Record<string, unknown>): string | nul
   }
 }
 
+// Render one side of a before/after diff. Writers log either an object of
+// changed fields or a bare scalar (a permissions bitfield string, a
+// mediaServer enum, a numeric quota, a boolean flag, or null for "cleared"),
+// so only a plain object is spread into `key: value` pairs; anything else is
+// shown whole, labelled with the entry's `field` when it has one.
+function formatDiffValue(v: unknown): string {
+  if (v === null || v === undefined) return "none";
+  return typeof v === "object" ? JSON.stringify(v) : String(v);
+}
+
+function formatDiffSide(value: unknown, field: unknown): string | null {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length === 0) return null;
+    return entries.map(([k, v]) => `${k}: ${formatDiffValue(v)}`).join(", ");
+  }
+  const text = formatDiffValue(value);
+  return typeof field === "string" && field ? `${field}: ${text}` : text;
+}
+
 function DetailSection({ details, action, expanded }: { details: string | null; action: string; expanded?: boolean }) {
   const [isExpanded, setIsExpanded] = useState(expanded ?? false);
   const parsed = parseDetails(details);
   if (!parsed) return <span className="text-zinc-500 text-xs">—</span>;
 
-  const before = parsed.before as Record<string, unknown> | undefined;
-  const after = parsed.after as Record<string, unknown> | undefined;
-  const hasDiff = before || after;
+  const beforeText = "before" in parsed ? formatDiffSide(parsed.before, parsed.field) : null;
+  const afterText = "after" in parsed ? formatDiffSide(parsed.after, parsed.field) : null;
+  const hasDiff = beforeText !== null || afterText !== null;
 
   const summary = formatSummary(action, parsed);
 
@@ -750,16 +770,16 @@ function DetailSection({ details, action, expanded }: { details: string | null; 
 
       {isExpanded && hasDiff && (
         <div className="mt-2 pl-4 space-y-1.5 border-l-2 border-zinc-700/60">
-          {before && Object.keys(before).length > 0 && (
+          {beforeText !== null && (
             <div className="flex items-start gap-2">
               <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-500/15 text-red-400">BEFORE</span>
-              <span className="text-red-400">{Object.entries(before).map(([k, v]) => `${k}: ${v}`).join(", ")}</span>
+              <span className="text-red-400">{beforeText}</span>
             </div>
           )}
-          {after && Object.keys(after).length > 0 && (
+          {afterText !== null && (
             <div className="flex items-start gap-2">
               <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-500/15 text-green-400">AFTER</span>
-              <span className="text-green-400">{Object.entries(after).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join(", ")}</span>
+              <span className="text-green-400">{afterText}</span>
             </div>
           )}
         </div>
@@ -839,10 +859,14 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
   let currentDate = "";
 
   for (const log of logs) {
-    // Group rows by their UTC date. The server and the browser can be in different
-    // time zones, so grouping by local date could split rows near midnight
-    // differently on each side and cause a React #418 hydration mismatch.
-    const dateStr = log.createdAt.slice(0, 10);
+    // Before mount, group rows by their UTC date: the server and the browser can
+    // be in different time zones, so grouping by local date during SSR/hydration
+    // could split rows near midnight differently on each side and cause a React
+    // #418 hydration mismatch. The headings only render after mount, so once
+    // mounted regroup by the viewer's LOCAL date — the same day formatDateGroup
+    // labels — or one heading could span two local days and two neighbouring
+    // groups could share a heading.
+    const dateStr = mounted ? new Date(log.createdAt).toDateString() : log.createdAt.slice(0, 10);
     if (dateStr !== currentDate) {
       currentDate = dateStr;
       groups.push({ date: log.createdAt, logs: [] });

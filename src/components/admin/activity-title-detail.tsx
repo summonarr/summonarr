@@ -213,7 +213,11 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
         <ActivityCard>
           <SectionHeader
             label="Who watched"
-            sub={`${s.topViewers.length} viewers`}
+            sub={
+              s.topViewers.length < s.uniqueViewers
+                ? `top ${s.topViewers.length} of ${s.uniqueViewers.toLocaleString("en-US")} viewers`
+                : `${s.uniqueViewers.toLocaleString("en-US")} viewers`
+            }
           />
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {s.topViewers.map((v, i) => (

@@ -371,7 +371,12 @@ test("computed-status writes: a copy records no approval of its own, batch follo
   const copies = allWrites.filter((w) => {
     if (!ts.isObjectLiteralExpression(w.data)) return false;
     const status = prop(w.data, "status");
-    return !!status && ts.isPropertyAccessExpression(unwrap(status.initializer)) && unwrap(status.initializer).getText().endsWith(".status");
+    if (!status) return false;
+    const init = unwrap(status.initializer);
+    // /api/requests copies through `mirrorStatus` (the peer's status, downgraded to
+    // APPROVED when an AVAILABLE peer isn't available to this requester).
+    return (ts.isPropertyAccessExpression(init) && init.getText().endsWith(".status")) ||
+      (ts.isIdentifier(init) && init.text === "mirrorStatus");
   });
   assert.deepEqual(copies.map((w) => w.file).sort(), ["src/app/api/interactions/route.ts", "src/app/api/requests/route.ts"]);
 

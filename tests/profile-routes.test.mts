@@ -215,7 +215,7 @@ shadowPrismaModel(prisma, "setting", {
 
 // logAudit is void-fired (guardrail 26) — a no-op create keeps its floated
 // promise from touching a real DB.
-shadowPrismaModel(prisma, "auditLog", { create: async () => ({}) });
+shadowPrismaModel(prisma, "auditLog", { create: async (a: unknown) => { rec("auditLog.create", a); return {}; } });
 
 // notification-email verification-token writes.
 const verificationTokenModel = {
@@ -259,8 +259,12 @@ const txObj = {
   $executeRawUnsafe: async () => 0,
   $executeRaw: async () => 1,
 };
+// Runs at the top of a CALLBACK-form tx, before its first read — lets a test land
+// a concurrent write "inside" the verifyPassword window.
+let beforeTxCallback: (() => void) | null = null;
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
   txCalls++;
+  if (!Array.isArray(arg) && beforeTxCallback) beforeTxCallback();
   if (Array.isArray(arg)) return Promise.all(arg);
   return (arg as (tx: typeof txObj) => Promise<unknown>)(txObj);
 });
@@ -741,6 +745,36 @@ test("self-delete SKIPS the password step-up for an SSO account (session is the 
   assert.deepEqual(await res.json(), { ok: true });
   assert.equal(txCalls, 1, "an SSO delete still runs the deactivation");
   assert.deepEqual(Object.keys(passwordUpdateData()).sort(), ["deactivatedAt", "sessionsRevokedAt"]);
+});
+
+test("self-delete racing an admin removal writes NO self-delete audit row when the in-tx re-read finds the row already disabled", async () => {
+  const { userId, token } = await mintSession({ provider: "jellyfin", passwordHash: null });
+  // The admin's deactivate commits after the handler's first read but before its tx.
+  beforeTxCallback = () => { usersById.get(userId)!.deactivatedAt = new Date(); };
+  try {
+    const res = await deleteProfile(token);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true });
+  } finally {
+    beforeTxCallback = null;
+  }
+  await new Promise((r) => setImmediate(r)); // let a void-fired logAudit land, if any
+  assert.equal(opsOf("user.update").length, 0, "the already-disabled row must not be re-deactivated");
+  assert.equal(
+    opsOf("auditLog.create").filter((o) => JSON.stringify(o.args).includes("self-delete")).length,
+    0,
+    "a self-delete that changed nothing must not be audited as one",
+  );
+});
+
+test("a self-delete that DID disable the row still writes its USER_DEACTIVATE audit", async () => {
+  const { token } = await mintSession({ provider: "jellyfin", passwordHash: null });
+  assert.equal((await deleteProfile(token)).status, 200);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(
+    opsOf("auditLog.create").filter((o) => JSON.stringify(o.args).includes("self-delete")).length,
+    1,
+  );
 });
 
 // ═══ shared: every profile route requires an authenticated session ══════════

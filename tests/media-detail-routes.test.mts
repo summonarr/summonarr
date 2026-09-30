@@ -450,6 +450,27 @@ test("person: an unrestricted holding is visible to everyone", async () => {
   assert.equal(body.credits.find((c: { id: number }) => c.id === 603).plexAvailable, true);
 });
 
+test("person: a DISABLED integration's leftover library rows badge nothing (flags passed to getBadgeVisibility)", async () => {
+  // A disabled integration's sync arm is skipped, so its old rows stay in the
+  // table. getBadgeVisibility defaults the integrations to TRUE when omitted, so
+  // an admin would otherwise see badges the movie/TV detail pages hide.
+  const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
+  plexLib = [{ tmdbId: 603, mediaType: "MOVIE", serverInstance: "" }];
+  jellyfinLib = [{ tmdbId: 603, mediaType: "MOVIE", serverInstance: "" }];
+  settings.set("feature.integration.plex", "false");
+  invalidateFeatureFlagCache();
+  try {
+    const admin = await mintSession({ role: "ADMIN", permissions: Permission.ADMIN });
+    const body = await (await getPerson(admin.token, "6384")).json();
+    const matrix = body.credits.find((c: { id: number }) => c.id === 603);
+    assert.equal(matrix.plexAvailable, false);
+    assert.equal(matrix.jellyfinAvailable, true);
+  } finally {
+    settings.delete("feature.integration.plex");
+    invalidateFeatureFlagCache();
+  }
+});
+
 test("person: availability is keyed on (tmdbId, mediaType) — a movie id can't light up the TV credit", async () => {
   // TMDB namespaces movie and TV ids separately, so the same number is two works.
   plexLib = [{ tmdbId: 1399, mediaType: "MOVIE", serverInstance: "" }];

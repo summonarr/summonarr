@@ -221,6 +221,7 @@ export function IssueDetailMobileDrawer({ selectedIssue, closeHref }: Props) {
                 )}
               </div>
               <IssueThread
+                key={issue.id}
                 issueId={issue.id}
                 variant="panel"
               />

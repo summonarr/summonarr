@@ -120,6 +120,8 @@ const auditRows: Array<Record<string, unknown>> = [];
 // shape + the guardrail-28 "unlink, never hard-delete" property.
 type TxOp = { op: string; args?: unknown };
 let txOps: TxOp[] = [];
+// Options passed to each interactive $transaction, in call order.
+let txOptsSeen: Array<{ timeout?: number } | undefined> = [];
 
 function makeTx() {
   const rec = (op: string) => (args?: unknown) => { txOps.push({ op, args }); return Promise.resolve({ count: 0 }); };
@@ -139,6 +141,7 @@ function makeTx() {
     hiddenItem: { deleteMany: rec("hiddenItem.deleteMany") },
     notification: { deleteMany: rec("notification.deleteMany") },
     userRecommendation: { deleteMany: rec("userRecommendation.deleteMany") },
+    verificationToken: { deleteMany: rec("verificationToken.deleteMany") },
     // The TMDB reset's graph half. Both live in ONE transaction so an unstamped
     // node can never be observed alongside its still-present edges (or, far
     // worse, the reverse) — see the route's comment.
@@ -269,7 +272,8 @@ const fakePrisma = {
       return args.data;
     },
   },
-  $transaction: async (arg: unknown, _opts?: { timeout?: number }) => {
+  $transaction: async (arg: unknown, opts?: { timeout?: number }) => {
+    if (typeof arg === "function") txOptsSeen.push(opts);
     if (typeof arg === "function") return (arg as (t: unknown) => Promise<unknown>)(makeTx());
     return Promise.all(arg as Promise<unknown>[]);
   },
@@ -300,6 +304,7 @@ const { NextRequest } = await import("next/server");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
 
+const { BATCH_TX_TIMEOUT } = await import("../src/lib/cron-auth.ts");
 const { DELETE: clearCache } = await import("../src/app/api/admin/clear-cache/route.ts");
 const { DELETE: playHistoryDelete } = await import("../src/app/api/play-history/[id]/route.ts");
 const { PATCH: userPatch, DELETE: userDelete } = await import("../src/app/api/admin/users/[id]/route.ts");
@@ -378,6 +383,7 @@ const ctxFor = (id: string): Ctx => ({ params: Promise.resolve({ id }) });
 const flush = () => new Promise((r) => setTimeout(r, 5));
 
 beforeEach(() => {
+  txOptsSeen = [];
   auditThrows = false;
   casRows = 1;
   txAuthDeleteThrows = false;
@@ -1321,6 +1327,21 @@ test("clear-cache source=tmdb also resets grid metadata and the suggestion graph
     unstampArgs.data,
     { suggestionsRefreshedAt: null, suggestionCount: 0 },
     "a TMDB clear resets suggestion bookkeeping only — quality verdicts come from MDBList/OMDB",
+  );
+});
+
+test("clear-cache graph reset passes BATCH_TX_TIMEOUT — a large graph must not hit Prisma's 5s default", async () => {
+  const admin = await mintSession("ADMIN");
+  const res = await clearCache(
+    req("http://localhost:3000/api/admin/clear-cache?source=tmdb", { method: "DELETE", headers: admin.header }),
+    undefined,
+  );
+  assert.equal(res.status, 200);
+  assert.equal(txOptsSeen.length, 1, "exactly one interactive transaction (the graph unstamp+delete)");
+  assert.equal(
+    txOptsSeen[0]?.timeout,
+    BATCH_TX_TIMEOUT,
+    "an unbounded updateMany + deleteMany over ~800k edge rows needs the library-sized timeout (guardrail 4)",
   );
 });
 

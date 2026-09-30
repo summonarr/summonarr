@@ -219,6 +219,7 @@ const rawStatements: Array<{ sql: string; values: unknown[] }> = [];
 // Every Setting key read via findUnique, in order — pins the registry read count.
 const settingFindUniqueKeys: string[] = [];
 const mediaRequestUpdateManyCalls: Array<{ where?: ReqWhere; data: Record<string, unknown> }> = [];
+const mediaRequestFindUniqueIds: string[] = [];
 // clearDeletionVotesForTmdbs' two writes (one deletionVote.deleteMany per
 // mediaType + one setting.deleteMany for the `deletionVoteNotified:` keys). Both
 // delegates already existed as silent no-ops; recording them is what makes the
@@ -300,6 +301,13 @@ const fakePrisma = {
         if (reqMatches(r, args.where)) { Object.assign(r, args.data); count++; }
       }
       return { count };
+    },
+    // runDownloadCheck's status re-read (the pendingNotifyAt backstop). Recorded
+    // so a test can tell whether the backstop ran for a row at all.
+    findUnique: async (args: { where: { id: string } }) => {
+      mediaRequestFindUniqueIds.push(args.where.id);
+      const r = requests.get(args.where.id);
+      return r ? { ...r } : null;
     },
     update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
       const r = requests.get(args.where.id);
@@ -659,6 +667,7 @@ beforeEach(() => {
   tmdbCacheDeleteManyCalls.length = 0;
   mediaRequestFindManyWheres.length = 0;
   mediaRequestUpdateManyCalls.length = 0;
+  mediaRequestFindUniqueIds.length = 0;
   deletionVoteDeleteWheres.length = 0;
   settingDeleteManyWheres.length = 0;
   userFindManyCalls.length = 0;
@@ -2482,6 +2491,63 @@ test("source-pinning: the ARR-available pass EXCLUDES a pinned user outright, le
   assert.equal(requests.get("r-pinned")!.status, "APPROVED", "a pinned user must not be flipped by the ARR pass");
   assert.equal(requests.get("r-pinned")!.notifiedAvailable, false);
   assert.ok(!notifiedUserIds().includes("u-pinned"), "pinned user was notified off an unreached library");
+});
+
+// ── the pendingNotifyAt "download pending" backstop ─────────────────────────
+// It must run AFTER the Radarr/Sonarr refresh: a download that imported since the
+// last tick has left the queue AND is missing from the run-start cache, so an
+// early check read "not downloading" and DMed "hasn't started downloading" about
+// a file already on disk (then the second ARR pass DMed "now available").
+
+test("backstop: an overdue row whose file landed in the FRESH arr cache is never checked or DMed (pinned user)", async () => {
+  configureBothServers();
+  respond = bothServersRespond([], []);
+  // Visible only from the SECOND radarrAvailableItem read — i.e. imported since the
+  // last run, invisible to the run-start snapshot.
+  arrAvailableRows.push({ model: "radarrAvailableItem", tmdbId: 880, arrInstance: "", fromCall: 2 });
+  pinUser("u-pinned", "plex"); // the ARR passes leave a pinned user APPROVED
+  const armed = new Date(Date.now() - 60 * 60 * 1000);
+  seedRequest({ id: "r-done", tmdbId: 880, mediaType: "MOVIE", requestedBy: "u-pinned", status: "APPROVED", pendingNotifyAt: armed });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  assert.equal(arrAvailableReadCounts.radarrAvailableItem, 2, "precondition: the second ARR pass read the fresh cache");
+  assert.ok(!mediaRequestFindUniqueIds.includes("r-done"),
+    "a title on disk in the freshly synced cache finished downloading — the backstop must not run for it");
+  assert.equal(requests.get("r-done")!.pendingNotifyAt, armed,
+    "the backstop was consumed (the old sweep blind-cleared it and DMed 'download pending')");
+});
+
+test("backstop: an overdue row with nothing on disk goes through runDownloadCheck's status re-read + APPROVED-scoped CAS consume", async () => {
+  configureBothServers();
+  respond = bothServersRespond([], []);
+  const armed = new Date(Date.now() - 60 * 60 * 1000);
+  seedRequest({ id: "r-stuck", tmdbId: 881, mediaType: "MOVIE", requestedBy: "u-1", status: "APPROVED", pendingNotifyAt: armed });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  assert.ok(mediaRequestFindUniqueIds.includes("r-stuck"), "the backstop must re-read the row's status before notifying");
+  const consume = mediaRequestUpdateManyCalls.find(
+    (c) => (c.where as { id?: unknown } | undefined)?.id === "r-stuck",
+  );
+  assert.ok(consume, "the backstop must clear pendingNotifyAt via updateMany, not a blind update by id");
+  assert.deepEqual(consume.where, { id: "r-stuck", status: "APPROVED", pendingNotifyAt: { not: null } },
+    "a CAS consume: an overlapping 90s job for the same row must not also DM");
+  assert.equal(requests.get("r-stuck")!.pendingNotifyAt, null);
+});
+
+test("backstop: it sits AFTER the Radarr/Sonarr refresh and the second ARR marking pass", () => {
+  const src = readFileSync("src/app/api/sync/route.ts", "utf-8");
+  const backstop = src.indexOf("await runConcurrent(overdue,");
+  assert.ok(backstop > 0, "the overdue sweep must still exist");
+  assert.ok(src.indexOf('windDownBefore("Sonarr")') < backstop, "the backstop must follow the arr cache refresh");
+  assert.ok(src.indexOf("const nowAvailableSecond") < backstop, "the backstop must follow the second ARR pass");
+  assert.ok(!/isMovieDownloadingInRadarr|isSeriesDownloadingInSonarr/.test(src),
+    "the orchestrator must go through runDownloadCheck, not a private copy of the check");
 });
 
 // ── guardrail 41: the run must wind down when its lock times out ────────────

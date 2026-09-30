@@ -129,15 +129,19 @@ export function StarterPackCard({
         setTimeout(() => setRefreshState((s) => (s === "error" ? s : "idle")), 3000);
         return;
       }
-      const data = (await res.json()) as {
+      const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
+        error?: string;
         errors?: string[];
         schemaDiagnostic?: string;
       };
       const hasErrors = !res.ok || !data.ok || (data.errors && data.errors.length > 0);
       setRefreshState(hasErrors ? "error" : "ok");
       if (hasErrors) {
-        setRefreshError({ errors: data.errors ?? [`HTTP ${res.status}`], schemaDiagnostic: data.schemaDiagnostic });
+        setRefreshError({
+          errors: data.errors && data.errors.length > 0 ? data.errors : [data.error ?? `HTTP ${res.status}`],
+          schemaDiagnostic: data.schemaDiagnostic,
+        });
       }
       await load();
       onChanged?.();

@@ -283,7 +283,9 @@ test("isSeriesWantedInSonarr tolerates a series row with no statistics block", (
   const source = readFileSync(new URL("../src/lib/arr.ts", import.meta.url), "utf8");
   const fn = source.slice(source.indexOf("export async function isSeriesWantedInSonarr"));
   const body = fn.slice(0, fn.indexOf("\n}\n"));
-  assert.match(body, /match\.statistics\?\./, "statistics must be optional-chained");
+  // It now reads the verdict through sonarrSeriesCompletion (guardrail 14a),
+  // which guards a missing block itself — no direct statistics access remains.
+  assert.match(body, /sonarrSeriesCompletion\(match\)\.complete/, "wanted must derive from the shared completion rule");
   assert.doesNotMatch(body, /match\.statistics\.[a-z]/i, "no bare statistics dereference may remain");
 });
 

@@ -790,6 +790,20 @@ test("ratings uses a DISTINCT advisory lock from upcoming", async () => {
   assert.deepEqual(ids, [2008]);
 });
 
+test("ratings observes withAdvisoryLock's AbortSignal at every batch boundary (guardrail 41)", async () => {
+  // Pinned STRUCTURALLY, like the orchestrator's windDownBefore: the abort is a
+  // 30-minute real timer with no seam to shorten. Ignoring the signal lets the
+  // warm keep running after lock 2008 is released, beside the next cron's copy.
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/app/api/sync/ratings/route.ts", import.meta.url), "utf8");
+  assert.match(src, /withAdvisoryLock\(\s*2008,\s*async \(signal\)/, "the lock callback must take the signal");
+  assert.match(src, /warmBatch\(all, signal\)/, "the signal must reach the per-item pass");
+  const warm = src.slice(src.indexOf("async function warmBatch"), src.indexOf("export async function POST"));
+  assert.match(warm, /for \([^)]*\) \{\s*(\/\/[^\n]*\n\s*)*if \(signal\.aborted\) break;/, "warmBatch must break on abort at the batch boundary");
+  assert.match(src, /for \(const type of \["movie", "tv"\] as const\) \{\s*if \(signal\.aborted\) break;/, "the MDBList pre-warm must stop between types on abort");
+  assert.ok(!/signal\.aborted\)\s*throw/.test(src), "abort must return, never throw (guardrail 41)");
+});
+
 // ── cross-route hygiene ──────────────────────────────────────────────────────
 
 test("no sync route echoes CRON_SECRET in its response", async () => {

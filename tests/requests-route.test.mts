@@ -383,6 +383,7 @@ shadowPrismaModel(prisma, "blacklistItem", {
 
 let plexHas = false;
 let jellyfinHas = false;
+let radarrHas = false; // the instance's *arr-available cache holds the title
 shadowPrismaModel(prisma, "plexLibraryItem", {
   findFirst: async (args: unknown) => {
     rec("plexLibraryItem.findFirst", args);
@@ -398,7 +399,7 @@ shadowPrismaModel(prisma, "jellyfinLibraryItem", {
 shadowPrismaModel(prisma, "radarrAvailableItem", {
   findUnique: async (args: unknown) => {
     rec("radarrAvailableItem.findUnique", args);
-    return null;
+    return radarrHas ? { tmdbId: 603, arrInstance: "" } : null;
   },
 });
 shadowPrismaModel(prisma, "sonarrAvailableItem", {
@@ -529,6 +530,7 @@ beforeEach(() => {
   blacklistRows = [];
   plexHas = false;
   jellyfinHas = false;
+  radarrHas = false;
   invalidateFeatureFlagCache();
   invalidateBlacklistCache(); // 30s memo would otherwise leak a prior test's block
   fetchImpl = () => {
@@ -972,12 +974,27 @@ test("a greenlit peer is mirrored: APPROVED copies the status, AVAILABLE also st
   ops.length = 0;
   sseEvents.length = 0;
   greenlitRow = { status: "AVAILABLE" };
+  radarrHas = true; // the instance's *arr holds the file — available to this requester too
   const b = await mintSession();
   const available = await post(b.token, requestBody(b.userId));
   assert.equal(available.status, 201);
   assert.equal(createdData().status, "AVAILABLE");
   assert.ok(createdData().availableAt instanceof Date, "mirroring AVAILABLE must stamp availableAt");
   assert.equal(createdData().approvedAt, undefined, "a copy records no approval of its own");
+});
+
+test("an AVAILABLE peer with no evidence the title is available to THIS requester is mirrored as APPROVED (guardrail 35)", async () => {
+  // The peer was marked AVAILABLE off a restricted server this caller holds no grant
+  // for: no visible library copy (else alreadyAvailable), no *arr-available row.
+  greenlitRow = { status: "AVAILABLE" };
+  radarrHas = false;
+  const a = await mintSession();
+  const res = await post(a.token, requestBody(a.userId));
+  assert.equal(res.status, 201);
+  assert.equal(createdData().status, "APPROVED", "the grant-gated sync marking pass must be the one to promote it");
+  assert.equal(createdData().availableAt, undefined);
+  assert.equal(createdData().approvedAt, undefined, "a copy records no approval of its own");
+  assert.equal(afterTasks.length, 0, "still nothing to review ⇒ no admin alert");
 });
 
 test("the pending branch: first pending request emits SSE, clears the caller's contradictory deletion vote, and enqueues ONE admin notify fan-out that completes offline; an earlier pending peer suppresses it", async () => {

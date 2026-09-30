@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Download, Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
@@ -139,6 +139,7 @@ function DbImportSection() {
   const [size, setSize] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [progress, setProgress] = useState<ChunkedUploadProgress | null>(null);
   const [result, setResult] = useState<
     | {
@@ -213,6 +214,9 @@ function DbImportSection() {
   }
 
   function clearFile() {
+    // Reset the uncontrolled input too, or re-picking the same file fires no
+    // change event and the drop zone stays empty.
+    if (fileInputRef.current) fileInputRef.current.value = "";
     setFile(null);
     setEncrypted(null);
     setSize(null);
@@ -329,9 +333,16 @@ function DbImportSection() {
         >
           Choose file
           <input
+            ref={fileInputRef}
             type="file"
             accept=".enc"
-            onChange={(e) => handleFileChange(e.target.files?.[0] ?? null)}
+            onChange={(e) => {
+              const picked = e.target.files?.[0] ?? null;
+              // Empty the input once read: a later drop or Clear replaces the
+              // file in state, and re-picking the same file must still fire.
+              e.target.value = "";
+              void handleFileChange(picked);
+            }}
             // sr-only, not hidden: display:none drops the input from the tab
             // order and a <label> can't take focus, so keyboard users could
             // never open the chooser.

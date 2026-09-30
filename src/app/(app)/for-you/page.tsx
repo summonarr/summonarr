@@ -5,7 +5,7 @@ import { PaginationBar } from "@/components/media/pagination-bar";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { Suspense } from "react";
 import { requireAppSession } from "@/lib/require-app-session";
-import { requireFeature } from "@/lib/features";
+import { isFeatureEnabled, requireFeature } from "@/lib/features";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import {
@@ -47,12 +47,21 @@ export default async function ForYouPage({
   searchParams: Promise<Record<string, string>>;
 }) {
   await requireFeature("feature.page.forYou");
-  const [sp, session] = await Promise.all([searchParams, requireAppSession()]);
+  const [sp, session, plexEnabled, jellyfinEnabled] = await Promise.all([
+    searchParams,
+    requireAppSession(),
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+  ]);
   const availability = parseAvailability(sp.filter);
   const type = parseRecommendationType(sp.type);
   const sort = parseRecommendationSort(sp.sort);
   const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  // Integration flags passed explicitly — they default to TRUE when omitted.
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, {
+    plex: plexEnabled,
+    jellyfin: jellyfinEnabled,
+  });
 
   const [recommendations, computedAt, show4k] = await Promise.all([
     getUserRecommendations(session.user.id),

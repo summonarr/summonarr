@@ -43,6 +43,7 @@ export function ActivityHistoryTable({
   startDateIso,
   initialFromDate,
   initialToDate,
+  initialWatched,
 }: {
   source?: string;
   mediaType?: string;
@@ -56,6 +57,7 @@ export function ActivityHistoryTable({
   // YYYY-MM-DD; the server page validates the format before passing them.
   initialFromDate?: string;
   initialToDate?: string;
+  initialWatched?: "true" | "false";
 }) {
   const mounted = useHasMounted();
 
@@ -68,7 +70,7 @@ export function ActivityHistoryTable({
 
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [watched, setWatched] = useState<"" | "true" | "false">("");
+  const [watched, setWatched] = useState<"" | "true" | "false">(initialWatched ?? "");
   const [method, setMethod] = useState("");
   const [platform, setPlatform] = useState("");
   const [userFilter, setUserFilter] = useState("");

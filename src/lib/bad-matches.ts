@@ -60,6 +60,55 @@ function commonPathPrefix(paths: (string | null)[]): string {
   return sep + first.slice(0, commonLen).join("/") + "/";
 }
 
+// The mount for a group holding ONE path. commonPathPrefix alone would return
+// that file's own parent directory, shrinking the row's key to a bare filename
+// that can never equal the other server's "Folder/file" key. Borrow the longest
+// mount another group (same service, same media type) inferred for a prefix of
+// this path; failing that, keep the title folder by shape — a movie file keeps
+// its parent folder, a TV episode keeps its show folder (and a season folder
+// under it), a folder path (no extension, e.g. a Jellyfin series) keeps itself.
+function singlePathMount(path: string, mediaType: "MOVIE" | "TV", siblingMounts: string[]): string {
+  const normalised = path.replace(/\\/g, "/");
+  let best = "";
+  for (const m of siblingMounts) {
+    if (m && m.length > best.length && normalised.startsWith(m) && normalised.length > m.length) best = m;
+  }
+  if (best) return best;
+  const segs = normalised.split("/").filter(Boolean);
+  const isFile = /\.[A-Za-z0-9]{1,5}$/.test(segs[segs.length - 1] ?? "");
+  let keep = 1;
+  if (isFile) {
+    keep = 2;
+    if (mediaType === "TV" && segs.length >= 3 && /^(season|series|specials|s\d+$)/i.test(segs[segs.length - 2])) keep = 3;
+  }
+  const mountLen = segs.length - keep;
+  if (mountLen <= 0) return "";
+  const sep = normalised.startsWith("/") ? "/" : "";
+  return sep + segs.slice(0, mountLen).join("/") + "/";
+}
+
+// Mount per `<slug> <MEDIATYPE>` group — the one definition shared with the
+// admin library page (src/app/(app)/admin/library/page.tsx). Multi-path groups
+// take their common prefix; a one-path group goes through singlePathMount,
+// borrowing from the other groups of the SAME media type in this call (so pass
+// one service's groups at a time). Groups must hold only rows with a filePath.
+export function inferGroupMounts(
+  byGroup: Map<string, { filePath: string | null; mediaType: "MOVIE" | "TV" }[]>,
+): Map<string, string> {
+  const mediaTypeOf = (groupKey: string) => groupKey.slice(groupKey.indexOf(" ") + 1);
+  const inferred = new Map<string, string>();
+  for (const [groupKey, group] of byGroup) {
+    if (group.length > 1) inferred.set(groupKey, commonPathPrefix(group.map((r) => r.filePath)));
+  }
+  const out = new Map(inferred);
+  for (const [groupKey, group] of byGroup) {
+    if (out.has(groupKey) || group.length === 0) continue;
+    const siblings = [...inferred].filter(([k]) => mediaTypeOf(k) === mediaTypeOf(groupKey)).map(([, m]) => m);
+    out.set(groupKey, singlePathMount(group[0].filePath!, group[0].mediaType, siblings));
+  }
+  return out;
+}
+
 function stripMountPoint(filePath: string | null, mountPoint: string): string | null {
   if (!filePath) return null;
   const normalised = filePath.replace(/\\/g, "/");
@@ -287,9 +336,10 @@ function buildPathMap(rows: LibraryRow[], stripFor: (instance: string, mediaType
     if (ai === bi) return a.localeCompare(b);
     return ai === DEFAULT_MEDIA_INSTANCE ? 1 : bi === DEFAULT_MEDIA_INSTANCE ? -1 : ai.localeCompare(bi);
   });
+  const mounts = inferGroupMounts(byGroup);
   for (const groupKey of ordered) {
     const group = byGroup.get(groupKey)!;
-    const mount = commonPathPrefix(group.map((r) => r.filePath));
+    const mount = mounts.get(groupKey)!;
     for (const item of group) {
       const rel = stripMountPoint(item.filePath, mount);
       if (!rel) continue;

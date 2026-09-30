@@ -32,7 +32,7 @@ interface Props {
 async function signInWithFetch(
   provider: "credentials" | "plex" | "jellyfin" | "jellyfin-quickconnect",
   payload: Record<string, unknown>,
-): Promise<{ ok: boolean; error?: string; offline?: boolean }> {
+): Promise<{ ok: boolean; error?: string; offline?: boolean; disabled?: boolean }> {
   let res: Response;
   try {
     res = await fetch(withBasePath(`/api/auth/sign-in/${provider}`), {
@@ -54,7 +54,10 @@ async function signInWithFetch(
       const body = await res.json();
       if (typeof body?.error === "string") error = body.error;
     } catch {}
-    return { ok: false, error };
+    // 403 is the disabled-account answer (disabledAccountResponse) — the one
+    // failure where "check your password" is the wrong advice, so callers show
+    // the server's message instead of their generic one.
+    return { ok: false, error, disabled: res.status === 403 };
   }
   return { ok: true };
 }
@@ -277,9 +280,11 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
       setError(
         res.offline
           ? "Network error — please try again."
-          : provider === "credentials"
-            ? "Invalid email or password."
-            : "Invalid credentials or Jellyfin server unreachable."
+          : res.disabled && res.error
+            ? res.error
+            : provider === "credentials"
+              ? "Invalid email or password."
+              : "Invalid credentials or Jellyfin server unreachable."
       );
       setLoading(false);
     } else {
@@ -373,7 +378,9 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
       setError(
         result.offline
           ? "Network error — please try again."
-          : "QuickConnect approved but sign-in failed. Contact the server owner."
+          : result.disabled && result.error
+            ? result.error
+            : "QuickConnect approved but sign-in failed. Contact the server owner."
       );
       setLoading(false);
       setQcCode(null);

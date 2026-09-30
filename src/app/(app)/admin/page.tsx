@@ -50,12 +50,20 @@ export default async function AdminPage({
     ...(typeFilter ? { mediaType: typeFilter } : {}),
   };
 
-  const groupOrderBy: Prisma.MediaRequestOrderByWithAggregationInput =
+  const primaryGroupOrder: Prisma.MediaRequestOrderByWithAggregationInput =
     sort === "oldest" ? { _min: { createdAt: "asc" } }
     : sort === "title" ? { _min: { title: "asc" } }
     : sort === "year-desc" ? { _max: { releaseYear: "desc" } }
     : sort === "year-asc" ? { _min: { releaseYear: "asc" } }
     : { _max: { createdAt: "desc" } };
+  // The group key is the tiebreaker. Year and title sorts tie constantly, and
+  // Postgres orders tied rows differently for different LIMIT/OFFSET bounds, so
+  // without a total order a title could repeat across pages or never appear.
+  const groupOrderBy: Prisma.MediaRequestOrderByWithAggregationInput[] = [
+    primaryGroupOrder,
+    { tmdbId: "asc" },
+    { mediaType: "asc" },
+  ];
 
   // Count the distinct (tmdbId, mediaType) groups in SQL. Doing it with a
   // groupBy would download every group row just to read how many there are.

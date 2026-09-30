@@ -138,10 +138,15 @@ function pwWatchProviders(raw?: RawItem["watch/providers"], region = "US"): Tmdb
   return out.length ? out : undefined;
 }
 
-async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise<void> {
+// Resolves `true` when TMDB gave a definitive answer (details stored, or a 404
+// tombstoned) and `false` when it didn't (SafeFetchError, non-404 non-2xx such
+// as 429/401/5xx, unparseable body) — those already warned here and must reach
+// the caller's `failed` counter, or a TMDB outage reports as a successful warm.
+// Never throws for those misses, so the page loop keeps going.
+async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise<boolean> {
   const type = mediaType === "MOVIE" ? "movie" : "tv";
   const auth = tmdbAuth();
-  if (!auth) return;
+  if (!auth) return false;
 
   const url = new URL(`${TMDB_BASE}/${type}/${tmdbId}`);
   for (const [k, v] of Object.entries(auth.query)) url.searchParams.set(k, v);
@@ -171,7 +176,7 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
   } catch (err) {
     if (err instanceof SafeFetchError) {
       console.warn(`[prewarm] TMDB ${type}:${tmdbId} → ${err.reason} (${err.message})`);
-      return;
+      return false;
     }
     throw err;
   }
@@ -180,10 +185,10 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
       // Tombstone the dead id so the triage skips it on later runs. Silent —
       // the title simply isn't on TMDB; noise here would flood every run.
       await setCache(`${type}:${tmdbId}:details:missing`, { _notFound: true }, MISSING_TOMBSTONE_TTL);
-    } else {
-      console.warn(`[prewarm] TMDB ${type}:${tmdbId} → HTTP ${res.status}`);
+      return true;
     }
-    return;
+    console.warn(`[prewarm] TMDB ${type}:${tmdbId} → HTTP ${res.status}`);
+    return false;
   }
 
   // Read as text first so we can log a diagnostic snippet if JSON parsing fails — `await res.json()`
@@ -202,7 +207,7 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
       `ct=${res.headers.get("content-type") ?? "none"}, head=${JSON.stringify(head)}, hex=${hex}):`,
       err instanceof Error ? err.message : String(err),
     );
-    return;
+    return false;
   }
   const rawDate = mediaType === "MOVIE" ? raw.release_date : raw.first_air_date;
   // US certification, extracted the same way getMovieDetails/getTVDetails do.
@@ -331,6 +336,7 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     voteAverage: raw.vote_average ?? 0,
     ...(certification && { certification }),
   });
+  return true;
 }
 
 async function processPrewarmPage(
@@ -409,8 +415,12 @@ async function processPrewarmPage(
       batch.map((item) => fetchAndStore(item.tmdbId, item.mediaType)),
     );
     for (const r of results) {
-      if (r.status === "fulfilled") stats.fetched++;
-      else { stats.failed++; console.warn("[prewarm] item failed:", r.reason); }
+      // A fulfilled `false` already warned inside fetchAndStore — count it
+      // failed without a second log line.
+      if (r.status === "fulfilled") {
+        if (r.value) stats.fetched++;
+        else stats.failed++;
+      } else { stats.failed++; console.warn("[prewarm] item failed:", r.reason); }
     }
     if (i + CONCURRENCY < staleItems.length) {
       await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY_MS));

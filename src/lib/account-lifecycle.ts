@@ -1,6 +1,7 @@
 import "server-only";
 
 import { prisma } from "./prisma";
+import { verifyIdentifierPrefixFor } from "./notification-email-verify";
 
 // The encryption extension in ./prisma changes the client's type, so the
 // generated Prisma.TransactionClient is NOT assignable to the interactive-tx
@@ -201,6 +202,12 @@ export async function purgeUserDataInTx(
   // and this is not in it. Leaving it behind meant an irreversible "delete my data"
   // purge kept a per-user profile of exactly the kind erasure is meant to remove.
   await tx.userRecommendation.deleteMany({ where: { userId: id } });
+  // A pending notification-email verification carries the candidate address in its
+  // identifier, and the confirm link stays redeemable for its TTL — left behind, a
+  // click after the purge would write that address back onto the scrubbed row.
+  await tx.verificationToken.deleteMany({
+    where: { identifier: { startsWith: verifyIdentifierPrefixFor(id) } },
+  });
   // Re-check deactivation atomically in the same statement that scrubs the row.
   // The precondition read at the top of this function is several awaited
   // deletes ago — a concurrent reactivate can clear deactivatedAt in that

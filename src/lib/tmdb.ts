@@ -1241,6 +1241,26 @@ function allowedDiscoverSort(sortBy: string | undefined): string {
   return sortBy && ALLOWED_DISCOVER_SORT.has(sortBy) ? sortBy : "popularity.desc";
 }
 
+// ALLOWED_DISCOVER_SORT is shared by movies and TV, but /discover/tv only sorts by
+// first_air_date, name/original_name, popularity and vote_*. The web filter-bar's
+// Newest/Oldest send release_date.* (iOS primary_release_date.*) for BOTH media
+// types, so translate to the media type's own field — before the cache key too, so
+// equivalent sorts share one row. A sort TV can't express (revenue) falls back to
+// popularity.desc. The movie side maps first_air_date.* to primary_release_date.*.
+function discoverSortFor(mediaType: "movie" | "tv", sortBy: string): string {
+  const dot = sortBy.lastIndexOf(".");
+  const field = sortBy.slice(0, dot);
+  const dir = sortBy.slice(dot + 1);
+  if (mediaType === "tv") {
+    if (field === "release_date" || field === "primary_release_date") return `first_air_date.${dir}`;
+    if (field === "original_title") return `original_name.${dir}`;
+    if (field === "revenue") return "popularity.desc";
+    return sortBy;
+  }
+  if (field === "first_air_date") return `primary_release_date.${dir}`;
+  return sortBy;
+}
+
 // Normalize the remaining free-text discover filters up front so junk values reach
 // neither TMDB nor the cache key (an unvalidated string baked into discoverKey() lets
 // an authenticated user manufacture arbitrary distinct TmdbCache rows). genreId is a
@@ -1288,6 +1308,7 @@ export async function discoverMoviesPage(filters: DiscoverFilters, page: number)
   const p = Math.min(Math.max(1, page), 500);
   // Normalize free-text filters up front so junk values reach neither TMDB nor the cache key.
   filters = sanitizeDiscoverFilters(filters);
+  filters = { ...filters, sortBy: discoverSortFor("movie", filters.sortBy ?? "popularity.desc") };
   const key = `${discoverKey("movie", filters)}:page:${p}`;
   const cached = await getCache<PagedResult>(key);
   if (cached) return cached;
@@ -1323,6 +1344,7 @@ export async function discoverTVPage(filters: DiscoverFilters, page: number): Pr
   const p = Math.min(Math.max(1, page), 500);
   // Normalize free-text filters up front so junk values reach neither TMDB nor the cache key.
   filters = sanitizeDiscoverFilters(filters);
+  filters = { ...filters, sortBy: discoverSortFor("tv", filters.sortBy ?? "popularity.desc") };
   const key = `${discoverKey("tv", filters)}:page:${p}`;
   const cached = await getCache<PagedResult>(key);
   if (cached) return cached;

@@ -11,6 +11,22 @@ import { maintenanceGuard } from "@/lib/maintenance";
 
 const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 
+// The same canonical string resolveToSafeUrlWithAddrs ([ssrf.ts]) returns for a
+// safe URL — serialize, then collapse ONLY the bare-origin trailing slash — minus
+// the DNS resolve. Keep the two in step or unsubscribe misses the stored key.
+function canonicalizePushEndpoint(raw: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  const serialized = url.toString();
+  const isBareOrigin = url.pathname === "/" && !url.search && !url.hash;
+  return isBareOrigin ? serialized.replace(/\/$/, "") : serialized;
+}
+
 export const POST = withAuth(async (req, _ctx, session) => {
   // Personal mutation — blocked during maintenance like profile delete/password.
   // DELETE (unsubscribe) intentionally stays open so users can always opt out.
@@ -140,15 +156,17 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ ok: true });
   }
 
-  if (!body.endpoint) {
+  if (typeof body.endpoint !== "string" || !body.endpoint) {
     return NextResponse.json({ error: "id or endpoint is required" }, { status: 400 });
   }
 
   // Reject rather than fall back to the raw endpoint: the stored row is keyed by
   // the canonicalized endpoint, so a raw value bypasses canonicalization and
-  // either no-ops or matches an unintended row. An unresolvable endpoint is a
-  // bad request.
-  const canonicalEndpoint = await resolveToSafeUrl(body.endpoint);
+  // either no-ops or matches an unintended row. Canonicalize WITHOUT DNS, though:
+  // the key is pure URL serialization, and the delete is userId-scoped, so there
+  // is nothing to SSRF-check. Going through resolveToSafeUrl made a transient DNS
+  // failure for the push service answer 400 and leave the opted-out row behind.
+  const canonicalEndpoint = canonicalizePushEndpoint(body.endpoint);
   if (!canonicalEndpoint) {
     return NextResponse.json({ error: "Invalid endpoint" }, { status: 400 });
   }

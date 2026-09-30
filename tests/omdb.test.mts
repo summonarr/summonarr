@@ -401,7 +401,7 @@ test("no TMDB read token: keyConfigured-only miss — NO transient flag, no fetc
   delete process.env.TMDB_READ_TOKEN;
   try {
     const result = await fetchAndCacheOmdbForTmdb(606, "movie", "omdb:tmdb:movie:606");
-    assert.deepEqual(result, { found: false, keyConfigured: true });
+    assert.deepEqual(result, { found: false, keyConfigured: true, tmdbUnconfigured: true });
     assert.equal(fetchCalls.length, 0);
     assert.equal(cacheUpserts.length, 0);
   } finally {

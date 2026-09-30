@@ -959,6 +959,46 @@ test("refetch REJECTS a malformed instance slug instead of coercing it to the de
   assert.equal(fetchCalls.length, 0, "a rejected request must not have contacted any server");
 });
 
+test("refetch REFUSES a RESOLVED issue with 409 before contacting any arr server", async () => {
+  // The post-search CAS only avoided flipping the status; the search itself had
+  // already queued a download for a closed issue (stale tab / native / direct API).
+  issueRow = { id: "issue-rf4", status: "RESOLVED", reportedBy: "r", title: "Show", mediaType: "TV", tmdbId: 1399, tvdbId: 121361, scope: "SEASON", seasonNumber: 2, episodeNumber: null };
+  settings.set("sonarrUrl", "http://sonarr-hd.example.com:8989");
+  settings.set("sonarrApiKey", "hd-api-key");
+  fetchImpl = (url: URL) => {
+    if (url.pathname === "/api/v3/series") return jsonResponse([{ id: 9, tvdbId: 121361 }]);
+    if (url.pathname === "/api/v3/command") return jsonResponse({ id: 1 });
+    throw new Error(`unexpected refetch fetch: ${url.href}`);
+  };
+  const admin = await mintSession({ role: "ADMIN" });
+
+  const res = await patchIssue(admin.token, "issue-rf4", { refetch: true });
+  assert.equal(res.status, 409);
+  assert.equal(fetchCalls.length, 0, "a resolved issue must not trigger a search");
+  assert.equal(opsOf("issue.updateMany").length, 0);
+  assert.deepEqual(sseEvents, []);
+});
+
+test("PATCH reopen (RESOLVED→OPEN) clears the stale resolution; a non-reopen move leaves it alone", async () => {
+  // Otherwise a later re-resolve with no note falls back to issue.resolution and
+  // re-announces the EARLIER fix to the reporter.
+  issueRow = { id: "issue-ro", status: "RESOLVED", reportedBy: "r", title: "t", mediaType: "MOVIE", tmdbId: 1, resolution: "replaced file", posterPath: null };
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+
+  const res = await patchIssue(admin.token, "issue-ro", { status: "OPEN" });
+  assert.equal(res.status, 200);
+  const cas = opsOf("issue.updateMany")[0].args as { data: Record<string, unknown> };
+  assert.equal(cas.data.status, "OPEN");
+  assert.ok("resolution" in cas.data, "the reopen must write the resolution column");
+  assert.equal(cas.data.resolution, null);
+
+  // Control: an OPEN→IN_PROGRESS move never touches the resolution.
+  issueRow = { id: "issue-ro2", status: "OPEN", reportedBy: "r", title: "t", mediaType: "MOVIE", tmdbId: 1, resolution: null, posterPath: null };
+  await patchIssue(admin.token, "issue-ro2", { status: "IN_PROGRESS" });
+  const cas2 = opsOf("issue.updateMany")[1].args as { data: Record<string, unknown> };
+  assert.ok(!("resolution" in cas2.data));
+});
+
 // An issue admin who REPORTED the issue and then replies is talking to
 // themselves. The inbox row skipped that case from the start; Discord, push and
 // email gated only on the reporter being ACTIVE, so a self-hosted instance where

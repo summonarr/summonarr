@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Popover } from "@base-ui/react/popover";
 import { ChevronDown, Globe, Loader2, MapPin, Network } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
@@ -53,7 +53,26 @@ export function IpInfo({ ip, inline = false }: Props) {
   const [error, setError] = useState<string | null>(() => {
     return cache.get(ip) === "missing" ? "Not available" : null;
   });
-  const fetchedRef = useRef(false);
+  // The ip this instance last fetched (null = none in flight / retry allowed).
+  // Keyed by ip, not a boolean, so a changed `ip` prop is fetched afresh.
+  const fetchedRef = useRef<string | null>(null);
+  // The ip currently rendered — a response for an older ip must not land.
+  const ipRef = useRef(ip);
+  useEffect(() => {
+    ipRef.current = ip;
+  }, [ip]);
+
+  // A live session's reported address can change between polls while this
+  // instance stays mounted; drop the previous ip's lookup so the popover never
+  // shows one ip's geolocation under another ip.
+  const [prevIp, setPrevIp] = useState(ip);
+  if (prevIp !== ip) {
+    setPrevIp(ip);
+    const c = cache.get(ip);
+    setData(c && c !== "missing" ? c : null);
+    setError(c === "missing" ? "Not available" : null);
+    setLoading(false);
+  }
 
   function handleOpenChange(next: boolean) {
     setOpen(next);
@@ -70,8 +89,10 @@ export function IpInfo({ ip, inline = false }: Props) {
       setError(null);
       return;
     }
-    if (fetchedRef.current) return;
-    fetchedRef.current = true;
+    if (fetchedRef.current === ip) return;
+    fetchedRef.current = ip;
+    const requested = ip;
+    const current = () => ipRef.current === requested;
     setLoading(true);
     setError(null);
     fetch(withBasePath(`/api/admin/ip-lookup?ip=${encodeURIComponent(ip)}`))
@@ -81,8 +102,8 @@ export function IpInfo({ ip, inline = false }: Props) {
           // ipinfo token is the common (and permanent) case, so negative-cache
           // it in the shared map rather than re-hitting the backend on every
           // open of every IP.
-          cacheSet(ip, "missing");
-          setError("Not available");
+          cacheSet(requested, "missing");
+          if (current()) setError("Not available");
           return;
         }
         if (!r.ok) {
@@ -93,20 +114,22 @@ export function IpInfo({ ip, inline = false }: Props) {
           // reset the fetch guard so the next open tries again.
           const body = (await r.json().catch(() => null)) as { error?: unknown } | null;
           const msg = typeof body?.error === "string" && body.error ? body.error : null;
-          setError(msg ?? "Lookup failed — try again");
-          fetchedRef.current = false;
+          if (fetchedRef.current === requested) fetchedRef.current = null;
+          if (current()) setError(msg ?? "Lookup failed — try again");
           return;
         }
         const json = (await r.json()) as Lookup;
-        cacheSet(ip, json);
-        setData(json);
+        cacheSet(requested, json);
+        if (current()) setData(json);
       })
       .catch(() => {
         // Network error / aborted: transient, same rule as above.
-        setError("Lookup failed — try again");
-        fetchedRef.current = false;
+        if (fetchedRef.current === requested) fetchedRef.current = null;
+        if (current()) setError("Lookup failed — try again");
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (current()) setLoading(false);
+      });
   }
 
   return (

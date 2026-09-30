@@ -951,10 +951,12 @@ export async function applyCustomFormats(
   type RemoteCf = { id: number; name: string; includeCustomFormatWhenRenaming?: boolean; specifications?: unknown[] };
   let remoteByName: Map<string, number>;
   let remoteById: Map<number, RemoteCf>;
+  let remoteNameById: Map<number, string>;
   try {
     const remote = await arrFetch<RemoteCf[]>(cfg, "/api/v3/customformat");
     remoteByName = new Map(remote.map((r) => [r.name, r.id]));
     remoteById = new Map(remote.map((r) => [r.id, r]));
+    remoteNameById = new Map(remote.map((r) => [r.id, r.name]));
   } catch (err) {
     // Can't read existing CFs → can't tell new from existing, so a blind POST in
     // the loop below would create duplicates. Fail the whole batch instead of
@@ -978,7 +980,7 @@ export async function applyCustomFormats(
       // PUT if remoteId is known (update existing); POST only for truly new CFs to avoid duplicate creation.
       // arrPutOrRecreate transparently recovers if the resource was deleted in the Arr UI between
       // Summonarr's last apply and now (PUT → 404 → POST).
-      const remoteId = spec.applications[0]?.remoteId ?? remoteByName.get(payload.name) ?? null;
+      const remoteId = resolveRemoteId(spec.applications[0]?.remoteId, payload.name, remoteNameById, remoteByName);
       // No-op skip: the cron re-applies every enabled spec each run to repair
       // drift (changes made by hand in Radarr/Sonarr). When the remote CF already
       // matches what we'd PUT, record success against the known id and skip the
@@ -1449,6 +1451,29 @@ async function buildProfileBody(
   return body;
 }
 
+// Picks the remote id a CF / quality-profile apply should PUT to. A stored
+// TrashApplication.remoteId is only trusted while the live row at that id still
+// carries this spec's name: a reset/reinstalled Arr restarts ids at 1 and a
+// CF deleted + re-imported outside Summonarr gets a new one, so a stale id can
+// name an UNRELATED resource (the PUT would overwrite it) while the real one
+// sits under a new id (a PUT 404 → POST then collides on the unique name).
+//   - live row at the stored id has our name   → stored id
+//   - some live row has our name               → that id
+//   - live row at the stored id has another name → null (POST; never overwrite it)
+//   - stored id absent from the live list      → stored id (PUT → 404 → POST recreate)
+export function resolveRemoteId(
+  storedId: number | null | undefined,
+  name: string,
+  remoteNameById: Map<number, string>,
+  remoteByName: Map<string, number>,
+): number | null {
+  if (storedId && remoteNameById.get(storedId) === name) return storedId;
+  const byName = remoteByName.get(name);
+  if (byName) return byName;
+  if (storedId && remoteNameById.has(storedId)) return null;
+  return storedId || null;
+}
+
 // Builds each QUALITY_PROFILE body (resolving CF remoteIds + scores for the variant) and PUT/POSTs it to the instance.
 export async function applyQualityProfiles(
   service: TrashService,
@@ -1464,9 +1489,11 @@ export async function applyQualityProfiles(
   if (specs.length === 0) return [];
 
   let remoteByName: Map<string, number>;
+  let remoteNameById: Map<number, string>;
   try {
     const remote = await arrFetch<Array<{ id: number; name: string }>>(cfg, "/api/v3/qualityprofile");
     remoteByName = new Map(remote.map((r) => [r.name, r.id]));
+    remoteNameById = new Map(remote.map((r) => [r.id, r.name]));
   } catch (err) {
     // Can't read existing quality profiles → a blind POST below would duplicate
     // them. Fail the whole batch instead of guessing, and log a warning.
@@ -1498,7 +1525,7 @@ export async function applyQualityProfiles(
     try {
       const profile = spec.payload as unknown as TrashQualityProfile;
       const body = await buildProfileBody(cfg, service, profile, variant, sharedRemotes);
-      const remoteId = spec.applications[0]?.remoteId ?? remoteByName.get(profile.name) ?? null;
+      const remoteId = resolveRemoteId(spec.applications[0]?.remoteId, profile.name, remoteNameById, remoteByName);
       let created: { id: number };
       let recreated = false;
       if (remoteId) {

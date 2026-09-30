@@ -131,6 +131,23 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
   const [batchError, setBatchError] = useState<string | null>(null);
   const [confirmingApprove, setConfirmingApprove] = useState(false);
 
+  // The batch bar hides (but keeps its state) when the selection empties by
+  // unchecking boxes or Clear. Reset the armed approve-confirm, the decline
+  // note and any error then, so the NEXT selection opens in the neutral state
+  // rather than one click away from a batch approve. Adjusted during render
+  // (React's "store the previous value" pattern) instead of in an effect.
+  const selectionEmpty = selected.size === 0;
+  const [prevSelectionEmpty, setPrevSelectionEmpty] = useState(selectionEmpty);
+  if (selectionEmpty !== prevSelectionEmpty) {
+    setPrevSelectionEmpty(selectionEmpty);
+    if (selectionEmpty) {
+      setConfirmingApprove(false);
+      setShowBatchNote(null);
+      setBatchNote("");
+      setBatchError(null);
+    }
+  }
+
   const allPendingIds = requests.flatMap((g) =>
     g.requesters.filter((r) => r.status === "PENDING").map((r) => r.requestId),
   );

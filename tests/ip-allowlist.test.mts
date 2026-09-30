@@ -93,17 +93,20 @@ test("degenerate prefixes: matcher fails closed, same as the validator", () => {
   assert.equal(isValidIpOrCidr("10.0.0.0/ 8"), false);
 });
 
-// Validator/matcher inconsistency: an IPv4-mapped-IPv6 CIDR with prefix > 32 is
-// VALID to store (fam=6, prefix <= 128) but can never match any client — the
-// matcher normalizes the mapped base to bits=32, then skips the entry because
-// prefix 104 > 32; mapped clients also normalize to 32 bits, and plain-v6
-// clients fail the bits mismatch. Fail-closed, so pin the current false result:
-// an admin can save "::ffff:10.0.0.0/104" and it silently never matches.
-test("valid-but-dead entry: IPv4-mapped CIDR with prefix > 32 never matches (pinned)", () => {
+// An IPv4-mapped-IPv6 CIDR's prefix counts the 96 mapping bits: the matcher
+// folds the mapped base to 32 bits, so it must subtract them (::ffff:10.0.0.0/104
+// is 10.0.0.0/8). A mapped prefix under 96 has no v4 meaning and is refused by
+// the validator and skipped by the matcher.
+test("IPv4-mapped CIDR entries match on their v6 prefix minus the 96 mapping bits", () => {
   assert.equal(isValidIpOrCidr("::ffff:10.0.0.0/104"), true);
-  assert.equal(isIpAllowed("10.0.0.5", ["::ffff:10.0.0.0/104"]), false);
-  assert.equal(isIpAllowed("::ffff:10.0.0.5", ["::ffff:10.0.0.0/104"]), false);
+  assert.equal(isIpAllowed("10.0.0.5", ["::ffff:10.0.0.0/104"]), true);
+  assert.equal(isIpAllowed("::ffff:10.0.0.5", ["::ffff:10.0.0.0/104"]), true);
+  assert.equal(isIpAllowed("11.0.0.5", ["::ffff:10.0.0.0/104"]), false);
   assert.equal(isIpAllowed("2001:db8::1", ["::ffff:10.0.0.0/104"]), false);
+  assert.equal(isIpAllowed("10.0.0.5", ["::ffff:10.0.0.5/128"]), true);
+  assert.equal(isIpAllowed("10.0.0.6", ["::ffff:10.0.0.5/128"]), false);
+  assert.equal(isValidIpOrCidr("::ffff:10.0.0.0/8"), false);
+  assert.equal(isIpAllowed("10.0.0.5", ["::ffff:10.0.0.0/8"]), false);
 });
 
 test("client IP carrying a port fails closed (never port-tolerant)", () => {
