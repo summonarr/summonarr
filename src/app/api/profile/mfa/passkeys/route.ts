@@ -13,6 +13,7 @@ import {
 } from "@/lib/mfa/mfa-store";
 import { consumeToken, isTokenUsable, recordTokenFailure, verifyPasskeyRegisterToken } from "@/lib/mfa/mfa-token";
 import { mfaEligibleUser } from "@/lib/mfa/step-up";
+import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 import {
   verifyRegistrationResponse,
   webAuthnConfigFromEnv,
@@ -23,9 +24,11 @@ import {
 // POST /api/profile/mfa/passkeys — step 2 of adding a passkey.
 // Body: { registrationToken, name, credential } where `credential` is the
 // PublicKeyCredential from navigator.credentials.create(), binary fields as
-// base64url. The password step-up happened at /passkeys/options; the token it
+// base64url. The enrollment step-up happened at /passkeys/options; the token it
 // issued is single-use, expires in 5 minutes and is bound to this user AND this
-// session, so it can't be replayed or completed from somewhere else.
+// session, so it can't be replayed or completed from somewhere else. A token
+// minted on the password alone (the account had no factor then) is refused if
+// the account has gained a factor since.
 //
 // When this is the account's FIRST second factor the response carries ten
 // one-time recovery codes and every OTHER session is signed out.
@@ -45,7 +48,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     claims.userId !== session.user.id ||
     !session.sessionId ||
     claims.sessionId !== session.sessionId ||
-    !isTokenUsable(claims.jti, claims.exp)
+    !isTokenUsable(claims.jti)
   ) {
     return NextResponse.json({ error: "This passkey setup has expired. Please start again." }, { status: 400 });
   }
@@ -53,6 +56,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (user instanceof NextResponse) return user;
   if (!parsed.credential || typeof parsed.credential !== "object") {
     return NextResponse.json({ error: "Missing passkey response" }, { status: 400 });
+  }
+  const before = await getMfaState(user.id);
+  if (before.enabled && !claims.factorVerified) {
+    return NextResponse.json({ error: "This passkey setup has expired. Please start again." }, { status: 400 });
   }
 
   let verified;
@@ -63,15 +70,14 @@ export const POST = withAuth(async (req, _ctx, session) => {
       config,
     });
   } catch (err) {
-    recordTokenFailure(claims.jti, claims.exp);
+    recordTokenFailure(claims.jti);
     const code = err instanceof WebAuthnError ? err.code : "verify";
     return NextResponse.json({ error: "The passkey could not be verified.", code }, { status: 400 });
   }
-  if (!consumeToken(claims.jti, claims.exp)) {
+  if (!consumeToken(claims.jti)) {
     return NextResponse.json({ error: "This passkey setup has expired. Please start again." }, { status: 400 });
   }
 
-  const before = await getMfaState(user.id);
   if (before.passkeys.length >= MAX_PASSKEYS_PER_USER) {
     return NextResponse.json({ error: `You can register at most ${MAX_PASSKEYS_PER_USER} passkeys.` }, { status: 400 });
   }
@@ -95,6 +101,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
           backedUp: verified.backedUp,
         },
       });
+      // First factor: a pending authenticator secret issued on the password
+      // alone must not be confirmable once the account has 2FA (totp/enable
+      // takes no password), so it goes.
+      if (!before.enabled) await tx.userTotp.deleteMany({ where: { userId: user.id, enabledAt: null } });
       return ensureRecoveryCodesInTx(tx, user.id);
     });
   } catch (err) {
@@ -105,6 +115,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
 
   const revoked = before.enabled ? 0 : await revokeOtherUserSessions(user.id, session.sessionId);
+  void notifyMfaSecurityEvent(user.id, "passkey-added");
   void logAudit({
     userId: user.id,
     userName: user.name ?? user.email,

@@ -5,14 +5,17 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
 import { getMfaState, MAX_PASSKEYS_PER_USER, webAuthnUserHandle } from "@/lib/mfa/mfa-store";
 import { MFA_TOKEN_TTL_SECONDS, signPasskeyRegisterToken } from "@/lib/mfa/mfa-token";
-import { mfaPasswordStepUp } from "@/lib/mfa/step-up";
+import { mfaPasswordStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { SUPPORTED_COSE_ALGS, webAuthnConfigFromEnv } from "@/lib/mfa/webauthn";
 
 // POST /api/profile/mfa/passkeys/options — step 1 of adding a passkey.
-// Body: { password }. Returns the PublicKeyCredentialCreationOptions (binary
+// Body: { password, secondFactor? } — the second factor is required when the
+// account already has an active factor (step-up.ts); a first passkey is
+// password-only. Returns the PublicKeyCredentialCreationOptions (binary
 // fields base64url) for navigator.credentials.create(), plus a short-lived
-// single-use `registrationToken` that carries the challenge and is bound to this
-// user AND this session. Step 2 is POST /api/profile/mfa/passkeys.
+// single-use `registrationToken` that carries the challenge, is bound to this
+// user AND this session, and records whether a second factor was verified.
+// Step 2 is POST /api/profile/mfa/passkeys.
 export const POST = withAuth(async (req, _ctx, session) => {
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
@@ -21,7 +24,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Passkeys need AUTH_URL to be set to this server's public URL." }, { status: 503 });
   }
   if (!session.sessionId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const parsed = await readJsonCapped<{ password?: unknown }>(req, 16384);
+  const parsed = await readJsonCapped<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024);
   if (parsed instanceof NextResponse) return parsed;
   const user = await mfaPasswordStepUp(session, parsed.password);
   if (user instanceof NextResponse) return user;
@@ -30,9 +33,16 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (state.passkeys.length >= MAX_PASSKEYS_PER_USER) {
     return NextResponse.json({ error: `You can register at most ${MAX_PASSKEYS_PER_USER} passkeys.` }, { status: 400 });
   }
+  const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor, state);
+  if (proof instanceof NextResponse) return proof;
 
   const challenge = randomBytes(32).toString("base64url");
-  const { token } = await signPasskeyRegisterToken({ userId: user.id, sessionId: session.sessionId, challenge });
+  const { token } = await signPasskeyRegisterToken({
+    userId: user.id,
+    sessionId: session.sessionId,
+    challenge,
+    factorVerified: proof.proved,
+  });
   return NextResponse.json(
     {
       registrationToken: token,

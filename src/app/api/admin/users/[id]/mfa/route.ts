@@ -5,7 +5,10 @@ import { revokeAllUserSessions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission } from "@/lib/permissions";
-import { deleteAllMfaInTx, getMfaState } from "@/lib/mfa/mfa-store";
+import { clearMfaLockoutInTx, deleteAllMfaInTx, getMfaState } from "@/lib/mfa/mfa-store";
+import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
+
+class TargetBecameAdminError extends Error {}
 
 // DELETE /api/admin/users/[id]/mfa — reset a user's two-factor authentication
 // (lost phone / lost security key). Removes their authenticator app, every
@@ -43,12 +46,32 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   }
 
   const before = await getMfaState(id);
-  await prisma.$transaction(async (tx) => {
-    await deleteAllMfaInTx(tx, id);
-  });
+  try {
+    await prisma.$transaction(async (tx) => {
+      // The role read above is stale by the time the tx opens: a promotion to
+      // ADMIN landing in between would let a delegated MANAGE_USERS holder strip
+      // an admin's second factor. Re-resolve it under advisory lock 42 — the lock
+      // the role-change and deactivate paths take (admin/users/[id]/route.ts) —
+      // and decide on that value.
+      await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock(42)");
+      const fresh = await tx.user.findUnique({ where: { id }, select: { role: true } });
+      if ((fresh?.role ?? target.role) === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
+        throw new TargetBecameAdminError();
+      }
+      await deleteAllMfaInTx(tx, id);
+      // A lost phone is exactly when an owner locks themselves out guessing.
+      await clearMfaLockoutInTx(tx, id);
+    });
+  } catch (err) {
+    if (err instanceof TargetBecameAdminError) {
+      return NextResponse.json({ error: "Only an admin can reset an admin's two-factor" }, { status: 403 });
+    }
+    throw err;
+  }
   // Every device of the target — a reset is a security event, and whoever lost
   // the factor may not be the only one holding a session.
   await revokeAllUserSessions(id);
+  if (before.enabled) void notifyMfaSecurityEvent(id, "mfa-reset");
 
   // Committed — a failed audit write must not 500 it (guardrail 26).
   void logAudit({

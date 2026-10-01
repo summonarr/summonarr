@@ -7,8 +7,9 @@ import { readJsonCapped } from "@/lib/body-size";
 import { checkRateLimit, getClientIp, ipBucketKey, refundHit } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
-import { consumeToken, isTokenUsable, recordTokenFailure, verifyMfaSigninToken } from "@/lib/mfa/mfa-token";
-import { passwordVersion, verifySecondFactor, type SecondFactorInput } from "@/lib/mfa/mfa-store";
+import { commitToken, isTokenUsable, releaseToken, reserveToken, verifyMfaSigninToken } from "@/lib/mfa/mfa-token";
+import { passwordVersion, type SecondFactorInput } from "@/lib/mfa/mfa-store";
+import { MFA_LOCKED_MESSAGE, verifySecondFactorGuarded } from "@/lib/mfa/lockout";
 import { webAuthnConfigFromEnv, type AuthenticationResponseJSON } from "@/lib/mfa/webauthn";
 
 // POST /api/auth/sign-in/mfa — the second half of a local-credentials sign-in
@@ -24,8 +25,12 @@ import { webAuthnConfigFromEnv, type AuthenticationResponseJSON } from "@/lib/mf
 // disabled-account refusal (33) are the shared ones, not a parallel copy.
 //
 // Throttles: per IP (every attempt), per account (reserved, refunded on
-// success — the credentials-route pattern), and per challenge token (burns after
-// MAX_TOKEN_FAILURES wrong answers, consumed on success).
+// success — the credentials-route pattern), per challenge token (burns after
+// MAX_TOKEN_FAILURES wrong answers, consumed on success, and RESERVED for the
+// duration of one verification so parallel requests can't both spend a
+// factor), and the PERSISTENT per-account code lockout in src/lib/mfa/lockout.ts
+// — the only bound that survives a restart and can't be dodged by minting new
+// challenges (a correct password refunds the password-step limiter).
 
 // An assertion is a few KB of base64url at most.
 const MAX_MFA_BODY_BYTES = 32 * 1024;
@@ -85,7 +90,7 @@ export async function POST(req: NextRequest) {
   }
 
   const claims = await verifyMfaSigninToken(body.mfaToken);
-  if (!claims || !isTokenUsable(claims.jti, claims.exp)) return expired();
+  if (!claims || !isTokenUsable(claims.jti)) return expired();
 
   // The native-client header selects the session lifetime and whether the JWT
   // goes in the body (guardrails 6b/6c); it was fixed at the password step.
@@ -114,20 +119,48 @@ export async function POST(req: NextRequest) {
   // step kills the challenge.
   if (!user?.passwordHash || !sameString(passwordVersion(user.passwordHash), claims.pwv)) return expired();
 
-  const verdict = await verifySecondFactor(user.id, input, {
-    webauthnChallenge: claims.webauthnChallenge,
-    webauthnConfig: webAuthnConfigFromEnv(),
-  });
+  // Claim the challenge BEFORE touching the factor. The factor verifiers burn
+  // single-use state in the DB (a recovery code, a TOTP step, a passkey
+  // counter); claiming the token only afterwards let two parallel requests on
+  // one challenge both reach them, so one sign-in could spend two recovery
+  // codes. reserveToken is a synchronous check-and-set: the loser is refused
+  // here without verifying anything.
+  if (!reserveToken(claims.jti)) {
+    if (!isTokenUsable(claims.jti)) return expired();
+    return NextResponse.json({ error: "This sign-in is already being verified." }, { status: 409 });
+  }
+
+  let verdict;
+  try {
+    verdict = await verifySecondFactorGuarded(user.id, input, {
+      webauthnChallenge: claims.webauthnChallenge,
+      webauthnConfig: webAuthnConfigFromEnv(),
+      context: "sign-in",
+      ipAddress: ip,
+      userAgent: ua,
+    });
+  } catch (err) {
+    releaseToken(claims.jti, { failed: false });
+    throw err;
+  }
   if (!verdict.ok) {
+    if (verdict.locked) {
+      // Persistent lockout (lockout.ts): no code was checked against this
+      // account, so the token is released without a failure.
+      releaseToken(claims.jti, { failed: false });
+      fail("mfa_locked", user.id, { method: input.method });
+      return NextResponse.json({ error: MFA_LOCKED_MESSAGE }, { status: 429 });
+    }
     // The reserved account hit is KEPT (a real failed second factor), and the
-    // token edges toward burning.
-    const failures = recordTokenFailure(claims.jti, claims.exp);
+    // token edges toward burning (counted synchronously at release).
+    const failures = releaseToken(claims.jti, { failed: true });
     fail("mfa_invalid", user.id, { method: input.method, check: verdict.reason, failures });
     return NextResponse.json({ error: INVALID_MESSAGE }, { status: 401 });
   }
 
-  // One challenge, one session — a concurrent second success loses here.
-  if (!consumeToken(claims.jti, claims.exp)) return expired();
+  // One challenge, one session. Only the reservation holder gets here; this
+  // fails only if the entry was evicted meanwhile.
+  if (!commitToken(claims.jti)) return expired();
   refundHit(userKey);
 
   const device = buildDeviceMeta(req.headers);

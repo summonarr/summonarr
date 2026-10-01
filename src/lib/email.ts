@@ -711,6 +711,33 @@ export async function notifyAdminsDeletionVoteThreshold(data: {
   }
 }
 
+// Account-security notice (two-factor changed / locked). Best-effort like every
+// notifier here: gated on the same email switch, never throws. Plain text only
+// in `message` — it is escaped, so no caller can inject markup.
+export async function notifyUserSecurityEventEmail(data: {
+  toEmail: string;
+  subject: string;
+  heading: string;
+  message: string;
+}): Promise<void> {
+  try {
+    const cfg = await getEmailConfig();
+    if (!cfg || !isBackendConfigured(cfg)) return;
+    const html = richEmailHtml({
+      preheader: data.message,
+      accent: "amber",
+      heading: esc(data.heading),
+      subheading: `${esc(data.message)} If this wasn&#39;t you, change your password and review your two-factor settings now.`,
+      ctaLabel: cfg.siteUrl ? "Review your account" : undefined,
+      ctaHref: cfg.siteUrl ? buildSiteUrl(cfg.siteUrl, "/profile#two-factor") : undefined,
+      siteUrl: cfg.siteUrl,
+    });
+    await sendOne(cfg, data.toEmail, data.subject, html);
+  } catch (err) {
+    console.error("[email] Failed to send security notification:", err instanceof Error ? err.message : err);
+  }
+}
+
 export async function sendTestEmail(to: string): Promise<void> {
   // Bypass the send toggle (but not the feature flag) so admins can verify the
   // SMTP/Resend transport before switching notification emails on.

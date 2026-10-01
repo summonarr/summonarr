@@ -176,6 +176,17 @@ async function main() {
       for (const table of ["UserTotp", "WebAuthnCredential", "MfaRecoveryCode"]) {
         await client.query(`DELETE FROM "${table}" WHERE "userId" = $1`, [u.id]);
       }
+      // ...and the persistent code lockout (clearMfaLockoutInTx). Probed first so
+      // the break-glass still works on a database whose schema predates it.
+      const { rows: lockCols } = await client.query(
+        `SELECT 1 FROM information_schema.columns WHERE table_name = 'User' AND column_name = 'mfaLockedUntil'`,
+      );
+      if (lockCols.length > 0) {
+        await client.query(
+          `UPDATE "User" SET "mfaFailedAttempts" = 0, "mfaLockoutCount" = 0, "mfaLockedUntil" = NULL WHERE id = $1`,
+          [u.id],
+        );
+      }
     }
     await client.query("COMMIT");
     console.log(

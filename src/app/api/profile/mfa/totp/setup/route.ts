@@ -2,29 +2,37 @@ import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
-import { beginTotpEnrollment } from "@/lib/mfa/mfa-store";
-import { mfaPasswordStepUp } from "@/lib/mfa/step-up";
+import { beginTotpEnrollment, getMfaState } from "@/lib/mfa/mfa-store";
+import { mfaPasswordStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { buildOtpauthUri } from "@/lib/mfa/totp";
 
+const ALREADY_ENABLED_MESSAGE = "An authenticator app is already set up. Remove it first to replace it.";
+
 // POST /api/profile/mfa/totp/setup — issues a PENDING authenticator-app secret.
-// Body: { password }. Returns { secret, otpauthUri } — the ONLY time the secret
+// Body: { password, secondFactor? }. When the account already has an active
+// factor (e.g. a passkey) adding an authenticator app is an enrollment change
+// and also needs a fresh second factor (step-up.ts); the very first factor is
+// password-only. Returns { secret, otpauthUri } — the ONLY time the secret
 // leaves the server (it is encrypted at rest by the Prisma extension). Nothing
 // changes for sign-in until POST /api/profile/mfa/totp/enable confirms a code.
 // Calling it again before confirming re-issues a fresh secret.
 export const POST = withAuth(async (req, _ctx, session) => {
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
-  const parsed = await readJsonCapped<{ password?: unknown }>(req, 16384);
+  const parsed = await readJsonCapped<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024);
   if (parsed instanceof NextResponse) return parsed;
   const user = await mfaPasswordStepUp(session, parsed.password);
   if (user instanceof NextResponse) return user;
 
+  // Checked before the second factor so a 409 never spends a recovery code.
+  const state = await getMfaState(user.id);
+  if (state.totpEnabled) return NextResponse.json({ error: ALREADY_ENABLED_MESSAGE }, { status: 409 });
+  const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor, state);
+  if (proof instanceof NextResponse) return proof;
+
   const result = await beginTotpEnrollment(user.id);
   if (result === "already-enabled") {
-    return NextResponse.json(
-      { error: "An authenticator app is already set up. Remove it first to replace it." },
-      { status: 409 },
-    );
+    return NextResponse.json({ error: ALREADY_ENABLED_MESSAGE }, { status: 409 });
   }
   return NextResponse.json(
     {

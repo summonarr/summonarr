@@ -2,6 +2,30 @@ import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import { Permission } from "@/lib/permissions";
 
+// Body of every two-factor ENROLLMENT change (guardrail 6d): the current
+// password, plus — once the account has an active factor — a fresh second factor.
+const MFA_SECOND_FACTOR_SCHEMA = {
+  type: "object",
+  description:
+    "Required once the account has an active second factor (omit for the first factor). { method: \"totp\" | \"recovery\", code } or { method: \"webauthn\", credential, challengeToken } with the challenge from POST /profile/mfa/challenge. A recovery code used here is spent.",
+  required: ["method"],
+  properties: {
+    method: { type: "string", enum: ["totp", "recovery", "webauthn"] },
+    code: { type: "string" },
+    credential: { type: "object", description: "PublicKeyCredential JSON (assertion response, base64url)" },
+    challengeToken: { type: "string" },
+  },
+};
+const MFA_STEP_UP_400 =
+  "Missing or wrong password, or a missing/invalid second factor ({ error, secondFactorRequired: true, methods? })";
+function mfaStepUpBody(extra: Record<string, unknown> = {}, extraRequired: string[] = []) {
+  return {
+    type: "object",
+    required: ["password", ...extraRequired],
+    properties: { password: { type: "string" }, secondFactor: MFA_SECOND_FACTOR_SCHEMA, ...extra },
+  };
+}
+
 const spec = {
   openapi: "3.0.3",
   info: {
@@ -1124,7 +1148,11 @@ const spec = {
     },
     // ── Two-factor authentication (local-credentials accounts only) ──────────
     // Every enrollment CHANGE takes the current password in the body (step-up);
-    // 403 = not a local-credentials account. The sign-in half
+    // once the account has an active factor it ALSO takes `secondFactor` (a
+    // current TOTP code, an unused recovery code — spent — or a passkey assertion
+    // over a /profile/mfa/challenge challenge). The first factor is
+    // password-only. 403 = not a local-credentials account; 429 = too many
+    // step-up attempts or the persistent code lockout. The sign-in half
     // (POST /auth/sign-in/mfa) is a handshake documented in SECURITY.md.
     "/profile/mfa": {
       get: {
@@ -1140,15 +1168,25 @@ const spec = {
       delete: {
         tags: ["Profile"],
         summary: "Turn two-factor off (removes every factor and recovery code)",
-        requestBody: {
-          required: true,
-          content: { "application/json": { schema: { type: "object", required: ["password"], properties: { password: { type: "string" } } } } },
-        },
+        requestBody: { required: true, content: { "application/json": { schema: mfaStepUpBody() } } },
         responses: {
           "200": { description: "Turned off; every OTHER session is signed out" },
-          "400": { description: "Missing or wrong password" },
+          "400": { description: MFA_STEP_UP_400 },
           "403": { description: "Not a local-credentials account" },
-          "429": { description: "Too many step-up attempts" },
+          "429": { description: "Too many step-up attempts, or code entry is locked" },
+        },
+      },
+    },
+    "/profile/mfa/challenge": {
+      post: {
+        tags: ["Profile"],
+        summary: "A fresh WebAuthn challenge for confirming an enrollment change with a passkey",
+        responses: {
+          "200": { description: "{ challengeToken, publicKey } — publicKey is PublicKeyCredentialRequestOptions (base64url); send the assertion back as secondFactor { method: \"webauthn\", credential, challengeToken }. Single-use, 5-minute, bound to this user and session" },
+          "400": { description: "The account has no passkeys" },
+          "403": { description: "Not a local-credentials account" },
+          "429": { description: "Too many challenges" },
+          "503": { description: "AUTH_URL is not configured, so no WebAuthn RP ID exists" },
         },
       },
     },
@@ -1156,14 +1194,12 @@ const spec = {
       post: {
         tags: ["Profile"],
         summary: "Issue a pending authenticator-app (TOTP) secret",
-        requestBody: {
-          required: true,
-          content: { "application/json": { schema: { type: "object", required: ["password"], properties: { password: { type: "string" } } } } },
-        },
+        requestBody: { required: true, content: { "application/json": { schema: mfaStepUpBody() } } },
         responses: {
           "200": { description: "{ secret, otpauthUri } — shown once; nothing changes until /totp/enable confirms a code" },
-          "400": { description: "Missing or wrong password" },
+          "400": { description: MFA_STEP_UP_400 },
           "409": { description: "An authenticator app is already enabled" },
+          "429": { description: "Too many step-up attempts, or code entry is locked" },
         },
       },
     },
@@ -1186,14 +1222,12 @@ const spec = {
       delete: {
         tags: ["Profile"],
         summary: "Remove the authenticator app",
-        requestBody: {
-          required: true,
-          content: { "application/json": { schema: { type: "object", required: ["password"], properties: { password: { type: "string" } } } } },
-        },
+        requestBody: { required: true, content: { "application/json": { schema: mfaStepUpBody() } } },
         responses: {
-          "200": { description: "Removed (recovery codes too when no passkey remains)" },
-          "400": { description: "Missing or wrong password" },
+          "200": { description: "Removed (recovery codes too, and every OTHER session signed out, when no passkey remains)" },
+          "400": { description: MFA_STEP_UP_400 },
           "404": { description: "No authenticator app set up" },
+          "429": { description: "Too many step-up attempts, or code entry is locked" },
         },
       },
     },
@@ -1201,13 +1235,11 @@ const spec = {
       post: {
         tags: ["Profile"],
         summary: "Replace every recovery code with ten new ones",
-        requestBody: {
-          required: true,
-          content: { "application/json": { schema: { type: "object", required: ["password"], properties: { password: { type: "string" } } } } },
-        },
+        requestBody: { required: true, content: { "application/json": { schema: mfaStepUpBody() } } },
         responses: {
           "200": { description: "{ recoveryCodes } — shown once; only hashes are stored" },
-          "400": { description: "Wrong password, or two-factor is off" },
+          "400": { description: `${MFA_STEP_UP_400}, or two-factor is off` },
+          "429": { description: "Too many step-up attempts, or code entry is locked" },
         },
       },
     },
@@ -1215,13 +1247,11 @@ const spec = {
       post: {
         tags: ["Profile"],
         summary: "Begin adding a passkey — WebAuthn creation options",
-        requestBody: {
-          required: true,
-          content: { "application/json": { schema: { type: "object", required: ["password"], properties: { password: { type: "string" } } } } },
-        },
+        requestBody: { required: true, content: { "application/json": { schema: mfaStepUpBody() } } },
         responses: {
           "200": { description: "{ registrationToken, publicKey } — publicKey is PublicKeyCredentialCreationOptions with base64url binary fields; the token is single-use, 5-minute, bound to this user and session" },
-          "400": { description: "Wrong password, or the passkey limit is reached" },
+          "400": { description: `${MFA_STEP_UP_400}, or the passkey limit is reached` },
+          "429": { description: "Too many step-up attempts, or code entry is locked" },
           "503": { description: "AUTH_URL is not configured, so no WebAuthn RP ID exists" },
         },
       },
@@ -1248,7 +1278,7 @@ const spec = {
         },
         responses: {
           "200": { description: "{ ok, recoveryCodes? } — recoveryCodes when this is the first factor, which also signs out every other session" },
-          "400": { description: "Expired/foreign registration token, or the response failed verification" },
+          "400": { description: "Expired/foreign registration token, a token issued on the password alone to an account that has since gained a factor, or the response failed verification" },
           "409": { description: "That credential is already registered" },
         },
       },
@@ -1260,19 +1290,16 @@ const spec = {
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: {
           required: true,
-          content: { "application/json": { schema: { type: "object", required: ["password", "name"], properties: { password: { type: "string" }, name: { type: "string", maxLength: 64 } } } } },
+          content: { "application/json": { schema: mfaStepUpBody({ name: { type: "string", maxLength: 64 } }, ["name"]) } },
         },
-        responses: { "200": { description: "Renamed" }, "400": { description: "Wrong password or empty name" }, "404": { description: "Not the caller's passkey" } },
+        responses: { "200": { description: "Renamed" }, "400": { description: `${MFA_STEP_UP_400}, or an empty name` }, "404": { description: "Not the caller's passkey" }, "429": { description: "Too many step-up attempts, or code entry is locked" } },
       },
       delete: {
         tags: ["Profile"],
         summary: "Remove one of the caller's passkeys",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
-        requestBody: {
-          required: true,
-          content: { "application/json": { schema: { type: "object", required: ["password"], properties: { password: { type: "string" } } } } },
-        },
-        responses: { "200": { description: "Removed (recovery codes too when it was the last factor)" }, "400": { description: "Wrong password" }, "404": { description: "Not the caller's passkey" } },
+        requestBody: { required: true, content: { "application/json": { schema: mfaStepUpBody() } } },
+        responses: { "200": { description: "Removed (recovery codes too, and every OTHER session signed out, when it was the last factor)" }, "400": { description: MFA_STEP_UP_400 }, "404": { description: "Not the caller's passkey" }, "429": { description: "Too many step-up attempts, or code entry is locked" } },
       },
     },
     "/profile/notifications": {

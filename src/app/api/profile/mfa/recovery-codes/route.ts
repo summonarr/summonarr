@@ -5,15 +5,18 @@ import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { getMfaState, replaceRecoveryCodesInTx } from "@/lib/mfa/mfa-store";
-import { mfaPasswordStepUp } from "@/lib/mfa/step-up";
+import { mfaPasswordStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
+import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 
 // POST /api/profile/mfa/recovery-codes — replaces every recovery code with ten
-// new ones (old ones stop working immediately). Body: { password }. The new
+// new ones (old ones stop working immediately). Body: { password, secondFactor }
+// — 2FA is necessarily on here, so a fresh second factor is always required
+// (step-up.ts); a recovery code used as that proof is consumed first. The new
 // codes are in this response and nowhere else — only their hashes are stored.
 export const POST = withAuth(async (req, _ctx, session) => {
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
-  const parsed = await readJsonCapped<{ password?: unknown }>(req, 16384);
+  const parsed = await readJsonCapped<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024);
   if (parsed instanceof NextResponse) return parsed;
   const user = await mfaPasswordStepUp(session, parsed.password);
   if (user instanceof NextResponse) return user;
@@ -22,7 +25,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (!state.enabled) {
     return NextResponse.json({ error: "Turn on two-factor authentication first" }, { status: 400 });
   }
+  const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor, state);
+  if (proof instanceof NextResponse) return proof;
   const codes = await prisma.$transaction(async (tx) => replaceRecoveryCodesInTx(tx, user.id));
+  void notifyMfaSecurityEvent(user.id, "recovery-regenerated");
 
   void logAudit({
     userId: user.id,

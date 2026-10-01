@@ -1,6 +1,8 @@
 import "server-only";
 
-// "Require two-factor for administrators" — the admin-area enrollment nudge.
+// "Prompt administrators to set up two-factor" (Setting requireMfaForAdmins,
+// formerly labelled "Require two-factor for administrators") — the admin-area
+// enrollment nudge.
 //
 // When the `requireMfaForAdmins` Setting is "true", an ADMIN whose session came
 // from LOCAL CREDENTIALS and who has no active second factor is redirected from
