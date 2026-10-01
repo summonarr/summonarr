@@ -50,6 +50,8 @@ export const ACTION_GROUP: Record<AuditAction, AuditGroup> = {
   // A request filed by the watchlist auto-request (in-app add or the Plex
   // watchlist cron) — grouped with the other request events.
   REQUEST_AUTO: "admin",
+  LIBRARY_CLEANUP_DELETE: "admin",
+  LIBRARY_CLEANUP_PROTECT: "admin",
   LIBRARY_SYNC: "system",
   CACHE_WARM: "system",
   RATINGS_CACHE_CLEAR: "system",
@@ -108,4 +110,6 @@ export const ACTION_LABELS: Record<AuditAction, ActionLabel> = {
   JELLYFIN_SESSION_TERMINATE: { label: "Jellyfin Session Terminated", color: "bg-red-500/15 text-red-400",      icon: "delete" },
   BLACKLIST_CHANGE:      { label: "Blacklist Changed",         color: "bg-red-500/15 text-red-400",             icon: "delete" },
   REQUEST_AUTO:          { label: "Auto-Requested",            color: "bg-sky-500/15 text-sky-400",           icon: "approve" },
+  LIBRARY_CLEANUP_DELETE: { label: "Library Cleanup Delete",   color: "bg-red-500/15 text-red-400",             icon: "delete" },
+  LIBRARY_CLEANUP_PROTECT: { label: "Cleanup Protection Changed", color: "bg-sky-500/15 text-sky-400",         icon: "role" },
 };

@@ -53,6 +53,21 @@ const spec = {
           notGraded: { type: "integer" },
         },
       },
+      CleanupSettings: {
+        type: "object",
+        description: "Library cleanup rules. Day-based exclusions take 0 to mean off.",
+        properties: {
+          unwatchedEnabled: { type: "boolean" },
+          unwatchedDays: { type: "integer", minimum: 1, maximum: 3650 },
+          neverWatchedEnabled: { type: "boolean" },
+          neverWatchedDays: { type: "integer", minimum: 1, maximum: 3650 },
+          votesEnabled: { type: "boolean" },
+          votesMin: { type: "integer", minimum: 1, maximum: 1000 },
+          minAgeDays: { type: "integer", minimum: 0, maximum: 3650 },
+          recentRequestDays: { type: "integer", minimum: 0, maximum: 3650 },
+          excludeAiring: { type: "boolean" },
+        },
+      },
       IssueType: {
         type: "string",
         enum: ["BAD_VIDEO", "WRONG_AUDIO", "MISSING_SUBTITLES", "WRONG_MATCH", "OTHER"],
@@ -151,6 +166,7 @@ const spec = {
     { name: "Admin – Backup", description: "Database export / import" },
     { name: "Admin – Debug", description: "Pipeline inspection" },
     { name: "Admin – Fix Match", description: "Manual metadata correction" },
+    { name: "Admin – Cleanup", description: "Library cleanup: rule-based candidates and admin-confirmed deletion (ADMIN only)" },
     { name: "Discord", description: "Discord OAuth / role sync" },
     { name: "Settings", description: "Application settings (ADMIN only)" },
     { name: "Webhooks", description: "Inbound webhooks from media servers / ARR" },
@@ -1786,6 +1802,177 @@ const spec = {
           },
           "403": { description: "Caller holds neither MANAGE_USERS nor MANAGE_REQUESTS" },
           "404": { description: "No such user" },
+        },
+      },
+    },
+
+    "/admin/cleanup": {
+      get: {
+        tags: ["Admin – Cleanup"],
+        summary: "Library cleanup report (ADMIN)",
+        description:
+          "Judges every library title (the union of every Plex and Jellyfin server) against the configured rules and " +
+          "returns each title any enabled rule matched: candidates first, then the ones an exclusion holds back, with " +
+          "every matched rule and exclusion named. Sizes and Radarr/Sonarr instances come from one live listing per " +
+          "configured instance. Nothing is written. 404 while `feature.admin.cleanup` is off.",
+        responses: {
+          "200": {
+            description: "The report",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    settings: { $ref: "#/components/schemas/CleanupSettings" },
+                    playHistoryTracked: { type: "boolean" },
+                    historyStart: { type: "string", format: "date-time", nullable: true },
+                    libraryTitles: { type: "integer" },
+                    rows: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          tmdbId: { type: "integer" },
+                          mediaType: { type: "string", enum: ["MOVIE", "TV"] },
+                          title: { type: "string" },
+                          posterPath: { type: "string", nullable: true },
+                          year: { type: "string", nullable: true },
+                          servers: { type: "array", items: { type: "string" } },
+                          addedAt: { type: "string", format: "date-time", nullable: true },
+                          lastPlayedAt: { type: "string", format: "date-time", nullable: true },
+                          playCount: { type: "integer" },
+                          votes: { type: "integer" },
+                          idleDays: { type: "integer", nullable: true },
+                          arr: { type: "array", items: { type: "object", properties: { service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" }, sizeOnDisk: { type: "number" } } } },
+                          sizeOnDisk: { type: "number", nullable: true },
+                          matched: { type: "array", items: { type: "string", enum: ["unwatched", "neverWatched", "votes"] } },
+                          excludedBy: { type: "array", items: { type: "string", enum: ["recentlyAdded", "activeRequest", "recentlyFulfilled", "watchlisted", "playingNow", "airing", "protected"] } },
+                          candidate: { type: "boolean" },
+                        },
+                      },
+                    },
+                    arrErrors: { type: "array", items: { type: "object", properties: { service: { type: "string" }, instance: { type: "string" }, error: { type: "string" } } } },
+                    protected: { type: "array", items: { type: "object", properties: { tmdbId: { type: "integer" }, mediaType: { type: "string" }, title: { type: "string", nullable: true }, reason: { type: "string", nullable: true }, createdAt: { type: "string", format: "date-time" } } } },
+                    totals: { type: "object", properties: { candidates: { type: "integer" }, held: { type: "integer" }, reclaimableBytes: { type: "number" } } },
+                  },
+                },
+              },
+            },
+          },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Library cleanup is disabled" },
+        },
+      },
+    },
+
+    "/admin/cleanup/settings": {
+      get: {
+        tags: ["Admin – Cleanup"],
+        summary: "Library cleanup rules in force (ADMIN)",
+        responses: {
+          "200": { description: "The rules", content: { "application/json": { schema: { type: "object", properties: { settings: { $ref: "#/components/schemas/CleanupSettings" } } } } } },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Library cleanup is disabled" },
+        },
+      },
+      patch: {
+        tags: ["Admin – Cleanup"],
+        summary: "Change library cleanup rules (ADMIN)",
+        description: "A partial object keyed by field name. Any unknown field or out-of-range value refuses the whole patch.",
+        requestBody: { required: true, content: { "application/json": { schema: { $ref: "#/components/schemas/CleanupSettings" } } } },
+        responses: {
+          "200": { description: "The rules now in force", content: { "application/json": { schema: { type: "object", properties: { settings: { $ref: "#/components/schemas/CleanupSettings" } } } } } },
+          "400": { description: "Invalid field or value" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Library cleanup is disabled" },
+        },
+      },
+    },
+
+    "/admin/cleanup/protect": {
+      post: {
+        tags: ["Admin – Cleanup"],
+        summary: "Protect a title from cleanup (ADMIN)",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["tmdbId", "mediaType"],
+                properties: {
+                  tmdbId: { type: "integer" },
+                  mediaType: { type: "string", enum: ["MOVIE", "TV"] },
+                  title: { type: "string", maxLength: 500 },
+                  reason: { type: "string", maxLength: 500 },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "201": { description: "Protected (an upsert)" },
+          "400": { description: "Invalid body" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Library cleanup is disabled" },
+        },
+      },
+      delete: {
+        tags: ["Admin – Cleanup"],
+        summary: "Remove a title's cleanup protection (ADMIN)",
+        parameters: [
+          { name: "tmdbId", in: "query", required: true, schema: { type: "integer" } },
+          { name: "mediaType", in: "query", required: true, schema: { type: "string", enum: ["MOVIE", "TV"] } },
+        ],
+        responses: {
+          "200": { description: "{ ok: true, removed: <count> }" },
+          "400": { description: "Missing or invalid query" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Library cleanup is disabled" },
+        },
+      },
+    },
+
+    "/admin/cleanup/delete": {
+      post: {
+        tags: ["Admin – Cleanup"],
+        summary: "Delete cleanup candidates from Radarr/Sonarr — dry run, then confirmed execute (ADMIN)",
+        description:
+          "Default is a DRY RUN: re-judges exactly the given titles against the live rules and returns every " +
+          "Radarr/Sonarr entry each occupies (every instance) and `targetCount`. `?execute=true` with the same body " +
+          "plus `confirmTargets` equal to the live count deletes each target with `deleteFiles=true` and the " +
+          "import-list exclusion flag; any other count answers 409 with the fresh plan. A title that is no longer a " +
+          "candidate is skipped, never deleted. Before deleting, every AVAILABLE request for the title is stamped so " +
+          "the sync never re-pushes it; `blacklist` (default true) also blacklists a fully removed title. Results are " +
+          "per title (deleted / partial / failed) — a partial failure is not an error status.",
+        parameters: [{ name: "execute", in: "query", schema: { type: "string", enum: ["true"] } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["items"],
+                properties: {
+                  items: {
+                    type: "array",
+                    minItems: 1,
+                    maxItems: 500,
+                    items: { type: "object", required: ["tmdbId", "mediaType"], properties: { tmdbId: { type: "integer" }, mediaType: { type: "string", enum: ["MOVIE", "TV"] } } },
+                  },
+                  blacklist: { type: "boolean", default: true },
+                  confirmTargets: { type: "integer", description: "Required with ?execute=true: the dry run's targetCount" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Dry run: { dryRun: true, targetCount, reclaimableBytes, items, skipped }. Execute: { dryRun: false, deletedCount, partialCount, failedCount, results, skipped }" },
+          "400": { description: "Invalid body" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Library cleanup is disabled" },
+          "409": { description: "confirmTargets missing or not equal to the live count (the fresh plan is returned)" },
         },
       },
     },

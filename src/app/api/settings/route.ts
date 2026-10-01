@@ -189,6 +189,7 @@ const SETTINGS_SCHEMA = [
   ["feature.admin.auditLog",          false],
   ["feature.admin.backup",            false],
   ["feature.admin.apiDocs",           false],
+  ["feature.admin.cleanup",           false],
 ] as const satisfies ReadonlyArray<readonly [string, boolean]>;
 
 type AllowedKey = (typeof SETTINGS_SCHEMA)[number][0];

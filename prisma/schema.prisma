@@ -298,6 +298,14 @@ model MediaRequest {
   availableAt       DateTime? // set once when status transitions to AVAILABLE; used for fulfillment-time stats
   pendingNotifyAt   DateTime? // set to approvedAt+90s; cleared once the pending/awaiting notification fires
   notifiedAvailable Boolean   @default(false) // set when the "ready to watch" notification is sent; never reset on status revert
+  // Set when an admin deleted this title from Radarr/Sonarr through Library
+  // cleanup (/admin/cleanup). The title then leaves every cache and library, and
+  // the sync's AVAILABLE→APPROVED revert would read that absence as "the file was
+  // lost" and push the title straight back to Radarr/Sonarr — re-downloading what
+  // the admin just deleted. The revert skips a row carrying this stamp, so the
+  // request stays AVAILABLE (it WAS fulfilled) and nothing is re-pushed. Only the
+  // cleanup delete route writes it; status and approvedAt are left alone.
+  cleanedUpAt       DateTime?
 
   requestedBy String
   user        User   @relation(fields: [requestedBy], references: [id], onDelete: Cascade)
@@ -745,6 +753,23 @@ model BlacklistItem {
   @@index([createdAt])
 }
 
+// ─── Library Cleanup Protection ────────────────────────────────────────────────
+// Titles an admin has pinned as "never a cleanup candidate" on /admin/cleanup.
+// Keyed like BlacklistItem by the app's canonical (tmdbId, mediaType) identity,
+// so a protection covers every server and every Radarr/Sonarr instance at once.
+// No FK on addedBy, for the same reason as BlacklistItem.
+
+model CleanupProtection {
+  tmdbId    Int
+  mediaType MediaType
+  title     String?  @db.VarChar(500)
+  reason    String?  @db.VarChar(500)
+  addedBy   String?
+  createdAt DateTime @default(now())
+
+  @@id([tmdbId, mediaType])
+}
+
 enum AuditAction {
   REQUEST_APPROVE
   REQUEST_DECLINE
@@ -786,6 +811,8 @@ enum AuditAction {
   JELLYFIN_SESSION_TERMINATE
   BLACKLIST_CHANGE
   REQUEST_AUTO
+  LIBRARY_CLEANUP_DELETE
+  LIBRARY_CLEANUP_PROTECT
 }
 
 // ─── Play History ────────────────────────────────────────────────────────────

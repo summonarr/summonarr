@@ -26,6 +26,7 @@ import {
   Bookmark,
   EyeOff,
   FileText,
+  FileX,
 } from "@/components/icons";
 import type { Translator } from "@/lib/i18n/translate";
 import { hasPermission, Permission, effectivePermissions, parsePermissions, type PermissionValue } from "@/lib/permissions";
@@ -64,6 +65,7 @@ export const NAV_ITEM_FEATURE_KEY: Record<string, string> = {
   "/admin/audit-log":    "feature.admin.auditLog",
   "/admin/backup":       "feature.admin.backup",
   "/admin/api-docs":     "feature.admin.apiDocs",
+  "/admin/cleanup":      "feature.admin.cleanup",
   "/admin/trash-guides": "trashGuidesEnabled",
 };
 
@@ -116,6 +118,7 @@ export const adminNavItems: NavItem[] = [
   { href: "/admin/users", label: "Users", icon: Users, section: "admin" },
   { href: "/admin/library", label: "Library Diff", icon: Library, section: "admin" },
   { href: "/admin/blacklist", label: "Blacklist", icon: Ban, section: "admin" },
+  { href: "/admin/cleanup", label: "Library Cleanup", icon: FileX, section: "admin" },
   { href: "/admin/stats", label: "Statistics", icon: BarChart3, section: "admin" },
   { href: "/admin/activity", label: "Activity", icon: Activity, section: "admin" },
   { href: "/admin/audit-log", label: "Audit Log", icon: ScrollText, section: "admin" },

@@ -127,6 +127,7 @@ type ReqRow = {
   status: ReqStatus; notifiedAvailable: boolean;
   pendingNotifyAt: Date | null; availableAt: Date | null;
   qualityProfileId: number | null; createdAt: Date; lastArrPushAt: Date | null; tvdbId: number | null;
+  cleanedUpAt: Date | null;
 };
 const requests = new Map<string, ReqRow>();
 function seedRequest(r: Partial<ReqRow> & { id: string; tmdbId: number; mediaType: MediaType; requestedBy: string; status: ReqStatus }): void {
@@ -134,6 +135,7 @@ function seedRequest(r: Partial<ReqRow> & { id: string; tmdbId: number; mediaTyp
     arrInstance: "", title: `title-${r.id}`, posterPath: null, notifiedAvailable: false,
     pendingNotifyAt: null, availableAt: null, qualityProfileId: null,
     createdAt: new Date("2026-01-01T00:00:00.000Z"), lastArrPushAt: null, tvdbId: null,
+    cleanedUpAt: null,
     ...r,
   });
 }
@@ -143,6 +145,7 @@ type ReqWhere = {
   status?: ReqStatus | { in?: ReqStatus[]; not?: ReqStatus };
   notifiedAvailable?: boolean;
   OR?: Array<{ lastArrPushAt?: null | { lte?: Date } }>;
+  cleanedUpAt?: null;
 };
 function reqMatches(row: ReqRow, where: ReqWhere | undefined): boolean {
   if (!where) return true;
@@ -156,6 +159,7 @@ function reqMatches(row: ReqRow, where: ReqWhere | undefined): boolean {
     }
   }
   if (where.notifiedAvailable !== undefined && row.notifiedAvailable !== where.notifiedAvailable) return false;
+  if (where.cleanedUpAt === null && row.cleanedUpAt !== null) return false;
   if (where.OR) {
     const any = where.OR.some((c) => {
       if (c.lastArrPushAt === null) return row.lastArrPushAt === null;
@@ -2741,4 +2745,65 @@ test("guardrail 14a: the hold is per INSTANCE — a wanted row on the default So
 
   assert.equal(requests.get("req-default")?.status, "APPROVED", "held: its own instance lists the series as wanted");
   assert.equal(requests.get("req-anime")?.status, "AVAILABLE", "not held: the anime instance has no wanted row (nothing tracks it there), so library presence decides");
+});
+
+// ── Library cleanup: a deleted title is never re-pushed ─────────────────────
+// An admin deleting a title through /admin/cleanup removes it from Radarr AND
+// every library. Left alone, the next sync reads that absence as a lost file,
+// demotes the AVAILABLE request to APPROVED, and the run after that re-pushes it
+// to Radarr — re-downloading what was just deleted. The cleanup stamps
+// MediaRequest.cleanedUpAt, and the demote's CAS skips a stamped row. Two runs, because
+// the re-push reads the request the previous run demoted.
+function cleanupScenario(): void {
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-1");
+  configureRadarr();
+  const plex = plexResponder([]); // the title is gone from Plex…
+  const radarr = radarrResponder([]); // …and from Radarr
+  respond = (url) => (url.origin === RADARR_ORIGIN ? radarr(url) : plex(url));
+  seedUser("u-clean", {});
+}
+const radarrAddAttempts = () =>
+  fetchCalls.filter((c) => c.url.origin === RADARR_ORIGIN && !(c.url.pathname === "/api/v3/movie" && c.method === "GET"));
+
+test("cleanup: a request whose title an admin deleted stays AVAILABLE and is never pushed back to Radarr", async () => {
+  cleanupScenario();
+  seedRequest({
+    id: "req-cleaned", tmdbId: 950, mediaType: "MOVIE", requestedBy: "u-clean", status: "AVAILABLE",
+    notifiedAvailable: true, cleanedUpAt: new Date("2026-09-01T00:00:00.000Z"),
+  });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.equal(requests.get("req-cleaned")?.status, "AVAILABLE", "a cleaned-up title is not a lost file — no demote");
+  assert.deepEqual(radarrAddAttempts().map((c) => c.url.pathname), [], "nothing may re-add a title the admin deleted");
+});
+
+test("cleanup counterpart: the SAME title without the stamp is demoted and then re-pushed — the stamp is what stops it", async () => {
+  // Without this the test above would also pass against a sync that never
+  // demotes anything at all.
+  cleanupScenario();
+  seedRequest({ id: "req-lost", tmdbId: 950, mediaType: "MOVIE", requestedBy: "u-clean", status: "AVAILABLE", notifiedAvailable: true });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+  assert.equal(requests.get("req-lost")?.status, "APPROVED", "a genuinely lost file is demoted");
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+  assert.ok(radarrAddAttempts().length > 0, "…and the next run tries to put it back in Radarr");
+});
+
+test("cleanup: the stamp is checked in the demote's CAS WHERE, so a stamp landing mid-run still wins", async () => {
+  cleanupScenario();
+  seedRequest({ id: "req-race", tmdbId: 951, mediaType: "MOVIE", requestedBy: "u-clean", status: "AVAILABLE", notifiedAvailable: true });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  const demote = mediaRequestUpdateManyCalls.find((c) => c.data.status === "APPROVED");
+  assert.ok(demote, "the demote ran");
+  assert.equal(demote.where?.cleanedUpAt, null, "the demote's where must carry cleanedUpAt: null");
 });

@@ -665,6 +665,19 @@ function formatSummary(action: string, d: Record<string, unknown>): string | nul
         d.title && `"${d.title}"`,
         d.reason && `— ${String(d.reason).slice(0, 80)}`,
       ].filter(Boolean).join(" ") || null;
+    case "LIBRARY_CLEANUP_DELETE":
+      return [
+        d.title && `"${d.title}"`,
+        Array.isArray(d.deleted) && d.deleted.length > 0 && `removed from ${d.deleted.join(", ")}`,
+        Array.isArray(d.failed) && d.failed.length > 0 && `failed on ${d.failed.join(", ")}`,
+        d.blacklisted === true && "· blacklisted",
+      ].filter(Boolean).join(" ") || null;
+    case "LIBRARY_CLEANUP_PROTECT":
+      return [
+        d.op === "remove" ? "Unprotected" : "Protected",
+        d.title && `"${d.title}"`,
+        d.reason && `— ${String(d.reason).slice(0, 80)}`,
+      ].filter(Boolean).join(" ") || null;
     case "BACKUP_EXPORT":
       return [
         d.format && `Format: ${String(d.format).toUpperCase()}`,
