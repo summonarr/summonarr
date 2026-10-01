@@ -211,5 +211,10 @@
   "profile.calendar.copyFeedUrl": "Copy {label} feed URL",
   "profile.calendar.copyLink": "Copy link",
   "profile.calendar.error.create": "Couldn’t create a feed link — try again.",
-  "profile.calendar.error.revoke": "Couldn’t turn off the feed — try again."
+  "profile.calendar.error.revoke": "Couldn’t turn off the feed — try again.",
+  "profile.mfa.stepUp.label": "Verification code",
+  "profile.mfa.stepUp.hint": "(authenticator or recovery code)",
+  "profile.mfa.stepUp.hintWithPasskey": "(authenticator or recovery code — leave empty to use a passkey)",
+  "profile.mfa.stepUp.passkeyFailed": "The passkey couldn't be used on this device.",
+  "profile.mfa.stepUp.codeRequired": "Enter a code from your authenticator app or a recovery code to confirm this change."
 }

@@ -6,7 +6,8 @@ import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
 import { Switch } from "@/components/ui/switch";
 
-// Admin → Settings → Authentication: "Require two-factor for administrators".
+// Admin → Settings → Authentication: "Prompt administrators to set up two-factor"
+// (Setting key requireMfaForAdmins).
 // See src/lib/mfa/policy.ts for exactly what it enforces (an /admin redirect to
 // enrollment — never a sign-in lockout).
 export function RequireAdminMfaToggle({ initialRequired, envOverride }: { initialRequired: boolean; envOverride: boolean }) {
@@ -53,9 +54,9 @@ export function RequireAdminMfaToggle({ initialRequired, envOverride }: { initia
   return (
     <div className="flex items-center justify-between gap-4 mt-4">
       <div>
-        <p id={titleId} className="text-sm font-medium text-zinc-200">Require two-factor for administrators</p>
+        <p id={titleId} className="text-sm font-medium text-zinc-200">Prompt administrators to set up two-factor</p>
         <p id={descId} className="text-xs text-zinc-500 mt-0.5">
-          Administrators who sign in with a password are sent to set up two-factor authentication before they can use the admin pages. Signing in is never blocked.
+          Administrators who sign in with a password and have no second factor are redirected to set one up when they open an admin page. This is a nudge, not a lock: signing in is never blocked, and the API, the app and the rest of the site keep working without two-factor.
           {envOverride && (
             <span className="block mt-1 text-amber-400">
               Currently switched off by SUMMONARR_DISABLE_MFA_ENFORCEMENT=true on the server.

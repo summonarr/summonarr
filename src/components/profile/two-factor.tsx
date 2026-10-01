@@ -11,7 +11,7 @@ import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
 import { translatedRelativeTime } from "./relative-time";
 import { encodeQr, qrToSvgPath } from "@/lib/qr";
-import { createPasskey, isWebAuthnCancel, isWebAuthnSupported, type CreationOptionsJSON } from "@/lib/client/webauthn";
+import { createPasskey, getPasskeyAssertion, isWebAuthnCancel, isWebAuthnSupported, type CreationOptionsJSON, type RequestOptionsJSON } from "@/lib/client/webauthn";
 
 export interface TwoFactorPasskey {
   id: string;
@@ -124,7 +124,8 @@ function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void 
 }
 
 // Profile → "Two-factor authentication". Every change re-asks for the current
-// password (the server enforces it — src/lib/mfa/step-up.ts); one password
+// password, and once 2FA is on a fresh second factor too (the server enforces
+// both — src/lib/mfa/step-up.ts); one password
 // field serves every action in the section.
 export function TwoFactorSettings({ initial, required }: Props) {
   const t = useT();
@@ -142,6 +143,9 @@ export function TwoFactorSettings({ initial, required }: Props) {
   const [passkeyName, setPasskeyName] = useState("");
   const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
   const [confirmDisable, setConfirmDisable] = useState(false);
+  // Once 2FA is on, every change also needs a fresh second factor (the server
+  // enforces it — src/lib/mfa/step-up.ts): a code typed here, or a passkey.
+  const [stepUpCode, setStepUpCode] = useState("");
 
   async function refresh() {
     const r = await call(t, "/api/profile/mfa", "GET");
@@ -166,6 +170,33 @@ export function TwoFactorSettings({ initial, required }: Props) {
     return false;
   }
 
+  // The `secondFactor` body field for a change, or null when the user must act
+  // first (an error is already shown). An account without 2FA sends nothing.
+  async function secondFactorBody(): Promise<Record<string, unknown> | null> {
+    if (!state.enabled) return {};
+    const code = stepUpCode.trim();
+    if (code.length > 0) {
+      const digits = code.replace(/\s/g, "");
+      return { secondFactor: { method: /^\d{6}$/.test(digits) ? "totp" : "recovery", code } };
+    }
+    if (state.passkeys.length > 0 && state.webauthnAvailable && isWebAuthnSupported()) {
+      const ch = await call(t, "/api/profile/mfa/challenge", "POST", {});
+      if (!ch.ok) {
+        setError(ch.error);
+        return null;
+      }
+      try {
+        const credential = await getPasskeyAssertion(ch.data.publicKey as RequestOptionsJSON);
+        return { secondFactor: { method: "webauthn", credential, challengeToken: ch.data.challengeToken } };
+      } catch (err) {
+        if (!isWebAuthnCancel(err)) setError(t("profile.mfa.stepUp.passkeyFailed"));
+        return null;
+      }
+    }
+    setError(t("profile.mfa.stepUp.codeRequired"));
+    return null;
+  }
+
   async function run(key: string, fn: () => Promise<void>) {
     setBusy(key);
     setError(null);
@@ -179,7 +210,10 @@ export function TwoFactorSettings({ initial, required }: Props) {
 
   const startTotp = () => run("totp-setup", async () => {
     if (needPassword()) return;
-    const r = await call(t, "/api/profile/mfa/totp/setup", "POST", { password });
+    const sf = await secondFactorBody();
+    if (!sf) return;
+    setStepUpCode("");
+    const r = await call(t, "/api/profile/mfa/totp/setup", "POST", { password, ...sf });
     if (!r.ok) return setError(r.error);
     setSetup({ secret: String(r.data.secret), otpauthUri: String(r.data.otpauthUri) });
     setSetupCode("");
@@ -197,7 +231,10 @@ export function TwoFactorSettings({ initial, required }: Props) {
 
   const removeTotp = () => run("totp-remove", async () => {
     if (needPassword()) return;
-    const r = await call(t, "/api/profile/mfa/totp", "DELETE", { password });
+    const sf = await secondFactorBody();
+    if (!sf) return;
+    setStepUpCode("");
+    const r = await call(t, "/api/profile/mfa/totp", "DELETE", { password, ...sf });
     if (!r.ok) return setError(r.error);
     setNotice(t("profile.mfa.notice.totpRemoved"));
     await refresh();
@@ -206,7 +243,10 @@ export function TwoFactorSettings({ initial, required }: Props) {
   const addPasskey = () => run("passkey-add", async () => {
     if (needPassword()) return;
     if (!isWebAuthnSupported()) return setError(t("auth.mfa.error.passkeyUnsupported"));
-    const opts = await call(t, "/api/profile/mfa/passkeys/options", "POST", { password });
+    const sf = await secondFactorBody();
+    if (!sf) return;
+    setStepUpCode("");
+    const opts = await call(t, "/api/profile/mfa/passkeys/options", "POST", { password, ...sf });
     if (!opts.ok) return setError(opts.error);
     let credential: Record<string, unknown>;
     try {
@@ -229,7 +269,10 @@ export function TwoFactorSettings({ initial, required }: Props) {
 
   const renamePasskey = (id: string, name: string) => run(`rename-${id}`, async () => {
     if (needPassword()) return;
-    const r = await call(t, `/api/profile/mfa/passkeys/${encodeURIComponent(id)}`, "PATCH", { password, name });
+    const sf = await secondFactorBody();
+    if (!sf) return;
+    setStepUpCode("");
+    const r = await call(t, `/api/profile/mfa/passkeys/${encodeURIComponent(id)}`, "PATCH", { password, name, ...sf });
     if (!r.ok) return setError(r.error);
     setRenaming(null);
     await refresh();
@@ -237,7 +280,10 @@ export function TwoFactorSettings({ initial, required }: Props) {
 
   const removePasskey = (id: string) => run(`remove-${id}`, async () => {
     if (needPassword()) return;
-    const r = await call(t, `/api/profile/mfa/passkeys/${encodeURIComponent(id)}`, "DELETE", { password });
+    const sf = await secondFactorBody();
+    if (!sf) return;
+    setStepUpCode("");
+    const r = await call(t, `/api/profile/mfa/passkeys/${encodeURIComponent(id)}`, "DELETE", { password, ...sf });
     if (!r.ok) return setError(r.error);
     setNotice(t("profile.mfa.notice.passkeyRemoved"));
     await refresh();
@@ -245,7 +291,10 @@ export function TwoFactorSettings({ initial, required }: Props) {
 
   const regenerateCodes = () => run("codes", async () => {
     if (needPassword()) return;
-    const r = await call(t, "/api/profile/mfa/recovery-codes", "POST", { password });
+    const sf = await secondFactorBody();
+    if (!sf) return;
+    setStepUpCode("");
+    const r = await call(t, "/api/profile/mfa/recovery-codes", "POST", { password, ...sf });
     if (!r.ok) return setError(r.error);
     setCodes(r.data.recoveryCodes as string[]);
     await refresh();
@@ -253,7 +302,10 @@ export function TwoFactorSettings({ initial, required }: Props) {
 
   const disableAll = () => run("disable", async () => {
     if (needPassword()) return;
-    const r = await call(t, "/api/profile/mfa", "DELETE", { password });
+    const sf = await secondFactorBody();
+    if (!sf) return;
+    setStepUpCode("");
+    const r = await call(t, "/api/profile/mfa", "DELETE", { password, ...sf });
     if (!r.ok) return setError(r.error);
     setConfirmDisable(false);
     setSetup(null);
@@ -289,6 +341,27 @@ export function TwoFactorSettings({ initial, required }: Props) {
           onChange={(e) => setPassword(e.target.value)}
         />
       </div>
+
+      {state.enabled && (
+        <div>
+          <label className="block text-sm text-zinc-400 mb-1" htmlFor="mfa-stepup-code">
+            {t("profile.mfa.stepUp.label")}{" "}
+            <span className="text-zinc-500">
+              {state.passkeys.length > 0 && state.webauthnAvailable
+                ? t("profile.mfa.stepUp.hintWithPasskey")
+                : t("profile.mfa.stepUp.hint")}
+            </span>
+          </label>
+          <Input
+            id="mfa-stepup-code"
+            autoComplete="one-time-code"
+            maxLength={24}
+            value={stepUpCode}
+            onChange={(e) => setStepUpCode(e.target.value)}
+            className="w-56"
+          />
+        </div>
+      )}
 
       {/* Authenticator app */}
       <section className="space-y-2">

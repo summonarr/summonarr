@@ -211,5 +211,10 @@
   "profile.calendar.copyFeedUrl": "Copiar la URL del calendario: {label}",
   "profile.calendar.copyLink": "Copiar enlace",
   "profile.calendar.error.create": "No se pudo crear el enlace del calendario. Inténtalo de nuevo.",
-  "profile.calendar.error.revoke": "No se pudo desactivar el calendario. Inténtalo de nuevo."
+  "profile.calendar.error.revoke": "No se pudo desactivar el calendario. Inténtalo de nuevo.",
+  "profile.mfa.stepUp.label": "Código de verificación",
+  "profile.mfa.stepUp.hint": "(código de la aplicación de autenticación o de recuperación)",
+  "profile.mfa.stepUp.hintWithPasskey": "(código de la aplicación de autenticación o de recuperación; déjalo vacío para usar una llave de acceso)",
+  "profile.mfa.stepUp.passkeyFailed": "No se pudo usar la llave de acceso en este dispositivo.",
+  "profile.mfa.stepUp.codeRequired": "Introduce un código de tu aplicación de autenticación o un código de recuperación para confirmar este cambio."
 }

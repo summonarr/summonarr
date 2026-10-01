@@ -5,8 +5,9 @@ import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { revokeOtherUserSessions } from "@/lib/auth";
-import { deleteAllMfaInTx, getMfaState } from "@/lib/mfa/mfa-store";
-import { mfaPasswordStepUp } from "@/lib/mfa/step-up";
+import { clearMfaLockoutInTx, deleteAllMfaInTx, getMfaState } from "@/lib/mfa/mfa-store";
+import { mfaPasswordStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
+import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 import { webAuthnConfigFromEnv } from "@/lib/mfa/webauthn";
 
 // GET /api/profile/mfa — the caller's two-factor status (never any secret).
@@ -35,21 +36,26 @@ export const GET = withAuth(async (_req, _ctx, session) => {
 });
 
 // DELETE /api/profile/mfa — turn two-factor OFF: removes the authenticator
-// app, every passkey and every recovery code. Password step-up; signs out every
-// OTHER session (the device doing this stays signed in).
+// app, every passkey and every recovery code. Body: { password, secondFactor }
+// — the second factor is required whenever a factor is active (step-up.ts).
+// Signs out every OTHER session (the device doing this stays signed in).
 export const DELETE = withAuth(async (req, _ctx, session) => {
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
-  const parsed = await readJsonCappedOr<{ password?: unknown }>(req, 16384, {});
+  const parsed = await readJsonCappedOr<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024, {});
   if (parsed instanceof NextResponse) return parsed;
   const user = await mfaPasswordStepUp(session, parsed.password);
   if (user instanceof NextResponse) return user;
+  const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor);
+  if (proof instanceof NextResponse) return proof;
 
-  const before = await getMfaState(user.id);
+  const before = proof.state;
   await prisma.$transaction(async (tx) => {
     await deleteAllMfaInTx(tx, user.id);
+    await clearMfaLockoutInTx(tx, user.id);
   });
   const revoked = before.enabled ? await revokeOtherUserSessions(user.id, session.sessionId) : 0;
+  if (before.enabled) void notifyMfaSecurityEvent(user.id, "mfa-disabled");
 
   // Committed — a failed audit write must not 500 it (guardrail 26).
   void logAudit({

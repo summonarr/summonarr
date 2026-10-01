@@ -148,6 +148,19 @@ model User {
   calendarTokenHash      String?   @unique
   calendarTokenCreatedAt DateTime?
 
+  // Two-factor GUESSING bound (src/lib/mfa/lockout.ts, guardrail 6d). Persistent
+  // on purpose: an in-memory limiter forgets on every restart, and a correct
+  // password refunds the password-step limiter, so only a DB counter bounds how
+  // many codes an attacker holding the password can try. Counts CONSECUTIVE
+  // failed codes (TOTP + recovery; passkeys are not guessable and never count),
+  // reset on a successful code. At MFA_LOCKOUT_THRESHOLD failures the counter
+  // resets and mfaLockedUntil is set (15 min, doubling per lockout, capped at 24h)
+  // — while it is in the future every CODE is refused, even a correct one.
+  // This is NOT a "has 2FA" flag: the factor rows stay the only source of truth.
+  mfaFailedAttempts Int       @default(0)
+  mfaLockoutCount   Int       @default(0)
+  mfaLockedUntil    DateTime?
+
   accounts          Account[]
   requests          MediaRequest[]
   issues            Issue[]            @relation(name: "IssueReporter")

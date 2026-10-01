@@ -15,7 +15,7 @@ import "server-only";
 //   - passkey:   UPDATE … SET signCount = n  WHERE signCount = <value verified>
 // so two concurrent requests presenting the same code/assertion can't both win.
 
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, hkdfSync } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { verifyTotp, generateTotpSecret } from "./totp";
 import { generateRecoveryCodes, hashRecoveryCode, normalizeRecoveryCode, recoveryHashesEqual } from "./recovery-codes";
@@ -87,10 +87,19 @@ export function webAuthnUserHandle(userId: string): string {
 // Keyed, so the value carried in the (client-readable) challenge token reveals
 // nothing about the hash itself. A changed password ⇒ a different value ⇒ the
 // pending challenge is dead.
-export function passwordVersion(passwordHash: string): string {
+//
+// The key is an HKDF subkey of NEXTAUTH_SECRET (like mfa-token.ts keyFor), never
+// the raw secret: that one signs session JWTs, and every use of a key outside
+// its purpose is a cross-protocol risk. Changing the derivation changes every
+// pwv value, so challenge tokens in flight at a deploy (5-minute TTL) die.
+function pwvKey(): Uint8Array {
   const secret = process.env.NEXTAUTH_SECRET;
   if (!secret) throw new Error("[mfa] NEXTAUTH_SECRET must be set");
-  return createHmac("sha256", secret).update(`summonarr-pwv:v1:${passwordHash}`).digest("base64url").slice(0, 32);
+  return new Uint8Array(hkdfSync("sha256", secret, "summonarr-pwv", "summonarr:pwv:v1", 32));
+}
+
+export function passwordVersion(passwordHash: string): string {
+  return createHmac("sha256", pwvKey()).update(`summonarr-pwv:v1:${passwordHash}`).digest("base64url").slice(0, 32);
 }
 
 // ─── second-factor verification (sign-in) ────────────────────────────────────
@@ -240,9 +249,29 @@ export async function confirmTotpEnrollmentInTx(
   return res.count === 1 ? "ok" : "invalid";
 }
 
+// Serializes a user's recovery-code writes. Under READ COMMITTED two concurrent
+// first-factor enrollments (TOTP enable + passkey registration) both counted
+// zero codes, both deleted, both inserted — and the user was shown a set the
+// other transaction had already deleted. A per-user transaction-scoped advisory
+// lock (released at COMMIT/ROLLBACK) makes count→delete→insert atomic.
+// Namespace 4610 is MFA's own (others in this repo: 42/43 accounts, 1001 arr,
+// 2000–2021 sync/cron); the key is a 31-bit hash of the user id so the call hits
+// the (int, int) overload. A collision only serializes two unrelated users.
+export const MFA_USER_LOCK_NAMESPACE = 4610;
+
+export function mfaUserLockKey(userId: string): number {
+  return createHash("sha256").update(`summonarr-mfa-lock:${userId}`).digest().readUInt32BE(0) & 0x7fffffff;
+}
+
+export async function lockUserMfaInTx(tx: MfaTxClient, userId: string): Promise<void> {
+  // Both operands are integers computed here — never caller input.
+  await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(${MFA_USER_LOCK_NAMESPACE}, ${mfaUserLockKey(userId)})`);
+}
+
 // Replaces every recovery code with a fresh set; returns the plaintext (shown
 // once). Runs inside the caller's transaction.
 export async function replaceRecoveryCodesInTx(tx: MfaTxClient, userId: string): Promise<string[]> {
+  await lockUserMfaInTx(tx, userId);
   const codes = generateRecoveryCodes();
   await tx.mfaRecoveryCode.deleteMany({ where: { userId } });
   await tx.mfaRecoveryCode.createMany({
@@ -254,6 +283,8 @@ export async function replaceRecoveryCodesInTx(tx: MfaTxClient, userId: string):
 // When the FIRST factor is enabled the user gets recovery codes; afterwards an
 // existing unused set is left alone (regenerating is an explicit action).
 export async function ensureRecoveryCodesInTx(tx: MfaTxClient, userId: string): Promise<string[] | null> {
+  // Lock BEFORE the count — the count is the racy read.
+  await lockUserMfaInTx(tx, userId);
   const remaining = await tx.mfaRecoveryCode.count({ where: { userId, usedAt: null } });
   if (remaining > 0) return null;
   return replaceRecoveryCodesInTx(tx, userId);
@@ -261,14 +292,28 @@ export async function ensureRecoveryCodesInTx(tx: MfaTxClient, userId: string): 
 
 // After a factor is removed: if nothing is left, the recovery codes go too —
 // they would otherwise be live credentials for a 2FA that no longer exists.
-export async function dropRecoveryCodesIfNoFactorInTx(tx: MfaTxClient, userId: string): Promise<void> {
+// Returns true when the account is left with NO active factor — the caller then
+// signs out the other sessions, exactly as turning 2FA off outright does.
+export async function dropRecoveryCodesIfNoFactorInTx(tx: MfaTxClient, userId: string): Promise<boolean> {
   const [totp, passkeys] = await Promise.all([
     tx.userTotp.findUnique({ where: { userId }, select: { enabledAt: true } }),
     tx.webAuthnCredential.count({ where: { userId } }),
   ]);
   if (!totp?.enabledAt && passkeys === 0) {
     await tx.mfaRecoveryCode.deleteMany({ where: { userId } });
+    return true;
   }
+  return false;
+}
+
+// Clears the persistent second-factor lockout (lockout.ts). Used by the admin
+// reset — a lost phone is exactly when an owner locks themselves out — and by
+// turning 2FA off.
+export async function clearMfaLockoutInTx(tx: MfaTxClient, userId: string): Promise<void> {
+  await tx.user.updateMany({
+    where: { id: userId },
+    data: { mfaFailedAttempts: 0, mfaLockoutCount: 0, mfaLockedUntil: null },
+  });
 }
 
 // Removes every second factor and recovery code — disable-all, admin reset and
