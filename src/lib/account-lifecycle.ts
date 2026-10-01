@@ -113,8 +113,13 @@ export async function reactivateUser(id: string): Promise<boolean> {
   // `purgedAt IS NULL` term alone is NOT enough: rows scrubbed before that
   // column existed carry the tombstone email with a null `purgedAt` (see
   // isPurgedRow), and re-enabling one produces an unusable zombie account.
+  //
+  // The calendar feed URL is cleared too: it is a bearer credential handed out
+  // before the account was disabled, and re-enabling must not silently revive a
+  // link that may have leaked in the meantime. The user can generate a new one.
   const rows = await prisma.$executeRaw`
-    UPDATE "User" SET "deactivatedAt" = NULL
+    UPDATE "User" SET "deactivatedAt" = NULL,
+      "calendarTokenHash" = NULL, "calendarTokenCreatedAt" = NULL
     WHERE id = ${id}
       AND "purgedAt" IS NULL
       AND "deactivatedAt" IS NOT NULL

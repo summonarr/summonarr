@@ -456,6 +456,8 @@ test("password change with the CORRECT current password re-hashes, stamps the in
   assert.ok(changedAt instanceof Date && revokedAt instanceof Date, "both invalidation cutoffs must be stamped");
   assert.ok(changedAt.getTime() >= before && changedAt.getTime() <= Date.now(), "passwordChangedAt must be ~now");
   assert.equal(changedAt.getTime(), revokedAt.getTime(), "both cutoffs are stamped from the same instant");
+  assert.equal(data.calendarTokenHash, null, "a password change revokes the calendar feed URL");
+  assert.equal(data.calendarTokenCreatedAt, null);
 
   // Every device session removed, and the caller marked force-revalidate so the
   // dbCheckedAt fast-path window closes immediately on the issuing replica.

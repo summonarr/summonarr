@@ -753,6 +753,8 @@ test("reactivate: clears deactivatedAt via the guarded updateMany and audits USE
   assert.match(sql, /"purgedAt" IS NULL/);
   assert.match(sql, /"deactivatedAt" IS NOT NULL/);
   assert.match(sql, /email <> 'deleted-' \|\| id \|\| '@deleted\.invalid'/); // the legacy-tombstone guard
+  // A re-enabled account must not revive a calendar feed URL issued before it was disabled.
+  assert.match(sql, /"calendarTokenHash" = NULL/);
   assert.deepEqual(values, [targetId]); // id travels as a bind param
   assert.equal(usersById.get(targetId)?.deactivatedAt, null);
   await flush();

@@ -86,6 +86,10 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
         passwordHash: newHash,
         passwordChangedAt: now,
         sessionsRevokedAt: now,
+        // The calendar feed URL is a bearer credential like a session; a
+        // password change (the usual compromise response) revokes it too.
+        calendarTokenHash: null,
+        calendarTokenCreatedAt: null,
       },
     }),
     prisma.authSession.deleteMany({
