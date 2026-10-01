@@ -171,8 +171,17 @@ export async function fetchPlexWatchlist(token: string, opts: { signal?: AbortSi
 export async function rememberPlexWatchlistToken(userId: string, plexToken: string): Promise<void> {
   if (typeof plexToken !== "string" || plexToken.length === 0 || plexToken.length > 512) return;
   if (!(await isFeatureEnabled(WATCHLIST_AUTO_REQUEST_FEATURE_KEY))) return;
-  const user = await prisma.user.findUnique({ where: { id: userId }, select: { plexUserId: true } });
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { plexUserId: true, role: true, permissions: true, plexWatchlistAutoRequest: true },
+  });
   if (!user?.plexUserId) return;
+  // A plex.tv token is a credential for the user's whole Plex account. Keep one
+  // only for a user the cron would actually use it for: permitted AND opted in.
+  // Opting out deletes it (PATCH /api/profile/auto-request).
+  if (!user.plexWatchlistAutoRequest) return;
+  const perms = effectivePermissions(user.role, user.permissions);
+  if ((perms & (AUTO_REQUEST_MASK | Permission.ADMIN)) === 0n) return;
   // Raw token — the Prisma extension encrypts access_token on upsert (guardrail 7a).
   await prisma.account.upsert({
     where: { provider_providerAccountId: { provider: "plex", providerAccountId: user.plexUserId } },

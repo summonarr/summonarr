@@ -677,3 +677,14 @@ test("rememberPlexWatchlistToken stores the raw token on a plex Account row only
   assert.equal(up.create.access_token, "plex-raw-token");
   assert.equal(up.create.userId, u.id);
 });
+
+test("rememberPlexWatchlistToken never stores a token for a user without the permission or who opted out", async () => {
+  settings.set(FLAG, "true");
+  invalidateFeatureFlagCache();
+  const noPerm = addUser({ plexUserId: "801", permissions: Permission.REQUEST });
+  const optedOut = addUser({ plexUserId: "802", plexWatchlistAutoRequest: false });
+  const before = opsOf("account.upsert").length;
+  await plexWatchlist.rememberPlexWatchlistToken(noPerm.id, "tok-a");
+  await plexWatchlist.rememberPlexWatchlistToken(optedOut.id, "tok-b");
+  assert.equal(opsOf("account.upsert").length, before, "a full-account Plex credential is kept only when the cron would use it");
+});

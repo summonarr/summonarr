@@ -44,5 +44,11 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     where: { id: session.user.id },
     data: { plexWatchlistAutoRequest: parsed.plexWatchlist },
   });
+  // Opting out drops the stored plex.tv token: it exists only to read the
+  // watchlist, and a full-account credential shouldn't outlive its purpose.
+  // Opting back in needs one Plex sign-in to store a fresh one.
+  if (!parsed.plexWatchlist) {
+    await prisma.account.deleteMany({ where: { userId: session.user.id, provider: "plex" } });
+  }
   return NextResponse.json({ plexWatchlist: parsed.plexWatchlist });
 });
