@@ -23,6 +23,7 @@ import { useState, useEffect, memo } from "react";
 import { requestRatings, type RatingsPayload } from "@/lib/client/ratings-batcher";
 import { withBasePath } from "@/lib/base-path";
 import { useToast } from "@/components/ui/toast";
+import { useT } from "@/components/i18n/i18n-provider";
 
 type LiveRatings = RatingsPayload;
 
@@ -66,6 +67,7 @@ function MediaCardImpl({
 }: MediaCardProps) {
   const router = useRouter();
   const { toast } = useToast();
+  const t = useT();
   const poster = posterUrl(media.posterPath, "w342");
   const [reqState, setReqState] = useState<RequestState>("idle");
   const [liveRatings, setLiveRatings] = useState<LiveRatings | null>(null);
@@ -140,14 +142,14 @@ function MediaCardImpl({
         // the "Retry" state.
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
         toast({
-          title: data?.error ?? `Couldn’t request ${media.title} — try again`,
+          title: data?.error ?? t("media.card.requestFailed", { title: media.title }),
           variant: "error",
         });
         const transient = res.status >= 500 || res.status === 429;
         setReqState(transient ? "error" : "idle");
       }
     } catch {
-      toast({ title: "Network error — please try again", variant: "error" });
+      toast({ title: t("media.networkError"), variant: "error" });
       setReqState("error");
     }
   }
@@ -175,12 +177,12 @@ function MediaCardImpl({
   // Accessible names for the overlay controls: each card's buttons read as
   // "Request <title>" rather than a page full of identical "Request"s.
   const bubbleLabel = () => {
-    if (isAvailable || isRequested) return `View ${media.title}`;
+    if (isAvailable || isRequested) return t("media.card.viewLabel", { title: media.title });
     // The button navigates (router.push), so name the action, not a status.
-    if (blacklisted) return `View ${media.title} (not available to request)`;
-    if (reqState === "loading") return `Requesting ${media.title}`;
-    if (reqState === "error") return `Retry request for ${media.title}`;
-    return `Request ${media.title}`;
+    if (blacklisted) return t("media.card.viewBlockedLabel", { title: media.title });
+    if (reqState === "loading") return t("media.card.requestingLabel", { title: media.title });
+    if (reqState === "error") return t("media.card.retryLabel", { title: media.title });
+    return t("media.card.requestLabel", { title: media.title });
   };
 
   // Over a poster the scrim is black and the overlay text white — an image is
@@ -196,21 +198,21 @@ function MediaCardImpl({
     : "1px solid var(--ds-border)";
 
   const bubbleContent = () => {
-    if (isAvailable) return <span>View</span>;
-    if (isRequested) return <span>View</span>;
+    if (isAvailable) return <span>{t("media.card.view")}</span>;
+    if (isRequested) return <span>{t("media.card.view")}</span>;
     if (blacklisted)
       return (
         <span className="flex items-center gap-1">
           <Ban className="w-3.5 h-3.5" />
-          Blocked
+          {t("media.card.blocked")}
         </span>
       );
     if (reqState === "loading") return <Loader2 className="w-3.5 h-3.5 animate-spin" />;
-    if (reqState === "error") return <span>Retry</span>;
+    if (reqState === "error") return <span>{t("media.card.retry")}</span>;
     return (
       <span className="flex items-center gap-1">
         <Plus className="w-3.5 h-3.5" />
-        Request
+        {t("media.card.request")}
       </span>
     );
   };
@@ -286,13 +288,13 @@ function MediaCardImpl({
                 className="text-center leading-tight font-semibold"
                 style={{ fontSize: 11, color: overlayFg }}
               >
-                Request this?
+                {t("media.card.confirmPrompt")}
               </span>
               <div className="flex items-center gap-2">
                 <button
                   onClick={handleBubbleClick}
                   type="button"
-                  aria-label={`Confirm request for ${media.title}`}
+                  aria-label={t("media.card.confirmLabel", { title: media.title })}
                   className="ds-tap inline-flex items-center gap-1 font-semibold transition-colors"
                   style={{
                     padding: "4px 10px",
@@ -304,12 +306,12 @@ function MediaCardImpl({
                   }}
                 >
                   <Check className="w-3 h-3" />
-                  Confirm
+                  {t("media.card.confirm")}
                 </button>
                 <button
                   onClick={cancelConfirm}
                   type="button"
-                  aria-label={`Cancel request for ${media.title}`}
+                  aria-label={t("media.card.cancelLabel", { title: media.title })}
                   className="ds-tap inline-flex items-center gap-1 font-semibold transition-colors"
                   style={{
                     padding: "4px 10px",
@@ -321,7 +323,7 @@ function MediaCardImpl({
                   }}
                 >
                   <X className="w-3 h-3" />
-                  Cancel
+                  {t("media.card.cancel")}
                 </button>
               </div>
             </div>
@@ -412,7 +414,7 @@ function MediaCardImpl({
               style={{ paddingLeft: 5, paddingRight: 6 }}
             >
               <Clock style={{ width: 9, height: 9 }} />
-              Queued
+              {t("media.badge.queued")}
             </span>
           )}
           {!media.arr4kAvailable && media.arr4kPending && (
@@ -421,7 +423,7 @@ function MediaCardImpl({
               style={{ paddingLeft: 5, paddingRight: 6 }}
             >
               <Clock style={{ width: 9, height: 9 }} />
-              4K Queued
+              {t("media.badge.queued4k")}
             </span>
           )}
         </div>
@@ -433,7 +435,7 @@ function MediaCardImpl({
             style={{ paddingLeft: 5, paddingRight: 6 }}
           >
             <CheckCircle style={{ width: 9, height: 9 }} />
-            Requested
+            {t("media.badge.requested")}
           </span>
         )}
 
@@ -450,7 +452,7 @@ function MediaCardImpl({
             }}
           >
             <Ban style={{ width: 9, height: 9 }} />
-            Blocked
+            {t("media.card.blocked")}
           </span>
         )}
 
@@ -546,7 +548,7 @@ function MediaCardImpl({
         >
           {media.releaseYear && <span>{media.releaseYear}</span>}
           {media.releaseYear && <span>·</span>}
-          <span>{media.mediaType === "movie" ? "MOVIE" : "TV"}</span>
+          <span>{media.mediaType === "movie" ? t("media.type.movie") : t("media.type.tv")}</span>
           {media.certification && (
             <>
               <span>·</span>

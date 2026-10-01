@@ -13,7 +13,6 @@ import {
   getRecommendationsComputedAt,
   summarizeRecommendationSeeds,
 } from "@/lib/recommendations";
-import { formatRelativeTime } from "@/lib/relative-time";
 import {
   applyRecommendationView,
   parseAvailability,
@@ -27,8 +26,22 @@ import { NotInterestedButton } from "@/components/media/not-interested-button";
 import { RebuildRecommendationsButton } from "@/components/media/rebuild-recommendations-button";
 import { Filter, Sparkles } from "@/components/icons";
 import type { TmdbMedia } from "@/lib/tmdb-types";
+import { getTranslator } from "@/lib/i18n/server";
+import type { Translator } from "@/lib/i18n/translate";
 
 const PER_PAGE = 100;
+
+// "updated 5m ago", localized. Same buckets as formatRelativeTime
+// (src/lib/relative-time.ts), which is English-only. Server-rendered, so the
+// browser receives finished text (guardrail 16 does not apply here).
+function updatedLabel(t: Translator, date: Date): string {
+  const minutes = Math.floor((Date.now() - date.getTime()) / 60_000);
+  if (minutes < 1) return t("browse.forYou.updated.justNow");
+  if (minutes < 60) return t("browse.forYou.updated.minutes", { count: minutes });
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return t("browse.forYou.updated.hours", { count: hours });
+  return t("browse.forYou.updated.days", { count: Math.floor(hours / 24) });
+}
 
 // Dedicated "For You" page — the full ranked recommendation set behind the
 // home rail (which shows only the top slice). Recommendations are precomputed
@@ -47,11 +60,12 @@ export default async function ForYouPage({
   searchParams: Promise<Record<string, string>>;
 }) {
   await requireFeature("feature.page.forYou");
-  const [sp, session, plexEnabled, jellyfinEnabled] = await Promise.all([
+  const [sp, session, plexEnabled, jellyfinEnabled, t] = await Promise.all([
     searchParams,
     requireAppSession(),
     isFeatureEnabled("feature.integration.plex"),
     isFeatureEnabled("feature.integration.jellyfin"),
+    getTranslator(),
   ]);
   const availability = parseAvailability(sp.filter);
   const type = parseRecommendationType(sp.type);
@@ -95,39 +109,39 @@ export default async function ForYouPage({
   const seeds = summarizeRecommendationSeeds(enriched);
   const seedParts: string[] = [];
   if (seeds.watchHistorySeeds > 0) {
-    seedParts.push(`${seeds.watchHistorySeeds} you watched`);
+    seedParts.push(t("browse.forYou.seeds.watched", { count: seeds.watchHistorySeeds }));
   }
   if (seeds.watchlistSeeds > 0) {
-    seedParts.push(`${seeds.watchlistSeeds} on your watchlist`);
+    seedParts.push(t("browse.forYou.seeds.watchlist", { count: seeds.watchlistSeeds }));
   }
   if (seeds.requestSeeds > 0) {
-    seedParts.push(`${seeds.requestSeeds} you requested`);
+    seedParts.push(t("browse.forYou.seeds.requested", { count: seeds.requestSeeds }));
   }
   const seedList =
     seedParts.length > 1
-      ? `${seedParts.slice(0, -1).join(", ")} and ${seedParts[seedParts.length - 1]}`
+      ? t("browse.forYou.seeds.join", { rest: seedParts.slice(0, -1).join(", "), last: seedParts[seedParts.length - 1] })
       : seedParts[0];
   // An all-fallback shelf (cold start) says so instead of implying these came
   // from a taste profile that does not exist yet.
   const allFallback = enriched.length > 0 && enriched.every((m) => m.fromTrendingFallback);
   const subtitle =
     enriched.length === 0
-      ? "Picked from what you watch, list and request"
+      ? t("browse.forYou.subtitle")
       : allFallback
         ? [
-            `${filtered.length} popular picks while your taste profile builds`,
-            "watch, list or request a few titles to make these personal",
-            computedAt ? `updated ${formatRelativeTime(computedAt)}` : null,
+            t("browse.forYou.fallbackPicks", { count: filtered.length }),
+            t("browse.forYou.fallbackHint"),
+            computedAt ? updatedLabel(t, computedAt) : null,
           ]
             .filter(Boolean)
             .join(" · ")
         : [
             // "200 of 200 picks" says nothing the plain count doesn't.
             filtered.length === enriched.length
-              ? `${enriched.length} picks`
-              : `${filtered.length} of ${enriched.length} picks`,
-            seedParts.length > 0 ? `built from ${seedList}` : null,
-            computedAt ? `updated ${formatRelativeTime(computedAt)}` : null,
+              ? t("browse.forYou.picks", { count: enriched.length })
+              : t("browse.forYou.picksOf", { count: filtered.length, total: enriched.length }),
+            seedParts.length > 0 ? t("browse.forYou.builtFrom", { seeds: seedList }) : null,
+            computedAt ? updatedLabel(t, computedAt) : null,
           ]
             .filter(Boolean)
             .join(" · ");
@@ -160,7 +174,7 @@ export default async function ForYouPage({
           after the JWT expires. It sits inline after "updated N ago" rather than
           as a header action — see the component for why. */}
       <PageHeader
-        title="For You"
+        title={t("nav.forYou")}
         subtitle={
           isAdmin ? (
             <>
@@ -176,40 +190,40 @@ export default async function ForYouPage({
         <div className="flex items-center gap-x-5 gap-y-3 flex-wrap mb-6">
           <Suspense>
             <PillFilter
-              label="Type"
+              label={t("browse.filter.type")}
               param="type"
               active={type}
               options={[
-                { value: undefined, label: "All" },
-                { value: "movie", label: "Movies" },
-                { value: "tv", label: "TV Shows" },
+                { value: undefined, label: t("browse.type.all") },
+                { value: "movie", label: t("nav.movies") },
+                { value: "tv", label: t("nav.tvShows") },
               ]}
             />
           </Suspense>
           <Suspense>
             <PillFilter
               // Not "Show": beside "Type: TV Shows" it read as the TV filter.
-              label="Library"
+              label={t("browse.forYou.filter.library")}
               param="filter"
               active={availability}
               options={[
-                { value: undefined, label: "All" },
-                { value: "available", label: "On Your Server" },
-                { value: "missing", label: "Not on Server" },
+                { value: undefined, label: t("browse.type.all") },
+                { value: "available", label: t("browse.forYou.filter.onServer") },
+                { value: "missing", label: t("browse.forYou.filter.notOnServer") },
               ]}
             />
           </Suspense>
           <Suspense>
             <PillFilter
-              label="Sort"
+              label={t("browse.filter.sort")}
               param="sort"
               // "match" is the default and is represented by the param's absence,
               // so it maps to undefined rather than to its own literal.
               active={sort === "match" ? undefined : sort}
               options={[
-                { value: undefined, label: "Best Match" },
-                { value: "newest", label: "Newest" },
-                { value: "rating", label: "Highest Rated" },
+                { value: undefined, label: t("browse.forYou.sort.match") },
+                { value: "newest", label: t("browse.forYou.sort.newest") },
+                { value: "rating", label: t("browse.forYou.sort.rating") },
               ]}
             />
           </Suspense>
@@ -220,28 +234,28 @@ export default async function ForYouPage({
         enriched.length === 0 ? (
           <EmptyState
             icon={Sparkles}
-            title="No recommendations yet"
-            description="Picks are built from what you watch, add to your watchlist and request, and refresh on a schedule — do any of those for a few titles and check back soon."
+            title={t("browse.forYou.empty.title")}
+            description={t("browse.forYou.empty.description")}
           />
         ) : page > 1 ? (
           <EmptyState
             icon={Filter}
-            title="No more results on this page"
-            description="Try going back to the first page."
-            cta={{ href: firstPageHref, label: "Back to page 1" }}
+            title={t("browse.empty.noMoreResults.title")}
+            description={t("browse.empty.noMoreResults.description")}
+            cta={{ href: firstPageHref, label: t("browse.empty.backToPage1") }}
           />
         ) : (
           <EmptyState
             icon={Filter}
-            title="No picks match these filters"
+            title={t("browse.forYou.noMatch.title")}
             description={
               availability === "available"
-                ? "None of your current picks are on your server yet — request some, or switch back to All."
+                ? t("browse.forYou.noMatch.available")
                 : availability === "missing"
-                  ? "Every current pick is already on your server — switch back to All."
-                  : "Nothing matches that combination — try widening one of the filters."
+                  ? t("browse.forYou.noMatch.missing")
+                  : t("browse.forYou.noMatch.other")
             }
-            cta={{ href: "/for-you", label: "Reset filters" }}
+            cta={{ href: "/for-you", label: t("browse.resetFilters") }}
           />
         )
       ) : (
@@ -259,7 +273,7 @@ export default async function ForYouPage({
               showPlex={showPlex}
               showJellyfin={showJellyfin}
               size="md"
-              caption={<RecommendationReason media={media} rankedOrder={sort === "match"} />}
+              caption={<RecommendationReason t={t} media={media} rankedOrder={sort === "match"} />}
               overlayAction={
                 <NotInterestedButton
                   tmdbId={media.id}
@@ -284,7 +298,7 @@ export default async function ForYouPage({
 // ordered by Newest or Highest rated, nothing on the page says which picks the
 // engine actually rates. Only the labelled bands render — most of a 200-title
 // shelf carries no chip, which is what keeps the label meaning something.
-function MatchTierChip({ tier }: { tier: NonNullable<TmdbMedia["matchTier"]> }) {
+function MatchTierChip({ t, tier }: { t: Translator; tier: NonNullable<TmdbMedia["matchTier"]> }) {
   const isTop = tier === "top";
   return (
     <span
@@ -298,11 +312,11 @@ function MatchTierChip({ tier }: { tier: NonNullable<TmdbMedia["matchTier"]> }) 
       }}
       title={
         isTop
-          ? "Among the highest-ranked picks the engine built for you"
-          : "Ranked well above the rest of your picks"
+          ? t("browse.forYou.tier.topTitle")
+          : t("browse.forYou.tier.strongTitle")
       }
     >
-      {isTop ? "Top match" : "Strong match"}
+      {isTop ? t("browse.forYou.tier.top") : t("browse.forYou.tier.strong")}
     </span>
   );
 }
@@ -316,7 +330,7 @@ function MatchTierChip({ tier }: { tier: NonNullable<TmdbMedia["matchTier"]> }) 
 // top third of the shelf — about two-thirds of page 1 — carried a chip, and a
 // label on most cards labels nothing. Under Newest / Highest rated the order no
 // longer carries the ranking, so both bands come back.
-function RecommendationReason({ media, rankedOrder }: { media: TmdbMedia; rankedOrder: boolean }) {
+function RecommendationReason({ t, media, rankedOrder }: { t: Translator; media: TmdbMedia; rankedOrder: boolean }) {
   const why = media.recommendedBecause;
   const tier = media.matchTier === "strong" && rankedOrder ? undefined : media.matchTier;
   if (!why) {
@@ -325,13 +339,13 @@ function RecommendationReason({ media, rankedOrder }: { media: TmdbMedia; ranked
     if (media.fromTrendingFallback) {
       return (
         <p className="ds-mono m-0" style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", lineHeight: 1.4 }}>
-          Popular right now
+          {t("browse.popularNow")}
         </p>
       );
     }
     return tier ? (
       <div className="flex">
-        <MatchTierChip tier={tier} />
+        <MatchTierChip t={t} tier={tier} />
       </div>
     ) : null;
   }
@@ -340,10 +354,10 @@ function RecommendationReason({ media, rankedOrder }: { media: TmdbMedia; ranked
   // read as if the recommended title itself were on the watchlist.
   const lead =
     why.source === "WATCHLIST"
-      ? "Because you watchlisted"
+      ? t("browse.forYou.because.watchlist")
       : why.source === "REQUEST"
-        ? "Because you requested"
-        : "Because you watched";
+        ? t("browse.forYou.because.request")
+        : t("browse.forYou.because.watched");
   // seedCount counts every seed that surfaced this title, the named one
   // included — so the "+N more" is the corroborating remainder.
   const others = why.seedCount - 1;
@@ -355,7 +369,7 @@ function RecommendationReason({ media, rankedOrder }: { media: TmdbMedia; ranked
   // hears all of it.
   return (
     <div className="flex flex-col gap-1 items-start">
-      {tier && <MatchTierChip tier={tier} />}
+      {tier && <MatchTierChip t={t} tier={tier} />}
       <p
         className="ds-mono m-0"
         style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", lineHeight: 1.4 }}
@@ -368,7 +382,7 @@ function RecommendationReason({ media, rankedOrder }: { media: TmdbMedia; ranked
       </p>
       {others > 0 && (
         <p className="ds-mono m-0" style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", lineHeight: 1.4 }}>
-          + {others} more of yours
+          {t("browse.forYou.moreOfYours", { count: others })}
         </p>
       )}
     </div>

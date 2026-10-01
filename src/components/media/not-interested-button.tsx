@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { EyeOff, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useToast } from "@/components/ui/toast";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // Compact "not interested" control for a MediaCard corner, used by /for-you so a
 // bad pick can be tuned away where it appears rather than only from the title's
@@ -27,6 +28,7 @@ export function NotInterestedButton({
 }) {
   const router = useRouter();
   const { toast } = useToast();
+  const t = useT();
   const [loading, setLoading] = useState(false);
 
   // The button is always visible on touch, in the poster corner, so a stray tap
@@ -38,12 +40,12 @@ export function NotInterestedButton({
       const res = await fetch(withBasePath(`/api/hidden?${qs}`), { method: "DELETE" });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        toast({ title: data.error ?? "Couldn’t undo that — unhide it from Hidden", variant: "error" });
+        toast({ title: data.error ?? t("media.notInterested.undoFailed"), variant: "error" });
         return;
       }
       router.refresh();
     } catch {
-      toast({ title: "Network error — unhide it from Hidden", variant: "error" });
+      toast({ title: t("media.notInterested.undoNetworkError"), variant: "error" });
     }
   }
 
@@ -63,17 +65,17 @@ export function NotInterestedButton({
       // a success for this button (same reading as HideButton).
       if (res.ok || res.status === 409) {
         toast({
-          title: `Hidden — "${title}" won’t be suggested again`,
+          title: t("media.notInterested.hidden", { title }),
           variant: "success",
-          action: { label: "Undo", onClick: () => void undo() },
+          action: { label: t("media.undo"), onClick: () => void undo() },
         });
         router.refresh();
       } else {
         const data = await res.json().catch(() => ({}));
-        toast({ title: data.error ?? "Couldn’t hide that — try again", variant: "error" });
+        toast({ title: data.error ?? t("media.notInterested.failed"), variant: "error" });
       }
     } catch {
-      toast({ title: "Network error — please try again", variant: "error" });
+      toast({ title: t("media.networkError"), variant: "error" });
     } finally {
       setLoading(false);
     }
@@ -84,8 +86,8 @@ export function NotInterestedButton({
       type="button"
       onClick={hide}
       disabled={loading}
-      aria-label={`Not interested in ${title}`}
-      title="Not interested — stop suggesting this"
+      aria-label={t("media.notInterested.label", { title })}
+      title={t("media.notInterested.title")}
       className="ds-tap ds-hover-tint relative inline-flex items-center justify-center"
       style={{
         width: 26,

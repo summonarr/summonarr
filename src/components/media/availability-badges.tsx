@@ -1,5 +1,10 @@
+"use client";
+
+// Client component only so it can read the UI translator; every caller is a
+// server page passing plain booleans.
 import { PlayCircle, MonitorPlay, Clock, CheckCircle } from "@/components/icons";
 import { cn } from "@/lib/utils";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export interface AvailabilityBadgesProps {
   plexAvailable?: boolean;
@@ -27,6 +32,7 @@ export function AvailabilityBadges({
   show4k,
   className,
 }: AvailabilityBadgesProps) {
+  const t = useT();
   // These flags come from cached library data, so the badges are only as fresh
   // as the last library sync.
   const isAvailable = !!(
@@ -55,13 +61,13 @@ export function AvailabilityBadges({
       {showPlexBadge && (
         <span className="ds-chip ds-chip-plex">
           <PlayCircle style={{ width: 10, height: 10 }} />
-          On Plex
+          {t("media.badge.onPlex")}
         </span>
       )}
       {showJellyfinBadge && (
         <span className="ds-chip ds-chip-jellyfin">
           <MonitorPlay style={{ width: 10, height: 10 }} />
-          On Jellyfin
+          {t("media.badge.onJellyfin")}
         </span>
       )}
       {show4kAvailBadge && (
@@ -74,25 +80,25 @@ export function AvailabilityBadges({
           }}
         >
           <CheckCircle style={{ width: 10, height: 10 }} />
-          Available in 4K
+          {t("media.badge.available4k")}
         </span>
       )}
       {showQueueBadge && (
         <span className="ds-chip ds-chip-pending">
           <Clock style={{ width: 10, height: 10 }} />
-          Queued
+          {t("media.badge.queued")}
         </span>
       )}
       {show4kQueueBadge && (
         <span className="ds-chip ds-chip-pending">
           <Clock style={{ width: 10, height: 10 }} />
-          4K Queued
+          {t("media.badge.queued4k")}
         </span>
       )}
       {showRequestedBadge && (
         <span className="ds-chip ds-chip-accent">
           <CheckCircle style={{ width: 10, height: 10 }} />
-          Requested
+          {t("media.badge.requested")}
         </span>
       )}
     </div>

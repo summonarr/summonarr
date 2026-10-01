@@ -9,6 +9,7 @@ import { PaginationBar } from "./pagination-bar";
 import { Loader2, Filter, AlertTriangle } from "@/components/icons";
 import { EmptyState } from "@/components/ui/design";
 import { usePathname } from "next/navigation";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface BrowseGridProps {
   initialItems: TmdbMedia[];
@@ -47,6 +48,7 @@ export function BrowseGrid({
 }: BrowseGridProps) {
   const searchParams = useSearchParams();
   const pathname = usePathname();
+  const t = useT();
 
   const genreId       = searchParams.get("genreId") || undefined;
   const keywordId     = searchParams.get("keywordId") || undefined;
@@ -118,7 +120,7 @@ export function BrowseGrid({
           }}
         >
           <AlertTriangle style={{ width: 14, height: 14, flexShrink: 0 }} />
-          Couldn&apos;t load results from TMDB — try again.
+          {t("browse.grid.loadFailed")}
         </div>
       )}
 
@@ -146,26 +148,26 @@ export function BrowseGrid({
           hasFilters ? (
             <EmptyState
               icon={Filter}
-              title="No results match these filters"
-              description="Try removing one or two filters to see more."
-              cta={{ href: pathname, label: "Clear filters" }}
+              title={t("browse.empty.noFilterMatch.title")}
+              description={t("browse.empty.noFilterMatch.description")}
+              cta={{ href: pathname, label: t("browse.clearFilters") }}
             />
           ) : tokenMissing ? (
             <EmptyState
               icon={AlertTriangle}
-              title="TMDB token not configured"
-              description="Set TMDB_READ_TOKEN in your environment to enable discovery."
+              title={t("browse.grid.tokenMissing.title")}
+              description={t("browse.grid.tokenMissing.description")}
             />
           ) : (
             <EmptyState
               icon={Filter}
-              title="No results on this page"
+              title={t("browse.grid.noResults.title")}
               description={
                 currentPage > 1
-                  ? "This page is past the end of the results."
-                  : "TMDB returned nothing here — try again later."
+                  ? t("browse.grid.noResults.pastEnd")
+                  : t("browse.grid.noResults.empty")
               }
-              cta={currentPage > 1 ? { href: pathname, label: "Back to page 1" } : undefined}
+              cta={currentPage > 1 ? { href: pathname, label: t("browse.empty.backToPage1") } : undefined}
             />
           )
         ) : (
