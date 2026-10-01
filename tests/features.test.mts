@@ -56,7 +56,9 @@ const LEGACY_KEYS = ["motdEnabled", "playHistoryEnabled", "trashGuidesEnabled"] 
 // no data to show on a fresh install. This is a short, named exception to the
 // rule "every feature.* flag defaults ON" — unrelated to LEGACY_KEYS above,
 // which are older than the Features tab.
-const NEW_FEATURE_DEFAULT_OFF_KEYS = ["feature.page.forYou"] as const;
+// feature.admin.cleanup defaults OFF because its page deletes media: an
+// operator opts in deliberately rather than finding it switched on by an upgrade.
+const NEW_FEATURE_DEFAULT_OFF_KEYS = ["feature.page.forYou", "feature.admin.cleanup"] as const;
 
 // ── Registry invariants ──────────────────────────────────────────────────
 
@@ -182,7 +184,7 @@ test("group sizes are exact (pins accidental category reassignment)", () => {
   assert.equal(groups.pages.length, 7);
   assert.equal(groups.behaviors.length, 5);
   assert.equal(groups.integrations.length, 7);
-  assert.equal(groups.admin.length, 6);
+  assert.equal(groups.admin.length, 7);
 });
 
 // ── getFeatureFlags(cfg) — the pure computeFlags path ────────────────────

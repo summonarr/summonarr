@@ -1319,7 +1319,13 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
       // CAS on status: only demote rows still AVAILABLE. toRevert is built from the
       // run-start `available` snapshot, so a row that a concurrent path moved out of
       // AVAILABLE must not be blind-written back to APPROVED.
-      where: { id: { in: toRevert.map((r) => r.id) }, status: "AVAILABLE" },
+      // `cleanedUpAt: null`: an admin deleted a stamped row's title on purpose
+      // through Library cleanup, so its absence from every cache and library is
+      // the INTENDED state, not a lost file. Demoting it would make the next
+      // run's re-push send it straight back to Radarr/Sonarr and re-download what
+      // was just removed. It stays AVAILABLE. Kept in the WHERE (not a JS filter
+      // over the run-start snapshot) so a stamp landing mid-run still wins (guardrail 14b).
+      where: { id: { in: toRevert.map((r) => r.id) }, status: "AVAILABLE", cleanedUpAt: null },
       // Clear pendingNotifyAt on demote: a stale overdue timestamp left from the
       // original approve would otherwise fire a false "download pending" notify
       // once the row is back to APPROVED.

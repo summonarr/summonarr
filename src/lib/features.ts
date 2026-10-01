@@ -205,6 +205,13 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
     defaultEnabled: true,
   },
   {
+    key: "feature.admin.cleanup",
+    label: "Library Cleanup page",
+    description: "Show the /admin/cleanup page: titles nobody watches, ranked by configurable rules, which an admin can delete from Radarr/Sonarr after a dry run. Nothing is ever deleted automatically. Off by default.",
+    category: "admin",
+    defaultEnabled: false,
+  },
+  {
     key: "trashGuidesEnabled",
     label: "TRaSH Guides",
     description: "Enable the TRaSH Guides admin page and nightly sync.",

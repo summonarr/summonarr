@@ -60,6 +60,7 @@ export const BACKUP_TABLES = [
   "RecommendationTitle",
   "TitleSuggestion",
   "BlacklistItem",
+  "CleanupProtection",
 ] as const;
 
 export const BACKUP_ENUMS = [

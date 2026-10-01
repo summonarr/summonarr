@@ -284,7 +284,20 @@ const ARR_FETCH_TIMEOUT_MS = 30_000;
 const ARR_FETCH_MAX_BYTES = 50 * 1024 * 1024;
 
 export async function arrFetch<T>(cfg: ArrCfg, path: string, options: RequestInit = {}): Promise<T> {
+  const res = await arrRequest(cfg, path, options);
+  return res.json() as Promise<T>;
+}
 
+// arrFetch for a call whose success answer carries no JSON body — Radarr's and
+// Sonarr's DELETE /movie|series/{id} answer 200 with an empty body, which
+// res.json() would throw on. Same transport, timeout, body cap and error
+// contract as arrFetch (ArrResponseError on non-2xx); the body is drained.
+export async function arrFetchNoContent(cfg: ArrCfg, path: string, options: RequestInit = {}): Promise<void> {
+  const res = await arrRequest(cfg, path, options);
+  await res.text().catch(() => "");
+}
+
+async function arrRequest(cfg: ArrCfg, path: string, options: RequestInit): Promise<Response> {
   const { signal, method, body } = options;
   const res = await safeFetchAdminConfigured(`${cfg.url}${path}`, {
     method,
@@ -300,8 +313,7 @@ export async function arrFetch<T>(cfg: ArrCfg, path: string, options: RequestIni
     console.error(`[arr] ${sanitizeForLog(path)} → ${res.status}`);
     throw new ArrResponseError(res.status, text);
   }
-
-  return res.json() as Promise<T>;
+  return res;
 }
 
 function isDuplicate(err: unknown): boolean {
