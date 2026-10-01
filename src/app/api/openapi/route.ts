@@ -1462,6 +1462,85 @@ const spec = {
       },
     },
 
+    "/profile/calendar": {
+      get: {
+        tags: ["Profile"],
+        summary: "Calendar feed status",
+        description:
+          "Whether the caller has an active iCal feed token. The feed URL itself is never returned here: only a SHA-256 hash of the token is stored, so the URL is shown once, by POST. 404 when feature.integration.calendar is off.",
+        responses: {
+          "200": {
+            description: "Feed status",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    enabled: { type: "boolean" },
+                    createdAt: { type: "string", format: "date-time", nullable: true },
+                    canSubscribeAll: { type: "boolean", description: "Caller holds MANAGE_REQUESTS and may use ?scope=all" },
+                  },
+                },
+              },
+            },
+          },
+          "404": { description: "feature.integration.calendar is disabled" },
+        },
+      },
+      post: {
+        tags: ["Profile"],
+        summary: "Generate (or regenerate) the calendar feed URL",
+        description:
+          "Mints a new secret token and returns the subscription URL ONCE. Any previous URL stops working immediately. Rate-limited per user.",
+        responses: {
+          "201": {
+            description: "New feed URL (shown once)",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    token: { type: "string" },
+                    url: { type: "string" },
+                    webcalUrl: { type: "string" },
+                    allUrl: { type: "string", nullable: true, description: "All-requests feed, for MANAGE_REQUESTS holders" },
+                    createdAt: { type: "string", format: "date-time" },
+                  },
+                },
+              },
+            },
+          },
+          "404": { description: "feature.integration.calendar is disabled, or the account is disabled" },
+          "429": { description: "Too many regenerations" },
+        },
+      },
+      delete: {
+        tags: ["Profile"],
+        summary: "Revoke the calendar feed URL",
+        responses: {
+          "200": { description: "Revoked ({ ok: true })" },
+          "404": { description: "feature.integration.calendar is disabled" },
+        },
+      },
+    },
+    "/calendar/feed/{token}": {
+      get: {
+        tags: ["Profile"],
+        summary: "iCal subscription feed (public, token-authed)",
+        description:
+          "RFC 5545 calendar of upcoming release dates (movie theatrical/digital/physical, TV episode air dates) for the token owner's non-declined requests and watchlist, ~30 days back to ~1 year ahead. The path segment is `<token>.ics`. `?scope=all` returns every non-declined request instead and requires MANAGE_REQUESTS (re-checked on every poll). Cache-read only. Every failure — unknown/revoked token, disabled or purged owner, missing permission, feature off — is a bare 404.",
+        security: [],
+        parameters: [
+          { name: "token", in: "path", required: true, schema: { type: "string" }, description: "`<token>.ics`" },
+          { name: "scope", in: "query", required: false, schema: { type: "string", enum: ["all"] } },
+        ],
+        responses: {
+          "200": { description: "The calendar", content: { "text/calendar": { schema: { type: "string" } } } },
+          "404": { description: "Not found" },
+          "429": { description: "Rate limited (per address and per token)" },
+        },
+      },
+    },
     "/profile": {
       delete: {
         tags: ["Profile"],

@@ -4,6 +4,7 @@ import { getUpcomingMovies, getUpcomingTV } from "@/lib/tmdb";
 import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecording } from "@/lib/cron-auth";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
+import { warmCalendarCache, type CalendarWarmResult } from "@/lib/calendar-feed";
 
 export async function POST(request: NextRequest) {
   if (!(await isCronAuthorized(request))) {
@@ -12,7 +13,7 @@ export async function POST(request: NextRequest) {
 
   return withCronRunRecording("upcoming-cache", () => withAdvisoryLock(
     2007,
-    async () => {
+    async (signal) => {
       const startTime = Date.now();
 
       const [movies, tv] = await Promise.allSettled([getUpcomingMovies(), getUpcomingTV()]);
@@ -68,6 +69,16 @@ export async function POST(request: NextRequest) {
         }
       }, { timeout: BATCH_TX_TIMEOUT });
 
+      // Fill the release-date caches the personal iCal feeds read
+      // (calendar-feed.ts). Bounded and signal-aware (guardrails 31/41); a
+      // failure here never fails the upcoming-list refresh it rides along with.
+      let calendar: CalendarWarmResult | null = null;
+      try {
+        calendar = await warmCalendarCache({ signal });
+      } catch (err) {
+        console.error("[sync/upcoming] calendar warm failed:", err instanceof Error ? err.message : err);
+      }
+
       const durationMs = Date.now() - startTime;
       const errors = [movies, tv].filter((r) => r.status === "rejected").length;
 
@@ -89,6 +100,7 @@ export async function POST(request: NextRequest) {
         total: rows.length,
         errors,
         durationMs,
+        calendar,
       }, failed ? { status: 502 } : {});
     },
     () => NextResponse.json({ skipped: true, reason: "already running" }),

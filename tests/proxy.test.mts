@@ -630,6 +630,17 @@ test("an unauthenticated protected API → machine-readable 401 JSON, never an H
   assert.deepEqual(await bodyOf(res), { error: "Unauthorized" });
 });
 
+test("the iCal feed is public (calendar apps send no cookie) — and ONLY the feed subtree is", async () => {
+  const feed = await proxy(req("/api/calendar/feed/abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG.ics"));
+  assertPassedThrough(feed, "GET /api/calendar/feed/<token>.ics must reach its token-authed handler anonymously");
+  // Its management route stays session-gated.
+  const manage = await proxy(req("/api/profile/calendar"));
+  assert.equal(manage.status, 401);
+  const sibling = await proxy(req("/api/calendar/other"));
+  assert.equal(sibling.status, 401, "only /api/calendar/feed/ is exempt, not the whole /api/calendar tree");
+  assert.equal(dbReads, 0, "the anonymous feed pass-through does not touch the DB in the proxy");
+});
+
 // ── session validation and the sliding refresh (guardrail 6b) ───────────────
 
 test("a valid cookie session passes and the slid session JWT rides back on Set-Cookie", async () => {

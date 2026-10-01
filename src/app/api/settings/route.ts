@@ -184,6 +184,7 @@ const SETTINGS_SCHEMA = [
   ["feature.integration.discord",     false],
   ["feature.integration.email",       false],
   ["feature.integration.push",        false],
+  ["feature.integration.calendar",    false],
   ["feature.admin.stats",             false],
   ["feature.admin.activity",          false],
   ["feature.admin.auditLog",          false],

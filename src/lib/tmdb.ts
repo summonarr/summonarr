@@ -206,7 +206,12 @@ interface RawTV {
   episode_run_time?: number[];
   number_of_seasons?: number | null;
   number_of_episodes?: number | null;
-  next_episode_to_air?: { air_date?: string | null } | null;
+  next_episode_to_air?: {
+    air_date?: string | null;
+    season_number?: number | null;
+    episode_number?: number | null;
+    name?: string | null;
+  } | null;
   content_ratings?: {
     results: { iso_3166_1: string; rating: string }[];
   };
@@ -907,6 +912,55 @@ export async function getTVSeasonEpisodes(
   // (mirrors searchMulti's guard).
   if (episodes.length > 0) await setCache(key, episodes, TTL.DETAILS);
   return episodes;
+}
+
+// Calendar-feed TV data (src/lib/calendar-events.ts): a plain /tv/<id> read,
+// cached under its OWN key. Deliberately not getTVDetails — that path also runs
+// the MDBList/OMDB ratings chain, whose OMDB getter detaches a stale refresh, so
+// a bounded warm over it would not bound the upstream work (guardrail 31a). This
+// one awaits everything it starts. A short TTL because next_episode_to_air moves
+// weekly for an airing show.
+export interface TvCalendarInfo {
+  status: string | null;
+  lastAirDate: string | null;
+  seasons: { seasonNumber: number; airDate: string | null; episodeCount: number }[];
+  nextEpisode: {
+    airDate: string;
+    seasonNumber: number | null;
+    episodeNumber: number | null;
+    name: string | null;
+  } | null;
+}
+export const TV_CALENDAR_TTL = 2 * 24 * 60 * 60;
+export function tvCalendarKey(tmdbId: number): string {
+  return `tv:${tmdbId}:calendar:v1`;
+}
+
+export async function getTVCalendarInfo(tmdbId: number): Promise<TvCalendarInfo> {
+  const key = tvCalendarKey(tmdbId);
+  return coalesce(key, async () => {
+    const cached = await getCache<TvCalendarInfo>(key);
+    if (cached) return cached;
+    const r = await tmdbFetch<RawTV>(`/tv/${tmdbId}`);
+    const next = r.next_episode_to_air;
+    const info: TvCalendarInfo = {
+      status: r.status ?? null,
+      lastAirDate: r.last_air_date ?? null,
+      seasons: (r.seasons ?? [])
+        .filter((s) => s.season_number > 0)
+        .map((s) => ({ seasonNumber: s.season_number, airDate: s.air_date ?? null, episodeCount: s.episode_count })),
+      nextEpisode: next?.air_date
+        ? {
+            airDate: next.air_date,
+            seasonNumber: next.season_number ?? null,
+            episodeNumber: next.episode_number ?? null,
+            name: next.name ?? null,
+          }
+        : null,
+    };
+    await setCache(key, info, TV_CALENDAR_TTL);
+    return info;
+  });
 }
 
 export async function getPersonDetails(id: number): Promise<PersonDetails> {

@@ -131,6 +131,8 @@ test("spot checks: security/UX-salient definitions are exact", () => {
   assert.equal(byKey.get("playHistoryEnabled")?.category, "behaviors");
   assert.equal(byKey.get("trashGuidesEnabled")?.category, "admin");
   assert.equal(byKey.get("feature.integration.push")?.category, "integrations");
+  assert.equal(byKey.get("feature.integration.calendar")?.category, "integrations");
+  assert.equal(byKey.get("feature.integration.calendar")?.defaultEnabled, true);
 });
 
 // ── groupFeaturesByCategory partition ────────────────────────────────────
@@ -186,7 +188,7 @@ test("group sizes are exact (pins accidental category reassignment)", () => {
   const groups = groupFeaturesByCategory();
   assert.equal(groups.pages.length, 8);
   assert.equal(groups.behaviors.length, 6);
-  assert.equal(groups.integrations.length, 7);
+  assert.equal(groups.integrations.length, 8);
   assert.equal(groups.admin.length, 7);
 });
 

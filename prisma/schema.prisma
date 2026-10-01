@@ -138,6 +138,15 @@ model User {
   // is on; the user can opt out on their profile. Default on so granting the
   // permission is enough.
   plexWatchlistAutoRequest Boolean @default(true)
+  // Personal iCal (.ics) subscription feed — /api/calendar/feed/<token>.ics.
+  // Calendar apps cannot send cookies or headers, so the URL itself carries a
+  // per-user secret. Only its SHA-256 HASH is stored (src/lib/calendar-token.ts):
+  // the plaintext is shown once at generation and never again, so a leaked
+  // backup or DB read cannot be replayed as a feed URL. Regenerating overwrites
+  // the hash, which revokes the old URL. null ⇒ no feed. Unique so the public
+  // route resolves a token with one indexed lookup.
+  calendarTokenHash      String?   @unique
+  calendarTokenCreatedAt DateTime?
 
   accounts          Account[]
   requests          MediaRequest[]

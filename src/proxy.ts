@@ -83,7 +83,11 @@ function isPublicPath(pathname: string): boolean {
     // Notification-email verification link is clicked from an email (possibly
     // logged-out / another device); the one-time token in the query IS the
     // credential. Token-authed inside the handler — see audit-routes exception.
-    pathname === "/api/profile/notification-email/confirm"
+    pathname === "/api/profile/notification-email/confirm" ||
+    // Personal iCal feed: calendar apps poll it with no cookie or header, so the
+    // secret token in the path IS the credential. Token-authed (hashed,
+    // timing-safe) inside the handler — see audit-routes exception.
+    pathname.startsWith("/api/calendar/feed/")
   );
 }
 

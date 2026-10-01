@@ -181,6 +181,13 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
     category: "integrations",
     defaultEnabled: true,
   },
+  {
+    key: "feature.integration.calendar",
+    label: "Calendar feed",
+    description: "Let users subscribe to an iCal (.ics) feed of upcoming release dates for their requests and watchlist from Google, Apple or Outlook calendar.",
+    category: "integrations",
+    defaultEnabled: true,
+  },
 
   // ── Admin pages ───────────────────────────────────────────────────────
   {
