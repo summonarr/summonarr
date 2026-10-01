@@ -5,6 +5,7 @@ import { Loader2, Check } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface ChangePasswordProps {
   hasPassword: boolean;
@@ -14,6 +15,7 @@ interface ChangePasswordProps {
 // (hasPassword), the current password is required too. When the server answers
 // `requiresRelogin`, we send the user to /login.
 export function ChangePassword({ hasPassword }: ChangePasswordProps) {
+  const t = useT();
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword]         = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -27,7 +29,7 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
     setSuccess(false);
 
     if (newPassword !== confirmPassword) {
-      setError("New passwords do not match");
+      setError(t("profile.password.error.mismatch"));
       return;
     }
 
@@ -43,7 +45,7 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setError(data.error ?? "Failed to update password");
+        setError(data.error ?? t("profile.password.error.failed"));
         return;
       }
       const data = await res.json().catch(() => ({}));
@@ -63,7 +65,7 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
       // The message mentions sign-out because the server signs out every
       // session when the password changes. If the change saved but only the
       // response was lost, the user is already signed out everywhere.
-      setError("Network error — please try again. If the change went through, you will be signed out.");
+      setError(t("profile.password.error.network"));
     } finally {
       setSaving(false);
     }
@@ -74,7 +76,7 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
       {hasPassword && (
         <div>
           <label className="block text-sm text-zinc-400 mb-1" htmlFor="current-password">
-            Current password
+            {t("profile.password.current")}
           </label>
           <Input
             id="current-password"
@@ -89,7 +91,7 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
 
       <div>
         <label className="block text-sm text-zinc-400 mb-1" htmlFor="new-password">
-          New password
+          {t("profile.password.new")}
         </label>
         <Input
           id="new-password"
@@ -97,7 +99,7 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
           autoComplete="new-password"
           value={newPassword}
           onChange={(e) => setNewPassword(e.target.value)}
-          placeholder="Min. 12 characters"
+          placeholder={t("profile.password.minLength", { count: 12 })}
           minLength={12}
           required
         />
@@ -105,7 +107,7 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
 
       <div>
         <label className="block text-sm text-zinc-400 mb-1" htmlFor="confirm-password">
-          Confirm new password
+          {t("profile.password.confirm")}
         </label>
         <Input
           id="confirm-password"
@@ -122,7 +124,7 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
 
       {success && (
         <p className="flex items-center gap-1.5 text-sm text-emerald-400">
-          <Check className="w-4 h-4" /> Password {hasPassword ? "updated" : "set"}
+          <Check className="w-4 h-4" /> {hasPassword ? t("profile.password.updated") : t("profile.password.setDone")}
         </p>
       )}
 
@@ -132,7 +134,7 @@ export function ChangePassword({ hasPassword }: ChangePasswordProps) {
         className="w-full sm:w-auto"
       >
         {saving ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-        {saving ? "Saving…" : hasPassword ? "Update password" : "Set password"}
+        {saving ? t("profile.common.saving") : hasPassword ? t("profile.password.update") : t("profile.password.set")}
       </Button>
     </form>
   );

@@ -4,11 +4,13 @@ import { useState } from "react";
 import { SetupForm } from "./setup-form";
 import { SetupImportPanel } from "./setup-import-panel";
 import { UserPlus, Upload } from "@/components/icons";
+import { useT } from "@/components/i18n/i18n-provider";
 
 type Tab = "create" | "restore";
 
 // First-run shell: create-account only, or create/restore tabs when a backup password is configured.
 export function SetupShell({ importAvailable }: { importAvailable: boolean }) {
+  const t = useT();
   const [tab, setTab] = useState<Tab>("create");
 
   if (!importAvailable) {
@@ -16,7 +18,7 @@ export function SetupShell({ importAvailable }: { importAvailable: boolean }) {
       <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-8">
         <div className="flex items-center gap-2 mb-6 px-3 py-2.5 rounded-lg bg-indigo-600/10 border border-indigo-500/20">
           <span className="text-indigo-400 text-xs font-medium">
-            First user automatically becomes administrator
+            {t("auth.setup.firstUserAdmin")}
           </span>
         </div>
         <SetupForm />
@@ -26,14 +28,14 @@ export function SetupShell({ importAvailable }: { importAvailable: boolean }) {
 
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
-      <div role="tablist" aria-label="Setup mode" className="grid grid-cols-2 border-b border-zinc-800">
+      <div role="tablist" aria-label={t("auth.setup.mode")} className="grid grid-cols-2 border-b border-zinc-800">
         <TabButton active={tab === "create"} onClick={() => setTab("create")}>
           <UserPlus className="w-3.5 h-3.5" />
-          Create account
+          {t("auth.setup.tab.create")}
         </TabButton>
         <TabButton active={tab === "restore"} onClick={() => setTab("restore")}>
           <Upload className="w-3.5 h-3.5" />
-          Restore backup
+          {t("auth.setup.tab.restore")}
         </TabButton>
       </div>
       <div role="tabpanel" className="p-8">
@@ -41,7 +43,7 @@ export function SetupShell({ importAvailable }: { importAvailable: boolean }) {
           <>
             <div className="flex items-center gap-2 mb-6 px-3 py-2.5 rounded-lg bg-indigo-600/10 border border-indigo-500/20">
               <span className="text-indigo-400 text-xs font-medium">
-                First user automatically becomes administrator
+                {t("auth.setup.firstUserAdmin")}
               </span>
             </div>
             <SetupForm />

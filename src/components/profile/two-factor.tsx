@@ -7,7 +7,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { withBasePath } from "@/lib/base-path";
-import { formatRelativeTime } from "@/lib/relative-time";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
+import { translatedRelativeTime } from "./relative-time";
 import { encodeQr, qrToSvgPath } from "@/lib/qr";
 import { createPasskey, isWebAuthnCancel, isWebAuthnSupported, type CreationOptionsJSON } from "@/lib/client/webauthn";
 
@@ -35,7 +37,7 @@ interface Props {
 
 type ApiResult = { ok: true; data: Record<string, unknown> } | { ok: false; error: string };
 
-async function call(path: string, method: string, body?: unknown): Promise<ApiResult> {
+async function call(t: Translator, path: string, method: string, body?: unknown): Promise<ApiResult> {
   try {
     const res = await fetch(withBasePath(path), {
       method,
@@ -43,21 +45,22 @@ async function call(path: string, method: string, body?: unknown): Promise<ApiRe
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!res.ok) return { ok: false, error: typeof data.error === "string" ? data.error : `Request failed (${res.status})` };
+    if (!res.ok) return { ok: false, error: typeof data.error === "string" ? data.error : t("profile.mfa.error.requestFailed", { status: res.status }) };
     return { ok: true, data };
   } catch {
-    return { ok: false, error: "Network error — please try again." };
+    return { ok: false, error: t("auth.login.error.network") };
   }
 }
 
 function QrImage({ text }: { text: string }) {
+  const t = useT();
   const { path, viewBox } = useMemo(() => qrToSvgPath(encodeQr(text, "M")), [text]);
   // Black modules on white regardless of theme: scanners need dark-on-light,
   // and this is an image, not a themed surface (guardrail 42 governs surfaces).
   return (
     <svg
       role="img"
-      aria-label="QR code for your authenticator app"
+      aria-label={t("profile.mfa.qrLabel")}
       viewBox={viewBox}
       width={184}
       height={184}
@@ -71,10 +74,11 @@ function QrImage({ text }: { text: string }) {
 }
 
 function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void }) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
   const text = codes.join("\n");
   function download() {
-    const blob = new Blob([`Summonarr recovery codes\nEach code works once.\n\n${text}\n`], { type: "text/plain" });
+    const blob = new Blob([`${t("profile.mfa.codes.fileHeader")}\n\n${text}\n`], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -83,10 +87,10 @@ function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void 
     URL.revokeObjectURL(url);
   }
   return (
-    <div className="space-y-3" role="region" aria-label="Recovery codes">
+    <div className="space-y-3" role="region" aria-label={t("auth.mfa.recoveryCodes")}>
       <p className="text-sm text-amber-400 flex items-start gap-2">
         <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-        Save these recovery codes somewhere safe. Each one signs you in once if you lose your authenticator or passkey. They won&apos;t be shown again.
+        {t("profile.mfa.codes.saveWarning")}
       </p>
       <ul
         className="ds-mono grid grid-cols-2 gap-x-6 gap-y-1 text-sm text-zinc-100"
@@ -108,12 +112,12 @@ function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void 
           }}
         >
           {copied ? <Check className="w-4 h-4 mr-1.5" /> : <Copy className="w-4 h-4 mr-1.5" />}
-          {copied ? "Copied" : "Copy"}
+          {copied ? t("profile.common.copied") : t("profile.common.copy")}
         </Button>
         <Button type="button" variant="outline" onClick={download}>
-          <Download className="w-4 h-4 mr-1.5" />Download
+          <Download className="w-4 h-4 mr-1.5" />{t("profile.common.download")}
         </Button>
-        <Button type="button" onClick={onDone}>I&apos;ve saved them</Button>
+        <Button type="button" onClick={onDone}>{t("profile.mfa.codes.saved")}</Button>
       </div>
     </div>
   );
@@ -123,6 +127,8 @@ function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void 
 // password (the server enforces it — src/lib/mfa/step-up.ts); one password
 // field serves every action in the section.
 export function TwoFactorSettings({ initial, required }: Props) {
+  const t = useT();
+  const locale = useLocale();
   const router = useRouter();
   const mounted = useHasMounted();
   const [state, setState] = useState<TwoFactorState>(initial);
@@ -138,7 +144,7 @@ export function TwoFactorSettings({ initial, required }: Props) {
   const [confirmDisable, setConfirmDisable] = useState(false);
 
   async function refresh() {
-    const r = await call("/api/profile/mfa", "GET");
+    const r = await call(t, "/api/profile/mfa", "GET");
     if (r.ok) {
       const d = r.data as unknown as TwoFactorState & { passkeys: TwoFactorPasskey[] };
       setState({
@@ -154,7 +160,7 @@ export function TwoFactorSettings({ initial, required }: Props) {
 
   function needPassword(): boolean {
     if (password.length === 0) {
-      setError("Enter your current password first.");
+      setError(t("profile.mfa.error.needPassword"));
       return true;
     }
     return false;
@@ -173,57 +179,57 @@ export function TwoFactorSettings({ initial, required }: Props) {
 
   const startTotp = () => run("totp-setup", async () => {
     if (needPassword()) return;
-    const r = await call("/api/profile/mfa/totp/setup", "POST", { password });
+    const r = await call(t, "/api/profile/mfa/totp/setup", "POST", { password });
     if (!r.ok) return setError(r.error);
     setSetup({ secret: String(r.data.secret), otpauthUri: String(r.data.otpauthUri) });
     setSetupCode("");
   });
 
   const confirmTotp = () => run("totp-enable", async () => {
-    const r = await call("/api/profile/mfa/totp/enable", "POST", { code: setupCode });
+    const r = await call(t, "/api/profile/mfa/totp/enable", "POST", { code: setupCode });
     if (!r.ok) return setError(r.error);
     setSetup(null);
     setSetupCode("");
     if (Array.isArray(r.data.recoveryCodes)) setCodes(r.data.recoveryCodes as string[]);
-    setNotice("Authenticator app turned on.");
+    setNotice(t("profile.mfa.notice.totpOn"));
     await refresh();
   });
 
   const removeTotp = () => run("totp-remove", async () => {
     if (needPassword()) return;
-    const r = await call("/api/profile/mfa/totp", "DELETE", { password });
+    const r = await call(t, "/api/profile/mfa/totp", "DELETE", { password });
     if (!r.ok) return setError(r.error);
-    setNotice("Authenticator app removed.");
+    setNotice(t("profile.mfa.notice.totpRemoved"));
     await refresh();
   });
 
   const addPasskey = () => run("passkey-add", async () => {
     if (needPassword()) return;
-    if (!isWebAuthnSupported()) return setError("This browser doesn't support passkeys.");
-    const opts = await call("/api/profile/mfa/passkeys/options", "POST", { password });
+    if (!isWebAuthnSupported()) return setError(t("auth.mfa.error.passkeyUnsupported"));
+    const opts = await call(t, "/api/profile/mfa/passkeys/options", "POST", { password });
     if (!opts.ok) return setError(opts.error);
     let credential: Record<string, unknown>;
     try {
       credential = await createPasskey(opts.data.publicKey as CreationOptionsJSON);
     } catch (err) {
-      if (!isWebAuthnCancel(err)) setError("The passkey couldn't be created on this device.");
+      if (!isWebAuthnCancel(err)) setError(t("profile.mfa.error.passkeyCreate"));
       return;
     }
-    const r = await call("/api/profile/mfa/passkeys", "POST", {
+    const r = await call(t, "/api/profile/mfa/passkeys", "POST", {
       registrationToken: opts.data.registrationToken,
-      name: passkeyName.trim() || "Passkey",
+      name: passkeyName.trim() || t("profile.mfa.passkey.defaultName"),
       credential,
     });
     if (!r.ok) return setError(r.error);
     setPasskeyName("");
     if (Array.isArray(r.data.recoveryCodes)) setCodes(r.data.recoveryCodes as string[]);
-    setNotice("Passkey added.");
+    setNotice(t("profile.mfa.notice.passkeyAdded"));
     await refresh();
   });
 
   const renamePasskey = (id: string, name: string) => run(`rename-${id}`, async () => {
     if (needPassword()) return;
-    const r = await call(`/api/profile/mfa/passkeys/${encodeURIComponent(id)}`, "PATCH", { password, name });
+    const r = await call(t, `/api/profile/mfa/passkeys/${encodeURIComponent(id)}`, "PATCH", { password, name });
     if (!r.ok) return setError(r.error);
     setRenaming(null);
     await refresh();
@@ -231,15 +237,15 @@ export function TwoFactorSettings({ initial, required }: Props) {
 
   const removePasskey = (id: string) => run(`remove-${id}`, async () => {
     if (needPassword()) return;
-    const r = await call(`/api/profile/mfa/passkeys/${encodeURIComponent(id)}`, "DELETE", { password });
+    const r = await call(t, `/api/profile/mfa/passkeys/${encodeURIComponent(id)}`, "DELETE", { password });
     if (!r.ok) return setError(r.error);
-    setNotice("Passkey removed.");
+    setNotice(t("profile.mfa.notice.passkeyRemoved"));
     await refresh();
   });
 
   const regenerateCodes = () => run("codes", async () => {
     if (needPassword()) return;
-    const r = await call("/api/profile/mfa/recovery-codes", "POST", { password });
+    const r = await call(t, "/api/profile/mfa/recovery-codes", "POST", { password });
     if (!r.ok) return setError(r.error);
     setCodes(r.data.recoveryCodes as string[]);
     await refresh();
@@ -247,11 +253,11 @@ export function TwoFactorSettings({ initial, required }: Props) {
 
   const disableAll = () => run("disable", async () => {
     if (needPassword()) return;
-    const r = await call("/api/profile/mfa", "DELETE", { password });
+    const r = await call(t, "/api/profile/mfa", "DELETE", { password });
     if (!r.ok) return setError(r.error);
     setConfirmDisable(false);
     setSetup(null);
-    setNotice("Two-factor authentication turned off.");
+    setNotice(t("profile.mfa.notice.disabled"));
     await refresh();
   });
 
@@ -262,18 +268,18 @@ export function TwoFactorSettings({ initial, required }: Props) {
       {required && !state.enabled && (
         <p role="alert" className="text-sm text-amber-400 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-          Your administrator requires two-factor authentication for admin accounts. Set it up below to use the admin pages.
+          {t("profile.mfa.requiredByAdmin")}
         </p>
       )}
 
       <p className="text-sm flex items-center gap-2" style={{ color: state.enabled ? "var(--ds-success)" : "var(--ds-fg-muted)" }}>
         <ShieldCheck className="w-4 h-4 shrink-0" />
-        {state.enabled ? "Two-factor authentication is on." : "Two-factor authentication is off — your password alone signs you in."}
+        {state.enabled ? t("profile.mfa.statusOn") : t("profile.mfa.statusOff")}
       </p>
 
       <div>
         <label className="block text-sm text-zinc-400 mb-1" htmlFor="mfa-password">
-          Current password <span className="text-zinc-500">(needed for any change)</span>
+          {t("profile.password.current")} <span className="text-zinc-500">{t("profile.mfa.passwordNeeded")}</span>
         </label>
         <Input
           id="mfa-password"
@@ -287,27 +293,27 @@ export function TwoFactorSettings({ initial, required }: Props) {
       {/* Authenticator app */}
       <section className="space-y-2">
         <h3 className="text-sm font-medium text-zinc-100 flex items-center gap-2">
-          <Smartphone className="w-4 h-4 text-zinc-400" /> Authenticator app
+          <Smartphone className="w-4 h-4 text-zinc-400" /> {t("profile.mfa.totp.title")}
         </h3>
         {state.totpEnabled ? (
           <div className="flex items-center justify-between gap-3">
-            <span className="text-sm text-zinc-400">On — enter a 6-digit code when you sign in.</span>
+            <span className="text-sm text-zinc-400">{t("profile.mfa.totp.on")}</span>
             <Button type="button" variant="outline" disabled={busy !== null} onClick={removeTotp}>
-              {busy === "totp-remove" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Remove"}
+              {busy === "totp-remove" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("profile.common.remove")}
             </Button>
           </div>
         ) : setup ? (
           <div className="space-y-3">
             <p className="text-sm text-zinc-400">
-              Scan this code with an authenticator app (1Password, Google Authenticator, Aegis, …), then enter the 6-digit code it shows.
+              {t("profile.mfa.totp.scan")}
             </p>
             <div className="flex flex-wrap items-start gap-4">
               <QrImage text={setup.otpauthUri} />
               <div className="min-w-0 flex-1 space-y-2">
-                <p className="text-xs text-zinc-500">Can&apos;t scan? Enter this key manually:</p>
+                <p className="text-xs text-zinc-500">{t("profile.mfa.totp.manual")}</p>
                 <p className="ds-mono break-all text-sm text-zinc-100">{setup.secret.replace(/(.{4})/g, "$1 ").trim()}</p>
                 <a href={setup.otpauthUri} className="text-xs underline" style={{ color: "var(--ds-accent-text)" }}>
-                  Open in an authenticator app on this device
+                  {t("profile.mfa.totp.openApp")}
                 </a>
               </div>
             </div>
@@ -316,7 +322,7 @@ export function TwoFactorSettings({ initial, required }: Props) {
               onSubmit={(e) => { e.preventDefault(); void confirmTotp(); }}
             >
               <div>
-                <label className="block text-sm text-zinc-400 mb-1" htmlFor="mfa-setup-code">Code</label>
+                <label className="block text-sm text-zinc-400 mb-1" htmlFor="mfa-setup-code">{t("profile.mfa.totp.code")}</label>
                 <Input
                   id="mfa-setup-code"
                   inputMode="numeric"
@@ -329,15 +335,15 @@ export function TwoFactorSettings({ initial, required }: Props) {
                 />
               </div>
               <Button type="submit" disabled={busy !== null || setupCode.replace(/\s/g, "").length !== 6}>
-                {busy === "totp-enable" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Turn on"}
+                {busy === "totp-enable" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("profile.mfa.turnOn")}
               </Button>
-              <Button type="button" variant="outline" onClick={() => setSetup(null)}>Cancel</Button>
+              <Button type="button" variant="outline" onClick={() => setSetup(null)}>{t("profile.common.cancel")}</Button>
             </form>
           </div>
         ) : (
           <Button type="button" variant="outline" disabled={busy !== null} onClick={startTotp}>
             {busy === "totp-setup" ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Plus className="w-4 h-4 mr-1.5" />}
-            Set up authenticator app
+            {t("profile.mfa.totp.setup")}
           </Button>
         )}
       </section>
@@ -345,10 +351,10 @@ export function TwoFactorSettings({ initial, required }: Props) {
       {/* Passkeys */}
       <section className="space-y-2">
         <h3 className="text-sm font-medium text-zinc-100 flex items-center gap-2">
-          <KeyRound className="w-4 h-4 text-zinc-400" /> Passkeys &amp; security keys
+          <KeyRound className="w-4 h-4 text-zinc-400" /> {t("profile.mfa.passkey.title")}
         </h3>
         {!state.webauthnAvailable ? (
-          <p className="text-sm text-zinc-500">Passkeys are unavailable until the server&apos;s AUTH_URL is set to its public address.</p>
+          <p className="text-sm text-zinc-500">{t("profile.mfa.passkey.unavailable")}</p>
         ) : (
           <>
             {state.passkeys.length > 0 && (
@@ -365,13 +371,13 @@ export function TwoFactorSettings({ initial, required }: Props) {
                         onSubmit={(e) => { e.preventDefault(); void renamePasskey(p.id, renaming.name); }}
                       >
                         <Input
-                          aria-label="Passkey name"
+                          aria-label={t("profile.mfa.passkey.nameLabel")}
                           value={renaming.name}
                           maxLength={64}
                           onChange={(e) => setRenaming({ id: p.id, name: e.target.value })}
                         />
-                        <Button type="submit" disabled={busy !== null}>Save</Button>
-                        <Button type="button" variant="outline" onClick={() => setRenaming(null)}>Cancel</Button>
+                        <Button type="submit" disabled={busy !== null}>{t("profile.common.save")}</Button>
+                        <Button type="button" variant="outline" onClick={() => setRenaming(null)}>{t("profile.common.cancel")}</Button>
                       </form>
                     ) : (
                       <>
@@ -380,21 +386,21 @@ export function TwoFactorSettings({ initial, required }: Props) {
                           <p className="text-xs text-zinc-500">
                             {mounted
                               ? p.lastUsedAt
-                                ? `Last used ${formatRelativeTime(new Date(p.lastUsedAt))}`
-                                : `Added ${new Date(p.createdAt).toLocaleDateString()}`
+                                ? t("profile.mfa.passkey.lastUsed", { time: translatedRelativeTime(p.lastUsedAt, t) })
+                                : t("profile.push.added", { date: new Date(p.createdAt).toLocaleDateString(locale) })
                               : ""}
-                            {p.backedUp ? " · synced" : ""}
+                            {p.backedUp ? ` · ${t("profile.mfa.passkey.synced")}` : ""}
                           </p>
                         </div>
                         <div className="flex shrink-0 gap-1.5">
                           <Button type="button" variant="outline" size="sm" disabled={busy !== null} onClick={() => setRenaming({ id: p.id, name: p.name })}>
-                            Rename
+                            {t("profile.mfa.passkey.rename")}
                           </Button>
                           <Button
                             type="button"
                             variant="outline"
                             size="sm"
-                            aria-label={`Remove passkey ${p.name}`}
+                            aria-label={t("profile.mfa.passkey.removeNamed", { name: p.name })}
                             disabled={busy !== null}
                             onClick={() => removePasskey(p.id)}
                           >
@@ -409,10 +415,10 @@ export function TwoFactorSettings({ initial, required }: Props) {
             )}
             <div className="flex flex-wrap items-end gap-2">
               <div>
-                <label className="block text-sm text-zinc-400 mb-1" htmlFor="mfa-passkey-name">Name</label>
+                <label className="block text-sm text-zinc-400 mb-1" htmlFor="mfa-passkey-name">{t("profile.mfa.passkey.name")}</label>
                 <Input
                   id="mfa-passkey-name"
-                  placeholder="e.g. YubiKey, MacBook"
+                  placeholder={t("profile.mfa.passkey.namePlaceholder")}
                   maxLength={64}
                   value={passkeyName}
                   onChange={(e) => setPasskeyName(e.target.value)}
@@ -421,7 +427,7 @@ export function TwoFactorSettings({ initial, required }: Props) {
               </div>
               <Button type="button" variant="outline" disabled={busy !== null} onClick={addPasskey}>
                 {busy === "passkey-add" ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Plus className="w-4 h-4 mr-1.5" />}
-                Add passkey
+                {t("profile.mfa.passkey.add")}
               </Button>
             </div>
           </>
@@ -430,13 +436,13 @@ export function TwoFactorSettings({ initial, required }: Props) {
 
       {state.enabled && (
         <section className="space-y-2">
-          <h3 className="text-sm font-medium text-zinc-100">Recovery codes</h3>
+          <h3 className="text-sm font-medium text-zinc-100">{t("auth.mfa.recoveryCodes")}</h3>
           <div className="flex items-center justify-between gap-3">
             <span className="text-sm text-zinc-400">
-              {state.recoveryCodesRemaining} unused code{state.recoveryCodesRemaining === 1 ? "" : "s"} left.
+              {t("profile.mfa.codes.remaining", { count: state.recoveryCodesRemaining })}
             </span>
             <Button type="button" variant="outline" disabled={busy !== null} onClick={regenerateCodes}>
-              {busy === "codes" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Generate new codes"}
+              {busy === "codes" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("profile.mfa.codes.regenerate")}
             </Button>
           </div>
         </section>
@@ -446,20 +452,20 @@ export function TwoFactorSettings({ initial, required }: Props) {
         <section className="pt-2" style={{ borderTop: "1px solid var(--ds-border)" }}>
           {confirmDisable ? (
             <div className="flex flex-wrap items-center gap-2">
-              <span className="text-sm text-zinc-400">Remove every second factor and recovery code?</span>
+              <span className="text-sm text-zinc-400">{t("profile.mfa.confirmDisable")}</span>
               <Button
                 type="button"
                 className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]"
                 disabled={busy !== null}
                 onClick={disableAll}
               >
-                {busy === "disable" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Turn off"}
+                {busy === "disable" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("profile.calendar.turnOff")}
               </Button>
-              <Button type="button" variant="outline" onClick={() => setConfirmDisable(false)}>Cancel</Button>
+              <Button type="button" variant="outline" onClick={() => setConfirmDisable(false)}>{t("profile.common.cancel")}</Button>
             </div>
           ) : (
             <Button type="button" variant="outline" onClick={() => setConfirmDisable(true)}>
-              Turn off two-factor authentication
+              {t("profile.mfa.disable")}
             </Button>
           )}
         </section>

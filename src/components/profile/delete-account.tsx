@@ -5,6 +5,7 @@ import { Loader2 } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // Self-service "close account" (required by App Store Guideline 5.1.1(v)).
 // It calls DELETE /api/profile, which DISABLES the account: every session is
@@ -13,6 +14,7 @@ import { withBasePath } from "@/lib/base-path";
 // erasing data is a separate admin action (see src/lib/account-lifecycle.ts,
 // guardrail 33). The server has already ended our session, so we just go to /login.
 export function DeleteAccount({ requiresPassword = false }: { requiresPassword?: boolean }) {
+  const t = useT();
   const [confirming, setConfirming] = useState(false);
   const [confirmText, setConfirmText] = useState("");
   const [password, setPassword] = useState("");
@@ -34,13 +36,13 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setError(data.error ?? "Failed to delete account");
+        setError(data.error ?? t("profile.close.error.failed"));
         setDeleting(false);
         return;
       }
       window.location.href = withBasePath("/login");
     } catch {
-      setError("Failed to delete account. Please try again.");
+      setError(t("profile.close.error.retry"));
       setDeleting(false);
     }
   }
@@ -49,10 +51,7 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
     return (
       <div className="space-y-3">
         <p className="text-sm text-zinc-400">
-          Close your account and sign out everywhere. You won’t be able to sign
-          back in — only an administrator can restore access. Your requests,
-          votes, issues and watch history are kept. Ask an administrator if you
-          also want your personal data erased.
+          {t("profile.close.intro")}
         </p>
         <Button
           type="button"
@@ -60,7 +59,7 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
           onClick={() => setConfirming(true)}
           className="w-full sm:w-auto"
         >
-          Close account
+          {t("profile.close.button")}
         </Button>
       </div>
     );
@@ -69,25 +68,25 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
   return (
     <div className="space-y-3">
       <p className="text-sm text-zinc-400">
-        Type <span className="font-semibold text-zinc-200">DELETE</span> to confirm.
-        This closes your account and signs you out of every device — you won’t be
-        able to sign back in unless an administrator restores it.
+        {t("profile.close.confirmPrompt").split("{word}").map((part, i) => (
+          <span key={i}>{i > 0 && <span className="font-semibold text-zinc-200">DELETE</span>}{part}</span>
+        ))}
       </p>
       <Input
         value={confirmText}
         onChange={(e) => setConfirmText(e.target.value)}
         placeholder="DELETE"
         autoComplete="off"
-        aria-label="Type DELETE to confirm account deletion"
+        aria-label={t("profile.close.confirmLabel", { word: "DELETE" })}
       />
       {requiresPassword && (
         <Input
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          placeholder="Current password"
+          placeholder={t("profile.password.current")}
           autoComplete="current-password"
-          aria-label="Current password"
+          aria-label={t("profile.password.current")}
         />
       )}
       {error && <p className="text-sm text-red-400">{error}</p>}
@@ -100,7 +99,7 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
           className="w-full sm:w-auto"
         >
           {deleting ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-          {deleting ? "Closing…" : "Close my account"}
+          {deleting ? t("profile.close.closing") : t("profile.close.confirmButton")}
         </Button>
         <Button
           type="button"
@@ -114,7 +113,7 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
           }}
           className="w-full sm:w-auto"
         >
-          Cancel
+          {t("profile.common.cancel")}
         </Button>
       </div>
     </div>

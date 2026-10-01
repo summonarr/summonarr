@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { Film, Wrench } from "@/components/icons";
 import { LoginForm } from "./login-form";
 import { getMaintenanceStatus } from "@/lib/maintenance";
+import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 
@@ -39,6 +40,7 @@ export default async function LoginPage() {
   const siteTitle = siteTitleRow?.value || "Summonarr";
   const siteUrl = siteUrlRow?.value || process.env.AUTH_URL || "";
   const maintenance = await getMaintenanceStatus();
+  const t = await getTranslator();
   // The Playfair wordmark above the icon already says "Summonarr"; repeating it
   // as the h1 read as a stutter on every default install. When the title IS the
   // default, the wordmark becomes the page's h1 instead so the heading outline
@@ -73,7 +75,7 @@ export default async function LoginPage() {
           >
             <Wrench style={{ width: 14, height: 14, marginTop: 2, color: "var(--ds-warning)", flexShrink: 0 }} />
             <p className="text-sm" style={{ color: "var(--ds-fg)", margin: 0 }}>
-              {maintenance.message || "We're performing some maintenance. Please check back shortly."}
+              {maintenance.message || t("auth.login.maintenanceDefault")}
             </p>
           </div>
         )}
@@ -119,7 +121,7 @@ export default async function LoginPage() {
             className="ds-mono m-0"
             style={{ fontSize: 12, color: "var(--ds-fg-subtle)", marginTop: 4 }}
           >
-            Sign in to your account
+            {t("auth.login.subtitle")}
           </p>
         </div>
 

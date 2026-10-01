@@ -6,6 +6,7 @@ import { Trash2, Loader2, Smartphone, X } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { withBasePath } from "@/lib/base-path";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 interface PushDevice {
   id: string;
@@ -20,6 +21,8 @@ interface PushDevicesProps {
 
 // Lists registered web-push devices with per-device confirm-then-remove; shows count against cap.
 export function PushDevices({ devices, cap }: PushDevicesProps) {
+  const t = useT();
+  const locale = useLocale();
   const router = useRouter();
   const mounted = useHasMounted();
   const [removing, setRemoving] = useState<string | null>(null);
@@ -50,7 +53,7 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
 
   if (devices.length === 0) {
     return (
-      <p className="text-sm text-zinc-500">No push-notification devices registered.</p>
+      <p className="text-sm text-zinc-500">{t("profile.push.empty")}</p>
     );
   }
 
@@ -58,10 +61,10 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
 
   return (
     <div className="space-y-2">
-      <p className="text-xs text-zinc-500 mb-3">{capLabel} device{devices.length !== 1 ? "s" : ""} registered</p>
-      {error && <p className="text-xs text-red-400 mb-2">Failed to remove device — try again.</p>}
+      <p className="text-xs text-zinc-500 mb-3">{t("profile.push.registered", { count: devices.length, label: capLabel })}</p>
+      {error && <p className="text-xs text-red-400 mb-2">{t("profile.push.error.remove")}</p>}
       {devices.map((device, i) => {
-        const deviceLabel = device.label || `Device ${i + 1}`;
+        const deviceLabel = device.label || t("profile.push.deviceN", { n: i + 1 });
         return (
           <div
             key={device.id}
@@ -72,7 +75,7 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
               <div className="min-w-0">
                 <p className="text-sm text-zinc-200">{deviceLabel}</p>
                 <p className="text-xs text-zinc-500">
-                  {mounted ? `Added ${new Date(device.createdAt).toLocaleDateString()}` : ""}
+                  {mounted ? t("profile.push.added", { date: new Date(device.createdAt).toLocaleDateString(locale) }) : ""}
                 </p>
               </div>
             </div>
@@ -81,8 +84,8 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
                 type="button"
                 size="sm"
                 variant="ghost"
-                aria-label={`Remove ${deviceLabel}`}
-                title="Remove device"
+                aria-label={t("profile.push.removeNamed", { name: deviceLabel })}
+                title={t("profile.push.removeDevice")}
                 className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-9 w-9 p-0"
                 disabled={removing === device.id}
                 onClick={() => setConfirmingRemove(device.id)}
@@ -97,19 +100,19 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
                 <Button
                   type="button"
                   size="sm"
-                  aria-label={`Confirm remove ${deviceLabel}`}
+                  aria-label={t("profile.push.confirmRemoveNamed", { name: deviceLabel })}
                   className="h-9 px-2.5 bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
                   onClick={() => remove(device.id)}
                   autoFocus
                 >
                   <Trash2 className="w-3.5 h-3.5" />
-                  Remove
+                  {t("profile.common.remove")}
                 </Button>
                 <Button
                   type="button"
                   size="sm"
                   variant="ghost"
-                  aria-label="Cancel remove"
+                  aria-label={t("profile.common.cancelRemove")}
                   className="h-9 w-9 p-0 text-zinc-400 hover:text-zinc-200"
                   onClick={() => setConfirmingRemove(null)}
                 >

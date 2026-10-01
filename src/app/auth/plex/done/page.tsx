@@ -5,6 +5,8 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { AlertTriangle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 
 interface LoginAuth {
   flow: "login";
@@ -33,7 +35,7 @@ type RedirectAuth = LoginAuth | SettingsAuth;
 //         token / server URL) is broken — which locks out every Plex user at
 //         once. Point at the server owner, not the individual.
 //   5xx → the server errored while completing sign-in.
-async function describePlexSignInFailure(res: Response): Promise<string> {
+async function describePlexSignInFailure(res: Response, t: Translator): Promise<string> {
   let detail = "";
   try {
     const data: { error?: unknown } = await res.json();
@@ -42,21 +44,24 @@ async function describePlexSignInFailure(res: Response): Promise<string> {
     // Non-JSON body (e.g. a reverse-proxy 502 HTML page) — use the status alone.
   }
   if (res.status === 400) {
-    return "Your Plex sign-in session expired or was invalid. Please go back and try again.";
+    return t("auth.plexDone.error.expired");
   }
   if (res.status === 401) {
-    return "Plex sign-in was rejected. Either your Plex account isn't shared on this server, or the server's Plex connection needs to be re-authorized — contact the server owner.";
+    return t("auth.plexDone.error.rejected");
   }
   if (res.status >= 500) {
-    return "The server hit an error finishing sign-in. Please try again, or contact the server owner if it keeps happening.";
+    return t("auth.plexDone.error.server");
   }
-  return `Plex sign-in failed (${res.status}${detail ? ` — ${detail}` : ""}). Contact the server owner if this persists.`;
+  return detail
+    ? t("auth.plexDone.error.statusDetail", { status: res.status, detail })
+    : t("auth.plexDone.error.status", { status: res.status });
 }
 
 // Landing page after the Plex PIN sign-in redirect. It polls until the user has
 // approved the PIN, then finishes either a login or the admin Settings connect.
 export default function PlexDonePage() {
-  const [message, setMessage] = useState("Completing Plex sign-in…");
+  const t = useT();
+  const [message, setMessage] = useState(() => t("auth.plexDone.completing"));
   // Every failure branch below used to swap the message and leave the spinner
   // running with no way out but the browser's Back button. `failed` stops the
   // spinner and surfaces a link back to /login; the success path is untouched.
@@ -97,11 +102,11 @@ export default function PlexDonePage() {
     }
 
     if (!authToken) {
-      fail("Sign-in timed out. Please go back and try again.");
+      fail(t("auth.plexDone.error.timeout"));
       return;
     }
 
-    setMessage("Signing in…");
+    setMessage(t("auth.plexDone.signingIn"));
     let result: Response;
     try {
       result = await fetch(withBasePath("/api/auth/sign-in/plex"), {
@@ -118,12 +123,12 @@ export default function PlexDonePage() {
     } catch {
       // The request never reached the server (offline, DNS/TLS, proxy down).
       // Without this the thrown fetch would leave the user on the spinner forever.
-      fail("Couldn't reach the server to finish sign-in. Check your connection and try again.");
+      fail(t("auth.plexDone.error.unreachable"));
       return;
     }
 
     if (!result.ok) {
-      fail(await describePlexSignInFailure(result));
+      fail(await describePlexSignInFailure(result, t));
       return;
     }
 
@@ -174,11 +179,11 @@ export default function PlexDonePage() {
     }
 
     if (!authToken) {
-      fail("Connection timed out. Please go back and try again.", "settings");
+      fail(t("auth.plexDone.error.connectionTimeout"), "settings");
       return;
     }
 
-    setMessage("Saving connection…");
+    setMessage(t("auth.plexDone.saving"));
     try {
       const res = await fetch(withBasePath("/api/settings/plex"), {
         method: "POST",
@@ -187,7 +192,7 @@ export default function PlexDonePage() {
       });
       if (!res.ok) throw new Error();
     } catch {
-      fail("Failed to save Plex connection. Please try again.", "settings");
+      fail(t("auth.plexDone.error.saveFailed"), "settings");
       return;
     }
 
@@ -229,7 +234,7 @@ export default function PlexDonePage() {
     // session was tampered with; an absent URL state means the redirect was forged.
     const urlState = searchParams.get("state");
     if (!auth.state || !urlState || urlState !== auth.state) {
-      fail("Sign-in failed: state mismatch. Please try again.", auth.flow === "settings" ? "settings" : "login");
+      fail(t("auth.plexDone.error.stateMismatch"), auth.flow === "settings" ? "settings" : "login");
       return;
     }
 
@@ -272,7 +277,7 @@ export default function PlexDonePage() {
             padding: "0 20px",
           }}
         >
-          {failedFlow === "settings" ? "Back to settings" : "Back to sign in"}
+          {failedFlow === "settings" ? t("auth.plexDone.backToSettings") : t("auth.mfa.backToSignIn")}
         </Link>
       )}
     </div>

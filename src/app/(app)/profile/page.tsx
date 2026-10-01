@@ -22,6 +22,7 @@ import { adminMfaPolicyApplies, REQUIRE_MFA_FOR_ADMINS_KEY } from "@/lib/mfa/pol
 import { webAuthnConfigFromEnv } from "@/lib/mfa/webauthn";
 import { User } from "@/components/icons";
 import { PageHeader } from "@/components/ui/design";
+import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 
@@ -99,12 +100,13 @@ export default async function ProfilePage() {
     adminMfaPolicyApplies({ role: session.user.role, provider: session.user.provider, settingValue: requireMfaRow?.value });
   const pushCap = parseRateLimit(maxPushSetting?.value, DEFAULT_MAX_PUSH_SUBSCRIPTIONS);
   const currentSessionId = session.sessionId;
+  const t = await getTranslator();
 
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Profile"
-        subtitle="Manage your account and integrations"
+        title={t("profile.title")}
+        subtitle={t("profile.subtitle")}
       />
 
       <div className="max-w-2xl lg:max-w-6xl lg:grid lg:grid-cols-2 lg:gap-6">
@@ -152,7 +154,7 @@ export default async function ProfilePage() {
 
           <ProfileCard
             title="Discord"
-            description="Link your Discord account to request media directly from Discord."
+            description={t("profile.discord.description")}
           >
             <DiscordLinkSection
               linkedDiscordId={user?.discordId ?? null}
@@ -162,8 +164,8 @@ export default async function ProfilePage() {
 
           {session.user.provider === "credentials" && (
             <ProfileCard
-              title="Change Password"
-              description="Update your local login password."
+              title={t("profile.password.title")}
+              description={t("profile.password.description")}
             >
               <ChangePassword hasPassword={hasPassword} />
             </ProfileCard>
@@ -172,8 +174,8 @@ export default async function ProfilePage() {
           {mfaState && (
             <ProfileCard
               id="two-factor"
-              title="Two-factor authentication"
-              description="Ask for a code from an authenticator app, or a passkey, after your password."
+              title={t("profile.mfa.title")}
+              description={t("profile.mfa.description")}
             >
               <TwoFactorSettings
                 required={mfaRequired}
@@ -195,8 +197,8 @@ export default async function ProfilePage() {
           )}
 
           <ProfileCard
-            title="Active Sessions"
-            description="Devices currently signed in. Revoke any session you don't recognize."
+            title={t("profile.sessions.title")}
+            description={t("profile.sessions.description")}
           >
             <AuthSessions
               sessions={authSessions.map((s) => ({
@@ -207,8 +209,8 @@ export default async function ProfilePage() {
           </ProfileCard>
 
           <ProfileCard
-            title="Close Account"
-            description="Close your account and block sign-in. Only an administrator can restore it."
+            title={t("profile.close.title")}
+            description={t("profile.close.description")}
           >
             <DeleteAccount requiresPassword={hasPassword} />
           </ProfileCard>
@@ -219,8 +221,8 @@ export default async function ProfilePage() {
           style={{ gap: 20 }}
         >
           <ProfileCard
-            title="Notification Preferences"
-            description="Choose which notifications you receive on each channel."
+            title={t("profile.notifications.title")}
+            description={t("profile.notifications.description")}
           >
             <NotificationPrefs
               emailEnabled={emailEnabled}
@@ -255,8 +257,8 @@ export default async function ProfilePage() {
 
           {autoRequestEnabled && (
             <ProfileCard
-              title="Watchlist Auto-Request"
-              description="Request titles automatically when you add them to a watchlist."
+              title={t("profile.autoRequest.title")}
+              description={t("profile.autoRequest.description")}
             >
               <AutoRequestPrefs
                 initialPlexWatchlist={user?.plexWatchlistAutoRequest ?? true}
@@ -266,8 +268,8 @@ export default async function ProfilePage() {
           )}
 
           <ProfileCard
-            title="Push Devices"
-            description="Devices registered for push notifications. Remove any you no longer use."
+            title={t("profile.push.title")}
+            description={t("profile.push.description")}
           >
             <PushDevices devices={pushDevices} cap={pushCap} />
           </ProfileCard>
@@ -275,8 +277,8 @@ export default async function ProfilePage() {
           {calendarEnabled && (
             <ProfileCard
               id="calendar-feed"
-              title="Calendar Feed"
-              description="Upcoming release dates in your own calendar app."
+              title={t("profile.calendar.title")}
+              description={t("profile.calendar.description")}
             >
               <CalendarFeed
                 enabled={!!user?.calendarTokenHash}
