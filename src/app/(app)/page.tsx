@@ -18,6 +18,7 @@ import { HideAvailableToggle } from "@/components/media/hide-available-toggle";
 import { requireAppSession } from "@/lib/require-app-session";
 import { getFeatureFlags } from "@/lib/features";
 import { getUserRecommendations } from "@/lib/recommendations";
+import { getRecentlyAddedForViewer, RECENTLY_ADDED_SIZE } from "@/lib/recently-added";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
@@ -123,6 +124,9 @@ export default async function DiscoverPage({
   const upcomingEnabled = flags["feature.page.upcoming"];
   const topEnabled = flags["feature.page.top"];
   const forYouEnabled = flags["feature.page.forYou"];
+  // Every title on this rail is on the viewer's own server by construction, so
+  // with Hide Available on it could only ever read "all available" — skip it.
+  const recentEnabled = flags["feature.page.recentlyAdded"] && !hideAvailable;
 
   // Start the 4K-visibility read concurrently with the TMDB fan-out; awaited
   // just before attachAllAvailability consumes it. The no-op catch only marks
@@ -140,6 +144,7 @@ export default async function DiscoverPage({
     topMoviesRes,
     topTVRes,
     forYouRes,
+    recentRes,
   ] = await Promise.allSettled([
     getTrending(),
     getPopularMovies(),
@@ -155,6 +160,15 @@ export default async function DiscoverPage({
     forYouEnabled
       ? getUserRecommendations(session.user.id)
       : Promise.resolve([] as TmdbMedia[]),
+    // Library reads scoped to the servers this viewer may see (guardrail 35),
+    // cached per visible-server set — never a TMDB call. Mirrors
+    // src/app/api/home/route.ts — keep the two in sync.
+    recentEnabled
+      ? getRecentlyAddedForViewer(session, {
+          plex: flags["feature.integration.plex"],
+          jellyfin: flags["feature.integration.jellyfin"],
+        })
+      : Promise.resolve([] as TmdbMedia[]),
   ]);
 
   const trending  = settled(trendingRes);
@@ -165,6 +179,7 @@ export default async function DiscoverPage({
   const topMovies = settled(topMoviesRes).slice(0, RAIL_OVERFETCH);
   const topTV     = settled(topTVRes).slice(0, RAIL_OVERFETCH);
   const forYou    = settled(forYouRes).slice(0, RAIL_OVERFETCH);
+  const recent    = settled(recentRes);
 
   // Enrich the full RAIL_OVERFETCH window (not just RAIL_SIZE): project() drops
   // available/hidden items then backfills toward RAIL_SIZE from the tail, so the
@@ -178,6 +193,9 @@ export default async function DiscoverPage({
     { raw: topMovies, limit: RAIL_OVERFETCH },
     { raw: topTV, limit: RAIL_OVERFETCH },
     { raw: forYou, limit: RAIL_OVERFETCH },
+    // Last, so a title also on a TMDB rail keeps that richer record (overview,
+    // backdrop) in the shared enriched map. Already capped at its overfetch.
+    { raw: recent, limit: recent.length },
   ];
   const displaySet = dedupeUnion(candidateLists.map((c) => c.raw.slice(0, c.limit)));
   const show4k = await show4kPromise;
@@ -196,6 +214,10 @@ export default async function DiscoverPage({
     (m) => !featuredKeys.has(`${m.mediaType}-${m.id}`),
   );
   const railsBase: { title: string; subtitle: string; href?: string; raw: TmdbMedia[]; items: TmdbMedia[] }[] = [
+    // No "See all": the only full list (/admin/activity/recent) is admin-only.
+    ...(recentEnabled
+      ? [{ title: "Recently Added", subtitle: "Just landed on your server", raw: recent, items: project(recent, emap, hideAvailable, RECENTLY_ADDED_SIZE, vis) }]
+      : []),
     ...(forYouEnabled
       ? [{ title: "For You", subtitle: "Picked based on what you watch", href: "/for-you", raw: forYou, items: project(forYou, emap, hideAvailable, RAIL_SIZE, vis) }]
       : []),

@@ -77,6 +77,13 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
     category: "pages",
     defaultEnabled: false,
   },
+  {
+    key: "feature.page.recentlyAdded",
+    label: "Recently Added row",
+    description: "Show the \"Recently Added\" row on the home page: the newest titles on the Plex/Jellyfin servers each user can see.",
+    category: "pages",
+    defaultEnabled: true,
+  },
 
   // ── Behaviors ─────────────────────────────────────────────────────────
   {
