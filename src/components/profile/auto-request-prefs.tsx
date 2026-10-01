@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 import { Switch } from "@/components/ui/switch";
 
 // "Auto-request from my Plex watchlist" — the user's own switch for the Plex half
@@ -15,6 +16,7 @@ export function AutoRequestPrefs({
   initialPlexWatchlist: boolean;
   plexConnected: boolean;
 }) {
+  const t = useT();
   const [on, setOn] = useState(initialPlexWatchlist);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -34,11 +36,11 @@ export function AutoRequestPrefs({
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         setOn(!next);
-        setError(data?.error ?? "Failed to save — please try again");
+        setError(data?.error ?? t("profile.error.saveFailed"));
       }
     } catch {
       setOn(!next);
-      setError("Network error — please try again");
+      setError(t("profile.error.network"));
     } finally {
       setSaving(false);
     }
@@ -47,18 +49,18 @@ export function AutoRequestPrefs({
   return (
     <div>
       <p className="text-xs text-zinc-500" style={{ marginBottom: 8 }}>
-        Titles you add to your Summonarr watchlist are requested for you automatically.
+        {t("profile.autoRequest.summonarrHint")}
       </p>
       <div className="flex items-start justify-between gap-4 py-3">
         <div>
-          <p className="text-sm font-medium text-zinc-200">Auto-request from my Plex watchlist</p>
+          <p className="text-sm font-medium text-zinc-200">{t("profile.autoRequest.plexLabel")}</p>
           <p className="text-xs text-zinc-500 mt-0.5">
             {plexConnected
-              ? "New titles on your Plex watchlist are requested periodically."
-              : "Sign in with Plex once to connect your Plex watchlist."}
+              ? t("profile.autoRequest.plexConnected")
+              : t("profile.autoRequest.plexNotConnected")}
           </p>
         </div>
-        <Switch checked={on} disabled={saving} onCheckedChange={toggle} aria-label="Auto-request from my Plex watchlist" />
+        <Switch checked={on} disabled={saving} onCheckedChange={toggle} aria-label={t("profile.autoRequest.plexLabel")} />
       </div>
       {error && (
         <p role="alert" className="text-xs text-red-400">

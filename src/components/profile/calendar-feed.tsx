@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { withBasePath } from "@/lib/base-path";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 interface CalendarFeedProps {
   /** A feed token exists (its URL cannot be shown again — only its hash is stored). */
@@ -24,6 +25,8 @@ interface Generated {
 // that generates it: the server stores a hash, never the token, so a lost URL is
 // replaced (which revokes the old one) rather than re-displayed.
 export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFeedProps) {
+  const t = useT();
+  const locale = useLocale();
   const mounted = useHasMounted();
   const [active, setActive] = useState(enabled);
   const [since, setSince] = useState<string | null>(createdAt);
@@ -40,14 +43,14 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
       const res = await fetch(withBasePath("/api/profile/calendar"), { method: "POST" });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(data.error ?? "Couldn’t create a feed link — try again.");
+        setError(data.error ?? t("profile.calendar.error.create"));
         return;
       }
       setGenerated({ url: data.url, webcalUrl: data.webcalUrl, allUrl: data.allUrl ?? null });
       setActive(true);
       setSince(data.createdAt ?? null);
     } catch {
-      setError("Couldn’t create a feed link — try again.");
+      setError(t("profile.calendar.error.create"));
     } finally {
       setBusy(null);
     }
@@ -60,14 +63,14 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
     try {
       const res = await fetch(withBasePath("/api/profile/calendar"), { method: "DELETE" });
       if (!res.ok) {
-        setError("Couldn’t turn off the feed — try again.");
+        setError(t("profile.calendar.error.revoke"));
         return;
       }
       setGenerated(null);
       setActive(false);
       setSince(null);
     } catch {
-      setError("Couldn’t turn off the feed — try again.");
+      setError(t("profile.calendar.error.revoke"));
     } finally {
       setBusy(null);
     }
@@ -76,40 +79,37 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
   return (
     <div className="space-y-3">
       <p className="text-sm text-zinc-400">
-        Subscribe in Google, Apple or Outlook calendar to see release dates for your
-        requests and watchlist — theatrical, digital and physical releases for movies,
-        and air dates for upcoming episodes. Anyone with the link can see these
-        titles, so keep it private.
+        {t("profile.calendar.intro")}
       </p>
 
       {generated && (
         <div className="space-y-3 rounded-md border border-[var(--ds-border)] bg-[var(--ds-bg-1)] p-3">
           <p className="text-xs text-amber-400">
-            Copy this link now — it won’t be shown again. Generating a new one turns this one off.
+            {t("profile.calendar.copyNow")}
           </p>
-          <FeedUrl label="Your releases" url={generated.url} />
-          {generated.allUrl && <FeedUrl label="All requests (request managers)" url={generated.allUrl} />}
+          <FeedUrl label={t("profile.calendar.yourReleases")} url={generated.url} />
+          {generated.allUrl && <FeedUrl label={t("profile.calendar.allRequests")} url={generated.allUrl} />}
           <div className="flex flex-wrap gap-2">
             <a
               href={generated.webcalUrl}
               className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[var(--ds-border)] px-3 text-sm text-zinc-100 ds-hover-tint"
             >
               <Calendar className="w-4 h-4" />
-              Open in calendar app
+              {t("profile.calendar.openApp")}
             </a>
           </div>
           <p className="text-xs text-zinc-500">
-            Google Calendar: Other calendars → From URL → paste the link. Apple Calendar:
-            File → New Calendar Subscription. Outlook: Add calendar → Subscribe from web.
-            Calendar apps refresh on their own schedule, from every few minutes to about a day.
+            {t("profile.calendar.howTo")}
           </p>
         </div>
       )}
 
       {!generated && active && (
         <p className="text-sm text-zinc-300">
-          A feed link is active{mounted && since ? ` (created ${new Date(since).toLocaleDateString()})` : ""}.
-          {" "}Lost it? Generate a new one — the old link stops working.
+          {mounted && since
+            ? t("profile.calendar.activeSince", { date: new Date(since).toLocaleDateString(locale) })
+            : t("profile.calendar.active")}
+          {" "}{t("profile.calendar.lostIt")}
         </p>
       )}
 
@@ -119,8 +119,8 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-sm text-zinc-300 w-full">
             {confirming === "regenerate"
-              ? "Generate a new link? Calendars subscribed with the current link stop updating."
-              : "Turn off the feed? Calendars subscribed with it stop updating."}
+              ? t("profile.calendar.confirmRegenerate")
+              : t("profile.calendar.confirmRevoke")}
           </p>
           <Button
             type="button"
@@ -129,10 +129,10 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
             className="w-full sm:w-auto"
             autoFocus
           >
-            {confirming === "regenerate" ? "Generate new link" : "Turn off feed"}
+            {confirming === "regenerate" ? t("profile.calendar.generateNew") : t("profile.calendar.turnOffFeed")}
           </Button>
           <Button type="button" variant="ghost" onClick={() => setConfirming(null)} className="w-full sm:w-auto">
-            Cancel
+            {t("profile.common.cancel")}
           </Button>
         </div>
       ) : (
@@ -144,7 +144,7 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
             className="w-full sm:w-auto gap-1.5"
           >
             {busy === "generate" ? <Loader2 className="w-4 h-4 animate-spin" /> : active ? <RefreshCw className="w-4 h-4" /> : <Calendar className="w-4 h-4" />}
-            {active ? "Generate new link" : "Create feed link"}
+            {active ? t("profile.calendar.generateNew") : t("profile.calendar.create")}
           </Button>
           {active && (
             <Button
@@ -155,14 +155,14 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
               className="w-full sm:w-auto"
             >
               {busy === "revoke" ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : null}
-              Turn off
+              {t("profile.calendar.turnOff")}
             </Button>
           )}
         </div>
       )}
       {canSubscribeAll && !generated && (
         <p className="text-xs text-zinc-500">
-          You manage requests, so a new link also comes with an all-requests feed.
+          {t("profile.calendar.allFeedHint")}
         </p>
       )}
     </div>
@@ -170,6 +170,7 @@ export function CalendarFeed({ enabled, createdAt, canSubscribeAll }: CalendarFe
 }
 
 function FeedUrl({ label, url }: { label: string; url: string }) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
   async function copy() {
     try {
@@ -187,7 +188,7 @@ function FeedUrl({ label, url }: { label: string; url: string }) {
         <Input
           readOnly
           value={url}
-          aria-label={`${label} feed URL`}
+          aria-label={t("profile.calendar.feedUrlLabel", { label })}
           onFocus={(e) => e.currentTarget.select()}
           className="font-mono text-xs"
         />
@@ -195,8 +196,8 @@ function FeedUrl({ label, url }: { label: string; url: string }) {
           type="button"
           variant="ghost"
           onClick={copy}
-          aria-label={`Copy ${label} feed URL`}
-          title="Copy link"
+          aria-label={t("profile.calendar.copyFeedUrl", { label })}
+          title={t("profile.calendar.copyLink")}
           className="h-9 w-9 shrink-0 p-0 text-zinc-400 hover:text-zinc-100"
         >
           {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}

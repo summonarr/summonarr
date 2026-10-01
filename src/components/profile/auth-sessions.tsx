@@ -6,7 +6,8 @@ import { Trash2, Loader2, Monitor, Smartphone, Tablet, MapPin, Clock, Check, X }
 import { Button } from "@/components/ui/button";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { withBasePath } from "@/lib/base-path";
-import { formatRelativeTime } from "@/lib/relative-time";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { translatedRelativeTime } from "./relative-time";
 import { isIndefiniteDeadline } from "@/lib/session-lifetime";
 
 interface AuthSessionRow {
@@ -33,6 +34,8 @@ function DeviceIcon({ deviceType }: { deviceType: string }) {
 
 // Lists the user's active auth sessions with per-device revoke (confirm-then-delete).
 export function AuthSessions({ sessions }: AuthSessionsProps) {
+  const t = useT();
+  const locale = useLocale();
   const router  = useRouter();
   const [revoking, setRevoking] = useState<string | null>(null);
   const [confirmingRevoke, setConfirmingRevoke] = useState<string | null>(null);
@@ -47,6 +50,13 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
   // server and in the browser (the clock moves on, and the locale can differ),
   // so they only render once mounted. See CLAUDE.md guardrail 16.
   const mounted = useHasMounted();
+
+  function deviceTypeLabel(deviceType: string): string {
+    if (deviceType === "mobile") return t("profile.sessions.device.mobile");
+    if (deviceType === "tablet") return t("profile.sessions.device.tablet");
+    if (deviceType === "desktop") return t("profile.sessions.device.desktop");
+    return t("profile.sessions.device.other", { type: deviceType });
+  }
 
   async function revoke(sessionId: string, confirmPassword?: string) {
     setRevoking(sessionId);
@@ -73,27 +83,27 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
       } else if (data.error === "invalid-password") {
         setPasswordFor(sessionId);
         setPassword("");
-        setRevokeError("Incorrect password.");
+        setRevokeError(t("profile.sessions.error.incorrectPassword"));
       } else {
         setPasswordFor(null);
         setPassword("");
-        setRevokeError(data.message ?? data.error ?? "Failed to revoke session.");
+        setRevokeError(data.message ?? data.error ?? t("profile.sessions.error.revoke"));
       }
     } catch {
-      setRevokeError("Failed to revoke session.");
+      setRevokeError(t("profile.sessions.error.revoke"));
     } finally {
       setRevoking(null);
     }
   }
 
   if (sessions.length === 0) {
-    return <p className="text-sm text-zinc-500">No active sessions.</p>;
+    return <p className="text-sm text-zinc-500">{t("profile.sessions.empty")}</p>;
   }
 
   return (
     <div className="space-y-2">
       <p className="text-xs text-zinc-500 mb-3">
-        {sessions.length} active session{sessions.length !== 1 ? "s" : ""}
+        {t("profile.sessions.count", { count: sessions.length })}
       </p>
 
       {sessions.map((s) => (
@@ -110,12 +120,12 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
             <div className="min-w-0 space-y-0.5">
               <div className="flex items-center gap-2 flex-wrap">
                 <p className="text-sm text-zinc-200 truncate">
-                  {s.deviceLabel ?? `${s.deviceType.charAt(0).toUpperCase() + s.deviceType.slice(1)} device`}
+                  {s.deviceLabel ?? deviceTypeLabel(s.deviceType)}
                 </p>
                 {s.isCurrent && (
                   <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-indigo-600 text-[var(--ds-accent-fg)] font-semibold shrink-0">
                     <Check className="w-3 h-3" />
-                    This device
+                    {t("profile.sessions.thisDevice")}
                   </span>
                 )}
               </div>
@@ -126,15 +136,15 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                   </span>
                 )}
                 <span className="flex items-center gap-1 text-xs text-zinc-500">
-                  <Clock className="w-3 h-3" />Active {mounted ? formatRelativeTime(s.lastSeenAt) : ""}
+                  <Clock className="w-3 h-3" />{t("profile.sessions.active", { time: mounted ? translatedRelativeTime(s.lastSeenAt, t) : "" })}
                 </span>
               </div>
               <p className="text-xs text-zinc-500">
                 {/* A native-app (iOS) session carries the never-reached sentinel
                     deadline (session-lifetime.ts) — it ends only when revoked. */}
                 {isIndefiniteDeadline(s.expiresAt)
-                  ? "Never expires — until revoked"
-                  : <>Expires {mounted ? new Date(s.expiresAt).toLocaleDateString() : ""}</>}
+                  ? t("profile.sessions.neverExpires")
+                  : t("profile.sessions.expires", { date: mounted ? new Date(s.expiresAt).toLocaleDateString(locale) : "" })}
               </p>
             </div>
           </div>
@@ -146,8 +156,10 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
               variant="ghost"
               // A 36x36 tap area, plus an aria-label so screen readers say
               // what this button does (sign that device out).
-              aria-label={`Revoke session ${s.deviceLabel ?? `${s.deviceType} device`}${s.ipAddress ? ` from ${s.ipAddress}` : ""}`}
-              title="Revoke session"
+              aria-label={s.ipAddress
+                ? t("profile.sessions.revokeNamedFrom", { name: s.deviceLabel ?? deviceTypeLabel(s.deviceType), ip: s.ipAddress })
+                : t("profile.sessions.revokeNamed", { name: s.deviceLabel ?? deviceTypeLabel(s.deviceType) })}
+              title={t("profile.sessions.revoke")}
               className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-9 w-9 p-0 mt-0.5"
               disabled={revoking === s.sessionId}
               onClick={() => setConfirmingRevoke(s.sessionId)}
@@ -162,19 +174,19 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
               <Button
                 type="button"
                 size="sm"
-                aria-label="Confirm revoke session"
+                aria-label={t("profile.sessions.confirmRevoke")}
                 className="h-9 px-2.5 bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
                 onClick={() => revoke(s.sessionId)}
                 autoFocus
               >
                 <Trash2 className="w-3.5 h-3.5" />
-                Revoke
+                {t("profile.sessions.revokeButton")}
               </Button>
               <Button
                 type="button"
                 size="sm"
                 variant="ghost"
-                aria-label="Cancel revoke"
+                aria-label={t("profile.sessions.cancelRevoke")}
                 className="h-9 w-9 p-0 text-zinc-400 hover:text-zinc-200"
                 onClick={() => setConfirmingRevoke(null)}
               >
@@ -193,8 +205,8 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                 type="password"
                 autoFocus
                 autoComplete="current-password"
-                aria-label="Confirm your password to revoke this device"
-                placeholder="Your password"
+                aria-label={t("profile.sessions.passwordLabel")}
+                placeholder={t("profile.sessions.passwordPlaceholder")}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 className="h-9 flex-1 min-w-0 sm:flex-none sm:w-40 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -202,20 +214,20 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
               <Button
                 type="submit"
                 size="sm"
-                aria-label="Confirm revoke session"
+                aria-label={t("profile.sessions.confirmRevoke")}
                 className="h-9 px-2.5 bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
                 disabled={!password || revoking === s.sessionId}
               >
                 {revoking === s.sessionId
                   ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   : <Trash2 className="w-3.5 h-3.5" />}
-                Revoke
+                {t("profile.sessions.revokeButton")}
               </Button>
               <Button
                 type="button"
                 size="sm"
                 variant="ghost"
-                aria-label="Cancel revoke"
+                aria-label={t("profile.sessions.cancelRevoke")}
                 className="h-9 w-9 p-0 text-zinc-400 hover:text-zinc-200"
                 onClick={() => { setPasswordFor(null); setPassword(""); setRevokeError(null); }}
               >

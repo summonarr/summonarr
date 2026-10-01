@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Check, Loader2, MessageCircle, Mail, AlertTriangle, Bell } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 import { Switch } from "@/components/ui/switch";
 
 interface NotificationPrefsProps {
@@ -76,6 +77,7 @@ export function NotificationPrefs({
   pushOnDeclined,
   notifyOnIssue,
 }: NotificationPrefsProps) {
+  const t = useT();
   const router = useRouter();
   const [prefs, setPrefs] = useState<AllPrefs>({
     notifyOnApproved,
@@ -154,7 +156,7 @@ export function NotificationPrefs({
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         rollBack();
-        setSaveError(data?.error ?? "Failed to save — please try again");
+        setSaveError(data?.error ?? t("profile.error.saveFailed"));
         return;
       }
       savedPrefsRef.current = updated;
@@ -162,7 +164,7 @@ export function NotificationPrefs({
       router.refresh();
     } catch {
       rollBack();
-      setSaveError("Network error — please try again");
+      setSaveError(t("profile.error.network"));
     } finally {
       setSaving(false);
     }
@@ -183,7 +185,7 @@ export function NotificationPrefs({
   async function sendVerification() {
     const trimmed = emailInput.trim();
     if (trimmed === "" || !EMAIL_RE.test(trimmed)) {
-      setEmailError("Please enter a valid email address");
+      setEmailError(t("profile.notifications.error.invalidEmail"));
       setEmailSavingState("error");
       return;
     }
@@ -197,13 +199,13 @@ export function NotificationPrefs({
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setEmailError(data?.error ?? "Couldn't send verification email");
+        setEmailError(data?.error ?? t("profile.notifications.error.sendVerification"));
         setEmailSavingState("error");
         return;
       }
       setEmailSavingState("sent");
     } catch {
-      setEmailError("Network error");
+      setEmailError(t("profile.notifications.error.network"));
       setEmailSavingState("error");
     }
   }
@@ -219,7 +221,7 @@ export function NotificationPrefs({
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setEmailError(data?.error ?? "Failed to remove email");
+        setEmailError(data?.error ?? t("profile.notifications.error.removeEmail"));
         setEmailSavingState("error");
         return;
       }
@@ -227,7 +229,7 @@ export function NotificationPrefs({
       setEmailSavingState("idle");
       router.refresh();
     } catch {
-      setEmailError("Network error");
+      setEmailError(t("profile.notifications.error.network"));
       setEmailSavingState("error");
     }
   }
@@ -238,9 +240,7 @@ export function NotificationPrefs({
         <div className="rounded-md border border-zinc-800 bg-zinc-900/50 p-3 text-xs text-zinc-400 flex items-start gap-2">
           <Bell className="w-4 h-4 shrink-0 text-zinc-500 mt-0.5" />
           <span>
-            Browser/device push is the only notification channel available to you right now —
-            enable it from the bell in the top bar. Link your Discord account to add another
-            channel, or ask an admin to configure email delivery.
+            {t("profile.notifications.pushOnly")}
           </span>
         </div>
       )}
@@ -252,22 +252,22 @@ export function NotificationPrefs({
             <p className="text-sm font-semibold text-indigo-400">Discord</p>
           </div>
           <ToggleRow
-            label="Request Approved"
-            description="Notify me on Discord when my request is approved"
+            label={t("profile.notifications.approved")}
+            description={t("profile.notifications.discord.approved")}
             checked={prefs.notifyOnApproved}
             onChange={() => toggle("notifyOnApproved")}
             disabled={saving}
           />
           <ToggleRow
-            label="Now Available"
-            description="Notify me on Discord when my content is ready to watch"
+            label={t("profile.notifications.available")}
+            description={t("profile.notifications.discord.available")}
             checked={prefs.notifyOnAvailable}
             onChange={() => toggle("notifyOnAvailable")}
             disabled={saving}
           />
           <ToggleRow
-            label="Request Declined"
-            description="Notify me on Discord when my request is declined"
+            label={t("profile.notifications.declined")}
+            description={t("profile.notifications.discord.declined")}
             checked={prefs.notifyOnDeclined}
             onChange={() => toggle("notifyOnDeclined")}
             disabled={saving}
@@ -279,29 +279,28 @@ export function NotificationPrefs({
         <div>
           <div className="flex items-center gap-2 mb-1">
             <Mail className="w-4 h-4 text-zinc-400" />
-            <p className="text-sm font-semibold text-zinc-400">Email</p>
+            <p className="text-sm font-semibold text-zinc-400">{t("profile.notifications.channel.email")}</p>
           </div>
 
           {isJellyfin ? (
             <div className="py-3 border-b border-zinc-800">
               <label htmlFor="notificationEmail" className="text-sm font-medium text-zinc-200 block">
-                Notification email address
+                {t("profile.notifications.emailAddress")}
               </label>
               <p className="text-xs text-zinc-500 mt-0.5 mb-2">
-                Jellyfin accounts don&apos;t expose a verified email. Enter an address and we&apos;ll
-                send a verification link — notifications start once you click it.
+                {t("profile.notifications.jellyfinEmailHint")}
               </p>
               {notificationEmail && (
                 <div className="flex items-center gap-2 mb-2">
                   <span className="text-sm text-zinc-300 font-mono">{notificationEmail}</span>
-                  <span className="text-[10px] uppercase tracking-wide text-green-400 border border-green-400/40 rounded px-1 py-0.5">verified</span>
+                  <span className="text-[10px] uppercase tracking-wide text-green-400 border border-green-400/40 rounded px-1 py-0.5">{t("profile.notifications.verified")}</span>
                   <button
                     type="button"
                     onClick={clearNotificationEmail}
                     disabled={emailSavingState === "saving"}
                     className="text-[11px] text-zinc-500 hover:text-zinc-300 underline disabled:opacity-50"
                   >
-                    Remove
+                    {t("profile.common.remove")}
                   </button>
                 </div>
               )}
@@ -315,7 +314,7 @@ export function NotificationPrefs({
                     if (emailSavingState !== "idle") setEmailSavingState("idle");
                     if (emailError) setEmailError(null);
                   }}
-                  placeholder={notificationEmail ? "change to a different address…" : "you@example.com"}
+                  placeholder={notificationEmail ? t("profile.notifications.changeAddress") : t("auth.field.emailPlaceholder")}
                   className="flex-1 rounded-md bg-zinc-950 border border-zinc-700 px-3 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
                   autoComplete="email"
                   spellCheck={false}
@@ -326,45 +325,45 @@ export function NotificationPrefs({
                   disabled={emailSavingState === "saving" || emailInput.trim() === ""}
                   className="rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed px-3 py-1.5 text-sm font-medium text-[var(--ds-accent-fg)] transition-colors whitespace-nowrap"
                 >
-                  {emailSavingState === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Send verification"}
+                  {emailSavingState === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("profile.notifications.sendVerification")}
                 </button>
               </div>
               {emailError && <p className="text-xs text-red-400 mt-1.5">{emailError}</p>}
               {emailSavingState === "sent" && !emailError && (
                 <p className="text-xs text-green-400 mt-1.5 flex items-center gap-1">
-                  <Check className="w-3 h-3" /> Verification email sent — check your inbox and click the link.
+                  <Check className="w-3 h-3" /> {t("profile.notifications.verificationSent")}
                 </p>
               )}
             </div>
           ) : (
             <div className="py-3 border-b border-zinc-800">
-              <p className="text-sm font-medium text-zinc-200">Notification email address</p>
+              <p className="text-sm font-medium text-zinc-200">{t("profile.notifications.emailAddress")}</p>
               <p className="text-xs text-zinc-500 mt-0.5">
-                Synced from your sign-in provider. Update it there to change where notifications are delivered.
+                {t("profile.notifications.syncedHint")}
               </p>
               <p className="text-sm text-zinc-300 mt-2 font-mono">
-                {notificationEmail ?? <span className="text-zinc-500 italic font-sans">Not set</span>}
+                {notificationEmail ?? <span className="text-zinc-500 italic font-sans">{t("profile.notifications.notSet")}</span>}
               </p>
             </div>
           )}
 
           <ToggleRow
-            label="Request Approved"
-            description="Email me when my request is approved"
+            label={t("profile.notifications.approved")}
+            description={t("profile.notifications.email.approved")}
             checked={prefs.emailOnApproved}
             onChange={() => toggle("emailOnApproved")}
             disabled={saving}
           />
           <ToggleRow
-            label="Now Available"
-            description="Email me when my content is ready to watch"
+            label={t("profile.notifications.available")}
+            description={t("profile.notifications.email.available")}
             checked={prefs.emailOnAvailable}
             onChange={() => toggle("emailOnAvailable")}
             disabled={saving}
           />
           <ToggleRow
-            label="Request Declined"
-            description="Email me when my request is declined"
+            label={t("profile.notifications.declined")}
+            description={t("profile.notifications.email.declined")}
             checked={prefs.emailOnDeclined}
             onChange={() => toggle("emailOnDeclined")}
             disabled={saving}
@@ -375,25 +374,25 @@ export function NotificationPrefs({
       <div>
         <div className="flex items-center gap-2 mb-1">
           <Bell className="w-4 h-4 text-zinc-400" />
-          <p className="text-sm font-semibold text-zinc-400">Push</p>
+          <p className="text-sm font-semibold text-zinc-400">{t("profile.notifications.channel.push")}</p>
         </div>
         <ToggleRow
-          label="Request Approved"
-          description="Push notification when my request is approved"
+          label={t("profile.notifications.approved")}
+          description={t("profile.notifications.push.approved")}
           checked={prefs.pushOnApproved}
           onChange={() => toggle("pushOnApproved")}
           disabled={saving}
         />
         <ToggleRow
-          label="Now Available"
-          description="Push notification when my content is ready to watch"
+          label={t("profile.notifications.available")}
+          description={t("profile.notifications.push.available")}
           checked={prefs.pushOnAvailable}
           onChange={() => toggle("pushOnAvailable")}
           disabled={saving}
         />
         <ToggleRow
-          label="Request Declined"
-          description="Push notification when my request is declined"
+          label={t("profile.notifications.declined")}
+          description={t("profile.notifications.push.declined")}
           checked={prefs.pushOnDeclined}
           onChange={() => toggle("pushOnDeclined")}
           disabled={saving}
@@ -404,11 +403,11 @@ export function NotificationPrefs({
         <div>
           <div className="flex items-center gap-2 mb-1">
             <AlertTriangle className="w-4 h-4 text-yellow-400" />
-            <p className="text-sm font-semibold text-yellow-400">Issues</p>
+            <p className="text-sm font-semibold text-yellow-400">{t("profile.notifications.channel.issues")}</p>
           </div>
           <ToggleRow
-            label="New Issues & Replies"
-            description="Notify me when a user reports an issue or replies to an existing one"
+            label={t("profile.notifications.issues")}
+            description={t("profile.notifications.issuesHint")}
             checked={prefs.notifyOnIssue}
             onChange={() => toggle("notifyOnIssue")}
             disabled={saving}
@@ -424,7 +423,7 @@ export function NotificationPrefs({
       ) : (saving || saved) && (
         <p className="text-xs text-zinc-500 flex items-center gap-1">
           {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3 text-green-400" />}
-          {saving ? "Saving…" : "Saved"}
+          {saving ? t("profile.common.saving") : t("profile.common.saved")}
         </p>
       )}
     </div>
