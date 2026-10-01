@@ -4,6 +4,7 @@ import { useState } from "react";
 import { EyeOff, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useToast } from "@/components/ui/toast";
+import { useT } from "@/components/i18n/i18n-provider";
 import { DetailActionButton } from "./detail-action-button";
 
 // "Not Interested" toggle on movie/TV detail pages. Hidden titles are removed from
@@ -23,6 +24,7 @@ export function HideButton({
   initialHidden: boolean;
 }) {
   const { toast } = useToast();
+  const t = useT();
   const [hidden, setHidden] = useState(initialHidden);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
@@ -47,13 +49,13 @@ export function HideButton({
       if (!res.ok && res.status !== 409) {
         const data = await res.json().catch(() => ({}));
         setHidden(!next); // rollback
-        setMsg(data.error ?? "Something went wrong");
+        setMsg(data.error ?? t("request.somethingWrong"));
       } else {
-        toast({ title: next ? "Hidden from discovery" : "Shown again", variant: "success" });
+        toast({ title: next ? t("detail.hide.hiddenToast") : t("detail.hide.shownToast"), variant: "success" });
       }
     } catch {
       setHidden(!next); // rollback
-      setMsg("Network error — please try again");
+      setMsg(t("request.networkError"));
     } finally {
       setLoading(false);
     }
@@ -67,8 +69,8 @@ export function HideButton({
         disabled={loading}
         busy={loading}
         aria-pressed={hidden}
-        aria-label={hidden ? "Show in discovery again" : "Hide from my discovery"}
-        title={hidden ? "Hidden from your discovery — click to show it again" : "Not interested — hide from your discovery"}
+        aria-label={hidden ? t("detail.hide.showLabel") : t("detail.hide.hideLabel")}
+        title={hidden ? t("detail.hide.hiddenTitle") : t("detail.hide.hideTitle")}
         // The hidden state sits one surface deeper than the idle one.
         style={hidden ? { background: "var(--ds-bg-3)" } : undefined}
       >
@@ -77,7 +79,7 @@ export function HideButton({
         ) : (
           <EyeOff style={{ width: 14, height: 14 }} />
         )}
-        {hidden ? "Hidden" : "Not Interested"}
+        {hidden ? t("detail.hide.hidden") : t("detail.hide.notInterested")}
       </DetailActionButton>
       {msg && (
         <span className="ds-mono" style={{ fontSize: 11, color: "var(--ds-danger)" }}>

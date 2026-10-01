@@ -6,6 +6,7 @@ import { Trash2, Loader2, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { DetailActionButton } from "@/components/media/detail-action-button";
 import { useToast } from "@/components/ui/toast";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface Props {
   tmdbId: number;
@@ -17,6 +18,7 @@ interface Props {
 export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted }: Props) {
   const router = useRouter();
   const { toast } = useToast();
+  const t = useT();
   const [state, setState] = useState<"idle" | "reason" | "loading" | "voted">(alreadyVoted ? "voted" : "idle");
   const [reason, setReason] = useState("");
 
@@ -33,11 +35,11 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
         router.refresh();
       } else {
         setState("idle");
-        toast({ title: "Couldn't record your vote", variant: "error" });
+        toast({ title: t("request.vote.recordFailed"), variant: "error" });
       }
     } catch {
       setState("idle");
-      toast({ title: "Couldn't record your vote", variant: "error" });
+      toast({ title: t("request.vote.recordFailed"), variant: "error" });
     }
   }
 
@@ -47,15 +49,15 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
       const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "DELETE" });
       if (res.ok) {
         setState("idle");
-        toast({ title: "Vote removed", variant: "success" });
+        toast({ title: t("request.vote.removed"), variant: "success" });
         router.refresh();
       } else {
         setState("voted");
-        toast({ title: "Couldn't remove your vote", variant: "error" });
+        toast({ title: t("request.vote.removeFailed"), variant: "error" });
       }
     } catch {
       setState("voted");
-      toast({ title: "Couldn't remove your vote", variant: "error" });
+      toast({ title: t("request.vote.removeFailed"), variant: "error" });
     }
   }
 
@@ -64,11 +66,11 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
       <DetailActionButton
         variant="danger-soft"
         onClick={handleUnvote}
-        title="Remove your delete vote"
-        aria-label="Voted to Delete (click to remove your vote)"
+        title={t("request.vote.removeTitle")}
+        aria-label={t("request.vote.votedLabel")}
       >
         <Check style={{ width: 14, height: 14 }} />
-        Voted to Delete
+        {t("request.vote.voted")}
       </DetailActionButton>
     );
   }
@@ -80,17 +82,17 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
           type="text"
           value={reason}
           onChange={(e) => setReason(e.target.value.slice(0, 200))}
-          placeholder="Reason (optional)"
-          aria-label="Reason"
+          placeholder={t("request.vote.reasonPlaceholder")}
+          aria-label={t("request.vote.reason")}
           className="h-[34px] w-48 rounded-md border border-zinc-700 bg-zinc-800 px-3 text-[13px] text-zinc-100 focus:outline-none focus:ring-2 focus:ring-red-500"
           autoFocus
           onKeyDown={(e) => { if (e.key === "Enter") handleVote(); if (e.key === "Escape") setState("idle"); }}
         />
         <DetailActionButton variant="danger" onClick={handleVote}>
-          Vote
+          {t("request.vote.vote")}
         </DetailActionButton>
         <DetailActionButton variant="ghost" onClick={() => setState("idle")}>
-          Cancel
+          {t("request.cancel")}
         </DetailActionButton>
       </div>
     );
@@ -98,7 +100,7 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
 
   if (state === "loading") {
     return (
-      <DetailActionButton variant="secondary" disabled busy aria-label="Updating vote">
+      <DetailActionButton variant="secondary" disabled busy aria-label={t("request.vote.updating")}>
         <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
       </DetailActionButton>
     );
@@ -107,7 +109,7 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
   return (
     <DetailActionButton variant="secondary" onClick={() => setState("reason")}>
       <Trash2 style={{ width: 14, height: 14 }} />
-      Vote to Delete
+      {t("request.vote.voteToDelete")}
     </DetailActionButton>
   );
 }

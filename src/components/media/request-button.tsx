@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useToast } from "@/components/ui/toast";
+import { useT } from "@/components/i18n/i18n-provider";
 import {
   Plus,
   Check,
@@ -70,16 +71,17 @@ interface RequestButtonProps {
 // used to collapse into "Already requested or available", which was false for
 // no-permission (target lacks the instance grant), rating-blocked, blacklisted
 // and error — the requester never learned the real reason.
+// Values are i18n keys (request.json); the caller translates them.
 export const ON_BEHALF_MESSAGES: Record<string, string> = {
-  created: "Requested for user ✓",
-  "auto-approved": "Requested and auto-approved for user ✓",
-  "already-available": "Already available for that user",
-  "already-requested": "Already requested by that user",
-  "skipped-declined": "Permanently declined for that user",
-  "no-permission": "That user can't request this title on that instance",
-  blacklisted: "This title is blacklisted",
-  "rating-blocked": "Blocked by that user's content-rating limit",
-  error: "Request failed — try again",
+  created: "request.onBehalf.created",
+  "auto-approved": "request.onBehalf.autoApproved",
+  "already-available": "request.onBehalf.alreadyAvailable",
+  "already-requested": "request.onBehalf.alreadyRequested",
+  "skipped-declined": "request.onBehalf.skippedDeclined",
+  "no-permission": "request.onBehalf.noPermission",
+  blacklisted: "request.onBehalf.blacklisted",
+  "rating-blocked": "request.onBehalf.ratingBlocked",
+  error: "request.onBehalf.error",
 };
 
 // Outcomes that mean the on-behalf request did NOT go through — shown in the
@@ -95,12 +97,12 @@ const ON_BEHALF_FAILURES = new Set([
 
 // Pure: resolves the status line from the bulk response. `result` is the first
 // item's outcome; `created` is the fallback for an older server whose response
-// carries no `results` array.
+// carries no `results` array. Returns an i18n key.
 export function onBehalfMessage(result: string | undefined, created: number | undefined): string {
   if (result !== undefined && Object.hasOwn(ON_BEHALF_MESSAGES, result)) {
     return ON_BEHALF_MESSAGES[result];
   }
-  return created ? ON_BEHALF_MESSAGES.created : "Already requested or available for that user";
+  return created ? ON_BEHALF_MESSAGES.created : "request.onBehalf.collapsed";
 }
 
 // Primary HD request CTA on movie/TV detail + cards: handles the confirm/note/
@@ -121,6 +123,7 @@ export function RequestButton({
   blacklisted = false,
 }: RequestButtonProps) {
   const { toast } = useToast();
+  const t = useT();
   const router = useRouter();
   const [state, setState] = useState<State>(requested ? "duplicate" : "idle");
   const [note, setNote] = useState("");
@@ -174,7 +177,7 @@ export function RequestButton({
       }
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setErrorMsg(data.error ?? "Something went wrong");
+        setErrorMsg(data.error ?? t("request.somethingWrong"));
         setState("error");
         return;
       }
@@ -186,11 +189,11 @@ export function RequestButton({
         return;
       }
       setState("requested");
-      toast({ title: `Requested “${title}”`, variant: "success" });
+      toast({ title: t("request.requestedToast", { title }), variant: "success" });
       // Re-render the server-side hero (availability badges, Queued state).
       router.refresh();
     } catch {
-      setErrorMsg("Network error — please try again");
+      setErrorMsg(t("request.networkError"));
       setState("error");
     }
   }
@@ -231,15 +234,15 @@ export function RequestButton({
         error?: string;
       } = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setObMsg(data.error ?? "Something went wrong");
+        setObMsg(data.error ?? t("request.somethingWrong"));
         setObMsgError(true);
         return;
       }
       const result = data.results?.[0]?.result;
-      setObMsg(onBehalfMessage(data.results?.[0]?.result, data.created));
+      setObMsg(t(onBehalfMessage(data.results?.[0]?.result, data.created)));
       setObMsgError(result !== undefined && ON_BEHALF_FAILURES.has(result));
     } catch {
-      setObMsg("Network error — please try again");
+      setObMsg(t("request.networkError"));
       setObMsgError(true);
     } finally {
       setObSubmitting(false);
@@ -254,7 +257,9 @@ export function RequestButton({
   // so this user is tracked for the "now available" notification. The queue
   // state is still shown by the "Queued" indicator above.
   const showViewRequest = isDone;
-  const label = mediaType === "MOVIE" ? "Movie" : "TV Show";
+  const requestLabel = mediaType === "MOVIE" ? t("request.requestMovie") : t("request.requestTv");
+  // Split around the title so it keeps its emphasis in any word order.
+  const confirmPrompt = t("request.confirmPrompt", { title: "\u0000" }).split("\u0000");
 
   // Reused in the confirm and note panels. Same element in two spots is fine — it
   // only renders when the user can choose a profile and options have loaded.
@@ -263,7 +268,7 @@ export function RequestButton({
       <select
         value={profileId}
         onChange={(e) => setProfileId(e.target.value ? Number(e.target.value) : "")}
-        aria-label="Quality profile"
+        aria-label={t("request.qualityProfile")}
         className="w-full max-w-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         style={{
           padding: "8px 12px",
@@ -274,7 +279,7 @@ export function RequestButton({
           borderRadius: 6,
         }}
       >
-        <option value="">Server default quality</option>
+        <option value="">{t("request.serverDefaultQuality")}</option>
         {profiles.map((p) => (
           <option key={p.id} value={p.id}>
             {p.name}
@@ -291,7 +296,7 @@ export function RequestButton({
           style={{ gap: 6, fontSize: 13, color: "var(--ds-plex-text)" }}
         >
           <PlayCircle style={{ width: 14, height: 14 }} />
-          Available on Plex
+          {t("request.availableOn", { server: "Plex" })}
         </div>
       )}
       {showJellyfin && jellyfinAvailable && (
@@ -300,13 +305,13 @@ export function RequestButton({
           style={{ gap: 6, fontSize: 13, color: "var(--ds-jellyfin-text)" }}
         >
           <Tv2 style={{ width: 14, height: 14 }} />
-          Available on Jellyfin
+          {t("request.availableOn", { server: "Jellyfin" })}
         </div>
       )}
       {foundAvailable && (
         <DetailActionStatus variant="accent-soft" style={{ width: "fit-content" }}>
           <Check style={{ width: 14, height: 14 }} />
-          Already available
+          {t("request.alreadyAvailable")}
         </DetailActionStatus>
       )}
       {arrPending && (
@@ -315,7 +320,7 @@ export function RequestButton({
           style={{ gap: 6, fontSize: 13, color: "var(--ds-warning)" }}
         >
           <Clock style={{ width: 14, height: 14 }} />
-          Queued
+          {t("request.queued")}
         </div>
       )}
 
@@ -326,7 +331,7 @@ export function RequestButton({
           style={{ ...detailActionStyle("accent-soft"), width: "fit-content" }}
         >
           <Check style={{ width: 14, height: 14 }} />
-          View Request
+          {t("request.viewRequest")}
           <ExternalLink style={{ width: 12, height: 12, opacity: 0.6 }} />
         </Link>
       )}
@@ -334,7 +339,7 @@ export function RequestButton({
       {!isAvailable && !showViewRequest && blacklisted && (
         <DetailActionStatus variant="muted" style={{ width: "fit-content" }}>
           <Ban style={{ width: 14, height: 14 }} />
-          Not available to request
+          {t("request.notAvailableToRequest")}
         </DetailActionStatus>
       )}
 
@@ -357,19 +362,20 @@ export function RequestButton({
                   style={{ width: 14, height: 14, color: "var(--ds-accent-text)" }}
                 />
                 <p style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0 }}>
-                  Request{" "}
-                  <span className="font-semibold">{title}</span>?
+                  {confirmPrompt[0]}
+                  <span className="font-semibold">{title}</span>
+                  {confirmPrompt[1]}
                 </p>
               </div>
               {profileSelect}
               <div className="flex items-center gap-2">
                 <DetailActionButton variant="primary" onClick={submitRequest}>
                   <Check style={{ width: 14, height: 14 }} />
-                  Confirm
+                  {t("request.confirm")}
                 </DetailActionButton>
                 <DetailActionButton variant="ghost" onClick={() => setState("idle")}>
                   <X style={{ width: 14, height: 14 }} />
-                  Cancel
+                  {t("request.cancel")}
                 </DetailActionButton>
               </div>
             </div>
@@ -380,8 +386,8 @@ export function RequestButton({
               <textarea
                 value={note}
                 onChange={(e) => setNote(e.target.value.slice(0, 500))}
-                placeholder="Add a note for the admin (optional)"
-                aria-label="Request note"
+                placeholder={t("request.notePlaceholder")}
+                aria-label={t("request.noteLabel")}
                 rows={3}
                 autoFocus
                 className="w-full resize-none focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -398,7 +404,7 @@ export function RequestButton({
               <div className="flex items-center gap-2">
                 <DetailActionButton variant="primary" onClick={submitRequest}>
                   <Plus style={{ width: 14, height: 14 }} />
-                  Request {label}
+                  {requestLabel}
                 </DetailActionButton>
                 <DetailActionButton
                   variant="ghost"
@@ -408,7 +414,7 @@ export function RequestButton({
                   }}
                 >
                   <X style={{ width: 14, height: 14 }} />
-                  Cancel
+                  {t("request.cancel")}
                 </DetailActionButton>
               </div>
               <p
@@ -428,13 +434,13 @@ export function RequestButton({
             <div className="flex flex-col gap-2 w-full max-w-sm">
               {obUsersState === "error" ? (
                 <p className="ds-mono" role="alert" style={{ fontSize: 11, color: "var(--ds-danger)", margin: 0 }}>
-                  Couldn&apos;t load users — try again
+                  {t("request.usersLoadFailed")}
                 </p>
               ) : (
               <select
                 value={obUserId}
                 onChange={(e) => setObUserId(e.target.value)}
-                aria-label="Select a user to request for"
+                aria-label={t("request.selectUserLabel")}
                 className="focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 style={{
                   padding: "8px 12px",
@@ -446,7 +452,7 @@ export function RequestButton({
                 }}
               >
                 <option value="">
-                  {obUsersState === "loading" ? "Loading users…" : "Select a user…"}
+                  {obUsersState === "loading" ? t("request.loadingUsers") : t("request.selectUser")}
                 </option>
                 {obUsers.map((u) => (
                   <option key={u.id} value={u.id}>
@@ -467,7 +473,7 @@ export function RequestButton({
                   ) : (
                     <Plus style={{ width: 14, height: 14 }} />
                   )}
-                  Request for User
+                  {t("request.requestForUser")}
                 </DetailActionButton>
                 <DetailActionButton
                   variant="ghost"
@@ -479,7 +485,7 @@ export function RequestButton({
                   }}
                 >
                   <X style={{ width: 14, height: 14 }} />
-                  Cancel
+                  {t("request.cancel")}
                 </DetailActionButton>
               </div>
               {obMsg && (
@@ -513,7 +519,7 @@ export function RequestButton({
                 ) : (
                   <Plus style={{ width: 14, height: 14 }} />
                 )}
-                {state === "loading" ? "Submitting…" : `Request ${label}`}
+                {state === "loading" ? t("request.submitting") : requestLabel}
               </DetailActionButton>
 
               {(state === "idle" || state === "error") && (
@@ -521,19 +527,19 @@ export function RequestButton({
                   <DetailActionButton
                     variant="secondary"
                     onClick={() => { loadProfiles(); setState("note"); }}
-                    title="Add a note to your request"
+                    title={t("request.addNoteTitle")}
                   >
                     <MessageSquare style={{ width: 14, height: 14 }} />
-                    Add Note
+                    {t("request.addNote")}
                   </DetailActionButton>
                   {canRequestOnBehalf && (
                     <DetailActionButton
                       variant="ghost"
                       onClick={openOnBehalf}
-                      title="Request for another user"
+                      title={t("request.requestForAnotherUser")}
                     >
                       <Plus style={{ width: 14, height: 14 }} />
-                      Request for User…
+                      {t("request.requestForUserEllipsis")}
                     </DetailActionButton>
                   )}
                 </>

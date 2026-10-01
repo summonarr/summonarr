@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Plus, Check, Loader2, Ban } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useToast } from "@/components/ui/toast";
+import { useT } from "@/components/i18n/i18n-provider";
 import { DetailActionButton, DetailActionStatus } from "./detail-action-button";
 
 // Secondary "Request on <instance>" action shown on movie/TV detail pages for
@@ -36,6 +37,7 @@ export function RequestInstanceButton({
   blacklisted?: boolean;
 }) {
   const { toast } = useToast();
+  const t = useT();
   const router = useRouter();
   const [state, setState] = useState<"idle" | "loading" | "requested" | "error">(
     requested ? "requested" : "idle",
@@ -62,7 +64,7 @@ export function RequestInstanceButton({
       }
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setMsg(data.error ?? "Something went wrong");
+        setMsg(data.error ?? t("request.somethingWrong"));
         setState("error");
         return;
       }
@@ -74,10 +76,10 @@ export function RequestInstanceButton({
         return;
       }
       setState("requested");
-      toast({ title: `Requested on ${instanceName}`, variant: "success" });
+      toast({ title: t("request.requestedOn", { instance: instanceName }), variant: "success" });
       router.refresh();
     } catch {
-      setMsg("Network error — please try again");
+      setMsg(t("request.networkError"));
       setState("error");
     }
   }
@@ -87,7 +89,7 @@ export function RequestInstanceButton({
     return (
       <DetailActionStatus variant="accent-soft">
         <Check style={{ width: 14, height: 14 }} />
-        Available on {instanceName}
+        {t("request.availableOnInstance", { instance: instanceName })}
       </DetailActionStatus>
     );
   }
@@ -96,7 +98,7 @@ export function RequestInstanceButton({
     return (
       <DetailActionStatus variant="accent-soft">
         <Check style={{ width: 14, height: 14 }} />
-        Requested on {instanceName}
+        {t("request.requestedOn", { instance: instanceName })}
       </DetailActionStatus>
     );
   }
@@ -106,7 +108,7 @@ export function RequestInstanceButton({
     return (
       <DetailActionStatus variant="muted">
         <Ban style={{ width: 14, height: 14 }} />
-        Not available to request
+        {t("request.notAvailableToRequest")}
       </DetailActionStatus>
     );
   }
@@ -124,7 +126,7 @@ export function RequestInstanceButton({
         ) : (
           <Plus style={{ width: 14, height: 14 }} />
         )}
-        Request on {instanceName}
+        {t("request.requestOn", { instance: instanceName })}
       </DetailActionButton>
       {state === "error" && msg && (
         <span className="ds-mono" style={{ fontSize: 11, color: "var(--ds-danger)" }}>

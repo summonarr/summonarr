@@ -1,5 +1,6 @@
 import { MediaCard } from "./media-card";
 import type { TmdbMedia } from "@/lib/tmdb-types";
+import { getTranslator } from "@/lib/i18n/server";
 
 interface SimilarRowProps {
   items: TmdbMedia[];
@@ -8,8 +9,9 @@ interface SimilarRowProps {
 }
 
 // "More Like This" grid of recommended/similar titles on a detail page.
-export function SimilarRow({ items, showPlex, showJellyfin }: SimilarRowProps) {
+export async function SimilarRow({ items, showPlex, showJellyfin }: SimilarRowProps) {
   if (items.length === 0) return null;
+  const t = await getTranslator();
   return (
     <section className="ds-detail-section">
       <h2
@@ -21,7 +23,7 @@ export function SimilarRow({ items, showPlex, showJellyfin }: SimilarRowProps) {
           margin: "0 0 12px",
         }}
       >
-        More Like This
+        {t("detail.moreLikeThis")}
       </h2>
       <div className="ds-media-grid">
         {items.map((media) => (

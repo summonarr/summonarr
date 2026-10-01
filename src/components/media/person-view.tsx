@@ -12,15 +12,33 @@ import { User } from "@/components/icons";
 import { MediaCard } from "@/components/media/media-card";
 import { EmptyState } from "@/components/ui/design";
 import type { PersonDetails, PersonCredit, TmdbMedia } from "@/lib/tmdb-types";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
-// "YYYY-MM-DD" → "June 9, 1963", pinned to UTC + en-US so server and client
-// produce identical text.
-function fmtDate(iso: string | null): string | null {
+// "YYYY-MM-DD" → "June 9, 1963", pinned to UTC + the active UI locale (the
+// same value on the server and the client) so both produce identical text.
+function fmtDate(iso: string | null, locale: string): string | null {
   if (!iso) return null;
   const d = new Date(`${iso}T00:00:00Z`);
   if (Number.isNaN(d.getTime())) return null;
-  return d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" });
+  return d.toLocaleDateString(locale, { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" });
 }
+
+// TMDB's known_for_department values → i18n keys. Anything unlisted is shown
+// as TMDB sent it.
+const DEPARTMENT_KEYS: Record<string, string> = {
+  Acting: "detail.person.department.acting",
+  Directing: "detail.person.department.directing",
+  Writing: "detail.person.department.writing",
+  Production: "detail.person.department.production",
+  Sound: "detail.person.department.sound",
+  Camera: "detail.person.department.camera",
+  Editing: "detail.person.department.editing",
+  Art: "detail.person.department.art",
+  "Costume & Make-Up": "detail.person.department.costume",
+  "Visual Effects": "detail.person.department.visualEffects",
+  Lighting: "detail.person.department.lighting",
+  Crew: "detail.person.department.crew",
+};
 
 // A filmography credit is a subset of TmdbMedia + `character`; fill the required
 // TmdbMedia fields the credit lacks so MediaCard can render it.
@@ -66,6 +84,8 @@ export function PersonView({
   showPlex: boolean;
   showJellyfin: boolean;
 }) {
+  const t = useT();
+  const locale = useLocale();
   const [filter, setFilter] = useState<"all" | "movie" | "tv">("all");
   const [bioExpanded, setBioExpanded] = useState(false);
 
@@ -73,8 +93,11 @@ export function PersonView({
   const tvCount = person.credits.filter((c) => c.mediaType === "tv").length;
   const shown = filter === "all" ? person.credits : person.credits.filter((c) => c.mediaType === filter);
 
-  const born = fmtDate(person.birthday);
-  const died = fmtDate(person.deathday);
+  const born = fmtDate(person.birthday, locale);
+  const died = fmtDate(person.deathday, locale);
+  const departmentKey = person.knownForDepartment
+    ? DEPARTMENT_KEYS[person.knownForDepartment]
+    : undefined;
   const bio = person.biography?.trim() ?? "";
   const bioIsLong = bio.length > BIO_CLAMP;
   const bioText = bioExpanded || !bioIsLong ? bio : `${bio.slice(0, BIO_CLAMP).trimEnd()}…`;
@@ -115,13 +138,13 @@ export function PersonView({
           </h1>
           {person.knownForDepartment && (
             <div className="ds-mono" style={{ fontSize: 12, color: "var(--ds-fg-subtle)", marginBottom: 10 }}>
-              {person.knownForDepartment}
+              {departmentKey ? t(departmentKey) : person.knownForDepartment}
             </div>
           )}
           {(born || died || person.placeOfBirth) && (
             <div style={{ fontSize: 12.5, color: "var(--ds-fg-muted)", marginBottom: 12, lineHeight: 1.7 }}>
-              {born && <div>Born {born}</div>}
-              {died && <div>Died {died}</div>}
+              {born && <div>{t("detail.person.born", { date: born })}</div>}
+              {died && <div>{t("detail.person.died", { date: died })}</div>}
               {person.placeOfBirth && <div>{person.placeOfBirth}</div>}
             </div>
           )}
@@ -135,7 +158,7 @@ export function PersonView({
                   className="hover:underline"
                   style={{ background: "none", border: 0, color: "var(--ds-accent-text)", fontSize: 13, padding: "4px 0" }}
                 >
-                  {bioExpanded ? "Show less" : "Show more"}
+                  {bioExpanded ? t("detail.person.showLess") : t("detail.person.showMore")}
                 </button>
               )}
             </p>
@@ -146,14 +169,14 @@ export function PersonView({
       <section style={{ padding: "0 0 32px" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
           <h2 className="font-semibold" style={{ fontSize: 15, letterSpacing: "-0.01em", color: "var(--ds-fg)", margin: 0 }}>
-            Known For
+            {t("detail.person.knownFor")}
           </h2>
           <div style={{ display: "inline-flex", gap: 6 }}>
             {(
               [
-                ["all", "All", person.credits.length],
-                ["movie", "Movies", movieCount],
-                ["tv", "TV", tvCount],
+                ["all", t("detail.person.filterAll"), person.credits.length],
+                ["movie", t("detail.person.filterMovies"), movieCount],
+                ["tv", t("detail.person.filterTv"), tvCount],
               ] as const
             ).map(([val, label, count]) => {
               if (val !== "all" && count === 0) return null;
@@ -183,7 +206,7 @@ export function PersonView({
         </div>
 
         {shown.length === 0 ? (
-          <EmptyState title="No titles to show" />
+          <EmptyState title={t("detail.person.noTitles")} />
         ) : (
           <div className="ds-media-grid">
             {shown.map((c) => (

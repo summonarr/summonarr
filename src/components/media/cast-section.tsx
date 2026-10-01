@@ -4,6 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { User } from "@/components/icons";
 import type { CastMember } from "@/lib/tmdb-types";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface CastSectionProps {
   cast: CastMember[];
@@ -14,13 +15,14 @@ interface CastSectionProps {
 // (Next's basePath setting prefixes <Link> hrefs automatically, so no
 // withBasePath is needed here.)
 export function CastSection({ cast }: CastSectionProps) {
+  const t = useT();
   return (
     <section className="ds-detail-section">
       <h2
         className="font-semibold"
         style={{ fontSize: 15, letterSpacing: "-0.01em", color: "var(--ds-fg)", margin: "0 0 12px" }}
       >
-        Cast
+        {t("detail.cast")}
       </h2>
       <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-12 2xl:grid-cols-16 gap-3">
         {cast.map((member, i) => (

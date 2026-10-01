@@ -8,6 +8,8 @@ import { cn } from "@/lib/utils";
 import { posterUrl, stillUrl, type TmdbSeason, type TmdbEpisode } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
 import { DetailActionButton } from "./detail-action-button";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 
 interface TVSeasonsProps {
   tmdbId: number;
@@ -26,20 +28,18 @@ interface SeasonState {
   owned: Set<number>;
 }
 
-// Formats with the browser's own locale, which the server can't know. So it is
-// only safe after hydration (the first client render): the one call site below
-// waits for `mounted` for that reason (guardrail 16). Calling it during the
-// server render would make the server and browser HTML disagree.
+// Formats in the active UI locale. The call site below still waits for
+// `mounted` (guardrail 16) — the date path stays client-only as before.
 //
 // TMDB's `air_date` is a bare date ("2024-03-05"), which `new Date` reads as
 // midnight UTC. Showing that in the viewer's time zone gave the PREVIOUS day to
 // everyone west of UTC, so a bare date is formatted in UTC (the same fix as
 // format-release-date.ts). Only the language/locale comes from the browser.
-function formatAirDate(iso: string | null): string | null {
+function formatAirDate(iso: string | null, locale: string): string | null {
   if (!iso) return null;
   try {
     const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(iso);
-    return new Date(iso).toLocaleDateString(undefined, {
+    return new Date(iso).toLocaleDateString(locale, {
       year: "numeric",
       month: "short",
       day: "numeric",
@@ -50,18 +50,22 @@ function formatAirDate(iso: string | null): string | null {
   }
 }
 
-function formatRuntime(min: number | null): string | null {
+function formatRuntime(min: number | null, t: Translator): string | null {
   if (!min || min <= 0) return null;
-  if (min < 60) return `${min}m`;
+  if (min < 60) return t("detail.runtime.minutes", { minutes: min });
   const h = Math.floor(min / 60);
   const m = min % 60;
-  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+  return m === 0
+    ? t("detail.runtime.hours", { hours: h })
+    : t("detail.runtime.hoursMinutes", { hours: h, minutes: m });
 }
 
 // Collapsible list of seasons. Episodes (and which ones are in the library) are
 // only fetched the first time a season is expanded.
 export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
   const mounted = useHasMounted();
+  const t = useT();
+  const locale = useLocale();
   const [state, setState] = useState<Record<number, SeasonState>>(() => {
     const init: Record<number, SeasonState> = {};
     for (const s of seasons) {
@@ -133,7 +137,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
           margin: "0 0 12px",
         }}
       >
-        Seasons
+        {t("detail.seasons.heading")}
       </h2>
       <div className="flex flex-col" style={{ gap: 8 }}>
         {seasons.map((season) => {
@@ -143,8 +147,8 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
             ownedCount === 0
               ? null
               : ownedCount >= season.episodeCount
-              ? "Complete"
-              : `${ownedCount} / ${season.episodeCount}`;
+              ? t("detail.seasons.complete")
+              : t("detail.seasons.ownedCount", { owned: ownedCount, total: season.episodeCount });
           const fullyOwned = ownedCount >= season.episodeCount;
 
           return (
@@ -221,8 +225,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                       className="ds-mono"
                       style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
                     >
-                      {season.episodeCount}{" "}
-                      {season.episodeCount === 1 ? "ep" : "eps"}
+                      {t("detail.seasons.episodeCount", { count: season.episodeCount })}
                     </span>
                     {season.airDate && (
                       <span
@@ -247,7 +250,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                       style={{ marginTop: 6 }}
                     >
                       <CheckCircle style={{ width: 10, height: 10 }} />
-                      {fullyOwned ? ownershipLabel : `${ownershipLabel} owned`}
+                      {ownershipLabel}
                     </span>
                   )}
                 </div>
@@ -290,7 +293,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                           color: "var(--ds-accent-text)",
                         }}
                       />
-                      Loading episodes…
+                      {t("detail.seasons.loadingEpisodes")}
                     </div>
                   )}
 
@@ -300,14 +303,14 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                       style={{ gap: 10, padding: "16px 0" }}
                     >
                       <span className="ds-mono" style={{ fontSize: 12, color: "var(--ds-danger)" }}>
-                        Failed to load episodes.
+                        {t("detail.seasons.loadFailed")}
                       </span>
                       <DetailActionButton
                         variant="secondary"
                         size="sm"
                         onClick={() => toggleSeason(season.seasonNumber, true)}
                       >
-                        Retry
+                        {t("detail.seasons.retry")}
                       </DetailActionButton>
                     </div>
                   )}
@@ -321,7 +324,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                         padding: "16px 0",
                       }}
                     >
-                      No episodes found.
+                      {t("detail.seasons.noEpisodes")}
                     </p>
                   )}
 
@@ -330,8 +333,8 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                       {s.episodes.map((ep) => {
                         const owned = s.owned.has(ep.episodeNumber);
                         const still = stillUrl(ep.stillPath, "w300");
-                        const runtime = formatRuntime(ep.runtime);
-                        const aired = mounted ? formatAirDate(ep.airDate) : null;
+                        const runtime = formatRuntime(ep.runtime, t);
+                        const aired = mounted ? formatAirDate(ep.airDate, locale) : null;
                         return (
                           <div
                             key={ep.episodeNumber}
@@ -402,7 +405,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                                       color: "var(--ds-success)",
                                       marginTop: 2,
                                     }}
-                                    aria-label="In library"
+                                    aria-label={t("detail.seasons.inLibrary")}
                                     role="img"
                                   />
                                 ) : (
@@ -413,7 +416,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                                       color: "var(--ds-fg-disabled)",
                                       marginTop: 2,
                                     }}
-                                    aria-label="Not in library"
+                                    aria-label={t("detail.seasons.notInLibrary")}
                                     role="img"
                                   />
                                 )}

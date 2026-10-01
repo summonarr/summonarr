@@ -3,13 +3,15 @@ import Link from "next/link";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
 import { safeExternalHref } from "@/lib/safe-url";
+import { getTranslator } from "@/lib/i18n/server";
 
 const PROVIDER_LOGO_BASE = "https://image.tmdb.org/t/p/w92";
 
+// i18n keys (detail.json), translated at render.
 const PROVIDER_GROUP_LABEL: Record<NonNullable<TmdbMedia["watchProviders"]>[number]["type"], string> = {
-  stream: "Stream",
-  rent: "Rent",
-  buy: "Buy",
+  stream: "detail.providers.stream",
+  rent: "detail.providers.rent",
+  buy: "detail.providers.buy",
 };
 
 /**
@@ -17,7 +19,7 @@ const PROVIDER_GROUP_LABEL: Record<NonNullable<TmdbMedia["watchProviders"]>[numb
  * (JustWatch data via TMDB), keyword tags, and an official-site link. Rendered as a server
  * component below the hero. Each section self-hides when its data is absent.
  */
-export function DetailExtras({ media, mediaType }: { media: TmdbMedia; mediaType: "movie" | "tv" }) {
+export async function DetailExtras({ media, mediaType }: { media: TmdbMedia; mediaType: "movie" | "tv" }) {
   const browseBase = mediaType === "tv" ? "/tv" : "/movies";
   const providers = media.watchProviders ?? [];
   // keywordList carries id+name (media.keywords is the names-only back-compat array).
@@ -29,6 +31,7 @@ export function DetailExtras({ media, mediaType }: { media: TmdbMedia; mediaType
   const hasKeywords = keywords.length > 0;
 
   if (!hasProviders && !hasKeywords && !homepage) return null;
+  const t = await getTranslator();
 
   // Group providers by offering type, preserving the stream → rent → buy order.
   const grouped: { type: NonNullable<TmdbMedia["watchProviders"]>[number]["type"]; items: typeof providers }[] = [];
@@ -47,12 +50,12 @@ export function DetailExtras({ media, mediaType }: { media: TmdbMedia; mediaType
           {/* h3, not h2: these are small sub-labels, below the page's real
               section headings (Cast, Seasons, More Like This). */}
           <h3 className="ds-mono" style={{ fontSize: 11, letterSpacing: "0.04em", color: "var(--ds-fg-subtle)", margin: 0, textTransform: "uppercase" }}>
-            Where to watch
+            {t("detail.whereToWatch")}
           </h3>
           <div className="flex flex-wrap items-start" style={{ gap: 18 }}>
             {grouped.map((g) => (
               <div key={g.type} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <span className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}>{PROVIDER_GROUP_LABEL[g.type]}</span>
+                <span className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}>{t(PROVIDER_GROUP_LABEL[g.type])}</span>
                 <div className="flex flex-wrap items-center" style={{ gap: 8 }}>
                   {g.items.map((p) => (
                     <div
@@ -83,14 +86,14 @@ export function DetailExtras({ media, mediaType }: { media: TmdbMedia; mediaType
       {hasKeywords && (
         <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <h3 className="ds-mono" style={{ fontSize: 11, letterSpacing: "0.04em", color: "var(--ds-fg-subtle)", margin: 0, textTransform: "uppercase" }}>
-            Keywords
+            {t("detail.keywords")}
           </h3>
           <div className="flex flex-wrap" style={{ gap: 6 }}>
             {keywords.map((k) => (
               <Link
                 key={k.id}
                 href={`${browseBase}?keywordId=${k.id}&keywordName=${encodeURIComponent(k.name)}`}
-                aria-label={`Browse ${mediaType === "tv" ? "TV" : "movies"} tagged ${k.name}`}
+                aria-label={t(mediaType === "tv" ? "detail.browseTvTagged" : "detail.browseMoviesTagged", { keyword: k.name })}
               >
                 <Chip className="ds-chip-link">{k.name}</Chip>
               </Link>
@@ -107,7 +110,7 @@ export function DetailExtras({ media, mediaType }: { media: TmdbMedia; mediaType
           className="ds-mono no-underline hover:underline"
           style={{ fontSize: 11.5, color: "var(--ds-accent-text)", width: "fit-content" }}
         >
-          Official site ↗
+          {t("detail.officialSite")} ↗
         </a>
       )}
     </section>

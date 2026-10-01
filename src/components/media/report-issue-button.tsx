@@ -6,23 +6,25 @@ import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogT
 import type { TVAvailabilityResponse, TVSeasonInfo } from "@/app/api/tv-availability/route";
 import { withBasePath } from "@/lib/base-path";
 import { useToast } from "@/components/ui/toast";
+import { useT } from "@/components/i18n/i18n-provider";
 import { DetailActionButton } from "./detail-action-button";
 
 type IssueType = "BAD_VIDEO" | "WRONG_AUDIO" | "MISSING_SUBTITLES" | "WRONG_MATCH" | "OTHER";
 type IssueScope = "FULL" | "SEASON" | "EPISODE";
 
+// i18n keys (request.json), translated at render.
 const ISSUE_TYPE_LABELS: Record<IssueType, string> = {
-  BAD_VIDEO: "Bad video quality / corrupted file",
-  WRONG_AUDIO: "Wrong or missing audio track",
-  MISSING_SUBTITLES: "Missing subtitles",
-  WRONG_MATCH: "Wrong movie / show matched",
-  OTHER: "Other",
+  BAD_VIDEO: "request.report.type.badVideo",
+  WRONG_AUDIO: "request.report.type.wrongAudio",
+  MISSING_SUBTITLES: "request.report.type.missingSubtitles",
+  WRONG_MATCH: "request.report.type.wrongMatch",
+  OTHER: "request.report.type.other",
 };
 
 const SCOPE_LABELS: Record<IssueScope, string> = {
-  FULL: "Entire show",
-  SEASON: "Specific season",
-  EPISODE: "Specific episode",
+  FULL: "request.report.scope.full",
+  SEASON: "request.report.scope.season",
+  EPISODE: "request.report.scope.episode",
 };
 
 interface ReportIssueButtonProps {
@@ -76,6 +78,7 @@ export function ReportIssueButton({
 }: ReportIssueButtonProps) {
   const [dialogState, setDialogState] = useState<DialogState>("idle");
   const { toast } = useToast();
+  const t = useT();
   const [issueType, setIssueType] = useState<IssueType>("BAD_VIDEO");
   const [scope, setScope] = useState<IssueScope>("FULL");
   const [note, setNote] = useState("");
@@ -233,15 +236,15 @@ export function ReportIssueButton({
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setErrorMsg(data.error ?? "Something went wrong");
+        setErrorMsg(data.error ?? t("request.somethingWrong"));
         setDialogState("open");
         return;
       }
 
       setDialogState("submitted");
-      toast({ title: "Issue reported — thanks!", variant: "success" });
+      toast({ title: t("request.report.reportedToast"), variant: "success" });
     } catch {
-      setErrorMsg("Network error — please try again");
+      setErrorMsg(t("request.networkError"));
       setDialogState("open");
     }
   }
@@ -254,8 +257,11 @@ export function ReportIssueButton({
     : availabilitySource === "jellyfin"
     ? "Jellyfin"
     : availabilitySource === "both"
-    ? "Plex & Jellyfin"
+    ? t("request.report.bothSources")
     : null;
+  // Split the sentence around the source so the name keeps its emphasis in
+  // any word order.
+  const showingFrom = t("request.report.showingFrom", { source: "\u0000" }).split("\u0000");
 
   return (
     <>
@@ -266,8 +272,8 @@ export function ReportIssueButton({
         <button
           type="button"
           onClick={openDialog}
-          aria-label={`Report an issue with ${title}`}
-          title="Report an issue"
+          aria-label={t("request.report.reportWith", { title })}
+          title={t("request.report.reportAnIssue")}
           className="ds-hover-tint inline-flex items-center justify-center shrink-0"
           style={{
             width: 28,
@@ -283,7 +289,7 @@ export function ReportIssueButton({
       ) : (
         <DetailActionButton variant="secondary" onClick={openDialog}>
           <AlertTriangle style={{ width: 14, height: 14 }} />
-          Report Issue
+          {t("request.report.reportIssue")}
         </DetailActionButton>
       )}
 
@@ -312,7 +318,7 @@ export function ReportIssueButton({
                   className="font-semibold"
                   style={{ fontSize: 15, color: "var(--ds-fg)", margin: 0 }}
                 >
-                  Report an Issue
+                  {t("request.report.dialogTitle")}
                 </DialogTitle>
                 <p
                   className="ds-mono truncate max-w-72"
@@ -326,7 +332,7 @@ export function ReportIssueButton({
                 </p>
               </div>
               <DialogClose
-                aria-label="Close"
+                aria-label={t("request.close")}
                 disabled={
                   dialogState === "submitting" || dialogState === "loading"
                 }
@@ -361,7 +367,7 @@ export function ReportIssueButton({
                     color: "var(--ds-accent-text)",
                   }}
                 />
-                Loading library info…
+                {t("request.report.loadingLibrary")}
               </div>
             )}
 
@@ -392,12 +398,12 @@ export function ReportIssueButton({
                   className="font-medium"
                   style={{ fontSize: 13, color: "var(--ds-fg)", margin: "0 0 4px" }}
                 >
-                  Issue reported
+                  {t("request.report.reported")}
                 </p>
                 <p
                   style={{ fontSize: 12, color: "var(--ds-fg-muted)", margin: 0 }}
                 >
-                  An admin will review it shortly.
+                  {t("request.report.adminWillReview")}
                 </p>
                 <DetailActionButton
                   variant="secondary"
@@ -405,7 +411,7 @@ export function ReportIssueButton({
                   onClick={closeDialog}
                   style={{ marginTop: 18 }}
                 >
-                  Close
+                  {t("request.close")}
                 </DetailActionButton>
               </div>
             )}
@@ -414,35 +420,37 @@ export function ReportIssueButton({
               <form onSubmit={handleSubmit} className="px-5 py-4 space-y-4">
                 {isTV && sourceLabel && (
                   <p className="text-[11px] text-zinc-500">
-                    Showing episodes from your <span className="text-zinc-400 font-medium">{sourceLabel}</span> library
+                    {showingFrom[0]}
+                    <span className="text-zinc-400 font-medium">{sourceLabel}</span>
+                    {showingFrom[1]}
                   </p>
                 )}
                 {isTV && availabilityFailed && (
                   <p className="text-[11px] text-amber-400">
-                    Could not load library data — enter season/episode manually
+                    {t("request.report.libraryLoadFailed")}
                   </p>
                 )}
 
                 <div className="space-y-1.5">
-                  <label htmlFor="report-issue-type" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">Issue type</label>
+                  <label htmlFor="report-issue-type" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">{t("request.report.issueType")}</label>
                   <SelectField
                     id="report-issue-type"
                     value={issueType}
                     onChange={(v) => setIssueType(v as IssueType)}
                     disabled={isSubmitting}
-                    options={Object.entries(ISSUE_TYPE_LABELS).map(([k, v]) => ({ value: k, label: v }))}
+                    options={Object.entries(ISSUE_TYPE_LABELS).map(([k, v]) => ({ value: k, label: t(v) }))}
                   />
                 </div>
 
                 {isTV && (
                   <div className="space-y-1.5">
-                    <label htmlFor="report-issue-scope" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">Affects</label>
+                    <label htmlFor="report-issue-scope" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">{t("request.report.affects")}</label>
                     <SelectField
                       id="report-issue-scope"
                       value={scope}
                       onChange={(v) => setScope(v as IssueScope)}
                       disabled={isSubmitting}
-                      options={Object.entries(SCOPE_LABELS).map(([k, v]) => ({ value: k, label: v }))}
+                      options={Object.entries(SCOPE_LABELS).map(([k, v]) => ({ value: k, label: t(v) }))}
                     />
                   </div>
                 )}
@@ -450,7 +458,7 @@ export function ReportIssueButton({
                 {isTV && scope !== "FULL" && (
                   <div className="flex gap-3">
                     <div className="flex-1 space-y-1.5">
-                      <label htmlFor="report-issue-season" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">Season</label>
+                      <label htmlFor="report-issue-season" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">{t("request.report.season")}</label>
                       {!useManualInputs ? (
                         <SelectField
                           id="report-issue-season"
@@ -459,7 +467,7 @@ export function ReportIssueButton({
                           disabled={isSubmitting}
                           options={tvSeasons.map((s) => ({
                             value: String(s.seasonNumber),
-                            label: `Season ${s.seasonNumber}`,
+                            label: t("request.report.seasonN", { number: s.seasonNumber }),
                           }))}
                         />
                       ) : (
@@ -467,7 +475,7 @@ export function ReportIssueButton({
                           id="report-issue-season"
                           value={manualSeason}
                           onChange={setManualSeason}
-                          placeholder="e.g. 2"
+                          placeholder={t("request.report.examplePlaceholder", { number: 2 })}
                           required
                           disabled={isSubmitting}
                         />
@@ -476,7 +484,7 @@ export function ReportIssueButton({
 
                     {scope === "EPISODE" && (
                       <div className="flex-1 space-y-1.5">
-                        <label htmlFor="report-issue-episode" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">Episode</label>
+                        <label htmlFor="report-issue-episode" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">{t("request.report.episode")}</label>
                         {!useManualInputs && currentSeason ? (
                           <SelectField
                             id="report-issue-episode"
@@ -485,7 +493,7 @@ export function ReportIssueButton({
                             disabled={isSubmitting}
                             options={currentSeason.episodes.map((ep) => ({
                               value: String(ep),
-                              label: `Episode ${ep}`,
+                              label: t("request.report.episodeN", { number: ep }),
                             }))}
                           />
                         ) : (
@@ -493,7 +501,7 @@ export function ReportIssueButton({
                             id="report-issue-episode"
                             value={manualEpisode}
                             onChange={setManualEpisode}
-                            placeholder="e.g. 4"
+                            placeholder={t("request.report.examplePlaceholder", { number: 4 })}
                             required
                             disabled={isSubmitting}
                           />
@@ -505,13 +513,13 @@ export function ReportIssueButton({
 
                 <div className="space-y-1.5">
                   <label htmlFor="report-issue-note" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">
-                    Additional details <span className="text-zinc-500 normal-case">(optional)</span>
+                    {t("request.report.details")} <span className="text-zinc-500 normal-case">{t("request.report.optional")}</span>
                   </label>
                   <textarea
                     id="report-issue-note"
                     value={note}
                     onChange={(e) => setNote(e.target.value)}
-                    placeholder={issueType === "WRONG_MATCH" ? "What is this actually matched to? Link to correct TMDB page if known." : "Describe the issue…"}
+                    placeholder={issueType === "WRONG_MATCH" ? t("request.report.wrongMatchPlaceholder") : t("request.report.describePlaceholder")}
                     maxLength={1000}
                     rows={3}
                     disabled={isSubmitting}
@@ -530,7 +538,7 @@ export function ReportIssueButton({
                     onClick={closeDialog}
                     disabled={isSubmitting}
                   >
-                    Cancel
+                    {t("request.cancel")}
                   </DetailActionButton>
                   <DetailActionButton
                     type="submit"
@@ -545,7 +553,7 @@ export function ReportIssueButton({
                         style={{ width: 14, height: 14 }}
                       />
                     )}
-                    Submit Report
+                    {t("request.report.submit")}
                   </DetailActionButton>
                 </div>
               </form>

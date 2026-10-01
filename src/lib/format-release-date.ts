@@ -7,9 +7,15 @@
 // convention wrapped-view / activity-calendar / my-stats-view already use.
 // Returns null for a missing or unparseable value so the caller's
 // `.filter(Boolean)` drops it instead of printing "Digital Invalid Date".
-export function formatDigitalRelease(value: string | null | undefined): string | null {
+// `locale` and `label` let the detail pages render it in the UI language;
+// the defaults keep the original English output.
+export function formatDigitalRelease(
+  value: string | null | undefined,
+  locale: string = "en-US",
+  label: (date: string) => string = (date) => `Digital ${date}`,
+): string | null {
   if (!value) return null;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return null;
-  return `Digital ${date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" })}`;
+  return label(date.toLocaleDateString(locale, { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }));
 }
