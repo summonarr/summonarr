@@ -172,6 +172,7 @@ const SETTINGS_SCHEMA = [
   ["feature.page.votes",              false],
   ["feature.page.donate",             false],
   ["feature.page.forYou",             false],
+  ["feature.page.recentlyAdded",      false],
   ["feature.behavior.activeSessions", false],
   ["feature.behavior.activityCalendar", false],
   ["feature.behavior.watchGrades",    false],

@@ -439,6 +439,74 @@ test("home: DOES read recommendations when feature.page.forYou is on", async () 
   );
 });
 
+// ── home: the Recently Added carousel ────────────────────────────────────────
+// Additive to the native wire contract: a new carousel id, existing ones
+// untouched. Its source is the library tables (never TMDB), scoped to the
+// viewer's visible server instances IN the query — the restricted-server pins
+// live in tests/recently-added.test.mts; these pin the route wiring: the flag,
+// the hideAvailable skip, and that the scoped read actually feeds the carousel.
+const { clearRecentlyAddedCache } = await import("../src/lib/recently-added.ts");
+const isRecentRead = (o: Op) =>
+  o.op === "plexLibraryItem.findMany" &&
+  !!(o.args as { where?: { addedAt?: unknown } } | undefined)?.where?.addedAt;
+
+test("home: the recently-added carousel comes from a serverInstance-scoped library read, after trending", async () => {
+  clearRecentlyAddedCache();
+  const { shadowPrismaModel: shadow } = await import("./_helpers.mts");
+  shadow(prisma, "plexLibraryItem", {
+    findMany: async (args: { where?: { addedAt?: unknown; serverInstance?: { in?: string[] } } } = {}) => {
+      rec("plexLibraryItem.findMany", args);
+      if (!args.where?.addedAt) return [];
+      return args.where.serverInstance?.in?.includes("")
+        ? [{ tmdbId: 27205, mediaType: "MOVIE", addedAt: new Date("2026-09-30T00:00:00Z"), title: "Inception", year: "2010" }]
+        : [];
+    },
+    findFirst: async () => null, findUnique: async () => null, count: async () => 0,
+  });
+  try {
+    const { token } = await mintSession();
+    const res = await inScope(() => home.GET(mk("/api/home", token, ""), undefined));
+    assert.equal(res.status, 200);
+    const read = ops.find(isRecentRead);
+    assert.ok(read, "home never read the library for the Recently Added carousel");
+    assert.deepEqual((read.args as { where: { serverInstance: unknown } }).where.serverInstance, { in: [""] });
+    const body = await res.json() as { carousels: { id: string; items: { id: number; title: string }[] }[] };
+    const ids = body.carousels.map((c) => c.id);
+    // The scripted trending list's lone title becomes the featured hero, so the
+    // (emptied) trending carousel is dropped and Recently Added leads the rails.
+    const at = ids.indexOf("recently-added");
+    assert.ok(at >= 0 && at < ids.indexOf("popular-movies"), `expected it ahead of the TMDB rails, got ${ids.join(",")}`);
+    assert.ok(!ids.includes("trending") || ids.indexOf("trending") < at);
+    assert.deepEqual(body.carousels[at].items.map((i) => [i.id, i.title]), [[27205, "Inception"]]);
+  } finally {
+    clearRecentlyAddedCache();
+    shadow(prisma, "plexLibraryItem", {
+      findMany: async (args: unknown) => { rec("plexLibraryItem.findMany", args); return []; },
+      findFirst: async () => null, findUnique: async () => null, count: async () => 0,
+    });
+  }
+});
+
+test("home: no Recently Added read when feature.page.recentlyAdded is off, or with hideAvailable", async () => {
+  clearRecentlyAddedCache();
+  settings.set("feature.page.recentlyAdded", "false");
+  invalidateFeatureFlagCache();
+  try {
+    const { token } = await mintSession();
+    const off = await inScope(() => home.GET(mk("/api/home", token, ""), undefined));
+    assert.equal(off.status, 200);
+    assert.ok(!ops.some(isRecentRead), "home read the library for a disabled carousel");
+  } finally {
+    settings.delete("feature.page.recentlyAdded");
+    invalidateFeatureFlagCache();
+  }
+  ops = [];
+  const { token } = await mintSession();
+  const hidden = await inScope(() => home.GET(mk("/api/home", token, "?hideAvailable=1"), undefined));
+  assert.equal(hidden.status, 200);
+  assert.ok(!ops.some(isRecentRead), "every recently-added title is available — hideAvailable must skip the read");
+});
+
 // ── integration flags reach the hideAvailable gate ──────────────────────────
 // getBadgeVisibility defaults both integrations to TRUE when omitted. A disabled
 // integration's sync arm is skipped, so its old library rows stay behind — and a

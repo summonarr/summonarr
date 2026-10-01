@@ -203,7 +203,11 @@ test("every feature.page.* flag is wired into the nav", () => {
   // only a Discover rail); the dedicated /for-you page made it a real nav
   // destination, so every page flag is wired now. Declare an exception here if
   // a section-only flag is ever added again.
-  const NOT_A_NAV_DESTINATION = new Set<string>([]);
+  const NOT_A_NAV_DESTINATION = new Set<string>([
+    // Gates only the home page's "Recently Added" row (and its /api/home
+    // carousel); there is no user-facing page behind it to link to.
+    "feature.page.recentlyAdded",
+  ]);
   const wired = new Set(Object.values(NAV_ITEM_FEATURE_KEY));
   for (const key of registeredKeys) {
     if (!key.startsWith("feature.page.") || NOT_A_NAV_DESTINATION.has(key)) continue;
