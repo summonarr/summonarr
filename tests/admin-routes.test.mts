@@ -142,6 +142,10 @@ function makeTx() {
     notification: { deleteMany: rec("notification.deleteMany") },
     userRecommendation: { deleteMany: rec("userRecommendation.deleteMany") },
     verificationToken: { deleteMany: rec("verificationToken.deleteMany") },
+    // Two-factor credentials — purge and the admin 2FA reset share this write set.
+    userTotp: { deleteMany: rec("userTotp.deleteMany") },
+    webAuthnCredential: { deleteMany: rec("webAuthnCredential.deleteMany") },
+    mfaRecoveryCode: { deleteMany: rec("mfaRecoveryCode.deleteMany") },
     // The TMDB reset's graph half. Both live in ONE transaction so an unstamped
     // node can never be observed alongside its still-present edges (or, far
     // worse, the reverse) — see the route's comment.
@@ -836,6 +840,13 @@ test("purge of a disabled account scrubs it, keeps the row, and audits USER_PURG
   assert.equal(data.email, `deleted-${targetId}@deleted.invalid`);
   assert.equal(data.passwordHash, null);
   assert.ok(data.purgedAt instanceof Date);
+  // Guardrail 6d: an erasure removes the two-factor credentials too — the
+  // encrypted TOTP secret, every passkey and every recovery-code hash.
+  for (const op of ["userTotp.deleteMany", "webAuthnCredential.deleteMany", "mfaRecoveryCode.deleteMany"]) {
+    const found = txOps.find((o) => o.op === op);
+    assert.ok(found, `purge must issue ${op}`);
+    assert.deepEqual(found.args, { where: { userId: targetId } });
+  }
 
   await flush();
   assert.equal(auditRows.length, 1);

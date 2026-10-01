@@ -148,6 +148,7 @@ The app refuses to boot in production if any of these are missing or invalid.
 | `OIDC_CLIENT_SECRET` | provider-defined                                            | Client secret from the IdP.                                                                                        |
 | `OIDC_DISPLAY_NAME`  | free-form; default `SSO`                                    | Optional label shown on the login button.                                                                          |
 | `SUMMONARR_ALLOW_OAUTH_FIRST_ADMIN` | `"true"` to enable; default off                 | Lets the first Plex / Jellyfin / OIDC sign-in bootstrap as ADMIN. Off by default — normally the first **local** registration becomes admin. Enable only for OAuth-only deployments. |
+| `SUMMONARR_DISABLE_MFA_ENFORCEMENT` | `"true"` to enable; default off                 | Escape hatch for **Admin → Settings → Authentication → Require two-factor for administrators**: switches off the redirect that sends a password-signed-in admin without two-factor to enrollment. It does not remove anyone's existing two-factor — for a locked-out admin use `reset-password.mjs … --reset-mfa` (see [Recovery — admin locked out](#recovery--admin-locked-out)). |
 | `SUMMONARR_ALLOW_SETUP_RESTORE` | `"true"` to enable; default off                     | Re-enables the **pre-authentication** first-run database restore (`/api/setup/import*`) on an internet-facing instance (`TRUST_PROXY=true`), where it is disabled by default. That path authenticates with `BACKUP_DB_PASSWORD` alone, so while no admin account exists it is a database-takeover surface — set it only for the duration of a first-run restore and **unset it as soon as the admin account exists** (the app warns at boot while it's on). LAN/loopback deployments don't need it. See [Block `/api/setup/*` until first-run completes](#block-apisetup-until-first-run-completes). |
 
 Plex OAuth is configured inside the app (**Admin → Settings → Plex**), not through environment variables.
@@ -496,6 +497,8 @@ Password reset for you@example.com (ADMIN) [id: <cuid>]. All existing sessions i
 ```
 
 The role in parentheses is the role **after** the update, so it should show `ADMIN` if you used `--admin`.
+
+**Locked out by two-factor authentication** (lost authenticator app *and* recovery codes, and no other admin to use **Admin → Users → Reset two-factor**)? Add `--reset-mfa`: it also removes the account's authenticator app, passkeys and recovery codes, so the next sign-in is password-only. A plain password reset leaves two-factor in place.
 
 ### Stdin variant (recommended for production)
 

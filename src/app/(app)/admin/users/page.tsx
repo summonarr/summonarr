@@ -21,7 +21,7 @@ export default async function UsersPage() {
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_USERS)) redirect("/");
 
-  const [users, localAuthRows, oidcAccountRows, serverUsers, autoDisableRow, radarr4kConfigured, sonarr4kConfigured] = await Promise.all([
+  const [users, localAuthRows, oidcAccountRows, serverUsers, autoDisableRow, radarr4kConfigured, sonarr4kConfigured, totpRows, passkeyRows] = await Promise.all([
     prisma.user.findMany({
       select: {
         id: true,
@@ -101,7 +101,12 @@ export default async function UsersPage() {
     prisma.setting.findUnique({ where: { key: "downloadAutoDisableNew" } }),
     isArrConfigured("radarr", "4k"),
     isArrConfigured("sonarr", "4k"),
+    // Which accounts have an active second factor — drives the Reset two-factor
+    // action. Selects only userId: the TOTP secret never leaves the extension.
+    prisma.userTotp.findMany({ where: { enabledAt: { not: null } }, select: { userId: true } }),
+    prisma.webAuthnCredential.findMany({ distinct: ["userId"], select: { userId: true } }),
   ]);
+  const mfaUserIds = new Set([...totpRows, ...passkeyRows].map((r) => r.userId));
   const localAuthIds = new Set(localAuthRows.map((r) => r.id));
   const oidcAuthIds = new Set(oidcAccountRows.map((r) => r.userId));
   // Request watch grades for every listed account (null when the feature or play
@@ -170,6 +175,7 @@ export default async function UsersPage() {
             createdAt: u.createdAt.toISOString(),
             disabled: u.deactivatedAt != null,
             purged: isPurgedRow(u),
+            mfaEnabled: mfaUserIds.has(u.id),
             discordId: u.discordId,
             permissions: u.permissions.toString(),
             movieQuotaLimit: u.movieQuotaLimit,

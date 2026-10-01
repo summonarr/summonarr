@@ -1122,6 +1122,159 @@ const spec = {
         },
       },
     },
+    // ── Two-factor authentication (local-credentials accounts only) ──────────
+    // Every enrollment CHANGE takes the current password in the body (step-up);
+    // 403 = not a local-credentials account. The sign-in half
+    // (POST /auth/sign-in/mfa) is a handshake documented in SECURITY.md.
+    "/profile/mfa": {
+      get: {
+        tags: ["Profile"],
+        summary: "Read the caller's two-factor status",
+        responses: {
+          "200": {
+            description:
+              "{ available, enabled, totpEnabled, passkeys: [{ id, name, transports, backedUp, createdAt, lastUsedAt }], recoveryCodesRemaining, webauthnAvailable } — never a secret",
+          },
+        },
+      },
+      delete: {
+        tags: ["Profile"],
+        summary: "Turn two-factor off (removes every factor and recovery code)",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["password"], properties: { password: { type: "string" } } } } },
+        },
+        responses: {
+          "200": { description: "Turned off; every OTHER session is signed out" },
+          "400": { description: "Missing or wrong password" },
+          "403": { description: "Not a local-credentials account" },
+          "429": { description: "Too many step-up attempts" },
+        },
+      },
+    },
+    "/profile/mfa/totp/setup": {
+      post: {
+        tags: ["Profile"],
+        summary: "Issue a pending authenticator-app (TOTP) secret",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["password"], properties: { password: { type: "string" } } } } },
+        },
+        responses: {
+          "200": { description: "{ secret, otpauthUri } — shown once; nothing changes until /totp/enable confirms a code" },
+          "400": { description: "Missing or wrong password" },
+          "409": { description: "An authenticator app is already enabled" },
+        },
+      },
+    },
+    "/profile/mfa/totp/enable": {
+      post: {
+        tags: ["Profile"],
+        summary: "Confirm the pending TOTP secret with a current code",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["code"], properties: { code: { type: "string", example: "123456" } } } } },
+        },
+        responses: {
+          "200": { description: "{ ok, recoveryCodes? } — recoveryCodes (shown once) when this is the first factor, which also signs out every other session" },
+          "400": { description: "No pending setup, or the code didn't match" },
+          "409": { description: "Already enabled" },
+        },
+      },
+    },
+    "/profile/mfa/totp": {
+      delete: {
+        tags: ["Profile"],
+        summary: "Remove the authenticator app",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["password"], properties: { password: { type: "string" } } } } },
+        },
+        responses: {
+          "200": { description: "Removed (recovery codes too when no passkey remains)" },
+          "400": { description: "Missing or wrong password" },
+          "404": { description: "No authenticator app set up" },
+        },
+      },
+    },
+    "/profile/mfa/recovery-codes": {
+      post: {
+        tags: ["Profile"],
+        summary: "Replace every recovery code with ten new ones",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["password"], properties: { password: { type: "string" } } } } },
+        },
+        responses: {
+          "200": { description: "{ recoveryCodes } — shown once; only hashes are stored" },
+          "400": { description: "Wrong password, or two-factor is off" },
+        },
+      },
+    },
+    "/profile/mfa/passkeys/options": {
+      post: {
+        tags: ["Profile"],
+        summary: "Begin adding a passkey — WebAuthn creation options",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["password"], properties: { password: { type: "string" } } } } },
+        },
+        responses: {
+          "200": { description: "{ registrationToken, publicKey } — publicKey is PublicKeyCredentialCreationOptions with base64url binary fields; the token is single-use, 5-minute, bound to this user and session" },
+          "400": { description: "Wrong password, or the passkey limit is reached" },
+          "503": { description: "AUTH_URL is not configured, so no WebAuthn RP ID exists" },
+        },
+      },
+    },
+    "/profile/mfa/passkeys": {
+      post: {
+        tags: ["Profile"],
+        summary: "Finish adding a passkey",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["registrationToken", "credential"],
+                properties: {
+                  registrationToken: { type: "string" },
+                  name: { type: "string", maxLength: 64 },
+                  credential: { type: "object", description: "PublicKeyCredential JSON (attestation response, base64url)" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "{ ok, recoveryCodes? } — recoveryCodes when this is the first factor, which also signs out every other session" },
+          "400": { description: "Expired/foreign registration token, or the response failed verification" },
+          "409": { description: "That credential is already registered" },
+        },
+      },
+    },
+    "/profile/mfa/passkeys/{id}": {
+      patch: {
+        tags: ["Profile"],
+        summary: "Rename one of the caller's passkeys",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["password", "name"], properties: { password: { type: "string" }, name: { type: "string", maxLength: 64 } } } } },
+        },
+        responses: { "200": { description: "Renamed" }, "400": { description: "Wrong password or empty name" }, "404": { description: "Not the caller's passkey" } },
+      },
+      delete: {
+        tags: ["Profile"],
+        summary: "Remove one of the caller's passkeys",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["password"], properties: { password: { type: "string" } } } } },
+        },
+        responses: { "200": { description: "Removed (recovery codes too when it was the last factor)" }, "400": { description: "Wrong password" }, "404": { description: "Not the caller's passkey" } },
+      },
+    },
     "/profile/notifications": {
       get: {
         tags: ["Profile"],
@@ -1660,6 +1813,21 @@ const spec = {
           "200": { description: "Personal data purged (idempotent)" },
           "400": { description: "Account must be disabled before it can be purged" },
           "403": { description: "Forbidden" },
+        },
+      },
+    },
+    "/admin/users/{id}/mfa": {
+      delete: {
+        tags: ["Admin – Users"],
+        summary: "Reset a user's two-factor authentication — lost device (MANAGE_USERS)",
+        description:
+          "Removes the user's authenticator app, every passkey and every recovery code, and signs the account out everywhere; their next sign-in is password-only. An ADMIN target needs the ADMIN bit. Refuses the caller's own account (use DELETE /profile/mfa with the password step-up).",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "Reset" },
+          "400": { description: "Own account" },
+          "403": { description: "Forbidden" },
+          "404": { description: "Not found" },
         },
       },
     },

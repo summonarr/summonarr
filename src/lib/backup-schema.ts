@@ -15,6 +15,15 @@ export const BACKUP_TABLES = [
   "Account",
   "VerificationToken",
   "AuthSession",
+  // Two-factor credentials (guardrail 6d). Backed up like every other secret:
+  // UserTotp.secret travels as its enc:v1 ciphertext (restorable only under the
+  // same TOKEN_ENCRYPTION_KEY — the import warns on a key mismatch, and such a
+  // user then signs in with a recovery code or a passkey, or gets an admin
+  // reset); recovery codes are hashes and passkeys are public keys, both inert
+  // outside this database. Omitting them would silently strip 2FA on restore.
+  "UserTotp",
+  "MfaRecoveryCode",
+  "WebAuthnCredential",
   "DiscordLinkToken",
   "DiscordMergeCode",
   "MediaRequest",

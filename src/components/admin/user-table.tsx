@@ -81,12 +81,13 @@ interface ActionsMenuProps {
   onDisable: () => void;
   onReactivate: () => void;
   onPurge: () => void;
+  onResetMfa: () => void;
   has4k?: boolean;
   namedInstances?: NamedInstance[];
   mediaInstances?: RestrictedMediaInstance[];
 }
 
-function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, namedInstances, mediaInstances }: ActionsMenuProps) {
+function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, onResetMfa, has4k, namedInstances, mediaInstances }: ActionsMenuProps) {
   const [open, setOpen]             = useState(false);
   const [notifOpen, setNotifOpen]   = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
@@ -229,6 +230,13 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, name
             <KeyRound className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
             "Sessions",
           )}
+          {/* Lost phone / lost security key: removes every second factor and
+              recovery code and signs the account out everywhere. */}
+          {u.mfaEnabled && !u.purged && item(
+            onResetMfa,
+            <ShieldOff className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
+            "Reset two-factor",
+          )}
 
           <div className="my-1 border-t border-zinc-800" />
 
@@ -262,7 +270,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
   const [error, setError] = useState<{ id: string; message: string } | null>(null);
   // Inline confirm state, keyed by user id. "disable" is reversible; "purge"
   // is not, so they confirm separately and never share a button.
-  const [confirming, setConfirming] = useState<{ id: string; kind: "disable" | "purge" } | null>(null);
+  const [confirming, setConfirming] = useState<{ id: string; kind: "disable" | "purge" | "resetMfa" } | null>(null);
   const mounted = useHasMounted();
 
   async function patch(id: string, key: string, body: object) {
@@ -290,17 +298,21 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
   // The three account-lifecycle actions. DELETE disables (reversible, nothing
   // scrubbed); /reactivate turns it back on; /purge is the irreversible scrub and
   // is only offered for an already-disabled account.
-  async function lifecycle(id: string, action: "disable" | "reactivate" | "purge") {
+  // resetMfa (DELETE …/mfa) rides the same plumbing: it is destructive for the
+  // target's sign-in setup, so it gets the same inline confirm.
+  async function lifecycle(id: string, action: "disable" | "reactivate" | "purge" | "resetMfa") {
     setConfirming(null);
     setBusy(id + action);
     setError(null);
     const path =
       action === "disable"
         ? `/api/admin/users/${id}`
-        : `/api/admin/users/${id}/${action}`;
+        : action === "resetMfa"
+          ? `/api/admin/users/${id}/mfa`
+          : `/api/admin/users/${id}/${action}`;
     try {
       const res = await fetch(withBasePath(path), {
-        method: action === "disable" ? "DELETE" : "POST",
+        method: action === "disable" || action === "resetMfa" ? "DELETE" : "POST",
       });
       const data = (await res.json().catch(() => null)) as { error?: string } | null;
       if (!res.ok || data?.error) {
@@ -493,7 +505,9 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                   aria-label={
                     confirming.kind === "disable"
                       ? `Confirm disabling ${displayName}`
-                      : `Confirm permanently purging ${displayName}'s personal data`
+                      : confirming.kind === "resetMfa"
+                        ? `Confirm resetting ${displayName}'s two-factor authentication`
+                        : `Confirm permanently purging ${displayName}'s personal data`
                   }
                   onClick={() => lifecycle(u.id, confirming.kind)}
                   autoFocus
@@ -501,6 +515,8 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                 >
                   {confirming.kind === "disable" ? (
                     <><UserX className="w-3.5 h-3.5" />Disable</>
+                  ) : confirming.kind === "resetMfa" ? (
+                    <><ShieldOff className="w-3.5 h-3.5" />Reset 2FA</>
                   ) : (
                     <><Trash2 className="w-3.5 h-3.5" />Purge data</>
                   )}
@@ -521,6 +537,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                 onDisable={() => setConfirming({ id: u.id, kind: "disable" })}
                 onReactivate={() => lifecycle(u.id, "reactivate")}
                 onPurge={() => setConfirming({ id: u.id, kind: "purge" })}
+                onResetMfa={() => setConfirming({ id: u.id, kind: "resetMfa" })}
                 has4k={has4k}
                 namedInstances={namedInstances}
                 mediaInstances={mediaInstances}

@@ -10,6 +10,7 @@ import { Loader2 } from "@/components/icons";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 import { withBasePath } from "@/lib/base-path";
 import { safeInternalPath } from "@/lib/safe-url";
+import { getPasskeyAssertion, isWebAuthnCancel, isWebAuthnSupported, type RequestOptionsJSON } from "@/lib/client/webauthn";
 
 type Provider = "credentials" | "plex" | "jellyfin" | "oidc";
 type JellyfinMode = "password" | "quickconnect";
@@ -29,10 +30,28 @@ interface Props {
   siteUrl: string;
 }
 
+// The password step's answer for an account with two-factor enabled (see
+// src/lib/mfa/signin-challenge.ts for the wire contract).
+type MfaMethod = "totp" | "webauthn" | "recovery";
+interface MfaChallenge {
+  mfaToken: string;
+  methods: MfaMethod[];
+  webauthn?: RequestOptionsJSON;
+}
+
+function parseMfaChallenge(body: unknown): MfaChallenge | null {
+  if (!body || typeof body !== "object") return null;
+  const b = body as Record<string, unknown>;
+  if (b.mfaRequired !== true || typeof b.mfaToken !== "string" || !Array.isArray(b.methods)) return null;
+  const methods = b.methods.filter((m): m is MfaMethod => m === "totp" || m === "webauthn" || m === "recovery");
+  const webauthn = b.webauthn && typeof b.webauthn === "object" ? (b.webauthn as RequestOptionsJSON) : undefined;
+  return { mfaToken: b.mfaToken, methods, webauthn };
+}
+
 async function signInWithFetch(
   provider: "credentials" | "plex" | "jellyfin" | "jellyfin-quickconnect",
   payload: Record<string, unknown>,
-): Promise<{ ok: boolean; error?: string; offline?: boolean; disabled?: boolean }> {
+): Promise<{ ok: boolean; error?: string; offline?: boolean; disabled?: boolean; mfa?: MfaChallenge }> {
   let res: Response;
   try {
     res = await fetch(withBasePath(`/api/auth/sign-in/${provider}`), {
@@ -52,6 +71,9 @@ async function signInWithFetch(
     let error = "Sign-in failed";
     try {
       const body = await res.json();
+      // Correct password, second factor still owed — not a failure to report.
+      const mfa = parseMfaChallenge(body);
+      if (mfa) return { ok: false, mfa };
       if (typeof body?.error === "string") error = body.error;
     } catch {}
     // 403 is the disabled-account answer (disabledAccountResponse) — the one
@@ -94,6 +116,8 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
   // below (which only renders for length > 1) never has to move it.
   const [jellyfinInstance, setJellyfinInstance] = useState(jellyfinInstances[0]?.slug ?? "");
   const [qcCode, setQcCode] = useState<string | null>(null);
+  // Set when the password was right but the account has two-factor enabled.
+  const [mfaChallenge, setMfaChallenge] = useState<MfaChallenge | null>(null);
   // Cancels an in-flight QuickConnect poll loop (provider switch, "Use password
   // instead", unmount) so an abandoned code can't later complete a sign-in.
   //
@@ -276,6 +300,13 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
     const fetchProvider = provider as "credentials" | "jellyfin";
     const res = await signInWithFetch(fetchProvider, payload);
 
+    if (res.mfa) {
+      setMfaChallenge(res.mfa);
+      setFields((f) => ({ ...f, password: "" }));
+      setLoading(false);
+      return;
+    }
+
     if (!res.ok) {
       setError(
         res.offline
@@ -296,6 +327,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
 
   function switchProvider(next: Provider) {
     cancelQuickConnect();
+    setMfaChallenge(null);
     setProvider(next);
     setError("");
     setFields({ email: "", password: "", username: "" });
@@ -389,6 +421,23 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
       router.refresh();
       router.push(callbackUrl);
     }
+  }
+
+  if (mfaChallenge) {
+    return (
+      <MfaStep
+        challenge={mfaChallenge}
+        onSuccess={async () => {
+          await refreshSession();
+          router.refresh();
+          router.push(callbackUrl);
+        }}
+        onRestart={(message) => {
+          setMfaChallenge(null);
+          setError(message ?? "");
+        }}
+      />
+    );
   }
 
   return (
@@ -613,6 +662,148 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
           )}
         </form>
       )}
+    </div>
+  );
+}
+
+// Second step of a password sign-in for an account with two-factor enabled.
+// Everything decisive happens server-side at POST /api/auth/sign-in/mfa.
+function MfaStep({
+  challenge,
+  onSuccess,
+  onRestart,
+}: {
+  challenge: MfaChallenge;
+  onSuccess: () => Promise<void>;
+  onRestart: (message?: string) => void;
+}) {
+  const initial: MfaMethod = challenge.methods.includes("totp")
+    ? "totp"
+    : challenge.methods.includes("webauthn")
+      ? "webauthn"
+      : "recovery";
+  const [method, setMethod] = useState<MfaMethod>(initial);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(body: Record<string, unknown>) {
+    setBusy(true);
+    setError("");
+    let res: Response;
+    try {
+      res = await fetch(withBasePath("/api/auth/sign-in/mfa"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ mfaToken: challenge.mfaToken, ...body }),
+      });
+    } catch {
+      setError("Network error — please try again.");
+      setBusy(false);
+      return;
+    }
+    if (res.ok) {
+      await onSuccess();
+      return;
+    }
+    const data = (await res.json().catch(() => ({}))) as { error?: string; mfaExpired?: boolean };
+    if (data.mfaExpired) {
+      onRestart(data.error ?? "Your sign-in expired. Please sign in again.");
+      return;
+    }
+    setError(data.error ?? "Verification failed.");
+    setCode("");
+    setBusy(false);
+  }
+
+  async function usePasskey() {
+    if (!challenge.webauthn) return;
+    if (!isWebAuthnSupported()) {
+      setError("This browser doesn't support passkeys.");
+      return;
+    }
+    let credential: Record<string, unknown>;
+    try {
+      credential = await getPasskeyAssertion(challenge.webauthn);
+    } catch (err) {
+      if (!isWebAuthnCancel(err)) setError("The passkey couldn't be used on this device.");
+      return;
+    }
+    await submit({ method: "webauthn", credential });
+  }
+
+  const noMethods = challenge.methods.length === 0;
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-1">
+        <p className="text-sm font-medium m-0" style={{ color: "var(--ds-fg)" }}>Two-factor authentication</p>
+        <p className="text-sm m-0" style={{ color: "var(--ds-fg-muted)" }}>
+          {noMethods
+            ? "This account has two-factor authentication but no way to complete it here. Ask an administrator to reset it."
+            : method === "totp"
+              ? "Enter the 6-digit code from your authenticator app."
+              : method === "webauthn"
+                ? "Use the passkey or security key registered to this account."
+                : "Enter one of your recovery codes. Each code works once."}
+        </p>
+      </div>
+
+      {method === "webauthn" && challenge.methods.includes("webauthn") && (
+        <Button type="button" onClick={usePasskey} disabled={busy} className="w-full min-h-11">
+          {busy ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Verifying…</> : "Use passkey"}
+        </Button>
+      )}
+
+      {(method === "totp" || method === "recovery") && challenge.methods.includes(method) && (
+        <form
+          className="space-y-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submit({ method, code });
+          }}
+        >
+          <Field label={method === "totp" ? "Verification code" : "Recovery code"} htmlFor="mfa-code">
+            <Input
+              id="mfa-code"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              autoComplete="one-time-code"
+              inputMode={method === "totp" ? "numeric" : "text"}
+              placeholder={method === "totp" ? "123456" : "XXXX-XXXX-XXXX-XXXX"}
+              maxLength={method === "totp" ? 7 : 24}
+              autoFocus
+              required
+            />
+          </Field>
+          <Button type="submit" disabled={busy || code.trim().length === 0} className="w-full min-h-11">
+            {busy ? "Verifying…" : "Verify"}
+          </Button>
+        </form>
+      )}
+
+      {error && <p role="alert" aria-live="assertive" className="text-sm text-red-400">{error}</p>}
+
+      <div className="flex flex-col gap-1">
+        {challenge.methods.filter((m) => m !== method).map((m) => (
+          <button
+            key={m}
+            type="button"
+            onClick={() => { setMethod(m); setError(""); setCode(""); }}
+            className="ds-hover-tint w-full min-h-9 rounded-md text-sm text-zinc-400 hover:text-zinc-200 transition-colors"
+          >
+            {m === "totp" ? "Use your authenticator app" : m === "webauthn" ? "Use a passkey" : "Use a recovery code"}
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={() => onRestart()}
+          className="ds-hover-tint w-full min-h-9 rounded-md text-sm text-zinc-400 hover:text-zinc-200 transition-colors"
+        >
+          Back to sign in
+        </button>
+      </div>
     </div>
   );
 }
