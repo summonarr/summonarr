@@ -24,6 +24,7 @@ import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { PageHeader, EmptyState } from "@/components/ui/design";
 import { AlertTriangle } from "@/components/icons";
+import { getTranslator } from "@/lib/i18n/server";
 
 const RAIL_SIZE = 14;
 const RAIL_OVERFETCH = 20;
@@ -111,7 +112,7 @@ export default async function DiscoverPage({
 }: {
   searchParams: Promise<Record<string, string>>;
 }) {
-  const [sp, session, flags] = await Promise.all([searchParams, requireAppSession(), getFeatureFlags()]);
+  const [sp, session, flags, t] = await Promise.all([searchParams, requireAppSession(), getFeatureFlags(), getTranslator()]);
   const hideAvailable = sp.hideAvailable === "1";
   // Integration flags passed explicitly: they default to TRUE when omitted, which
   // left a disabled integration's leftover library rows driving these rails while
@@ -216,23 +217,23 @@ export default async function DiscoverPage({
   const railsBase: { title: string; subtitle: string; href?: string; raw: TmdbMedia[]; items: TmdbMedia[] }[] = [
     // No "See all": the only full list (/admin/activity/recent) is admin-only.
     ...(recentEnabled
-      ? [{ title: "Recently Added", subtitle: "Just landed on your server", raw: recent, items: project(recent, emap, hideAvailable, RECENTLY_ADDED_SIZE, vis) }]
+      ? [{ title: t("home.rail.recent.title"), subtitle: t("home.rail.recent.subtitle"), raw: recent, items: project(recent, emap, hideAvailable, RECENTLY_ADDED_SIZE, vis) }]
       : []),
     ...(forYouEnabled
-      ? [{ title: "For You", subtitle: "Picked based on what you watch", href: "/for-you", raw: forYou, items: project(forYou, emap, hideAvailable, RAIL_SIZE, vis) }]
+      ? [{ title: t("home.rail.forYou.title"), subtitle: t("home.rail.forYou.subtitle"), href: "/for-you", raw: forYou, items: project(forYou, emap, hideAvailable, RAIL_SIZE, vis) }]
       : []),
-    { title: "Popular Movies",   subtitle: "Most popular on TMDB",                  href: "/movies",   raw: popMovies, items: project(popMovies, emap, hideAvailable, RAIL_SIZE, vis) },
-    { title: "Popular TV",       subtitle: "Most popular TV shows",                 href: "/tv",       raw: popTV, items: project(popTV,     emap, hideAvailable, RAIL_SIZE, vis) },
+    { title: t("home.rail.popularMovies.title"), subtitle: t("home.rail.popularMovies.subtitle"), href: "/movies",   raw: popMovies, items: project(popMovies, emap, hideAvailable, RAIL_SIZE, vis) },
+    { title: t("home.rail.popularTv.title"), subtitle: t("home.rail.popularTv.subtitle"), href: "/tv",       raw: popTV, items: project(popTV,     emap, hideAvailable, RAIL_SIZE, vis) },
     ...(upcomingEnabled
       ? [
-          { title: "Upcoming Movies", subtitle: "Hitting theaters soon",  href: "/upcoming", raw: upMovies, items: project(upMovies, emap, hideAvailable, RAIL_SIZE, vis) },
-          { title: "On The Air TV",   subtitle: "New episodes this week", href: "/upcoming", raw: upTV, items: project(upTV,     emap, hideAvailable, RAIL_SIZE, vis) },
+          { title: t("home.rail.upcomingMovies.title"), subtitle: t("home.rail.upcomingMovies.subtitle"), href: "/upcoming", raw: upMovies, items: project(upMovies, emap, hideAvailable, RAIL_SIZE, vis) },
+          { title: t("home.rail.onTheAir.title"), subtitle: t("home.rail.onTheAir.subtitle"), href: "/upcoming", raw: upTV, items: project(upTV,     emap, hideAvailable, RAIL_SIZE, vis) },
         ]
       : []),
     ...(topEnabled
       ? [
-          { title: "Top Rated Movies", subtitle: "Highest-rated films of all time", href: "/top", raw: topMovies, items: project(topMovies, emap, hideAvailable, RAIL_SIZE, vis) },
-          { title: "Top Rated TV",     subtitle: "Highest-rated shows of all time", href: "/top", raw: topTV, items: project(topTV,     emap, hideAvailable, RAIL_SIZE, vis) },
+          { title: t("home.rail.topMovies.title"), subtitle: t("home.rail.topMovies.subtitle"), href: "/top", raw: topMovies, items: project(topMovies, emap, hideAvailable, RAIL_SIZE, vis) },
+          { title: t("home.rail.topTv.title"), subtitle: t("home.rail.topTv.subtitle"), href: "/top", raw: topTV, items: project(topTV,     emap, hideAvailable, RAIL_SIZE, vis) },
         ]
       : []),
   ];
@@ -257,8 +258,8 @@ export default async function DiscoverPage({
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
 
       <PageHeader
-        title="Discover"
-        subtitle="What’s popular on TMDB right now"
+        title={t("home.title")}
+        subtitle={t("home.subtitle")}
         right={
           <Suspense>
             <HideAvailableToggle active={hideAvailable} />
@@ -274,8 +275,8 @@ export default async function DiscoverPage({
         <div style={{ marginBottom: 36 }}>
           <EmptyState
             icon={AlertTriangle}
-            title="Trending unavailable"
-            description="TMDB returned nothing. Check that TMDB_READ_TOKEN is set in your environment; if it is, TMDB may be unreachable right now."
+            title={t("home.trendingUnavailable.title")}
+            description={t("home.trendingUnavailable.description")}
           />
         </div>
       ) : (
@@ -285,7 +286,7 @@ export default async function DiscoverPage({
               {featuredMovie && (
                 <DiscoverHero
                   media={featuredMovie}
-                  label="Trending movie"
+                  label={t("home.hero.trendingMovie")}
                   showPlex={showPlex}
                   showJellyfin={showJellyfin}
                 />
@@ -293,7 +294,7 @@ export default async function DiscoverPage({
               {featuredTV && (
                 <DiscoverHero
                   media={featuredTV}
-                  label="Trending TV"
+                  label={t("home.hero.trendingTv")}
                   showPlex={showPlex}
                   showJellyfin={showJellyfin}
                 />
@@ -301,8 +302,8 @@ export default async function DiscoverPage({
             </div>
           )}
           <DiscoverRow
-            title="Trending this week"
-            subtitle={`${trendingRest.length} results`}
+            title={t("home.trending.title")}
+            subtitle={t("home.trending.results", { count: trendingRest.length })}
             items={trendingRest}
             showPlex={showPlex}
             showJellyfin={showJellyfin}

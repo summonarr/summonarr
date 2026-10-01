@@ -14,15 +14,21 @@
 import type { Locale } from "./locales";
 import type { Messages } from "./translate";
 import enAppearance from "./messages/en/appearance.json";
+import enBrowse from "./messages/en/browse.json";
+import enHome from "./messages/en/home.json";
+import enMedia from "./messages/en/media.json";
 import enNav from "./messages/en/nav.json";
 import enSearch from "./messages/en/search.json";
 import esAppearance from "./messages/es/appearance.json";
+import esBrowse from "./messages/es/browse.json";
+import esHome from "./messages/es/home.json";
+import esMedia from "./messages/es/media.json";
 import esNav from "./messages/es/nav.json";
 import esSearch from "./messages/es/search.json";
 
 export const CATALOGS: Record<Locale, Messages> = {
-  en: { ...enAppearance, ...enNav, ...enSearch },
-  es: { ...esAppearance, ...esNav, ...esSearch },
+  en: { ...enAppearance, ...enBrowse, ...enHome, ...enMedia, ...enNav, ...enSearch },
+  es: { ...esAppearance, ...esBrowse, ...esHome, ...esMedia, ...esNav, ...esSearch },
 };
 
 export const FALLBACK_MESSAGES: Messages = CATALOGS.en;

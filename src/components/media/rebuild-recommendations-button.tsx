@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // Admin-only shortcut on /for-you to the same job the cron loop runs every
 // WARM_RECOMMENDATIONS_INTERVAL (12h). The shelf is PRECOMPUTED, so without
@@ -28,6 +29,7 @@ import { withBasePath } from "@/lib/base-path";
 // comes from padding cancelled by a negative margin so the line box doesn't grow.
 export function RebuildRecommendationsButton() {
   const router = useRouter();
+  const t = useT();
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
   const [cooldown, setCooldown] = useState(0);
@@ -68,7 +70,7 @@ export function RebuildRecommendationsButton() {
       // a success. Checked BEFORE the error branch because a skip is not a
       // failure — the job is already running, which is what the operator wanted.
       if (res.ok && data.skipped) {
-        setMessage({ text: data.reason ?? "Already running", type: "success" });
+        setMessage({ text: data.reason ?? t("browse.forYou.rebuild.alreadyRunning"), type: "success" });
         setCooldown(30);
         return;
       }
@@ -80,8 +82,8 @@ export function RebuildRecommendationsButton() {
           text:
             data.error ??
             (gatewayTimeout
-              ? "Lost contact with the server; the rebuild may still be running"
-              : `Rebuild failed (HTTP ${res.status})`),
+              ? t("browse.forYou.rebuild.lostContact")
+              : t("browse.forYou.rebuild.failed", { status: res.status })),
           type: "error",
         });
         setCooldown(30);
@@ -91,7 +93,7 @@ export function RebuildRecommendationsButton() {
       const updated = data.usersUpdated ?? 0;
       const eligible = data.usersEligible ?? 0;
       setMessage({
-        text: `Rebuilt ${updated} of ${eligible} ${eligible === 1 ? "shelf" : "shelves"}`,
+        text: t("browse.forYou.rebuild.done", { updated, count: eligible }),
         type: "success",
       });
       setCooldown(60);
@@ -104,7 +106,7 @@ export function RebuildRecommendationsButton() {
       // (~60-100s) while still completing server-side, so a transport failure
       // must not claim the job failed — say what is actually known.
       setMessage({
-        text: "Lost contact with the server; the rebuild may still be running",
+        text: t("browse.forYou.rebuild.lostContact"),
         type: "error",
       });
       setCooldown(60);
@@ -121,11 +123,11 @@ export function RebuildRecommendationsButton() {
         type="button"
         onClick={handleRebuild}
         disabled={busy}
-        aria-label={cooldown > 0 ? `Rebuild picks — wait ${cooldown}s` : "Rebuild picks"}
+        aria-label={cooldown > 0 ? t("browse.forYou.rebuild.labelWait", { seconds: cooldown }) : t("browse.forYou.rebuild.label")}
         title={
           cooldown > 0
-            ? `Wait ${cooldown}s`
-            : "Re-run the recommendation build now. Rebuilds every active user’s shelf, not just yours, and can take a few minutes on a cold graph."
+            ? t("browse.forYou.rebuild.wait", { seconds: cooldown })
+            : t("browse.forYou.rebuild.title")
         }
         // No hover tint while disabled — a dimmed control that still lights up
         // under the cursor reads as clickable.
@@ -149,7 +151,7 @@ export function RebuildRecommendationsButton() {
           className={loading ? "animate-spin" : undefined}
           aria-hidden="true"
         />
-        {loading ? "Rebuilding…" : "Rebuild"}
+        {loading ? t("browse.forYou.rebuild.running") : t("browse.forYou.rebuild.button")}
       </button>
       <span role="status" className="ds-mono" style={{ fontSize: 11 }}>
         {message && (

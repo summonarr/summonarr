@@ -7,13 +7,14 @@ import { tmdbAuth } from "@/lib/tmdb-auth";
 import { LiveRefresh } from "@/components/live-refresh";
 import { BrowseGrid } from "@/components/media/browse-grid";
 import { PageHeader } from "@/components/ui/design";
+import { getTranslator } from "@/lib/i18n/server";
 
 export default async function TVPage({
   searchParams,
 }: {
   searchParams: Promise<Record<string, string>>;
 }) {
-  const [sp, session] = await Promise.all([searchParams, requireAppSession()]);
+  const [sp, session, t] = await Promise.all([searchParams, requireAppSession(), getTranslator()]);
   const genreId        = sp.genreId        || undefined;
   const keywordId      = sp.keywordId      || undefined;
   const minRating      = sp.minRating      || undefined;
@@ -52,17 +53,17 @@ export default async function TVPage({
   const hasFilters = !!(genreId || keywordId || minRating || ratingFilter || minVoteCount || fromYear || toYear || sortBy || watchProvider || hideAvailable);
   // `items` is ONE TMDB page (~20), not the result set — see movies/page.tsx.
   const subtitle = !hasFilters
-    ? "Popular right now"
+    ? t("browse.popularNow")
     : failed
-      ? "Filtered results"
+      ? t("browse.filteredResults")
       : totalPages > 1
-        ? `Page ${Math.min(page, totalPages)} of ${totalPages}`
-        : `${items.length} result${items.length === 1 ? "" : "s"}`;
+        ? t("browse.pageOf", { page: Math.min(page, totalPages), total: totalPages })
+        : t("browse.results", { count: items.length });
 
   return (
     <div className="ds-page-enter">
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
-      <PageHeader title="TV Shows" subtitle={subtitle} />
+      <PageHeader title={t("nav.tvShows")} subtitle={subtitle} />
       <BrowseGrid
         initialItems={items}
         initialTotalPages={totalPages}

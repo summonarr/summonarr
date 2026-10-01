@@ -17,6 +17,7 @@ import { posterUrl, type TmdbMedia } from "@/lib/tmdb-types";
 import { safeExternalHref } from "@/lib/safe-url";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { requestRatings, type RatingsPayload } from "@/lib/client/ratings-batcher";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface DiscoverHeroProps {
   media: TmdbMedia;
@@ -33,8 +34,9 @@ export function DiscoverHero({
   media,
   showPlex = true,
   showJellyfin = true,
-  label = "Trending #1",
+  label,
 }: DiscoverHeroProps) {
+  const t = useT();
   const poster = posterUrl(media.posterPath, "w500");
   const [liveRatings, setLiveRatings] = useState<RatingsPayload | null>(null);
 
@@ -141,7 +143,7 @@ export function DiscoverHero({
         style={{ gap: 10, minWidth: 0 }}
       >
         <div className="flex flex-wrap items-center" style={{ gap: 6 }}>
-          <span className="ds-chip ds-chip-accent">{label}</span>
+          <span className="ds-chip ds-chip-accent">{label ?? t("media.hero.trendingFirst")}</span>
           {showPlex && media.plexAvailable && (
             <span
               className="ds-chip ds-chip-plex"
@@ -167,7 +169,7 @@ export function DiscoverHero({
                 style={{ paddingLeft: 5, paddingRight: 6 }}
               >
                 <Clock style={{ width: 9, height: 9 }} />
-                Queued
+                {t("media.badge.queued")}
               </span>
             )}
           {/* 4K chips — arr4k* are only populated when the viewer has 4K access (enrichment gate) */}
@@ -192,7 +194,7 @@ export function DiscoverHero({
               style={{ paddingLeft: 5, paddingRight: 6 }}
             >
               <Clock style={{ width: 9, height: 9 }} />
-              4K Queued
+              {t("media.badge.queued4k")}
             </span>
           )}
           {!isAvailable &&
@@ -202,7 +204,7 @@ export function DiscoverHero({
                 style={{ paddingLeft: 5, paddingRight: 6 }}
               >
                 <CheckCircle style={{ width: 9, height: 9 }} />
-                Requested
+                {t("media.badge.requested")}
               </span>
             )}
         </div>
@@ -238,11 +240,11 @@ export function DiscoverHero({
           {media.runtime ? (
             <>
               <span>·</span>
-              <span>{media.runtime}m</span>
+              <span>{t("media.runtimeMinutes", { minutes: media.runtime })}</span>
             </>
           ) : null}
           <span>·</span>
-          <span>{media.mediaType === "movie" ? "MOVIE" : "TV"}</span>
+          <span>{media.mediaType === "movie" ? t("media.type.movie") : t("media.type.tv")}</span>
         </div>
 
         <RatingsBar
@@ -296,7 +298,7 @@ export function DiscoverHero({
               border: 0,
             }}
           >
-            View details
+            {t("media.hero.viewDetails")}
             <ChevronRight style={{ width: 14, height: 14 }} />
           </Link>
           {trailerHref && (
@@ -316,8 +318,8 @@ export function DiscoverHero({
               }}
             >
               <Play style={{ width: 14, height: 14 }} />
-              Trailer
-              <span className="sr-only"> (opens in new tab)</span>
+              {t("media.hero.trailer")}
+              <span className="sr-only"> {t("media.opensInNewTab")}</span>
             </a>
           )}
         </div>

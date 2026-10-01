@@ -3,6 +3,7 @@ import { ChevronRight } from "@/components/icons";
 import { MediaCard } from "./media-card";
 import { SectionHeader } from "@/components/ui/design";
 import type { TmdbMedia } from "@/lib/tmdb-types";
+import { getTranslator } from "@/lib/i18n/server";
 
 interface DiscoverRowProps {
   title: string;
@@ -19,7 +20,8 @@ interface DiscoverRowProps {
   allAvailable?: boolean;
 }
 
-export function DiscoverRow({
+// Server component (async for the request translator); only the home page renders it.
+export async function DiscoverRow({
   title,
   items,
   showPlex,
@@ -29,6 +31,7 @@ export function DiscoverRow({
   allAvailable,
 }: DiscoverRowProps) {
   if (items.length === 0 && !allAvailable) return null;
+  const t = await getTranslator();
   return (
     <section style={{ marginBottom: 36 }}>
       <SectionHeader
@@ -47,7 +50,7 @@ export function DiscoverRow({
                 borderRadius: 6,
               }}
             >
-              See all
+              {t("media.row.seeAll")}
               <ChevronRight style={{ width: 12, height: 12 }} />
             </Link>
           ) : undefined
@@ -58,7 +61,7 @@ export function DiscoverRow({
           className="ds-mono m-0"
           style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
         >
-          Everything here is already on your server.
+          {t("media.row.allAvailable")}
         </p>
       ) : (
         <div className="ds-media-grid">
