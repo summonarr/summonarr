@@ -16,7 +16,9 @@ import { PaginationBar } from "@/components/media/pagination-bar";
 import { requireFeature } from "@/lib/features";
 import type { Prisma } from "@/generated/prisma";
 import { Chip, EmptyState, PageHeader } from "@/components/ui/design";
-import { ISSUE_DATE_FORMAT, ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL, ISSUE_TYPE_LABELS } from "@/lib/status-labels";
+import { ISSUE_STATUS_LABEL_KEY, ISSUE_STATUS_TONE, ISSUE_TYPE_LABEL_KEY, issueDateFormat } from "@/lib/status-labels";
+import { getLocale, getTranslator } from "@/lib/i18n/server";
+import type { Translator } from "@/lib/i18n/translate";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
 
 export const dynamic = "force-dynamic";
@@ -27,12 +29,15 @@ const VALID_ISSUE_TYPES = ["BAD_VIDEO", "WRONG_AUDIO", "MISSING_SUBTITLES", "WRO
 const PAGE_SIZE = 20;
 
 // Formats an issue's scope into a short label (SxxEyy for episodes, "Season N" for seasons); null for whole-title scope.
-function scopeLabelFor(issue: { scope: string; seasonNumber: number | null; episodeNumber: number | null }): string | null {
+function scopeLabelFor(
+  issue: { scope: string; seasonNumber: number | null; episodeNumber: number | null },
+  t: Translator,
+): string | null {
   if (issue.scope === "EPISODE" && issue.seasonNumber != null && issue.episodeNumber != null) {
     return `S${String(issue.seasonNumber).padStart(2, "0")}E${String(issue.episodeNumber).padStart(2, "0")}`;
   }
   if (issue.scope === "SEASON" && issue.seasonNumber != null) {
-    return `Season ${issue.seasonNumber}`;
+    return t("personal.issues.season", { number: issue.seasonNumber });
   }
   return null;
 }
@@ -44,6 +49,10 @@ export default async function IssuesPage({
 }) {
   await requireFeature("feature.page.issues");
   const session = await requireAppSession();
+  const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
+  const dateFormat = issueDateFormat(locale);
+  const statusLabel = (s: string) => (ISSUE_STATUS_LABEL_KEY[s] ? t(ISSUE_STATUS_LABEL_KEY[s]) : s);
+  const typeLabel = (s: string) => (ISSUE_TYPE_LABEL_KEY[s] ? t(ISSUE_TYPE_LABEL_KEY[s]) : s);
 
   const {
     page: pageParam,
@@ -124,10 +133,9 @@ export default async function IssuesPage({
   const hasFilters = status !== null || issueType !== null || q !== "";
 
   const countLine =
-    `${total} issue${total !== 1 ? "s" : ""} reported` +
-    (hasFilters && totalAllStatuses !== total
-      ? ` (of ${totalAllStatuses} total)`
-      : "");
+    hasFilters && totalAllStatuses !== total
+      ? t("personal.issues.countOfTotal", { count: total, total: totalAllStatuses })
+      : t("personal.issues.count", { count: total });
 
   return (
     <div className="ds-page-enter">
@@ -135,15 +143,14 @@ export default async function IssuesPage({
         on={["issue:updated", "issue:deleted", "issuemessage:created"]}
       />
       <PageHeader
-        title="My Issues"
+        title={t("personal.issues.title")}
         subtitle={
           <>
-            {countLine} · To report a new issue, search for the movie or TV
-            show above, then click{" "}
+            {countLine} · {t("personal.issues.hintBefore")}{" "}
             <span style={{ color: "var(--ds-fg-muted)", fontWeight: 500 }}>
-              Report Issue
+              {t("personal.issues.reportIssue")}
             </span>{" "}
-            on its page
+            {t("personal.issues.hintAfter")}
           </>
         }
       />
@@ -154,10 +161,10 @@ export default async function IssuesPage({
             param="status"
             active={status ?? ""}
             options={[
-              { value: "", label: "All", count: totalAllStatuses },
-              { value: "OPEN", label: "Open", count: statusCounts.OPEN ?? 0 },
-              { value: "IN_PROGRESS", label: "In Progress", count: statusCounts.IN_PROGRESS ?? 0 },
-              { value: "RESOLVED", label: "Resolved", count: statusCounts.RESOLVED ?? 0 },
+              { value: "", label: t("personal.common.all"), count: totalAllStatuses },
+              { value: "OPEN", label: t("personal.issues.status.open"), count: statusCounts.OPEN ?? 0 },
+              { value: "IN_PROGRESS", label: t("personal.issues.status.inProgress"), count: statusCounts.IN_PROGRESS ?? 0 },
+              { value: "RESOLVED", label: t("personal.issues.status.resolved"), count: statusCounts.RESOLVED ?? 0 },
             ]}
             preserve={["type", "q", "selected"]}
           />
@@ -166,19 +173,19 @@ export default async function IssuesPage({
               param="type"
               active={issueType ?? ""}
               options={[
-                { value: "", label: "Any type" },
-                { value: "BAD_VIDEO", label: "Video" },
-                { value: "WRONG_AUDIO", label: "Audio" },
-                { value: "MISSING_SUBTITLES", label: "Subtitles" },
-                { value: "WRONG_MATCH", label: "Wrong match" },
-                { value: "OTHER", label: "Other" },
+                { value: "", label: t("personal.issues.filter.anyType") },
+                { value: "BAD_VIDEO", label: t("personal.issues.filter.video") },
+                { value: "WRONG_AUDIO", label: t("personal.issues.filter.audio") },
+                { value: "MISSING_SUBTITLES", label: t("personal.issues.filter.subtitles") },
+                { value: "WRONG_MATCH", label: t("personal.issues.type.wrongMatch") },
+                { value: "OTHER", label: t("personal.issues.type.other") },
               ]}
               preserve={["status", "q", "selected"]}
             />
             <SearchBox
               param="q"
               initial={q}
-              placeholder="Search titles…"
+              placeholder={t("personal.common.searchTitles")}
               preserve={["status", "type", "selected"]}
             />
           </div>
@@ -192,15 +199,21 @@ export default async function IssuesPage({
         // no way back.
         <EmptyState
           icon={MessageSquare}
-          title={total > 0 ? "Nothing on this page" : hasFilters ? "No matching issues" : "No issues reported"}
+          title={
+            total > 0
+              ? t("personal.common.nothingOnPage")
+              : hasFilters
+                ? t("personal.issues.emptyFilteredTitle")
+                : t("personal.issues.emptyTitle")
+          }
           description={
             total > 0
-              ? "No more issues on this page."
+              ? t("personal.issues.emptyPageDescription")
               : hasFilters
-                ? "No issues match these filters."
-                : "Use the Report Issue button on any movie or TV show page."
+                ? t("personal.issues.emptyFilteredDescription")
+                : t("personal.issues.emptyDescription")
           }
-          cta={total > 0 ? { href: buildHref({ page: 1, selected: "" }), label: "Back to page 1" } : undefined}
+          cta={total > 0 ? { href: buildHref({ page: 1, selected: "" }), label: t("personal.common.backToFirst") } : undefined}
         />
       ) : (
         <div className="xl:grid xl:grid-cols-[1fr_480px] xl:gap-6 xl:items-start">
@@ -208,7 +221,7 @@ export default async function IssuesPage({
             <div className="flex flex-col" style={{ gap: 8 }}>
               {issues.map((issue) => {
                 const poster = posterUrl(issue.posterPath, "w342");
-                const scopeLabel = scopeLabelFor(issue);
+                const scopeLabel = scopeLabelFor(issue, t);
                 const isSelected = issue.id === selectedId;
 
                 return (
@@ -284,11 +297,10 @@ export default async function IssuesPage({
                               color: "var(--ds-fg-subtle)",
                             }}
                           >
-                            {issue.mediaType === "MOVIE" ? "MOVIE" : "TV"}
+                            {issue.mediaType === "MOVIE" ? t("personal.common.movie") : t("personal.common.tv")}
                           </span>
                           <Chip>
-                            {ISSUE_TYPE_LABELS[issue.issueType] ??
-                              issue.issueType}
+                            {typeLabel(issue.issueType)}
                           </Chip>
                           {scopeLabel && <Chip>{scopeLabel}</Chip>}
                           <span
@@ -298,7 +310,7 @@ export default async function IssuesPage({
                               color: "var(--ds-fg-subtle)",
                             }}
                           >
-                            {ISSUE_DATE_FORMAT.format(new Date(issue.updatedAt))}
+                            {dateFormat.format(new Date(issue.updatedAt))}
                           </span>
                         </div>
                         {issue.note && (
@@ -327,7 +339,7 @@ export default async function IssuesPage({
                                 "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))",
                             }}
                           >
-                            Resolution: {issue.resolution}
+                            {t("personal.issues.resolution", { text: issue.resolution })}
                           </p>
                         )}
                         {issue._count.messages > 0 && (
@@ -340,15 +352,14 @@ export default async function IssuesPage({
                                 "color-mix(in oklab, var(--ds-accent-text) 80%, var(--ds-fg))",
                             }}
                           >
-                            {issue._count.messages} message
-                            {issue._count.messages !== 1 ? "s" : ""}
+                            {t("personal.issues.messages", { count: issue._count.messages })}
                           </p>
                         )}
                       </div>
 
                       <div className="flex items-center shrink-0" style={{ gap: 8 }}>
                         <Chip tone={ISSUE_STATUS_TONE[issue.status]}>
-                          {ISSUE_STATUS_LABEL[issue.status]}
+                          {statusLabel(issue.status)}
                         </Chip>
                         <ChevronRight
                           className="xl:hidden"
@@ -437,14 +448,13 @@ export default async function IssuesPage({
                         style={{ gap: 6, marginTop: 4 }}
                       >
                         <Chip tone={ISSUE_STATUS_TONE[selectedIssue.status]}>
-                          {ISSUE_STATUS_LABEL[selectedIssue.status]}
+                          {statusLabel(selectedIssue.status)}
                         </Chip>
                         <Chip>
-                          {ISSUE_TYPE_LABELS[selectedIssue.issueType] ??
-                            selectedIssue.issueType}
+                          {typeLabel(selectedIssue.issueType)}
                         </Chip>
                         {(() => {
-                          const label = scopeLabelFor(selectedIssue);
+                          const label = scopeLabelFor(selectedIssue, t);
                           return label ? <Chip>{label}</Chip> : null;
                         })()}
                       </div>
@@ -456,8 +466,9 @@ export default async function IssuesPage({
                           color: "var(--ds-fg-subtle)",
                         }}
                       >
-                        Reported{" "}
-                        {ISSUE_DATE_FORMAT.format(new Date(selectedIssue.createdAt))}
+                        {t("personal.issues.reported", {
+                          date: dateFormat.format(new Date(selectedIssue.createdAt)),
+                        })}
                       </p>
                     </div>
                   </div>
@@ -488,7 +499,7 @@ export default async function IssuesPage({
                           "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))",
                       }}
                     >
-                      Resolution: {selectedIssue.resolution}
+                      {t("personal.issues.resolution", { text: selectedIssue.resolution })}
                     </p>
                   )}
                 </div>
@@ -498,8 +509,8 @@ export default async function IssuesPage({
               <EmptyState
                 className="h-full justify-center"
                 icon={MessageSquare}
-                title="Select an issue"
-                description="Pick an issue from the list to view its thread."
+                title={t("personal.issues.selectTitle")}
+                description={t("personal.issues.selectDescription")}
               />
             )}
           </aside>

@@ -4,13 +4,15 @@
 // from the caller's own PlayHistory (getWrappedForServerUsers). Deliberately
 // louder than the My Stats dashboard: a gradient hero, a #1 spotlight, and a
 // grid of bold stat cards. Every label is derived deterministically from the
-// data props (day/month/hour names from static tables, dates formatted in UTC)
-// so there is NO Date.now()/locale drift in the client render path (guardrail
-// 16). Screenshot-friendly; no interactivity, so nothing here holds state.
+// data props (day/month/hour names via Intl in the ACTIVE UI locale — the same
+// value on the server and the client — and dates formatted in UTC) so there is
+// NO Date.now()/locale drift in the client render path (guardrail 16). Screenshot-friendly; no interactivity, so nothing here holds state.
 
 import type { ReactNode } from "react";
 import Link from "next/link";
 import { Poster, fmtDuration } from "@/components/admin/activity-ui";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 
 export interface WrappedData {
   year: number;
@@ -43,29 +45,43 @@ export interface WrappedData {
   topDevice: string | null;
 }
 
-const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const capitalize = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 
-function hourLabel(h: number): string {
-  const ampm = h < 12 ? "AM" : "PM";
-  const h12 = h % 12 === 0 ? 12 : h % 12;
-  return `${h12} ${ampm}`;
+// 0=Sunday..6=Saturday. 2023-01-01 was a Sunday; UTC-pinned so every runtime agrees.
+function dayName(dow: number, locale: string): string {
+  return capitalize(
+    new Date(Date.UTC(2023, 0, 1 + dow)).toLocaleDateString(locale, { weekday: "long", timeZone: "UTC" }),
+  );
 }
-function partOfDay(h: number): string {
-  if (h < 5) return "late nights";
-  if (h < 12) return "mornings";
-  if (h < 17) return "afternoons";
-  if (h < 21) return "evenings";
-  return "nights";
+function hourLabel(h: number, locale: string): string {
+  if (locale === "en") {
+    const ampm = h < 12 ? "AM" : "PM";
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    return `${h12} ${ampm}`;
+  }
+  return new Date(Date.UTC(2023, 0, 1, h)).toLocaleTimeString(locale, {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+    timeZone: "UTC",
+  });
+}
+function partOfDay(h: number, t: Translator): string {
+  if (h < 5) return t("personal.wrapped.part.lateNights");
+  if (h < 12) return t("personal.wrapped.part.mornings");
+  if (h < 17) return t("personal.wrapped.part.afternoons");
+  if (h < 21) return t("personal.wrapped.part.evenings");
+  return t("personal.wrapped.part.nights");
 }
 // 'YYYY-MM-DD' (or full ISO) → "Mar 3", pinned to UTC so SSR and client agree.
-function fmtDay(s: string): string {
+function fmtDay(s: string, locale: string): string {
   const iso = s.length === 10 ? `${s}T00:00:00Z` : s;
-  return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+  return new Date(iso).toLocaleDateString(locale, { month: "short", day: "numeric", timeZone: "UTC" });
 }
-function monthName(ym: string): string {
+function monthName(ym: string, locale: string): string {
   const m = parseInt(ym.slice(5, 7), 10);
-  return MONTHS[m - 1] ?? ym;
+  if (!(m >= 1 && m <= 12)) return ym;
+  return capitalize(new Date(Date.UTC(2023, m - 1, 1)).toLocaleDateString(locale, { month: "short", timeZone: "UTC" }));
 }
 function mediaHref(tmdbId: number | null, mediaType: string | null): string | null {
   if (tmdbId == null) return null;
@@ -99,55 +115,71 @@ function WrappedStat({ grad, kicker, value, sub }: { grad: string; kicker: strin
 }
 
 export function WrappedView({ data: w }: { data: WrappedData }) {
+  const t = useT();
+  const locale = useLocale();
   const top = w.topTitles[0];
   const heroHref = top ? mediaHref(top.tmdbId, top.mediaType) : null;
 
   const primeLine =
     w.primeDow != null
-      ? `${DAYS[w.primeDow]} ${w.primeHour != null ? partOfDay(w.primeHour) : ""}`.trim()
+      ? w.primeHour != null
+        ? t("personal.wrapped.primeLine", { day: dayName(w.primeDow, locale), part: partOfDay(w.primeHour, t) })
+        : dayName(w.primeDow, locale)
       : w.primeHour != null
-        ? `${partOfDay(w.primeHour)}`
+        ? capitalize(partOfDay(w.primeHour, t))
         : "—";
 
   const cards: { kicker: string; value: ReactNode; sub?: ReactNode }[] = [];
   cards.push({
-    kicker: "Movies vs TV",
+    kicker: t("personal.wrapped.moviesVsTv"),
     value: `${w.movies.titles} · ${w.tv.episodes}`,
-    sub: `${w.movies.titles} movies · ${w.tv.episodes} episodes (${w.tv.shows} shows)`,
+    sub: t("personal.wrapped.moviesVsTvSub", {
+      movies: w.movies.titles,
+      episodes: w.tv.episodes,
+      shows: w.tv.shows,
+    }),
   });
   if (w.biggestDay) {
     cards.push({
-      kicker: "Biggest binge",
-      value: fmtDay(w.biggestDay.day),
-      sub: `${w.biggestDay.plays} plays · ${w.biggestDay.hours}h in one day`,
+      kicker: t("personal.wrapped.biggestBinge"),
+      value: fmtDay(w.biggestDay.day, locale),
+      sub: t("personal.wrapped.biggestBingeSub", { plays: w.biggestDay.plays, hours: w.biggestDay.hours }),
     });
   }
   if (w.primeDow != null || w.primeHour != null) {
     cards.push({
-      kicker: "Prime time",
+      kicker: t("personal.wrapped.primeTime"),
       value: primeLine,
-      sub: w.primeHour != null ? `peak around ${hourLabel(w.primeHour)}` : undefined,
+      sub: w.primeHour != null ? t("personal.wrapped.peakAround", { hour: hourLabel(w.primeHour, locale) }) : undefined,
     });
   }
   if (w.longestSitting) {
     cards.push({
-      kicker: "Longest sitting",
+      kicker: t("personal.wrapped.longestSitting"),
       value: fmtDuration(w.longestSitting.seconds),
       sub: w.longestSitting.title,
     });
   }
   if (w.completion.total > 0) {
     cards.push({
-      kicker: "Finish rate",
+      kicker: t("personal.wrapped.finishRate"),
       value: `${Math.round((w.completion.watched / w.completion.total) * 100)}%`,
-      sub: `saw ${w.completion.watched} of ${w.completion.total} plays through`,
+      sub: t("personal.wrapped.finishRateSub", { watched: w.completion.watched, total: w.completion.total }),
     });
   }
   if (w.busiestMonth) {
-    cards.push({ kicker: "Busiest month", value: monthName(w.busiestMonth.month), sub: `${w.busiestMonth.plays} plays` });
+    cards.push({
+      kicker: t("personal.wrapped.busiestMonth"),
+      value: monthName(w.busiestMonth.month, locale),
+      sub: t("personal.wrapped.playsCount", { count: w.busiestMonth.plays }),
+    });
   }
   if (w.topDevice || w.topPlatform) {
-    cards.push({ kicker: "Go-to screen", value: w.topDevice ?? w.topPlatform!, sub: w.topDevice && w.topPlatform ? `on ${w.topPlatform}` : undefined });
+    cards.push({
+      kicker: t("personal.wrapped.goToScreen"),
+      value: w.topDevice ?? w.topPlatform!,
+      sub: w.topDevice && w.topPlatform ? t("personal.wrapped.onPlatform", { platform: w.topPlatform }) : undefined,
+    });
   }
 
   return (
@@ -163,16 +195,18 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
         }}
       >
         <div className="ds-mono uppercase" style={{ fontSize: 11, letterSpacing: "0.16em", opacity: 0.85 }}>
-          {w.isCurrentYear ? `${w.year} so far` : `${w.year} in review`}
+          {w.isCurrentYear
+            ? t("personal.wrapped.soFar", { year: w.year })
+            : t("personal.wrapped.inReview", { year: w.year })}
         </div>
         <div style={{ fontSize: 30, fontWeight: 700, letterSpacing: "-0.03em", marginTop: 6, marginBottom: 20 }}>
-          Your Year in Review
+          {t("personal.wrapped.heading")}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 16 }}>
           {[
-            { n: w.totals.hours.toLocaleString("en-US"), l: "hours watched" },
-            { n: w.totals.plays.toLocaleString("en-US"), l: "plays" },
-            { n: w.totals.titles.toLocaleString("en-US"), l: "titles" },
+            { n: w.totals.hours.toLocaleString(locale), l: t("personal.wrapped.hoursWatched") },
+            { n: w.totals.plays.toLocaleString(locale), l: t("personal.wrapped.plays") },
+            { n: w.totals.titles.toLocaleString(locale), l: t("personal.wrapped.titles") },
           ].map((s) => (
             <div key={s.l}>
               <div style={{ fontSize: 38, fontWeight: 800, letterSpacing: "-0.03em", lineHeight: 1 }}>{s.n}</div>
@@ -187,7 +221,7 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
         <div style={{ display: "flex", gap: 18, alignItems: "center", background: "var(--ds-bg-2)", border: "1px solid var(--ds-border)", borderRadius: 14, padding: 18 }}>
           <Poster src={top.posterSrc} letter={(top.title[0] ?? "?").toUpperCase()} w={70} h={104} radius={6} />
           <div style={{ minWidth: 0 }}>
-            <div className="ds-mono uppercase" style={{ fontSize: 10.5, letterSpacing: "0.12em", color: "var(--ds-accent-text)" }}>Your #1 this year</div>
+            <div className="ds-mono uppercase" style={{ fontSize: 10.5, letterSpacing: "0.12em", color: "var(--ds-accent-text)" }}>{t("personal.wrapped.number1")}</div>
             <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.02em", color: "var(--ds-fg)", margin: "4px 0 6px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {heroHref ? (
                 <Link href={heroHref} className="hover:underline" style={{ color: "inherit", textDecoration: "none" }}>{top.title}</Link>
@@ -196,7 +230,7 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
               )}
             </div>
             <div className="ds-mono" style={{ fontSize: 12.5, color: "var(--ds-fg-subtle)" }}>
-              {top.count} {top.count === 1 ? "play" : "plays"} · {top.hours}h watched
+              {t("personal.wrapped.topSummary", { count: top.count, hours: top.hours })}
             </div>
           </div>
         </div>
@@ -213,23 +247,23 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
       {w.topTitles.length > 0 && (
         <div style={{ background: "var(--ds-bg-2)", border: "1px solid var(--ds-border)", borderRadius: 14, padding: 18 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ds-fg)", marginBottom: 14 }}>
-            Your top {w.topTitles.length} of {w.year}
+            {t("personal.wrapped.topList", { count: w.topTitles.length, year: w.year })}
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {w.topTitles.map((t, i) => {
-              const href = mediaHref(t.tmdbId, t.mediaType);
+            {w.topTitles.map((item, i) => {
+              const href = mediaHref(item.tmdbId, item.mediaType);
               return (
-                <div key={`${t.title}-${i}`} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <div key={`${item.title}-${i}`} style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   <span className="ds-mono" style={{ width: 20, textAlign: "right", fontSize: 15, fontWeight: 700, color: "var(--ds-accent-text)" }}>{i + 1}</span>
-                  <Poster src={t.posterSrc} letter={(t.title[0] ?? "?").toUpperCase()} w={32} h={46} radius={4} />
+                  <Poster src={item.posterSrc} letter={(item.title[0] ?? "?").toUpperCase()} w={32} h={46} radius={4} />
                   <div style={{ flex: 1, minWidth: 0, display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10 }}>
                     {href ? (
-                      <Link href={href} className="hover:underline" style={{ fontSize: 14, color: "var(--ds-fg)", textDecoration: "none", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.title}</Link>
+                      <Link href={href} className="hover:underline" style={{ fontSize: 14, color: "var(--ds-fg)", textDecoration: "none", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</Link>
                     ) : (
-                      <span style={{ fontSize: 14, color: "var(--ds-fg)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.title}</span>
+                      <span style={{ fontSize: 14, color: "var(--ds-fg)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.title}</span>
                     )}
                     <span className="ds-mono" style={{ fontSize: 12, color: "var(--ds-fg-subtle)", fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
-                      {t.count} {t.count === 1 ? "play" : "plays"}
+                      {t("personal.wrapped.playsCount", { count: item.count })}
                     </span>
                   </div>
                 </div>
@@ -240,7 +274,7 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
       )}
 
       <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-disabled)", textAlign: "center", paddingBottom: 4 }}>
-        Summonarr · Year in Review — screenshot to share
+        {t("personal.wrapped.footer")}
       </div>
     </div>
   );

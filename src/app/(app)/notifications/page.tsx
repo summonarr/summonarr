@@ -2,6 +2,7 @@ import { requireAppSession } from "@/lib/require-app-session";
 import { prisma } from "@/lib/prisma";
 import { PageHeader } from "@/components/ui/design";
 import { NotificationList, type NotificationListItem } from "@/components/notifications/notification-list";
+import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +13,7 @@ export const dynamic = "force-dynamic";
 // caller's own id.
 export default async function NotificationsPage() {
   const session = await requireAppSession();
+  const t = await getTranslator();
   const [rows, total] = await Promise.all([
     prisma.notification.findMany({
       where: { userId: session.user.id },
@@ -34,7 +36,7 @@ export default async function NotificationsPage() {
 
   return (
     <div className="ds-page-enter">
-      <PageHeader title="Notifications" subtitle="Request updates and replies" />
+      <PageHeader title={t("personal.notifications.title")} subtitle={t("personal.notifications.subtitle")} />
       <NotificationList initialItems={items} initialTotal={total} />
     </div>
   );

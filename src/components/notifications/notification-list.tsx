@@ -7,7 +7,10 @@ import { Film, Tv2, Check, X, Bell, Trash2 } from "@/components/icons";
 import { posterUrl } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
 import { useHasMounted } from "@/hooks/use-has-mounted";
-import { notificationHref, timeAgo } from "@/lib/notification-links";
+import { notificationHref } from "@/lib/notification-links";
+import { formatRelativeTimeLocalized } from "@/lib/relative-time";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 import { EmptyState } from "@/components/ui/design";
 
 export interface NotificationListItem {
@@ -22,6 +25,30 @@ export interface NotificationListItem {
   createdAt: string;
 }
 
+// Request-status rows are re-rendered from their type + media type so they read
+// in the viewer's language; the stored body is the server's English copy (and
+// stays the fallback for every other type, e.g. issue replies that quote text).
+const REQUEST_BODY_KEYS: Record<string, { movie: string; tv: string }> = {
+  REQUEST_APPROVED: {
+    movie: "personal.notifications.body.approvedMovie",
+    tv: "personal.notifications.body.approvedTv",
+  },
+  REQUEST_AVAILABLE: {
+    movie: "personal.notifications.body.availableMovie",
+    tv: "personal.notifications.body.availableTv",
+  },
+  REQUEST_DECLINED: {
+    movie: "personal.notifications.body.declinedMovie",
+    tv: "personal.notifications.body.declinedTv",
+  },
+};
+
+function notificationBody(n: NotificationListItem, t: Translator): string {
+  const keys = REQUEST_BODY_KEYS[n.type];
+  if (!keys || n.mediaType == null) return n.body;
+  return t(n.mediaType === "MOVIE" ? keys.movie : keys.tv);
+}
+
 const POST = (body: string) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body });
 
 export function NotificationList({ initialItems, initialTotal }: { initialItems: NotificationListItem[]; initialTotal: number }) {
@@ -34,6 +61,8 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
   // pair (mirrors vote-actions' dismiss) — it deletes every notification.
   const [confirmingClear, setConfirmingClear] = useState(false);
   const mounted = useHasMounted();
+  const t = useT();
+  const locale = useLocale();
   // A counter bumped every time the whole list is wiped (clearAll). removeOne
   // notes the value when it starts; if it changed by the time its delete fails,
   // it skips putting the row back — otherwise a failed single delete could
@@ -120,12 +149,12 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
         setTotal(data.total);
         setHasMore(data.nextCursor != null);
       } else {
-        setError("Couldn't load more. Tap Load more to retry.");
+        setError(t("personal.common.loadMoreError"));
       }
     } catch {
       // Always show an error on failure — otherwise a failed load looks the
       // same as having nothing more to load.
-      setError("Couldn't load more. Tap Load more to retry.");
+      setError(t("personal.common.loadMoreError"));
     } finally {
       setLoading(false);
     }
@@ -138,9 +167,9 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     return (
       <EmptyState
         icon={Bell}
-        title="No notifications yet"
-        description="Request updates (approved, available, declined) and replies will show up here."
-        cta={{ href: "/requests", label: "View your requests" }}
+        title={t("personal.notifications.emptyTitle")}
+        description={t("personal.notifications.emptyDescription")}
+        cta={{ href: "/requests", label: t("personal.notifications.viewRequests") }}
       />
     );
   }
@@ -150,7 +179,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
       <div className="flex items-center justify-end gap-3 flex-wrap" style={{ marginBottom: 10 }}>
         {anyUnread && (
           <button type="button" onClick={markAllRead} className="text-xs text-zinc-400 hover:text-zinc-200 underline">
-            Mark all read
+            {t("personal.notifications.markAllRead")}
           </button>
         )}
         {confirmingClear ? (
@@ -162,19 +191,19 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
               className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
             >
               <Trash2 className="w-3 h-3" />
-              Clear all?
+              {t("personal.notifications.clearAllConfirm")}
             </button>
             <button
               type="button"
               onClick={() => setConfirmingClear(false)}
               className="text-xs px-2 py-1.5 text-zinc-400 hover:text-zinc-100 transition-colors"
             >
-              Cancel
+              {t("personal.common.cancel")}
             </button>
           </div>
         ) : (
           <button type="button" onClick={() => setConfirmingClear(true)} className="text-xs text-zinc-500 hover:text-zinc-300 underline">
-            Clear all
+            {t("personal.notifications.clearAll")}
           </button>
         )}
       </div>
@@ -210,8 +239,8 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
                   >
                     {n.title}
                   </span>
-                  <span className="block" style={{ fontSize: 12, color: "var(--ds-fg-muted)", lineHeight: 1.4, marginTop: 2 }}>{n.body}</span>
-                  <span className="ds-mono block" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", marginTop: 3 }}>{mounted ? timeAgo(n.createdAt) : ""}</span>
+                  <span className="block" style={{ fontSize: 12, color: "var(--ds-fg-muted)", lineHeight: 1.4, marginTop: 2 }}>{notificationBody(n, t)}</span>
+                  <span className="ds-mono block" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", marginTop: 3 }}>{mounted ? formatRelativeTimeLocalized(n.createdAt, locale) : ""}</span>
                 </span>
               </Link>
               <div className="flex flex-col items-center shrink-0" style={{ gap: 2, margin: "-6px -6px 0 0" }}>
@@ -219,8 +248,8 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
                   <button
                     type="button"
                     onClick={() => markOneRead(n.id)}
-                    aria-label="Mark read"
-                    title="Mark read"
+                    aria-label={t("personal.notifications.markRead")}
+                    title={t("personal.notifications.markRead")}
                     className="ds-hover-tint inline-flex items-center justify-center"
                     style={{ width: 32, height: 32, borderRadius: 6, color: "var(--ds-accent-text)" }}
                   >
@@ -230,8 +259,8 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
                 <button
                   type="button"
                   onClick={() => removeOne(n.id)}
-                  aria-label="Remove notification"
-                  title="Remove"
+                  aria-label={t("personal.notifications.removeAria")}
+                  title={t("personal.notifications.remove")}
                   className="ds-hover-tint inline-flex items-center justify-center"
                   style={{ width: 32, height: 32, borderRadius: 6, color: "var(--ds-fg-subtle)" }}
                 >
@@ -251,7 +280,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
             disabled={loading}
             className="rounded-md border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 px-4 py-1.5 text-xs text-zinc-200 transition-colors"
           >
-            {loading ? "Loading…" : `Load more (${total - items.length})`}
+            {loading ? t("personal.common.loading") : t("personal.common.loadMore", { count: total - items.length })}
           </button>
           {error && (
             <span role="alert" aria-live="assertive" className="text-xs text-red-400">{error}</span>

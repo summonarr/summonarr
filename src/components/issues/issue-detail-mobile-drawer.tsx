@@ -16,7 +16,9 @@ import { Chip } from "@/components/ui/design";
 import { IssueThread } from "@/components/issues/issue-thread";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { useMediaQuery } from "@/hooks/use-media-query";
-import { ISSUE_DATE_FORMAT, ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL, ISSUE_TYPE_LABELS } from "@/lib/status-labels";
+import { ISSUE_STATUS_LABEL_KEY, ISSUE_STATUS_TONE, ISSUE_TYPE_LABEL_KEY, issueDateFormat } from "@/lib/status-labels";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 
 export interface IssueDrawerPayload {
   id: string;
@@ -34,12 +36,12 @@ export interface IssueDrawerPayload {
   messageCount: number;
 }
 
-function scopeLabel(p: IssueDrawerPayload): string | null {
+function scopeLabel(p: IssueDrawerPayload, t: Translator): string | null {
   if (p.scope === "EPISODE" && p.seasonNumber != null && p.episodeNumber != null) {
     return `S${String(p.seasonNumber).padStart(2, "0")}E${String(p.episodeNumber).padStart(2, "0")}`;
   }
   if (p.scope === "SEASON" && p.seasonNumber != null) {
-    return `Season ${p.seasonNumber}`;
+    return t("personal.issues.season", { number: p.seasonNumber });
   }
   return null;
 }
@@ -54,6 +56,8 @@ export function IssueDetailMobileDrawer({ selectedIssue, closeHref }: Props) {
   // Gate every Date-in-render against post-mount so server-locale SSR doesn't disagree with
   // the browser-locale hydration pass (guardrail 16 in CLAUDE.md).
   const mounted = useHasMounted();
+  const t = useT();
+  const locale = useLocale();
   // Complement of the desktop pane's `xl` breakpoint; the pane's thread is gated
   // on `(min-width: 1280px)` in desktop-issue-thread.tsx so exactly one IssueThread
   // mounts per viewport. null (SSR/hydration) and false both render nothing.
@@ -74,7 +78,7 @@ export function IssueDetailMobileDrawer({ selectedIssue, closeHref }: Props) {
 
   const open = Boolean(selectedIssue) && selectedIssue?.id !== closedId;
   const issue = stickyIssue;
-  const label = issue ? scopeLabel(issue) : null;
+  const label = issue ? scopeLabel(issue, t) : null;
 
   return (
     <Drawer
@@ -97,7 +101,7 @@ export function IssueDetailMobileDrawer({ selectedIssue, closeHref }: Props) {
           }}
         >
           <DrawerTitle>
-            {issue ? `Issue: ${issue.title}` : "Issue"}
+            {issue ? t("personal.issues.drawerTitle", { title: issue.title }) : t("personal.issues.drawerTitleEmpty")}
           </DrawerTitle>
           {issue && (
             <>
@@ -156,10 +160,10 @@ export function IssueDetailMobileDrawer({ selectedIssue, closeHref }: Props) {
                       style={{ gap: 6, marginTop: 6 }}
                     >
                       <Chip tone={ISSUE_STATUS_TONE[issue.status]}>
-                        {ISSUE_STATUS_LABEL[issue.status] ?? issue.status}
+                        {ISSUE_STATUS_LABEL_KEY[issue.status] ? t(ISSUE_STATUS_LABEL_KEY[issue.status]) : issue.status}
                       </Chip>
                       <Chip>
-                        {ISSUE_TYPE_LABELS[issue.issueType] ?? issue.issueType}
+                        {ISSUE_TYPE_LABEL_KEY[issue.issueType] ? t(ISSUE_TYPE_LABEL_KEY[issue.issueType]) : issue.issueType}
                       </Chip>
                       {label && <Chip>{label}</Chip>}
                     </div>
@@ -171,7 +175,9 @@ export function IssueDetailMobileDrawer({ selectedIssue, closeHref }: Props) {
                         color: "var(--ds-fg-subtle)",
                       }}
                     >
-                      Reported {mounted ? ISSUE_DATE_FORMAT.format(new Date(issue.createdAt)) : ""}
+                      {mounted
+                        ? t("personal.issues.reported", { date: issueDateFormat(locale).format(new Date(issue.createdAt)) })
+                        : ""}
                     </p>
                   </div>
                   <DrawerClose
@@ -184,7 +190,7 @@ export function IssueDetailMobileDrawer({ selectedIssue, closeHref }: Props) {
                       background: "var(--ds-bg-2)",
                       color: "var(--ds-fg-muted)",
                     }}
-                    aria-label="Close issue"
+                    aria-label={t("personal.issues.close")}
                   >
                     <X style={{ width: 16, height: 16 }} />
                   </DrawerClose>
@@ -216,7 +222,7 @@ export function IssueDetailMobileDrawer({ selectedIssue, closeHref }: Props) {
                         "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))",
                     }}
                   >
-                    Resolution: {issue.resolution}
+                    {t("personal.issues.resolution", { text: issue.resolution })}
                   </p>
                 )}
               </div>

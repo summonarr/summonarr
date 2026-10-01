@@ -5,6 +5,7 @@ import { ExternalLink, Heart } from "@/components/icons";
 import { requireFeature } from "@/lib/features";
 import { DONATION_SETTING_KEYS, hasDonationLinks } from "@/lib/donations";
 import { PageHeader } from "@/components/ui/design";
+import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +34,8 @@ export default async function DonatePage() {
   // returns a 404, so a direct visit can't land on an empty Support Us page.
   if (!hasDonationLinks(cfg)) notFound();
 
+  const t = await getTranslator();
+
   const methods = [
     {
       key: "donationPaypal",
@@ -48,7 +51,7 @@ export default async function DonatePage() {
           : /^(www\.)?paypal\.me\//i.test(v)
             ? safeUrl(`https://${v}`)
             : safeUrl(`https://paypal.me/${v.replace(/^@/, "")}`),
-      hint: "Click to donate via PayPal",
+      hint: t("personal.donate.paypalHint"),
     },
     {
       key: "donationVenmo",
@@ -60,7 +63,7 @@ export default async function DonatePage() {
         v.startsWith("http")
           ? safeUrl(v)
           : safeUrl(`https://venmo.com/${v.replace(/^@/, "")}`),
-      hint: "Click to pay via Venmo",
+      hint: t("personal.donate.venmoHint"),
     },
     {
       key: "donationZelle",
@@ -69,17 +72,17 @@ export default async function DonatePage() {
       pillBg: "#6d1ed4",
       pillColor: "#ffffff",
       href: () => "https://www.zellepay.com/",
-      hint: "Send via your bank's Zelle to:",
+      hint: t("personal.donate.zelleHint"),
       noLink: true,
     },
     {
       key: "donationAmazon",
-      label: "Amazon Wishlist",
+      label: t("personal.donate.amazonLabel"),
       value: cfg.donationAmazon ?? "",
       pillBg: "#ff9900",
       pillColor: "#000000",
       href: (v: string) => safeUrl(v),
-      hint: "View my Amazon Wishlist",
+      hint: t("personal.donate.amazonHint"),
     },
     {
       key: "donationPatreon",
@@ -91,7 +94,7 @@ export default async function DonatePage() {
         v.startsWith("http")
           ? safeUrl(v)
           : safeUrl(`https://www.patreon.com/${v.replace(/^@/, "")}`),
-      hint: "Become a patron on Patreon",
+      hint: t("personal.donate.patreonHint"),
     },
     {
       key: "donationBuyMeACoffee",
@@ -103,7 +106,7 @@ export default async function DonatePage() {
         v.startsWith("http")
           ? safeUrl(v)
           : safeUrl(`https://www.buymeacoffee.com/${v.replace(/^@/, "")}`),
-      hint: "Buy me a coffee",
+      hint: t("personal.donate.coffeeHint"),
     },
   ].filter((m) => m.value);
 
@@ -115,10 +118,10 @@ export default async function DonatePage() {
             <Heart
               style={{ width: 20, height: 20, color: "#f472b6", fill: "#f472b6" }}
             />
-            Support Us
+            {t("personal.donate.title")}
           </span>
         }
-        subtitle="If you enjoy using this service, consider leaving a donation — it helps cover hosting costs and development time"
+        subtitle={t("personal.donate.subtitle")}
       />
 
       <div className="flex flex-col" style={{ gap: 10 }}>

@@ -157,3 +157,17 @@ test("translator: plurals by locale category with _other fallback", () => {
   assert.equal(tes("n.items", { count: 1000000 }), "1000000 elementos");
   assert.equal(tes("n.items", { count: 1 }), "1 elemento");
 });
+
+test("every English key is used somewhere in src/ (no dead strings)", () => {
+  // A key counts as used when its literal (minus any plural suffix) appears in
+  // a source file, or when a template literal builds keys under its parent
+  // prefix (`appearance.accent.${a}`) — those can't be checked statically.
+  const sources = walk(join(ROOT, "src")).map((f) => readFileSync(f, "utf8")).join("\n");
+  const unused = Object.keys(en).filter((key) => {
+    const base = key.replace(/_(zero|one|two|few|many|other)$/, "");
+    if (sources.includes(`"${base}"`) || sources.includes(`'${base}'`)) return false;
+    const prefix = base.slice(0, base.lastIndexOf(".") + 1);
+    return !sources.includes("`" + prefix + "${");
+  });
+  assert.deepEqual(unused, []);
+});

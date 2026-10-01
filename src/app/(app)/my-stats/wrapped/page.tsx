@@ -6,6 +6,7 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { ChevronLeft, Sparkles } from "@/components/icons";
 import { EmptyState, PageHeader } from "@/components/ui/design";
 import { WrappedView, type WrappedData } from "@/components/watch-history/wrapped-view";
+import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +22,7 @@ export default async function WrappedPage({
   searchParams: Promise<{ year?: string }>;
 }) {
   const session = await requireAppSession();
+  const t = await getTranslator();
   const sp = await searchParams;
   const requested = sp.year && /^\d{4}$/.test(sp.year) ? parseInt(sp.year, 10) : undefined;
   const { linked, years, year, data } = await getMyWrapped(session.user.id, requested);
@@ -89,10 +91,10 @@ export default async function WrappedPage({
         }}
       >
         <ChevronLeft aria-hidden style={{ width: 14, height: 14 }} />
-        Back to My Stats
+        {t("personal.wrapped.back")}
       </Link>
 
-      <PageHeader title="Year in Review" subtitle="Your watching, wrapped up" />
+      <PageHeader title={t("personal.wrapped.title")} subtitle={t("personal.wrapped.subtitle")} />
 
       {years.length > 1 && (
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
@@ -127,13 +129,13 @@ export default async function WrappedPage({
       ) : (
         <EmptyState
           icon={Sparkles}
-          title="Nothing to wrap up yet"
+          title={t("personal.wrapped.emptyTitle")}
           description={
             !linked
               ? serverProvider
-                ? "No watch activity has been recorded for your account yet — once you play something on the server, your Year in Review will appear here."
-                : "Your account isn't linked to a Plex or Jellyfin identity yet, so there's nothing to wrap up. Your account links automatically when your media-server email matches, or an admin can link it manually."
-              : "Not enough watch activity yet to build a Year in Review. Come back once you've watched a few things on the server."
+                ? t("personal.wrapped.emptyServer")
+                : t("personal.wrapped.emptyUnlinked")
+              : t("personal.wrapped.emptyNotEnough")
           }
         />
       )}

@@ -7,6 +7,7 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { X, Film, Tv2, EyeOff } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { EmptyState } from "@/components/ui/design";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export interface HiddenGridItem {
   tmdbId: number;
@@ -21,6 +22,7 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
   const [items, setItems] = useState(initialItems);
   const [removing, setRemoving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const t = useT();
 
   async function unhide(it: HiddenGridItem) {
     const key = `${it.tmdbId}:${it.mediaType}`;
@@ -40,7 +42,7 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
         const idx = cur.findIndex((x) => order(x) > at);
         return idx === -1 ? [...cur, it] : [...cur.slice(0, idx), it, ...cur.slice(idx)];
       });
-      setError(`Couldn't unhide “${it.title}”. Please try again.`);
+      setError(t("personal.hidden.unhideError", { title: it.title }));
     };
     try {
       const res = await fetch(
@@ -59,12 +61,8 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
     return (
       <EmptyState
         icon={EyeOff}
-        title="Nothing hidden"
-        description={
-          <>
-            Use &ldquo;Not interested&rdquo; on a movie or TV page to keep it out of your discovery.
-          </>
-        }
+        title={t("personal.hidden.emptyTitle")}
+        description={t("personal.hidden.emptyDescription")}
       />
     );
   }
@@ -107,8 +105,8 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
               type="button"
               onClick={() => unhide(it)}
               disabled={removing === key}
-              aria-label={`Unhide ${it.title}`}
-              title="Unhide"
+              aria-label={t("personal.hidden.unhideAria", { title: it.title })}
+              title={t("personal.hidden.unhide")}
               className="ds-hover-tint absolute"
               style={{
                 top: 6,
