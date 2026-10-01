@@ -10,9 +10,11 @@ import {
   userNavItems,
   getVisibleAdminItems,
   filterNavByFeatures,
+  navItemLabel,
   type NavItem,
 } from "@/lib/nav-items";
 import type { FeatureFlags } from "@/lib/features";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export function Sidebar({
   siteTitle,
@@ -22,6 +24,7 @@ export function Sidebar({
   featureFlags?: FeatureFlags;
 }) {
   const pathname = usePathname();
+  const t = useT();
   const { session } = useSummonarrSession();
   const role = session?.user?.role;
   const perms = session?.user?.permissions;
@@ -93,14 +96,14 @@ export function Sidebar({
         className="flex-1 overflow-y-auto"
         style={{ padding: "10px 8px" }}
       >
-        <NavSection label="Browse">
+        <NavSection label={t("nav.section.browse")}>
           {browseItems.map((item) => (
             <NavLink key={item.href} item={item} active={isActive(item)} />
           ))}
         </NavSection>
 
         {personalItems.length > 0 && (
-          <NavSection label="You">
+          <NavSection label={t("nav.section.you")}>
             {personalItems.map((item) => (
               <NavLink key={item.href} item={item} active={isActive(item)} />
             ))}
@@ -108,7 +111,7 @@ export function Sidebar({
         )}
 
         {visibleAdminItems.length > 0 && (
-          <NavSection label="Admin">
+          <NavSection label={t("nav.section.admin")}>
             {visibleAdminItems.map((item) => (
               <NavLink key={item.href} item={item} active={isActive(item)} />
             ))}
@@ -130,7 +133,7 @@ export function Sidebar({
           href="https://github.com/Summonarr/Summonarr"
           target="_blank"
           rel="noopener noreferrer"
-          title="Summonarr is free software (AGPL-3.0). View the source and fork it on GitHub."
+          title={t("nav.footer.sourceTitle")}
           className="flex items-center gap-2 text-[var(--ds-fg-subtle)] hover:text-[var(--ds-fg-muted)] transition-colors"
         >
           <GitFork className="h-3 w-3 shrink-0" />
@@ -138,14 +141,14 @@ export function Sidebar({
             className="ds-mono"
             style={{ fontSize: 10 }}
           >
-            Fork me on GitHub
+            {t("nav.footer.fork")}
           </span>
         </a>
         <a
           href="https://www.themoviedb.org"
           target="_blank"
           rel="noopener noreferrer"
-          title="This product uses the TMDB API but is not endorsed or certified by TMDB."
+          title={t("nav.footer.tmdbTitle")}
           className="flex items-center gap-2 text-[var(--ds-fg-subtle)] hover:text-[var(--ds-fg-muted)] transition-colors"
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -154,7 +157,7 @@ export function Sidebar({
             className="ds-mono"
             style={{ fontSize: 10 }}
           >
-            Data via TMDB
+            {t("nav.footer.tmdb")}
           </span>
         </a>
       </div>
@@ -190,6 +193,7 @@ function NavSection({
 }
 
 function NavLink({ item, active }: { item: NavItem; active: boolean }) {
+  const t = useT();
   const Icon = item.icon;
   return (
     <Link
@@ -232,7 +236,7 @@ function NavLink({ item, active }: { item: NavItem; active: boolean }) {
           color: active ? "var(--ds-accent-text)" : "inherit",
         }}
       />
-      <span>{item.label}</span>
+      <span>{navItemLabel(item, t)}</span>
     </Link>
   );
 }

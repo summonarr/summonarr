@@ -24,6 +24,8 @@ import type { FeatureFlags } from "@/lib/features";
 import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
+import { useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 import { useDetailTitle } from "@/components/layout/detail-title";
 import { useNotifications } from "@/components/notifications/notification-store";
 import { SearchBar } from "@/components/layout/header";
@@ -36,6 +38,7 @@ type Tab = {
 };
 
 export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
+  const tr = useT();
   const pathname = usePathname();
   const { session } = useSummonarrSession();
   const role = session?.user?.role;
@@ -55,11 +58,12 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
     filterNavByFeatures(userNavItems, featureFlags),
     session?.user?.permissions,
     featureFlags,
+    tr,
   );
   const someTabActive = tabs.some((t) => t.match(pathname));
 
   const detailTitle = useDetailTitle();
-  const crumbs = breadcrumbFor(pathname, detailTitle);
+  const crumbs = breadcrumbFor(pathname, detailTitle, tr);
   const breadcrumbLabel = crumbs.map((c) => c.label).join(" · ");
 
   return (
@@ -84,7 +88,7 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
               type="button"
               onClick={() => setSearchOpen(false)}
               className="ds-tap inline-flex items-center justify-center shrink-0"
-              aria-label="Close search"
+              aria-label={tr("nav.closeSearch")}
               style={{
                 width: 36,
                 height: 36,
@@ -109,7 +113,7 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
             <button
               type="button"
               onClick={() => setDrawerOpen(true)}
-              aria-label="Open menu"
+              aria-label={tr("nav.openMenu")}
               className="ds-tap inline-flex items-center justify-center shrink-0"
               style={{
                 width: 36,
@@ -157,7 +161,7 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
             <button
               type="button"
               onClick={() => setSearchOpen(true)}
-              aria-label="Search"
+              aria-label={tr("nav.search")}
               className="ds-tap inline-flex items-center justify-center shrink-0"
               style={{
                 width: 36,
@@ -227,7 +231,7 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
           <button
             type="button"
             onClick={() => setDrawerOpen(true)}
-            aria-label="More"
+            aria-label={tr("nav.more")}
             aria-haspopup="dialog"
             aria-expanded={drawerOpen}
             className={cn(
@@ -275,11 +279,12 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
 // separate fetches would request /api/notifications twice per page.
 function NotificationsLink() {
   const { unread } = useNotifications();
+  const t = useT();
 
   return (
     <Link
       href="/notifications"
-      aria-label={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}
+      aria-label={unread > 0 ? t("nav.notificationsUnread", { count: unread }) : t("nav.crumb.notifications")}
       className="ds-tap inline-flex items-center justify-center shrink-0 relative"
       style={{
         width: 36,
@@ -324,6 +329,7 @@ function buildTabs(
   userItems: readonly { href: string }[],
   sessionPerms: string | undefined,
   featureFlags: Record<string, boolean> | undefined,
+  t: Translator,
 ): Tab[] {
   const has = (href: string) => userItems.some((i) => i.href === href);
 
@@ -335,13 +341,13 @@ function buildTabs(
 
   const discover: Tab = {
     href: "/",
-    label: "Discover",
+    label: t("nav.discover"),
     icon: LayoutDashboard,
     match: (p) => p === "/",
   };
   const browse: Tab = {
     href: browseHref,
-    label: "Browse",
+    label: t("nav.tab.browse"),
     icon: Film,
     match: (p) =>
       p === "/movies" ||
@@ -354,7 +360,7 @@ function buildTabs(
   };
   const requests: Tab = {
     href: "/requests",
-    label: "Requests",
+    label: t("nav.requests"),
     icon: ClipboardList,
     match: (p) =>
       p === "/requests" || p === "/issues" || p === "/votes" || p === "/watchlist" || p === "/hidden",
@@ -374,7 +380,7 @@ function buildTabs(
   if (adminItems.length > 0 && !issuesOnly) {
     const admin: Tab = {
       href: adminItems[0].href,
-      label: "Admin",
+      label: t("nav.section.admin"),
       icon: ShieldCheck,
       match: (p) => p.startsWith("/admin") || p === "/settings",
     };
@@ -384,7 +390,7 @@ function buildTabs(
   if (issuesOnly) {
     const issues: Tab = {
       href: "/admin/issues",
-      label: "Issues",
+      label: t("nav.tab.issues"),
       icon: AlertTriangle,
       match: (p) => p.startsWith("/admin/issues"),
     };
@@ -393,7 +399,7 @@ function buildTabs(
 
   const profile: Tab = {
     href: "/profile",
-    label: "Profile",
+    label: t("nav.profile"),
     icon: UserCircle,
     match: (p) => p === "/profile" || p === "/donate",
   };

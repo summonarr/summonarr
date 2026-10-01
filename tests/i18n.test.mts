@@ -24,10 +24,39 @@ import {
 import { createTranslator, interpolate, placeholdersOf } from "../src/lib/i18n/translate.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
-const readCatalog = (locale: string): Record<string, string> =>
-  JSON.parse(readFileSync(join(ROOT, "src/lib/i18n/messages", `${locale}.json`), "utf8"));
+const MESSAGES = join(ROOT, "src/lib/i18n/messages");
+
+const areasOf = (locale: string): string[] =>
+  readdirSync(join(MESSAGES, locale)).filter((f) => f.endsWith(".json")).sort();
+
+// Merges a locale's per-area files, failing on a key defined in two areas
+// (the later spread would silently win at runtime).
+function readCatalog(locale: string): Record<string, string> {
+  const merged: Record<string, string> = {};
+  for (const file of areasOf(locale)) {
+    const area: Record<string, string> = JSON.parse(readFileSync(join(MESSAGES, locale, file), "utf8"));
+    for (const [k, v] of Object.entries(area)) {
+      assert.ok(!(k in merged), `${locale}: key ${k} defined in more than one area (${file})`);
+      merged[k] = v;
+    }
+  }
+  return merged;
+}
 
 const en = readCatalog("en");
+
+test("every locale has the same area files as English, all wired into catalogs.ts", () => {
+  const catalogs = readFileSync(join(ROOT, "src/lib/i18n/catalogs.ts"), "utf8");
+  for (const locale of LOCALES) {
+    assert.deepEqual(areasOf(locale), areasOf("en"), `${locale} area files`);
+    for (const file of areasOf(locale)) {
+      assert.ok(
+        catalogs.includes(`"./messages/${locale}/${file}"`),
+        `catalogs.ts does not import messages/${locale}/${file}`,
+      );
+    }
+  }
+});
 
 test("every locale has exactly the English keys", () => {
   for (const locale of LOCALES) {
@@ -66,11 +95,13 @@ function walk(dir: string, out: string[] = []): string[] {
 test("every literal t() key used in src/ exists in en.json", () => {
   // Matches t("a.b") and t('a.b', …) — dynamic keys (template literals) are
   // out of reach of a scan and must be covered by their own catalog entries.
-  const call = /\bt\(\s*["']([a-zA-Z0-9_.-]+)["']/g;
+  // Also matches `i18nKey: "a.b"` — data-driven labels (nav items) that are
+  // translated at render time from a key stored beside them.
+  const call = /(?:\bt\(\s*|\bi18nKey:\s*)["']([a-zA-Z0-9_.-]+)["']/g;
   const missing: string[] = [];
   for (const file of walk(join(ROOT, "src"))) {
     const src = readFileSync(file, "utf8");
-    if (!/\buse(T|Translator)\b|getTranslator/.test(src)) continue;
+    if (!/\buse(T|Translator)\b|getTranslator|i18nKey/.test(src)) continue;
     for (const m of src.matchAll(call)) {
       const key = m[1];
       const plural = Object.keys(en).some((k) => k.startsWith(`${key}_`));

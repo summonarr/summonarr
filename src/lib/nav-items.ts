@@ -27,11 +27,15 @@ import {
   EyeOff,
   FileText,
 } from "@/components/icons";
+import type { Translator } from "@/lib/i18n/translate";
 import { hasPermission, Permission, effectivePermissions, parsePermissions, type PermissionValue } from "@/lib/permissions";
 
 export interface NavItem {
   href: string;
+  // English label. Admin items are English-only for now; user-facing items
+  // also carry an i18nKey that renderers translate through navItemLabel.
   label: string;
+  i18nKey?: string;
   icon: IconComponent;
   // Match only this exact path when highlighting the active item (not sub-paths).
   exact?: boolean;
@@ -83,23 +87,27 @@ export function filterNavByFeatures<T extends { href: string }>(
   });
 }
 
+export function navItemLabel(item: Pick<NavItem, "label" | "i18nKey">, t: Translator): string {
+  return item.i18nKey ? t(item.i18nKey) : item.label;
+}
+
 export const userNavItems: NavItem[] = [
-  { href: "/", label: "Discover", icon: LayoutDashboard, exact: true, mobileBottomBar: true, section: "browse" },
-  { href: "/for-you", label: "For You", icon: Sparkles, section: "browse" },
-  { href: "/movies", label: "Movies", icon: Film, mobileBottomBar: true, section: "browse" },
-  { href: "/tv", label: "TV Shows", icon: Tv2, mobileBottomBar: true, section: "browse" },
-  { href: "/top", label: "Top Rated", icon: Trophy, section: "browse" },
-  { href: "/popular", label: "Popular on Server", icon: Flame, section: "browse" },
-  { href: "/upcoming", label: "Upcoming", icon: CalendarDays, section: "browse" },
-  { href: "/requests", label: "Requests", icon: ClipboardList, mobileBottomBar: true, section: "personal" },
-  { href: "/watchlist", label: "Watchlist", icon: Bookmark, section: "personal" },
-  { href: "/watch-history", label: "Watch History", icon: Clock, section: "personal" },
-  { href: "/my-stats", label: "My Stats", icon: BarChart3, section: "personal" },
-  { href: "/hidden", label: "Hidden", icon: EyeOff, section: "personal" },
-  { href: "/issues", label: "My Issues", icon: MessageSquare, section: "personal" },
-  { href: "/votes", label: "Vote to Delete", icon: Trash2, section: "personal" },
-  { href: "/donate", label: "Donate", icon: Heart, section: "personal" },
-  { href: "/profile", label: "Profile", icon: UserCircle, section: "personal" },
+  { href: "/", i18nKey: "nav.discover", label: "Discover", icon: LayoutDashboard, exact: true, mobileBottomBar: true, section: "browse" },
+  { href: "/for-you", i18nKey: "nav.forYou", label: "For You", icon: Sparkles, section: "browse" },
+  { href: "/movies", i18nKey: "nav.movies", label: "Movies", icon: Film, mobileBottomBar: true, section: "browse" },
+  { href: "/tv", i18nKey: "nav.tvShows", label: "TV Shows", icon: Tv2, mobileBottomBar: true, section: "browse" },
+  { href: "/top", i18nKey: "nav.topRated", label: "Top Rated", icon: Trophy, section: "browse" },
+  { href: "/popular", i18nKey: "nav.popularOnServer", label: "Popular on Server", icon: Flame, section: "browse" },
+  { href: "/upcoming", i18nKey: "nav.upcoming", label: "Upcoming", icon: CalendarDays, section: "browse" },
+  { href: "/requests", i18nKey: "nav.requests", label: "Requests", icon: ClipboardList, mobileBottomBar: true, section: "personal" },
+  { href: "/watchlist", i18nKey: "nav.watchlist", label: "Watchlist", icon: Bookmark, section: "personal" },
+  { href: "/watch-history", i18nKey: "nav.watchHistory", label: "Watch History", icon: Clock, section: "personal" },
+  { href: "/my-stats", i18nKey: "nav.myStats", label: "My Stats", icon: BarChart3, section: "personal" },
+  { href: "/hidden", i18nKey: "nav.hidden", label: "Hidden", icon: EyeOff, section: "personal" },
+  { href: "/issues", i18nKey: "nav.myIssues", label: "My Issues", icon: MessageSquare, section: "personal" },
+  { href: "/votes", i18nKey: "nav.voteToDelete", label: "Vote to Delete", icon: Trash2, section: "personal" },
+  { href: "/donate", i18nKey: "nav.donate", label: "Donate", icon: Heart, section: "personal" },
+  { href: "/profile", i18nKey: "nav.profile", label: "Profile", icon: UserCircle, section: "personal" },
 ];
 
 export const adminNavItems: NavItem[] = [
