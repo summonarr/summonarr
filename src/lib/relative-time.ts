@@ -28,3 +28,18 @@ export function formatRelativeTimeWithDateFallback(date: string | number | Date)
   if (days < 30) return `${days}d ago`;
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
+
+// Locale-aware twin of formatRelativeTime. English keeps the compact
+// "Xm ago" output above byte-for-byte; every other locale goes through
+// Intl.RelativeTimeFormat ("hace 3 min", "ahora"). Same read-the-clock-at-call
+// contract, so client callers still gate it behind useHasMounted (guardrail 16).
+export function formatRelativeTimeLocalized(date: string | number | Date, locale: string): string {
+  if (locale === "en") return formatRelativeTime(date);
+  const minutes = Math.max(0, Math.floor((Date.now() - new Date(date).getTime()) / 60_000));
+  const rtf = new Intl.RelativeTimeFormat(locale, { numeric: "auto", style: "short" });
+  if (minutes < 1) return rtf.format(0, "second");
+  if (minutes < 60) return rtf.format(-minutes, "minute");
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return rtf.format(-hours, "hour");
+  return rtf.format(-Math.floor(hours / 24), "day");
+}

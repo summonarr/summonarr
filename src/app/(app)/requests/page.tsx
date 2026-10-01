@@ -15,7 +15,8 @@ import { isFeatureEnabled } from "@/lib/features";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { Chip, EmptyState, PageHeader } from "@/components/ui/design";
-import { REQUEST_STATUS_TONE, REQUEST_STATUS_LABEL } from "@/lib/status-labels";
+import { REQUEST_STATUS_TONE } from "@/lib/status-labels";
+import { getLocale, getTranslator } from "@/lib/i18n/server";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
 
 export const dynamic = "force-dynamic";
@@ -25,12 +26,20 @@ const VALID_SORTS = ["newest", "oldest"] as const;
 
 const PAGE_SIZE = 20;
 
+const STATUS_LABEL_KEY: Record<string, string> = {
+  PENDING: "requests.status.pending",
+  APPROVED: "requests.status.approved",
+  DECLINED: "requests.status.declined",
+  AVAILABLE: "requests.status.available",
+};
+
 export default async function RequestsPage({
   searchParams,
 }: {
   searchParams: Promise<{ page?: string; status?: string; sort?: string; q?: string }>;
 }) {
   const session = await requireAppSession();
+  const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
 
   const { page: pageParam, status: statusParam, sort: sortParam, q: qParam } = await searchParams;
   const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
@@ -127,26 +136,25 @@ export default async function RequestsPage({
   const hasFilters = status !== null || sort !== "newest" || q !== "";
 
   const subtitle =
-    `${total} request${total !== 1 ? "s" : ""}` +
-    (hasFilters && totalAllStatuses !== total
-      ? ` (of ${totalAllStatuses} total)`
-      : "");
+    hasFilters && totalAllStatuses !== total
+      ? t("requests.countOfTotal", { count: total, total: totalAllStatuses })
+      : t("requests.count", { count: total });
 
   return (
     <div className="ds-page-enter">
       <LiveRefresh on={["request:updated", "request:deleted"]} />
-      <PageHeader title="My Requests" subtitle={subtitle} />
+      <PageHeader title={t("requests.title")} subtitle={subtitle} />
 
       <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:items-center sm:justify-between">
         <FilterPills
           param="status"
           active={status ?? ""}
           options={[
-            { value: "", label: "All", count: totalAllStatuses },
-            { value: "PENDING", label: "Pending", count: statusCounts.PENDING ?? 0 },
-            { value: "APPROVED", label: "Approved", count: statusCounts.APPROVED ?? 0 },
-            { value: "AVAILABLE", label: "Available", count: statusCounts.AVAILABLE ?? 0 },
-            { value: "DECLINED", label: "Declined", count: statusCounts.DECLINED ?? 0 },
+            { value: "", label: t("requests.filter.all"), count: totalAllStatuses },
+            { value: "PENDING", label: t("requests.status.pending"), count: statusCounts.PENDING ?? 0 },
+            { value: "APPROVED", label: t("requests.status.approved"), count: statusCounts.APPROVED ?? 0 },
+            { value: "AVAILABLE", label: t("requests.status.available"), count: statusCounts.AVAILABLE ?? 0 },
+            { value: "DECLINED", label: t("requests.status.declined"), count: statusCounts.DECLINED ?? 0 },
           ]}
           preserve={["sort", "q"]}
         />
@@ -155,15 +163,15 @@ export default async function RequestsPage({
             param="sort"
             active={sort === "newest" ? "" : sort}
             options={[
-              { value: "", label: "Newest" },
-              { value: "oldest", label: "Oldest" },
+              { value: "", label: t("requests.sort.newest") },
+              { value: "oldest", label: t("requests.sort.oldest") },
             ]}
             preserve={["status", "q"]}
           />
           <SearchBox
             param="q"
             initial={q}
-            placeholder="Search titles…"
+            placeholder={t("requests.searchPlaceholder")}
             preserve={["status", "sort"]}
           />
         </div>
@@ -179,32 +187,32 @@ export default async function RequestsPage({
           icon={ClipboardList}
           title={
             total > 0
-              ? "Nothing on this page"
+              ? t("requests.empty.pageTitle")
               : hasFilters
-                ? "No matching requests"
-                : "No requests yet"
+                ? t("requests.empty.filteredTitle")
+                : t("requests.empty.noneTitle")
           }
           description={
             total > 0 ? (
               <>
-                No more requests on this page.{" "}
+                {t("requests.empty.pageDescription")}{" "}
                 <Link
                   href={pageHref(1)}
                   className="hover:underline"
                   style={{ color: "var(--ds-accent-text)", fontWeight: 500 }}
                 >
-                  Back to page 1
+                  {t("requests.empty.backToFirst")}
                 </Link>
               </>
             ) : hasFilters ? (
-              "No requests match these filters."
+              t("requests.empty.filteredDescription")
             ) : (
-              "Find something on Discover, Movies, or TV and hit Request."
+              t("requests.empty.noneDescription")
             )
           }
           cta={
             total === 0 && !hasFilters
-              ? { href: "/movies", label: "Browse movies" }
+              ? { href: "/movies", label: t("requests.empty.browseMovies") }
               : undefined
           }
         />
@@ -283,11 +291,11 @@ export default async function RequestsPage({
                         }}
                       >
                         <span>
-                          {r.mediaType === "MOVIE" ? "MOVIE" : "TV"}
+                          {r.mediaType === "MOVIE" ? t("requests.mediaType.movie") : t("requests.mediaType.tv")}
                           {r.releaseYear ? ` · ${r.releaseYear}` : ""}
                         </span>
                         <span>·</span>
-                        <span>{new Date(r.createdAt).toLocaleDateString()}</span>
+                        <span>{new Date(r.createdAt).toLocaleDateString(locale)}</span>
                       </div>
                       <AvailabilityBadges
                         plexAvailable={availability?.plexAvailable}
@@ -318,7 +326,7 @@ export default async function RequestsPage({
                   </Link>
 
                   <Chip tone={REQUEST_STATUS_TONE[r.status]}>
-                    {REQUEST_STATUS_LABEL[r.status]}
+                    {STATUS_LABEL_KEY[r.status] ? t(STATUS_LABEL_KEY[r.status]) : r.status}
                   </Chip>
                 </div>
               );

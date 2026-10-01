@@ -2,6 +2,7 @@ import { requireAppSession } from "@/lib/require-app-session";
 import { prisma } from "@/lib/prisma";
 import { PageHeader } from "@/components/ui/design";
 import { WatchlistGrid } from "@/components/watchlist/watchlist-grid";
+import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +11,7 @@ export const dynamic = "force-dynamic";
 // state tree, so each page enforces the login wall itself (see src/lib/require-app-session.ts).
 export default async function WatchlistPage() {
   const session = await requireAppSession();
+  const t = await getTranslator();
   const items = await prisma.watchlistItem.findMany({
     where: { userId: session.user.id },
     select: { tmdbId: true, mediaType: true, title: true, posterPath: true },
@@ -19,7 +21,7 @@ export default async function WatchlistPage() {
 
   return (
     <div className="ds-page-enter">
-      <PageHeader title="Watchlist" subtitle="Titles you saved for later" />
+      <PageHeader title={t("personal.watchlist.title")} subtitle={t("personal.watchlist.subtitle")} />
       <WatchlistGrid initialItems={items} />
     </div>
   );

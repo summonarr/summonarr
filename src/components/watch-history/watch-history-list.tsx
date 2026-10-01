@@ -12,7 +12,8 @@ import Image from "next/image";
 import { Check, Clock, Film, Tv2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useHasMounted } from "@/hooks/use-has-mounted";
-import { formatRelativeTime } from "@/lib/relative-time";
+import { formatRelativeTimeLocalized } from "@/lib/relative-time";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { EmptyState, FilterBar, type FilterSegment } from "@/components/ui/design";
 import { ReportIssueButton } from "@/components/media/report-issue-button";
 import type { MyWatchHistoryItem, MyWatchHistoryPage } from "@/lib/my-watch-history";
@@ -41,10 +42,10 @@ function mediaHref(item: MyWatchHistoryItem): string | null {
 
 type TypeFilter = "" | "MOVIE" | "TV";
 
-const TYPE_SEGMENTS: readonly FilterSegment<TypeFilter>[] = [
-  { value: "", label: "All" },
-  { value: "MOVIE", label: "Movies" },
-  { value: "TV", label: "TV" },
+const TYPE_SEGMENT_KEYS: readonly { value: TypeFilter; key: string }[] = [
+  { value: "", key: "personal.common.all" },
+  { value: "MOVIE", key: "personal.history.filter.movies" },
+  { value: "TV", key: "personal.history.filter.tv" },
 ];
 
 export function WatchHistoryList({
@@ -61,6 +62,12 @@ export function WatchHistoryList({
   issuesEnabled: boolean;
 }) {
   const mounted = useHasMounted();
+  const t = useT();
+  const locale = useLocale();
+  const typeSegments: readonly FilterSegment<TypeFilter>[] = TYPE_SEGMENT_KEYS.map((s) => ({
+    value: s.value,
+    label: t(s.key),
+  }));
 
   const [items, setItems] = useState<MyWatchHistoryItem[]>(initial.items);
   const [total, setTotal] = useState(initial.total);
@@ -71,7 +78,7 @@ export function WatchHistoryList({
   const [refreshing, setRefreshing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 350);
@@ -97,7 +104,7 @@ export function WatchHistoryList({
     // AbortController instead; loadMore isn't, so it needs this check.
     filterGen.current += 1;
     setRefreshing(true);
-    setError(null);
+    setLoadFailed(false);
     // Drop the cursor for the duration of the refetch. The generation counter
     // cannot cover this on its own: it is bumped synchronously HERE, while
     // nextCursor is state that only updates when the refetch resolves. In that
@@ -126,7 +133,7 @@ export function WatchHistoryList({
       .catch((err) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
         console.error("[watch-history]", err);
-        setError("Failed to load watch history");
+        setLoadFailed(true);
         setRefreshing(false);
       });
     return () => ac.abort();
@@ -156,13 +163,13 @@ export function WatchHistoryList({
         setTotal(data.total);
         setNextCursor(data.nextCursor);
       } else if (filterGen.current === myGen) {
-        setLoadError("Couldn't load more. Tap Load more to retry.");
+        setLoadError(t("personal.common.loadMoreError"));
       }
     } catch {
       // A network failure shows the retry hint too. Same generation guard as the
       // success path, so a superseded request can't report its failure over the
       // current one.
-      if (filterGen.current === myGen) setLoadError("Couldn't load more. Tap Load more to retry.");
+      if (filterGen.current === myGen) setLoadError(t("personal.common.loadMoreError"));
     } finally {
       setLoadingMore(false);
     }
@@ -172,11 +179,11 @@ export function WatchHistoryList({
     return (
       <EmptyState
         icon={Clock}
-        title="No watch history yet"
+        title={t("personal.history.emptyTitle")}
         description={
           serverProvider
-            ? "What you watch on the server will show up here."
-            : "Activity appears here once your account is linked to a Plex or Jellyfin user — linking happens automatically when the media-server account uses the same email address, or an admin can link it manually."
+            ? t("personal.history.emptyServer")
+            : t("personal.history.emptyUnlinked")
         }
       />
     );
@@ -187,21 +194,23 @@ export function WatchHistoryList({
   return (
     <div>
       <FilterBar
-        segments={TYPE_SEGMENTS}
+        segments={typeSegments}
         active={typeFilter}
         onChange={setTypeFilter}
         right={
           <div className="flex items-center flex-wrap" style={{ gap: 10 }}>
             <span className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
-              {initial.stats.plays} {initial.stats.plays === 1 ? "play" : "plays"} ·{" "}
-              {fmtDuration(initial.stats.playSeconds)} watched
+              {t("personal.history.summary", {
+                count: initial.stats.plays,
+                duration: fmtDuration(initial.stats.playSeconds),
+              })}
             </span>
             <input
               type="search"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search titles…"
-              aria-label="Search watch history"
+              placeholder={t("personal.common.searchTitles")}
+              aria-label={t("personal.history.searchAria")}
               className="outline-none focus-visible:ring-2 focus-visible:ring-ring"
               style={{
                 fontSize: 12,
@@ -217,20 +226,20 @@ export function WatchHistoryList({
         }
       />
 
-      {error && (
+      {loadFailed && (
         <p className="ds-mono" style={{ fontSize: 11, color: "var(--ds-danger)", margin: "0 0 10px" }}>
-          {error}
+          {t("personal.history.loadFailed")}
         </p>
       )}
 
       {items.length === 0 ? (
         <EmptyState
           icon={Clock}
-          title={filtersActive ? "No matching plays" : "No watch history yet"}
+          title={filtersActive ? t("personal.history.noMatchTitle") : t("personal.history.emptyTitle")}
           description={
             filtersActive
-              ? "No plays match your filters."
-              : "Plays on the media server will show up here."
+              ? t("personal.history.noMatchDescription")
+              : t("personal.history.noPlaysDescription")
           }
         />
       ) : (
@@ -300,7 +309,7 @@ export function WatchHistoryList({
                     {(item.playCount ?? 1) > 1 && (
                       <span
                         className="ds-mono"
-                        title={`Watched ${item.playCount} times — showing the latest play`}
+                        title={t("personal.history.watchedTimes", { count: item.playCount ?? 1 })}
                         style={{
                           fontSize: 9.5,
                           fontWeight: 400,
@@ -358,9 +367,9 @@ export function WatchHistoryList({
                   <span
                     className="ds-mono"
                     style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
-                    title={mounted ? new Date(item.startedAt).toLocaleString() : undefined}
+                    title={mounted ? new Date(item.startedAt).toLocaleString(locale) : undefined}
                   >
-                    {mounted ? formatRelativeTime(item.startedAt) : ""}
+                    {mounted ? formatRelativeTimeLocalized(item.startedAt, locale) : ""}
                   </span>
                   <span className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-muted)" }}>
                     {fmtDuration(groupSeconds)}
@@ -370,7 +379,7 @@ export function WatchHistoryList({
                       className="flex items-center"
                       style={{ gap: 3, fontSize: 10.5, color: "var(--ds-success)" }}
                     >
-                      <Check style={{ width: 11, height: 11 }} /> Watched
+                      <Check style={{ width: 11, height: 11 }} /> {t("personal.history.watched")}
                     </span>
                   ) : (
                     <span className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}>
@@ -432,7 +441,9 @@ export function WatchHistoryList({
             disabled={loadingMore}
             className="rounded-md border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 px-4 py-1.5 text-xs text-zinc-200 transition-colors"
           >
-            {loadingMore ? "Loading…" : `Load more (${Math.max(0, total - items.length)})`}
+            {loadingMore
+              ? t("personal.common.loading")
+              : t("personal.common.loadMore", { count: Math.max(0, total - items.length) })}
           </button>
           {loadError && (
             <span role="alert" aria-live="assertive" className="text-xs text-red-400">{loadError}</span>

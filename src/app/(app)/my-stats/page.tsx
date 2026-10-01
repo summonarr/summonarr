@@ -6,6 +6,7 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { BarChart3 } from "@/components/icons";
 import { EmptyState, PageHeader } from "@/components/ui/design";
 import { MyStatsView, type MyStatsData } from "@/components/watch-history/my-stats-view";
+import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +18,7 @@ export const dynamic = "force-dynamic";
 // param exists, so nothing here can widen the scope to another user.
 export default async function MyStatsPage() {
   const session = await requireAppSession();
+  const t = await getTranslator();
   const { linked, stats } = await getMyPlayStats(session.user.id);
 
   // Plex/Jellyfin sign-ins ARE media-server identities — for them an empty
@@ -61,15 +63,13 @@ export default async function MyStatsPage() {
 
   return (
     <div className="ds-page-enter">
-      <PageHeader title="My Stats" subtitle="Your viewing activity on the server" />
+      <PageHeader title={t("personal.stats.title")} subtitle={t("personal.stats.subtitle")} />
       {!linked ? (
         <EmptyState
           icon={BarChart3}
-          title="No stats yet"
+          title={t("personal.stats.emptyTitle")}
           description={
-            serverProvider
-              ? "No watch activity has been recorded for your account yet. Once you play something on the server, your stats will appear here."
-              : "Your account isn't linked to a Plex or Jellyfin identity yet, so there's no watch history to summarize. Your account links automatically when your media-server email matches, or an admin can link it manually."
+            serverProvider ? t("personal.stats.emptyServer") : t("personal.stats.emptyUnlinked")
           }
         />
       ) : data ? (
@@ -96,7 +96,7 @@ export default async function MyStatsPage() {
               <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
                 <span style={{ fontSize: 18 }}>✨</span>
                 <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: "-0.01em" }}>
-                  Your Year in Review
+                  {t("personal.stats.yearInReview")}
                 </span>
               </span>
               <span aria-hidden style={{ fontSize: 18, opacity: 0.9 }}>→</span>

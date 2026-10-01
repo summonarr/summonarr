@@ -35,18 +35,28 @@ test("requests page: empty state keys on the paged slice, not the unpaged total"
   );
 });
 
+// The copy now lives in the i18n catalog, so each pin checks both halves: the
+// page uses the key, and the English catalog still carries the original text.
+const en: Record<string, string> = JSON.parse(
+  readFileSync(path.join(here, "..", "src", "lib", "i18n", "messages", "en", "requests.json"), "utf8"),
+);
+function assertCopy(key: string, text: RegExp): void {
+  assert.ok(src.includes(`t("${key}")`), `page must render ${key}`);
+  assert.match(en[key] ?? "", text);
+}
+
 test("requests page: a past-the-end page offers a link back to page 1", () => {
-  assert.match(src, /No more requests on this page\./);
+  assertCopy("requests.empty.pageDescription", /No more requests on this page\./);
   // The CTA is built from the same href helper the pager uses so status/sort/q
   // filters survive the jump back.
   assert.match(src, /href=\{pageHref\(1\)\}/);
-  assert.match(src, /Back to page 1/);
+  assertCopy("requests.empty.backToFirst", /Back to page 1/);
 });
 
 test("requests page: the original no-requests copy is retained for total === 0", () => {
-  assert.match(src, /No requests match these filters\./);
+  assertCopy("requests.empty.filteredDescription", /No requests match these filters\./);
   // The design EmptyState splits the sentence into a title ("No requests yet")
   // and a description, so the two halves are pinned separately.
-  assert.match(src, /No requests yet/);
-  assert.match(src, /Find something on Discover/);
+  assertCopy("requests.empty.noneTitle", /No requests yet/);
+  assertCopy("requests.empty.noneDescription", /Find something on Discover/);
 });

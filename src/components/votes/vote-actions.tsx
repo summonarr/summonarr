@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { ThumbsUp, Trash2, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useToast } from "@/components/ui/toast";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface Props {
   tmdbId: number;
@@ -16,6 +17,7 @@ interface Props {
 export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
   const router = useRouter();
   const { toast } = useToast();
+  const t = useT();
   // Which action is in flight: both buttons disable, only the clicked one spins.
   const [pending, setPending] = useState<"unvote" | "dismiss" | null>(null);
   const loading = pending !== null;
@@ -31,15 +33,15 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
     try {
       const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "DELETE" });
       if (res.ok) {
-        toast({ title: "Vote removed", variant: "success" });
+        toast({ title: t("personal.votes.removed"), variant: "success" });
         router.refresh();
       } else {
         setVoted(true);
-        toast({ title: "Couldn't remove your vote", variant: "error" });
+        toast({ title: t("personal.votes.removeFailed"), variant: "error" });
       }
     } catch {
       setVoted(true);
-      toast({ title: "Couldn't remove your vote", variant: "error" });
+      toast({ title: t("personal.votes.removeFailed"), variant: "error" });
     } finally {
       setPending(null);
     }
@@ -53,15 +55,15 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
     try {
       const res = await fetch(withBasePath(`/api/votes/${tmdbId}?mediaType=${mediaType}`), { method: "PATCH" });
       if (res.ok) {
-        toast({ title: "Votes dismissed", variant: "success" });
+        toast({ title: t("personal.votes.dismissed"), variant: "success" });
         router.refresh();
       } else {
         setDismissed(false);
-        toast({ title: "Couldn't dismiss the votes", variant: "error" });
+        toast({ title: t("personal.votes.dismissFailed"), variant: "error" });
       }
     } catch {
       setDismissed(false);
-      toast({ title: "Couldn't dismiss the votes", variant: "error" });
+      toast({ title: t("personal.votes.dismissFailed"), variant: "error" });
     } finally {
       setPending(null);
     }
@@ -83,7 +85,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
           className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-indigo-500/50 bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 transition-colors disabled:opacity-50"
         >
           {pending === "unvote" ? <Loader2 className="w-3 h-3 animate-spin" /> : <ThumbsUp className="w-3 h-3" />}
-          Voted
+          {t("personal.votes.voted")}
         </button>
       )}
       {isAdmin && !confirmingDismiss && (
@@ -93,7 +95,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
           className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-red-500/50 bg-red-600/10 text-red-400 hover:bg-red-600/20 transition-colors disabled:opacity-50"
         >
           {pending === "dismiss" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-          Dismiss
+          {t("personal.votes.dismiss")}
         </button>
       )}
       {isAdmin && confirmingDismiss && (
@@ -105,14 +107,14 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
             autoFocus
           >
             {pending === "dismiss" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-            Confirm dismiss
+            {t("personal.votes.confirmDismiss")}
           </button>
           <button
             onClick={() => setConfirmingDismiss(false)}
             disabled={loading}
             className="text-xs px-2 py-1.5 text-zinc-400 hover:text-zinc-100 transition-colors"
           >
-            Cancel
+            {t("personal.common.cancel")}
           </button>
         </div>
       )}
