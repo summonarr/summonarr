@@ -74,6 +74,10 @@ const ROUTE_EXCEPTIONS: Array<{ route: string; reason: string }> = [
     route: "/api/profile/notification-email/confirm",
     reason: "public email-verification landing (clicked from email, possibly logged-out); the one-time hashed token in the query IS the credential — pre-auth via isPublicPath in proxy.ts",
   },
+  {
+    route: "/api/calendar/feed/[token]",
+    reason: "public iCal subscription feed — calendar apps send no cookie/header, so the per-user secret in the path IS the credential (SHA-256-hashed at rest, timing-safe compare, IP + token rate limits, 404 for disabled/purged owners) — pre-auth via isPublicPath in proxy.ts",
+  },
 ];
 
 /**

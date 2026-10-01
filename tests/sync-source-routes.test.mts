@@ -164,6 +164,9 @@ for (const m of [
   "tVEpisodeCacheStaging",
   "upcomingCacheItem", "tmdbCache", "tmdbMediaCore",
   "plexLibraryItem", "jellyfinLibraryItem", "mediaRequest", "user", "authSession",
+  // sync/upcoming also runs the calendar-feed cache warm, which reads every
+  // watchlist; unstubbed it would block on the real client like auditLog below.
+  "watchlistItem",
 ]) {
   shadowPrismaModel(prisma, m, cacheModel(m));
 }

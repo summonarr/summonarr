@@ -14,6 +14,7 @@ import { LiveRefresh } from "@/components/live-refresh";
 import { PageHeader, EmptyState } from "@/components/ui/design";
 import { PaginationBar } from "@/components/media/pagination-bar";
 import { AlertTriangle, Calendar } from "@/components/icons";
+import Link from "next/link";
 
 // One screenful, matching POPULAR_PER_PAGE. See the note at the slice below for
 // why this page needed bounding at all.
@@ -49,11 +50,12 @@ export default async function UpcomingPage({
   searchParams: Promise<Record<string, string>>;
 }) {
   await requireFeature("feature.page.upcoming");
-  const [sp, session, plexEnabled, jellyfinEnabled] = await Promise.all([
+  const [sp, session, plexEnabled, jellyfinEnabled, calendarEnabled] = await Promise.all([
     searchParams,
     requireAppSession(),
     isFeatureEnabled("feature.integration.plex"),
     isFeatureEnabled("feature.integration.jellyfin"),
+    isFeatureEnabled("feature.integration.calendar"),
   ]);
   const hideAvailable = sp.hideAvailable === "1";
   // Integration flags passed explicitly — they default to TRUE when omitted.
@@ -136,9 +138,31 @@ export default async function UpcomingPage({
             : "Movies and TV shows premiering soon"
         }
         right={
-          <Suspense>
-            <HideAvailableToggle active={hideAvailable} />
-          </Suspense>
+          <div className="flex flex-wrap items-center gap-2">
+            {calendarEnabled && (
+              <Link
+                href="/profile#calendar-feed"
+                title="Subscribe to your requests and watchlist release dates in a calendar app"
+                className="ds-tap ds-hover-tint inline-flex items-center gap-1.5 font-medium"
+                style={{
+                  padding: "5px 12px",
+                  minHeight: 32,
+                  borderRadius: 6,
+                  fontSize: 12,
+                  background: "var(--ds-bg-2)",
+                  color: "var(--ds-fg-muted)",
+                  border: "1px solid var(--ds-border)",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                <Calendar className="w-3.5 h-3.5" />
+                Subscribe
+              </Link>
+            )}
+            <Suspense>
+              <HideAvailableToggle active={hideAvailable} />
+            </Suspense>
+          </div>
         }
       />
 

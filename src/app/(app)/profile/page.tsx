@@ -10,6 +10,10 @@ import { PushDevices } from "@/components/profile/push-devices";
 import { AuthSessions } from "@/components/profile/auth-sessions";
 import { ChangePassword } from "@/components/profile/change-password";
 import { DeleteAccount } from "@/components/profile/delete-account";
+import { CalendarFeed } from "@/components/profile/calendar-feed";
+import { isFeatureEnabled } from "@/lib/features";
+import { hasPermission, Permission } from "@/lib/permissions";
+import { CALENDAR_FEATURE_KEY } from "@/lib/calendar-feed";
 import { User } from "@/components/icons";
 import { PageHeader } from "@/components/ui/design";
 
@@ -25,7 +29,7 @@ export default async function ProfilePage() {
   const session = await authActive();
   if (!session) redirect("/login");
 
-  const [user, hasPassword, discordInviteSetting, pushDevices, maxPushSetting, authSessions, emailEnabled] = await Promise.all([
+  const [user, hasPassword, discordInviteSetting, pushDevices, maxPushSetting, authSessions, emailEnabled, calendarEnabled] = await Promise.all([
     prisma.user.findUnique({
       where: { id: session.user.id },
       select: {
@@ -35,6 +39,7 @@ export default async function ProfilePage() {
         emailOnApproved: true, emailOnAvailable: true, emailOnDeclined: true,
         pushOnApproved: true, pushOnAvailable: true, pushOnDeclined: true,
         notifyOnIssue: true,
+        calendarTokenHash: true, calendarTokenCreatedAt: true,
       },
     }),
     prisma.user.count({
@@ -59,6 +64,7 @@ export default async function ProfilePage() {
       },
     }),
     isNotificationEmailEnabled(),
+    isFeatureEnabled(CALENDAR_FEATURE_KEY),
   ]);
   const discordInviteUrl = discordInviteSetting?.value || null;
   const pushCap = parseRateLimit(maxPushSetting?.value, DEFAULT_MAX_PUSH_SUBSCRIPTIONS);
@@ -198,6 +204,20 @@ export default async function ProfilePage() {
           >
             <PushDevices devices={pushDevices} cap={pushCap} />
           </ProfileCard>
+
+          {calendarEnabled && (
+            <ProfileCard
+              id="calendar-feed"
+              title="Calendar Feed"
+              description="Upcoming release dates in your own calendar app."
+            >
+              <CalendarFeed
+                enabled={!!user?.calendarTokenHash}
+                createdAt={user?.calendarTokenHash ? (user.calendarTokenCreatedAt?.toISOString() ?? null) : null}
+                canSubscribeAll={hasPermission(session.user.permissions, Permission.MANAGE_REQUESTS)}
+              />
+            </ProfileCard>
+          )}
         </div>
       </div>
     </div>
@@ -205,17 +225,21 @@ export default async function ProfilePage() {
 }
 
 function ProfileCard({
+  id,
   title,
   description,
   children,
 }: {
+  id?: string;
   title?: string;
   description?: string;
   children: React.ReactNode;
 }) {
   return (
     <section
+      id={id}
       style={{
+        scrollMarginTop: 80,
         padding: 20,
         background: "var(--ds-bg-2)",
         border: "1px solid var(--ds-border)",
