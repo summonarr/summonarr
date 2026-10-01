@@ -48,6 +48,8 @@ export interface User {
   // (guardrail 16), and only the on/off state drives the UI.
   disabled: boolean;
   purged: boolean;
+  // Has an active second factor (TOTP or a passkey) — offers Reset two-factor.
+  mfaEnabled: boolean;
   // How the account authenticates, derived by the page via deriveUserSource
   // (src/lib/user-source.ts): "local" = passwordHash, "oidc" = an oidc Account
   // row, "jellyfin"/"plex" = the provider-pinned rest, "discord" = a shadow

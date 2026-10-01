@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { AccountDeactivatedError, authorizeWithCredentials, signInAndMintSession } from "@/lib/auth";
 import { buildSignInResponse, disabledAccountResponse } from "@/lib/sign-in-response";
 import { readJsonCapped } from "@/lib/body-size";
+import { mfaChallengeFor } from "@/lib/mfa/signin-challenge";
 
 // Summonarr-native credentials sign-in: authorize(), then mint a Summonarr JWT we own.
 
@@ -29,6 +30,16 @@ export async function POST(req: NextRequest) {
   if (!user) {
     return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
   }
+
+  // Two-factor (guardrail 6d): the password alone NEVER mints a session for an
+  // account with an active second factor — it earns a short-lived challenge
+  // token, redeemed at POST /api/auth/sign-in/mfa. Null ⇒ no 2FA ⇒ the flow
+  // below is unchanged.
+  const challenge = await mfaChallengeFor(req, {
+    id: user.id as string,
+    rememberMe: user.rememberMe as string | undefined,
+  });
+  if (challenge) return challenge;
 
   let result;
   try {

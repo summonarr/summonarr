@@ -169,6 +169,48 @@ function safeDecryptSettingValue(key: string | undefined, value: string): string
   }
 }
 
+// ─── UserTotp.secret (two-factor authenticator-app secret) ──────────────────
+// Every write of `secret` is sensitive (unlike Setting, where sensitivity depends
+// on the row's key), so the same value-level encryption is valid for bulk writes
+// too — updateMany/createMany are ENCRYPTED rather than forbidden. Covered
+// operations mirror the Account block below; guardrail 7a forbids any caller
+// from pre-encrypting.
+export function encryptTotpSecretInPlace(data: Record<string, unknown> | undefined | null): void {
+  if (!data) return;
+  const v = data.secret;
+  if (typeof v === "string" && v.length > 0) {
+    data.secret = encryptToken(v);
+  } else if (v && typeof v === "object" && typeof (v as { set?: unknown }).set === "string") {
+    const set = (v as { set: string }).set;
+    if (set.length > 0) (v as { set: string }).set = encryptToken(set);
+  }
+}
+
+function encryptTotpRowsInPlace(data: unknown): void {
+  const list = Array.isArray(data) ? data : data ? [data] : [];
+  for (const row of list) encryptTotpSecretInPlace(row as Record<string, unknown>);
+}
+
+export function decryptTotpSecretInPlace(row: Record<string, unknown> | null | undefined): void {
+  if (!row) return;
+  const v = row.secret;
+  if (typeof v !== "string" || v.length === 0) return;
+  const id = typeof row.userId === "string" ? row.userId : "?";
+  const label = `UserTotp.secret (userId=${id})`;
+  try {
+    row.secret = decryptToken(v, label);
+  } catch (err) {
+    // Wrong TOKEN_ENCRYPTION_KEY (e.g. a backup restored onto another server)
+    // or a corrupt row. Fail CLOSED: an empty secret verifies no code, so the
+    // user signs in with a recovery code or a passkey, or an admin resets 2FA.
+    console.error(
+      `[totp-crypto] Decrypt failed for ${label} — the user must use a recovery code or have an admin reset their two-factor. Original error:`,
+      err instanceof Error ? err.message : err,
+    );
+    row.secret = "";
+  }
+}
+
 function createPrismaClient() {
   const adapter = new PrismaPg({
     connectionString: process.env.DATABASE_URL,
@@ -181,8 +223,9 @@ function createPrismaClient() {
     log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
   });
 
-  // Transparent at-rest crypto for both Setting rows (keyed by `key`) and Account rows
-  // (specific OAuth-token columns). Reads decrypt, writes encrypt — callers always work in plaintext.
+  // Transparent at-rest crypto for Setting rows (keyed by `key`), Account rows
+  // (specific OAuth-token columns) and UserTotp.secret (the two-factor
+  // authenticator secret). Reads decrypt, writes encrypt — callers always work in plaintext.
   return base.$extends({
     name: "setting-and-account-crypto",
     query: {
@@ -407,6 +450,72 @@ function createPrismaClient() {
         },
         async deleteMany({ args, query }) {
           return query(args);
+        },
+      },
+      userTotp: {
+        async findUnique({ args, query }) {
+          const row = await query(args);
+          decryptTotpSecretInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async findFirst({ args, query }) {
+          const row = await query(args);
+          decryptTotpSecretInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async findUniqueOrThrow({ args, query }) {
+          const row = await query(args);
+          decryptTotpSecretInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async findFirstOrThrow({ args, query }) {
+          const row = await query(args);
+          decryptTotpSecretInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async findMany({ args, query }) {
+          const rows = await query(args);
+          for (const r of rows) decryptTotpSecretInPlace(r as Record<string, unknown>);
+          return rows;
+        },
+        async create({ args, query }) {
+          encryptTotpSecretInPlace(args.data as Record<string, unknown> | undefined);
+          const row = await query(args);
+          decryptTotpSecretInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async update({ args, query }) {
+          encryptTotpSecretInPlace(args.data as Record<string, unknown> | undefined);
+          const row = await query(args);
+          decryptTotpSecretInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async upsert({ args, query }) {
+          encryptTotpSecretInPlace(args.create as Record<string, unknown> | undefined);
+          encryptTotpSecretInPlace(args.update as Record<string, unknown> | undefined);
+          const row = await query(args);
+          decryptTotpSecretInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async updateMany({ args, query }) {
+          encryptTotpSecretInPlace((args as { data?: Record<string, unknown> }).data);
+          return query(args);
+        },
+        async updateManyAndReturn({ args, query }) {
+          encryptTotpSecretInPlace((args as { data?: Record<string, unknown> }).data);
+          const rows = await query(args);
+          for (const r of rows) decryptTotpSecretInPlace(r as Record<string, unknown>);
+          return rows;
+        },
+        async createMany({ args, query }) {
+          encryptTotpRowsInPlace((args as { data?: unknown }).data);
+          return query(args);
+        },
+        async createManyAndReturn({ args, query }) {
+          encryptTotpRowsInPlace((args as { data?: unknown }).data);
+          const rows = await query(args);
+          for (const r of rows) decryptTotpSecretInPlace(r as Record<string, unknown>);
+          return rows;
         },
       },
     },

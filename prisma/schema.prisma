@@ -148,6 +148,12 @@ model User {
   hidden            HiddenItem[]
   notifications     Notification[]
   recommendations   UserRecommendation[]
+  // Two-factor authentication for LOCAL-CREDENTIALS sign-in (src/lib/mfa/).
+  // The factor rows ARE the source of truth for "has 2FA" — there is no
+  // denormalized flag on this row that could drift and silently fail open.
+  totp              UserTotp?
+  mfaRecoveryCodes  MfaRecoveryCode[]
+  webAuthnCredentials WebAuthnCredential[]
 }
 
 model PushSubscription {
@@ -193,6 +199,72 @@ model VerificationToken {
   expires    DateTime
 
   @@unique([identifier, token])
+}
+
+// ─── Two-factor authentication (local credentials only) ─────────────────────
+// Second factors for the password sign-in path. Plex/Jellyfin/OIDC sign-ins are
+// out of scope (the IdP owns MFA there). See src/lib/mfa/ and CLAUDE.md
+// guardrail 6d. Account purge (purgeUserDataInTx) deletes all three tables'
+// rows for the user; an admin reset (DELETE /api/admin/users/[id]/mfa) does too.
+
+// One authenticator-app (RFC 6238) secret per user.
+model UserTotp {
+  userId       String    @id
+  // enc:v1 ciphertext at rest. The prisma.ts extension encrypts on every write
+  // and decrypts on every read (guardrail 7a) — callers pass/receive base32
+  // plaintext and NEVER call encryptToken themselves.
+  secret       String
+  // null while the enrollment is pending (secret issued by /totp/setup, not yet
+  // confirmed with a code). Only an enabled row is a second factor.
+  enabledAt    DateTime?
+  // Highest 30-second TOTP time step ever accepted. A code is accepted only for
+  // a step strictly greater than this (compare-and-swap) — replay protection.
+  lastUsedStep Int?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// One-time recovery codes. Only a SHA-256 of the normalized code is stored;
+// the plaintext is shown to the user exactly once.
+model MfaRecoveryCode {
+  id        String    @id @default(cuid(2))
+  userId    String
+  codeHash  String    @db.VarChar(64)
+  // Set (compare-and-swap from null) when the code is redeemed — single use.
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Also serves every by-user lookup (userId is the leading column).
+  @@unique([userId, codeHash])
+}
+
+// A WebAuthn (passkey / security key) credential used as a second factor.
+model WebAuthnCredential {
+  id             String    @id @default(cuid(2))
+  userId         String
+  // base64url credential id (raw id from the authenticator). Globally unique.
+  credentialId   String    @unique
+  // base64url COSE_Key bytes from the attested credential data. Public — not
+  // a secret, so it is stored as-is (like an SSH public key).
+  publicKey      String
+  // Authenticator signature counter (uint32). A non-increasing value from an
+  // authenticator that counts is rejected as a possible cloned credential.
+  signCount      BigInt    @default(0)
+  transports     String[]  @default([])
+  name           String    @db.VarChar(64)
+  aaguid         String?   @db.VarChar(36)
+  backupEligible Boolean   @default(false)
+  backedUp       Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  lastUsedAt     DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 // One record per active JWT auth session. Created at sign-in, deleted on sign-out or revocation.
@@ -777,6 +849,10 @@ enum AuditAction {
   PLEX_SESSION_TERMINATE
   JELLYFIN_SESSION_TERMINATE
   BLACKLIST_CHANGE
+  // A user changed their own two-factor enrollment (TOTP, passkey, recovery codes).
+  MFA_CHANGE
+  // An admin reset another user's two-factor enrollment (lost device).
+  MFA_RESET
 }
 
 // ─── Play History ────────────────────────────────────────────────────────────

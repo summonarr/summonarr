@@ -514,6 +514,28 @@ export async function revokeAllUserSessions(userId: string): Promise<void> {
   markUserForceRevalidate(userId);
 }
 
+// Revokes every session of `userId` EXCEPT `keepSessionId` — used when a user
+// changes their own two-factor enrollment, so a session an attacker may already
+// hold is cut off while the device making the change stays signed in. Unlike
+// revokeAllUserSessions this deliberately does NOT stamp sessionsRevokedAt: that
+// cutoff is per-USER (`iat <= cutoff`) and would kill the kept session too.
+// It doesn't need it — a deleted AuthSession row fails the slow-path presence
+// check, and markSessionForceRevoked forces the very next request of each
+// revoked session onto that slow path (single process, guardrail 17). Ledger
+// marks go after the delete commits (guardrail 27).
+export async function revokeOtherUserSessions(userId: string, keepSessionId: string | undefined): Promise<number> {
+  const sessionIds = await prisma.$transaction(async (tx) => {
+    const where = keepSessionId
+      ? { userId, sessionId: { not: keepSessionId } }
+      : { userId };
+    const sessions = await tx.authSession.findMany({ where, select: { sessionId: true } });
+    await tx.authSession.deleteMany({ where });
+    return sessions.map((s) => s.sessionId);
+  });
+  for (const sessionId of sessionIds) markSessionForceRevoked(sessionId);
+  return sessionIds.length;
+}
+
 export interface DeviceMeta {
   _sessionId: string;
   _uaFingerprint: string;
@@ -1156,8 +1178,13 @@ export class AccountDeactivatedError extends Error {
 export async function signInAndMintSession(params: {
   user: Record<string, unknown>;
   providerId: "credentials" | "plex" | "jellyfin" | "jellyfin-quickconnect" | "oidc";
+  // Set ONLY by POST /api/auth/sign-in/mfa, after the second factor verified —
+  // recorded in the AUTH_LOGIN audit row. The credentials route never mints for
+  // an account with 2FA (guardrail 6d), so this is the only way such a session
+  // comes into existence.
+  secondFactor?: "totp" | "recovery" | "webauthn";
 }): Promise<SignInResult> {
-  const { user, providerId } = params;
+  const { user, providerId, secondFactor } = params;
   const userId = user.id as string | undefined;
 
   // Single chokepoint for every provider (credentials / plex / jellyfin /
@@ -1234,6 +1261,7 @@ export async function signInAndMintSession(params: {
       // persist until the 90-day scrub).
       emailHash: typeof user.email === "string" ? hashAuditEmail(user.email) : null,
       role: token.role,
+      ...(secondFactor ? { secondFactor } : {}),
       ip: (user as { _auditIp?: string })._auditIp,
       browser: ((user as { _auditUa?: string })._auditUa)?.slice(0, 100),
     },

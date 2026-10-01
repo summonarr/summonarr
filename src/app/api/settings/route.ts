@@ -126,6 +126,10 @@ const SETTINGS_SCHEMA = [
   // read via getAuditPiiRetentionDays() by the scrub cron AND the manual scrub.
   ["auditPiiRetentionDays",         false],
   ["disableLocalLogin",              false],
+  // "true" ⇒ a local-credentials ADMIN with no second factor is redirected from
+  // /admin to enroll (src/lib/mfa/policy.ts; SUMMONARR_DISABLE_MFA_ENFORCEMENT
+  // is the env escape hatch).
+  ["requireMfaForAdmins",            false],
   ["playHistoryEnabled",             false],
   ["playHistoryPlexEnabled",         false],
   ["playHistoryJellyfinEnabled",     false],

@@ -2,6 +2,7 @@ import "server-only";
 
 import { prisma } from "./prisma";
 import { verifyIdentifierPrefixFor } from "./notification-email-verify";
+import { deleteAllMfaInTx } from "./mfa/mfa-store";
 
 // The encryption extension in ./prisma changes the client's type, so the
 // generated Prisma.TransactionClient is NOT assignable to the interactive-tx
@@ -175,6 +176,12 @@ export async function purgeUserDataInTx(
   // anonymize the row in place (keeps requests/votes/issues linked).
   await tx.account.deleteMany({ where: { userId: id } });
   await tx.authSession.deleteMany({ where: { userId: id } });
+  // Two-factor credentials (guardrail 6d): the encrypted TOTP secret, every
+  // passkey public key and every recovery-code hash. They authenticate nothing
+  // once the password is nulled below, but they are this person's credential
+  // data and an erasure must not leave it behind. Same write set as the admin
+  // reset and the self-service disable.
+  await deleteAllMfaInTx(tx, id);
   // Orphaned device + Discord-link rows would otherwise outlive the anonymized
   // row and keep delivering pushes (to a possibly handed-down device) or leave
   // dangling unique link/merge rows. Remove them in the same transaction.

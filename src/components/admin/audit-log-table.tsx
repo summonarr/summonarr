@@ -699,6 +699,14 @@ function formatSummary(action: string, d: Record<string, unknown>): string | nul
         d.adminAction && "by admin",
         d.revokedByOwner && "by owner",
       ].filter(Boolean).join(" · ") || null;
+    case "MFA_CHANGE":
+      return [
+        d.kind && String(d.kind).replace(/-/g, " "),
+        d.name && `"${String(d.name)}"`,
+        typeof d.otherSessionsRevoked === "number" && d.otherSessionsRevoked > 0 && `${d.otherSessionsRevoked} other session(s) signed out`,
+      ].filter(Boolean).join(" · ") || null;
+    case "MFA_RESET":
+      return d.targetUser ? `User: ${String(d.targetUser)}` : null;
     default:
       return null;
   }

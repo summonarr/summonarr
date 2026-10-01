@@ -22,6 +22,8 @@ import { CronJobTable, type CronJobInfo } from "@/components/settings/cron-job-t
 import { FeaturesForm } from "@/components/settings/features-form";
 import { getFeatureFlags, groupFeaturesByCategory } from "@/lib/features";
 import { parseHiddenRatingSources } from "@/lib/ratings-visibility";
+import { mfaEnforcementDisabledByEnv } from "@/lib/mfa/policy";
+import { RequireAdminMfaToggle } from "@/components/settings/forms/require-admin-mfa-toggle";
 
 const TAB_SECTIONS: Record<TabId, SettingsNavItem[]> = {
   site: [
@@ -133,6 +135,7 @@ const ALL_KEYS = [
   "discordLinkedRoleId", "discordPlexRoleId", "discordJellyfinRoleId", "discordAdminRoleId", "discordIssueAdminRoleId",
   "deletionVoteThreshold",
   "disableLocalLogin",
+  "requireMfaForAdmins",
   "jellyfinRestrictSignIn",
   "enableMachineSession", "machineSessionAllowedIps",
   "playHistoryEnabled", "playHistoryPlexEnabled", "playHistoryJellyfinEnabled",
@@ -565,6 +568,10 @@ export default async function SettingsPage({
                 </p>
               </div>
               <DisableLocalLoginToggle initialDisabled={cfg.disableLocalLogin === "true"} />
+              <RequireAdminMfaToggle
+                initialRequired={cfg.requireMfaForAdmins === "true"}
+                envOverride={mfaEnforcementDisabledByEnv()}
+              />
               <JellyfinRestrictSignInToggle initialRestrict={cfg.jellyfinRestrictSignIn !== "false"} />
               <EnableMachineSessionToggle
                 initialEnabled={cfg.enableMachineSession === "true"}

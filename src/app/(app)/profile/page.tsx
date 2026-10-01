@@ -10,6 +10,10 @@ import { PushDevices } from "@/components/profile/push-devices";
 import { AuthSessions } from "@/components/profile/auth-sessions";
 import { ChangePassword } from "@/components/profile/change-password";
 import { DeleteAccount } from "@/components/profile/delete-account";
+import { TwoFactorSettings } from "@/components/profile/two-factor";
+import { getMfaState } from "@/lib/mfa/mfa-store";
+import { adminMfaPolicyApplies, REQUIRE_MFA_FOR_ADMINS_KEY } from "@/lib/mfa/policy";
+import { webAuthnConfigFromEnv } from "@/lib/mfa/webauthn";
 import { User } from "@/components/icons";
 import { PageHeader } from "@/components/ui/design";
 
@@ -61,6 +65,19 @@ export default async function ProfilePage() {
     isNotificationEmailEnabled(),
   ]);
   const discordInviteUrl = discordInviteSetting?.value || null;
+
+  // Two-factor is offered only to local-credentials accounts (guardrail 6d).
+  const mfaAvailable = session.user.provider === "credentials" && hasPassword;
+  const [mfaState, requireMfaRow] = mfaAvailable
+    ? await Promise.all([
+        getMfaState(session.user.id),
+        prisma.setting.findUnique({ where: { key: REQUIRE_MFA_FOR_ADMINS_KEY } }),
+      ])
+    : [null, null];
+  const mfaRequired =
+    !!mfaState &&
+    !mfaState.enabled &&
+    adminMfaPolicyApplies({ role: session.user.role, provider: session.user.provider, settingValue: requireMfaRow?.value });
   const pushCap = parseRateLimit(maxPushSetting?.value, DEFAULT_MAX_PUSH_SUBSCRIPTIONS);
   const currentSessionId = session.sessionId;
 
@@ -130,6 +147,31 @@ export default async function ProfilePage() {
               description="Update your local login password."
             >
               <ChangePassword hasPassword={hasPassword} />
+            </ProfileCard>
+          )}
+
+          {mfaState && (
+            <ProfileCard
+              id="two-factor"
+              title="Two-factor authentication"
+              description="Ask for a code from an authenticator app, or a passkey, after your password."
+            >
+              <TwoFactorSettings
+                required={mfaRequired}
+                initial={{
+                  enabled: mfaState.enabled,
+                  totpEnabled: mfaState.totpEnabled,
+                  passkeys: mfaState.passkeys.map((p) => ({
+                    id: p.id,
+                    name: p.name,
+                    backedUp: p.backedUp,
+                    createdAt: p.createdAt.toISOString(),
+                    lastUsedAt: p.lastUsedAt?.toISOString() ?? null,
+                  })),
+                  recoveryCodesRemaining: mfaState.recoveryRemaining,
+                  webauthnAvailable: webAuthnConfigFromEnv() !== null,
+                }}
+              />
             </ProfileCard>
           )}
 
@@ -205,16 +247,19 @@ export default async function ProfilePage() {
 }
 
 function ProfileCard({
+  id,
   title,
   description,
   children,
 }: {
+  id?: string;
   title?: string;
   description?: string;
   children: React.ReactNode;
 }) {
   return (
     <section
+      id={id}
       style={{
         padding: 20,
         background: "var(--ds-bg-2)",
