@@ -185,7 +185,10 @@ const DECISION_ROUTES = [
   "src/app/api/requests/[id]/route.ts",
   "src/app/api/requests/batch/route.ts",
   "src/app/api/requests/bulk/route.ts",
-  "src/app/api/requests/route.ts",
+  // POST /api/requests' create + auto-approve, extracted from the route so the
+  // watchlist auto-request files through the same chokepoint. The route itself
+  // no longer writes a MediaRequest.
+  "src/lib/request-create.ts",
 ];
 const BACKFILL = "src/lib/request-approval.ts";
 // May read the column (or document it), never write it.
@@ -373,12 +376,12 @@ test("computed-status writes: a copy records no approval of its own, batch follo
     const status = prop(w.data, "status");
     if (!status) return false;
     const init = unwrap(status.initializer);
-    // /api/requests copies through `mirrorStatus` (the peer's status, downgraded to
+    // /api/requests (src/lib/request-create.ts) copies through `mirrorStatus` (the peer's status, downgraded to
     // APPROVED when an AVAILABLE peer isn't available to this requester).
     return (ts.isPropertyAccessExpression(init) && init.getText().endsWith(".status")) ||
       (ts.isIdentifier(init) && init.text === "mirrorStatus");
   });
-  assert.deepEqual(copies.map((w) => w.file).sort(), ["src/app/api/interactions/route.ts", "src/app/api/requests/route.ts"]);
+  assert.deepEqual(copies.map((w) => w.file).sort(), ["src/app/api/interactions/route.ts", "src/lib/request-create.ts"]);
 
   const batch = byFile.get("src/app/api/requests/batch/route.ts")!;
   assert.equal(

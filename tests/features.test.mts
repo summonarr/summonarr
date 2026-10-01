@@ -56,7 +56,10 @@ const LEGACY_KEYS = ["motdEnabled", "playHistoryEnabled", "trashGuidesEnabled"] 
 // no data to show on a fresh install. This is a short, named exception to the
 // rule "every feature.* flag defaults ON" — unrelated to LEGACY_KEYS above,
 // which are older than the Features tab.
-const NEW_FEATURE_DEFAULT_OFF_KEYS = ["feature.page.forYou"] as const;
+// feature.behavior.watchlistAutoRequest is the other kind of exception: it files
+// requests on users' behalf (and needs Plex tokens stored at sign-in), so an
+// operator opts in rather than having it start on upgrade.
+const NEW_FEATURE_DEFAULT_OFF_KEYS = ["feature.page.forYou", "feature.behavior.watchlistAutoRequest"] as const;
 
 // ── Registry invariants ──────────────────────────────────────────────────
 
@@ -180,7 +183,7 @@ test("every registered flag is writable through /api/settings — an unlisted ke
 test("group sizes are exact (pins accidental category reassignment)", () => {
   const groups = groupFeaturesByCategory();
   assert.equal(groups.pages.length, 8);
-  assert.equal(groups.behaviors.length, 5);
+  assert.equal(groups.behaviors.length, 6);
   assert.equal(groups.integrations.length, 7);
   assert.equal(groups.admin.length, 6);
 });

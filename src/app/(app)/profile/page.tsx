@@ -10,6 +10,10 @@ import { PushDevices } from "@/components/profile/push-devices";
 import { AuthSessions } from "@/components/profile/auth-sessions";
 import { ChangePassword } from "@/components/profile/change-password";
 import { DeleteAccount } from "@/components/profile/delete-account";
+import { AutoRequestPrefs } from "@/components/profile/auto-request-prefs";
+import { isFeatureEnabled } from "@/lib/features";
+import { canAutoRequest } from "@/lib/permissions";
+import { WATCHLIST_AUTO_REQUEST_FEATURE_KEY } from "@/lib/auto-request";
 import { User } from "@/components/icons";
 import { PageHeader } from "@/components/ui/design";
 
@@ -35,6 +39,7 @@ export default async function ProfilePage() {
         emailOnApproved: true, emailOnAvailable: true, emailOnDeclined: true,
         pushOnApproved: true, pushOnAvailable: true, pushOnDeclined: true,
         notifyOnIssue: true,
+        plexWatchlistAutoRequest: true,
       },
     }),
     prisma.user.count({
@@ -60,6 +65,16 @@ export default async function ProfilePage() {
     }),
     isNotificationEmailEnabled(),
   ]);
+  // Watchlist auto-request section: only for a user who can use it. The
+  // permission check is free; the flag and token reads only run for them.
+  const autoRequestPermitted =
+    canAutoRequest(session.user.permissions, "MOVIE") || canAutoRequest(session.user.permissions, "TV");
+  const [autoRequestEnabled, plexAccount] = autoRequestPermitted
+    ? await Promise.all([
+        isFeatureEnabled(WATCHLIST_AUTO_REQUEST_FEATURE_KEY),
+        prisma.account.findFirst({ where: { userId: session.user.id, provider: "plex" }, select: { id: true } }),
+      ])
+    : [false, null];
   const discordInviteUrl = discordInviteSetting?.value || null;
   const pushCap = parseRateLimit(maxPushSetting?.value, DEFAULT_MAX_PUSH_SUBSCRIPTIONS);
   const currentSessionId = session.sessionId;
@@ -191,6 +206,18 @@ export default async function ProfilePage() {
               notifyOnIssue={user?.notifyOnIssue ?? true}
             />
           </ProfileCard>
+
+          {autoRequestEnabled && (
+            <ProfileCard
+              title="Watchlist Auto-Request"
+              description="Request titles automatically when you add them to a watchlist."
+            >
+              <AutoRequestPrefs
+                initialPlexWatchlist={user?.plexWatchlistAutoRequest ?? true}
+                plexConnected={plexAccount !== null}
+              />
+            </ProfileCard>
+          )}
 
           <ProfileCard
             title="Push Devices"

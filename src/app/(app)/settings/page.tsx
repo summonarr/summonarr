@@ -292,7 +292,7 @@ export default async function SettingsPage({
     const cronTargets = [
       "sync:full", "upcoming-cache", "ratings-sync", "list-cache",
       "activity", "mdblist", "omdb", "recommendations", "library", "audit-log:pii-scrub", "auth-sessions:purge-expired",
-      "trash-sync", "download-policies",
+      "trash-sync", "download-policies", "plex-watchlist",
     ];
     // Primary source: `Setting` rows written by `recordCronRun` on every run
     // (admin- or cron-triggered). Several warm jobs deliberately skip the
@@ -423,6 +423,7 @@ export default async function SettingsPage({
       { name: "Purge Sessions", description: "Delete expired auth sessions", endpoint: "/api/cron/purge-auth-sessions", interval: formatInterval(process.env.PURGE_SESSIONS_INTERVAL, "86400"), ...lastRunInfo("auth-sessions:purge-expired") },
       { name: "Scrub Audit PII", description: "Remove IP/UA from audit entries past the retention window (default 90 days)", endpoint: "/api/cron/scrub-audit-pii", interval: formatInterval(process.env.SCRUB_AUDIT_PII_INTERVAL, "86400"), ...lastRunInfo("audit-log:pii-scrub") },
       { name: "TRaSH Sync", description: "Refresh TRaSH-Guides catalog (capped at hourly) and re-apply managed specs each tick", endpoint: "/api/cron/trash-sync", interval: formatInterval(process.env.TRASH_SYNC_INTERVAL, "86400"), ...lastRunInfo("trash-sync") },
+      { name: "Plex Watchlist Auto-Request", description: "Request new titles from permitted users' Plex watchlists (needs Watchlist auto-request on)", endpoint: "/api/cron/sync-plex-watchlists", interval: formatInterval(process.env.PLEX_WATCHLIST_SYNC_INTERVAL, "1800"), ...lastRunInfo("plex-watchlist") },
       { name: "Download Policy Sync", description: "Sync Plex & Jellyfin user download permissions, enforce any restrictions set in Summonarr", endpoint: "/api/cron/sync-download-policies", interval: formatInterval(process.env.SYNC_INTERVAL, "3600"), ...lastRunInfo("download-policies") },
     ];
   }

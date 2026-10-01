@@ -1,4 +1,4 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { NextResponse, after, type NextRequest } from "next/server";
 import { AccountDeactivatedError, authorizeWithPlex, signInAndMintSession } from "@/lib/auth";
 import { buildSignInResponse, disabledAccountResponse } from "@/lib/sign-in-response";
 import { readJsonCapped } from "@/lib/body-size";
@@ -7,6 +7,8 @@ import {
   readPlexFlowCookie,
   verifyPlexFlowCookie,
 } from "@/lib/plex-flow-state";
+import { rememberPlexWatchlistToken } from "@/lib/plex-watchlist";
+import { sanitizeForLog } from "@/lib/sanitize";
 
 // Plex sign-in body carries plexToken/plexClientId/pinId/rememberMe — 16 KB
 // cap protects this unauthenticated surface against memory-exhaustion DoS.
@@ -73,6 +75,17 @@ export async function POST(req: NextRequest) {
     }
     throw err;
   }
+  // Watchlist auto-request reads the user's plex.tv watchlist with THEIR token,
+  // so a successful sign-in stores it (encrypted, only while the feature is on —
+  // see src/lib/plex-watchlist.ts). After the response, best-effort: a failure
+  // here must never fail the sign-in that just succeeded.
+  const plexToken = body.plexToken;
+  after(() =>
+    rememberPlexWatchlistToken(result.user.id, plexToken).catch((err: unknown) =>
+      console.error(`[plex-watchlist] storing the Plex token failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`),
+    ),
+  );
+
   // Best-effort clear of the flow cookie. This is NOT a server-side one-shot —
   // a client that ignores the Set-Cookie can resubmit until the cookie's TTL
   // runs out. That is acceptable because a resubmission must also carry the
