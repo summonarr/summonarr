@@ -4,6 +4,7 @@
 // so it is exhaustively unit-testable. Run via `npm test` (Node's built-in runner).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   Permission,
   KNOWN_MASK,
@@ -20,6 +21,8 @@ import {
   parseMediaServerGrants,
   serializeMediaServerGrants,
   canViewMediaInstance,
+  canAutoRequest,
+  AUTO_REQUEST_MASK,
   type MediaServerGrants,
 } from "../src/lib/permissions.ts";
 
@@ -315,4 +318,46 @@ test("media-server grants: prototype-pollution attempts at BOTH nesting levels a
 
   // A polluted prototype must not be able to fabricate a grant either.
   assert.equal(canViewMediaInstance(0n, { slug: "polluted", restricted: true }, parsedOuter, "plex"), false);
+});
+
+// ── watchlist auto-request bits (guardrail 34b) ──────────────────────────────
+
+test("AUTO_REQUEST bits are fixed at 19/20/21, legal in KNOWN_MASK, and seeded by NO role preset", () => {
+  // Bit numbers are stored in the DB — they can never move.
+  assert.equal(Permission.AUTO_REQUEST, 1n << 19n);
+  assert.equal(Permission.AUTO_REQUEST_MOVIE, 1n << 20n);
+  assert.equal(Permission.AUTO_REQUEST_TV, 1n << 21n);
+  assert.equal(AUTO_REQUEST_MASK, (1n << 19n) | (1n << 20n) | (1n << 21n));
+  assert.equal(KNOWN_MASK & AUTO_REQUEST_MASK, AUTO_REQUEST_MASK, "the admin PATCH must accept them");
+  assert.equal(parseAndValidatePermissions(AUTO_REQUEST_MASK.toString()), AUTO_REQUEST_MASK);
+  // Filing requests on someone's behalf is opt-in per user: no preset grants it.
+  for (const role of ["USER", "ISSUE_ADMIN"]) {
+    assert.equal(defaultPermissionsForRole(role) & AUTO_REQUEST_MASK, 0n, `${role} preset must not auto-request`);
+  }
+  assert.equal(canAutoRequest(effectivePermissions("USER", 0n), "MOVIE"), false, "an unseeded USER does not auto-request");
+});
+
+test("canAutoRequest: umbrella-or-specific per media type, ADMIN via the superbit, and no other bit implies it", () => {
+  assert.equal(canAutoRequest(Permission.AUTO_REQUEST, "MOVIE"), true);
+  assert.equal(canAutoRequest(Permission.AUTO_REQUEST, "TV"), true);
+  assert.equal(canAutoRequest(Permission.AUTO_REQUEST_MOVIE, "MOVIE"), true);
+  assert.equal(canAutoRequest(Permission.AUTO_REQUEST_MOVIE, "TV"), false);
+  assert.equal(canAutoRequest(Permission.AUTO_REQUEST_TV, "TV"), true);
+  assert.equal(canAutoRequest(Permission.AUTO_REQUEST_TV, "MOVIE"), false);
+  assert.equal(canAutoRequest(Permission.ADMIN, "TV"), true);
+  // Requesting or auto-APPROVING is not auto-REQUESTING.
+  const everythingElse = KNOWN_MASK & ~AUTO_REQUEST_MASK & ~Permission.ADMIN;
+  assert.equal(canAutoRequest(everythingElse, "MOVIE"), false);
+  assert.equal(canAutoRequest(everythingElse, "TV"), false);
+  // And the automation bit alone grants no request capability.
+  assert.equal(canRequest(Permission.AUTO_REQUEST, "MOVIE", false), false);
+});
+
+test("every permission bit is editable in the admin permission editor", () => {
+  // A bit missing from the modal can be granted by nobody through the UI.
+  const modal = readFileSync("src/components/admin/user-modals/permissions-modal.tsx", "utf8");
+  for (const key of Object.keys(Permission)) {
+    if (key === "ADMIN") continue; // the superbit follows role=ADMIN, not a checkbox
+    assert.match(modal, new RegExp(`key: "${key}"`), `${key} has no checkbox in permissions-modal.tsx`);
+  }
 });

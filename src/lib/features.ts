@@ -114,6 +114,13 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
     category: "behaviors",
     defaultEnabled: true,
   },
+  {
+    key: "feature.behavior.watchlistAutoRequest",
+    label: "Watchlist auto-request",
+    description: "File a request automatically when a user adds a title to their watchlist — in Summonarr, and on their Plex watchlist (polled by the sync-plex-watchlists cron). Only for users granted an Auto-request permission; each request still goes through quota, blacklist and approval. Plex users must sign in with Plex once after this is enabled so their watchlist can be read.",
+    category: "behaviors",
+    defaultEnabled: false,
+  },
 
   // ── Integrations ──────────────────────────────────────────────────────
   // Off-switches that layer on top of config presence. A disabled integration

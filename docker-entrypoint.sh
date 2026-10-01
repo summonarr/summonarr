@@ -435,8 +435,9 @@ _cron_loop() {
   PURGE_SESSIONS_NEXT=$((NOW_INIT + 600))
   SCRUB_AUDIT_PII_NEXT=$((NOW_INIT + 900))
   TRASH_SYNC_NEXT=$((NOW_INIT + 360))
+  PLEX_WATCHLIST_NEXT=$((NOW_INIT + 420))
 
-  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  Recommendations: ${WARM_RECOMMENDATIONS_INTERVAL:-43200}s  Library: ${WARM_LIBRARY_INTERVAL:-86400}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s"
+  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  Recommendations: ${WARM_RECOMMENDATIONS_INTERVAL:-43200}s  Library: ${WARM_LIBRARY_INTERVAL:-86400}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s  PlexWatchlist: ${PLEX_WATCHLIST_SYNC_INTERVAL:-1800}s"
   while true; do
     sleep 60
     NOW=$(date +%s)
@@ -487,6 +488,12 @@ _cron_loop() {
     if [ "$NOW" -ge "$TRASH_SYNC_NEXT" ]; then
       _cron_sync "${TRASH_SYNC_URL:-${CRON_BASE}/api/cron/trash-sync}" "trash-sync" && rc=0 || rc=$?
       TRASH_SYNC_NEXT=$(_cron_next "$rc" "$NOW" "${TRASH_SYNC_INTERVAL:-86400}" 86400)
+    fi
+    # Watchlist auto-request (Plex half). A no-op unless the admin enabled
+    # feature.behavior.watchlistAutoRequest; quiet so the disabled no-op doesn't log.
+    if [ "$NOW" -ge "$PLEX_WATCHLIST_NEXT" ]; then
+      _cron_sync "${PLEX_WATCHLIST_SYNC_URL:-${CRON_BASE}/api/cron/sync-plex-watchlists}" "sync-plex-watchlists" quiet && rc=0 || rc=$?
+      PLEX_WATCHLIST_NEXT=$(_cron_next "$rc" "$NOW" "${PLEX_WATCHLIST_SYNC_INTERVAL:-1800}" 1800)
     fi
   done
 }

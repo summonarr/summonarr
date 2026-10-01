@@ -1177,6 +1177,45 @@ const spec = {
       },
     },
 
+    "/profile/auto-request": {
+      get: {
+        tags: ["Profile"],
+        summary: "Read the caller's watchlist auto-request state",
+        responses: {
+          "200": {
+            description: "Feature, permission and toggle state",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    enabled: { type: "boolean", description: "feature.behavior.watchlistAutoRequest is on" },
+                    permitted: {
+                      type: "object",
+                      description: "Whether the caller holds an AUTO_REQUEST* bit for each media type",
+                      properties: { movie: { type: "boolean" }, tv: { type: "boolean" } },
+                    },
+                    plexWatchlist: { type: "boolean", description: "The caller's \"Auto-request from my Plex watchlist\" toggle" },
+                    plexConnected: { type: "boolean", description: "A Plex token is stored (captured at Plex sign-in while the feature is on)" },
+                  },
+                },
+              },
+            },
+          },
+          "404": { description: "User row not found" },
+        },
+      },
+      patch: {
+        tags: ["Profile"],
+        summary: "Turn the caller's Plex watchlist auto-request on or off",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["plexWatchlist"], properties: { plexWatchlist: { type: "boolean" } } } } },
+        },
+        responses: { "200": { description: "Saved" }, "400": { description: "plexWatchlist is not a boolean" } },
+      },
+    },
+
     "/push/vapid-key": {
       get: {
         tags: ["Push"],
@@ -2527,8 +2566,43 @@ const spec = {
       post: {
         tags: ["Lists"],
         summary: "Add a title to the caller's watchlist",
+        description:
+          "When watchlist auto-request applies (feature.behavior.watchlistAutoRequest on and the caller holds an AUTO_REQUEST* bit for the media type), the add also files a request through the same path as POST /requests. A refusal never fails the add: the 201 body then carries an additive `autoRequest` object. The field is absent whenever auto-request does not apply.",
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["tmdbId", "mediaType"], properties: { tmdbId: { type: "integer" }, mediaType: { $ref: "#/components/schemas/MediaType" } } } } } },
-        responses: { "201": { description: "Added" }, "409": { description: "Already on watchlist" }, "422": { description: "Could not verify media with TMDB" } },
+        responses: {
+          "201": {
+            description: "Added",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    tmdbId: { type: "integer" },
+                    mediaType: { $ref: "#/components/schemas/MediaType" },
+                    title: { type: "string" },
+                    posterPath: { type: "string", nullable: true },
+                    createdAt: { type: "string", format: "date-time" },
+                    autoRequest: {
+                      type: "object",
+                      description: "Present only when auto-request applied to this add",
+                      properties: {
+                        outcome: {
+                          type: "string",
+                          description: "requested | already-available | already-requested | quota | blacklisted | permanently-declined | rating-cap | forbidden | instance-unavailable | tmdb-unverified | arr-unreachable | discord-link-required | rate-limited | maintenance | error",
+                        },
+                        requested: { type: "boolean" },
+                        status: { type: "string", nullable: true, description: "The filed request's status when one was filed" },
+                        message: { type: "string", description: "Short user-facing explanation" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "409": { description: "Already on watchlist" },
+          "422": { description: "Could not verify media with TMDB" },
+        },
       },
       delete: {
         tags: ["Lists"],

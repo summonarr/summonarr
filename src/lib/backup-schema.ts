@@ -51,6 +51,7 @@ export const BACKUP_TABLES = [
   "WebhookReplay",
   "WatchlistItem",
   "HiddenItem",
+  "AutoRequestLedger",
   "Notification",
   "UserRecommendation",
   // The server-wide "For You" graph (recommendation-graph.ts). Derived data —

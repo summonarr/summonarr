@@ -46,6 +46,20 @@ export function WatchlistButton({
         setMsg(data.error ?? "Something went wrong");
       } else {
         toast({ title: next ? "Added to watchlist" : "Removed from watchlist", variant: "success" });
+        // Watchlist auto-request: the add may also have filed a request. The
+        // field is present only when auto-request applied; a refusal (quota,
+        // blacklisted, already available…) never fails the add itself.
+        if (next && res.status === 201) {
+          const data = (await res.json().catch(() => ({}))) as {
+            autoRequest?: { requested?: boolean; outcome?: string; message?: string };
+          };
+          const ar = data.autoRequest;
+          if (ar?.requested) {
+            toast({ title: `Auto-requested: ${ar.message ?? "Requested"}`, variant: "success" });
+          } else if (ar && ar.outcome !== "already-requested" && ar.outcome !== "already-available") {
+            toast({ title: `Not auto-requested: ${ar.message ?? "something went wrong"}` });
+          }
+        }
       }
     } catch {
       setOn(!next); // rollback

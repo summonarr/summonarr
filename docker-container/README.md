@@ -169,6 +169,7 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | `PURGE_SESSIONS_INTERVAL`    | `86400` | Expired auth-session purge.                                        |
 | `SCRUB_AUDIT_PII_INTERVAL`   | `86400` | Audit-log PII scrubber.                                            |
 | `TRASH_SYNC_INTERVAL`        | `86400` | TRaSH-Guides quality profile refresh.                              |
+| `PLEX_WATCHLIST_SYNC_INTERVAL` | `1800` | Plex watchlist auto-request (a no-op unless *Watchlist auto-request* is enabled in Features). |
 
 ### Advanced / rarely needed
 
@@ -234,6 +235,7 @@ Jobs staggered after startup to avoid a thundering herd:
 | MDBList warmer         | +240s                 |
 | OMDB warmer            | +300s                 |
 | TRaSH-Guides sync      | +360s                 |
+| Plex watchlist sync    | +420s                 |
 | Auth-session purge     | +600s                 |
 | Audit-log PII scrubber | +900s                 |
 

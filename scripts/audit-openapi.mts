@@ -105,6 +105,7 @@ const EXCEPTIONS: Array<{ route: string; reason: string }> = [
   { route: "/cron/trash-sync", reason: "cron job (CRON_SECRET)" },
   { route: "/cron/trash-diagnostic", reason: "cron diagnostic (CRON_SECRET)" },
   { route: "/cron/warm-list-cache", reason: "cron job (CRON_SECRET)" },
+  { route: "/cron/sync-plex-watchlists", reason: "cron job (CRON_SECRET)" },
 ];
 
 /**

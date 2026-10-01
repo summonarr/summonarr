@@ -591,8 +591,11 @@ test("every route that ARMS pendingNotifyAt also SCHEDULES the check", () => {
   // `pendingNotifyAt: now + 90_000` line and stops there is exactly the bug this
   // suite exists for, and it would sail past a fixed roster. Arming the flag only
   // buys the orchestrator's periodic sweep — the schedule is what makes it prompt.
+  // src/lib/request-create.ts is POST /api/requests' body, extracted so the
+  // watchlist auto-request files through the same chokepoint — an approval path
+  // like the routes, so it is scanned with them.
   const arming = walkSrc()
-    .filter((f) => f.startsWith("src/app/api/"))
+    .filter((f) => f.startsWith("src/app/api/") || f === "src/lib/request-create.ts")
     .filter((f) => {
       const text = src(f);
       return text.includes("pendingNotifyAt") && /\+ 90_000/.test(text);
@@ -605,7 +608,7 @@ test("every route that ARMS pendingNotifyAt also SCHEDULES the check", () => {
     "src/app/api/requests/[id]/route.ts",
     "src/app/api/requests/batch/route.ts",
     "src/app/api/requests/bulk/route.ts",
-    "src/app/api/requests/route.ts",
+    "src/lib/request-create.ts",
   ], "an approval path was added or removed — confirm it schedules, then update this roster");
 
   const armedButUnscheduled = arming.filter((f) => !/scheduleDownloadChecks?\(/.test(src(f)));

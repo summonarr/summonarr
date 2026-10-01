@@ -7,6 +7,7 @@ import { Prisma } from "@/generated/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { resolveMediaMeta } from "@/lib/request-meta";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
+import { maybeAutoRequestWatchlistAdd } from "@/lib/auto-request";
 
 const PAGE_SIZE = 60;
 const SELECT = { tmdbId: true, mediaType: true, title: true, posterPath: true, createdAt: true } as const;
@@ -46,6 +47,15 @@ export const GET = withAuth(async (req, _ctx, session) => {
 // POST — add { tmdbId, mediaType } to the caller's watchlist. No library/permission
 // gate: the watchlist is a personal save-for-later list, deliberately usable for
 // unavailable titles. TMDB verification supplies the denormalized title/poster.
+//
+// Watchlist auto-request (src/lib/auto-request.ts): for a caller holding an
+// AUTO_REQUEST* bit while feature.behavior.watchlistAutoRequest is on, the add
+// also files a request. That is strictly ADDITIVE — the add has already
+// succeeded, so a refusal (quota, blacklist, already available…) or any failure
+// never turns it into an error; the response is the item plus an `autoRequest`
+// field describing what happened. The field is absent whenever auto-request
+// does not apply, so the response is byte-identical to before for everyone else
+// (the iOS app decodes it).
 export const POST = withAuth(async (req, _ctx, session) => {
   if (!checkRateLimit(`watchlist:${session.user.id}`, 60, 60_000)) {
     return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
@@ -71,18 +81,35 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: "Could not verify media with TMDB" }, { status: 422 });
   }
 
+  let item: Prisma.WatchlistItemGetPayload<{ select: typeof SELECT }>;
   try {
-    const item = await prisma.watchlistItem.create({
+    item = await prisma.watchlistItem.create({
       data: { tmdbId, mediaType, title: verified.title, posterPath: verified.posterPath, userId: session.user.id },
       select: SELECT,
     });
-    return NextResponse.json(item, { status: 201 });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       return NextResponse.json({ error: "Already on your watchlist" }, { status: 409 });
     }
     throw err;
   }
+
+  // Never throws (auto-request.ts), and runs outside the try above so nothing it
+  // does can be mistaken for the watchlist insert's own P2002.
+  const autoRequest = await maybeAutoRequestWatchlistAdd(session, tmdbId, mediaType);
+  if (!autoRequest) return NextResponse.json(item, { status: 201 });
+  return NextResponse.json(
+    {
+      ...item,
+      autoRequest: {
+        outcome: autoRequest.outcome,
+        requested: autoRequest.outcome === "requested",
+        status: autoRequest.status,
+        message: autoRequest.message,
+      },
+    },
+    { status: 201 },
+  );
 });
 
 // DELETE — remove ?tmdbId=&mediaType= from the caller's watchlist. deleteMany so a

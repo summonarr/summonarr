@@ -1,6 +1,6 @@
-// Route-level unit tests for all eleven POST /api/cron/* handlers:
+// Route-level unit tests for all twelve POST /api/cron/* handlers:
 //   purge-auth-sessions, scrub-audit-pii, sync-download-policies,
-//   trash-diagnostic, trash-sync, warm-activity, warm-library,
+//   sync-plex-watchlists, trash-diagnostic, trash-sync, warm-activity, warm-library,
 //   warm-list-cache, warm-mdblist, warm-omdb, warm-recommendations
 //
 // These are the internet-facing entry points the container's own cron loop
@@ -158,6 +158,8 @@ for (const model of [
   // An unstubbed model here does not fail — it tries to open a real connection
   // and the suite hangs.
   "userRecommendation", "watchlistItem", "titleSuggestion", "recommendationTitle",
+  // sync-plex-watchlists: stored Plex tokens + the auto-request ledger.
+  "account", "autoRequestLedger",
 ]) {
   shadowPrismaModel(prisma, model, counter(model));
 }
@@ -216,6 +218,7 @@ const ROUTES: CronRoute[] = [
   await load("purge-auth-sessions", 2001),
   await load("scrub-audit-pii", 2002),
   await load("sync-download-policies", 2009),
+  await load("sync-plex-watchlists", AL.PLEX_WATCHLIST_LOCK_ID),
   await load("trash-diagnostic", null),
   await load("trash-sync", AL.TRASH_SYNC_LOCK_ID),
   await load("warm-activity", null),
@@ -251,8 +254,8 @@ beforeEach(() => {
 
 // ── the matrix itself must not pass vacuously ────────────────────────────────
 
-test("all eleven cron routes loaded and expose a POST handler", () => {
-  assert.equal(ROUTES.length, 11);
+test("all twelve cron routes loaded and expose a POST handler", () => {
+  assert.equal(ROUTES.length, 12);
   for (const r of ROUTES) assert.equal(typeof r.POST, "function", `${r.name} has no POST`);
 });
 

@@ -175,6 +175,7 @@ const SETTINGS_SCHEMA = [
   ["feature.behavior.activeSessions", false],
   ["feature.behavior.activityCalendar", false],
   ["feature.behavior.watchGrades",    false],
+  ["feature.behavior.watchlistAutoRequest", false],
   ["feature.integration.plex",        false],
   ["feature.integration.jellyfin",    false],
   ["feature.integration.radarr",      false],

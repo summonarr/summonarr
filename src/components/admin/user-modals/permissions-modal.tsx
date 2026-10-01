@@ -40,6 +40,17 @@ const PERMISSION_GROUPS: { title: string; bits: { key: keyof typeof Permission; 
     ],
   },
   {
+    // File a request when the user adds a title to their watchlist (Summonarr or
+    // Plex). The request still needs the Request bits above and goes through quota,
+    // blacklist and approval like any other — this only automates the click.
+    title: "Auto-request from watchlist",
+    bits: [
+      { key: "AUTO_REQUEST", label: "Auto-request (all)" },
+      { key: "AUTO_REQUEST_MOVIE", label: "Auto-request movies" },
+      { key: "AUTO_REQUEST_TV", label: "Auto-request TV" },
+    ],
+  },
+  {
     title: "Manage",
     bits: [
       { key: "MANAGE_REQUESTS", label: "Manage requests" },
