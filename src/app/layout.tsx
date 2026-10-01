@@ -8,7 +8,9 @@ import { ThemeProvider } from "@/components/theme/theme-provider";
 import { ToastProvider } from "@/components/ui/toast";
 import { I18nProvider } from "@/components/i18n/i18n-provider";
 import { getLocale } from "@/lib/i18n/server";
-import { CATALOGS, FALLBACK_MESSAGES } from "@/lib/i18n/catalogs";
+import { CATALOGS } from "@/lib/i18n/catalogs";
+
+const EMPTY_MESSAGES = {};
 
 // Runs before first paint: applies the user's persisted theme/accent so there
 // is no flash. Mirrors the storage keys + validation in theme-provider.tsx.
@@ -133,8 +135,10 @@ export default async function RootLayout({
         <I18nProvider
           locale={locale}
           messages={CATALOGS[locale]}
-          // English is already the active catalog — don't ship it twice.
-          fallback={locale === "en" ? {} : FALLBACK_MESSAGES}
+          // No client-side fallback: tests/i18n.test.mts pins every locale to
+          // exactly English's key set, so the active catalog is always complete
+          // and shipping English beside it would only double the payload.
+          fallback={EMPTY_MESSAGES}
         >
           <SummonarrSessionProvider initialSession={summonarrInitialSession}>
             <ThemeProvider>
