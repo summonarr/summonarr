@@ -3,6 +3,7 @@
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useCallback, useState } from "react";
 import Link from "next/link";
+import { useT } from "@/components/i18n/i18n-provider";
 
 const DATE_RANGES = [
   { label: "7d", value: "7" },
@@ -11,29 +12,32 @@ const DATE_RANGES = [
   { label: "90d", value: "90" },
 ];
 
-const SOURCES = [
-  { label: "All", value: "" },
+// `labelKey` entries are catalog keys translated at render; brand names
+// (Plex, Jellyfin) carry a literal `label` instead.
+const SOURCES: { label?: string; labelKey?: string; value: string }[] = [
+  { labelKey: "adminActivity.filter.all", value: "" },
   { label: "Plex", value: "plex" },
   { label: "Jellyfin", value: "jellyfin" },
 ];
 
 const MEDIA_TYPES = [
-  { label: "All", value: "" },
-  { label: "Movies", value: "MOVIE" },
-  { label: "TV", value: "TV" },
+  { labelKey: "adminActivity.filter.all", value: "" },
+  { labelKey: "adminActivity.filter.movies", value: "MOVIE" },
+  { labelKey: "adminActivity.filter.tv", value: "TV" },
 ];
 
-const SUB_PAGES = [
-  { label: "Overview", href: "/admin/activity", exact: true },
-  { label: "History", href: "/admin/activity", tab: "history" },
-  { label: "Users", href: "/admin/activity/users" },
-  { label: "Stats", href: "/admin/activity/stats" },
-  { label: "Recently Added", href: "/admin/activity/recent" },
+const SUB_PAGES: { labelKey: string; href: string; exact?: boolean; tab?: string }[] = [
+  { labelKey: "adminActivity.tab.overview", href: "/admin/activity", exact: true },
+  { labelKey: "adminActivity.tab.history", href: "/admin/activity", tab: "history" },
+  { labelKey: "adminActivity.tab.users", href: "/admin/activity/users" },
+  { labelKey: "adminActivity.tab.stats", href: "/admin/activity/stats" },
+  { labelKey: "adminActivity.tab.recentlyAdded", href: "/admin/activity/recent" },
 ];
 
 // Sub-page nav tabs plus period/source/type filters for the admin activity
 // pages; filters are driven entirely through URL search params.
 export function ActivityFilterBar() {
+  const t = useT();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -95,16 +99,16 @@ export function ActivityFilterBar() {
   const applyCustomDays = () => {
     const trimmed = customValue.trim();
     if (trimmed === "") {
-      setCustomError("Enter a number of days.");
+      setCustomError(t("adminActivity.filter.error.empty"));
       return;
     }
     const num = Number(trimmed);
     if (!Number.isInteger(num)) {
-      setCustomError("Whole days only.");
+      setCustomError(t("adminActivity.filter.error.whole"));
       return;
     }
     if (num < 1 || num > 3650) {
-      setCustomError("Pick between 1 and 3650 days.");
+      setCustomError(t("adminActivity.filter.error.range"));
       return;
     }
     setCustomError(null);
@@ -122,7 +126,7 @@ export function ActivityFilterBar() {
           if (page.tab) {
             return (
               <button
-                key={page.label}
+                key={page.labelKey}
                 onClick={() => router.push(`/admin/activity?tab=${page.tab}`)}
                 aria-current={active ? "page" : undefined}
                 className={`inline-flex items-center min-h-8 px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
@@ -131,14 +135,14 @@ export function ActivityFilterBar() {
                     : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60"
                 }`}
               >
-                {page.label}
+                {t(page.labelKey)}
               </button>
             );
           }
           if (page.href === "/admin/activity" && page.exact) {
             return (
               <button
-                key={page.label}
+                key={page.labelKey}
                 onClick={() => router.push("/admin/activity")}
                 aria-current={active ? "page" : undefined}
                 className={`inline-flex items-center min-h-8 px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
@@ -147,13 +151,13 @@ export function ActivityFilterBar() {
                     : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60"
                 }`}
               >
-                {page.label}
+                {t(page.labelKey)}
               </button>
             );
           }
           return (
             <Link
-              key={page.label}
+              key={page.labelKey}
               href={page.href}
               aria-current={active ? "page" : undefined}
               className={`inline-flex items-center min-h-8 px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
@@ -162,7 +166,7 @@ export function ActivityFilterBar() {
                   : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60"
               }`}
             >
-              {page.label}
+              {t(page.labelKey)}
             </Link>
           );
         })}
@@ -172,7 +176,7 @@ export function ActivityFilterBar() {
       {showFilters && (
         <div className="flex flex-wrap items-center gap-4">
           <div className="flex flex-wrap items-center gap-1">
-            <span className="text-xs text-zinc-500 mr-1">Period</span>
+            <span className="text-xs text-zinc-500 mr-1">{t("adminActivity.filter.period")}</span>
             <div className="flex rounded-lg border border-zinc-700 overflow-hidden">
               {DATE_RANGES.map((r) => {
                 const selected =
@@ -204,7 +208,7 @@ export function ActivityFilterBar() {
                     : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
                 }`}
               >
-                Custom
+                {t("adminActivity.filter.custom")}
               </button>
             </div>
             {showCustom && (
@@ -220,8 +224,8 @@ export function ActivityFilterBar() {
                     if (customError) setCustomError(null);
                   }}
                   onKeyDown={(e) => e.key === "Enter" && applyCustomDays()}
-                  placeholder="days"
-                  aria-label="Custom range in days"
+                  placeholder={t("adminActivity.filter.daysPlaceholder")}
+                  aria-label={t("adminActivity.filter.customAria")}
                   aria-invalid={customError ? true : undefined}
                   aria-describedby={customError ? "activity-custom-days-error" : undefined}
                   className={`w-16 min-h-8 px-2 py-1 text-xs bg-zinc-800 border rounded-lg text-zinc-100 placeholder:text-zinc-500 focus:outline-none tabular-nums ${
@@ -234,7 +238,7 @@ export function ActivityFilterBar() {
                   onClick={applyCustomDays}
                   className="inline-flex items-center min-h-8 px-2 py-1 text-xs font-medium bg-indigo-600 text-[var(--ds-accent-fg)] rounded-lg hover:bg-indigo-500 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
                 >
-                  Go
+                  {t("adminActivity.filter.go")}
                 </button>
                 {customError && (
                   <span
@@ -250,7 +254,7 @@ export function ActivityFilterBar() {
           </div>
 
           <div className="flex items-center gap-1">
-            <span className="text-xs text-zinc-500 mr-1">Source</span>
+            <span className="text-xs text-zinc-500 mr-1">{t("adminActivity.filter.source")}</span>
             <div className="flex rounded-lg border border-zinc-700 overflow-hidden">
               {SOURCES.map((s) => (
                 <button
@@ -263,27 +267,27 @@ export function ActivityFilterBar() {
                       : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
                   }`}
                 >
-                  {s.label}
+                  {s.labelKey ? t(s.labelKey) : s.label}
                 </button>
               ))}
             </div>
           </div>
 
           <div className="flex items-center gap-1">
-            <span className="text-xs text-zinc-500 mr-1">Type</span>
+            <span className="text-xs text-zinc-500 mr-1">{t("adminActivity.filter.type")}</span>
             <div className="flex rounded-lg border border-zinc-700 overflow-hidden">
-              {MEDIA_TYPES.map((t) => (
+              {MEDIA_TYPES.map((mt) => (
                 <button
-                  key={t.value}
-                  onClick={() => setParam("mediaType", t.value)}
-                  aria-pressed={currentMediaType === t.value}
+                  key={mt.value}
+                  onClick={() => setParam("mediaType", mt.value)}
+                  aria-pressed={currentMediaType === mt.value}
                   className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
-                    currentMediaType === t.value
+                    currentMediaType === mt.value
                       ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
                       : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700 hover:text-zinc-100"
                   }`}
                 >
-                  {t.label}
+                  {t(mt.labelKey)}
                 </button>
               ))}
             </div>

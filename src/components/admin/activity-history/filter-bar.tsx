@@ -7,6 +7,7 @@
 
 import { useId } from "react";
 import type { MediaServerUserOption } from "./types";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 const inputStyle: React.CSSProperties = {
   fontFamily: "inherit",
@@ -104,6 +105,7 @@ function SelectField({
   onChange: (v: string) => void;
   options: { value: string; label: string }[];
 }) {
+  const t = useT();
   return (
     <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
       <span
@@ -134,7 +136,7 @@ function SelectField({
           cursor: "pointer",
         }}
       >
-        <option value="">All</option>
+        <option value="">{t("adminActivity.filter.all")}</option>
         {options.map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}
@@ -192,6 +194,8 @@ export function HistoryFilterBar({
   clearFilters: () => void;
   exportAs: (format: "csv" | "json") => void;
 }) {
+  const t = useT();
+  const locale = useLocale();
   return (
     <div
       style={{
@@ -244,8 +248,8 @@ export function HistoryFilterBar({
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by title, user, or IP…"
-            aria-label="Search plays"
+            placeholder={t("adminActivity.history.searchPlaceholder")}
+            aria-label={t("adminActivity.history.searchAria")}
             className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             style={{
               fontFamily: "inherit",
@@ -261,7 +265,7 @@ export function HistoryFilterBar({
           {search && (
             <button
               onClick={() => setSearch("")}
-              aria-label="Clear search"
+              aria-label={t("adminActivity.history.clearSearch")}
               style={{
                 position: "absolute",
                 right: 8,
@@ -298,7 +302,7 @@ export function HistoryFilterBar({
             type="date"
             className={dateInputClass}
             value={fromDate}
-            aria-label="From date"
+            aria-label={t("adminActivity.history.fromDate")}
             onChange={(e) => setFromDate(e.target.value)}
             style={{
               ...inputStyle,
@@ -315,7 +319,7 @@ export function HistoryFilterBar({
             type="date"
             className={dateInputClass}
             value={toDate}
-            aria-label="To date"
+            aria-label={t("adminActivity.history.toDate")}
             onChange={(e) => setToDate(e.target.value)}
             style={{
               ...inputStyle,
@@ -335,7 +339,7 @@ export function HistoryFilterBar({
             whiteSpace: "nowrap",
           }}
         >
-          {total.toLocaleString("en-US")} total
+          {t("adminActivity.history.total", { n: total.toLocaleString(locale) })}
         </div>
 
         {hasFilter && (
@@ -353,7 +357,7 @@ export function HistoryFilterBar({
               whiteSpace: "nowrap",
             }}
           >
-            Clear filters
+            {t("adminActivity.history.clearFilters")}
           </button>
         )}
 
@@ -371,7 +375,7 @@ export function HistoryFilterBar({
               whiteSpace: "nowrap",
             }}
           >
-            Export CSV
+            {t("adminActivity.history.exportCsv")}
           </button>
           <button
             onClick={() => exportAs("json")}
@@ -400,45 +404,45 @@ export function HistoryFilterBar({
         }}
       >
         <SegGroup
-          label="Watched"
+          label={t("adminActivity.field.watched")}
           value={watched}
           setValue={setWatched}
           options={[
-            { value: "", label: "All" },
-            { value: "true", label: "Yes" },
-            { value: "false", label: "No" },
+            { value: "", label: t("adminActivity.filter.all") },
+            { value: "true", label: t("adminActivity.common.yes") },
+            { value: "false", label: t("adminActivity.common.no") },
           ]}
         />
         <SegGroup
-          label="Stream"
+          label={t("adminActivity.field.stream")}
           value={method}
           setValue={setMethod}
           options={[
-            { value: "", label: "All" },
-            { value: "DirectPlay", label: "Direct" },
-            { value: "DirectStream", label: "Remux" },
-            { value: "Transcode", label: "Transcode" },
+            { value: "", label: t("adminActivity.filter.all") },
+            { value: "DirectPlay", label: t("adminActivity.method.direct") },
+            { value: "DirectStream", label: t("adminActivity.method.remux") },
+            { value: "Transcode", label: t("adminActivity.method.transcode") },
           ]}
         />
         <SelectField
-          label="User"
+          label={t("adminActivity.field.user")}
           value={userFilter}
           onChange={setUserFilter}
           options={users.map((u) => ({ value: u.id, label: u.username }))}
         />
         <SelectField
-          label="Platform"
+          label={t("adminActivity.field.platform")}
           value={platform}
           onChange={setPlatform}
           options={platforms.map((p) => ({ value: p, label: p }))}
         />
         <SegGroup
-          label="Group resumes"
+          label={t("adminActivity.history.groupResumes")}
           value={grouped ? "on" : "off"}
           setValue={(v) => setGrouped(v === "on")}
           options={[
-            { value: "on", label: "On" },
-            { value: "off", label: "Off" },
+            { value: "on", label: t("adminActivity.common.on") },
+            { value: "off", label: t("adminActivity.common.off") },
           ]}
         />
       </div>

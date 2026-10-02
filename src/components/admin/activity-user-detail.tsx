@@ -6,7 +6,8 @@
 
 import Link from "next/link";
 import { useHasMounted } from "@/hooks/use-has-mounted";
-import { formatRelativeTime } from "@/lib/relative-time";
+import { formatRelativeTimeLocalized } from "@/lib/relative-time";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { IpInfo } from "@/components/admin/ip-info";
 import {
   ActivityCard,
@@ -65,17 +66,18 @@ export interface UserDetailData {
   }[];
 }
 
-const STREAM_META: Record<string, { label: string; color: string }> = {
-  DirectPlay: { label: "Direct Play", color: "var(--ds-success)" },
-  DirectStream: { label: "Remux", color: "var(--ds-info)" },
-  Transcode: { label: "Transcode", color: "var(--ds-warning)" },
+// `labelKey` is a catalog key, translated at render.
+const STREAM_META: Record<string, { labelKey: string; color: string }> = {
+  DirectPlay: { labelKey: "adminActivity.method.directPlay", color: "var(--ds-success)" },
+  DirectStream: { labelKey: "adminActivity.method.remux", color: "var(--ds-info)" },
+  Transcode: { labelKey: "adminActivity.method.transcode", color: "var(--ds-warning)" },
 };
 
-function absTime(iso: string): string {
+function absTime(iso: string, locale: string): string {
   // Pin to UTC so the server (container time zone) and the browser (user time
   // zone) print the same date. Otherwise a play near midnight could render as
   // different days and cause a React #418 hydration mismatch.
-  return new Date(iso).toLocaleDateString("en-US", {
+  return new Date(iso).toLocaleDateString(locale, {
     month: "short",
     day: "numeric",
     timeZone: "UTC",
@@ -84,8 +86,10 @@ function absTime(iso: string): string {
 
 export function UserDetailView({ data: s }: { data: UserDetailData }) {
   const mounted = useHasMounted();
+  const t = useT();
+  const locale = useLocale();
   const when = (iso: string | null) =>
-    !iso ? "—" : mounted ? formatRelativeTime(iso) : absTime(iso);
+    !iso ? "—" : mounted ? formatRelativeTimeLocalized(iso, locale) : absTime(iso, locale);
 
   // Postgres day-of-week is 0=Sun..6=Sat; the heatmap rows start on Monday,
   // so (dow + 6) % 7 shifts Sunday to the last row.
@@ -99,7 +103,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
   }
 
   const streamTypes = ["DirectPlay", "DirectStream", "Transcode"].map((m) => ({
-    label: STREAM_META[m].label,
+    label: t(STREAM_META[m].labelKey),
     count: s.transcodeRatio.find((r) => r.method === m)?.count ?? 0,
     color: STREAM_META[m].color,
   }));
@@ -111,7 +115,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
   return (
     <div className="ds-page-enter">
       <DetailHeader
-        back={{ href: "/admin/activity/users", label: "Back to users" }}
+        back={{ href: "/admin/activity/users", label: t("adminActivity.user.backToUsers") }}
         leading={
           <Avatar
             letter={(s.username[0] ?? "?").toUpperCase()}
@@ -123,7 +127,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
         meta={<SourceTag source={s.source} />}
         subtitle={
           [s.email, s.linkedLabel].filter(Boolean).join(" · ") ||
-          `${s.source} account`
+          t("adminActivity.user.sourceAccount", { source: s.source })
         }
       />
 
@@ -137,22 +141,22 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
         }}
       >
         <MiniKpi
-          label="Total plays"
-          value={s.totalPlays.toLocaleString("en-US")}
+          label={t("adminActivity.user.totalPlays")}
+          value={s.totalPlays.toLocaleString(locale)}
           big
         />
         <MiniKpi
-          label="Watch time"
-          value={`${s.totalWatchTimeHours.toLocaleString("en-US")}h`}
+          label={t("adminActivity.kpi.watchTime")}
+          value={`${s.totalWatchTimeHours.toLocaleString(locale)}h`}
           big
         />
-        <MiniKpi label="Last active" value={when(s.lastActiveIso)} />
+        <MiniKpi label={t("adminActivity.user.lastActive")} value={when(s.lastActiveIso)} />
         <MiniKpi
-          label="Avg session"
+          label={t("adminActivity.user.avgSession")}
           value={fmtDuration(s.avgSessionDuration)}
         />
         <MiniKpi
-          label="Direct play"
+          label={t("adminActivity.user.directPlay")}
           value={s.directPct != null ? `${s.directPct}%` : "—"}
           big
         />
@@ -162,8 +166,8 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
         <div style={{ marginBottom: 22 }}>
           <ActivityCard>
             <SectionHeader
-              label="365-day activity"
-              sub={`${s.activityCalendar.filter((v) => v.count > 0).length} active days`}
+              label={t("adminActivity.calendar.title")}
+              sub={t("adminActivity.user.activeDays", { count: s.activityCalendar.filter((v) => v.count > 0).length })}
             />
             <ActivityCalendar
               data={s.activityCalendar}
@@ -185,18 +189,18 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
       >
         <ActivityCard>
           <SectionHeader
-            label="Plays per day · 90d"
-            sub={`peak ${Math.max(...playsByDay, 0)} plays`}
+            label={t("adminActivity.title.playsPerDay90")}
+            sub={t("adminActivity.user.peakPlays", { count: Math.max(...playsByDay, 0) })}
           />
           <AreaChart
             data={playsByDay}
             h={130}
-            labels={s.playsByDay.map((d) => absTime(`${d.day}T00:00:00Z`))}
-            valueSuffix=" plays"
+            labels={s.playsByDay.map((d) => absTime(`${d.day}T00:00:00Z`, locale))}
+            valueSuffix={t("adminActivity.common.playsSuffix")}
           />
         </ActivityCard>
         <ActivityCard>
-          <SectionHeader label="Viewing heatmap" sub="day × hour" />
+          <SectionHeader label={t("adminActivity.user.viewingHeatmap")} sub={t("adminActivity.user.dayHour")} />
           <HourHeatmap matrix={heatmapMatrix} detailBase={{ userId: s.userId }} />
         </ActivityCard>
       </div>
@@ -212,8 +216,8 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
       >
         <ActivityCard>
           <SectionHeader
-            label="Platforms"
-            sub={`${s.platformBreakdown.length} unique`}
+            label={t("adminActivity.title.platforms")}
+            sub={t("adminActivity.title.unique", { count: s.platformBreakdown.length })}
           />
           <HorizontalBars
             items={s.platformBreakdown
@@ -222,11 +226,11 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
           />
         </ActivityCard>
         <ActivityCard>
-          <SectionHeader label="Stream type" sub="play method mix" />
+          <SectionHeader label={t("adminActivity.title.streamType")} sub={t("adminActivity.title.playMethodMix")} />
           <StreamTypeBars data={streamTypes} />
         </ActivityCard>
         <ActivityCard>
-          <SectionHeader label="Resolutions" />
+          <SectionHeader label={t("adminActivity.title.resolutions")} />
           <HorizontalBars
             items={s.resolutionBreakdown.map((r) => ({
               label: r.resolution,
@@ -238,8 +242,8 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
         </ActivityCard>
         <ActivityCard>
           <SectionHeader
-            label="Devices"
-            sub={`${s.deviceList.length} known`}
+            label={t("adminActivity.user.devices")}
+            sub={t("adminActivity.user.known", { count: s.deviceList.length })}
           />
           <HorizontalBars
             items={s.deviceList
@@ -255,8 +259,8 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
         <div style={{ marginBottom: 22 }}>
           <ActivityCard>
             <SectionHeader
-              label="Most watched"
-              sub={`${s.topMedia.length} titles`}
+              label={t("adminActivity.user.mostWatched")}
+              sub={t("adminActivity.user.titles", { count: s.topMedia.length })}
             />
             <div
               style={{ display: "flex", flexDirection: "column", gap: 8 }}
@@ -358,7 +362,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
                           whiteSpace: "nowrap",
                         }}
                       >
-                        {m.count} plays
+                        {t("adminActivity.common.plays", { count: m.count })}
                       </span>
                     </div>
                     <div
@@ -397,8 +401,8 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
       >
         <ActivityCard>
           <SectionHeader
-            label="Known IP addresses"
-            sub={`${s.knownIps.length} unique`}
+            label={t("adminActivity.user.knownIps")}
+            sub={t("adminActivity.user.uniqueIps", { count: s.knownIps.length })}
           />
           {s.knownIps.length === 0 ? (
             <div
@@ -409,7 +413,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
                 textAlign: "center",
               }}
             >
-              No IP data
+              {t("adminActivity.user.noIpData")}
             </div>
           ) : (
             <table
@@ -421,9 +425,9 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
             >
               <thead>
                 <tr>
-                  <Th label="IP address" />
-                  <Th label="Plays" align="right" />
-                  <Th label="Last seen" align="right" />
+                  <Th label={t("adminActivity.field.ipAddress")} />
+                  <Th label={t("adminActivity.stat.plays")} align="right" />
+                  <Th label={t("adminActivity.user.lastSeen")} align="right" />
                 </tr>
               </thead>
               <tbody>
@@ -464,8 +468,8 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
         </ActivityCard>
         <ActivityCard>
           <SectionHeader
-            label="Recent plays"
-            sub={`last ${s.recentPlays.length}`}
+            label={t("adminActivity.recentPlays.title")}
+            sub={t("adminActivity.user.lastN", { count: s.recentPlays.length })}
           />
           {s.recentPlays.length === 0 ? (
             <div
@@ -476,7 +480,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
                 textAlign: "center",
               }}
             >
-              No plays recorded
+              {t("adminActivity.title.noPlays")}
             </div>
           ) : (
             <table
@@ -488,9 +492,9 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
             >
               <thead>
                 <tr>
-                  <Th label="Title" />
-                  <Th label="Quality" />
-                  <Th label="When" align="right" />
+                  <Th label={t("adminActivity.field.title")} />
+                  <Th label={t("adminActivity.field.quality")} />
+                  <Th label={t("adminActivity.field.when")} align="right" />
                 </tr>
               </thead>
               <tbody>

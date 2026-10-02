@@ -19,13 +19,24 @@ import {
   StreamTypeBars,
 } from "@/components/admin/activity-ui";
 import { KpiStrip, type Kpi } from "@/components/admin/activity-sections";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 
-const DOW_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+// Mon-first weekday catalog keys, translated at render.
+const DOW_LABEL_KEYS = [
+  "adminActivity.weekday.mon",
+  "adminActivity.weekday.tue",
+  "adminActivity.weekday.wed",
+  "adminActivity.weekday.thu",
+  "adminActivity.weekday.fri",
+  "adminActivity.weekday.sat",
+  "adminActivity.weekday.sun",
+];
 
-function shortDay(day: string): string {
+function shortDay(day: string, locale: string): string {
   // Parse explicitly as UTC and format in UTC so SSR (UTC) and client (local
   // TZ) agree on the day label. Mirrors activity-calendar.tsx (guardrail 16).
-  return new Date(`${day.slice(0, 10)}T00:00:00Z`).toLocaleDateString("en-US", {
+  return new Date(`${day.slice(0, 10)}T00:00:00Z`).toLocaleDateString(locale, {
     month: "short",
     day: "numeric",
     timeZone: "UTC",
@@ -36,29 +47,31 @@ function shortDay(day: string): string {
 // there are days. Always using five made short ranges repeat a date (a 4-day
 // range printed "Aug 26 · 27 · 28 · 28 · 29"). With at most one label per day,
 // the chosen positions are at least one apart, so no date is printed twice.
-function axisLabels(days: string[]): string[] {
-  if (days.length < 2) return days.map(shortDay);
+function axisLabels(days: string[], locale: string): string[] {
+  if (days.length < 2) return days.map((d) => shortDay(d, locale));
   const ticks = Math.min(5, days.length);
   return Array.from({ length: ticks }, (_, i) =>
-    shortDay(days[Math.round((i / (ticks - 1)) * (days.length - 1))]),
+    shortDay(days[Math.round((i / (ticks - 1)) * (days.length - 1))], locale),
   );
 }
 
 function delta(
+  t: Translator,
   current: number,
   previous: number,
 ): Kpi["delta"] {
   if (previous === 0 && current === 0) return null;
-  if (previous === 0) return { text: "new", dir: "up" };
+  if (previous === 0) return { text: t("adminActivity.kpi.new"), dir: "up" };
   const pct = Math.round(((current - previous) / previous) * 100);
   if (pct === 0) return { text: "0%", dir: "flat" };
   return { text: `${Math.abs(pct)}%`, dir: pct > 0 ? "up" : "down" };
 }
 
-const STREAM_META: Record<string, { label: string; color: string }> = {
-  DirectPlay: { label: "Direct Play", color: "var(--ds-success)" },
-  DirectStream: { label: "Remux", color: "var(--ds-info)" },
-  Transcode: { label: "Transcode", color: "var(--ds-warning)" },
+// `labelKey` is a catalog key, translated at render.
+const STREAM_META: Record<string, { labelKey: string; color: string }> = {
+  DirectPlay: { labelKey: "adminActivity.method.directPlay", color: "var(--ds-success)" },
+  DirectStream: { labelKey: "adminActivity.method.remux", color: "var(--ds-info)" },
+  Transcode: { labelKey: "adminActivity.method.transcode", color: "var(--ds-warning)" },
 };
 
 export function ActivityStatsRedesign({
@@ -68,6 +81,8 @@ export function ActivityStatsRedesign({
   stats: PlayHistoryStatsResult;
   days: number;
 }) {
+  const t = useT();
+  const locale = useLocale();
   const watchHours = Math.round(stats.totalWatchTimeHours);
   const repeatRate =
     stats.uniqueTitles > 0
@@ -76,25 +91,25 @@ export function ActivityStatsRedesign({
 
   const kpis: Kpi[] = [
     {
-      label: "Plays",
-      value: stats.totalPlays.toLocaleString("en-US"),
-      delta: delta(stats.totalPlays, stats.prevPeriod.totalPlays),
+      label: t("adminActivity.stat.plays"),
+      value: stats.totalPlays.toLocaleString(locale),
+      delta: delta(t, stats.totalPlays, stats.prevPeriod.totalPlays),
       spark: stats.playsByDay.map((d) => d.count),
     },
     {
-      label: "Watch hours",
-      value: `${watchHours.toLocaleString("en-US")}h`,
-      delta: delta(watchHours, Math.round(stats.prevPeriod.totalWatchTimeHours)),
+      label: t("adminActivity.stats.watchHours"),
+      value: `${watchHours.toLocaleString(locale)}h`,
+      delta: delta(t, watchHours, Math.round(stats.prevPeriod.totalWatchTimeHours)),
       spark: stats.watchTimeByDay.map((d) => d.hours),
     },
     {
-      label: "Unique viewers",
-      value: stats.uniqueViewers.toLocaleString("en-US"),
-      delta: delta(stats.uniqueViewers, stats.prevPeriod.uniqueViewers),
+      label: t("adminActivity.stats.uniqueViewers"),
+      value: stats.uniqueViewers.toLocaleString(locale),
+      delta: delta(t, stats.uniqueViewers, stats.prevPeriod.uniqueViewers),
       spark: stats.uniqueViewersByDay.map((d) => d.count),
     },
     {
-      label: "Bandwidth",
+      label: t("adminActivity.kpi.bandwidth"),
       value:
         stats.totalBandwidthGB >= 1000
           ? `${(stats.totalBandwidthGB / 1000).toFixed(1)} TB`
@@ -102,14 +117,14 @@ export function ActivityStatsRedesign({
       spark: stats.bandwidthByDay.map((d) => d.gb),
     },
     {
-      label: "Repeat rate",
+      label: t("adminActivity.stats.repeatRate"),
       value: `${repeatRate.toFixed(1)}×`,
-      sub: `${stats.uniqueTitles.toLocaleString("en-US")} unique titles`,
+      sub: t("adminActivity.stats.uniqueTitles", { count: stats.uniqueTitles, n: stats.uniqueTitles.toLocaleString(locale) }),
     },
     {
-      label: "Peak concurrency",
-      value: stats.peakConcurrent.toLocaleString("en-US"),
-      sub: "max simultaneous streams",
+      label: t("adminActivity.stats.peakConcurrency"),
+      value: stats.peakConcurrent.toLocaleString(locale),
+      sub: t("adminActivity.stats.maxSimultaneous"),
     },
   ];
 
@@ -121,28 +136,28 @@ export function ActivityStatsRedesign({
     days: string[];
   }[] = [
     {
-      label: "Plays per day",
+      label: t("adminActivity.stats.playsPerDay"),
       data: stats.playsByDay.map((d) => d.count),
       color: "var(--ds-accent-text)",
       unit: "",
       days: stats.playsByDay.map((d) => d.day),
     },
     {
-      label: "Watch hours per day",
+      label: t("adminActivity.stats.watchHoursPerDay"),
       data: stats.watchTimeByDay.map((d) => d.hours),
       color: "oklch(0.68 0.16 158)",
       unit: "h",
       days: stats.watchTimeByDay.map((d) => d.day),
     },
     {
-      label: "Bandwidth per day",
+      label: t("adminActivity.stats.bandwidthPerDay"),
       data: stats.bandwidthByDay.map((d) => d.gb),
       color: "oklch(0.72 0.13 220)",
       unit: "GB",
       days: stats.bandwidthByDay.map((d) => d.day),
     },
     {
-      label: "Unique viewers per day",
+      label: t("adminActivity.stats.uniqueViewersPerDay"),
       data: stats.uniqueViewersByDay.map((d) => d.count),
       color: "oklch(0.78 0.16 75)",
       unit: "",
@@ -161,7 +176,7 @@ export function ActivityStatsRedesign({
   const tvMax = topTV[0]?.plays ?? 1;
 
   const streamTypes = ["DirectPlay", "DirectStream", "Transcode"].map((m) => ({
-    label: STREAM_META[m].label,
+    label: t(STREAM_META[m].labelKey),
     count: stats.transcodeRatio.find((r) => r.method === m)?.count ?? 0,
     color: STREAM_META[m].color,
   }));
@@ -197,10 +212,10 @@ export function ActivityStatsRedesign({
       : 0;
 
   // Postgres numbers weekdays 0=Sun..6=Sat; this chart starts the week on Monday.
-  const dowItems = DOW_LABELS.map((label, i) => {
+  const dowItems = DOW_LABEL_KEYS.map((key, i) => {
     const dow = (i + 1) % 7;
     return {
-      label,
+      label: t(key),
       count: stats.playsByDow.find((d) => d.dow === dow)?.count ?? 0,
     };
   });
@@ -217,17 +232,17 @@ export function ActivityStatsRedesign({
       {/* Trends 2×2 */}
       <section style={{ marginBottom: 22 }}>
         <div className="resp-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          {trends.map((t) => {
-            const peak = Math.max(...t.data, 0);
+          {trends.map((tr) => {
+            const peak = Math.max(...tr.data, 0);
             // Divide by the full window, not t.data.length: the query skips
             // days with no activity, so the array can be shorter than `days`.
             const avg =
-              days > 0 ? t.data.reduce((s, v) => s + v, 0) / days : 0;
+              days > 0 ? tr.data.reduce((s, v) => s + v, 0) / days : 0;
             return (
-              <ActivityCard key={t.label}>
+              <ActivityCard key={tr.label}>
                 <SectionHeader
-                  label={t.label}
-                  sub={`last ${days}d · peak ${peak.toLocaleString("en-US")}${t.unit}`}
+                  label={tr.label}
+                  sub={t("adminActivity.stats.lastDaysPeak", { days, peak: `${peak.toLocaleString(locale)}${tr.unit}` })}
                   right={
                     <span
                       className="ds-mono"
@@ -237,17 +252,16 @@ export function ActivityStatsRedesign({
                         fontVariantNumeric: "tabular-nums",
                       }}
                     >
-                      avg {avg.toFixed(1)}
-                      {t.unit}
+                      {t("adminActivity.stats.avg", { value: `${avg.toFixed(1)}${tr.unit}` })}
                     </span>
                   }
                 />
                 <AreaChart
-                  data={t.data}
+                  data={tr.data}
                   h={120}
-                  color={t.color}
-                  labels={t.days.map(shortDay)}
-                  valueSuffix={t.unit ? ` ${t.unit}` : ""}
+                  color={tr.color}
+                  labels={tr.days.map((d) => shortDay(d, locale))}
+                  valueSuffix={tr.unit ? ` ${tr.unit}` : ""}
                 />
                 <div
                   className="ds-mono"
@@ -259,7 +273,7 @@ export function ActivityStatsRedesign({
                     color: "var(--ds-fg-subtle)",
                   }}
                 >
-                  {axisLabels(t.days).map((l, i) => (
+                  {axisLabels(tr.days, locale).map((l, i) => (
                     <span key={i}>{l}</span>
                   ))}
                 </div>
@@ -274,8 +288,8 @@ export function ActivityStatsRedesign({
         <div className="resp-grid-3" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
           <ActivityCard>
             <SectionHeader
-              label="Top viewers"
-              sub={`${stats.topUsers.length} of ${stats.uniqueViewers}`}
+              label={t("adminActivity.stats.topViewers")}
+              sub={t("adminActivity.stats.nOfTotal", { n: stats.topUsers.length, total: stats.uniqueViewers })}
             />
             <div
               style={{ display: "flex", flexDirection: "column", gap: 6 }}
@@ -293,14 +307,14 @@ export function ActivityStatsRedesign({
                   }
                   title={u.username}
                   source={u.source}
-                  primary={`${u.count} plays`}
+                  primary={t("adminActivity.common.plays", { count: u.count })}
                   pct={(u.count / userMax) * 100}
                 />
               ))}
             </div>
           </ActivityCard>
           <ActivityCard>
-            <SectionHeader label="Top movies" sub={`${topMovies.length} ranked`} />
+            <SectionHeader label={t("adminActivity.stats.topMovies")} sub={t("adminActivity.stats.ranked", { count: topMovies.length })} />
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {topMovies.map((m, i) => (
                 <LbRow
@@ -317,8 +331,8 @@ export function ActivityStatsRedesign({
                     />
                   }
                   title={m.title}
-                  primary={`${m.plays} plays`}
-                  secondary={`${m.viewers} viewers`}
+                  primary={t("adminActivity.common.plays", { count: m.plays })}
+                  secondary={t("adminActivity.common.viewers", { count: m.viewers })}
                   pct={(m.plays / movieMax) * 100}
                 />
               ))}
@@ -326,7 +340,7 @@ export function ActivityStatsRedesign({
             </div>
           </ActivityCard>
           <ActivityCard>
-            <SectionHeader label="Top TV" sub={`${topTV.length} ranked`} />
+            <SectionHeader label={t("adminActivity.stats.topTv")} sub={t("adminActivity.stats.ranked", { count: topTV.length })} />
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {topTV.map((m, i) => (
                 <LbRow
@@ -343,8 +357,8 @@ export function ActivityStatsRedesign({
                     />
                   }
                   title={m.title}
-                  primary={`${m.plays} plays`}
-                  secondary={`${m.viewers} viewers`}
+                  primary={t("adminActivity.common.plays", { count: m.plays })}
+                  secondary={t("adminActivity.common.viewers", { count: m.viewers })}
                   pct={(m.plays / tvMax) * 100}
                 />
               ))}
@@ -357,12 +371,12 @@ export function ActivityStatsRedesign({
       {/* Quality & infrastructure */}
       <section style={{ marginBottom: 22 }}>
         <SectionHeader
-          label="Quality & infrastructure"
-          sub={`how viewers stream · last ${days}d`}
+          label={t("adminActivity.stats.qualityInfra")}
+          sub={t("adminActivity.stats.howViewersStream", { days })}
         />
         <div className="resp-grid-3" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
           <ActivityCard>
-            <SectionHeader label="Resolution" />
+            <SectionHeader label={t("adminActivity.popover.resolution")} />
             <HorizontalBars
               items={stats.resolutionBreakdown.map((r) => ({
                 label: r.bucket,
@@ -373,7 +387,7 @@ export function ActivityStatsRedesign({
             />
           </ActivityCard>
           <ActivityCard>
-            <SectionHeader label="Video codec" />
+            <SectionHeader label={t("adminActivity.field.videoCodec")} />
             <HorizontalBars
               items={stats.videoCodecBreakdown.map((r) => ({
                 label: r.codec,
@@ -383,7 +397,7 @@ export function ActivityStatsRedesign({
             />
           </ActivityCard>
           <ActivityCard>
-            <SectionHeader label="Audio codec" />
+            <SectionHeader label={t("adminActivity.stats.audioCodec")} />
             <HorizontalBars
               items={stats.audioCodecBreakdown.map((r) => ({
                 label: r.codec,
@@ -394,7 +408,7 @@ export function ActivityStatsRedesign({
             />
           </ActivityCard>
           <ActivityCard>
-            <SectionHeader label="Container" />
+            <SectionHeader label={t("adminActivity.field.container")} />
             <HorizontalBars
               items={stats.containerBreakdown.map((r) => ({
                 label: r.container,
@@ -405,7 +419,7 @@ export function ActivityStatsRedesign({
             />
           </ActivityCard>
           <ActivityCard>
-            <SectionHeader label="Bitrate" sub="distribution" />
+            <SectionHeader label={t("adminActivity.field.bitrate")} sub={t("adminActivity.stats.distribution")} />
             <HorizontalBars
               items={stats.bitrateBuckets.map((r) => ({
                 label: r.bucket,
@@ -416,7 +430,7 @@ export function ActivityStatsRedesign({
             />
           </ActivityCard>
           <ActivityCard>
-            <SectionHeader label="Top players" sub="client apps" />
+            <SectionHeader label={t("adminActivity.stats.topPlayers")} sub={t("adminActivity.stats.clientApps")} />
             <HorizontalBars
               items={stats.topPlayers
                 .slice(0, 8)
@@ -440,8 +454,8 @@ export function ActivityStatsRedesign({
         >
           <ActivityCard>
             <SectionHeader
-              label="Why we're transcoding"
-              sub={`${transcodeTotal.toLocaleString("en-US")} transcoded sessions · ${transcodePct}% of sessions`}
+              label={t("adminActivity.stats.whyTranscoding")}
+              sub={t("adminActivity.stats.transcodedSessions", { n: transcodeTotal.toLocaleString(locale), pct: transcodePct })}
             />
             <HorizontalBars
               items={stats.transcodeReasons.map((r) => ({
@@ -501,19 +515,24 @@ export function ActivityStatsRedesign({
                     }}
                   >
                     {topReason.reason === "Unknown" ? (
-                      <>
-                        {topReasonPct}% of transcodes have no recorded reason.
-                        Reasons are captured from new sessions onward — this
-                        clears as fresh playback data accumulates.
-                      </>
+                      <>{t("adminActivity.stats.noReason", { pct: topReasonPct })}</>
                     ) : (
                       <>
-                        {topReasonPct}% of transcodes are caused by{" "}
-                        <span style={{ color: "var(--ds-fg)" }}>
-                          {topReason.reason.toLowerCase()}
-                        </span>
-                        . Addressing it would meaningfully cut server
-                        transcode load.
+                        {(() => {
+                          const [before, after] = t("adminActivity.stats.causedBy", {
+                            pct: topReasonPct,
+                            reason: "\u0000",
+                          }).split("\u0000");
+                          return (
+                            <>
+                              {before}
+                              <span style={{ color: "var(--ds-fg)" }}>
+                                {topReason.reason.toLowerCase()}
+                              </span>
+                              {after}
+                            </>
+                          );
+                        })()}
                       </>
                     )}
                   </div>
@@ -523,8 +542,8 @@ export function ActivityStatsRedesign({
           </ActivityCard>
           <ActivityCard>
             <SectionHeader
-              label={`Stream method · ${days}d`}
-              sub={`${directPct}% direct play`}
+              label={t("adminActivity.stats.streamMethodDays", { days })}
+              sub={t("adminActivity.stats.directPlayPct", { pct: directPct })}
             />
             <StreamTypeBars data={streamTypes} />
             <hr
@@ -534,7 +553,7 @@ export function ActivityStatsRedesign({
                 margin: "14px 0 12px",
               }}
             />
-            <SectionHeader label="Source split" />
+            <SectionHeader label={t("adminActivity.stats.sourceSplit")} />
             <StreamTypeBars data={sourceSplit} />
           </ActivityCard>
         </div>
@@ -551,13 +570,13 @@ export function ActivityStatsRedesign({
           }}
         >
           <ActivityCard>
-            <SectionHeader label="Day of week" sub="plays by weekday" />
+            <SectionHeader label={t("adminActivity.stats.dayOfWeek")} sub={t("adminActivity.stats.playsByWeekday")} />
             <HorizontalBars items={dowItems} labelWidth={42} />
           </ActivityCard>
           <ActivityCard>
             <SectionHeader
-              label="Hour of day"
-              sub="24-hour distribution"
+              label={t("adminActivity.stats.hourOfDay")}
+              sub={t("adminActivity.stats.hourDistribution")}
               right={
                 <span
                   className="ds-mono"
@@ -567,7 +586,7 @@ export function ActivityStatsRedesign({
                     whiteSpace: "nowrap",
                   }}
                 >
-                  peak {peakHour}:00 · {Math.max(...hourData, 0)} plays
+                  {t("adminActivity.stats.peakHour", { hour: `${peakHour}:00`, count: Math.max(...hourData, 0) })}
                 </span>
               }
             />
@@ -595,8 +614,8 @@ export function ActivityStatsRedesign({
         <div className="resp-grid-3" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
           <ActivityCard>
             <SectionHeader
-              label="Platforms"
-              sub={`${stats.playsByPlatform.length} unique`}
+              label={t("adminActivity.title.platforms")}
+              sub={t("adminActivity.title.unique", { count: stats.playsByPlatform.length })}
             />
             <HorizontalBars
               items={stats.playsByPlatform
@@ -607,8 +626,8 @@ export function ActivityStatsRedesign({
           </ActivityCard>
           <ActivityCard>
             <SectionHeader
-              label="Devices"
-              sub={`${stats.topDevices.length} known`}
+              label={t("adminActivity.user.devices")}
+              sub={t("adminActivity.user.known", { count: stats.topDevices.length })}
             />
             <HorizontalBars
               items={stats.topDevices
@@ -620,8 +639,8 @@ export function ActivityStatsRedesign({
           </ActivityCard>
           <ActivityCard>
             <SectionHeader
-              label="Movie decades"
-              sub="release year · movies only"
+              label={t("adminActivity.stats.movieDecades")}
+              sub={t("adminActivity.stats.releaseYear")}
             />
             <HorizontalBars
               items={stats.decadeBreakdown.map((d) => ({
@@ -639,6 +658,7 @@ export function ActivityStatsRedesign({
 }
 
 function Empty() {
+  const t = useT();
   return (
     <div
       style={{
@@ -648,7 +668,7 @@ function Empty() {
         textAlign: "center",
       }}
     >
-      No data yet
+      {t("adminActivity.common.noDataYet")}
     </div>
   );
 }

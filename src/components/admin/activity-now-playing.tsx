@@ -8,6 +8,7 @@ import { parseActiveSessionId } from "@/lib/media-instances";
 import { bitrateToKbps } from "@/lib/bitrate";
 import { IpInfo } from "@/components/admin/ip-info";
 import { Loader2, X } from "@/components/icons";
+import { useT } from "@/components/i18n/i18n-provider";
 import {
   Dialog,
   DialogBackdrop,
@@ -66,6 +67,7 @@ function fmtOffset(ms: number): string {
 }
 
 function MarkersChip({ s }: { s: ActiveSessionLive }) {
+  const t = useT();
   const hasIntro = s.introStartMs != null && s.introEndMs != null;
   const hasCredits = s.creditsStartMs != null;
   if (!hasIntro && !hasCredits) return null;
@@ -86,14 +88,14 @@ function MarkersChip({ s }: { s: ActiveSessionLive }) {
       }}
     >
       {hasIntro && (
-        <span title="Intro marker (from Plex)">
-          <span style={{ color: "var(--ds-fg-disabled)" }}>INTRO </span>
+        <span title={t("adminActivity.nowPlaying.introTitle")}>
+          <span style={{ color: "var(--ds-fg-disabled)" }}>{t("adminActivity.nowPlaying.intro")} </span>
           {fmtOffset(s.introStartMs!)}–{fmtOffset(s.introEndMs!)}
         </span>
       )}
       {hasCredits && (
-        <span title="Credits marker (from Plex)">
-          <span style={{ color: "var(--ds-fg-disabled)" }}>CREDITS </span>
+        <span title={t("adminActivity.nowPlaying.creditsTitle")}>
+          <span style={{ color: "var(--ds-fg-disabled)" }}>{t("adminActivity.nowPlaying.credits")} </span>
           {creditsLabel}
         </span>
       )}
@@ -102,6 +104,7 @@ function MarkersChip({ s }: { s: ActiveSessionLive }) {
 }
 
 function NetworkBadges({ s }: { s: ActiveSessionLive }) {
+  const t = useT();
   // Only render anything when at least one signal is present. Plex populates
   // these; Jellyfin currently leaves them null.
   if (s.location == null && s.secure == null && s.relayed == null) {
@@ -123,7 +126,7 @@ function NetworkBadges({ s }: { s: ActiveSessionLive }) {
         <span
           className="ds-mono"
           style={{ color: "var(--ds-warning, #c84)" }}
-          title="Streaming through Plex's relay proxy"
+          title={t("adminActivity.nowPlaying.relayTitle")}
         >
           RELAY
         </span>
@@ -132,7 +135,7 @@ function NetworkBadges({ s }: { s: ActiveSessionLive }) {
         <span
           className="ds-mono"
           style={{ color: s.secure ? "var(--ds-fg-subtle)" : "var(--ds-warning, #c84)" }}
-          title={s.secure ? "HTTPS connection" : "Plain HTTP connection"}
+          title={s.secure ? t("adminActivity.nowPlaying.httpsTitle") : t("adminActivity.nowPlaying.httpTitle")}
         >
           {s.secure ? "TLS" : "HTTP"}
         </span>
@@ -141,9 +144,10 @@ function NetworkBadges({ s }: { s: ActiveSessionLive }) {
   );
 }
 
-const DEFAULT_TERMINATE_REASON = "Session terminated by an administrator.";
-
 function TerminateButton({ session }: { session: ActiveSessionLive }) {
+  const t = useT();
+  // Pre-filled reason shown on the viewer's client; editable before sending.
+  const DEFAULT_TERMINATE_REASON = t("adminActivity.terminate.defaultReason");
   const target = terminateTargetFor(session);
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState(DEFAULT_TERMINATE_REASON);
@@ -179,8 +183,8 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
         }),
       });
       if (!res.ok) {
-        const data = await res.json().catch(() => ({ error: "Unknown error" }));
-        setError(typeof data.error === "string" ? data.error : "Failed");
+        const data = await res.json().catch(() => ({ error: t("adminActivity.terminate.unknownError") }));
+        setError(typeof data.error === "string" ? data.error : t("adminActivity.terminate.failed"));
         setBusy(false);
         return;
       }
@@ -217,9 +221,9 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
           color: "var(--ds-fg-muted)",
           cursor: "pointer",
         }}
-        title={`Terminate this ${serverLabel} session`}
+        title={t("adminActivity.terminate.buttonTitle", { server: serverLabel })}
       >
-        Terminate
+        {t("adminActivity.terminate.button")}
       </button>
 
       {open && (
@@ -250,7 +254,7 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
                     className="font-semibold"
                     style={{ fontSize: 15, color: "var(--ds-fg)", margin: 0 }}
                   >
-                    Terminate {serverLabel} session
+                    {t("adminActivity.terminate.dialogTitle", { server: serverLabel })}
                   </DialogTitle>
                   <p
                     className="ds-mono truncate max-w-72"
@@ -260,7 +264,7 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
                   </p>
                 </div>
                 <DialogClose
-                  aria-label="Close"
+                  aria-label={t("adminActivity.common.close")}
                   disabled={busy}
                   className="inline-flex items-center justify-center rounded-full transition-colors disabled:opacity-40"
                   style={{
@@ -281,7 +285,7 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
                     htmlFor="terminate-reason"
                     className="text-xs font-medium text-zinc-400 uppercase tracking-wide"
                   >
-                    Reason shown to the user
+                    {t("adminActivity.terminate.reasonLabel")}
                   </label>
                   <textarea
                     id="terminate-reason"
@@ -313,7 +317,7 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
                       border: "1px solid var(--ds-border)",
                     }}
                   >
-                    Cancel
+                    {t("adminActivity.common.cancel")}
                   </button>
                   <button
                     type="submit"
@@ -330,7 +334,7 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
                     }}
                   >
                     {busy && <Loader2 className="animate-spin" style={{ width: 12, height: 12 }} />}
-                    {busy ? "Terminating…" : "Terminate"}
+                    {busy ? t("adminActivity.terminate.terminating") : t("adminActivity.terminate.button")}
                   </button>
                 </div>
               </form>
@@ -352,6 +356,7 @@ function accentFor(seed: string): string {
 }
 
 function SessionCard({ s }: { s: ActiveSessionLive }) {
+  const t = useT();
   const isTV = (s.mediaType ?? "").toUpperCase() === "TV";
   const mediaHref = s.tmdbId
     ? `/admin/activity/media/${s.tmdbId}${s.mediaType ? `?type=${(s.mediaType ?? "").toUpperCase()}` : ""}`
@@ -363,7 +368,7 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
   // media-instances.ts — so the badge needs no wire change. "" for the default
   // instance, and SourceTag renders nothing extra in that case.
   const serverInstance = parseActiveSessionId(s.id).serverInstance;
-  const m = methodLabel(s.playMethod, s.videoDecision, s.audioDecision);
+  const m = methodLabel(t, s.playMethod, s.videoDecision, s.audioDecision);
   const bitrateMbps = bitrateToKbps(s.bitrate, s.source) / 1000;
   const paused = s.state === "paused";
 
@@ -458,10 +463,10 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
               style={{ fontSize: 9.5, color: "var(--ds-fg-subtle)" }}
             >
               {paused
-                ? "PAUSED"
+                ? t("adminActivity.nowPlaying.state.paused")
                 : s.state === "buffering"
-                  ? "BUFFERING"
-                  : "PLAYING"}
+                  ? t("adminActivity.nowPlaying.state.buffering")
+                  : t("adminActivity.nowPlaying.state.playing")}
             </span>
             {(s.source === "plex" || s.source === "jellyfin") && (
               <span style={{ marginLeft: "auto" }}>
@@ -518,7 +523,7 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
               </>
             ) : (
               <>
-                {s.year ? `${s.year} · ` : ""}Movie
+                {s.year ? `${s.year} · ` : ""}{t("adminActivity.common.movie")}
               </>
             )}
           </div>
@@ -558,17 +563,17 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
           position: "relative",
         }}
       >
-        <KeyVal k="User" v={userNode} />
+        <KeyVal k={t("adminActivity.field.user")} v={userNode} />
         <KeyVal
-          k="Device"
+          k={t("adminActivity.field.device")}
           v={[s.device, s.platform ?? s.player].filter(Boolean).join(" · ") || "—"}
         />
         <KeyVal
-          k="Stream"
+          k={t("adminActivity.field.stream")}
           v={<MethodPill method={m.label} methodClass={m.cls} />}
         />
         <KeyVal
-          k="Quality"
+          k={t("adminActivity.field.quality")}
           v={
             <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
               <span className="ds-mono">{s.resolution ?? "—"}</span>
@@ -584,7 +589,7 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
           }
         />
         <KeyVal
-          k="Codec"
+          k={t("adminActivity.field.codec")}
           v={
             <>
               <span className="ds-mono">
@@ -603,7 +608,7 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
           }
         />
         <KeyVal
-          k="Origin"
+          k={t("adminActivity.field.origin")}
           v={
             s.ipAddress ? (
               <IpInfo ip={s.ipAddress} inline />
@@ -612,7 +617,7 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
             )
           }
         />
-        <KeyVal k="Network" v={<NetworkBadges s={s} />} />
+        <KeyVal k={t("adminActivity.field.network")} v={<NetworkBadges s={s} />} />
       </div>
     </article>
   );
@@ -638,6 +643,7 @@ export function ActivityNowPlaying({
   // event below, matched on `instance`.
   plexReachability?: { instance: string; name: string; reachable: boolean | null }[];
 }) {
+  const t = useT();
   const [sessions, setSessions] =
     useState<ActiveSessionLive[]>(initialSessions);
   const [connected, setConnected] = useState(false);
@@ -678,17 +684,17 @@ export function ActivityNowPlaying({
 
   const sub =
     sessions.length === 0
-      ? "no active streams"
-      : `${sessions.length} active${
+      ? t("adminActivity.nowPlaying.noActiveLower")
+      : `${t("adminActivity.nowPlaying.activeCount", { count: sessions.length })}${
           plexCount > 0 && jellyfinCount > 0
             ? ` · ${plexCount} Plex · ${jellyfinCount} Jellyfin`
             : ""
-        }${totalMbps > 0 ? ` · ${totalMbps.toFixed(1)} Mbps combined` : ""}`;
+        }${totalMbps > 0 ? ` · ${t("adminActivity.nowPlaying.combined", { mbps: totalMbps.toFixed(1) })}` : ""}`;
 
   return (
     <section style={{ marginBottom: 28 }}>
       <SectionHeader
-        label="Now playing"
+        label={t("adminActivity.nowPlaying.title")}
         sub={sub}
         right={
           <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
@@ -698,7 +704,7 @@ export function ActivityNowPlaying({
                 <span
                   key={r.instance}
                   className="ds-mono"
-                  title={`Summonarr can't reach ${r.name} — its play tracking and now-playing are paused until it's reachable again. Checked every poll via getPlexSessions.`}
+                  title={t("adminActivity.nowPlaying.unreachableTitle", { name: r.name })}
                   style={{
                     display: "inline-flex",
                     alignItems: "center",
@@ -718,7 +724,7 @@ export function ActivityNowPlaying({
                   />
                   {/* The default server's name is "Plex", so a single-server
                       deployment renders exactly the string it always did. */}
-                  {r.name} unreachable
+                  {t("adminActivity.nowPlaying.unreachable", { name: r.name })}
                 </span>
               ))}
             <span
@@ -742,7 +748,7 @@ export function ActivityNowPlaying({
                     : "var(--ds-fg-disabled)",
                 }}
               />
-              {connected ? "Live" : "Connecting…"}
+              {connected ? t("adminActivity.nowPlaying.live") : t("adminActivity.nowPlaying.connecting")}
             </span>
           </span>
         }
@@ -759,7 +765,7 @@ export function ActivityNowPlaying({
             textAlign: "center",
           }}
         >
-          No active streams
+          {t("adminActivity.nowPlaying.noActive")}
         </div>
       ) : (
         <div

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Popover } from "@base-ui/react/popover";
 import { ChevronDown, Globe, Loader2, MapPin, Network } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 type Lookup = {
   ip: string;
@@ -40,6 +41,7 @@ interface Props {
 }
 
 export function IpInfo({ ip, inline = false }: Props) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   // Initialize from cache at mount AND re-read on open: a sibling IpInfo for the
   // same IP may have populated the cache after this instance mounted, in which
@@ -51,7 +53,7 @@ export function IpInfo({ ip, inline = false }: Props) {
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(() => {
-    return cache.get(ip) === "missing" ? "Not available" : null;
+    return cache.get(ip) === "missing" ? t("adminActivity.ip.notAvailable") : null;
   });
   // The ip this instance last fetched (null = none in flight / retry allowed).
   // Keyed by ip, not a boolean, so a changed `ip` prop is fetched afresh.
@@ -70,7 +72,7 @@ export function IpInfo({ ip, inline = false }: Props) {
     setPrevIp(ip);
     const c = cache.get(ip);
     setData(c && c !== "missing" ? c : null);
-    setError(c === "missing" ? "Not available" : null);
+    setError(c === "missing" ? t("adminActivity.ip.notAvailable") : null);
     setLoading(false);
   }
 
@@ -81,7 +83,7 @@ export function IpInfo({ ip, inline = false }: Props) {
     // even if this instance's useState initializer saw an empty cache at mount.
     const cached = cache.get(ip);
     if (cached === "missing") {
-      setError("Not available");
+      setError(t("adminActivity.ip.notAvailable"));
       return;
     }
     if (cached) {
@@ -103,19 +105,19 @@ export function IpInfo({ ip, inline = false }: Props) {
           // it in the shared map rather than re-hitting the backend on every
           // open of every IP.
           cacheSet(requested, "missing");
-          if (current()) setError("Not available");
+          if (current()) setError(t("adminActivity.ip.notAvailable"));
           return;
         }
         if (!r.ok) {
           // 429 (rate limit), 5xx, or a brief upstream hiccup: these are
           // temporary, so don't write the shared cache. The cache survives page
-          // changes, and caching a blip would show "Not available" for this IP
+          // changes, and caching a blip would show t("adminActivity.ip.notAvailable") for this IP
           // everywhere until a full reload. Show the route's own message and
           // reset the fetch guard so the next open tries again.
           const body = (await r.json().catch(() => null)) as { error?: unknown } | null;
           const msg = typeof body?.error === "string" && body.error ? body.error : null;
           if (fetchedRef.current === requested) fetchedRef.current = null;
-          if (current()) setError(msg ?? "Lookup failed — try again");
+          if (current()) setError(msg ?? t("adminActivity.ip.lookupFailed"));
           return;
         }
         const json = (await r.json()) as Lookup;
@@ -125,7 +127,7 @@ export function IpInfo({ ip, inline = false }: Props) {
       .catch(() => {
         // Network error / aborted: transient, same rule as above.
         if (fetchedRef.current === requested) fetchedRef.current = null;
-        if (current()) setError("Lookup failed — try again");
+        if (current()) setError(t("adminActivity.ip.lookupFailed"));
       })
       .finally(() => {
         if (current()) setLoading(false);
@@ -149,14 +151,14 @@ export function IpInfo({ ip, inline = false }: Props) {
               {loading && (
                 <div className="flex items-center gap-1.5 text-zinc-400">
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  <span>Looking up…</span>
+                  <span>{t("adminActivity.ip.lookingUp")}</span>
                 </div>
               )}
 
               {!loading && error && <div className="text-zinc-500">{error}</div>}
 
               {!loading && !error && data && data.bogon && (
-                <div className="text-zinc-500">Local / private network — no public lookup.</div>
+                <div className="text-zinc-500">{t("adminActivity.ip.private")}</div>
               )}
 
               {!loading && !error && data && !data.bogon && (
@@ -177,9 +179,9 @@ export function IpInfo({ ip, inline = false }: Props) {
                     </div>
                   )}
                   {data.hostname && (
-                    <div className="text-zinc-500 break-all">Host: {data.hostname}</div>
+                    <div className="text-zinc-500 break-all">{t("adminActivity.ip.host", { host: data.hostname })}</div>
                   )}
-                  {data.timezone && <div className="text-zinc-500">TZ: {data.timezone}</div>}
+                  {data.timezone && <div className="text-zinc-500">{t("adminActivity.ip.timezone", { tz: data.timezone })}</div>}
                   {data.latitude != null && data.longitude != null && (
                     <a
                       href={`https://www.openstreetmap.org/?mlat=${data.latitude}&mlon=${data.longitude}&zoom=10`}

@@ -14,7 +14,7 @@ import {
   XCircle,
 } from "@/components/icons";
 import {
-  KIND_LABEL,
+  KIND_LABEL_KEY,
   type ActionState,
   type ApplyResult,
   type StarterPackItem,
@@ -22,6 +22,15 @@ import {
 import { ApplyLog } from "./apply-log";
 import { RefreshErrorBanner } from "./banners";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
+
+// Splits a translated template on {name} placeholders and drops in nodes.
+function rich(template: string, nodes: Record<string, React.ReactNode>): React.ReactNode[] {
+  return template.split(/(\{\w+\})/).map((part, i) => {
+    const m = /^\{(\w+)\}$/.exec(part);
+    return m && m[1] in nodes ? <span key={i}>{nodes[m[1]]}</span> : part;
+  });
+}
 
 interface StarterPackCardProps {
   radarrConfigured: boolean;
@@ -35,6 +44,7 @@ export function StarterPackCard({
   sonarrConfigured,
   onChanged,
 }: StarterPackCardProps) {
+  const t = useT();
   const [items, setItems] = useState<StarterPackItem[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [applyState, setApplyState] = useState<ActionState>("idle");
@@ -125,7 +135,7 @@ export function StarterPackCard({
       if (res.status === 409) {
         setRefreshState("error");
         const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setRefreshError({ errors: [data.error ?? "Trash sync already running. Try again in 30 seconds."] });
+        setRefreshError({ errors: [data.error ?? t("trash.starter.alreadyRunning")] });
         setTimeout(() => setRefreshState((s) => (s === "error" ? s : "idle")), 3000);
         return;
       }
@@ -167,7 +177,7 @@ export function StarterPackCard({
       if (res.status === 409) {
         setApplyState("error");
         const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setRefreshError({ errors: [data.error ?? "Trash sync already running. Try again in 30 seconds."] });
+        setRefreshError({ errors: [data.error ?? t("trash.starter.alreadyRunning")] });
         setTimeout(() => setApplyState("idle"), 3000);
         return;
       }
@@ -213,11 +223,11 @@ export function StarterPackCard({
               <Sparkles className="w-5 h-5 text-indigo-300" />
             </div>
             <div>
-              <h2 className="font-semibold text-zinc-100 text-lg">Profile Library</h2>
+              <h2 className="font-semibold text-zinc-100 text-lg">{t("trash.starter.title")}</h2>
               <p className="text-sm text-zinc-400 mt-0.5 max-w-2xl">
-                Every TRaSH quality profile, naming scheme, and quality-size template in the catalog. The{" "}
-                <span className="text-indigo-300">Recommended</span> baseline for 1080p movies and TV is pre-selected;
-                applying any quality profile cascades to every custom format it references.
+                {rich(t("trash.starter.description"), {
+                  recommended: <span className="text-indigo-300">{t("trash.starter.recommended")}</span>,
+                })}
               </p>
             </div>
           </div>
@@ -227,11 +237,11 @@ export function StarterPackCard({
               onClick={handleRefresh}
               disabled={refreshState === "running"}
               className="bg-zinc-800 hover:bg-zinc-700 text-zinc-100"
-              title="Pull the latest catalog from TRaSH"
+              title={t("trash.starter.refreshTitle")}
             >
               {refreshState === "running"
-                ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Refreshing…</>
-                : <><RefreshCw className="w-4 h-4 mr-2" />Refresh Catalog</>}
+                ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("trash.sync.refreshing")}</>
+                : <><RefreshCw className="w-4 h-4 mr-2" />{t("trash.sync.refreshCatalog")}</>}
             </Button>
             <Button
               type="button"
@@ -240,8 +250,8 @@ export function StarterPackCard({
               className="bg-indigo-600 hover:bg-indigo-500 text-[var(--ds-accent-fg)]"
             >
               {applyState === "running"
-                ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Applying…</>
-                : <><Play className="w-4 h-4 mr-2" />Apply selected ({selected.size})</>}
+                ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("trash.starter.applying")}</>
+                : <><Play className="w-4 h-4 mr-2" />{t("trash.starter.applySelected", { count: selected.size })}</>}
             </Button>
           </div>
         </div>
@@ -250,29 +260,29 @@ export function StarterPackCard({
           <div className="mb-4 p-3 rounded-md bg-amber-500/10 border border-amber-500/30 flex items-start gap-2 text-xs text-amber-400">
             <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
             <div>
-              <p className="font-medium">Catalog is empty</p>
+              <p className="font-medium">{t("trash.starter.catalogEmpty")}</p>
               <p className="mt-0.5 text-zinc-400">
-                Click <span className="font-semibold">Refresh Catalog</span> above to pull the TRaSH catalog into the database. This takes ~20 s the first time; subsequent refreshes only fetch changed specs.
+                {t("trash.starter.catalogEmptyHint")}
               </p>
             </div>
           </div>
         )}
 
         {!loaded ? (
-          <p className="text-xs text-zinc-500 italic">Loading library…</p>
+          <p className="text-xs text-zinc-500 italic">{t("trash.starter.loading")}</p>
         ) : items.length === 0 ? (
-          <p className="text-xs text-zinc-500 italic">Library is empty.</p>
+          <p className="text-xs text-zinc-500 italic">{t("trash.starter.empty")}</p>
         ) : (
           <>
             <div className="flex flex-wrap items-center gap-2 mb-3 text-xs">
-              <span className="text-zinc-500">Quick select:</span>
+              <span className="text-zinc-500">{t("trash.starter.quickSelect")}</span>
               <button
                 type="button"
                 onClick={selectRecommended}
                 disabled={recommendedIds.length === 0 || recommendedSelected}
                 className="px-2 py-0.5 rounded bg-indigo-600/30 hover:bg-indigo-600/20 text-zinc-100 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Recommended ({recommendedIds.length})
+                {t("trash.starter.recommendedCount", { count: recommendedIds.length })}
               </button>
               <button
                 type="button"
@@ -280,7 +290,7 @@ export function StarterPackCard({
                 disabled={resolvedIds.length === 0 || allSelected}
                 className="px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                All ({resolvedIds.length})
+                {t("trash.starter.allCount", { count: resolvedIds.length })}
               </button>
               {selected.size > 0 && (
                 <button
@@ -288,7 +298,7 @@ export function StarterPackCard({
                   onClick={clearAll}
                   className="px-2 py-0.5 text-zinc-400 hover:text-zinc-100"
                 >
-                  Clear ({selected.size})
+                  {t("trash.starter.clearCount", { count: selected.size })}
                 </button>
               )}
             </div>
@@ -298,7 +308,7 @@ export function StarterPackCard({
               return (
                 <div key={service} className="mb-4 last:mb-0">
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-2">
-                    {service === "RADARR" ? "Radarr (Movies)" : "Sonarr (TV)"}
+                    {service === "RADARR" ? t("trash.starter.radarrHeading") : t("trash.starter.sonarrHeading")}
                     <span className="ml-2 font-normal normal-case tracking-normal text-zinc-500">{rows.length}</span>
                   </h3>
                   <div className="grid sm:grid-cols-2 gap-3">
@@ -321,25 +331,25 @@ export function StarterPackCard({
           {missing.length > 0 && !catalogEmpty && (
             <span className="text-amber-400 flex items-center gap-1.5">
               <AlertTriangle className="w-3.5 h-3.5" />
-              {missing.length} missing — try Refresh Catalog, then check upstream naming
+              {t("trash.starter.missingCount", { count: missing.length })}
             </span>
           )}
           {applied.length > 0 && (
             <span className="text-green-400 flex items-center gap-1.5">
               <CheckCircle className="w-3.5 h-3.5" />
-              {applied.length} / {items.length} applied
+              {t("trash.starter.appliedOf", { applied: applied.length, total: items.length })}
             </span>
           )}
           {errored.length > 0 && (
             <span className="text-red-400 flex items-center gap-1.5">
               <XCircle className="w-3.5 h-3.5" />
-              {errored.length} errored
+              {t("trash.starter.erroredCount", { count: errored.length })}
             </span>
           )}
-          {refreshState === "ok"    && <span className="text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />Catalog refreshed</span>}
-          {refreshState === "error" && <span className="text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />Refresh failed — see banner below</span>}
-          {applyState === "ok"    && <span className="text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />Selection applied</span>}
-          {applyState === "error" && <span className="text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />One or more failed — see below</span>}
+          {refreshState === "ok"    && <span className="text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />{t("trash.sync.catalogRefreshed")}</span>}
+          {refreshState === "error" && <span className="text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />{t("trash.starter.refreshFailedSee")}</span>}
+          {applyState === "ok"    && <span className="text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />{t("trash.starter.selectionApplied")}</span>}
+          {applyState === "error" && <span className="text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />{t("trash.starter.someFailed")}</span>}
         </div>
       </Card>
 
@@ -358,16 +368,17 @@ function StarterPackRow({
   selected: boolean;
   onToggle: () => void;
 }) {
+  const t = useT();
   const { item, spec, application } = row;
   let status: { icon: React.ReactNode; label: string; tone: string };
   if (!spec) {
-    status = { icon: <AlertTriangle className="w-3.5 h-3.5" />, label: "missing", tone: "text-amber-400" };
+    status = { icon: <AlertTriangle className="w-3.5 h-3.5" />, label: t("trash.status.missing"), tone: "text-amber-400" };
   } else if (application?.lastError) {
-    status = { icon: <XCircle className="w-3.5 h-3.5" />, label: "error", tone: "text-red-400" };
+    status = { icon: <XCircle className="w-3.5 h-3.5" />, label: t("trash.status.error"), tone: "text-red-400" };
   } else if (application?.appliedAt) {
-    status = { icon: <CheckCircle className="w-3.5 h-3.5" />, label: "applied", tone: "text-green-400" };
+    status = { icon: <CheckCircle className="w-3.5 h-3.5" />, label: t("trash.status.applied"), tone: "text-green-400" };
   } else {
-    status = { icon: <CircleDashed className="w-3.5 h-3.5" />, label: "ready", tone: "text-zinc-300" };
+    status = { icon: <CircleDashed className="w-3.5 h-3.5" />, label: t("trash.status.ready"), tone: "text-zinc-300" };
   }
 
   const interactive = !!spec;
@@ -397,11 +408,11 @@ function StarterPackRow({
               <div className="flex items-center gap-1.5 flex-wrap">
                 <p className="text-sm text-zinc-100 font-medium">{item.label}</p>
                 <span className="text-[10px] uppercase tracking-wider text-zinc-500 px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800">
-                  {KIND_LABEL[item.kind]}
+                  {t(KIND_LABEL_KEY[item.kind])}
                 </span>
                 {item.recommended && (
                   <span className="text-[10px] uppercase tracking-wider text-indigo-300 px-1.5 py-0.5 rounded bg-indigo-500/20 border border-indigo-500/40">
-                    Recommended
+                    {t("trash.starter.recommended")}
                   </span>
                 )}
               </div>

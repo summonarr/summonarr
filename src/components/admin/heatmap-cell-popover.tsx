@@ -12,6 +12,7 @@ import Link from "next/link";
 import { Loader2, X } from "@/components/icons";
 import type { HeatmapCellDetail } from "@/lib/play-history";
 import { withBasePath } from "@/lib/base-path";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 const POPOVER_WIDTH = 264;
 const MARGIN = 8;
@@ -39,6 +40,7 @@ export function HeatmapCellPopover({
   viewPlaysHref?: string;
   onClose: () => void;
 }) {
+  const t = useT();
   const [detail, setDetail] = useState<HeatmapCellDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
@@ -128,7 +130,7 @@ export function HeatmapCellPopover({
     <div
       ref={ref}
       role="dialog"
-      aria-label={`Activity detail for ${label}`}
+      aria-label={t("adminActivity.popover.dialogAria", { label })}
       style={{
         position: "fixed",
         left: pos?.left ?? anchor.x,
@@ -156,7 +158,7 @@ export function HeatmapCellPopover({
           type="button"
           ref={closeRef}
           onClick={onClose}
-          aria-label="Close"
+          aria-label={t("adminActivity.common.close")}
           className="inline-flex items-center justify-center rounded-full"
           style={{ width: 32, height: 32, margin: "-6px -8px -6px 0", background: "transparent", border: 0, color: "var(--ds-fg-muted)", cursor: "pointer" }}
         >
@@ -173,10 +175,10 @@ export function HeatmapCellPopover({
             style={{ gap: 7, padding: "10px 0", color: "var(--ds-fg-subtle)" }}
           >
             <Loader2 className="animate-spin" style={{ width: 13, height: 13, color: "var(--ds-accent-text)" }} />
-            Loading…
+            {t("adminActivity.common.loading")}
           </div>
         ) : detail.totalPlays === 0 ? (
-          <p style={{ color: "var(--ds-fg-subtle)", margin: 0 }}>No plays in this period.</p>
+          <p style={{ color: "var(--ds-fg-subtle)", margin: 0 }}>{t("adminActivity.popover.noPlays")}</p>
         ) : (
           <CellBody detail={detail} />
         )}
@@ -195,7 +197,7 @@ export function HeatmapCellPopover({
             textDecoration: "none",
           }}
         >
-          View these plays →
+          {t("adminActivity.popover.viewPlays")}
         </Link>
       )}
     </div>,
@@ -204,27 +206,29 @@ export function HeatmapCellPopover({
 }
 
 function CellBody({ detail }: { detail: HeatmapCellDetail }) {
+  const t = useT();
+  const locale = useLocale();
   const m = detail.methods;
   const methodTotal = m.directPlay + m.directStream + m.transcode + m.other;
   const methodRows = [
-    { label: "Direct Play", count: m.directPlay, color: "var(--ds-success, #2c9)" },
-    { label: "Direct Stream", count: m.directStream, color: "var(--ds-accent)" },
-    { label: "Transcode", count: m.transcode, color: "var(--ds-warning)" },
-    { label: "Other", count: m.other, color: "var(--ds-fg-disabled)" },
+    { label: t("adminActivity.method.directPlay"), count: m.directPlay, color: "var(--ds-success, #2c9)" },
+    { label: t("adminActivity.method.directStream"), count: m.directStream, color: "var(--ds-accent)" },
+    { label: t("adminActivity.method.transcode"), count: m.transcode, color: "var(--ds-warning)" },
+    { label: t("adminActivity.method.other"), count: m.other, color: "var(--ds-fg-disabled)" },
   ].filter((r) => r.count > 0);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       {/* Headline numbers */}
       <div style={{ display: "flex", gap: 14, alignItems: "baseline" }}>
-        <Stat value={detail.totalPlays.toLocaleString("en-US")} unit="plays" big />
-        <Stat value={`${detail.watchHours}`} unit="h watched" />
-        <Stat value={`${detail.avgSessionMinutes}`} unit="min avg" />
+        <Stat value={detail.totalPlays.toLocaleString(locale)} unit={t("adminActivity.popover.unitPlays", { count: detail.totalPlays })} big />
+        <Stat value={`${detail.watchHours}`} unit={t("adminActivity.popover.unitHoursWatched")} />
+        <Stat value={`${detail.avgSessionMinutes}`} unit={t("adminActivity.popover.unitMinAvg")} />
       </div>
 
       {/* Transcode / stream mix */}
       {methodRows.length > 0 && (
-        <Section title="Stream method">
+        <Section title={t("adminActivity.popover.streamMethod")}>
           <div style={{ display: "flex", height: 5, borderRadius: 999, overflow: "hidden", gap: 1 }}>
             {methodRows.map((r) => (
               <div
@@ -243,7 +247,7 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
       )}
 
       {detail.topTranscodeReasons.length > 0 && (
-        <Section title="Transcode reasons">
+        <Section title={t("adminActivity.popover.transcodeReasons")}>
           {detail.topTranscodeReasons.map((r) => (
             <KV key={r.reason} k={r.reason} v={`${r.count}`} />
           ))}
@@ -251,20 +255,20 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
       )}
 
       {detail.topTitles.length > 0 && (
-        <Section title="Top titles">
-          {detail.topTitles.map((t) => (
+        <Section title={t("adminActivity.popover.topTitles")}>
+          {detail.topTitles.map((tt) => (
             // Key on the tuple the SQL groups by — (tmdbId, mediaType), falling
             // back to the title when tmdbId is null. TMDB movie and TV ids are
             // separate namespaces that overlap numerically, so a movie and a
             // series sharing an integer are two rows: distinct keys, and the
             // link carries ?type= so the stats page doesn't blend the two.
             <KV
-              key={`${t.mediaType ?? ""}:${t.tmdbId != null ? `id:${t.tmdbId}` : `t:${t.title}`}`}
-              k={t.title}
-              v={`${t.count}`}
+              key={`${tt.mediaType ?? ""}:${tt.tmdbId != null ? `id:${tt.tmdbId}` : `t:${tt.title}`}`}
+              k={tt.title}
+              v={`${tt.count}`}
               href={
-                t.tmdbId
-                  ? `/admin/activity/media/${t.tmdbId}${t.mediaType ? `?type=${t.mediaType}` : ""}`
+                tt.tmdbId
+                  ? `/admin/activity/media/${tt.tmdbId}${tt.mediaType ? `?type=${tt.mediaType}` : ""}`
                   : undefined
               }
             />
@@ -273,7 +277,7 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
       )}
 
       {detail.topUsers.length > 0 && (
-        <Section title={detail.topUsers.length > 1 ? "Top viewers" : "Top viewer"}>
+        <Section title={t("adminActivity.popover.topViewers", { count: detail.topUsers.length })}>
           {detail.topUsers.map((u) => (
             <KV
               key={u.id}
@@ -286,29 +290,29 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
       )}
 
       {/* Completion */}
-      <Section title="Completion">
-        <KV k="Finished" v={`${detail.completedPct}% · ${detail.completedCount}/${detail.totalPlays}`} />
+      <Section title={t("adminActivity.popover.completion")}>
+        <KV k={t("adminActivity.popover.finished")} v={`${detail.completedPct}% · ${detail.completedCount}/${detail.totalPlays}`} />
       </Section>
 
       {/* Quality & network */}
-      <Section title="Quality & network">
-        {detail.avgBitrateMbps > 0 && <KV k="Avg bitrate" v={`${detail.avgBitrateMbps} Mbps`} />}
-        {detail.dataTransferredGb > 0 && <KV k="Data" v={`${detail.dataTransferredGb} GB`} />}
+      <Section title={t("adminActivity.popover.qualityNetwork")}>
+        {detail.avgBitrateMbps > 0 && <KV k={t("adminActivity.popover.avgBitrate")} v={`${detail.avgBitrateMbps} Mbps`} />}
+        {detail.dataTransferredGb > 0 && <KV k={t("adminActivity.popover.data")} v={`${detail.dataTransferredGb} GB`} />}
         {detail.topResolutions.length > 0 && (
           <KV
-            k="Resolution"
+            k={t("adminActivity.popover.resolution")}
             wrapValue
             v={detail.topResolutions.map((r) => `${r.resolution} (${r.count})`).join(", ")}
           />
         )}
         {(detail.network.lan > 0 || detail.network.wan > 0 || detail.network.relay > 0) && (
           <KV
-            k="Network"
+            k={t("adminActivity.popover.network")}
             wrapValue
             v={[
               detail.network.lan > 0 ? `LAN ${detail.network.lan}` : null,
               detail.network.wan > 0 ? `WAN ${detail.network.wan}` : null,
-              detail.network.relay > 0 ? `Relay ${detail.network.relay}` : null,
+              detail.network.relay > 0 ? t("adminActivity.popover.relayCount", { count: detail.network.relay }) : null,
             ]
               .filter(Boolean)
               .join(" · ")}
@@ -317,10 +321,10 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
       </Section>
 
       {/* Source / type context */}
-      <Section title="Breakdown">
+      <Section title={t("adminActivity.popover.breakdown")}>
         {(detail.source.plex > 0 || detail.source.jellyfin > 0) && (
           <KV
-            k="Source"
+            k={t("adminActivity.popover.source")}
             v={[
               detail.source.plex > 0 ? `Plex ${detail.source.plex}` : null,
               detail.source.jellyfin > 0 ? `Jellyfin ${detail.source.jellyfin}` : null,
@@ -331,10 +335,10 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
         )}
         {(detail.mediaType.movie > 0 || detail.mediaType.tv > 0) && (
           <KV
-            k="Type"
+            k={t("adminActivity.popover.type")}
             v={[
-              detail.mediaType.movie > 0 ? `Movies ${detail.mediaType.movie}` : null,
-              detail.mediaType.tv > 0 ? `TV ${detail.mediaType.tv}` : null,
+              detail.mediaType.movie > 0 ? t("adminActivity.popover.moviesCount", { count: detail.mediaType.movie }) : null,
+              detail.mediaType.tv > 0 ? t("adminActivity.popover.tvCount", { count: detail.mediaType.tv }) : null,
             ]
               .filter(Boolean)
               .join(" · ")}

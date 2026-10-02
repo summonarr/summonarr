@@ -32,17 +32,20 @@ import {
   type TitleResolveMap,
 } from "@/lib/activity-title-resolve";
 import { requireFeature, getFeatureFlags } from "@/lib/features";
+import { getLocale, getTranslator } from "@/lib/i18n/server";
+import type { Translator } from "@/lib/i18n/translate";
 
 export const dynamic = "force-dynamic";
 
 // Change versus the previous period for a KPI cell: "new" when the previous
 // period had nothing, otherwise a rounded percentage with an up/down/flat arrow.
 function kpiDelta(
+  t: Translator,
   current: number,
   previous: number,
 ): Kpi["delta"] {
   if (previous === 0 && current === 0) return null;
-  if (previous === 0) return { text: "new", dir: "up" };
+  if (previous === 0) return { text: t("adminActivity.kpi.new"), dir: "up" };
   const pct = Math.round(((current - previous) / previous) * 100);
   if (pct === 0) return { text: "0%", dir: "flat" };
   return { text: `${Math.abs(pct)}%`, dir: pct > 0 ? "up" : "down" };
@@ -50,14 +53,23 @@ function kpiDelta(
 
 // Deterministic from a fixed YYYY-MM-DD string — not Date.now()/new Date()
 // in a client render path, so this is safe in the server component.
-function shortDay(day: string): string {
-  return new Date(`${day}T00:00:00`).toLocaleDateString("en-US", {
+function shortDay(day: string, locale: string): string {
+  return new Date(`${day}T00:00:00`).toLocaleDateString(locale, {
     month: "short",
     day: "numeric",
   });
 }
 
-const HEATMAP_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+// Catalog keys (Mon-first), translated at render.
+const HEATMAP_DAY_KEYS = [
+  "adminActivity.weekday.mon",
+  "adminActivity.weekday.tue",
+  "adminActivity.weekday.wed",
+  "adminActivity.weekday.thu",
+  "adminActivity.weekday.fri",
+  "adminActivity.weekday.sat",
+  "adminActivity.weekday.sun",
+];
 
 export default async function ActivityPage({
   searchParams,
@@ -80,6 +92,9 @@ export default async function ActivityPage({
   const showActiveSessions   = featureFlags["feature.behavior.activeSessions"] !== false;
   const showActivityCalendar = featureFlags["feature.behavior.activityCalendar"] !== false;
 
+  const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
+  const fmtDay = (day: string) => shortDay(day, locale);
+
   const { days: daysParam, source: sourceParam, mediaType: mediaTypeParam, tab, from: fromParam, to: toParam, watched: watchedParam } = await searchParams;
   const isHistoryTab = tab === "history";
   const days = Math.min(Math.max(parseInt(daysParam ?? "30", 10) || 30, 1), 3650);
@@ -100,8 +115,8 @@ export default async function ActivityPage({
       <div className="ds-page-enter">
         <ActivityLiveRefresher />
         <PageHeader
-          title="Activity"
-          subtitle="Play history and server activity monitoring"
+          title={t("adminActivity.title")}
+          subtitle={t("adminActivity.subtitle")}
         />
         <ActivityFilterBar />
         <ActivityHistoryTable
@@ -261,7 +276,7 @@ export default async function ActivityPage({
     // "Default unreachable" on a single-server deployment where it has always
     // said "Plex" — exactly the kind of observable difference guardrail 35
     // forbids. Label the default bare and qualify only named servers.
-    const name = inst.slug === "" ? "Plex" : `Plex (${inst.name})`;
+    const name = inst.slug === "" ? "Plex" : `Plex (${inst.name})`; // brand + server name, not translated
     return { instance: inst.slug, name, reachable };
   });
 
@@ -516,44 +531,44 @@ export default async function ActivityPage({
 
   const kpis: Kpi[] = [
     {
-      label: `${days}-day plays`,
-      value: stats.totalPlays.toLocaleString(),
-      delta: kpiDelta(stats.totalPlays, prevPlaysNum),
+      label: t("adminActivity.kpi.dayPlays", { days }),
+      value: stats.totalPlays.toLocaleString(locale),
+      delta: kpiDelta(t, stats.totalPlays, prevPlaysNum),
       spark: stats.playsByDay.map((d) => d.count),
-      sparkLabels: stats.playsByDay.map((d) => shortDay(d.day)),
-      sparkSuffix: " plays",
+      sparkLabels: stats.playsByDay.map((d) => fmtDay(d.day)),
+      sparkSuffix: t("adminActivity.common.playsSuffix"),
     },
     {
-      label: "Watch time",
-      value: `${watchHoursNd.toLocaleString()}h`,
-      delta: kpiDelta(watchHoursNd, Math.round(prevWatchTimeNum)),
+      label: t("adminActivity.kpi.watchTime"),
+      value: `${watchHoursNd.toLocaleString(locale)}h`,
+      delta: kpiDelta(t, watchHoursNd, Math.round(prevWatchTimeNum)),
       spark: stats.watchTimeByDay.map((d) => d.hours),
-      sparkLabels: stats.watchTimeByDay.map((d) => shortDay(d.day)),
+      sparkLabels: stats.watchTimeByDay.map((d) => fmtDay(d.day)),
       sparkSuffix: "h",
     },
     {
-      label: "Active users",
-      value: activeUsersNd.toLocaleString(),
-      delta: kpiDelta(activeUsersNd, stats.prevPeriod?.uniqueViewers ?? 0),
+      label: t("adminActivity.kpi.activeUsers"),
+      value: activeUsersNd.toLocaleString(locale),
+      delta: kpiDelta(t, activeUsersNd, stats.prevPeriod?.uniqueViewers ?? 0),
     },
     {
-      label: "Completion rate",
+      label: t("adminActivity.kpi.completionRate"),
       value: `${stats.completionRate}%`,
     },
     {
-      label: "Busiest day",
-      value: busiestDay?.day ? shortDay(busiestDay.day) : "—",
+      label: t("adminActivity.kpi.busiestDay"),
+      value: busiestDay?.day ? fmtDay(busiestDay.day) : "—",
       sub: busiestDay?.day
-        ? `${Number(busiestDay.count).toLocaleString()} plays`
+        ? t("adminActivity.common.playsFormatted", { count: Number(busiestDay.count), n: Number(busiestDay.count).toLocaleString(locale) })
         : undefined,
     },
     {
-      label: "Bandwidth",
+      label: t("adminActivity.kpi.bandwidth"),
       value: stats.avgBitrateMbps > 0 ? `${stats.avgBitrateMbps} Mbps` : "—",
       sub:
         stats.totalBandwidthGB >= 1000
-          ? `${(stats.totalBandwidthGB / 1000).toFixed(1)} TB total`
-          : `${stats.totalBandwidthGB} GB total`,
+          ? t("adminActivity.kpi.total", { amount: `${(stats.totalBandwidthGB / 1000).toFixed(1)} TB` })
+          : t("adminActivity.kpi.total", { amount: `${stats.totalBandwidthGB} GB` }),
     },
   ];
 
@@ -581,13 +596,18 @@ export default async function ActivityPage({
   );
   const heatmapInsight =
     peakVal > 0
-      ? `${HEATMAP_DAYS[peakRow]} ${peakHour}:00 is the busiest hour — ${peakVal.toLocaleString()} plays.`
-      : "Not enough play history yet to surface a peak hour.";
+      ? t("adminActivity.overview.heatmapPeak", {
+          day: t(HEATMAP_DAY_KEYS[peakRow]),
+          hour: `${peakHour}:00`,
+          count: peakVal,
+          n: peakVal.toLocaleString(locale),
+        })
+      : t("adminActivity.overview.heatmapEmpty");
 
   const STREAM_LABELS: Record<string, { label: string; color: string }> = {
-    DirectPlay: { label: "Direct Play", color: "var(--ds-success)" },
-    DirectStream: { label: "Remux", color: "var(--ds-info)" },
-    Transcode: { label: "Transcode", color: "var(--ds-warning)" },
+    DirectPlay: { label: t("adminActivity.method.directPlay"), color: "var(--ds-success)" },
+    DirectStream: { label: t("adminActivity.method.remux"), color: "var(--ds-info)" },
+    Transcode: { label: t("adminActivity.method.transcode"), color: "var(--ds-warning)" },
   };
   const streamTotal = stats.transcodeRatio.reduce((a, r) => a + r.count, 0);
   const streamMix = [...stats.transcodeRatio]
@@ -595,7 +615,7 @@ export default async function ActivityPage({
     .map((r) => ({
       label: STREAM_LABELS[r.method]?.label ?? r.method,
       color: STREAM_LABELS[r.method]?.color ?? "var(--ds-fg-subtle)",
-      value: r.count.toLocaleString(),
+      value: r.count.toLocaleString(locale),
       pct: streamTotal > 0 ? Math.round((r.count / streamTotal) * 100) : 0,
     }));
 
@@ -605,12 +625,12 @@ export default async function ActivityPage({
     .map((r) => ({
       label:
         r.type === "TV"
-          ? "TV episodes"
+          ? t("adminActivity.overview.tvEpisodes")
           : r.type === "MOVIE"
-            ? "Movies"
+            ? t("adminActivity.overview.movies")
             : r.type,
       color: r.type === "TV" ? "var(--ds-accent)" : "oklch(0.72 0.10 275)",
-      value: r.count.toLocaleString(),
+      value: r.count.toLocaleString(locale),
       pct: mediaTotal > 0 ? Math.round((r.count / mediaTotal) * 100) : 0,
     }));
 
@@ -619,11 +639,11 @@ export default async function ActivityPage({
     const n = stats.playsByDay.length;
     for (let i = 0; i < 5; i++) {
       const idx = Math.round((i / 4) * (n - 1));
-      axisLabels.push(shortDay(stats.playsByDay[idx].day));
+      axisLabels.push(fmtDay(stats.playsByDay[idx].day));
     }
   }
   const peakSub = busiestDay?.day
-    ? `peak ${Number(busiestDay.count).toLocaleString()} on ${shortDay(busiestDay.day)}`
+    ? t("adminActivity.overview.peakOn", { n: Number(busiestDay.count).toLocaleString(locale), day: fmtDay(busiestDay.day) })
     : "";
 
   // calendarData is GROUP BY date over the last 365 days, so every row already
@@ -660,8 +680,8 @@ export default async function ActivityPage({
     <div className="ds-page-enter">
       <ActivityLiveRefresher />
       <PageHeader
-        title="Activity"
-        subtitle="Play history and server activity monitoring"
+        title={t("adminActivity.title")}
+        subtitle={t("adminActivity.subtitle")}
         right={<ActivityWarmButton />}
       />
 
@@ -681,7 +701,7 @@ export default async function ActivityPage({
 
       <AnalyticsRow
         playsByDay={stats.playsByDay.map((d) => d.count)}
-        playsByDayLabels={stats.playsByDay.map((d) => shortDay(d.day))}
+        playsByDayLabels={stats.playsByDay.map((d) => fmtDay(d.day))}
         heatmapMatrix={heatmapMatrix}
         heatmapDetailBase={{ days, source, mediaType }}
         streamMix={streamMix}

@@ -7,7 +7,8 @@ import { getAllUsersStats } from "@/lib/play-history";
 import { PageHeader } from "@/components/ui/design";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
 import { ArrowDown, ArrowUp, ArrowUpDown } from "@/components/icons";
-import { formatRelativeTimeWithDateFallback } from "@/lib/relative-time";
+import { relativeWithDateFallback } from "../_relative";
+import { getLocale, getTranslator } from "@/lib/i18n/server";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 
 export const dynamic = "force-dynamic";
@@ -87,6 +88,7 @@ export default async function UsersActivityPage({
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const { search, sort: sortParam, dir: dirParam } = await searchParams;
+  const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
 
   const sort: SortField = (SORT_FIELDS as readonly string[]).includes(sortParam ?? "")
     ? (sortParam as SortField)
@@ -122,8 +124,8 @@ export default async function UsersActivityPage({
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Server Users"
-        subtitle={`${users.length} user${users.length !== 1 ? "s" : ""} with play history`}
+        title={t("adminActivity.users.title")}
+        subtitle={t("adminActivity.users.subtitle", { count: users.length })}
       />
 
       <ActivityFilterBar />
@@ -134,9 +136,9 @@ export default async function UsersActivityPage({
         <input
           type="search"
           name="search"
-          aria-label="Search users by username"
+          aria-label={t("adminActivity.users.searchAria")}
           defaultValue={search ?? ""}
-          placeholder="Search by username…"
+          placeholder={t("adminActivity.users.searchPlaceholder")}
           className="w-full max-w-xs px-3 py-1.5 text-sm bg-zinc-800 border border-zinc-700 rounded-lg text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-[var(--ds-accent-ring)]"
         />
       </form>
@@ -146,24 +148,24 @@ export default async function UsersActivityPage({
           <table className="w-full text-sm">
             <thead>
               <tr className="text-xs text-zinc-500 uppercase tracking-wider border-b border-zinc-800">
-                <SortHeader label="User" field="user" currentSort={sort} currentDir={dir} search={search} />
-                <SortHeader label="Source" field="source" currentSort={sort} currentDir={dir} search={search} />
-                <SortHeader label="Plays" field="plays" currentSort={sort} currentDir={dir} search={search} align="right" />
-                <SortHeader label="Watch Time" field="hours" currentSort={sort} currentDir={dir} search={search} align="right" />
-                <SortHeader label="Last Active" field="lastActive" currentSort={sort} currentDir={dir} search={search} />
+                <SortHeader label={t("adminActivity.field.user")} field="user" currentSort={sort} currentDir={dir} search={search} />
+                <SortHeader label={t("adminActivity.filter.source")} field="source" currentSort={sort} currentDir={dir} search={search} />
+                <SortHeader label={t("adminActivity.stat.plays")} field="plays" currentSort={sort} currentDir={dir} search={search} align="right" />
+                <SortHeader label={t("adminActivity.kpi.watchTime")} field="hours" currentSort={sort} currentDir={dir} search={search} align="right" />
+                <SortHeader label={t("adminActivity.user.lastActive")} field="lastActive" currentSort={sort} currentDir={dir} search={search} />
                 {/* Hide Fav Platform + Direct % below the sm breakpoint — the
                     7-col table sums to ~831 px (≈1.9× a 440 px viewport). The
                     two hidden columns are the lowest-information for a mobile
                     leaderboard view. */}
-                <th scope="col" className="hidden sm:table-cell text-left py-3 px-4">Fav Platform</th>
-                <th scope="col" className="hidden sm:table-cell text-right py-3 px-4">Direct %</th>
+                <th scope="col" className="hidden sm:table-cell text-left py-3 px-4">{t("adminActivity.users.favPlatform")}</th>
+                <th scope="col" className="hidden sm:table-cell text-right py-3 px-4">{t("adminActivity.users.directPct")}</th>
               </tr>
             </thead>
             <tbody>
               {users.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="py-12 text-center text-zinc-500 text-sm">
-                    No users found
+                    {t("adminActivity.users.empty")}
                   </td>
                 </tr>
               ) : (
@@ -198,13 +200,13 @@ export default async function UsersActivityPage({
                       </span>
                     </td>
                     <td className="py-3 px-4 text-right text-zinc-300 tabular-nums font-medium">
-                      {u.plays > 0 ? u.plays.toLocaleString() : <span className="text-zinc-500">0</span>}
+                      {u.plays > 0 ? u.plays.toLocaleString(locale) : <span className="text-zinc-500">0</span>}
                     </td>
                     <td className="py-3 px-4 text-right text-zinc-400 tabular-nums">
                       {u.hours > 0 ? `${u.hours}h` : <span className="text-zinc-500">—</span>}
                     </td>
                     <td className="py-3 px-4 text-zinc-400 text-xs">
-                      {u.lastActive ? formatRelativeTimeWithDateFallback(u.lastActive) : "Never"}
+                      {u.lastActive ? relativeWithDateFallback(u.lastActive, locale) : t("adminActivity.users.never")}
                     </td>
                     <td className="hidden sm:table-cell py-3 px-4 text-zinc-400 text-xs truncate max-w-[120px]">
                       {u.favPlatform ?? <span className="text-zinc-500">—</span>}

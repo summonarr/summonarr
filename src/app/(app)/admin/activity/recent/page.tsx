@@ -8,7 +8,8 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { PageHeader, EmptyState } from "@/components/ui/design";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
 import { Film, Tv2 } from "@/components/icons";
-import { formatRelativeTimeWithDateFallback } from "@/lib/relative-time";
+import { getLocale, getTranslator } from "@/lib/i18n/server";
+import { relativeWithDateFallback } from "../_relative";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +28,7 @@ interface RecentItem {
 export default async function RecentlyAddedPage() {
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
+  const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
 
   const [plexItems, jellyfinItems] = await Promise.all([
     prisma.plexLibraryItem.findMany({
@@ -60,7 +62,7 @@ export default async function RecentlyAddedPage() {
     }
     merged.set(key, {
       tmdbId: item.tmdbId,
-      title: item.title ?? "Unknown",
+      title: item.title ?? t("adminActivity.common.unknownTitle"),
       mediaType: item.mediaType as "MOVIE" | "TV",
       year: item.year ?? null,
       addedAt: item.addedAt!,
@@ -83,7 +85,7 @@ export default async function RecentlyAddedPage() {
     } else {
       merged.set(key, {
         tmdbId: item.tmdbId,
-        title: item.title ?? "Unknown",
+        title: item.title ?? t("adminActivity.common.unknownTitle"),
         mediaType: item.mediaType as "MOVIE" | "TV",
         year: item.year ?? null,
         addedAt: item.addedAt!,
@@ -123,12 +125,12 @@ export default async function RecentlyAddedPage() {
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Recently Added"
+        title={t("adminActivity.tab.recentlyAdded")}
         subtitle={
           // items is capped (slice above), so this is "the latest N", not a total.
           items.length > 0
-            ? `The latest ${items.length} ${items.length === 1 ? "item" : "items"} added to your media server`
-            : "Items recently added to your media server"
+            ? t("adminActivity.recent.subtitle", { count: items.length })
+            : t("adminActivity.recent.subtitleEmpty")
         }
       />
 
@@ -137,9 +139,9 @@ export default async function RecentlyAddedPage() {
       {items.length === 0 ? (
         <EmptyState
           icon={Film}
-          title="No recently added items"
-          description="Run a library sync first."
-          cta={{ href: "/admin/library", label: "Go to Library" }}
+          title={t("adminActivity.recent.emptyTitle")}
+          description={t("adminActivity.recent.emptyDescription")}
+          cta={{ href: "/admin/library", label: t("adminActivity.recent.goToLibrary") }}
         />
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
@@ -188,7 +190,7 @@ export default async function RecentlyAddedPage() {
                   </Link>
                   <p className="text-[10px] text-zinc-500">
                     {item.year && <span>{item.year} · </span>}
-                    {formatRelativeTimeWithDateFallback(item.addedAt)}
+                    {relativeWithDateFallback(item.addedAt, locale)}
                   </p>
                 </div>
               </div>

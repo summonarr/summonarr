@@ -4,7 +4,8 @@ import { Fragment, useEffect, useState } from "react";
 import Link from "next/link";
 import { ChevronDown, ChevronRight, Loader2 } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
-import { formatRelativeTime } from "@/lib/relative-time";
+import { formatRelativeTimeLocalized } from "@/lib/relative-time";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { formatDurationSeconds } from "@/lib/format-duration";
 import {
   ActivityCard,
@@ -55,13 +56,13 @@ export interface RecentPlay {
   userThumb: string | null;
 }
 
-// Unpinned locale/timezone (via "en-US" + no timeZone) is only safe because
+// Unpinned timezone (no timeZone) is only safe because
 // the sole caller (below, inside DetailRow) never renders during SSR/first
 // paint — DetailRow is gated behind `isExpanded`, false until a post-hydration
 // click (guardrail 16). Don't call this from an ungated render path.
-function formatTimestamp(dateStr: string | null): string {
+function formatTimestamp(dateStr: string | null, locale: string): string {
   if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleString("en-US");
+  return new Date(dateStr).toLocaleString(locale);
 }
 
 const TH: React.CSSProperties = {
@@ -81,25 +82,27 @@ const TD: React.CSSProperties = {
 };
 
 function DetailRow({ play }: { play: RecentPlay }) {
+  const t = useT();
+  const locale = useLocale();
   const cells: [string, React.ReactNode][] = [
-    ["Device", play.device ?? "—"],
+    [t("adminActivity.field.device"), play.device ?? "—"],
     [
-      "IP Address",
+      t("adminActivity.field.ipAddress"),
       play.ipAddress ? <IpInfo ip={play.ipAddress} inline /> : "—",
     ],
-    ["Container", play.container?.toUpperCase() ?? "—"],
-    ["Bitrate", fmtBitrate(play.bitrate, play.source)],
-    ["Video Decision", play.videoDecision ?? "—"],
-    ["Audio Decision", play.audioDecision ?? "—"],
-    ["Audio Codec", play.audioCodec?.toUpperCase() ?? "—"],
+    [t("adminActivity.field.container"), play.container?.toUpperCase() ?? "—"],
+    [t("adminActivity.field.bitrate"), fmtBitrate(play.bitrate, play.source)],
+    [t("adminActivity.field.videoDecision"), play.videoDecision ?? "—"],
+    [t("adminActivity.field.audioDecision"), play.audioDecision ?? "—"],
+    [t("adminActivity.field.audioCodec"), play.audioCodec?.toUpperCase() ?? "—"],
     [
-      "Paused",
+      t("adminActivity.field.paused"),
       play.pausedDuration ? formatDurationSeconds(play.pausedDuration) : "—",
     ],
-    ["Started", formatTimestamp(play.startedAt)],
-    ["Stopped", formatTimestamp(play.stoppedAt)],
-    ["Total Duration", formatDurationSeconds(play.duration)],
-    ["Actual Watch Time", formatDurationSeconds(play.playDuration)],
+    [t("adminActivity.field.started"), formatTimestamp(play.startedAt, locale)],
+    [t("adminActivity.field.stopped"), formatTimestamp(play.stoppedAt, locale)],
+    [t("adminActivity.field.totalDuration"), formatDurationSeconds(play.duration)],
+    [t("adminActivity.field.actualWatchTime"), formatDurationSeconds(play.playDuration)],
   ];
   return (
     <tr style={{ background: "var(--ds-bg-1)" }}>
@@ -162,6 +165,8 @@ export function ActivityRecentPlays({
   const [page, setPage] = useState(1);
   const [loadError, setLoadError] = useState(false);
   const mounted = useHasMounted();
+  const t = useT();
+  const locale = useLocale();
 
   // When a stream finishes, ActivityLiveRefresher calls router.refresh(). That
   // sends new props but keeps this component (and its useState) alive, so we
@@ -229,7 +234,7 @@ export function ActivityRecentPlays({
         episodeNumber: p.episodeNumber,
         episodeTitle: p.episodeTitle,
         mediaServerUserId: p.mediaServerUserId,
-        username: p.mediaServerUser?.username ?? "Unknown",
+        username: p.mediaServerUser?.username ?? t("adminActivity.common.unknownUser"),
         userSource: p.mediaServerUser?.source ?? "",
         userThumb: p.mediaServerUser?.thumbUrl ?? null,
       }));
@@ -284,7 +289,7 @@ export function ActivityRecentPlays({
                 whiteSpace: "nowrap",
               }}
             >
-              Recent plays
+              {t("adminActivity.recentPlays.title")}
             </h2>
             <span
               className="ds-mono"
@@ -294,7 +299,7 @@ export function ActivityRecentPlays({
                 whiteSpace: "nowrap",
               }}
             >
-              last {plays.length} sessions
+              {t("adminActivity.recentPlays.lastSessions", { count: plays.length })}
             </span>
           </div>
           <Link
@@ -307,7 +312,7 @@ export function ActivityRecentPlays({
               whiteSpace: "nowrap",
             }}
           >
-            View history →
+            {t("adminActivity.recentPlays.viewHistory")}
           </Link>
         </div>
 
@@ -321,7 +326,7 @@ export function ActivityRecentPlays({
               textAlign: "center",
             }}
           >
-            No play history recorded yet
+            {t("adminActivity.recentPlays.empty")}
           </p>
         ) : (
           <div className="resp-table-scroll">
@@ -339,7 +344,15 @@ export function ActivityRecentPlays({
                     className="ds-mono uppercase"
                     style={{ ...TH, width: 26 }}
                   />
-                  {["User", "Title", "Started", "Duration", "Stream", "Quality", ""].map(
+                  {[
+                    t("adminActivity.field.user"),
+                    t("adminActivity.field.title"),
+                    t("adminActivity.field.started"),
+                    t("adminActivity.field.duration"),
+                    t("adminActivity.field.stream"),
+                    t("adminActivity.field.quality"),
+                    "",
+                  ].map(
                     (h, i) => (
                       <th
                         key={i}
@@ -360,6 +373,7 @@ export function ActivityRecentPlays({
                 {plays.map((p, i) => {
                   const isExpanded = expandedId === p.id;
                   const m = methodLabel(
+                    t,
                     p.playMethod,
                     p.videoDecision,
                     p.audioDecision,
@@ -390,7 +404,7 @@ export function ActivityRecentPlays({
                       ]
                         .filter(Boolean)
                         .join(" · ")
-                    : "Movie";
+                    : t("adminActivity.common.movie");
                   return (
                     <Fragment key={p.id}>
                       <tr
@@ -454,7 +468,7 @@ export function ActivityRecentPlays({
                             {p.serverInstance && (
                               <span
                                 className="ds-mono"
-                                title={`Played on the "${p.serverInstance}" ${p.source} server`}
+                                title={t("adminActivity.common.playedOnServer", { instance: p.serverInstance, source: p.source })}
                                 style={{
                                   fontSize: 9.5,
                                   padding: "1px 5px",
@@ -520,7 +534,7 @@ export function ActivityRecentPlays({
                             fontVariantNumeric: "tabular-nums",
                           }}
                         >
-                          {mounted ? formatRelativeTime(p.startedAt) : ""}
+                          {mounted ? formatRelativeTimeLocalized(p.startedAt, locale) : ""}
                         </td>
                         <td
                           className="ds-mono"
@@ -606,7 +620,7 @@ export function ActivityRecentPlays({
                 role="alert"
                 style={{ fontSize: 11.5, color: "var(--ds-danger)" }}
               >
-                Couldn&apos;t load more plays — retry
+                {t("adminActivity.recentPlays.loadMoreError")}
               </span>
             )}
             <button
@@ -633,10 +647,10 @@ export function ActivityRecentPlays({
                     style={{ width: 14, height: 14 }}
                     className="animate-spin"
                   />
-                  Loading…
+                  {t("adminActivity.common.loading")}
                 </>
               ) : (
-                "Load more"
+                t("adminActivity.common.loadMore")
               )}
             </button>
           </div>

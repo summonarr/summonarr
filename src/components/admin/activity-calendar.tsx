@@ -8,8 +8,10 @@ import {
   HeatmapCellPopover,
   type HeatmapCellAnchor,
 } from "@/components/admin/heatmap-cell-popover";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
-const DOW_LABELS = ["", "Mon", "", "Wed", "", "Fri", ""];
+// Sun-first gutter: catalog keys for the labelled rows, translated at render.
+const DOW_LABEL_KEYS = ["", "adminActivity.weekday.mon", "", "adminActivity.weekday.wed", "", "adminActivity.weekday.fri", ""];
 const CELL = 11;
 const GAP = 2;
 
@@ -47,6 +49,8 @@ export function ActivityCalendar({
   // plays" deep-link; omit it on pages with no history table (user detail).
   detailBase?: { userId?: string; source?: string; mediaType?: string; historyPath?: string };
 }) {
+  const t = useT();
+  const locale = useLocale();
   const [selected, setSelected] = useState<
     {
       queryString: string;
@@ -65,7 +69,7 @@ export function ActivityCalendar({
     if (detailBase.mediaType) params.set("mediaType", detailBase.mediaType);
     // Date formatting in an event handler runs only client-side (never during
     // SSR/hydration), so new Date() here is safe — see guardrail 16.
-    const label = new Date(`${date}T00:00:00Z`).toLocaleDateString("en-US", {
+    const label = new Date(`${date}T00:00:00Z`).toLocaleDateString(locale, {
       weekday: "short",
       month: "short",
       day: "numeric",
@@ -125,7 +129,7 @@ export function ActivityCalendar({
       const month = new Date(firstDay.date).getUTCMonth();
       if (month !== lastMonth) {
         monthLabels.push({
-          label: new Date(firstDay.date).toLocaleString("en-US", {
+          label: new Date(firstDay.date).toLocaleString(locale, {
             month: "short",
             timeZone: "UTC",
           }),
@@ -147,7 +151,7 @@ export function ActivityCalendar({
           userSelect: "none",
         }}
       >
-        ← swipe to see the full year →
+        {t("adminActivity.calendar.swipe")}
       </p>
       <div className="overflow-x-auto">
         <div
@@ -155,7 +159,11 @@ export function ActivityCalendar({
           // only used when the cells are not clickable. Clickable cells need a
           // "group" so their role="button" stays reachable.
           role={detailBase ? "group" : "img"}
-          aria-label={`Activity over the last 365 days. ${totalPlays.toLocaleString("en-US")} total plays across ${activeDays} active days. Peak day: ${peak} plays.`}
+          aria-label={t("adminActivity.calendar.aria", {
+            total: totalPlays.toLocaleString(locale),
+            activeDays,
+            peak,
+          })}
           style={{ minWidth: 700 }}
         >
           {/* Month labels */}
@@ -185,7 +193,7 @@ export function ActivityCalendar({
             <div
               style={{ display: "flex", flexDirection: "column", gap: GAP }}
             >
-              {DOW_LABELS.map((label, i) => (
+              {DOW_LABEL_KEYS.map((key, i) => (
                 <div
                   key={i}
                   className="ds-mono"
@@ -198,7 +206,7 @@ export function ActivityCalendar({
                     width: 20,
                   }}
                 >
-                  {label}
+                  {key ? t(key) : ""}
                 </div>
               ))}
             </div>
@@ -222,7 +230,7 @@ export function ActivityCalendar({
                     return (
                       <div
                         key={day.date}
-                        title={`${day.date}: ${day.count} ${day.count === 1 ? "play" : "plays"}`}
+                        title={t("adminActivity.calendar.cellTitle", { date: day.date, count: day.count })}
                         role={clickable ? "button" : undefined}
                         tabIndex={clickable ? 0 : undefined}
                         onClick={
@@ -268,7 +276,7 @@ export function ActivityCalendar({
               color: "var(--ds-fg-disabled)",
             }}
           >
-            <span>Less</span>
+            <span>{t("adminActivity.calendar.less")}</span>
             {[0, 0.25, 0.5, 0.75, 1].map((level) => (
               <div
                 key={level}
@@ -280,9 +288,9 @@ export function ActivityCalendar({
                 }}
               />
             ))}
-            <span>More</span>
+            <span>{t("adminActivity.calendar.more")}</span>
             <span style={{ marginLeft: "auto", color: "var(--ds-fg-disabled)" }}>
-              days in UTC
+              {t("adminActivity.calendar.daysUtc")}
             </span>
           </div>
         </div>
