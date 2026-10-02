@@ -7,6 +7,7 @@ import {
   STATE_PAGE_CTA_CLASS,
   statePageCtaStyle,
 } from "@/components/layout/state-page";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // Section-scoped error boundary for the admin subtree. Without it, a render
 // error in any admin page bubbles to the (app)-root boundary and unmounts the
@@ -20,6 +21,7 @@ export default function AdminError({
   error: Error & { digest?: string };
   retry: () => void;
 }) {
+  const t = useT();
   useEffect(() => {
     console.error("[admin/error]", error);
   }, [error]);
@@ -27,8 +29,8 @@ export default function AdminError({
   return (
     <StatePage
       glyph={<AlertTriangle style={{ width: 56, height: 56 }} />}
-      title="Admin panel error"
-      description="Something went wrong loading this admin section. The rest of the app is unaffected."
+      title={t("shared.error.adminTitle")}
+      description={t("shared.error.adminDescription")}
       primary={
         <button
           type="button"
@@ -37,10 +39,10 @@ export default function AdminError({
           style={statePageCtaStyle("primary")}
         >
           <RefreshCw className="w-4 h-4" />
-          Try again
+          {t("shared.error.tryAgain")}
         </button>
       }
-      secondary={[{ label: "Go home", href: "/", icon: <Home className="w-4 h-4" /> }]}
+      secondary={[{ label: t("shared.error.goHome"), href: "/", icon: <Home className="w-4 h-4" /> }]}
     />
   );
 }

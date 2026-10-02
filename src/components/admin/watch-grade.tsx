@@ -6,15 +6,17 @@ import { AlertCircle, Film, Loader2, Tv2, X } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useModalA11y } from "@/hooks/use-modal-a11y";
 import {
-  describeWatchGrade,
   hasWatchGradeSignal,
   watchGradeBands,
   watchGradeVolume,
   type RequestWatchVerdict,
   type WatchGradeDetail,
   type WatchGradeLetter,
+  type WatchGradeSettings,
   type WatchGradeSummary,
 } from "@/lib/watch-grade";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 
 // Admin-only request watch grade: a chip beside a user (Users page, request
 // queue) that opens the per-request breakdown. Display-only — see
@@ -36,6 +38,45 @@ const LETTER_COLOR: Record<WatchGradeLetter, string> = {
   F: "var(--ds-danger)",
 };
 
+// Translated twin of describeWatchGrade (src/lib/watch-grade.ts) — same
+// branches, so the two must change together. The lib copy stays English for
+// its tests and any non-UI caller.
+function describeGrade(t: Translator, summary: WatchGradeSummary, settings?: WatchGradeSettings): string {
+  switch (summary.status) {
+    case "graded": {
+      const byOthers =
+        summary.byOthers > 0 ? t("adminQueue.grade.describe.byOthers", { count: summary.byOthers }) : "";
+      return t("adminQueue.grade.describe.graded", {
+        letter: summary.letter ?? "—",
+        score: summary.score ?? 0,
+        fulfilled: t("adminQueue.grade.describe.fulfilled", { count: summary.graded }),
+        watched: summary.watched,
+        byOthers,
+        partial: summary.partial,
+        unwatched: summary.unwatched,
+      });
+    }
+    case "insufficient":
+      if (summary.graded === 0 && summary.inGrace > 0) {
+        const grace = settings
+          ? t("adminQueue.grade.describe.graceDays", { days: settings.graceDays })
+          : t("adminQueue.grade.describe.grace");
+        return t("adminQueue.grade.describe.inGrace", {
+          fulfilled: t("adminQueue.grade.describe.fulfilled", { count: summary.inGrace }),
+          grace,
+        });
+      }
+      if (summary.graded === 0 && summary.untracked > 0) {
+        return t("adminQueue.grade.describe.predates", { count: summary.untracked });
+      }
+      return t("adminQueue.grade.describe.needs", { min: summary.minGradedRequests, graded: summary.graded });
+    case "unlinked":
+      return t("adminQueue.grade.describe.unlinked");
+    case "untracked":
+      return t("adminQueue.grade.describe.untracked");
+  }
+}
+
 export function WatchGradeChip({
   userId,
   userLabel,
@@ -48,6 +89,7 @@ export function WatchGradeChip({
   // Letter and volume (the request queue); the Users page also shows the score.
   compact?: boolean;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
   if (!hasWatchGradeSignal(summary)) return null;
@@ -58,12 +100,12 @@ export function WatchGradeChip({
   const volume = summary.graded > 0 ? ` · ${watchGradeVolume(summary)}` : "";
   const text = letter
     ? compact
-      ? `Watch ${letter}${volume}`
-      : `Watch grade ${letter} · ${summary.score}%${volume}`
+      ? t("adminQueue.grade.chipCompact", { letter, volume })
+      : t("adminQueue.grade.chip", { letter, score: summary.score ?? 0, volume })
     : compact
-      ? `Watch —${volume}`
-      : `Watch grade —${volume}`;
-  const description = describeWatchGrade(summary);
+      ? t("adminQueue.grade.chipCompact", { letter: "—", volume })
+      : t("adminQueue.grade.chipNone", { volume });
+  const description = describeGrade(t, summary);
 
   return (
     <>
@@ -71,7 +113,7 @@ export function WatchGradeChip({
         type="button"
         onClick={() => setOpen(true)}
         title={description}
-        aria-label={`${description}. Show the breakdown for ${userLabel}`}
+        aria-label={t("adminQueue.grade.chipAria", { description, user: userLabel })}
         aria-haspopup="dialog"
         // The pseudo-element widens the hit area to ~32px tall without
         // changing the chip's 16px visual size (it sits in dense rows).
@@ -103,61 +145,62 @@ function matchesFilter(v: RequestWatchVerdict, filter: Filter): boolean {
 }
 
 // Only ever set on a scored request the requester didn't fully watch.
-function othersText(v: RequestWatchVerdict): string {
+function othersText(v: RequestWatchVerdict, t: Translator): string {
   if (!v.otherViewers) return "";
-  return ` · watched by ${v.otherViewers} other${v.otherViewers === 1 ? "" : "s"}`;
+  return t("adminQueue.grade.progress.others", { count: v.otherViewers });
 }
 
-function duplicatesText(v: RequestWatchVerdict): string {
+function duplicatesText(v: RequestWatchVerdict, t: Translator): string {
   if (v.duplicates <= 0) return "";
-  return ` · also requested on ${v.duplicates} other instance${v.duplicates === 1 ? "" : "s"}`;
+  return t("adminQueue.grade.progress.duplicates", { count: v.duplicates });
 }
 
-function progressText(v: RequestWatchVerdict): string {
-  if (v.watch === null) return "Watches can't be tracked";
-  const tail = othersText(v) + duplicatesText(v);
+function progressText(v: RequestWatchVerdict, t: Translator): string {
+  if (v.watch === null) return t("adminQueue.grade.progress.untrackable");
+  const tail = othersText(v, t) + duplicatesText(v, t);
   if (v.episodes) {
     const e = v.episodes;
-    const started = e.started > 0 ? `, ${e.started} started` : "";
+    const started = e.started > 0 ? t("adminQueue.grade.progress.started", { started: e.started }) : "";
     // The best season is what the credit comes from.
-    const season = e.season !== null ? `S${e.season}: ` : "";
+    const season = e.season !== null ? t("adminQueue.grade.progress.season", { season: e.season }) : "";
     return (
       (e.library > 0
-        ? `${season}${e.watched} of ${e.library} episodes watched${started} · ${e.required} needed`
-        : `${season}${e.watched} episode${e.watched === 1 ? "" : "s"} watched${started} · episode count unknown`) + tail
+        ? t("adminQueue.grade.progress.episodesOf", { season, watched: e.watched, library: e.library, started, required: e.required })
+        : t("adminQueue.grade.progress.episodesUnknown", { season, count: e.watched, started })) + tail
     );
   }
-  if (v.watch === "watched") return `Watched${tail}`;
-  return (v.watch === "partial" ? "Started, not finished" : "Not played since the request") + tail;
+  if (v.watch === "watched") return t("adminQueue.grade.state.watched") + tail;
+  return (v.watch === "partial" ? t("adminQueue.grade.progress.partial") : t("adminQueue.grade.progress.notPlayed")) + tail;
 }
 
 function StateChip({ v }: { v: RequestWatchVerdict }) {
+  const t = useT();
   if (v.scoring === "grace") {
     return (
-      <span className="ds-chip" title="Doesn't count toward the grade until the grace period ends">
-        Counts in {v.graceDaysLeft}d
+      <span className="ds-chip" title={t("adminQueue.grade.state.graceTitle")}>
+        {t("adminQueue.grade.state.grace", { days: v.graceDaysLeft ?? 0 })}
       </span>
     );
   }
   if (v.scoring === "untracked") {
     return (
-      <span className="ds-chip" title="Fulfilled before play history was tracking this user's media servers — never counted">
-        Not counted
+      <span className="ds-chip" title={t("adminQueue.grade.state.untrackedTitle")}>
+        {t("adminQueue.grade.state.untracked")}
       </span>
     );
   }
-  if (v.watch === "watched") return <span className="ds-chip ds-chip-approved">Watched</span>;
+  if (v.watch === "watched") return <span className="ds-chip ds-chip-approved">{t("adminQueue.grade.state.watched")}</span>;
   if (v.watchedByOthers) {
     return (
-      <span className="ds-chip ds-chip-approved" title="The requester didn't watch it, but enough other people did, so it counts as watched">
-        Others watched
+      <span className="ds-chip ds-chip-approved" title={t("adminQueue.grade.state.othersTitle")}>
+        {t("adminQueue.grade.state.others")}
       </span>
     );
   }
   if (v.watch === "partial") {
-    return <span className="ds-chip ds-chip-pending">Partly · {Math.round(v.credit * 100)}%</span>;
+    return <span className="ds-chip ds-chip-pending">{t("adminQueue.grade.state.partial", { percent: Math.round(v.credit * 100) })}</span>;
   }
-  return <span className="ds-chip ds-chip-declined">Not watched</span>;
+  return <span className="ds-chip ds-chip-declined">{t("adminQueue.grade.state.unwatched")}</span>;
 }
 
 export function WatchGradeModal({
@@ -169,6 +212,8 @@ export function WatchGradeModal({
   userLabel: string;
   onClose: () => void;
 }) {
+  const t = useT();
+  const locale = useLocale();
   const [data, setData] = useState<WatchGradeDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
@@ -184,7 +229,7 @@ export function WatchGradeModal({
       .then(async (res) => {
         if (!res.ok) {
           const body = (await res.json().catch(() => null)) as { error?: string } | null;
-          throw new Error(body?.error ?? `Could not load the watch grade (${res.status})`);
+          throw new Error(body?.error ?? t("adminQueue.grade.loadFailedStatus", { status: res.status }));
         }
         return (await res.json()) as WatchGradeDetail;
       })
@@ -192,12 +237,12 @@ export function WatchGradeModal({
         if (!cancelled) setData(detail);
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Could not load the watch grade");
+        if (!cancelled) setError(err instanceof Error ? err.message : t("adminQueue.grade.loadFailed"));
       });
     return () => {
       cancelled = true;
     };
-  }, [userId]);
+  }, [userId, t]);
 
   const grade = data?.grade ?? null;
   const settings = data?.settings ?? null;
@@ -205,13 +250,13 @@ export function WatchGradeModal({
   const shown = verdicts.filter((v) => matchesFilter(v, filter));
   const filters: { id: Filter; label: string; count: number }[] = grade
     ? [
-        { id: "all", label: "All", count: verdicts.length },
-        { id: "unwatched", label: "Not watched", count: grade.unwatched },
-        { id: "partial", label: "Partly", count: grade.partial },
-        { id: "others", label: "Others watched", count: grade.byOthers },
-        { id: "watched", label: "Watched", count: grade.watched },
-        { id: "grace", label: "Grace period", count: grade.inGrace },
-        { id: "untracked", label: "Not counted", count: grade.untracked },
+        { id: "all", label: t("requests.filter.all"), count: verdicts.length },
+        { id: "unwatched", label: t("adminQueue.grade.state.unwatched"), count: grade.unwatched },
+        { id: "partial", label: t("adminQueue.grade.filter.partial"), count: grade.partial },
+        { id: "others", label: t("adminQueue.grade.state.others"), count: grade.byOthers },
+        { id: "watched", label: t("adminQueue.grade.state.watched"), count: grade.watched },
+        { id: "grace", label: t("adminQueue.grade.filter.grace"), count: grade.inGrace },
+        { id: "untracked", label: t("adminQueue.grade.state.untracked"), count: grade.untracked },
       ]
     : [];
 
@@ -232,12 +277,12 @@ export function WatchGradeModal({
       >
         <div className="flex items-center justify-between mb-1">
           <h3 id={titleId} className="text-sm font-semibold text-zinc-100">
-            Request watch grade
+            {t("adminQueue.grade.title")}
           </h3>
           <button
             ref={closeBtnRef}
             type="button"
-            aria-label="Close"
+            aria-label={t("adminQueue.common.close")}
             onClick={onClose}
             className="p-1.5 -m-1.5 rounded text-zinc-500 hover:text-zinc-100 transition-colors"
           >
@@ -258,8 +303,8 @@ export function WatchGradeModal({
         ) : !data.enabled ? (
           <p className="text-xs text-zinc-400">
             {data.reason === "feature-off"
-              ? "Watch grades are turned off. Enable “Request watch grades” in Settings → Features."
-              : "Watch grades need play history tracking. Turn it on for at least one media server in Settings → Media → Play History."}
+              ? t("adminQueue.grade.featureOff")
+              : t("adminQueue.grade.needsHistory")}
           </p>
         ) : grade && settings ? (
           <>
@@ -280,30 +325,37 @@ export function WatchGradeModal({
               </div>
               <div className="min-w-0">
                 <p className="text-sm text-zinc-200">
-                  {grade.score !== null ? `${grade.score}% watch rate` : "No scored requests yet"}
+                  {grade.score !== null ? t("adminQueue.grade.watchRate", { score: grade.score }) : t("adminQueue.grade.noScored")}
                 </p>
-                <p className="text-xs text-zinc-500 mt-0.5">{describeWatchGrade(grade, settings)}</p>
+                <p className="text-xs text-zinc-500 mt-0.5">{describeGrade(t, grade, settings)}</p>
               </div>
             </div>
 
             <p className="text-[11px] leading-relaxed text-zinc-500 mb-3">
-              Approved requests fulfilled {settings.windowDays > 0 ? `in the last ${settings.windowDays} days` : "at any time"} count{" "}
-              {settings.graceDays} days after they became available — approving a title counts for everyone who requested it; pending, declined and never-approved requests don&apos;t. A movie counts once it&apos;s{" "}
-              {settings.watchedThresholdPercent}% played (half credit once a quarter of it is played); a show once{" "}
-              {settings.tvEpisodePercent}% of one season&apos;s episodes are watched — the best season counts.{" "}
+              {t("adminQueue.grade.rules.counting", {
+                window:
+                  settings.windowDays > 0
+                    ? t("adminQueue.grade.rules.window", { days: settings.windowDays })
+                    : t("adminQueue.grade.rules.anyTime"),
+                grace: settings.graceDays,
+              })}{" "}
+              {t("adminQueue.grade.rules.thresholds", {
+                movie: settings.watchedThresholdPercent,
+                tv: settings.tvEpisodePercent,
+              })}{" "}
               {settings.otherViewers > 0
-                ? `A request the requester skipped also counts once ${settings.otherViewers} other ${settings.otherViewers === 1 ? "person has" : "people have"} watched it. `
+                ? `${t("adminQueue.grade.rules.others", { count: settings.otherViewers })} `
                 : ""}
-              Grades need{" "}
-              {settings.minGradedRequests}+ counted requests —{" "}
-              {watchGradeBands(settings).filter((b) => b.letter !== "F")
-                .map((b) => `${b.letter} ${b.min}%+`)
-                .join(", ")}
-              , otherwise F.
+              {t("adminQueue.grade.rules.bands", {
+                min: settings.minGradedRequests,
+                bands: watchGradeBands(settings).filter((b) => b.letter !== "F")
+                  .map((b) => `${b.letter} ${b.min}%+`)
+                  .join(", "),
+              })}
             </p>
 
             {verdicts.length > 0 && (
-              <div className="flex flex-wrap gap-1.5 mb-3" role="group" aria-label="Filter requests">
+              <div className="flex flex-wrap gap-1.5 mb-3" role="group" aria-label={t("adminQueue.grade.filterAria")}>
                 {filters
                   .filter((f) => f.id === "all" || f.count > 0)
                   .map((f) => (
@@ -327,10 +379,12 @@ export function WatchGradeModal({
             <div className="overflow-y-auto -mx-1 px-1 flex flex-col gap-1.5">
               {verdicts.length === 0 ? (
                 <p className="text-xs text-zinc-500 py-4 text-center">
-                  No approved requests fulfilled {settings.windowDays > 0 ? `in the last ${settings.windowDays} days` : "yet"}.
+                  {settings.windowDays > 0
+                    ? t("adminQueue.grade.emptyWindow", { days: settings.windowDays })
+                    : t("adminQueue.grade.empty")}
                 </p>
               ) : shown.length === 0 ? (
-                <p className="text-xs text-zinc-500 py-4 text-center">Nothing in this filter.</p>
+                <p className="text-xs text-zinc-500 py-4 text-center">{t("adminQueue.grade.emptyFilter")}</p>
               ) : (
                 shown.map((v) => (
                   <div
@@ -347,8 +401,8 @@ export function WatchGradeModal({
                         {v.title}
                         {v.releaseYear ? <span className="text-zinc-500"> ({v.releaseYear})</span> : null}
                       </p>
-                      <p className="text-[11px] text-zinc-500 truncate" title={progressText(v)}>
-                        Available {new Date(v.fulfilledAt).toLocaleDateString()} · {progressText(v)}
+                      <p className="text-[11px] text-zinc-500 truncate" title={progressText(v, t)}>
+                        {t("adminQueue.grade.availableOn", { date: new Date(v.fulfilledAt).toLocaleDateString(locale) })} · {progressText(v, t)}
                       </p>
                     </div>
                     <StateChip v={v} />
@@ -357,7 +411,7 @@ export function WatchGradeModal({
               )}
               {data.truncated && (
                 <p className="text-[11px] text-zinc-500 text-center py-1">
-                  Showing the newest {verdicts.length} requests; the grade covers all of them.
+                  {t("adminQueue.grade.truncated", { count: verdicts.length })}
                 </p>
               )}
             </div>

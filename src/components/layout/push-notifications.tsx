@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 type State = "unsupported" | "loading" | "subscribed" | "unsubscribed" | "denied" | "naming";
 type TestState = "idle" | "sending" | "ok" | "error";
@@ -36,6 +37,7 @@ export function PushNotifications() {
   // both emit nothing — otherwise the parent's child count disagrees with the
   // SSR DOM (React #418 on /, /movies, /admin/library etc.).
   const mounted = useHasMounted();
+  const t = useT();
   const [state, setState] = useState<State>("loading");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -96,7 +98,7 @@ export function PushNotifications() {
           .json()
           .then((b: { error?: string }) => b?.error)
           .catch(() => undefined);
-        throw new Error(reason || "Could not fetch VAPID key");
+        throw new Error(reason || t("shared.push.vapidFailed"));
       }
       const { publicKey } = await res.json() as { publicKey: string };
 
@@ -123,7 +125,7 @@ export function PushNotifications() {
         // and the bell would wrongly show "subscribed" on every later visit.
         await sub.unsubscribe().catch(() => { });
         const data = (await subscribeRes.json().catch(() => null)) as { error?: string } | null;
-        setError(data?.error ?? `Could not enable notifications (${subscribeRes.status})`);
+        setError(data?.error ?? t("shared.push.enableFailedStatus", { status: subscribeRes.status }));
         setState("unsubscribed");
         return;
       }
@@ -140,7 +142,7 @@ export function PushNotifications() {
         .then((s) => s?.unsubscribe())
         .catch(() => { });
       const denied = Notification.permission === "denied";
-      if (!denied) setError("Could not enable notifications. Please try again.");
+      if (!denied) setError(t("shared.push.enableFailed"));
       setState(denied ? "denied" : "unsubscribed");
     } finally {
       setBusy(false);
@@ -190,7 +192,7 @@ export function PushNotifications() {
       setState("unsubscribed");
       window.dispatchEvent(new Event(PUSH_CHANGED_EVENT));
     } catch {
-      setError("Could not turn off notifications. Please try again.");
+      setError(t("shared.push.disableFailed"));
     } finally {
       setBusy(false);
     }
@@ -204,8 +206,8 @@ export function PushNotifications() {
     return (
       <button
         disabled
-        aria-label="Push notifications not supported"
-        title="Push notifications are not supported in this browser"
+        aria-label={t("shared.push.unsupportedAria")}
+        title={t("shared.push.unsupportedTitle")}
         className="ds-tap inline-flex items-center justify-center cursor-not-allowed shrink-0"
         // fg-disabled, not zinc-700: zinc-700 is a background colour in this
         // theme, so the icon would vanish into the header.
@@ -220,8 +222,8 @@ export function PushNotifications() {
     return (
       <button
         disabled
-        aria-label="Notifications blocked"
-        title="Notifications blocked — enable them in your browser settings"
+        aria-label={t("shared.push.blockedAria")}
+        title={t("shared.push.blockedTitle")}
         className="ds-tap inline-flex items-center justify-center text-zinc-500 cursor-not-allowed shrink-0"
         style={{ width: 32, height: 32, borderRadius: 6 }}
       >
@@ -247,9 +249,9 @@ export function PushNotifications() {
           type="text"
           value={deviceName}
           onChange={(e) => setDeviceName(e.target.value)}
-          placeholder="Device name (e.g. Work Mac)"
+          placeholder={t("shared.push.devicePlaceholder")}
           maxLength={100}
-          aria-label="Device name"
+          aria-label={t("shared.push.deviceName")}
           className="w-40 shrink text-xs md:text-xs"
         />
         <Button
@@ -257,9 +259,9 @@ export function PushNotifications() {
           size="sm"
           className="h-8 shrink-0"
           disabled={busy}
-          aria-label="Enable push notifications for this device"
+          aria-label={t("shared.push.enableAria")}
         >
-          Enable
+          {t("shared.push.enable")}
         </Button>
         <Button
           type="button"
@@ -268,7 +270,7 @@ export function PushNotifications() {
           className="h-8 shrink-0"
           onClick={() => { setState("unsubscribed"); setDeviceName(""); }}
         >
-          Cancel
+          {t("shared.common.cancel")}
         </Button>
       </form>
     );
@@ -281,8 +283,8 @@ export function PushNotifications() {
           onClick={unsubscribe}
           disabled={busy}
           // A failed unsubscribe keeps this state, so show its error here.
-          aria-label={error ?? "Disable desktop notifications"}
-          title={error ?? "Disable desktop notifications"}
+          aria-label={error ?? t("shared.push.disable")}
+          title={error ?? t("shared.push.disable")}
           className={`ds-tap inline-flex items-center justify-center transition-colors disabled:opacity-50 shrink-0 ${
             error ? "text-red-400" : "text-indigo-400 hover:text-indigo-300"
           }`}
@@ -293,8 +295,8 @@ export function PushNotifications() {
         <button
           onClick={sendTest}
           disabled={testState === "sending"}
-          aria-label="Send a test notification"
-          title="Send a test notification"
+          aria-label={t("shared.push.sendTest")}
+          title={t("shared.push.sendTest")}
           className={`ds-tap inline-flex items-center justify-center transition-colors disabled:opacity-50 shrink-0 ${
             testState === "ok" ? "text-green-400" : testState === "error" ? "text-red-400" : "text-zinc-500 hover:text-zinc-300"
           }`}
@@ -313,8 +315,8 @@ export function PushNotifications() {
     <button
       onClick={() => { setError(null); setState("naming"); }}
       disabled={busy}
-      aria-label={error ?? "Enable desktop notifications"}
-      title={error ?? "Enable desktop notifications"}
+      aria-label={error ?? t("shared.push.enableDesktop")}
+      title={error ?? t("shared.push.enableDesktop")}
       className={`ds-tap inline-flex items-center justify-center transition-colors disabled:opacity-50 shrink-0 ${
         error ? "text-red-400 hover:text-[var(--ds-danger-hover)]" : "text-zinc-500 hover:text-zinc-300"
       }`}

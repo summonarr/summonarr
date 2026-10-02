@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Loader2, Check, X, AlertTriangle, RefreshCw, RotateCcw, Search, MessageSquare, Trash2, Users, Settings } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface RequestActionsProps {
   requestId: string;
@@ -20,6 +21,7 @@ interface RequestActionsProps {
 
 export function RequestActions({ requestId, currentStatus, mediaType, arrInstance, existingAdminNote, groupPendingIds }: RequestActionsProps) {
   const router = useRouter();
+  const t = useT();
   const [loading, setLoading] = useState<"APPROVED" | "DECLINED" | "RETRY" | "SEARCH" | "NOTE" | "DELETE" | null>(null);
 
   const [optimisticStatus, setOptimisticStatus] = useState<string | null>(null);
@@ -62,14 +64,14 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
       const res = await fetch(withBasePath(`/api/requests/quality-profiles?mediaType=${mediaType}&instance=${encodeURIComponent(arrInstance)}`));
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setProfilesError((data as { error?: string }).error ?? "Couldn't load quality profiles");
+        setProfilesError((data as { error?: string }).error ?? t("adminQueue.actions.profilesFailed"));
         return;
       }
       const data: { qualityProfiles: { id: number; name: string }[]; defaultId: number | null } = await res.json();
       setProfiles(data.qualityProfiles);
       setDefaultProfileId(data.defaultId);
     } catch {
-      setProfilesError("Couldn't load quality profiles");
+      setProfilesError(t("adminQueue.actions.profilesFailed"));
     } finally {
       setProfilesLoading(false);
     }
@@ -95,14 +97,14 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
       const failed = results.find((r) => !r.ok);
       if (failed) {
         const data = await failed.json().catch(() => ({}));
-        setArrError((data as { error?: string }).error ?? "Failed to save reply");
+        setArrError((data as { error?: string }).error ?? t("adminQueue.actions.saveReplyFailed"));
         return;
       }
       setShowReply(false);
       setReplySaved(true);
       router.refresh();
     } catch {
-      setArrError("Network error — please try again.");
+      setArrError(t("shared.thread.networkError"));
     } finally {
       setLoading(null);
     }
@@ -144,7 +146,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
       if (!res.ok) {
         setOptimisticStatus(null);
         const data = await res.json().catch(() => ({}));
-        setArrError((data as { error?: string }).error ?? "Failed to update");
+        setArrError((data as { error?: string }).error ?? t("adminQueue.actions.updateFailed"));
         return;
       }
       const data: { arrError?: string } = await res.json().catch(() => ({}));
@@ -164,7 +166,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
       router.refresh();
     } catch {
       setOptimisticStatus(null);
-      setArrError("Network error — please try again.");
+      setArrError(t("shared.thread.networkError"));
     } finally {
       setLoading(null);
     }
@@ -182,7 +184,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        setArrError((err as { arrError?: string; error?: string }).arrError ?? (err as { error?: string }).error ?? `Request failed (${res.status})`);
+        setArrError((err as { arrError?: string; error?: string }).arrError ?? (err as { error?: string }).error ?? t("adminQueue.common.requestFailed", { status: res.status }));
         return;
       }
       const data = (await res.json().catch(() => ({}))) as { arrError?: string };
@@ -192,7 +194,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
         setRetryOk(true);
       }
     } catch {
-      setArrError("Network error — please try again.");
+      setArrError(t("shared.thread.networkError"));
     } finally {
       setLoading(null);
     }
@@ -210,7 +212,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        setArrError((err as { arrError?: string; error?: string }).arrError ?? (err as { error?: string }).error ?? `Request failed (${res.status})`);
+        setArrError((err as { arrError?: string; error?: string }).arrError ?? (err as { error?: string }).error ?? t("adminQueue.common.requestFailed", { status: res.status }));
         return;
       }
       const data = (await res.json().catch(() => ({}))) as { arrError?: string };
@@ -220,7 +222,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
         setRetryOk(true);
       }
     } catch {
-      setArrError("Network error — please try again.");
+      setArrError(t("shared.thread.networkError"));
     } finally {
       setLoading(null);
     }
@@ -232,14 +234,14 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
       const res = await fetch(withBasePath(`/api/requests/${requestId}`), { method: "DELETE" });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setArrError((data as { error?: string }).error ?? "Delete failed");
+        setArrError((data as { error?: string }).error ?? t("adminQueue.actions.deleteFailed"));
         return;
       }
       router.refresh();
     } catch {
       // `finally` always closes the confirm dialog, so show an error here —
       // otherwise a network failure would look like the admin just cancelled.
-      setArrError("Network error — please try again.");
+      setArrError(t("shared.thread.networkError"));
     } finally {
       setLoading(null);
       setShowDeleteConfirm(false);
@@ -254,15 +256,15 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           className="flex items-center gap-1 text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors"
         >
           <MessageSquare className="w-3 h-3" />
-          {existingAdminNote ? "Edit reply" : "Reply"}
+          {existingAdminNote ? t("adminQueue.actions.editReply") : t("adminQueue.actions.reply")}
         </button>
       ) : (
         <div className="flex flex-col items-end gap-1.5 w-48">
           <textarea
             value={replyText}
             onChange={(e) => setReplyText(e.target.value.slice(0, 500))}
-            placeholder="Admin reply (visible to user)"
-            aria-label="Admin reply to requester"
+            placeholder={t("adminQueue.actions.replyPlaceholder")}
+            aria-label={t("adminQueue.actions.replyAria")}
             rows={2}
             autoFocus
             className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
@@ -275,7 +277,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
               disabled={loading === "NOTE"}
               className="h-6 px-2 text-[11px] border-zinc-700 text-zinc-500 hover:text-zinc-100"
             >
-              Cancel
+              {t("shared.common.cancel")}
             </Button>
             <Button
               size="sm"
@@ -284,14 +286,14 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
               className="h-6 px-2 text-[11px] bg-indigo-700 hover:bg-indigo-600 gap-1"
             >
               {loading === "NOTE" ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <Check className="w-2.5 h-2.5" />}
-              Save
+              {t("adminQueue.actions.save")}
             </Button>
           </div>
         </div>
       )}
       {replySaved && !showReply && (
         <span role="status" aria-live="polite" className="flex items-center gap-1 text-[11px] text-green-400">
-          <Check className="w-3 h-3" />Reply saved
+          <Check className="w-3 h-3" />{t("adminQueue.actions.replySaved")}
         </span>
       )}
     </div>
@@ -301,7 +303,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
     if (showDeleteConfirm) {
       return (
         <div className="flex flex-col items-end gap-2">
-          <span className="text-xs text-zinc-400">Delete this request?</span>
+          <span className="text-xs text-zinc-400">{t("adminQueue.actions.deleteConfirm")}</span>
           <div className="flex items-center gap-2">
             <Button
               size="sm"
@@ -310,7 +312,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
               disabled={loading === "DELETE"}
               className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100"
             >
-              Cancel
+              {t("shared.common.cancel")}
             </Button>
             <Button
               size="sm"
@@ -319,7 +321,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
               className="h-7 px-3 text-xs bg-red-800 text-white hover:bg-red-700 gap-1"
             >
               {loading === "DELETE" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-              Delete
+              {t("adminQueue.actions.delete")}
             </Button>
           </div>
         </div>
@@ -337,7 +339,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1"
           >
             {loading === "SEARCH" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Search className="w-3 h-3" />}
-            Search
+            {t("adminQueue.actions.search")}
           </Button>
           <Button
             size="sm"
@@ -347,7 +349,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1"
           >
             {loading === "RETRY" ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
-            Re-push
+            {t("adminQueue.actions.repush")}
           </Button>
           <Button
             size="sm"
@@ -357,12 +359,12 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             className="h-7 px-3 text-xs border-red-800/50 text-red-500 hover:bg-red-500/10 hover:text-red-400 gap-1"
           >
             <Trash2 className="w-3 h-3" />
-            Delete
+            {t("adminQueue.actions.delete")}
           </Button>
         </div>
         {retryOk && (
           <span role="status" aria-live="polite" className="flex items-center gap-1 text-[11px] text-green-400">
-            <Check className="w-3 h-3" />Done
+            <Check className="w-3 h-3" />{t("adminQueue.actions.done")}
           </span>
         )}
         {arrError && (
@@ -386,7 +388,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1"
         >
           {loading === "APPROVED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
-          Re-approve
+          {t("adminQueue.actions.reapprove")}
         </Button>
         {arrError && (
           <span role="alert" aria-live="assertive" className="flex items-center gap-1 text-[11px] text-amber-400 max-w-48 text-right">
@@ -405,7 +407,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             only shows on small screens: the row's own status chip is
             `hidden sm:inline-flex`, so exactly one "Available" shows at any
             width. */}
-        <span className="sm:hidden text-xs text-indigo-400 font-medium">Available</span>
+        <span className="sm:hidden text-xs text-indigo-400 font-medium">{t("requests.status.available")}</span>
         {replyBlock}
         {/* saveReply is reachable from this branch too, so it needs somewhere to
             report a failure — otherwise a reply on an available title silently
@@ -425,8 +427,8 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
         <textarea
           value={declineNote}
           onChange={(e) => setDeclineNote(e.target.value)}
-          placeholder="Reason (optional)"
-          aria-label="Decline reason"
+          placeholder={t("adminQueue.actions.reasonPlaceholder")}
+          aria-label={t("adminQueue.actions.declineReasonAria")}
           rows={2}
           className="w-full rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 resize-none"
         />
@@ -440,27 +442,27 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             disabled={loading !== null}
             className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100"
           >
-            Cancel
+            {t("shared.common.cancel")}
           </Button>
           <Button
             size="sm"
             onClick={() => updateStatus("DECLINED", declineNote.trim() || undefined, false)}
             disabled={loading !== null}
             className="h-7 px-3 text-xs bg-red-800 text-white hover:bg-red-700 gap-1"
-            title="User can re-request this title later"
+            title={t("adminQueue.actions.denyAllowTitle")}
           >
             {loading === "DECLINED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3" />}
-            Deny — allow re-request
+            {t("adminQueue.actions.denyAllow")}
           </Button>
           <Button
             size="sm"
             onClick={() => updateStatus("DECLINED", declineNote.trim() || undefined, true)}
             disabled={loading !== null}
             className="h-7 px-3 text-xs bg-red-950 text-white hover:bg-red-900 border border-red-700 gap-1"
-            title="User cannot re-request this title"
+            title={t("adminQueue.actions.denyPermanentTitle")}
           >
             {loading === "DECLINED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3" />}
-            Deny — permanent
+            {t("adminQueue.actions.denyPermanent")}
           </Button>
         </div>
         {/* A failed decline leaves this form open, so its error has to be
@@ -477,7 +479,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
   if (showProfilePicker) {
     return (
       <div className="flex flex-col items-end gap-2 w-56">
-        <span className="text-xs text-zinc-400">Approve with quality profile</span>
+        <span className="text-xs text-zinc-400">{t("adminQueue.actions.approveWithProfile")}</span>
         {profilesLoading ? (
           <Loader2 className="w-4 h-4 animate-spin text-zinc-500" />
         ) : profilesError ? (
@@ -485,7 +487,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             <AlertTriangle className="w-3 h-3 shrink-0" />{profilesError}
           </span>
         ) : (profiles?.length ?? 0) === 0 ? (
-          <span className="text-[11px] text-zinc-500 text-right">No quality profiles found</span>
+          <span className="text-[11px] text-zinc-500 text-right">{t("adminQueue.actions.noProfiles")}</span>
         ) : (
           <div className="flex flex-col items-stretch gap-1 w-full">
             {(profiles ?? []).map((p) => (
@@ -501,7 +503,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
                   {loading === "APPROVED" && approvingProfileId === p.id ? <Loader2 className="w-3 h-3 animate-spin shrink-0" /> : null}
                   <span className="truncate">{p.name}</span>
                 </span>
-                {p.id === defaultProfileId && <span className="text-[10px] uppercase tracking-wide text-zinc-500 shrink-0">default</span>}
+                {p.id === defaultProfileId && <span className="text-[10px] uppercase tracking-wide text-zinc-500 shrink-0">{t("adminQueue.actions.defaultProfile")}</span>}
               </Button>
             ))}
           </div>
@@ -513,7 +515,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           disabled={loading !== null}
           className="h-6 px-2 text-[11px] border-zinc-700 text-zinc-500 hover:text-zinc-100"
         >
-          Cancel
+          {t("shared.common.cancel")}
         </Button>
         {arrError && (
           <span role="alert" aria-live="assertive" className="flex items-center gap-1 text-[11px] text-amber-400 max-w-56 text-right">
@@ -536,7 +538,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           className="h-7 px-3 text-xs bg-green-700 text-white hover:bg-green-800 gap-1"
         >
           {loading === "APPROVED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
-          Approve
+          {t("adminQueue.actions.approve")}
         </Button>
         {allowProfilePick && (
           <Button
@@ -545,10 +547,10 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             onClick={openProfilePicker}
             disabled={loading !== null}
             className="h-7 px-3 text-xs border-zinc-700 text-zinc-300 hover:bg-zinc-800 gap-1"
-            title="Approve and add to Radarr/Sonarr with a specific quality profile"
+            title={t("adminQueue.actions.approveAsTitle")}
           >
             <Settings className="w-3 h-3" />
-            Approve as…
+            {t("adminQueue.actions.approveAs")}
           </Button>
         )}
         <Button
@@ -559,7 +561,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           className="h-7 px-3 text-xs border-red-800 text-red-400 hover:bg-red-500/10 hover:text-red-400 gap-1"
         >
           <X className="w-3 h-3" />
-          Decline
+          {t("adminQueue.actions.decline")}
         </Button>
       </div>
       {arrError && (
@@ -574,6 +576,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
 
 export function SyncButton() {
   const router = useRouter();
+  const t = useT();
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [isError, setIsError] = useState(false);
@@ -600,12 +603,12 @@ export function SyncButton() {
       // cron or a Plex-triggered run — already holds the lock. Check it first,
       // because none of the count fields are present in that answer.
       if (data.skipped) {
-        setResult("A sync is already running");
+        setResult(t("adminQueue.sync.alreadyRunning"));
         return;
       }
       if (!res.ok) {
         setIsError(true);
-        setResult(data.error ?? `Sync failed (${res.status})`);
+        setResult(data.error ?? t("adminQueue.sync.failedStatus", { status: res.status }));
         return;
       }
 
@@ -619,19 +622,21 @@ export function SyncButton() {
       // once by each, so adding them would count it twice (guardrail 36).
       const parts = ([["Plex", "plex", data.plexMarked], ["Jellyfin", "jellyfin", data.jellyfinMarked]] as const)
         .filter(([, key]) => !skipped.has(key))
-        .map(([name, key, count]) => (failed.has(key) ? `${name} failed` : `${name} ${count ?? 0}`));
+        .map(([name, key, count]) =>
+          failed.has(key) ? t("adminQueue.sync.sourceFailed", { name }) : t("adminQueue.sync.sourceMarked", { name, marked: count ?? 0 }),
+        );
 
       // A *arr outage is worth saying even though its count is not per-server.
       for (const source of ["radarr", "sonarr"]) {
-        if (failed.has(source)) parts.push(`${source} failed`);
+        if (failed.has(source)) parts.push(t("adminQueue.sync.sourceFailed", { name: source }));
       }
 
       setIsError(failed.size > 0);
-      setResult(parts.length > 0 ? parts.join(" · ") : "No media servers configured");
+      setResult(parts.length > 0 ? parts.join(" · ") : t("adminQueue.sync.noServers"));
       router.refresh();
     } catch {
       setIsError(true);
-      setResult("Sync failed");
+      setResult(t("adminQueue.sync.failed"));
     } finally {
       setLoading(false);
     }
@@ -647,7 +652,7 @@ export function SyncButton() {
         className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
       >
         <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
-        {loading ? "Syncing…" : "Sync now"}
+        {loading ? t("adminQueue.sync.syncing") : t("adminQueue.sync.syncNow")}
       </Button>
       {result && (
         <span
@@ -663,6 +668,7 @@ export function SyncButton() {
 }
 
 export function SyncRolesButton() {
+  const t = useT();
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [isError, setIsError] = useState(false);
@@ -678,13 +684,13 @@ export function SyncRolesButton() {
       // body from a reverse proxy) otherwise reported "Synced 0 users".
       if (!res.ok || data.error) {
         setIsError(true);
-        setResult(data.error ?? `Sync failed (${res.status})`);
+        setResult(data.error ?? t("adminQueue.sync.failedStatus", { status: res.status }));
       } else {
-        setResult(`Synced ${data.synced ?? 0} user${data.synced !== 1 ? "s" : ""}`);
+        setResult(t("adminQueue.sync.syncedUsers", { count: data.synced ?? 0 }));
       }
     } catch {
       setIsError(true);
-      setResult("Sync failed");
+      setResult(t("adminQueue.sync.failed"));
     } finally {
       setLoading(false);
     }
@@ -700,7 +706,7 @@ export function SyncRolesButton() {
         className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
       >
         <Users className={`w-4 h-4 ${loading ? "animate-pulse" : ""}`} />
-        {loading ? "Syncing…" : "Sync Discord Roles"}
+        {loading ? t("adminQueue.sync.syncing") : t("adminQueue.sync.syncDiscordRoles")}
       </Button>
       {result && (
         <span

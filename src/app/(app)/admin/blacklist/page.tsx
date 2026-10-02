@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { PageHeader } from "@/components/ui/design";
 import { BlacklistManager } from "@/components/admin/blacklist-manager";
+import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 
@@ -22,12 +23,13 @@ export default async function BlacklistPage() {
     reason: i.reason,
     createdAt: i.createdAt.toISOString(),
   }));
+  const t = await getTranslator();
 
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Blacklist"
-        subtitle="Block specific titles from discovery and requests"
+        title={t("adminQueue.blacklist.title")}
+        subtitle={t("adminQueue.blacklist.subtitle")}
       />
       <BlacklistManager initial={initial} />
     </div>

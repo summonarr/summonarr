@@ -13,6 +13,7 @@ import { AdminFilterBar } from "@/components/admin/admin-filter-bar";
 import { EmptyState, PageHeader, StatCard } from "@/components/ui/design";
 import { ClipboardList } from "@/components/icons";
 import { getWatchGradeSummaries } from "@/lib/watch-grade-data";
+import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 
@@ -172,12 +173,13 @@ export default async function AdminPage({
     statusCounts.find((s) => s.status === status)?._count.status ?? 0;
 
   const totalAll = statusCounts.reduce((sum, s) => sum + s._count.status, 0);
+  const t = await getTranslator();
 
   const stats = [
-    { label: "Total Requests", value: totalAll },
-    { label: "Pending",        value: countFor("PENDING") },
-    { label: "Approved",       value: countFor("APPROVED") },
-    { label: "Users",          value: userCount },
+    { key: "total",    label: t("adminQueue.page.statTotal"), value: totalAll },
+    { key: "pending",  label: t("requests.status.pending"),   value: countFor("PENDING") },
+    { key: "approved", label: t("requests.status.approved"),  value: countFor("APPROVED") },
+    { key: "users",    label: t("adminQueue.page.statUsers"), value: userCount },
   ];
 
   const statusCountsMap: Record<string, number> = {};
@@ -253,14 +255,14 @@ export default async function AdminPage({
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Requested"
-        subtitle="Approve, decline, or manage every incoming request"
+        title={t("adminQueue.page.title")}
+        subtitle={t("adminQueue.page.subtitle")}
         right={<SyncButton />}
       />
 
       <div className="ds-stat-row" style={{ marginBottom: 24 }}>
         {stats.map((s) => (
-          <StatCard key={s.label} label={s.label} value={s.value} mono />
+          <StatCard key={s.key} label={s.label} value={s.value} mono />
         ))}
       </div>
 
@@ -277,8 +279,8 @@ export default async function AdminPage({
           icon={ClipboardList}
           title={
             statusFilter
-              ? `No ${statusFilter.toLowerCase()} requests.`
-              : "No requests yet."
+              ? t(`adminQueue.page.emptyStatus.${statusFilter.toLowerCase()}`)
+              : t("adminQueue.page.empty")
           }
         />
       ) : (

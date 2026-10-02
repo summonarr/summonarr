@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "@/components/icons";
 import { Button } from "@/components/ui/button";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface MotdModalProps {
   title: string;
@@ -27,6 +28,7 @@ export function MotdModal({ title, body }: MotdModalProps) {
   // Starts hidden so the first client render matches the server (which renders
   // nothing); the effect below shows it after hydration.
   const [visible, setVisible] = useState(false);
+  const t = useT();
   const dialogRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
   const titleId = "motd-modal-title";
@@ -61,7 +63,7 @@ export function MotdModal({ title, body }: MotdModalProps) {
     // Focus the primary action ("Got it") so Enter/Space dismisses immediately.
     const primary =
       dialogRef.current?.querySelector<HTMLElement>("[data-motd-primary]") ??
-      dialogRef.current?.querySelector<HTMLElement>("[aria-label='Dismiss']");
+      dialogRef.current?.querySelector<HTMLElement>("[data-motd-close]");
     primary?.focus();
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") {
@@ -112,7 +114,7 @@ export function MotdModal({ title, body }: MotdModalProps) {
         role="dialog"
         aria-modal="true"
         aria-labelledby={title ? titleId : undefined}
-        aria-label={title ? undefined : "Announcement"}
+        aria-label={title ? undefined : t("shared.motd.announcement")}
         className="relative w-full max-w-md rounded-xl bg-zinc-900 border border-zinc-700 shadow-[var(--ds-shadow-lg)] p-6"
         onClick={(e) => e.stopPropagation()}
       >
@@ -121,7 +123,8 @@ export function MotdModal({ title, body }: MotdModalProps) {
           onClick={dismiss}
           className="ds-hover-tint absolute top-3 right-3 inline-flex items-center justify-center rounded-md text-zinc-500 hover:text-zinc-100 transition-colors"
           style={{ width: 32, height: 32 }}
-          aria-label="Dismiss"
+          data-motd-close
+          aria-label={t("shared.common.dismiss")}
         >
           <X className="w-5 h-5" />
         </button>
@@ -139,7 +142,7 @@ export function MotdModal({ title, body }: MotdModalProps) {
 
         <div className="mt-6 flex justify-end">
           <Button data-motd-primary onClick={dismiss}>
-            Got it
+            {t("shared.motd.gotIt")}
           </Button>
         </div>
       </div>

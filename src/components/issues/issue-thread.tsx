@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { useLiveEvents } from "@/hooks/use-live-events";
 import { withBasePath } from "@/lib/base-path";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 interface IssueMessageData {
   id: string;
@@ -34,6 +35,8 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
   // Guardrail 16: toLocaleString can differ between the server render and the
   // browser (different locale/timezone). Show nothing until mounted in the browser.
   const mounted = useHasMounted();
+  const t = useT();
+  const locale = useLocale();
 
   const loadMessages = useCallback(
     (signal?: AbortSignal, { silent = false }: { silent?: boolean } = {}) => {
@@ -98,7 +101,7 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setSendError(data.error ?? "Failed to send");
+        setSendError(data.error ?? t("shared.thread.sendFailed"));
       } else {
         const msg: IssueMessageData = await res.json();
         // The server also sends an SSE event for this message, and the silent
@@ -108,7 +111,7 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
         textareaRef.current?.focus();
       }
     } catch {
-      setSendError("Network error — please try again");
+      setSendError(t("shared.thread.networkError"));
     } finally {
       setSending(false);
     }
@@ -141,7 +144,7 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
         {loadState === "loading" && (
           <div className="flex items-center gap-2 text-xs text-zinc-500 py-2">
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            Loading messages…
+            {t("shared.thread.loading")}
           </div>
         )}
         {loadState === "error" && (
@@ -150,25 +153,25 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
           // retry path — otherwise the only ways back to "ready" are a remount
           // or an SSE-triggered silent reload that needs someone else to post.
           <div className="flex items-center gap-2 py-2">
-            <p className="text-xs text-red-400">Failed to load messages.</p>
+            <p className="text-xs text-red-400">{t("shared.thread.loadFailed")}</p>
             <Button
               type="button"
               size="xs"
               variant="ghost"
               onClick={() => void loadMessages()}
             >
-              Retry
+              {t("shared.common.retry")}
             </Button>
           </div>
         )}
         {loadState === "ready" && messages.length === 0 && (
-          <p className="text-xs text-zinc-500 py-2">No messages yet. Start the conversation below.</p>
+          <p className="text-xs text-zinc-500 py-2">{t("shared.thread.empty")}</p>
         )}
         {messages.map((msg) => {
           // `name` can be null, and `email` is only sent to admins (never on a
           // POST reply), so fall back to "Unknown" — `authorName[0]` below
           // would throw on undefined and blank the whole thread.
-          const authorName = msg.author.name ?? msg.author.email ?? "Unknown";
+          const authorName = msg.author.name ?? msg.author.email ?? t("shared.thread.unknownAuthor");
           const isAdmin = msg.fromAdmin;
           return (
             <div key={msg.id} className={`flex gap-2.5 ${isAdmin ? "flex-row-reverse" : "flex-row"}`}>
@@ -187,7 +190,7 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
                   {msg.body}
                 </div>
                 <p className="text-[10px] text-zinc-500 px-1">
-                  {isAdmin ? "Admin" : authorName} · {mounted ? new Date(msg.createdAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : ""}
+                  {isAdmin ? t("shared.thread.admin") : authorName} · {mounted ? new Date(msg.createdAt).toLocaleString(locale, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : ""}
                 </p>
               </div>
             </div>
@@ -202,8 +205,8 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
           value={body}
           onChange={(e) => setBody(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Write a message… (⌘↵ to send)"
-          aria-label="Message"
+          placeholder={t("shared.thread.placeholder")}
+          aria-label={t("shared.thread.message")}
           maxLength={2000}
           rows={2}
           disabled={sending || loadState !== "ready"}
@@ -212,7 +215,7 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
         <Button
           type="submit"
           size="sm"
-          aria-label="Send message"
+          aria-label={t("shared.thread.send")}
           disabled={!body.trim() || sending || loadState !== "ready"}
           className="h-9 px-3 shrink-0 bg-indigo-600 hover:bg-indigo-500 gap-1.5"
         >

@@ -7,6 +7,7 @@ import {
   STATE_PAGE_CTA_CLASS,
   statePageCtaStyle,
 } from "@/components/layout/state-page";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export default function AppError({
   error,
@@ -15,6 +16,7 @@ export default function AppError({
   error: Error & { digest?: string };
   retry: () => void;
 }) {
+  const t = useT();
   useEffect(() => {
     console.error("[app/error]", error);
   }, [error]);
@@ -22,8 +24,8 @@ export default function AppError({
   return (
     <StatePage
       glyph="500"
-      title="Something went wrong"
-      description="An unexpected error occurred. Trying again re-renders this page; if it keeps failing, head home."
+      title={t("shared.error.title")}
+      description={t("shared.error.description")}
       primary={
         // The retry callback is client-only, so the shell takes this ready-made
         // button in its primary slot rather than a link config.
@@ -34,10 +36,10 @@ export default function AppError({
           style={statePageCtaStyle("primary")}
         >
           <RefreshCw className="w-4 h-4" />
-          Try again
+          {t("shared.error.tryAgain")}
         </button>
       }
-      secondary={[{ label: "Go home", href: "/", icon: <Home className="w-4 h-4" /> }]}
+      secondary={[{ label: t("shared.error.goHome"), href: "/", icon: <Home className="w-4 h-4" /> }]}
     />
   );
 }
