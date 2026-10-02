@@ -11,6 +11,7 @@ import type { FileInfoInstance, FileInfoResponse } from "@/app/api/admin/fix-mat
 import { withBasePath } from "@/lib/base-path";
 import { runFixMatch } from "@/lib/client/fix-match";
 import { DEFAULT_MEDIA_INSTANCE, mediaInstanceLabel } from "@/lib/media-instances";
+import { useT } from "@/components/i18n/i18n-provider";
 
 type ServerStatus = "idle" | "fetching" | "selecting" | "applying" | "done" | "error";
 
@@ -65,13 +66,13 @@ function seedInstance(cur: string | null, rows: FileInfoInstance[], hint: string
   return resolveInstance(rows, hint);
 }
 
-const LEVEL_STYLES: Record<string, { border: string; bg: string; badge: string; label: string }> = {
-  exact:    { border: "border-l-2 border-green-500",       bg: "bg-green-500/5 hover:bg-green-500/10",     badge: "bg-green-500/20 text-green-400 border-green-500/40",     label: "Exact"    },
-  strong:   { border: "border-l-2 border-emerald-500/70",  bg: "bg-emerald-500/5 hover:bg-emerald-500/10", badge: "bg-emerald-500/20 text-emerald-400 border-emerald-500/40", label: "Strong"   },
-  likely:   { border: "border-l-2 border-yellow-500/70",   bg: "bg-yellow-500/5 hover:bg-yellow-500/10",   badge: "bg-yellow-500/20 text-yellow-400 border-yellow-500/40",   label: "Likely"   },
-  possible: { border: "border-l-2 border-zinc-500/50",     bg: "hover:bg-zinc-800",                        badge: "bg-zinc-700 text-zinc-400 border-zinc-600",               label: "Possible" },
-  wrong:    { border: "border-l-2 border-red-500/70",      bg: "bg-red-500/5 hover:bg-red-500/10",         badge: "bg-red-500/20 text-red-400 border-red-500/40",            label: "Wrong"    },
-  unknown:  { border: "border-l-2 border-transparent",     bg: "hover:bg-zinc-800",                        badge: "bg-zinc-800 text-zinc-500 border-zinc-700",               label: "Unknown"  },
+const LEVEL_STYLES: Record<string, { border: string; bg: string; badge: string }> = {
+  exact:    { border: "border-l-2 border-green-500",       bg: "bg-green-500/5 hover:bg-green-500/10",     badge: "bg-green-500/20 text-green-400 border-green-500/40" },
+  strong:   { border: "border-l-2 border-emerald-500/70",  bg: "bg-emerald-500/5 hover:bg-emerald-500/10", badge: "bg-emerald-500/20 text-emerald-400 border-emerald-500/40" },
+  likely:   { border: "border-l-2 border-yellow-500/70",   bg: "bg-yellow-500/5 hover:bg-yellow-500/10",   badge: "bg-yellow-500/20 text-yellow-400 border-yellow-500/40" },
+  possible: { border: "border-l-2 border-zinc-500/50",     bg: "hover:bg-zinc-800",                        badge: "bg-zinc-700 text-zinc-400 border-zinc-600" },
+  wrong:    { border: "border-l-2 border-red-500/70",      bg: "bg-red-500/5 hover:bg-red-500/10",         badge: "bg-red-500/20 text-red-400 border-red-500/40" },
+  unknown:  { border: "border-l-2 border-transparent",     bg: "hover:bg-zinc-800",                        badge: "bg-zinc-800 text-zinc-500 border-zinc-700" },
 };
 
 function PlexCandidateRow({
@@ -82,7 +83,9 @@ function PlexCandidateRow({
   disabled:       boolean;
   serverInstance: string;
 }) {
-  const style   = LEVEL_STYLES[candidate.matchLevel] ?? LEVEL_STYLES.unknown;
+  const t = useT();
+  const level   = LEVEL_STYLES[candidate.matchLevel] ? candidate.matchLevel : "unknown";
+  const style   = LEVEL_STYLES[level];
   // Relative Plex thumb paths are server-local — proxy them against the same
   // instance the candidates came from. Omitted when default.
   const thumbSrc = candidate.thumb
@@ -102,17 +105,17 @@ function PlexCandidateRow({
       <div className="flex-shrink-0 w-14 h-[84px] rounded overflow-hidden bg-zinc-800 flex items-center justify-center mt-0.5">
         {thumbSrc
           // eslint-disable-next-line @next/next/no-img-element
-          ? <img src={thumbSrc} alt={candidate.name || "thumb"} className="w-full h-full object-cover" />
+          ? <img src={thumbSrc} alt={candidate.name || t("adminQueue.fixMatch.thumb")} className="w-full h-full object-cover" />
           : <span className="text-zinc-500 text-xs">?</span>}
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-base font-medium text-zinc-200 leading-tight">
-            {(candidate.tmdbTitle ?? candidate.name) || "(untitled)"}
+            {(candidate.tmdbTitle ?? candidate.name) || t("adminQueue.fixMatch.untitled")}
           </span>
           {candidate.year && <span className="text-sm text-zinc-500">({candidate.year})</span>}
           <span className={`text-xs px-1.5 py-0.5 rounded border font-medium ${style.badge}`}>
-            {candidate.matchLevel === "exact" ? "Exact ✓" : style.label}
+            {candidate.matchLevel === "exact" ? t("adminQueue.fixMatch.exactCheck") : t(`adminQueue.fixMatch.level.${level}`)}
           </span>
           {candidate.confidence > 0 && candidate.matchLevel !== "exact" && (
             <span className="text-xs text-zinc-500">{candidate.confidence}%</span>
@@ -121,10 +124,10 @@ function PlexCandidateRow({
         <div className="flex items-center gap-3 mt-1 flex-wrap">
           {candidate.tmdbId && <span className="text-xs font-mono text-zinc-500">tmdb:{candidate.tmdbId}</span>}
           {candidate.imdbId && <span className="text-xs font-mono text-zinc-500">{candidate.imdbId}</span>}
-          {candidate.tmdbRuntime && <span className="text-xs text-zinc-500">{candidate.tmdbRuntime} min</span>}
+          {candidate.tmdbRuntime && <span className="text-xs text-zinc-500">{t("adminQueue.fixMatch.minutes", { minutes: candidate.tmdbRuntime })}</span>}
         </div>
       </div>
-      <div className="flex-shrink-0 text-xs text-zinc-500 mt-1">Apply →</div>
+      <div className="flex-shrink-0 text-xs text-zinc-500 mt-1">{t("adminQueue.fixMatch.apply")}</div>
     </button>
   );
 }
@@ -141,10 +144,11 @@ function InstancePicker({
   onChange: (slug: string) => void;
   disabled: boolean;
 }) {
+  const t = useT();
   if (rows.length < 2) return null;
   return (
     <div className="flex items-center gap-1.5 flex-wrap">
-      <span className="text-xs text-zinc-500 shrink-0">Server</span>
+      <span className="text-xs text-zinc-500 shrink-0">{t("adminQueue.fixMatch.server")}</span>
       {rows.map((r) => (
         <button
           key={r.serverInstance}
@@ -171,6 +175,7 @@ export function IssueFixMatchButton({
   const showPlex     = onPlex     && (isAdmin || userProvider === "plex");
   const showJellyfin = onJellyfin && (isAdmin || userProvider === "jellyfin" || userProvider === "jellyfin-quickconnect");
   const router = useRouter();
+  const t = useT();
   const [open, setOpen] = useState(false);
 
   const [phase, setPhase]               = useState<Phase>("search");
@@ -279,7 +284,7 @@ export function IssueFixMatchButton({
         setSearchResults(json as TmdbMedia[]);
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
-        setSearchError(err instanceof Error ? err.message : "Search failed");
+        setSearchError(err instanceof Error ? err.message : t("adminQueue.fixMatch.searchFailed"));
       } finally {
         setSearching(false);
       }
@@ -288,7 +293,7 @@ export function IssueFixMatchButton({
       if (searchTimer.current) clearTimeout(searchTimer.current);
       ac.abort();
     };
-  }, [query, open, phase, mediaType]);
+  }, [query, open, phase, mediaType, t]);
 
   function pickResult(result: TmdbMedia) {
     setSelected(result);
@@ -318,7 +323,7 @@ export function IssueFixMatchButton({
       setPlexState({ status: "selecting" });
       setPhase("plex-candidates");
     } catch (err) {
-      setPlexState({ status: "error", error: err instanceof Error ? err.message : "Failed" });
+      setPlexState({ status: "error", error: err instanceof Error ? err.message : t("adminQueue.claim.failed") });
     }
   }
 
@@ -347,7 +352,7 @@ export function IssueFixMatchButton({
       router.refresh();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return; // unmounted; job runs on
-      setPlexState({ status: "error", error: err instanceof Error ? err.message : "Failed" });
+      setPlexState({ status: "error", error: err instanceof Error ? err.message : t("adminQueue.claim.failed") });
     }
   }
 
@@ -367,7 +372,7 @@ export function IssueFixMatchButton({
       router.refresh();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return; // unmounted; job runs on
-      setJellyfinState({ status: "error", error: err instanceof Error ? err.message : "Failed" });
+      setJellyfinState({ status: "error", error: err instanceof Error ? err.message : t("adminQueue.claim.failed") });
     }
   }
 
@@ -423,7 +428,7 @@ export function IssueFixMatchButton({
           bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 hover:bg-indigo-500/20 transition-colors"
       >
         <Wrench className="w-3 h-3" />
-        Fix Match
+        {t("adminQueue.fixMatch.button")}
       </button>
 
       {/* While an apply is in flight the dialog HIDES rather than resetting
@@ -444,36 +449,36 @@ export function IssueFixMatchButton({
                       else { setPhase("search"); setSelected(null); }
                     }}
                     disabled={busy}
-                    aria-label="Back"
-                    title="Back"
+                    aria-label={t("adminQueue.fixMatch.back")}
+                    title={t("adminQueue.fixMatch.back")}
                     className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors"
                   >
                     <ChevronLeft className="w-5 h-5" />
                   </button>
                 )}
                 <DialogTitle className="text-base font-semibold text-zinc-100">
-                  {phase === "search" && "Find correct match"}
-                  {phase === "confirm" && "Apply fix"}
-                  {phase === "plex-candidates" && "Select Plex item"}
+                  {phase === "search" && t("adminQueue.fixMatch.titleSearch")}
+                  {phase === "confirm" && t("adminQueue.fixMatch.titleConfirm")}
+                  {phase === "plex-candidates" && t("adminQueue.fixMatch.titlePlex")}
                 </DialogTitle>
               </div>
               {/* Not disabled while busy: closing during an apply HIDES the
                   dialog (see onOpenChange) so the admin isn't trapped for the
                   minutes a real remap takes; the background job runs on. */}
-              <DialogClose aria-label={busy ? "Hide" : "Close"} title={busy ? "Hide — the fix keeps running" : "Close"} className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors">
+              <DialogClose aria-label={busy ? t("adminQueue.fixMatch.hide") : t("adminQueue.common.close")} title={busy ? t("adminQueue.fixMatch.hideTitle") : t("adminQueue.common.close")} className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors">
                 <X className="w-5 h-5" />
               </DialogClose>
             </div>
 
             <div className="px-6 py-3 border-b border-zinc-800 flex-shrink-0 space-y-2">
               <div className="flex items-center gap-2">
-                <span className="text-xs text-zinc-500 font-mono uppercase shrink-0">Current</span>
+                <span className="text-xs text-zinc-500 font-mono uppercase shrink-0">{t("adminQueue.fixMatch.current")}</span>
                 <span className="text-sm text-zinc-400 truncate">{title}</span>
                 <span className="text-xs font-mono text-zinc-500 shrink-0">#{tmdbId}</span>
               </div>
               {fileInfoError && (
                 <p className="text-xs text-orange-400">
-                  Couldn&apos;t load file details. Match info may be incomplete.
+                  {t("adminQueue.fixMatch.fileInfoFailed")}
                 </p>
               )}
               {plexPath && (
@@ -524,7 +529,7 @@ export function IssueFixMatchButton({
                       className="text-xs px-2 py-0.5 rounded border border-orange-600/30 bg-orange-500/10
                         text-orange-400 hover:bg-orange-500/20 transition-colors shrink-0 font-medium"
                     >
-                      Use this →
+                      {t("adminQueue.fixMatch.useThis")}
                     </button>
                   </div>
                 </div>
@@ -534,7 +539,7 @@ export function IssueFixMatchButton({
                   <span className="text-xs font-semibold text-zinc-500 w-16 shrink-0">
                     {mediaType === "MOVIE" ? "Radarr" : "Sonarr"}
                   </span>
-                  <span className="text-xs text-emerald-400">matches current — may be a different issue</span>
+                  <span className="text-xs text-emerald-400">{t("adminQueue.fixMatch.matchesCurrent")}</span>
                 </div>
               )}
             </div>
@@ -549,7 +554,7 @@ export function IssueFixMatchButton({
                       type="text"
                       value={query}
                       onChange={(e) => setQuery(e.target.value)}
-                      placeholder={`Search ${mediaType === "MOVIE" ? "movies" : "TV shows"}…`}
+                      placeholder={mediaType === "MOVIE" ? t("adminQueue.fixMatch.searchMovies") : t("adminQueue.fixMatch.searchTv")}
                       className="w-full bg-zinc-800 border border-zinc-700 rounded-md pl-10 pr-3 py-2.5
                         text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500/60"
                     />
@@ -562,10 +567,10 @@ export function IssueFixMatchButton({
 
                 <div className="overflow-y-auto flex-1 divide-y divide-zinc-800/60">
                   {searchResults.length === 0 && !searching && query.trim() && (
-                    <p className="px-6 py-8 text-sm text-zinc-500 text-center">No results found.</p>
+                    <p className="px-6 py-8 text-sm text-zinc-500 text-center">{t("adminQueue.fixMatch.noResults")}</p>
                   )}
                   {searchResults.length === 0 && !query.trim() && (
-                    <p className="px-6 py-8 text-sm text-zinc-500 text-center">Type to search…</p>
+                    <p className="px-6 py-8 text-sm text-zinc-500 text-center">{t("adminQueue.fixMatch.typeToSearch")}</p>
                   )}
                   {searchResults.map((r) => {
                     const thumb = posterUrl(r.posterPath, "w342");
@@ -590,14 +595,14 @@ export function IssueFixMatchButton({
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="text-base font-medium text-zinc-200 leading-tight">{r.title}</span>
                             {r.releaseYear && <span className="text-sm text-zinc-500">({r.releaseYear})</span>}
-                            {isCurrentMatch && <span className="text-xs text-zinc-500">current</span>}
+                            {isCurrentMatch && <span className="text-xs text-zinc-500">{t("adminQueue.fixMatch.currentBadge")}</span>}
                           </div>
                           <span className="text-xs font-mono text-zinc-500 mt-0.5 block">TMDB #{r.id}</span>
                           {r.overview && (
                             <p className="text-xs text-zinc-500 mt-1 line-clamp-2 leading-snug">{r.overview}</p>
                           )}
                         </div>
-                        <div className="flex-shrink-0 text-xs text-zinc-500 mt-1">Select →</div>
+                        <div className="flex-shrink-0 text-xs text-zinc-500 mt-1">{t("adminQueue.fixMatch.select")}</div>
                       </button>
                     );
                   })}
@@ -618,13 +623,13 @@ export function IssueFixMatchButton({
                       : <div className="flex-shrink-0 w-16 h-[96px] rounded bg-zinc-800" />;
                   })()}
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">Correct match</p>
+                    <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">{t("adminQueue.fixMatch.correctMatch")}</p>
                     <p className="text-base font-semibold text-zinc-100 leading-tight">{selected.title}</p>
                     {selected.releaseYear && <p className="text-sm text-zinc-400 mt-0.5">{selected.releaseYear}</p>}
                     <p className="text-xs font-mono text-zinc-500 mt-0.5">TMDB #{selected.id}</p>
                     {fileInfo?.arrTmdbId === selected.id && (
                       <p className="text-xs text-emerald-500 mt-0.5">
-                        ✓ {mediaType === "MOVIE" ? "Radarr" : "Sonarr"} confirmed
+                        {t("adminQueue.fixMatch.arrConfirmed", { arr: mediaType === "MOVIE" ? "Radarr" : "Sonarr" })}
                       </p>
                     )}
                     {selected.overview && (
@@ -641,7 +646,7 @@ export function IssueFixMatchButton({
                           Plex{plexInstanceLabel && <span className="ml-1.5 text-xs font-normal text-zinc-400">{plexInstanceLabel}</span>}
                         </span>
                         {plexState.status === "done" && (
-                          <span className="flex items-center gap-1.5 text-xs text-green-400"><Check className="w-3.5 h-3.5" /> Fixed</span>
+                          <span className="flex items-center gap-1.5 text-xs text-green-400"><Check className="w-3.5 h-3.5" /> {t("adminQueue.fixMatch.fixed")}</span>
                         )}
                         {plexState.status === "error" && (
                           <span className="text-xs text-red-400">{plexState.error}</span>
@@ -661,12 +666,12 @@ export function IssueFixMatchButton({
                             bg-yellow-500/10 border-yellow-600/30 text-yellow-400
                             hover:bg-yellow-500/20 hover:border-yellow-500/50"
                         >
-                          Search Plex for TMDB #{selected.id} →
+                          {t("adminQueue.fixMatch.searchPlex", { id: selected.id })}
                         </button>
                       ) : plexState.status === "fetching" ? (
-                        <p className="text-xs text-zinc-500">Loading Plex candidates…</p>
+                        <p className="text-xs text-zinc-500">{t("adminQueue.fixMatch.loadingPlex")}</p>
                       ) : plexState.status === "applying" ? (
-                        <p className="text-xs text-zinc-500">Applying…</p>
+                        <p className="text-xs text-zinc-500">{t("adminQueue.fixMatch.applying")}</p>
                       ) : null}
                     </div>
                   )}
@@ -678,7 +683,7 @@ export function IssueFixMatchButton({
                           Jellyfin{jellyfinInstanceLabel && <span className="ml-1.5 text-xs font-normal text-zinc-400">{jellyfinInstanceLabel}</span>}
                         </span>
                         {jellyfinState.status === "done" && (
-                          <span className="flex items-center gap-1.5 text-xs text-green-400"><Check className="w-3.5 h-3.5" /> Fixed</span>
+                          <span className="flex items-center gap-1.5 text-xs text-green-400"><Check className="w-3.5 h-3.5" /> {t("adminQueue.fixMatch.fixed")}</span>
                         )}
                         {jellyfinState.status === "error" && (
                           <span className="text-xs text-red-400">{jellyfinState.error}</span>
@@ -698,27 +703,27 @@ export function IssueFixMatchButton({
                             bg-purple-500/10 border-purple-600/30 text-purple-400
                             hover:bg-purple-500/20 hover:border-purple-500/50"
                         >
-                          Fix Jellyfin → TMDB #{selected.id}
+                          {t("adminQueue.fixMatch.fixJellyfin", { id: selected.id })}
                         </button>
                       ) : jellyfinState.status === "applying" ? (
-                        <p className="text-xs text-zinc-500">Applying…</p>
+                        <p className="text-xs text-zinc-500">{t("adminQueue.fixMatch.applying")}</p>
                       ) : null}
                     </div>
                   )}
 
                   {!showPlex && !showJellyfin && (
                     <p className="text-sm text-zinc-500 text-center py-6">
-                      This item is not in any synced library.
+                      {t("adminQueue.fixMatch.notInLibrary")}
                     </p>
                   )}
 
                   {anyFixDone && (
                     <div className="rounded-lg border border-zinc-700 bg-zinc-900 p-4 space-y-2">
                       <p className="text-xs text-zinc-400 leading-snug">
-                        The previously wrong match{" "}
+                        {t("adminQueue.fixMatch.wrongMatchBefore")}{" "}
                         <span className="font-medium text-zinc-200">{title}</span>{" "}
                         <span className="font-mono text-zinc-500">#{tmdbId}</span>{" "}
-                        may still be a title users want. Add it as a new media request?
+                        {t("adminQueue.fixMatch.wrongMatchAfter")}
                       </p>
                       {addWrongState === "idle" && (
                         <button
@@ -726,22 +731,22 @@ export function IssueFixMatchButton({
                           className="text-xs px-3 py-1.5 rounded border font-medium transition-colors
                             bg-zinc-800 border-zinc-600 text-zinc-300 hover:bg-zinc-700 hover:border-zinc-500"
                         >
-                          Add &ldquo;{title}&rdquo; as new request
+                          {t("adminQueue.fixMatch.addAsRequest", { title })}
                         </button>
                       )}
                       {addWrongState === "adding" && (
-                        <p className="text-xs text-zinc-500">Adding…</p>
+                        <p className="text-xs text-zinc-500">{t("adminQueue.fixMatch.adding")}</p>
                       )}
                       {addWrongState === "done" && (
                         <p className="flex items-center gap-1.5 text-xs text-green-400">
-                          <Check className="w-3.5 h-3.5" /> Added as new request
+                          <Check className="w-3.5 h-3.5" /> {t("adminQueue.fixMatch.added")}
                         </p>
                       )}
                       {addWrongState === "conflict" && (
-                        <p className="text-xs text-zinc-500">Already exists as a request.</p>
+                        <p className="text-xs text-zinc-500">{t("adminQueue.fixMatch.alreadyRequested")}</p>
                       )}
                       {addWrongState === "error" && (
-                        <p className="text-xs text-red-400">Failed to add — try again.</p>
+                        <p className="text-xs text-red-400">{t("adminQueue.fixMatch.addFailed")}</p>
                       )}
                     </div>
                   )}
@@ -753,23 +758,23 @@ export function IssueFixMatchButton({
               <>
                 <div className="px-6 pt-4 pb-3 border-b border-zinc-700 flex-shrink-0">
                   <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1.5">
-                    Plex candidates for TMDB #{selected.id} · {plexCandidates.candidates.length} found
+                    {t("adminQueue.fixMatch.plexCandidatesFor", { id: selected.id, count: plexCandidates.candidates.length })}
                     {plexInstanceLabel && (
-                      <span className="ml-1.5 normal-case text-orange-400">on {plexInstanceLabel}</span>
+                      <span className="ml-1.5 normal-case text-orange-400">{t("adminQueue.fixMatch.onInstance", { instance: plexInstanceLabel })}</span>
                     )}
                   </p>
                   {plexCandidates.arrConfirmedTmdbId !== null && (
                     <p className={`text-sm ${plexCandidates.arrConfirmedTmdbId === selected.id ? "text-emerald-400" : "text-yellow-400"}`}>
                       {plexCandidates.arrConfirmedTmdbId === selected.id
-                        ? "✓ Radarr/Sonarr confirms this TMDB ID"
-                        : `⚠ Radarr/Sonarr has TMDB #${plexCandidates.arrConfirmedTmdbId}`}
+                        ? t("adminQueue.fixMatch.arrConfirmsId")
+                        : t("adminQueue.fixMatch.arrHasId", { id: plexCandidates.arrConfirmedTmdbId })}
                     </p>
                   )}
                 </div>
 
                 <div className="overflow-y-auto flex-1 divide-y divide-zinc-800/60">
                   {plexCandidates.candidates.length === 0 ? (
-                    <p className="px-6 py-8 text-sm text-zinc-500 text-center">No candidates found in Plex.</p>
+                    <p className="px-6 py-8 text-sm text-zinc-500 text-center">{t("adminQueue.fixMatch.noCandidates")}</p>
                   ) : (
                     plexCandidates.candidates.map((c) => (
                       <PlexCandidateRow
@@ -791,7 +796,7 @@ export function IssueFixMatchButton({
                 className="text-sm px-4 py-2 rounded border border-zinc-600 text-zinc-400
                   hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50 transition-colors"
               >
-                Close
+                {t("adminQueue.common.close")}
               </DialogClose>
             </div>
           </DialogPopup>

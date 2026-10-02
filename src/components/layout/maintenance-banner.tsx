@@ -2,6 +2,7 @@
 
 import { Wrench, X } from "@/components/icons";
 import { useState } from "react";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // Admin-only strip shown while maintenance mode is on (non-admins see
 // MaintenancePage instead). Styled like the login page's maintenance notice:
@@ -9,6 +10,7 @@ import { useState } from "react";
 // on the icon so the text stays readable in both themes.
 export function MaintenanceBanner({ message }: { message?: string }) {
   const [dismissed, setDismissed] = useState(false);
+  const t = useT();
   if (dismissed) return null;
 
   return (
@@ -24,14 +26,14 @@ export function MaintenanceBanner({ message }: { message?: string }) {
     >
       <Wrench className="shrink-0" style={{ width: 14, height: 14, color: "var(--ds-warning)" }} />
       <p className="text-sm flex-1 m-0" style={{ color: "var(--ds-fg)" }}>
-        <span className="font-medium">Maintenance mode is active.</span>
+        <span className="font-medium">{t("shared.maintenance.active")}</span>
         {message && (
           <span className="ml-1" style={{ color: "var(--ds-fg-muted)" }}>
             {message}
           </span>
         )}
         <span className="ml-1" style={{ color: "var(--ds-fg-muted)" }}>
-          Non-admin users are blocked.
+          {t("shared.maintenance.blocked")}
         </span>
       </p>
       <button
@@ -39,7 +41,7 @@ export function MaintenanceBanner({ message }: { message?: string }) {
         onClick={() => setDismissed(true)}
         className="ds-hover-tint shrink-0 inline-flex items-center justify-center rounded-md transition-colors"
         style={{ width: 32, height: 32, color: "var(--ds-fg-muted)" }}
-        aria-label="Dismiss maintenance banner"
+        aria-label={t("shared.maintenance.dismiss")}
       >
         <X className="w-4 h-4" />
       </button>

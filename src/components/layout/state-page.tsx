@@ -47,14 +47,6 @@ export function statePageCtaStyle(kind: "primary" | "secondary"): CSSProperties 
       };
 }
 
-// Shared copy for the two not-found boundaries (root + (app)); they catch
-// different cases but must read identically.
-export const NOT_FOUND_COPY = {
-  title: "Couldn't find that page",
-  description:
-    "That page doesn't exist. It may have been removed, or the link may be wrong.",
-} as const;
-
 function isAction(value: unknown): value is StatePageAction {
   return (
     typeof value === "object" &&

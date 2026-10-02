@@ -1,5 +1,6 @@
 import { Home, Film, Tv } from "@/components/icons";
-import { NOT_FOUND_COPY, StatePage } from "@/components/layout/state-page";
+import { StatePage } from "@/components/layout/state-page";
+import { getTranslator } from "@/lib/i18n/server";
 
 // ROOT not-found boundary. This is a different file from (app)/not-found.tsx and
 // catches a different case — do not merge them.
@@ -24,17 +25,18 @@ import { NOT_FOUND_COPY, StatePage } from "@/components/layout/state-page";
 // viewport where the (app) copy sits top-aligned under the header. The links
 // below are the recovery path; each redirects to /login on its own if there is
 // no session.
-export default function RootNotFound() {
+export default async function RootNotFound() {
+  const t = await getTranslator();
   return (
     <StatePage
       frame="document"
       glyph="404"
-      title={NOT_FOUND_COPY.title}
-      description={NOT_FOUND_COPY.description}
-      primary={{ label: "Go home", href: "/", icon: <Home className="w-4 h-4" /> }}
+      title={t("shared.notFound.title")}
+      description={t("shared.notFound.description")}
+      primary={{ label: t("shared.error.goHome"), href: "/", icon: <Home className="w-4 h-4" /> }}
       secondary={[
-        { label: "Browse movies", href: "/movies", icon: <Film className="w-4 h-4" /> },
-        { label: "Browse TV", href: "/tv", icon: <Tv className="w-4 h-4" /> },
+        { label: t("shared.notFound.browseMovies"), href: "/movies", icon: <Film className="w-4 h-4" /> },
+        { label: t("shared.notFound.browseTv"), href: "/tv", icon: <Tv className="w-4 h-4" /> },
       ]}
     />
   );

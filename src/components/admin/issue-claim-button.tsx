@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Loader2, UserCheck, UserX, X } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface IssueClaimButtonProps {
   issueId: string;
@@ -15,6 +16,7 @@ interface IssueClaimButtonProps {
 
 export function IssueClaimButton({ issueId, claimedBy, claimerName, currentUserId }: IssueClaimButtonProps) {
   const router = useRouter();
+  const t = useT();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingTakeover, setConfirmingTakeover] = useState(false);
@@ -39,7 +41,7 @@ export function IssueClaimButton({ issueId, claimedBy, claimerName, currentUserI
         // `message` first — a claim CAS miss answers { error: "claim-conflict",
         // message: "<who claimed it>" }, and showing the slug hid the useful half.
         const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
-        setError(data.message ?? data.error ?? "Failed");
+        setError(data.message ?? data.error ?? t("adminQueue.claim.failed"));
         // 409 means these props are stale: pull the real state so the button
         // re-renders as "Take over from <name>" instead of "Claim".
         if (res.status === 409) router.refresh();
@@ -47,7 +49,7 @@ export function IssueClaimButton({ issueId, claimedBy, claimerName, currentUserI
       }
       router.refresh();
     } catch {
-      setError("Network error");
+      setError(t("adminQueue.claim.networkError"));
     } finally {
       setBusy(false);
     }
@@ -62,10 +64,10 @@ export function IssueClaimButton({ issueId, claimedBy, claimerName, currentUserI
   }
 
   const label = isClaimedByMe
-    ? "Release"
+    ? t("adminQueue.claim.release")
     : isClaimedByOther
-      ? "Take over"
-      : "Claim";
+      ? t("adminQueue.claim.takeOver")
+      : t("adminQueue.claim.claim");
   const Icon = isClaimedByMe ? UserX : UserCheck;
 
   return (
@@ -88,20 +90,20 @@ export function IssueClaimButton({ issueId, claimedBy, claimerName, currentUserI
           <Button
             type="button"
             size="sm"
-            aria-label={`Confirm take over from ${claimerName ?? "another admin"}`}
+            aria-label={t("adminQueue.claim.confirmAria", { name: claimerName ?? t("adminQueue.claim.anotherAdmin") })}
             className="h-7 px-2.5 text-xs gap-1.5 bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]"
             onClick={performToggle}
             disabled={busy}
             autoFocus
           >
             {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <UserCheck className="w-3.5 h-3.5" />}
-            Take over from {claimerName ?? "admin"}
+            {t("adminQueue.claim.takeOverFrom", { name: claimerName ?? t("adminQueue.claim.admin") })}
           </Button>
           <Button
             type="button"
             size="sm"
             variant="ghost"
-            aria-label="Cancel take over"
+            aria-label={t("adminQueue.claim.cancelAria")}
             className="h-7 w-7 p-0 text-zinc-400 hover:text-zinc-200"
             onClick={() => setConfirmingTakeover(false)}
             disabled={busy}

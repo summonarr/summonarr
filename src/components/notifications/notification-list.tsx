@@ -43,7 +43,8 @@ const REQUEST_BODY_KEYS: Record<string, { movie: string; tv: string }> = {
   },
 };
 
-function notificationBody(n: NotificationListItem, t: Translator): string {
+// Exported for the header bell, so both surfaces localize the same rows.
+export function notificationBody(n: Pick<NotificationListItem, "type" | "body" | "mediaType">, t: Translator): string {
   const keys = REQUEST_BODY_KEYS[n.type];
   if (!keys || n.mediaType == null) return n.body;
   return t(n.mediaType === "MOVIE" ? keys.movie : keys.tv);

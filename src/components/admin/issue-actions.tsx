@@ -10,6 +10,7 @@ import {
 } from "@/components/icons";
 import type { ArrRelease } from "@/lib/arr";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface IssueActionsProps {
   issueId: string;
@@ -26,10 +27,11 @@ interface IssueActionsProps {
   instances?: { slug: string; name: string }[];
 }
 
-const REFETCH_LABEL: Record<string, string> = {
-  FULL: "Refetch all",
-  SEASON: "Refetch season",
-  EPISODE: "Refetch episode",
+// i18n keys, translated at render.
+const REFETCH_LABEL_KEY: Record<string, string> = {
+  FULL: "adminQueue.issueActions.refetchAll",
+  SEASON: "adminQueue.issueActions.refetchSeason",
+  EPISODE: "adminQueue.issueActions.refetchEpisode",
 };
 
 function formatSize(bytes: number): string {
@@ -56,6 +58,7 @@ export function IssueActions({
   instances,
 }: IssueActionsProps) {
   const router = useRouter();
+  const t = useT();
 
   const [loading, setLoading] = useState<"refetch" | "status" | "delete" | "releases" | "grab" | null>(null);
   const [arrError, setArrError] = useState<string | null>(null);
@@ -106,7 +109,7 @@ export function IssueActions({
       // only for `arrError` would show a green "Search triggered" for the first kind.
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
-        setArrError(data.message ?? data.error ?? `Search failed (${res.status})`);
+        setArrError(data.message ?? data.error ?? t("adminQueue.issueActions.searchFailed", { status: res.status }));
         return;
       }
       const data = (await res.json().catch(() => ({}))) as { arrError?: string };
@@ -117,7 +120,7 @@ export function IssueActions({
         router.refresh();
       }
     } catch {
-      setArrError("Network error — please try again.");
+      setArrError(t("shared.thread.networkError"));
     } finally {
       setLoading(null);
     }
@@ -136,14 +139,14 @@ export function IssueActions({
         // `message` first — a concurrent status change answers
         // { error: "status-conflict", message: "<sentence>" }; the slug alone is noise.
         const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
-        setArrError(data.message ?? data.error ?? "Status update failed");
+        setArrError(data.message ?? data.error ?? t("adminQueue.issueActions.statusFailed"));
         return;
       }
       router.refresh();
     } catch {
       // `finally` closes the resolve panel either way, so without this a network
       // failure looked exactly like a successful resolve: panel gone, no error.
-      setArrError("Network error — please try again.");
+      setArrError(t("shared.thread.networkError"));
     } finally {
       setLoading(null);
       setPanel(null);
@@ -157,12 +160,12 @@ export function IssueActions({
       const res = await fetch(withBasePath(`/api/issues/${issueId}`), { method: "DELETE" });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setArrError((data as { error?: string }).error ?? "Delete failed");
+        setArrError((data as { error?: string }).error ?? t("adminQueue.actions.deleteFailed"));
         return;
       }
       router.refresh();
     } catch {
-      setArrError("Network error — please try again.");
+      setArrError(t("shared.thread.networkError"));
     } finally {
       setLoading(null);
       setPanel(null);
@@ -185,7 +188,7 @@ export function IssueActions({
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         if (reqId !== releaseReqRef.current) return;
-        setArrError(data.error ?? "Failed to fetch releases");
+        setArrError(data.error ?? t("adminQueue.issueActions.releasesFailed"));
         setPanel(null);
       } else {
         const data = (await res.json()) as ArrRelease[];
@@ -199,7 +202,7 @@ export function IssueActions({
       // dialog would show the empty list and say "No releases found", which is a
       // different claim from "the search never completed".
       if (reqId === releaseReqRef.current) {
-        setArrError("Network error — please try again.");
+        setArrError(t("shared.thread.networkError"));
         setPanel(null);
       }
     } finally {
@@ -233,13 +236,13 @@ export function IssueActions({
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setArrError(data.error ?? "Grab failed");
+        setArrError(data.error ?? t("adminQueue.issueActions.grabFailed"));
       } else {
         setGrabOk(true);
         router.refresh();
       }
     } catch {
-      setArrError("Network error — please try again.");
+      setArrError(t("shared.thread.networkError"));
     } finally {
       setLoading(null);
     }
@@ -263,7 +266,10 @@ export function IssueActions({
     }
   }, [panel, releases.length, loading]);
 
-  const refetchLabel = mediaType === "MOVIE" ? "Refetch movie" : (REFETCH_LABEL[scope] ?? "Refetch");
+  const refetchLabel =
+    mediaType === "MOVIE"
+      ? t("adminQueue.issueActions.refetchMovie")
+      : t(REFETCH_LABEL_KEY[scope] ?? "adminQueue.issueActions.refetch");
   const canRefetch = mediaType === "MOVIE" || !!tvdbId;
 
   const canReplace = mediaType === "MOVIE" || !!tvdbId || scope === "EPISODE";
@@ -274,7 +280,7 @@ export function IssueActions({
     scope === "EPISODE" && seasonNumber != null && episodeNumber != null
       ? `S${String(seasonNumber).padStart(2, "0")}E${String(episodeNumber).padStart(2, "0")}`
       : scope === "SEASON" && seasonNumber != null
-      ? `Season ${seasonNumber}`
+      ? t("adminQueue.issues.scope.seasonN", { number: seasonNumber })
       : null;
 
   const filterTerm = releaseFilter.toLowerCase();
@@ -289,7 +295,7 @@ export function IssueActions({
         <span className="text-[10px] text-zinc-500 font-mono">{scopeDetail}</span>
       )}
       {libraryConfirmed && scope === "EPISODE" && !isResolved && (
-        <span className="text-[10px] text-sky-400">library match confirmed</span>
+        <span className="text-[10px] text-sky-400">{t("adminQueue.issueActions.matchConfirmed")}</span>
       )}
 
       {panel === null && (
@@ -320,7 +326,7 @@ export function IssueActions({
               }`}
             >
               <Download className="w-3 h-3" />
-              {libraryConfirmed && scope === "EPISODE" ? "Replace episode" : "Replace"}
+              {libraryConfirmed && scope === "EPISODE" ? t("adminQueue.issueActions.replaceEpisode") : t("adminQueue.issueActions.replace")}
             </Button>
           )}
 
@@ -333,7 +339,7 @@ export function IssueActions({
               className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-yellow-400 hover:border-yellow-500/50 gap-1"
             >
               {loading === "status" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Clock className="w-3 h-3" />}
-              In Progress
+              {t("personal.issues.status.inProgress")}
             </Button>
           )}
 
@@ -346,7 +352,7 @@ export function IssueActions({
               className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-green-400 hover:border-green-500/50 gap-1"
             >
               <Check className="w-3 h-3" />
-              Resolve
+              {t("adminQueue.issueActions.resolve")}
             </Button>
           )}
 
@@ -358,7 +364,7 @@ export function IssueActions({
               disabled={loading !== null}
               className="h-7 px-3 text-xs border-zinc-700 text-zinc-500 hover:text-zinc-100 gap-1"
             >
-              Reopen
+              {t("adminQueue.issueActions.reopen")}
             </Button>
           )}
 
@@ -367,8 +373,8 @@ export function IssueActions({
             variant="outline"
             onClick={() => setPanel("delete")}
             disabled={loading !== null}
-            aria-label="Delete issue"
-            title="Delete issue"
+            aria-label={t("adminQueue.issueActions.deleteIssue")}
+            title={t("adminQueue.issueActions.deleteIssue")}
             className="h-7 px-3 text-xs border-zinc-700 text-zinc-500 hover:text-red-400 hover:border-red-500/50"
           >
             <Trash2 className="w-3 h-3" />
@@ -382,8 +388,8 @@ export function IssueActions({
             type="text"
             value={resolution}
             onChange={(e) => setResolution(e.target.value)}
-            placeholder="Resolution note (optional)"
-            aria-label="Resolution note"
+            placeholder={t("adminQueue.issueActions.resolutionPlaceholder")}
+            aria-label={t("adminQueue.issueActions.resolutionAria")}
             className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring w-44"
           />
           <Button
@@ -393,15 +399,15 @@ export function IssueActions({
             className="h-6 px-2 text-xs bg-green-700 text-white hover:bg-green-800 gap-1"
           >
             {loading === "status" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
-            Done
+            {t("adminQueue.actions.done")}
           </Button>
-          <button onClick={() => setPanel(null)} className="text-zinc-500 hover:text-zinc-400 text-xs">Cancel</button>
+          <button onClick={() => setPanel(null)} className="text-zinc-500 hover:text-zinc-400 text-xs">{t("shared.common.cancel")}</button>
         </div>
       )}
 
       {panel === "delete" && (
         <div className="flex items-center gap-1.5 justify-end mt-0.5">
-          <span className="text-[11px] text-zinc-400">Delete this issue?</span>
+          <span className="text-[11px] text-zinc-400">{t("adminQueue.issueActions.deleteConfirm")}</span>
           <Button
             size="sm"
             onClick={deleteIssue}
@@ -409,9 +415,9 @@ export function IssueActions({
             className="h-6 px-2 text-xs bg-red-800 text-white hover:bg-red-700 gap-1"
           >
             {loading === "delete" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
-            Delete
+            {t("adminQueue.actions.delete")}
           </Button>
-          <button onClick={() => setPanel(null)} className="text-zinc-500 hover:text-zinc-400 text-xs">Cancel</button>
+          <button onClick={() => setPanel(null)} className="text-zinc-500 hover:text-zinc-400 text-xs">{t("shared.common.cancel")}</button>
         </div>
       )}
 
@@ -422,7 +428,7 @@ export function IssueActions({
 
             <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-700 flex-shrink-0">
               <DialogTitle className="text-base font-semibold text-zinc-100">
-                {libraryConfirmed && scope === "EPISODE" ? "Replace episode" : "Replace"}
+                {libraryConfirmed && scope === "EPISODE" ? t("adminQueue.issueActions.replaceEpisode") : t("adminQueue.issueActions.replace")}
               </DialogTitle>
               <div className="flex items-center gap-3">
                 {(instances?.length ?? 0) > 1 && (
@@ -430,7 +436,7 @@ export function IssueActions({
                     value={instance}
                     onChange={(e) => switchInstance(e.target.value)}
                     disabled={loading !== null}
-                    aria-label="Instance"
+                    aria-label={t("adminQueue.issueActions.instance")}
                     className="text-xs rounded-md bg-zinc-800 border border-zinc-700 text-zinc-200 px-2 py-1 disabled:opacity-50"
                   >
                     {(instances ?? []).map((i) => (
@@ -440,8 +446,8 @@ export function IssueActions({
                 )}
                 <DialogClose
                   disabled={loading === "grab"}
-                  aria-label="Close"
-                  title="Close"
+                  aria-label={t("adminQueue.common.close")}
+                  title={t("adminQueue.common.close")}
                   className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors"
                 >
                   <X className="w-5 h-5" />
@@ -452,21 +458,21 @@ export function IssueActions({
             {loading === "releases" ? (
               <div className="flex items-center justify-center gap-3 text-sm text-zinc-500 py-16">
                 <Loader2 className="w-5 h-5 animate-spin" />
-                Searching indexers…
+                {t("adminQueue.issueActions.searching")}
               </div>
             ) : grabOk ? (
               <div className="flex items-center justify-center gap-2 text-sm text-green-400 py-16">
                 <Check className="w-4 h-4" />
-                Grab queued — download starting
+                {t("adminQueue.issueActions.grabQueued")}
               </div>
             ) : releases.length === 0 ? (
-              <div className="text-sm text-zinc-500 text-center py-16">No releases found</div>
+              <div className="text-sm text-zinc-500 text-center py-16">{t("adminQueue.issueActions.noReleases")}</div>
             ) : (
               <>
                 {libraryConfirmed && scope === "EPISODE" && (
                   <div className="px-6 py-2.5 bg-sky-500/10 border-b border-sky-500/30 flex items-center gap-2 flex-shrink-0">
                     <span className="text-xs text-sky-400">
-                      Library match confirmed — filter below to find the right episode release
+                      {t("adminQueue.issueActions.matchBanner")}
                     </span>
                   </div>
                 )}
@@ -479,15 +485,15 @@ export function IssueActions({
                       type="text"
                       value={releaseFilter}
                       onChange={(e) => setReleaseFilter(e.target.value)}
-                      placeholder="Filter releases…"
-                      aria-label="Filter releases"
+                      placeholder={t("adminQueue.issueActions.filterPlaceholder")}
+                      aria-label={t("adminQueue.issueActions.filterAria")}
                       className="w-full bg-zinc-800 border border-zinc-700 rounded-md pl-10 pr-9 py-2.5 text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-indigo-500/60 focus-visible:ring-2 focus-visible:ring-ring"
                     />
                     {releaseFilter && (
                       <button
                         onClick={() => setReleaseFilter("")}
-                        aria-label="Clear filter"
-                        title="Clear filter"
+                        aria-label={t("adminQueue.issueActions.clearFilter")}
+                        title={t("adminQueue.issueActions.clearFilter")}
                         className="absolute right-3 text-zinc-500 hover:text-zinc-300"
                       >
                         <X className="w-4 h-4" />
@@ -496,8 +502,8 @@ export function IssueActions({
                   </div>
                   {visibleReleases.length === 0 && filterTerm && (
                     <p className="text-xs text-zinc-500 mt-2 text-center">
-                      No releases match &ldquo;{releaseFilter}&rdquo;{" "}
-                      <button onClick={() => setReleaseFilter("")} className="text-zinc-400 hover:text-zinc-200 underline">Clear</button>
+                      {t("adminQueue.issueActions.noMatch", { filter: releaseFilter })}{" "}
+                      <button onClick={() => setReleaseFilter("")} className="text-zinc-400 hover:text-zinc-200 underline">{t("adminQueue.list.clear")}</button>
                     </p>
                   )}
                 </div>
@@ -551,12 +557,12 @@ export function IssueActions({
                     className="w-full flex items-center justify-center gap-1.5 py-2 text-xs text-zinc-500 hover:text-zinc-400 border-t border-zinc-800 transition-colors flex-shrink-0"
                   >
                     {showRejected ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                    {showRejected ? "Hide" : "Show"} {rejectedCount} rejected
+                    {showRejected ? t("adminQueue.issueActions.hideRejected", { count: rejectedCount }) : t("adminQueue.issueActions.showRejected", { count: rejectedCount })}
                   </button>
                 )}
 
                 <div className="flex items-center justify-between px-6 py-4 border-t border-zinc-700 bg-zinc-900 flex-shrink-0">
-                  <button onClick={() => setPanel(null)} className="text-sm text-zinc-500 hover:text-zinc-300">Cancel</button>
+                  <button onClick={() => setPanel(null)} className="text-sm text-zinc-500 hover:text-zinc-300">{t("shared.common.cancel")}</button>
                   <Button
                     size="sm"
                     onClick={grabRelease}
@@ -564,7 +570,7 @@ export function IssueActions({
                     className="h-8 px-4 text-sm bg-blue-700 text-white hover:bg-blue-600 gap-2"
                   >
                     {loading === "grab" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-                    Grab release
+                    {t("adminQueue.issueActions.grab")}
                   </Button>
                 </div>
               </>
@@ -576,7 +582,7 @@ export function IssueActions({
       {panel === null && refetchOk && (
         <span className="flex items-center gap-1 text-[11px] text-green-400">
           <Check className="w-3 h-3" />
-          Search triggered
+          {t("adminQueue.issueActions.searchTriggered")}
         </span>
       )}
       {arrError && (

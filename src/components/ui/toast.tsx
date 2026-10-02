@@ -2,6 +2,7 @@
 
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from "react";
 import { Check, AlertTriangle, Bell, X } from "@/components/icons";
+import { useT } from "@/components/i18n/i18n-provider";
 
 type ToastVariant = "success" | "error" | "info";
 /** One inline button (e.g. "Undo"). Clicking it runs `onClick` and dismisses
@@ -46,6 +47,8 @@ function dismissAfter(variant: ToastVariant, hasAction = false): number {
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  // Named `tr`, not `t`: the render below already uses `t` for each toast.
+  const tr = useT();
   const idRef = useRef(0);
   // Pending auto-dismiss timers by toast id, so a manual dismiss clears its
   // timer and hovering/focusing a toast can pause it.
@@ -176,7 +179,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
             <button
               type="button"
               onClick={() => dismiss(t.id)}
-              aria-label="Dismiss"
+              aria-label={tr("shared.common.dismiss")}
               className="ds-hover-tint shrink-0 inline-flex items-center justify-center rounded-md"
               // 28px hit box around the 14px glyph; the negative margins keep
               // the row's height and right edge where the text puts them.

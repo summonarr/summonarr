@@ -7,7 +7,10 @@ import { Bell, Film, Tv2 } from "@/components/icons";
 import { posterUrl } from "@/lib/tmdb-types";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { useNotifications } from "@/components/notifications/notification-store";
-import { notificationHref, timeAgo } from "@/lib/notification-links";
+import { notificationHref } from "@/lib/notification-links";
+import { notificationBody } from "@/components/notifications/notification-list";
+import { formatRelativeTimeLocalized } from "@/lib/relative-time";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 export function NotificationBell() {
   // Fetching, polling and live (SSE) reloads all happen in the shared
@@ -22,6 +25,8 @@ export function NotificationBell() {
   const panelRef = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const mounted = useHasMounted();
+  const t = useT();
+  const locale = useLocale();
 
   // Close on outside click / Escape.
   useEffect(() => {
@@ -29,8 +34,8 @@ export function NotificationBell() {
     // Move focus into the panel on open so keyboard users land inside it.
     (panelRef.current?.querySelector<HTMLElement>("a[href], button") ?? panelRef.current)?.focus();
     function onDoc(e: MouseEvent) {
-      const t = e.target as Node;
-      if (panelRef.current?.contains(t) || btnRef.current?.contains(t)) return;
+      const target = e.target as Node;
+      if (panelRef.current?.contains(target) || btnRef.current?.contains(target)) return;
       setOpen(false);
     }
     function onKey(e: KeyboardEvent) {
@@ -61,7 +66,7 @@ export function NotificationBell() {
         ref={btnRef}
         type="button"
         onClick={toggle}
-        aria-label={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}
+        aria-label={unread > 0 ? t("nav.notificationsUnread", { count: unread }) : t("personal.notifications.title")}
         aria-haspopup="menu"
         aria-expanded={open}
         className="relative inline-flex items-center justify-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
@@ -114,13 +119,13 @@ export function NotificationBell() {
             className="flex items-center justify-between"
             style={{ padding: "10px 12px", borderBottom: "1px solid var(--ds-border)" }}
           >
-            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--ds-fg)" }}>Notifications</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--ds-fg)" }}>{t("personal.notifications.title")}</span>
           </div>
 
           <div style={{ maxHeight: 380, overflowY: "auto" }}>
             {items.length === 0 ? (
               <div className="ds-mono" style={{ padding: "28px 16px", textAlign: "center", fontSize: 12, color: "var(--ds-fg-subtle)" }}>
-                No notifications yet.
+                {t("shared.bell.empty")}
               </div>
             ) : (
               items.map((n) => {
@@ -158,9 +163,9 @@ export function NotificationBell() {
                       <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ds-fg)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         {n.title}
                       </div>
-                      <div style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", lineHeight: 1.35, marginTop: 1 }}>{n.body}</div>
+                      <div style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", lineHeight: 1.35, marginTop: 1 }}>{notificationBody(n, t)}</div>
                       <div className="ds-mono" style={{ fontSize: 10, color: "var(--ds-fg-subtle)", marginTop: 3 }}>
-                        {mounted ? timeAgo(n.createdAt) : ""}
+                        {mounted ? formatRelativeTimeLocalized(n.createdAt, locale) : ""}
                       </div>
                     </div>
                   </Link>
@@ -175,7 +180,7 @@ export function NotificationBell() {
             className="block text-center transition-colors hover:bg-[var(--ds-bg-3)]"
             style={{ padding: "9px 12px", borderTop: "1px solid var(--ds-border)", fontSize: 12, fontWeight: 500, color: "var(--ds-accent-text)" }}
           >
-            View all
+            {t("shared.bell.viewAll")}
           </Link>
         </div>
       )}
