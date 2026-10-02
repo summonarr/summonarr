@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { fetchUnifiedRatings } from "@/lib/omdb-availability";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // GET /api/ratings?id=&type= — external ratings for a single title. MDBList is
 // tried first (richer field set); OMDB is the fallback whenever MDBList can't
@@ -12,6 +13,7 @@ import { tooManyRequests } from "@/lib/http";
 // follows the MdblistRatings shape; an OMDB hit fills the fields it lacks with
 // null.
 export const GET = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`ratings:${session.user.id}`, 60, 60_000)) {
     return tooManyRequests(60);
   }
@@ -21,12 +23,12 @@ export const GET = withAuth(async (req, _ctx, session) => {
   const type = searchParams.get("type");
 
   if (!id || !type || (type !== "movie" && type !== "tv")) {
-    return NextResponse.json({ error: "Missing or invalid id/type" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.ratings.invalidIdType") }, { status: 400 });
   }
 
   const numericId = Number(id);
   if (!Number.isFinite(numericId) || numericId <= 0 || !Number.isInteger(numericId)) {
-    return NextResponse.json({ error: "id must be a positive integer" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.idPositive") }, { status: 400 });
   }
 
   // TTL bucketing: fetchUnifiedRatings keys its ratings-cache TTLs off the

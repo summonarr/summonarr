@@ -14,16 +14,18 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit, auditContext } from "@/lib/audit";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { isFeatureEnabled } from "@/lib/features";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
-export const GET = withAuth(async (_req, { params }: RouteContext, session) => {
+export const GET = withAuth(async (req, { params }: RouteContext, session) => {
+  const t = translatorForRequest(req);
   const { id } = await params;
   const issue = await prisma.issue.findUnique({ where: { id } });
-  if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!issue) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
   if (!hasPermission(session.user.permissions, Permission.MANAGE_ISSUES) && issue.reportedBy !== session.user.id) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: t("apiUser.common.forbidden") }, { status: 403 });
   }
 
   const isAdmin = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
@@ -38,26 +40,27 @@ export const GET = withAuth(async (_req, { params }: RouteContext, session) => {
 });
 
 export const POST = withAuth(async (req, { params }: RouteContext, session) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   if (!checkRateLimit(`issue-msg:${session.user.id}`, 10, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many messages — try again in a minute" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.issues.messagesRateLimited") }, { status: 429 });
   }
 
   const { id } = await params;
   const issue = await prisma.issue.findUnique({ where: { id } });
-  if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!issue) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
   const isIssueAdmin = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
   if (!isIssueAdmin && issue.reportedBy !== session.user.id) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: t("apiUser.common.forbidden") }, { status: 403 });
   }
 
   // Match the issues POST gate: when issue reporting is disabled, ordinary users
   // can't add to a thread. Issue admins stay able to respond / wind threads down.
   if (!isIssueAdmin && !(await isFeatureEnabled("feature.page.issues"))) {
-    return NextResponse.json({ error: "Issue reporting is disabled" }, { status: 403 });
+    return NextResponse.json({ error: t("apiUser.issues.disabled") }, { status: 403 });
   }
 
   const parsed = await readJsonCapped<{ body?: string }>(req, 65536);
@@ -68,14 +71,14 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   // at runtime, so a number/object/null body would throw on .trim() and become a
   // 500 instead of this 400.
   if (typeof body.body !== "string") {
-    return NextResponse.json({ error: "body is required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.issues.messageBodyRequired") }, { status: 400 });
   }
   const rawText = body.body.trim();
   if (!rawText) {
-    return NextResponse.json({ error: "body is required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.issues.messageBodyRequired") }, { status: 400 });
   }
   if (rawText.length > 2000) {
-    return NextResponse.json({ error: "body must be under 2000 characters" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.issues.messageBodyTooLong") }, { status: 400 });
   }
   const text = sanitizeText(rawText);
 

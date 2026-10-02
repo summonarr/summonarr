@@ -12,6 +12,8 @@ import {
   type CreateMediaRequestFailure,
   type RequestContext,
 } from "@/lib/request-create";
+import { instanceDefaultLocale, translatorFor } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 // Watchlist auto-request (Overseerr's "Auto-Request"): a title a user adds to
 // their watchlist is filed as a request on their behalf. Two sources:
@@ -141,16 +143,20 @@ export async function autoRequestTitle(opts: {
   source: AutoRequestSource;
   // Pre-loaded request context (the cron reuses one per user across titles).
   ctx?: RequestContext;
+  // The language of `message`: the caller's request for a watchlist add; the
+  // instance default when omitted (the cron, which never shows it to anyone).
+  t?: Translator;
 }): Promise<AutoRequestAttempt> {
   const { session, tmdbId, mediaType, source } = opts;
+  const t = opts.t ?? translatorFor(instanceDefaultLocale());
   let attempt: AutoRequestAttempt;
   try {
-    attempt = await fileRequest(opts);
+    attempt = await fileRequest({ ...opts, t });
   } catch (err) {
     console.error(
       `[auto-request] ${source} request for ${mediaType}:${tmdbId} (user ${session.user.id}) failed: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`,
     );
-    attempt = { outcome: "error", requestId: null, status: null, message: "Couldn't request this automatically" };
+    attempt = { outcome: "error", requestId: null, status: null, message: t("apiUser.autoRequest.failed") };
   }
 
   // Outside any transaction and after the request's own commit — a failed ledger
@@ -187,14 +193,15 @@ async function fileRequest(opts: {
   mediaType: "MOVIE" | "TV";
   source: AutoRequestSource;
   ctx?: RequestContext;
+  t: Translator;
 }): Promise<AutoRequestAttempt> {
-  const { session, tmdbId, mediaType, source } = opts;
+  const { session, tmdbId, mediaType, source, t } = opts;
   const refused = (outcome: AutoRequestOutcome, message: string): AutoRequestAttempt =>
     ({ outcome, requestId: null, status: null, message });
 
   // The same pre-body gates POST /api/requests applies, in the same order.
   const maint = await maintenanceGuard(session);
-  if (maint) return refused("maintenance", "Requests are paused for maintenance");
+  if (maint) return refused("maintenance", t("apiUser.autoRequest.maintenance"));
 
   const ctx = opts.ctx ?? (await loadRequestContext(session.user.id));
 
@@ -203,22 +210,22 @@ async function fileRequest(opts: {
   if (source === "watchlist") {
     const limit = parseRateLimit(ctx.settings.rateLimitRequests, 20);
     if (!checkRateLimit(`requests:${session.user.id}`, limit, 60 * 1000)) {
-      return refused("rate-limited", "Too many requests — try again later");
+      return refused("rate-limited", t("apiUser.common.tooManyRequestsLater"));
     }
   }
 
   if (ctx.settings.discordRequireLinkedAccountSite === "true" && !ctx.userRecord?.discordId) {
-    return refused("discord-link-required", "You must link your Discord account before making requests");
+    return refused("discord-link-required", t("apiUser.common.discordLinkRequired"));
   }
 
-  const result = await createMediaRequest(session, ctx, { tmdbId, mediaType, note: AUTO_REQUEST_NOTES[source] });
+  const result = await createMediaRequest(session, ctx, { tmdbId, mediaType, note: AUTO_REQUEST_NOTES[source] }, t);
   if (!result.ok) return refused(result.reason, result.error);
-  if (result.kind === "already-available") return refused("already-available", "Already available");
+  if (result.kind === "already-available") return refused("already-available", t("apiUser.autoRequest.alreadyAvailable"));
   return {
     outcome: "requested",
     requestId: result.request.id,
     status: result.request.status,
-    message: result.request.status === "PENDING" ? "Requested — waiting for approval" : "Requested",
+    message: result.request.status === "PENDING" ? t("apiUser.autoRequest.requestedPending") : t("apiUser.autoRequest.requested"),
   };
 }
 
@@ -230,6 +237,7 @@ export async function maybeAutoRequestWatchlistAdd(
   session: SummonarrSession,
   tmdbId: number,
   mediaType: "MOVIE" | "TV",
+  t?: Translator,
 ): Promise<AutoRequestAttempt | null> {
   if (!canAutoRequest(session.user.permissions, mediaType)) return null;
   let enabled: boolean;
@@ -240,5 +248,5 @@ export async function maybeAutoRequestWatchlistAdd(
     return null;
   }
   if (!enabled) return null;
-  return autoRequestTitle({ session, tmdbId, mediaType, source: "watchlist" });
+  return autoRequestTitle({ session, tmdbId, mediaType, source: "watchlist", t });
 }

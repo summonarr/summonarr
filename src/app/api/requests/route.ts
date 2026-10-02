@@ -11,6 +11,7 @@ import { sanitizeContainsSearch } from "@/lib/sanitize";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { verifyRequestToken } from "@/lib/request-token";
 import { createMediaRequest, loadRequestContext } from "@/lib/request-create";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const PAGE_SIZE = 20;
 const VALID_STATUSES = ["PENDING", "APPROVED", "AVAILABLE", "DECLINED"] as const;
@@ -86,6 +87,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
 });
 
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
@@ -94,11 +96,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   const limit = parseRateLimit(settings.rateLimitRequests, 20);
   if (!checkRateLimit(`requests:${session.user.id}`, limit, 60 * 1000)) {
-    return tooManyRequests(60, "Too many requests — try again later");
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
 
   if (settings.discordRequireLinkedAccountSite === "true" && !userRecord?.discordId) {
-    return NextResponse.json({ error: "You must link your Discord account before making requests" }, { status: 403 });
+    return NextResponse.json({ error: t("apiUser.common.discordLinkRequired") }, { status: 403 });
   }
 
   // Capability + per-media-type quota are evaluated below, once mediaType is
@@ -119,7 +121,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const { tmdbId, mediaType, note, _token } = body;
 
   if (!tmdbId || !mediaType) {
-    return NextResponse.json({ error: "tmdbId and mediaType are required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdMediaTypeRequired") }, { status: 400 });
   }
 
   // typeof-guard BEFORE verifyRequestToken: readJsonCapped<T>'s generic is a
@@ -127,15 +129,15 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // old `!_token` check and threw ERR_INVALID_ARG_TYPE out of Buffer.from(a, "hex")
   // as a 500 instead of this 403. Empty string is non-verifying and still 403s.
   if (typeof _token !== "string" || !verifyRequestToken(_token, tmdbId, mediaType, session.user.id)) {
-    return NextResponse.json({ error: "Invalid or expired request token" }, { status: 403 });
+    return NextResponse.json({ error: t("apiUser.common.invalidRequestToken") }, { status: 403 });
   }
 
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
-    return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
   }
 
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: "mediaType must be MOVIE or TV" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.mediaTypeInvalid") }, { status: 400 });
   }
 
   // Everything from instance resolution to the admin fan-out lives in the shared
@@ -149,7 +151,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     is4k: body.is4k,
     arrInstance: body.arrInstance,
     qualityProfileId: body.qualityProfileId,
-  });
+  }, t);
   if (!result.ok) {
     return NextResponse.json({ error: result.error }, { status: result.status });
   }

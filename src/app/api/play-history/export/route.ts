@@ -6,6 +6,7 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { composeWhere, parsePlayHistoryFilters, PLAY_METHODS } from "@/lib/play-history-filters";
 import { SEARCH_TERM_MAX_LEN } from "@/lib/sanitize";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const dynamic = "force-dynamic";
 
@@ -74,12 +75,13 @@ function escapeCSV(value: unknown): string {
 }
 
 export async function GET(request: NextRequest) {
+  const t = translatorForRequest(request);
   // Not wrapped in withPermission because this route streams a CSV body; the
   // ADMIN check is done by hand just below (guardrail 6a).
   const session = await requireAuth();
   if (session instanceof NextResponse) return session;
   if (!hasPermission(session.user.permissions, Permission.ADMIN)) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: t("apiUser.common.forbidden") }, { status: 403 });
   }
 
   // Keyed on the session user ALONE. getClientIp falls back to a hash of the
@@ -88,7 +90,7 @@ export async function GET(request: NextRequest) {
   // multiply its own allowance on a bulk PII export. A caller-controlled component can
   // only ever widen a limit, never tighten it.
   if (!checkRateLimit(`ph-export:${session.user.id}`, 5, 3_600_000)) {
-    return NextResponse.json({ error: "Too many export requests — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.playHistory.exportRateLimited") }, { status: 429 });
   }
 
   const params = request.nextUrl.searchParams;
@@ -110,7 +112,7 @@ export async function GET(request: NextRequest) {
   // row must not record an export that never ran.
   for (const [name, value] of [["startDate", startDate], ["endDate", endDate]] as const) {
     if (value && isNaN(new Date(value).getTime())) {
-      return NextResponse.json({ error: `${name} must be a valid date` }, { status: 400 });
+      return NextResponse.json({ error: t("apiUser.playHistory.invalidDate", { name }) }, { status: 400 });
     }
   }
 

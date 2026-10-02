@@ -8,6 +8,7 @@ import { sanitizeText } from "@/lib/sanitize";
 import { readJsonCapped } from "@/lib/body-size";
 import { isFeatureEnabled } from "@/lib/features";
 import { maintenanceGuard } from "@/lib/maintenance";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 
@@ -28,6 +29,7 @@ function canonicalizePushEndpoint(raw: string): string | null {
 }
 
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   // Personal mutation — blocked during maintenance like profile delete/password.
   // DELETE (unsubscribe) intentionally stays open so users can always opt out.
   const maint = await maintenanceGuard(session);
@@ -35,10 +37,10 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // Don't accept new subscriptions while push is disabled: the send path already
   // no-ops when off, so a registration stored here would never deliver.
   if (!(await isFeatureEnabled("feature.integration.push"))) {
-    return NextResponse.json({ error: "Push notifications are disabled" }, { status: 403 });
+    return NextResponse.json({ error: t("apiUser.push.disabled") }, { status: 403 });
   }
   if (!checkRateLimit(`push-sub:${session.user.id}`, 10, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
 
   const parsed = await readJsonCapped<{ endpoint?: string; keys?: { p256dh?: string; auth?: string }; label?: string }>(req, 32768);
@@ -47,7 +49,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   const { endpoint, keys, label } = body;
   if (!endpoint || !keys?.p256dh || !keys?.auth) {
-    return NextResponse.json({ error: "endpoint, keys.p256dh, and keys.auth are required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.push.fieldsRequired") }, { status: 400 });
   }
   const p256dh = keys.p256dh;
   const auth = keys.auth;
@@ -55,14 +57,14 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // Cheap field-length checks first — no DNS, no DB. Doing this before
   // resolveToSafeUrl avoids resolving a 64KB attacker-controlled URL.
   if (endpoint.length > 2048 || p256dh.length > 256 || auth.length > 256) {
-    return NextResponse.json({ error: "Push subscription fields exceed maximum length" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.push.fieldsTooLong") }, { status: 400 });
   }
 
   // Allowlist known push services before DNS resolution to prevent SSRF via push endpoint registration
   try {
     const url = new URL(endpoint);
     if (url.protocol !== "https:") {
-      return NextResponse.json({ error: "Push endpoint must use HTTPS" }, { status: 400 });
+      return NextResponse.json({ error: t("apiUser.push.endpointHttps") }, { status: 400 });
     }
     const host = url.hostname.toLowerCase();
     const allowedHosts = [
@@ -79,20 +81,20 @@ export const POST = withAuth(async (req, _ctx, session) => {
     const isAllowed = allowedHosts.includes(host)
       || allowedSuffixes.some((suffix) => host.endsWith(suffix));
     if (!isAllowed) {
-      return NextResponse.json({ error: "Push endpoint is not from a recognized push service" }, { status: 400 });
+      return NextResponse.json({ error: t("apiUser.push.endpointUnrecognized") }, { status: 400 });
     }
   } catch {
-    return NextResponse.json({ error: "Invalid push endpoint URL" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.push.endpointInvalidUrl") }, { status: 400 });
   }
 
   const safeEndpoint = await resolveToSafeUrl(endpoint);
   if (!safeEndpoint) {
-    return NextResponse.json({ error: "Push endpoint resolves to a disallowed address" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.push.endpointDisallowed") }, { status: 400 });
   }
 
   const existing = await prisma.pushSubscription.findUnique({ where: { endpoint: safeEndpoint } });
   if (existing && existing.userId !== session.user.id) {
-    return NextResponse.json({ error: "Endpoint already registered to another user" }, { status: 409 });
+    return NextResponse.json({ error: t("apiUser.push.endpointTaken") }, { status: 409 });
   }
 
   const alreadyOwns = existing?.userId === session.user.id;
@@ -143,6 +145,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
 });
 
 export const DELETE = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const parsed = await readJsonCapped<{ endpoint?: string; id?: string }>(req, 32768);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
@@ -157,7 +160,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   }
 
   if (typeof body.endpoint !== "string" || !body.endpoint) {
-    return NextResponse.json({ error: "id or endpoint is required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.push.idOrEndpointRequired") }, { status: 400 });
   }
 
   // Reject rather than fall back to the raw endpoint: the stored row is keyed by
@@ -168,7 +171,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   // failure for the push service answer 400 and leave the opted-out row behind.
   const canonicalEndpoint = canonicalizePushEndpoint(body.endpoint);
   if (!canonicalEndpoint) {
-    return NextResponse.json({ error: "Invalid endpoint" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.push.endpointInvalid") }, { status: 400 });
   }
 
   await prisma.pushSubscription.deleteMany({

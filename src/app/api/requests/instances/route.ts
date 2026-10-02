@@ -4,6 +4,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
 import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
 import { isBlacklisted } from "@/lib/blacklist";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const dynamic = "force-dynamic";
 
@@ -29,6 +30,7 @@ export const dynamic = "force-dynamic";
 //
 // Query: tmdbId=<int>&mediaType=MOVIE|TV
 export const GET = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`request-instances:${session.user.id}`, 60, 60_000)) {
     return tooManyRequests(60);
   }
@@ -36,11 +38,11 @@ export const GET = withAuth(async (req, _ctx, session) => {
   const sp = req.nextUrl.searchParams;
   const mediaType = sp.get("mediaType");
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: "mediaType must be MOVIE or TV" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.mediaTypeInvalid") }, { status: 400 });
   }
   const tmdbId = Number(sp.get("tmdbId"));
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
-    return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
   }
 
   const rows = await resolveNamedInstanceTargets({

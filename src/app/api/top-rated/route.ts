@@ -10,6 +10,7 @@ import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { isFeatureEnabled } from "@/lib/features";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Native-client mirror of src/app/(app)/top/page.tsx — deduplicated top-rated
 // titles across TMDB + Trakt + MDBList, sorted by a chosen rating source. Keep
@@ -138,11 +139,12 @@ function applyFilters(
 }
 
 export const GET = withAuth(async (request, _ctx, session) => {
+  const t = translatorForRequest(request);
   if (!(await isFeatureEnabled("feature.page.top"))) {
-    return NextResponse.json({ error: "Top Rated is disabled" }, { status: 403 });
+    return NextResponse.json({ error: t("apiUser.browse.topRatedDisabled") }, { status: 403 });
   }
   if (!checkRateLimit(`top-rated:${session.user.id}`, 30, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequests") }, { status: 429 });
   }
 
   const sp = request.nextUrl.searchParams;
@@ -270,6 +272,6 @@ export const GET = withAuth(async (request, _ctx, session) => {
     });
   } catch (err) {
     console.error("[top-rated] Failed:", err);
-    return NextResponse.json({ error: "Failed to fetch" }, { status: 500 });
+    return NextResponse.json({ error: t("apiUser.common.fetchFailed") }, { status: 500 });
   }
 });

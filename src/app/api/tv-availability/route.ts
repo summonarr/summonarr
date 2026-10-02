@@ -3,6 +3,7 @@ import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { getVisibleServerInstances, visibleEpisodeSourcesFor } from "@/lib/media-visibility";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export interface TVSeasonInfo {
   seasonNumber: number;
@@ -15,15 +16,16 @@ export interface TVAvailabilityResponse {
 }
 
 export const GET = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`tv-availability:${session.user.id}`, 30, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequests") }, { status: 429 });
   }
 
   const raw = req.nextUrl.searchParams.get("tmdbId");
-  if (!raw) return NextResponse.json({ error: "tmdbId is required" }, { status: 400 });
+  if (!raw) return NextResponse.json({ error: t("apiUser.common.tmdbIdRequired") }, { status: 400 });
   const tmdbId = parseInt(raw, 10);
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
-    return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
   }
 
   const provider = session.user.provider;

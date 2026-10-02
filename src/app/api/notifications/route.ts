@@ -4,6 +4,7 @@ import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const PAGE_SIZE = 30;
 const SELECT = { id: true, type: true, title: true, body: true, tmdbId: true, mediaType: true, posterPath: true, readAt: true, createdAt: true } as const;
@@ -77,6 +78,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
 // `all=1` signal. A request with neither is a no-op 400, never a wipe. Matches
 // the watchlist/hidden/blacklist DELETE convention. Returns the new unread count.
 export const DELETE = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`notifications-del:${session.user.id}`, 60, 60_000)) {
     return tooManyRequests(60);
   }
@@ -87,7 +89,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     ? idsParam.split(",").map((s) => s.trim()).filter(Boolean).slice(0, 500)
     : [];
   if (!all && ids.length === 0) {
-    return NextResponse.json({ error: "specify ?ids= or ?all=1" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.notifications.selectorRequired") }, { status: 400 });
   }
 
   await prisma.notification.deleteMany({

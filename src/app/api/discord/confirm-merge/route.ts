@@ -6,16 +6,18 @@ import { assignDiscordRolesOnLink } from "@/lib/discord-notify";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { timingSafeEqual } from "crypto";
 import { readJsonCapped } from "@/lib/body-size";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Step 2 of linking a Discord account: the user types in the 12-character code
 // the bot sent them by DM (step 1 is discord/initiate-merge, which also holds
 // the DM text).
 
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`discord-merge:${session.user.id}`, 5, 10 * 60 * 1000)) {
     await prisma.discordMergeCode.deleteMany({ where: { userId: session.user.id } });
     return NextResponse.json(
-      { error: "rate_limit", message: "Too many attempts. Wait 10 minutes and try again." },
+      { error: "rate_limit", message: t("apiUser.discord.merge.rateLimited") },
       { status: 429 }
     );
   }
@@ -30,7 +32,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   if (!record) {
     return NextResponse.json(
-      { error: "No pending verification — please request a code first." },
+      { error: t("apiUser.discord.merge.noPending") },
       { status: 400 }
     );
   }
@@ -40,7 +42,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     // race-safe pattern used by the rate-limit path above.
     await prisma.discordMergeCode.deleteMany({ where: { userId: session.user.id } });
     return NextResponse.json(
-      { error: "Code has expired — please request a new one." },
+      { error: t("apiUser.discord.merge.expired") },
       { status: 400 }
     );
   }
@@ -51,7 +53,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const expected = Buffer.from(record.code, "utf8");
   const supplied = Buffer.from(code, "utf8");
   if (expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) {
-    return NextResponse.json({ error: "Incorrect code." }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.discord.merge.incorrect") }, { status: 400 });
   }
 
   try {
@@ -71,6 +73,6 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
     return NextResponse.json({ ok: true, migrated, discordId: record.discordId });
   } catch {
-    return NextResponse.json({ error: "Could not link accounts." }, { status: 409 });
+    return NextResponse.json({ error: t("apiUser.discord.merge.linkFailed") }, { status: 409 });
   }
 });

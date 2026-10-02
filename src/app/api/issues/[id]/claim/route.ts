@@ -5,6 +5,7 @@ import { emitSSE } from "@/lib/sse-emitter";
 import { logAudit, auditContext } from "@/lib/audit";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCappedOr } from "@/lib/body-size";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -15,6 +16,7 @@ type RouteContext = { params: Promise<{ id: string }> };
 // Notifications for replies on a claimed issue narrow to the claimer + the
 // reporter — see src/app/api/issues/[id]/messages/route.ts.
 export const POST = withIssueAdmin(async (req, { params }: RouteContext, session) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
@@ -29,7 +31,7 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
   const hasExpectation = "expectedClaimedBy" in body;
   const expectedClaimedBy = body.expectedClaimedBy;
   if (hasExpectation && expectedClaimedBy !== null && typeof expectedClaimedBy !== "string") {
-    return NextResponse.json({ error: "Invalid expectedClaimedBy" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.issues.claim.invalidExpected") }, { status: 400 });
   }
 
   const issue = await prisma.issue.findUnique({
@@ -43,7 +45,7 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
       claimedUser: { select: { name: true, email: true } },
     },
   });
-  if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!issue) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
   const existingClaimedBy = issue.claimedBy;
 
@@ -53,13 +55,15 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
   // skipping the take-over confirmation it never knew to show. Refuse when the
   // caller's view of the claim no longer matches the row.
   if (hasExpectation && expectedClaimedBy !== existingClaimedBy) {
-    const holder = issue.claimedUser?.name ?? issue.claimedUser?.email ?? "Another admin";
+    const holder = issue.claimedUser?.name ?? issue.claimedUser?.email;
     return NextResponse.json(
       {
         error: "claim-conflict",
         message: existingClaimedBy
-          ? `${holder} claimed this issue first.`
-          : "This issue is no longer claimed.",
+          ? holder != null
+            ? t("apiUser.issues.claim.claimedBy", { name: holder })
+            : t("apiUser.issues.claim.anotherAdmin")
+          : t("apiUser.issues.claim.noLongerClaimed"),
       },
       { status: 409 }
     );
@@ -80,7 +84,7 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
 
   if (result.count === 0) {
     return NextResponse.json(
-      { error: "claim-conflict", message: "Another admin claimed this issue first." },
+      { error: "claim-conflict", message: t("apiUser.issues.claim.anotherAdmin") },
       { status: 409 }
     );
   }

@@ -5,6 +5,7 @@ import { listQualityProfiles } from "@/lib/arr";
 import { isValidInstanceSlug } from "@/lib/arr-instances";
 import { getArrInstances } from "@/lib/arr-instance-registry";
 import { prisma } from "@/lib/prisma";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Quality profiles for the Radarr/Sonarr instance a given request targets, so the
 // approve UI can offer "approve with profile X", and the request UI can offer a
@@ -15,17 +16,18 @@ import { prisma } from "@/lib/prisma";
 //   ?instance=<slug>     → any instance slug ("" default, "4k", named)
 //   ?is4k=true           → legacy shorthand for instance=4k
 export const GET = withPermission([Permission.MANAGE_REQUESTS, Permission.REQUEST_ADVANCED])(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const sp = req.nextUrl.searchParams;
   const mediaType = sp.get("mediaType");
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: "mediaType must be MOVIE or TV" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.mediaTypeInvalid") }, { status: 400 });
   }
   const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
   const rawInstance = sp.get("instance");
   const variant =
     rawInstance !== null ? rawInstance.trim() : sp.get("is4k") === "true" ? "4k" : "";
   if (!isValidInstanceSlug(variant)) {
-    return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.invalidInstance") }, { status: 400 });
   }
 
   // listQualityProfiles is deliberately permission-agnostic (see arr.ts), so this
@@ -55,7 +57,7 @@ export const GET = withPermission([Permission.MANAGE_REQUESTS, Permission.REQUES
         request4kAllRow?.value === "true",
       )
     ) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      return NextResponse.json({ error: t("apiUser.common.forbidden") }, { status: 403 });
     }
   }
 
@@ -64,12 +66,12 @@ export const GET = withPermission([Permission.MANAGE_REQUESTS, Permission.REQUES
     result = await listQualityProfiles(service, variant);
   } catch (err) {
     console.error(`[requests/quality-profiles] Failed to fetch ${service} profiles:`, err);
-    return NextResponse.json({ error: `Could not connect to ${service}` }, { status: 502 });
+    return NextResponse.json({ error: t("apiUser.common.couldNotConnect", { service }) }, { status: 502 });
   }
 
   if (!result) {
     const label = variant === "" ? service : `${service} (${variant})`;
-    return NextResponse.json({ error: `${label} is not configured` }, { status: 422 });
+    return NextResponse.json({ error: t("apiUser.common.notConfigured", { name: label }) }, { status: 422 });
   }
 
   return NextResponse.json({ qualityProfiles: result.profiles, defaultId: result.defaultId });

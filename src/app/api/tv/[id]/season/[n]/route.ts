@@ -6,6 +6,7 @@ import type { TmdbEpisode } from "@/lib/tmdb-types";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { settleLimit } from "@/lib/concurrency";
 import { getVisibleServerInstances, visibleEpisodeSourcesFor } from "@/lib/media-visibility";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export interface TVSeasonResponse {
   episodes: TmdbEpisode[];
@@ -14,29 +15,30 @@ export interface TVSeasonResponse {
 }
 
 export const GET = withAuth(async (
-  _req,
+  req,
   { params }: { params: Promise<{ id: string; n: string }> },
   session
 ) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`tv-season:${session.user.id}`, 30, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequests") }, { status: 429 });
   }
 
   const { id: rawId, n: rawN } = await params;
   const tmdbId = parseInt(rawId, 10);
   const seasonNumber = parseInt(rawN, 10);
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
-    return NextResponse.json({ error: "id must be a positive integer" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.idPositive") }, { status: 400 });
   }
   if (!Number.isInteger(seasonNumber) || seasonNumber < 0) {
-    return NextResponse.json({ error: "n must be a non-negative integer" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.tv.seasonInvalid") }, { status: 400 });
   }
 
   let episodes: TmdbEpisode[];
   try {
     episodes = await getTVSeasonEpisodes(tmdbId, seasonNumber);
   } catch {
-    return NextResponse.json({ error: "Failed to fetch season from TMDB" }, { status: 502 });
+    return NextResponse.json({ error: t("apiUser.tv.seasonFetchFailed") }, { status: 502 });
   }
 
   const provider = session.user.provider;

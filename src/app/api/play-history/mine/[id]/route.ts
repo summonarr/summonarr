@@ -3,6 +3,7 @@ import { withAuth } from "@/lib/api-auth";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
 import { getMyWatchHistoryEntry } from "@/lib/my-watch-history";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const dynamic = "force-dynamic";
 
@@ -12,20 +13,21 @@ export const dynamic = "force-dynamic";
 // a row belonging to another user's media-server identity 404s exactly like a
 // missing one, so foreign ids leak nothing. Shares the /mine rate bucket.
 export const GET = withAuth(async (
-  _req,
+  req,
   { params }: { params: Promise<{ id: string }> },
   session,
 ) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`play-history-mine:${session.user.id}`, 120, 60_000)) {
     return tooManyRequests(60);
   }
   const { id } = await params;
   if (!id || typeof id !== "string" || id.length > 64) {
-    return NextResponse.json({ error: "Invalid ID" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.invalidId") }, { status: 400 });
   }
   const detail = await getMyWatchHistoryEntry(session.user.id, id);
   if (!detail) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
   }
   return NextResponse.json(detail);
 });

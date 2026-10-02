@@ -5,17 +5,19 @@ import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const dynamic = "force-dynamic";
 
 export const GET = withPermission(Permission.ADMIN)(async (
-  _request,
+  request,
   { params }: { params: Promise<{ id: string }> },
   _session,
 ) => {
+  const t = translatorForRequest(request);
   const { id } = await params;
   if (!id || typeof id !== "string") {
-    return NextResponse.json({ error: "Invalid ID" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.invalidId") }, { status: 400 });
   }
 
   const record = await prisma.playHistory.findUnique({
@@ -27,7 +29,7 @@ export const GET = withPermission(Permission.ADMIN)(async (
     },
   });
   if (!record) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
   }
 
   return NextResponse.json(record);
@@ -38,12 +40,13 @@ export const DELETE = withPermission(Permission.ADMIN)(async (
   { params }: { params: Promise<{ id: string }> },
   session,
 ) => {
+  const t = translatorForRequest(request);
   const { id } = await params;
   if (!checkRateLimit(`admin-play-history-delete:${session.user.id}`, 10, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many attempts — please wait a minute." }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.playHistory.deleteRateLimited") }, { status: 429 });
   }
   if (!id || typeof id !== "string") {
-    return NextResponse.json({ error: "Invalid ID" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.invalidId") }, { status: 400 });
   }
 
   const record = await prisma.playHistory.findUnique({
@@ -60,7 +63,7 @@ export const DELETE = withPermission(Permission.ADMIN)(async (
     },
   });
   if (!record) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
   }
 
   // `?chain=true` deletes the whole resume chain — one viewing that was paused

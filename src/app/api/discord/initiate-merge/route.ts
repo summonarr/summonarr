@@ -5,19 +5,21 @@ import { randomBytes } from "crypto";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { readJsonCapped } from "@/lib/body-size";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const DISCORD_API = "https://discord.com/api/v10";
 const DISCORD_HOSTS = ["discord.com"];
 const SNOWFLAKE_RE = /^\d{17,20}$/;
 
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const parsed = await readJsonCapped<{ discordId?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const discordId = String(parsed.discordId ?? "").trim();
 
   if (!SNOWFLAKE_RE.test(discordId)) {
     return NextResponse.json(
-      { error: "Invalid Discord user ID — it must be a 17–20 digit number." },
+      { error: t("apiUser.discord.merge.invalidUserId") },
       { status: 400 }
     );
   }
@@ -27,7 +29,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // This caps total merge-init DMs across ALL targets for one user.
   if (!checkRateLimit(`discord-merge-init-global:${session.user.id}`, 10, 60 * 60_000)) {
     return NextResponse.json(
-      { error: "Too many merge attempts — try again later." },
+      { error: t("apiUser.discord.merge.tooManyAttempts") },
       { status: 429 }
     );
   }
@@ -36,7 +38,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // the same Discord account every 15 minutes.
   if (!checkRateLimit(`discord-merge-init:${session.user.id}:${discordId}`, 3, 15 * 60 * 1000)) {
     return NextResponse.json(
-      { error: "Too many requests — please wait 15 minutes before trying again." },
+      { error: t("apiUser.discord.merge.waitFifteen") },
       { status: 429 }
     );
   }
@@ -48,14 +50,14 @@ export const POST = withAuth(async (req, _ctx, session) => {
     !alreadyLinked.email.endsWith("@discord.local")
   ) {
     return NextResponse.json(
-      { error: "Could not initiate account linking. Please try again later." },
+      { error: t("apiUser.discord.merge.initiateFailed") },
       { status: 409 }
     );
   }
 
   const botTokenRow = await prisma.setting.findUnique({ where: { key: "discordBotToken" } });
   if (!botTokenRow?.value) {
-    return NextResponse.json({ error: "Discord bot is not configured." }, { status: 503 });
+    return NextResponse.json({ error: t("apiUser.discord.merge.botNotConfigured") }, { status: 503 });
   }
 
   // 6 random bytes = 12 hex characters (~48 bits). Together with the rate
@@ -108,7 +110,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     console.warn("[discord/initiate-merge] DM failed:", err);
     await prisma.discordMergeCode.deleteMany({ where: { userId: session.user.id } });
     return NextResponse.json(
-      { error: "Failed to send Discord DM. Make sure your DMs are open." },
+      { error: t("apiUser.discord.merge.dmFailed") },
       { status: 502 }
     );
   }

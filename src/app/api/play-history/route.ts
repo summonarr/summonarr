@@ -7,10 +7,12 @@ import { resolvePosterPathMap, posterPathKey } from "@/lib/poster-cache";
 import { posterUrl } from "@/lib/tmdb-types";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { composeWhere, parsePlayHistoryFilters } from "@/lib/play-history-filters";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const dynamic = "force-dynamic";
 
 export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, session) => {
+  const t = translatorForRequest(request);
   // The grouped path runs two heavy window-function/aggregate raw queries over
   // the full PlayHistory table per request; throttle per admin to bound abuse.
   // Keyed on the session ALONE. getClientIp falls back to a hash of the User-Agent
@@ -19,7 +21,7 @@ export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, sessio
   // allowance against these heavy window-function queries. A caller-controlled component
   // can only ever widen a limit.
   if (!checkRateLimit(`play-history:${session.user.id}`, 120, 60_000)) {
-    return NextResponse.json({ error: "Too many requests — try again shortly" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsShortly") }, { status: 429 });
   }
 
   const params = request.nextUrl.searchParams;
@@ -49,7 +51,7 @@ export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, sessio
   for (const name of ["startDate", "endDate"] as const) {
     const value = params.get(name);
     if (value && isNaN(new Date(value).getTime())) {
-      return NextResponse.json({ error: `${name} must be a valid date` }, { status: 400 });
+      return NextResponse.json({ error: t("apiUser.playHistory.invalidDate", { name }) }, { status: 400 });
     }
   }
 

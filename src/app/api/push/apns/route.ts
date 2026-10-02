@@ -5,6 +5,7 @@ import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { encryptToken } from "@/lib/token-crypto";
 import { sanitizeText } from "@/lib/sanitize";
 import { readJsonCapped } from "@/lib/body-size";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 // APNs device tokens are 32 bytes (64 hex) today; Apple reserves the right to
@@ -16,8 +17,9 @@ const DEVICE_TOKEN_RE = /^(?:[0-9a-fA-F]{2}){32,100}$/;
 // POST /api/push/apns — registers (or updates) an iOS device's APNs token as a
 // push subscription for the caller, capped per-user with oldest-eviction.
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`push-apns:${session.user.id}`, 10, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
 
   const parsed = await readJsonCapped<{ deviceToken?: string; label?: string; publicKey?: string | null }>(req, 16384);
@@ -33,7 +35,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // (which would leave the stale row pushing to a signed-out device).
   const deviceToken = typeof body.deviceToken === "string" ? body.deviceToken.trim().toLowerCase() : "";
   if (!DEVICE_TOKEN_RE.test(deviceToken)) {
-    return NextResponse.json({ error: "deviceToken must be a hex APNs token" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.push.deviceTokenInvalid") }, { status: 400 });
   }
 
   // Synthetic unique handle so upsert/prune can key off `endpoint` for both web
@@ -47,7 +49,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     // ownership proof from the caller) would let any user hijack another
     // account's device token. Require the prior owner to DELETE first — a
     // legitimate device handoff goes through sign-out (mirrors /api/push/subscribe).
-    return NextResponse.json({ error: "Device already registered to another account" }, { status: 409 });
+    return NextResponse.json({ error: t("apiUser.push.deviceTaken") }, { status: 409 });
   }
   const alreadyOwns = existing?.userId === session.user.id;
 
@@ -120,6 +122,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
 });
 
 export const DELETE = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const parsed = await readJsonCapped<{ deviceToken?: string }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
@@ -129,7 +132,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   // a signed-out device.
   const deviceToken = typeof body.deviceToken === "string" ? body.deviceToken.trim().toLowerCase() : "";
   if (!deviceToken) {
-    return NextResponse.json({ error: "deviceToken is required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.push.deviceTokenRequired") }, { status: 400 });
   }
 
   await prisma.pushSubscription.deleteMany({

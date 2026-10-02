@@ -1053,3 +1053,49 @@ test("the parental content-rating cap blocks a capped user when the cached certi
   assert.equal(fetchCalls.length, 0, "the certification is read from the details cache, not the wire");
   assert.equal(opsOf("mediaRequest.create").length, 0);
 });
+
+// ── language of the refusal text (apiUser.* catalog) ────────────────────────
+// The refusal `error` is written in the caller's language: the picker cookie,
+// else Accept-Language — except for a native client, which gets the instance
+// default. Every test above sends no hint and pins the English text verbatim.
+
+async function postWithHeaders(token: string, body: unknown, headers: Record<string, string>): Promise<Response> {
+  const req = new NextRequest("http://localhost:3000/api/requests", {
+    method: "POST",
+    headers: { cookie: `${COOKIE}=${token}; ${headers.cookie ?? ""}`, "content-type": "application/json", ...Object.fromEntries(Object.entries(headers).filter(([k]) => k !== "cookie")) },
+    body: JSON.stringify(body),
+  });
+  return inScope(() => postRequest(req, undefined));
+}
+
+test("i18n: the route's own validation and the chokepoint's refusals follow the locale cookie / Accept-Language", async () => {
+  const { userId, token } = await mintSession({ movieQuotaLimit: 1, movieQuotaDays: 3 });
+
+  const missing = await postWithHeaders(token, { mediaType: "MOVIE" }, { cookie: "summonarr-locale=es" });
+  assert.equal(missing.status, 400);
+  assert.deepEqual(await missing.json(), { error: "tmdbId y mediaType son obligatorios" });
+
+  requestCounts = [1];
+  const quota = await postWithHeaders(token, requestBody(userId), { "accept-language": "es-ES,es;q=0.9" });
+  assert.equal(quota.status, 429);
+  assert.deepEqual(await quota.json(), { error: "Has alcanzado tu cuota de solicitudes de 1 por 3 días" });
+});
+
+test("i18n: a weekly-quota and a duplicate refusal in Spanish; a native client ignores Accept-Language", async () => {
+  settings.set("quotaLimit", "2");
+  settings.set("quotaPeriod", "week");
+  const { userId, token } = await mintSession();
+  requestCounts = [2];
+  const quota = await postWithHeaders(token, requestBody(userId), { cookie: "summonarr-locale=es" });
+  assert.deepEqual(await quota.json(), { error: "Has alcanzado tu cuota de solicitudes de 2 por semana" });
+
+  settings.clear();
+  requestCounts = [];
+  existingRow = { id: "req-old", status: "PENDING", permanentlyDeclined: false };
+  const dup = await postWithHeaders(token, requestBody(userId), { "accept-language": "es" });
+  assert.equal(dup.status, 409);
+  assert.deepEqual(await dup.json(), { error: "Ya solicitado" });
+
+  const native = await postWithHeaders(token, requestBody(userId), { "accept-language": "es", "x-summonarr-client": "ios; build=40" });
+  assert.deepEqual(await native.json(), { error: "Already requested" });
+});

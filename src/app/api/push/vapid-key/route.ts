@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { getOrCreateVapidPublicKey } from "@/lib/push";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Authenticated-only: the lazy keypair-init path on first call shouldn't be
 // reachable by anonymous flood. Any signed-in user needs the public key to
 // register a push subscription, so withAuth is the correct level.
-export const GET = withAuth(async () => {
+export const GET = withAuth(async (req) => {
+  const t = translatorForRequest(req);
   const publicKey = await getOrCreateVapidPublicKey();
   // An empty key means the stored keypair is INCOMPLETE — exactly one half
   // present, which the generator refuses to repair because overwriting the
@@ -16,7 +18,7 @@ export const GET = withAuth(async () => {
   // and it is the operator's Settings that need repairing.
   if (!publicKey) {
     return NextResponse.json(
-      { error: "Web push is not configured on this server" },
+      { error: t("apiUser.push.webPushNotConfigured") },
       { status: 503 },
     );
   }

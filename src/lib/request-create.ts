@@ -14,11 +14,13 @@ import { canRequestInstance, canAutoApproveInstance, parseInstanceGrants, hasPer
 import { getArrInstancesWithConfigured } from "@/lib/arr-instance-registry";
 import { getVisibleServerInstances } from "@/lib/media-visibility";
 import { routeMediaToSlug, type RoutableMedia } from "@/lib/arr-instances";
-import { resolveUserQuota, parseQuotaLimit, type ResolvedQuota } from "@/lib/quota";
+import { resolveUserQuota, parseQuotaLimit, translateQuotaWindow, type ResolvedQuota } from "@/lib/quota";
 import { resolveMediaMeta } from "@/lib/request-meta";
 import { isBlacklisted } from "@/lib/blacklist";
 import { exceedsCap } from "@/lib/content-rating";
 import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
+import { instanceDefaultLocale, translatorFor } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 // The request chokepoint — everything POST /api/requests does once the caller is
 // authenticated, rate-limited and its body validated: instance resolution and
@@ -125,6 +127,10 @@ export async function createMediaRequest(
   session: SummonarrSession,
   ctx: RequestContext,
   input: CreateMediaRequestInput,
+  // The language of the refusal `error` text — the route passes the caller's
+  // (translatorForRequest), the auto-request the user's. Only that text is
+  // translated; `reason` and `status` are the machine-readable half.
+  t: Translator = translatorFor(instanceDefaultLocale()),
 ): Promise<CreateMediaRequestResult> {
   const { settings, userRecord } = ctx;
   const body = input;
@@ -183,12 +189,12 @@ export async function createMediaRequest(
 
   let instance = instances.find((i) => i.slug === instanceSlug);
   if (!instance) {
-    return fail(400, "That instance isn't available for requests", "instance-unavailable");
+    return fail(400, t("apiUser.create.instanceUnavailable"), "instance-unavailable");
   }
   // A non-default instance must have a configured connection (url + apiKey). The default
   // instance ("") is always allowed — a request with no arr configured simply stays pending.
   if (instanceSlug !== "" && !configuredSlugs.has(instanceSlug)) {
-    return fail(400, `Requests to "${instance.name}" aren't available — that instance isn't configured`, "instance-unavailable");
+    return fail(400, t("apiUser.create.instanceNotConfigured", { name: instance.name }), "instance-unavailable");
   }
 
   // Capability gate — the permission bitmask is authoritative (admins pass via the ADMIN
@@ -204,7 +210,7 @@ export async function createMediaRequest(
     // ever selects a CONFIGURED instance, so the default fallback is always valid.
     // Mirrors the Discord (interactions) and bulk request paths.
     if (instanceExplicit) {
-      return fail(403, "You don't have permission to request this", "forbidden");
+      return fail(403, t("apiUser.create.forbidden"), "forbidden");
     }
     const defaultInstance = instances.find((i) => i.slug === "");
     // Re-check against the DEFAULT instance before falling back. canRequestInstance
@@ -218,7 +224,7 @@ export async function createMediaRequest(
       !defaultInstance ||
       !canRequestInstance(session.user.permissions, defaultInstance, grants, mediaType, settings.request4kAll === "true")
     ) {
-      return fail(403, "You don't have permission to request this", "forbidden");
+      return fail(403, t("apiUser.create.forbidden"), "forbidden");
     }
     instanceSlug = "";
     instance = defaultInstance;
@@ -231,10 +237,10 @@ export async function createMediaRequest(
   let chosenQualityProfileId: number | undefined;
   if (body.qualityProfileId !== undefined) {
     if (!Number.isInteger(body.qualityProfileId) || body.qualityProfileId <= 0) {
-      return fail(400, "qualityProfileId must be a positive integer", "invalid-quality-profile");
+      return fail(400, t("apiUser.requests.qualityProfileIdInvalid"), "invalid-quality-profile");
     }
     if (!hasPermission(session.user.permissions, Permission.REQUEST_ADVANCED)) {
-      return fail(403, "You don't have permission to choose a quality profile", "forbidden");
+      return fail(403, t("apiUser.create.profileForbidden"), "forbidden");
     }
     if (!instanceExplicit && instanceSlug !== "") {
       // The request was AUTO-ROUTED to a non-default instance, but the client's
@@ -256,10 +262,10 @@ export async function createMediaRequest(
         profileList = await listQualityProfiles(service, instanceSlug);
       } catch (err) {
         console.error(`[requests] Failed to fetch ${service} profiles:`, err);
-        return fail(502, `Could not connect to ${service}`, "arr-unreachable");
+        return fail(502, t("apiUser.common.couldNotConnect", { service }), "arr-unreachable");
       }
       if (!profileList || !profileList.profiles.some((p) => p.id === body.qualityProfileId)) {
-        return fail(400, "Invalid quality profile for this request", "invalid-quality-profile");
+        return fail(400, t("apiUser.create.profileInvalid"), "invalid-quality-profile");
       }
       chosenQualityProfileId = body.qualityProfileId;
     }
@@ -289,13 +295,13 @@ export async function createMediaRequest(
         where: { requestedBy: session.user.id, mediaType, createdAt: { gte: resolvedQuota.since }, status: { notIn: ["DECLINED"] } },
       });
       if (preCount >= resolvedQuota.limit) {
-        return fail(429, `You have reached your request quota of ${resolvedQuota.limit} per ${resolvedQuota.windowLabel}`, "quota");
+        return fail(429, t("apiUser.create.quota", { limit: resolvedQuota.limit, window: translateQuotaWindow(t, resolvedQuota.windowLabel) }), "quota");
       }
     }
   }
 
   if (note !== undefined && (typeof note !== "string" || note.length > 500)) {
-    return fail(400, "note must be a string under 500 characters", "invalid-note");
+    return fail(400, t("apiUser.create.noteTooLong"), "invalid-note");
   }
   const sanitizedNote = sanitizeOptional(note);
 
@@ -303,17 +309,17 @@ export async function createMediaRequest(
   try {
     verified = await resolveMediaMeta(tmdbId, mediaType);
   } catch {
-    return fail(422, "Could not verify media with TMDB", "tmdb-unverified");
+    return fail(422, t("apiUser.common.tmdbUnverified"), "tmdb-unverified");
   }
   if (!verified) {
-    return fail(422, "Could not verify media with TMDB", "tmdb-unverified");
+    return fail(422, t("apiUser.common.tmdbUnverified"), "tmdb-unverified");
   }
 
   // Blacklist gate — an admin-blocked title can never be requested. This is the
   // authoritative block (discovery hiding is best-effort UX) and must run before
   // any request row is created.
   if (await isBlacklisted(tmdbId, mediaType)) {
-    return fail(403, "This title has been blocked by an administrator", "blacklisted");
+    return fail(403, t("apiUser.create.blacklisted"), "blacklisted");
   }
 
   // Parental control — block a request whose US certification exceeds the user's
@@ -328,7 +334,7 @@ export async function createMediaRequest(
       cert = undefined;
     }
     if (exceedsCap(cert, userRecord.maxContentRating)) {
-      return fail(403, "This title's rating exceeds your account's limit", "rating-cap");
+      return fail(403, t("apiUser.create.ratingCap"), "rating-cap");
     }
   }
 
@@ -344,7 +350,7 @@ export async function createMediaRequest(
 
   if (existing) {
     if (existing.permanentlyDeclined) {
-      return fail(403, "This request has been permanently denied", "permanently-declined");
+      return fail(403, t("apiUser.create.permanentlyDeclined"), "permanently-declined");
     }
     // An ordinary (non-permanent) decline is not terminal — let the user
     // re-request: remember the stale DECLINED row (it is deleted inside the tx
@@ -353,7 +359,7 @@ export async function createMediaRequest(
     if (existing.status === "DECLINED") {
       staleDeclinedId = existing.id;
     } else {
-      return fail(409, "Already requested", "already-requested");
+      return fail(409, t("apiUser.create.alreadyRequested"), "already-requested");
     }
   }
 
@@ -491,11 +497,11 @@ export async function createMediaRequest(
     }, { isolationLevel: "Serializable" }));
   } catch (err) {
     if (err instanceof Error && err.message === "QUOTA_EXCEEDED") {
-      return fail(429, `You have reached your request quota of ${resolvedQuota?.limit ?? 0} per ${resolvedQuota?.windowLabel ?? "period"}`, "quota");
+      return fail(429, t("apiUser.create.quota", { limit: resolvedQuota?.limit ?? 0, window: translateQuotaWindow(t, resolvedQuota?.windowLabel) }), "quota");
     }
 
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-      return fail(409, "Already requested", "already-requested");
+      return fail(409, t("apiUser.create.alreadyRequested"), "already-requested");
     }
     throw err;
   }

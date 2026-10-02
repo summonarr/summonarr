@@ -14,16 +14,18 @@ import { notifyAdminsDeletionVoteThreshold } from "@/lib/email";
 import { notifyAdminsDeletionVoteThresholdPush } from "@/lib/push";
 import { isFeatureEnabled } from "@/lib/features";
 import { getVisibleServerInstances } from "@/lib/media-visibility";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const PAGE_SIZE = 40;
 const VALID_VOTE_SORTS = ["votes", "recent"] as const;
 
 export const GET = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   // Same gate as POST below and /api/votes/[tmdbId]: disabling the feature
   // must switch off the whole surface — this listing carries other users'
   // free-text vote reasons, not just the caller's own state.
   if (!(await isFeatureEnabled("feature.page.votes"))) {
-    return NextResponse.json({ error: "Deletion voting is disabled" }, { status: 403 });
+    return NextResponse.json({ error: t("apiUser.votes.disabled") }, { status: 403 });
   }
   if (!checkRateLimit(`votes-list:${session.user.id}`, 30, 60_000)) {
     return tooManyRequests(60);
@@ -163,8 +165,9 @@ export const GET = withAuth(async (req, _ctx, session) => {
 });
 
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!(await isFeatureEnabled("feature.page.votes"))) {
-    return NextResponse.json({ error: "Deletion voting is disabled" }, { status: 403 });
+    return NextResponse.json({ error: t("apiUser.votes.disabled") }, { status: 403 });
   }
 
   const maint = await maintenanceGuard(session);
@@ -173,7 +176,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const rlRow = await prisma.setting.findUnique({ where: { key: "rateLimitRequests" } });
   const limit = parseRateLimit(rlRow?.value, 20);
   if (!checkRateLimit(`votes:${session.user.id}`, limit, 60 * 1000)) {
-    return tooManyRequests(60, "Too many requests — try again later");
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
 
   const parsed = await readJsonCapped<{ tmdbId?: number; mediaType?: string; reason?: string; _token?: string }>(req, 16384);
@@ -183,16 +186,16 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const { tmdbId, mediaType, reason, _token } = body;
 
   if (!tmdbId || !mediaType) {
-    return NextResponse.json({ error: "tmdbId and mediaType are required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdMediaTypeRequired") }, { status: 400 });
   }
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
-    return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
   }
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: "mediaType must be MOVIE or TV" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.mediaTypeInvalid") }, { status: 400 });
   }
   if (reason !== undefined && (typeof reason !== "string" || reason.length > 200)) {
-    return NextResponse.json({ error: "reason must be a string under 200 characters" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.votes.reasonTooLong") }, { status: 400 });
   }
 
   // typeof-guard BEFORE verifyRequestToken: readJsonCapped<T>'s generic is a
@@ -200,7 +203,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // old `!_token` check and threw ERR_INVALID_ARG_TYPE out of Buffer.from(a, "hex")
   // as a 500 instead of this 403. Empty string is non-verifying and still 403s.
   if (typeof _token !== "string" || !verifyRequestToken(_token, tmdbId, mediaType, session.user.id)) {
-    return NextResponse.json({ error: "Invalid or expired request token" }, { status: 403 });
+    return NextResponse.json({ error: t("apiUser.common.invalidRequestToken") }, { status: 403 });
   }
 
   // Three-tier cached resolver (TmdbMediaCore -> details cache -> live TMDB),
@@ -209,7 +212,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // made a cold-cache TMDB outage 422 votes for titles the app already knows.
   const verified = await resolveMediaMeta(tmdbId, mediaType);
   if (!verified) {
-    return NextResponse.json({ error: "Could not verify media with TMDB" }, { status: 422 });
+    return NextResponse.json({ error: t("apiUser.common.tmdbUnverified") }, { status: 422 });
   }
 
   // Scoped to the servers THIS voter can see. A deletion vote is a claim about media the
@@ -222,7 +225,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     prisma.jellyfinLibraryItem.findFirst({ where: { tmdbId, mediaType, serverInstance: { in: visible.jellyfin } } }),
   ]);
   if (!inPlex && !inJellyfin) {
-    return NextResponse.json({ error: "Media is not in any library" }, { status: 422 });
+    return NextResponse.json({ error: t("apiUser.votes.notInLibrary") }, { status: 422 });
   }
 
   const sanitizedReason = sanitizeOptional(reason);
@@ -235,7 +238,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     select: { id: true },
   });
   if (ownRequest) {
-    return NextResponse.json({ error: "Cannot vote to delete your own request" }, { status: 403 });
+    return NextResponse.json({ error: t("apiUser.votes.ownRequest") }, { status: 403 });
   }
 
   let vote: Awaited<ReturnType<typeof prisma.deletionVote.create>>;
@@ -252,7 +255,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-      return NextResponse.json({ error: "Already voted" }, { status: 409 });
+      return NextResponse.json({ error: t("apiUser.votes.alreadyVoted") }, { status: 409 });
     }
     throw err;
   }

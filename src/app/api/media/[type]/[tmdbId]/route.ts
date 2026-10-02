@@ -15,6 +15,7 @@ import type { CastMember } from "@/lib/tmdb-types";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Lightweight projection for related/collection rails on native clients — the
 // app only needs poster + label + availability marks for these, not the full
@@ -40,22 +41,23 @@ function lite(m: TmdbMedia) {
 // rich TMDB details (genres, runtime, seasons, ratings, trailer) + top cast +
 // per-viewer availability/request/4K flags.
 export const GET = withAuth(async (
-  _req,
+  req,
   { params }: { params: Promise<{ type: string; tmdbId: string }> },
   session,
 ) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`media:${session.user.id}`, 30, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequests") }, { status: 429 });
   }
 
   const { type, tmdbId: rawId } = await params;
   const tmdbId = parseInt(rawId, 10);
 
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
-    return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
   }
   if (type !== "movie" && type !== "tv") {
-    return NextResponse.json({ error: "type must be movie or tv" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.media.typeInvalid") }, { status: 400 });
   }
 
   // Scoped to this page's backend (web-page parity): a movie page must not
@@ -191,6 +193,6 @@ export const GET = withAuth(async (
     });
   } catch (err) {
     console.error("[media] detail fetch failed:", err);
-    return NextResponse.json({ error: "Could not load this title" }, { status: 502 });
+    return NextResponse.json({ error: t("apiUser.media.loadFailed") }, { status: 502 });
   }
 });
