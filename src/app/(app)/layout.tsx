@@ -12,6 +12,7 @@ import { prisma } from "@/lib/prisma";
 import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { getTranslator } from "@/lib/i18n/server";
+import { LocaleSync } from "@/components/i18n/locale-sync";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getFeatureFlags, type FeatureFlags } from "@/lib/features";
 import { DONATION_SETTING_KEYS, hasDonationLinks } from "@/lib/donations";
@@ -58,6 +59,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   let siteTitle = "";
   let discordInviteUrl = "";
   let userDiscordId: string | null = null;
+  let storedLocale: string | null = null;
+  let localeKnown = false;
   let maintenanceEnabled = false;
   let maintenanceMessage = "";
   let featureFlags: FeatureFlags | undefined;
@@ -69,7 +72,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     const [rows, flags, user] = await Promise.all([
       readLayoutSettings(),
       getFeatureFlags(),
-      prisma.user.findUnique({ where: { id: session.user.id }, select: { discordId: true } }),
+      prisma.user.findUnique({ where: { id: session.user.id }, select: { discordId: true, locale: true } }),
     ]);
     const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
     hiddenRatingSources = parseHiddenRatingSources(cfg.ratingsHiddenSources);
@@ -83,6 +86,8 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     // nothing to link to, regardless of the feature toggle.
     featureFlags        = hasDonationLinks(cfg) ? flags : { ...flags, "feature.page.donate": false };
     userDiscordId       = discordInviteUrl ? (user?.discordId ?? null) : null;
+    storedLocale        = user?.locale ?? null;
+    localeKnown         = user !== null;
   } catch {
     // A failed settings read keeps the defaults above, so a DB hiccup here
     // never takes down every page in the app.
@@ -115,6 +120,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
       >
         {t("shared.skipToContent")}
       </a>
+      {/* Only after a successful user read: a failed one must not look like
+          "never stored" and overwrite a real choice. */}
+      {localeKnown && <LocaleSync stored={storedLocale} />}
       <NavigationProgress />
       <Sidebar siteTitle={siteTitle} featureFlags={featureFlags} />
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">

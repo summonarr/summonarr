@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
+import { LOCALES } from "@/lib/i18n/locales";
 import { Permission } from "@/lib/permissions";
 
 // Body of every two-factor ENROLLMENT change (guardrail 6d): the current
@@ -1300,6 +1301,17 @@ const spec = {
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
         requestBody: { required: true, content: { "application/json": { schema: mfaStepUpBody() } } },
         responses: { "200": { description: "Removed (recovery codes too, and every OTHER session signed out, when it was the last factor)" }, "400": { description: MFA_STEP_UP_400 }, "404": { description: "Not the caller's passkey" }, "429": { description: "Too many step-up attempts, or code entry is locked" } },
+      },
+    },
+    "/profile/locale": {
+      patch: {
+        tags: ["Profile"],
+        summary: "Store the caller's UI language (used for emails, push and Discord DMs)",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["locale"], properties: { locale: { type: "string", enum: [...LOCALES] } } } } },
+        },
+        responses: { "200": { description: "Stored" }, "400": { description: "Unsupported locale" } },
       },
     },
     "/profile/notifications": {

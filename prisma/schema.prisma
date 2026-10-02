@@ -14,6 +14,11 @@ model User {
   name          String?
   email         String    @unique
   image         String?
+  // UI language for text sent WITHOUT a browser — emails, push, Discord DMs
+  // (src/lib/i18n/server-locale.ts). Written by PATCH /api/profile/locale when
+  // the user picks a language (or, once, from the language they first browse
+  // in). null ⇒ the instance default (SUMMONARR_DEFAULT_LOCALE).
+  locale        String?   @db.VarChar(16)
   passwordHash  String?
   // Set when the credentials password is changed. verifyAndRefreshSession()
   // (src/lib/session-refresh.ts) rejects any session JWT issued (iat) at or before

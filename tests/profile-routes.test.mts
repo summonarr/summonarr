@@ -368,6 +368,7 @@ function bodyOr(value: unknown, raw?: string): string | undefined {
 // Routes under test (imported AFTER every stub is in place).
 const { PATCH: passwordPATCH } = await import("../src/app/api/profile/password/route.ts");
 const { GET: notificationsGET, PATCH: notificationsPATCH } = await import("../src/app/api/profile/notifications/route.ts");
+const { PATCH: localePATCH } = await import("../src/app/api/profile/locale/route.ts");
 const { POST: notifEmailPOST } = await import("../src/app/api/profile/notification-email/route.ts");
 const { DELETE: profileDELETE } = await import("../src/app/api/profile/route.ts");
 
@@ -802,4 +803,38 @@ test("all four profile routes reject an unauthenticated request with 401 (withAu
   assert.equal(ops.length, 0);
   assert.equal(txCalls, 0);
   assert.equal(fetchCalls.length, 0);
+});
+
+
+// ── PATCH /api/profile/locale ───────────────────────────────────────────────
+// The stored language is what emails / push / Discord DMs are written in, so
+// it must only ever hold a supported locale, and only for the caller.
+
+async function patchLocale(token: string | null, body: unknown): Promise<Response> {
+  const req = makeReq("/api/profile/locale", { method: "PATCH", token, body: bodyOr(body) });
+  return inScope(() => localePATCH(req, undefined));
+}
+
+test("locale PATCH stores a supported locale on the caller's own row", async () => {
+  const { userId, token } = await mintSession();
+  const res = await patchLocale(token, { locale: "es" });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { locale: "es" });
+  const [up] = opsOf("user.update").map((o) => o.args as { where: { id: string }; data: Record<string, unknown> });
+  assert.deepEqual(up, { where: { id: userId }, data: { locale: "es" } });
+});
+
+test("locale PATCH refuses an unsupported or malformed locale and writes nothing", async () => {
+  const { token } = await mintSession();
+  for (const body of [{ locale: "fr" }, { locale: "ES" }, { locale: 1 }, {}]) {
+    const res = await patchLocale(token, body);
+    assert.equal(res.status, 400, JSON.stringify(body));
+  }
+  assert.equal(opsOf("user.update").length, 0);
+});
+
+test("locale PATCH needs a session", async () => {
+  const res = await patchLocale(null, { locale: "es" });
+  assert.equal(res.status, 401);
+  assert.equal(opsOf("user.update").length, 0);
 });

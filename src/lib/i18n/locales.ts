@@ -28,9 +28,13 @@ export function isLocale(value: unknown): value is Locale {
 
 // Picks the best supported locale from an Accept-Language header. Matches on
 // the primary subtag only ("es-MX" → "es"), honours q-values, ignores q=0, and
-// falls back to DEFAULT_LOCALE for an absent or unmatched header.
-export function negotiateLocale(acceptLanguage: string | null | undefined): Locale {
-  if (!acceptLanguage) return DEFAULT_LOCALE;
+// falls back to `fallback` (the instance default on the server) for an absent
+// or unmatched header.
+export function negotiateLocale(
+  acceptLanguage: string | null | undefined,
+  fallback: Locale = DEFAULT_LOCALE,
+): Locale {
+  if (!acceptLanguage) return fallback;
   const ranked = acceptLanguage
     .split(",")
     .map((part, index) => {
@@ -52,13 +56,25 @@ export function negotiateLocale(acceptLanguage: string | null | undefined): Loca
   for (const r of ranked) {
     if (isLocale(r.primary)) return r.primary;
   }
-  return DEFAULT_LOCALE;
+  return fallback;
 }
 
 // Cookie value wins when valid; otherwise negotiate from the header.
 export function resolveLocale(
   cookieValue: string | null | undefined,
   acceptLanguage: string | null | undefined,
+  fallback: Locale = DEFAULT_LOCALE,
 ): Locale {
-  return isLocale(cookieValue) ? cookieValue : negotiateLocale(acceptLanguage);
+  return isLocale(cookieValue) ? cookieValue : negotiateLocale(acceptLanguage, fallback);
+}
+
+// Reads the locale cookie out of a raw Cookie header (route handlers get a
+// Request, not the next/headers cookie store).
+export function localeCookieFrom(cookieHeader: string | null | undefined): string | undefined {
+  if (!cookieHeader) return undefined;
+  for (const part of cookieHeader.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq > 0 && part.slice(0, eq).trim() === LOCALE_COOKIE) return part.slice(eq + 1).trim();
+  }
+  return undefined;
 }
