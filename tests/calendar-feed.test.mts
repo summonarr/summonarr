@@ -349,6 +349,25 @@ test("movie: theatrical/digital/physical each become an event, only inside the w
   assert.match(out[0].description ?? "", /Digital release\nhttps:\/\/x\.example\/req\/movie\/693134/);
 });
 
+test("event labels follow the feed owner's language; uids, dates and links never change", async () => {
+  const { translatorFor } = await import("../src/lib/i18n/server-locale.ts");
+  const titles = [
+    { tmdbId: 693134, mediaType: "movie" as const, title: "Dune: Part Two" },
+    { tmdbId: 7, mediaType: "tv" as const, title: "Show" },
+  ];
+  const data = {
+    movies: new Map([[693134, { digital: "2026-12-01" }]]),
+    tv: new Map([[7, { status: "Returning Series", lastAirDate: null, seasons: [{ seasonNumber: 2, airDate: "2026-11-01" }], nextEpisode: null }]]),
+    episodes: new Map(),
+  };
+  const en = events.buildCalendarEvents(titles, data, W, "https://x.example");
+  const es = events.buildCalendarEvents(titles, data, W, "https://x.example", translatorFor("es"));
+  assert.deepEqual(en.map((e) => e.summary), ["Show – Season 2 premiere", "Dune: Part Two (Digital)"]);
+  assert.deepEqual(es.map((e) => e.summary), ["Show – Estreno de la temporada 2", "Dune: Part Two (Digital)"]);
+  assert.equal(es[1].description, "Lanzamiento digital\nhttps://x.example/movie/693134");
+  assert.deepEqual(es.map((e) => [e.uid, e.date, e.url]), en.map((e) => [e.uid, e.date, e.url]));
+});
+
 test("window bounds are inclusive at both ends", () => {
   const out = events.buildCalendarEvents(
     [{ tmdbId: 1, mediaType: "movie", title: "M" }],
@@ -536,6 +555,12 @@ test("buildCalendarFeed: end-to-end from cache rows; declined title absent; link
   assert.ok(unfolded.includes("URL:https://summonarr.example.com/req/movie/10"));
   assert.ok(!unfolded.includes(me.email) && !unfolded.includes(me.id), "no PII beyond titles");
   assert.equal(fetchCalls.length, 0, "the feed is cache-read only");
+
+  // The owner's stored language names the calendar and labels the events.
+  const es = (await buildCalendarFeed({ kind: "user", userId: me.id }, now, "es")).replace(/\r\n /g, "");
+  assert.ok(es.includes("X-WR-CALNAME:Summonarr – Mis estrenos"), es.slice(0, 400));
+  assert.ok(es.includes("SUMMARY:Keep\\, Me (Digital)"));
+  assert.ok(ics.includes("X-WR-CALNAME:Summonarr – My releases"), "no locale ⇒ English, as before");
 });
 
 test("resolveCalendarToken re-checks the found row's hash (a lookup that returns the wrong row is refused)", async () => {

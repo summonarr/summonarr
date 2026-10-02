@@ -9,6 +9,7 @@ import "server-only";
 import { prisma } from "@/lib/prisma";
 import { resolveUserNotificationEmail } from "@/lib/notification-email";
 import { notifyUserSecurityEventEmail } from "@/lib/email";
+import { translatorForUser } from "@/lib/i18n/server-locale";
 
 export type MfaSecurityEvent =
   | "totp-enabled"
@@ -21,33 +22,24 @@ export type MfaSecurityEvent =
   | "mfa-reset"
   | "lockout";
 
-const MESSAGES: Record<MfaSecurityEvent, string> = {
-  "totp-enabled": "An authenticator app was turned on for your Summonarr account.",
-  "totp-removed": "The authenticator app was removed from your Summonarr account.",
-  "passkey-added": "A passkey was added to your Summonarr account.",
-  "passkey-renamed": "A passkey on your Summonarr account was renamed.",
-  "passkey-removed": "A passkey was removed from your Summonarr account.",
-  "recovery-regenerated": "New recovery codes were generated for your Summonarr account. The old ones no longer work.",
-  "mfa-disabled": "Two-factor authentication was turned off for your Summonarr account.",
-  "mfa-reset": "An administrator reset two-factor authentication on your Summonarr account.",
-  lockout:
-    "Too many incorrect verification codes were entered for your Summonarr account, so code sign-in is temporarily locked. Someone may know your password.",
-};
-
+// Text lives in the notify.mfa.* catalog keys, written in the account owner's
+// language (their stored User.locale, else the instance default).
 export async function notifyMfaSecurityEvent(userId: string, event: MfaSecurityEvent): Promise<void> {
   try {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { email: true, notificationEmail: true },
+      select: { email: true, notificationEmail: true, locale: true },
     });
     if (!user) return;
     const to = resolveUserNotificationEmail(user);
     if (!to) return;
+    const t = translatorForUser(user);
     await notifyUserSecurityEventEmail({
       toEmail: to,
-      subject: event === "lockout" ? "Summonarr — two-factor sign-in locked" : "Summonarr — two-factor settings changed",
-      heading: event === "lockout" ? "Two-factor sign-in locked" : "Two-factor settings changed",
-      message: MESSAGES[event],
+      subject: event === "lockout" ? t("notify.mfa.subject.locked") : t("notify.mfa.subject.changed"),
+      heading: event === "lockout" ? t("notify.mfa.heading.locked") : t("notify.mfa.heading.changed"),
+      message: t(`notify.mfa.event.${event}`),
+      locale: user.locale ?? null,
     });
   } catch (err) {
     console.error("[mfa] security notification failed:", err instanceof Error ? err.message : err);

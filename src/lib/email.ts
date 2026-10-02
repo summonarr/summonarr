@@ -8,6 +8,28 @@ import { isSafeAddrForAdmin } from "@/lib/ssrf";
 import { sendMail, type SmtpConfig } from "@/lib/smtp";
 import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
 import { settleLimit } from "@/lib/concurrency";
+import { localeForUser, translatorFor } from "@/lib/i18n/server-locale";
+import type { Locale } from "@/lib/i18n/locales";
+import type { Translator } from "@/lib/i18n/translate";
+import { issueTypeLabelT, mediaLabelT } from "@/lib/notify-i18n";
+
+// Every email is written in its RECIPIENT's language: the user-facing notifiers
+// take the recipient's stored `locale` (null → the instance default), and the
+// admin fan-outs group recipients by their own locale and render once per group.
+interface Lang {
+  t: Translator;
+  locale: Locale;
+}
+
+function langFor(locale: string | null | undefined): Lang {
+  const resolved = localeForUser({ locale });
+  return { t: translatorFor(resolved), locale: resolved };
+}
+
+interface Recipient {
+  to: string;
+  locale: string | null;
+}
 
 // Keys read from the Setting table. `emailBackend` picks the transport:
 //   - "resend" → Resend HTTP API (direct POST to api.resend.com via safeFetchTrusted)
@@ -192,13 +214,43 @@ async function sendMany(cfg: EmailConfig, recipients: string[], subject: string,
   if (failures.length > 0) throw failures[0].reason;
 }
 
+// Admin fan-out in each recipient's language: one render per locale present,
+// then the bounded sendMany per group. Groups go out one after another so the
+// SMTP concurrency cap holds across the whole fan-out; every group is attempted
+// even when an earlier one failed, and the first failure is rethrown.
+async function sendManyLocalized(
+  cfg: EmailConfig,
+  recipients: Recipient[],
+  render: (lang: Lang) => { subject: string; html: string },
+): Promise<void> {
+  const groups = new Map<Locale, string[]>();
+  for (const r of recipients) {
+    const locale = localeForUser({ locale: r.locale });
+    const list = groups.get(locale) ?? [];
+    list.push(r.to);
+    groups.set(locale, list);
+  }
+  let firstError: unknown = null;
+  let failed = false;
+  for (const [locale, to] of groups) {
+    const { subject, html } = render({ t: translatorFor(locale), locale });
+    try {
+      await sendMany(cfg, to, subject, html);
+    } catch (err) {
+      if (!failed) firstError = err;
+      failed = true;
+    }
+  }
+  if (failed) throw firstError;
+}
+
 // A newline (CR/LF) inside a header value would let an attacker add fake headers
 // ("CRLF injection"), so strip newlines from any value that goes into a header.
 function safeHeader(str: string): string {
   return str.replace(/[\r\n]+/g, " ");
 }
 
-async function getAdminEmails(excludeUserId?: string): Promise<string[]> {
+async function getAdminEmails(excludeUserId?: string): Promise<Recipient[]> {
   // Bitmask authoritative: any holder of MANAGE_REQUESTS (or ADMIN superbit).
   // Includes custom-granted users; falls back correctly for legacy rows.
   const rows = await prisma.user.findMany({
@@ -208,20 +260,22 @@ async function getAdminEmails(excludeUserId?: string): Promise<string[]> {
     // (deleted-<id>@deleted.invalid) hard-bounces on every send. This is the
     // admin-side chokepoint — the requester fan-out has its own two gates.
     where: { deactivatedAt: null, ...(excludeUserId ? { id: { not: excludeUserId } } : {}) },
-    select: { email: true, notificationEmail: true, role: true, permissions: true },
+    select: { email: true, notificationEmail: true, role: true, permissions: true, locale: true },
   });
   return rows
     .filter((u) => {
       const perms = effectivePermissions(u.role, parsePermissions(String(u.permissions ?? 0)));
       return hasPermission(perms, Permission.MANAGE_REQUESTS);
     })
-    .map((a) => resolveUserNotificationEmail(a))
-    .filter((e): e is string => Boolean(e));
+    .flatMap((a) => {
+      const to = resolveUserNotificationEmail(a);
+      return to ? [{ to, locale: a.locale ?? null }] : [];
+    });
 }
 
 // For issue-related admin emails: holders of MANAGE_ISSUES + notifyOnIssue.
 // Bitmask authoritative so clearing the bit stops notifications; ADMIN always passes.
-async function getIssueAdminEmails(opts: { excludeUserId?: string; restrictToUserId?: string } = {}): Promise<string[]> {
+async function getIssueAdminEmails(opts: { excludeUserId?: string; restrictToUserId?: string } = {}): Promise<Recipient[]> {
   if (opts.restrictToUserId && opts.restrictToUserId === opts.excludeUserId) return [];
   const idFilter = opts.restrictToUserId
     ? { id: opts.restrictToUserId }
@@ -234,15 +288,17 @@ async function getIssueAdminEmails(opts: { excludeUserId?: string; restrictToUse
       deactivatedAt: null, // see getAdminEmails
       ...idFilter,
     },
-    select: { email: true, notificationEmail: true, role: true, permissions: true },
+    select: { email: true, notificationEmail: true, role: true, permissions: true, locale: true },
   });
   return rows
     .filter((u) => {
       const perms = effectivePermissions(u.role, parsePermissions(String(u.permissions ?? 0)));
       return hasPermission(perms, Permission.MANAGE_ISSUES);
     })
-    .map((a) => resolveUserNotificationEmail(a))
-    .filter((e): e is string => Boolean(e));
+    .flatMap((a) => {
+      const to = resolveUserNotificationEmail(a);
+      return to ? [{ to, locale: a.locale ?? null }] : [];
+    });
 }
 
 // ─── Template ────────────────────────────────────────────────────────────────
@@ -261,6 +317,7 @@ const ACCENTS: Record<Accent, { bar: string; button: string; buttonHover: string
 };
 
 interface TemplateOpts {
+  lang: Lang;
   preheader: string;
   accent: Accent;
   heading: string;
@@ -281,13 +338,14 @@ function posterUrl(path?: string | null): string | null {
   return `https://image.tmdb.org/t/p/w300${clean}`;
 }
 
-function mediaAltText(mediaType?: string): string {
-  if (mediaType === "MOVIE") return "Movie poster";
-  if (mediaType === "TV") return "TV show poster";
-  return "Poster";
+function mediaAltText(t: Translator, mediaType?: string): string {
+  if (mediaType === "MOVIE") return t("notify.email.posterAlt.movie");
+  if (mediaType === "TV") return t("notify.email.posterAlt.tv");
+  return t("notify.email.posterAlt.other");
 }
 
 function richEmailHtml(opts: TemplateOpts): string {
+  const { t } = opts.lang;
   const accent = ACCENTS[opts.accent];
   const poster = posterUrl(opts.posterPath);
 
@@ -303,7 +361,7 @@ function richEmailHtml(opts: TemplateOpts): string {
     ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;width:100%">
         <tr>
           <td valign="top" width="130" style="padding:0 20px 0 0">
-            <img src="${esc(poster)}" width="120" alt="${esc(mediaAltText(opts.mediaType))}"
+            <img src="${esc(poster)}" width="120" alt="${esc(mediaAltText(t, opts.mediaType))}"
               style="display:block;width:120px;max-width:120px;height:auto;border-radius:8px;border:1px solid #3f3f46" />
           </td>
           <td valign="top" style="min-width:0">
@@ -331,12 +389,12 @@ function richEmailHtml(opts: TemplateOpts): string {
 
   const footerHtml = opts.siteUrl
     ? `<p style="margin:0;font-size:11px;color:#52525b;line-height:1.5">
-        Sent by <a href="${esc(opts.siteUrl)}" style="color:#71717a;text-decoration:none">Summonarr</a>
+        ${t("notify.email.footer", { brand: `<a href="${esc(opts.siteUrl)}" style="color:#71717a;text-decoration:none">Summonarr</a>` })}
       </p>`
-    : `<p style="margin:0;font-size:11px;color:#52525b;line-height:1.5">Sent by Summonarr</p>`;
+    : `<p style="margin:0;font-size:11px;color:#52525b;line-height:1.5">${t("notify.email.footer", { brand: "Summonarr" })}</p>`;
 
   return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${opts.lang.locale}">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
@@ -409,11 +467,7 @@ function buildSiteUrl(siteUrl: string | undefined, path: string): string | undef
   return `${trimmed}${prefixed}`;
 }
 
-function mediaLabelOf(mediaType: string): string {
-  return mediaType === "MOVIE" ? "Movie" : "TV Show";
-}
-
-function noteBlockHtml(note: string | null | undefined, label = "Note"): string {
+function noteBlockHtml(note: string | null | undefined, label: string): string {
   if (!note) return "";
   return `<div style="margin-top:14px;padding:12px 14px;background:#1f1f23;border-left:3px solid #52525b;border-radius:6px">
     <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.04em;font-weight:600;color:#71717a;margin-bottom:4px">${esc(label)}</div>
@@ -440,27 +494,30 @@ export async function notifyAdminsNewRequest(data: {
     const to = await getAdminEmails(data.excludeUserId);
     if (!to.length) return;
 
-    const mediaLabel = mediaLabelOf(data.mediaType);
-    const subject = `New ${mediaLabel} Request: ${data.title}`;
     const titleWithYear = data.releaseYear ? `${data.title} (${data.releaseYear})` : data.title;
-    const html = richEmailHtml({
-      preheader: `${data.requestedBy} requested ${mediaLabel.toLowerCase()}: ${data.title}`,
-      accent: "indigo",
-      heading: "New Request",
-      subheading: `A user submitted a new ${mediaLabel.toLowerCase()} request.`,
-      posterPath: data.posterPath,
-      mediaType: data.mediaType,
-      details: [
-        ["Title", esc(titleWithYear)],
-        ["Type", mediaLabel],
-        ["Requested by", esc(data.requestedBy)],
-      ],
-      bodyHtml: noteBlockHtml(data.note),
-      ctaLabel: "Review in Summonarr",
-      ctaHref: buildSiteUrl(cfg.siteUrl, "/"),
-      siteUrl: cfg.siteUrl,
+    await sendManyLocalized(cfg, to, (lang) => {
+      const { t } = lang;
+      const mediaLabel = mediaLabelT(t, data.mediaType);
+      const html = richEmailHtml({
+        lang,
+        preheader: t("notify.email.newRequest.preheader", { user: data.requestedBy, media: mediaLabel.toLowerCase(), title: data.title }),
+        accent: "indigo",
+        heading: t("notify.email.newRequest.heading"),
+        subheading: t("notify.email.newRequest.subheading", { media: mediaLabel.toLowerCase() }),
+        posterPath: data.posterPath,
+        mediaType: data.mediaType,
+        details: [
+          [t("notify.email.detail.title"), esc(titleWithYear)],
+          [t("notify.email.detail.type"), mediaLabel],
+          [t("notify.email.detail.requestedBy"), esc(data.requestedBy)],
+        ],
+        bodyHtml: noteBlockHtml(data.note, t("notify.email.note.note")),
+        ctaLabel: t("notify.email.newRequest.cta"),
+        ctaHref: buildSiteUrl(cfg.siteUrl, "/"),
+        siteUrl: cfg.siteUrl,
+      });
+      return { subject: t("notify.email.newRequest.subject", { media: mediaLabel, title: data.title }), html };
     });
-    await sendMany(cfg, to, subject, html);
   } catch (err) {
     console.error("[email] Failed to send new request notification:", err instanceof Error ? err.message : err);
   }
@@ -485,29 +542,32 @@ export async function notifyAdminsNewIssue(data: {
     const to = await getIssueAdminEmails({ excludeUserId: data.excludeUserId });
     if (!to.length) return;
 
-    const mediaLabel = mediaLabelOf(data.mediaType);
-    const issueLabel = data.issueType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-    const subject = `New Issue Report: ${data.title}`;
     const ctaPath = data.issueId ? `/admin/issues?selected=${data.issueId}` : "/admin/issues";
-    const html = richEmailHtml({
-      preheader: `${data.reportedBy} reported a ${issueLabel.toLowerCase()} issue on ${data.title}`,
-      accent: "amber",
-      heading: "New Issue Report",
-      subheading: `A user flagged a problem with a ${mediaLabel.toLowerCase()}.`,
-      posterPath: data.posterPath,
-      mediaType: data.mediaType,
-      details: [
-        ["Title", esc(data.title)],
-        ["Type", mediaLabel],
-        ["Issue", esc(issueLabel)],
-        ["Reported by", esc(data.reportedBy)],
-      ],
-      bodyHtml: noteBlockHtml(data.note, "Description"),
-      ctaLabel: "Review Issue",
-      ctaHref: buildSiteUrl(cfg.siteUrl, ctaPath),
-      siteUrl: cfg.siteUrl,
+    await sendManyLocalized(cfg, to, (lang) => {
+      const { t } = lang;
+      const mediaLabel = mediaLabelT(t, data.mediaType);
+      const issueLabel = issueTypeLabelT(t, data.issueType);
+      const html = richEmailHtml({
+        lang,
+        preheader: t("notify.email.newIssue.preheader", { user: data.reportedBy, issue: issueLabel.toLowerCase(), title: data.title }),
+        accent: "amber",
+        heading: t("notify.email.newIssue.heading"),
+        subheading: t("notify.email.newIssue.subheading", { media: mediaLabel.toLowerCase() }),
+        posterPath: data.posterPath,
+        mediaType: data.mediaType,
+        details: [
+          [t("notify.email.detail.title"), esc(data.title)],
+          [t("notify.email.detail.type"), mediaLabel],
+          [t("notify.email.detail.issue"), esc(issueLabel)],
+          [t("notify.email.detail.reportedBy"), esc(data.reportedBy)],
+        ],
+        bodyHtml: noteBlockHtml(data.note, t("notify.email.note.description")),
+        ctaLabel: t("notify.email.newIssue.cta"),
+        ctaHref: buildSiteUrl(cfg.siteUrl, ctaPath),
+        siteUrl: cfg.siteUrl,
+      });
+      return { subject: t("notify.email.newIssue.subject", { title: data.title }), html };
     });
-    await sendMany(cfg, to, subject, html);
   } catch (err) {
     console.error("[email] Failed to send new issue notification:", err instanceof Error ? err.message : err);
   }
@@ -532,24 +592,30 @@ export async function notifyAdminsIssueMessageEmail(data: {
     });
     if (!to.length) return;
 
-    const subject = data.fromAdmin
-      ? `Admin reply on issue: ${data.issueTitle}`
-      : `New reply on issue: ${data.issueTitle}`;
-    const html = richEmailHtml({
-      preheader: `${data.userName} replied to the issue "${data.issueTitle}"`,
-      accent: "amber",
-      heading: data.fromAdmin ? "Admin Reply on Issue" : "New Issue Reply",
-      subheading: `${esc(data.userName)} replied to an open issue.`,
-      details: [
-        ["Issue", esc(data.issueTitle)],
-        ["From", esc(data.userName)],
-      ],
-      bodyHtml: noteBlockHtml(data.body, "Message"),
-      ctaLabel: "View Issue",
-      ctaHref: buildSiteUrl(cfg.siteUrl, `/admin/issues?selected=${data.issueId}`),
-      siteUrl: cfg.siteUrl,
+    await sendManyLocalized(cfg, to, (lang) => {
+      const { t } = lang;
+      const subject = data.fromAdmin
+        ? t("notify.email.adminIssueMessage.subjectFromAdmin", { title: data.issueTitle })
+        : t("notify.email.adminIssueMessage.subject", { title: data.issueTitle });
+      const html = richEmailHtml({
+        lang,
+        preheader: t("notify.email.adminIssueMessage.preheader", { user: data.userName, title: data.issueTitle }),
+        accent: "amber",
+        heading: data.fromAdmin
+          ? t("notify.email.adminIssueMessage.headingFromAdmin")
+          : t("notify.email.adminIssueMessage.heading"),
+        subheading: t("notify.email.adminIssueMessage.subheading", { user: esc(data.userName) }),
+        details: [
+          [t("notify.email.detail.issue"), esc(data.issueTitle)],
+          [t("notify.email.detail.from"), esc(data.userName)],
+        ],
+        bodyHtml: noteBlockHtml(data.body, t("notify.email.note.message")),
+        ctaLabel: t("notify.email.cta.viewIssue"),
+        ctaHref: buildSiteUrl(cfg.siteUrl, `/admin/issues?selected=${data.issueId}`),
+        siteUrl: cfg.siteUrl,
+      });
+      return { subject, html };
     });
-    await sendMany(cfg, to, subject, html);
   } catch (err) {
     console.error("[email] Failed to send admin issue-message notification:", err instanceof Error ? err.message : err);
   }
@@ -560,23 +626,28 @@ export async function notifyUserIssueMessageEmail(data: {
   issueTitle: string;
   authorName: string;
   body: string;
+  /** The recipient's stored User.locale (null → the instance default). */
+  locale?: string | null;
 }): Promise<void> {
   try {
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
 
-    const subject = `Admin replied on: ${data.issueTitle}`;
+    const lang = langFor(data.locale);
+    const { t } = lang;
+    const subject = t("notify.email.userIssueMessage.subject", { title: data.issueTitle });
     const html = richEmailHtml({
-      preheader: `${data.authorName} replied to your issue "${data.issueTitle}"`,
+      lang,
+      preheader: t("notify.email.userIssueMessage.preheader", { user: data.authorName, title: data.issueTitle }),
       accent: "indigo",
-      heading: "Admin Replied to Your Issue",
-      subheading: `${esc(data.authorName)} sent you a message about your open issue.`,
+      heading: t("notify.email.userIssueMessage.heading"),
+      subheading: t("notify.email.userIssueMessage.subheading", { user: esc(data.authorName) }),
       details: [
-        ["Issue", esc(data.issueTitle)],
-        ["From", esc(data.authorName)],
+        [t("notify.email.detail.issue"), esc(data.issueTitle)],
+        [t("notify.email.detail.from"), esc(data.authorName)],
       ],
-      bodyHtml: noteBlockHtml(data.body, "Message"),
-      ctaLabel: "View Issue",
+      bodyHtml: noteBlockHtml(data.body, t("notify.email.note.message")),
+      ctaLabel: t("notify.email.cta.viewIssue"),
       ctaHref: buildSiteUrl(cfg.siteUrl, "/issues"),
       siteUrl: cfg.siteUrl,
     });
@@ -592,23 +663,28 @@ export async function notifyUserRequestApprovedEmail(data: {
   mediaType: string;
   posterPath?: string | null;
   tmdbId?: number;
+  /** The recipient's stored User.locale (null → the instance default). */
+  locale?: string | null;
 }): Promise<void> {
   try {
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
-    const mediaLabel = mediaLabelOf(data.mediaType);
+    const lang = langFor(data.locale);
+    const { t } = lang;
+    const mediaLabel = mediaLabelT(t, data.mediaType);
     const html = richEmailHtml({
-      preheader: `Your ${mediaLabel.toLowerCase()} request for ${data.title} was approved.`,
+      lang,
+      preheader: t("notify.email.approved.preheader", { media: mediaLabel.toLowerCase(), title: data.title }),
       accent: "green",
-      heading: "Request Approved",
-      subheading: `Your <strong style="color:#fafafa">${mediaLabel}</strong> request for <strong style="color:#fafafa">${esc(data.title)}</strong> has been approved and is being added to the library.`,
+      heading: t("notify.email.approved.heading"),
+      subheading: t("notify.email.approved.subheading", { media: strong(mediaLabel), title: strong(esc(data.title)) }),
       posterPath: data.posterPath,
       mediaType: data.mediaType,
-      ctaLabel: "View Your Requests",
+      ctaLabel: t("notify.email.cta.viewRequests"),
       ctaHref: buildSiteUrl(cfg.siteUrl, "/requests"),
       siteUrl: cfg.siteUrl,
     });
-    await sendOne(cfg, data.toEmail, `Your ${mediaLabel} Request Was Approved: ${data.title}`, html);
+    await sendOne(cfg, data.toEmail, t("notify.email.approved.subject", { media: mediaLabel, title: data.title }), html);
   } catch (err) {
     console.error("[email] Failed to send user approved notification:", err instanceof Error ? err.message : err);
   }
@@ -620,24 +696,29 @@ export async function notifyUserRequestDeclinedEmail(data: {
   mediaType: string;
   adminNote?: string | null;
   posterPath?: string | null;
+  /** The recipient's stored User.locale (null → the instance default). */
+  locale?: string | null;
 }): Promise<void> {
   try {
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
-    const mediaLabel = mediaLabelOf(data.mediaType);
+    const lang = langFor(data.locale);
+    const { t } = lang;
+    const mediaLabel = mediaLabelT(t, data.mediaType);
     const html = richEmailHtml({
-      preheader: `Your ${mediaLabel.toLowerCase()} request for ${data.title} was declined.`,
+      lang,
+      preheader: t("notify.email.declined.preheader", { media: mediaLabel.toLowerCase(), title: data.title }),
       accent: "red",
-      heading: "Request Declined",
-      subheading: `Your <strong style="color:#fafafa">${mediaLabel}</strong> request for <strong style="color:#fafafa">${esc(data.title)}</strong> was not approved.`,
+      heading: t("notify.email.declined.heading"),
+      subheading: t("notify.email.declined.subheading", { media: strong(mediaLabel), title: strong(esc(data.title)) }),
       posterPath: data.posterPath,
       mediaType: data.mediaType,
-      bodyHtml: noteBlockHtml(data.adminNote, "Note from admin"),
-      ctaLabel: "View Your Requests",
+      bodyHtml: noteBlockHtml(data.adminNote, t("notify.email.note.adminNote")),
+      ctaLabel: t("notify.email.cta.viewRequests"),
       ctaHref: buildSiteUrl(cfg.siteUrl, "/requests"),
       siteUrl: cfg.siteUrl,
     });
-    await sendOne(cfg, data.toEmail, `Your ${mediaLabel} Request Was Declined: ${data.title}`, html);
+    await sendOne(cfg, data.toEmail, t("notify.email.declined.subject", { media: mediaLabel, title: data.title }), html);
   } catch (err) {
     console.error("[email] Failed to send user declined notification:", err instanceof Error ? err.message : err);
   }
@@ -649,25 +730,30 @@ export async function notifyUserRequestAvailableEmail(data: {
   mediaType: string;
   posterPath?: string | null;
   tmdbId?: number;
+  /** The recipient's stored User.locale (null → the instance default). */
+  locale?: string | null;
 }): Promise<void> {
   try {
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
-    const mediaLabel = mediaLabelOf(data.mediaType);
+    const lang = langFor(data.locale);
+    const { t } = lang;
+    const mediaLabel = mediaLabelT(t, data.mediaType);
     const mediaSlug = data.mediaType === "MOVIE" ? "movie" : "tv";
     const deepLink = data.tmdbId ? `/${mediaSlug}/${data.tmdbId}` : "/requests";
     const html = richEmailHtml({
-      preheader: `${data.title} is ready to watch on Summonarr.`,
+      lang,
+      preheader: t("notify.email.available.preheader", { title: data.title }),
       accent: "green",
-      heading: "Now Available",
-      subheading: `Your <strong style="color:#fafafa">${mediaLabel}</strong> request for <strong style="color:#fafafa">${esc(data.title)}</strong> is ready to watch.`,
+      heading: t("notify.email.available.heading"),
+      subheading: t("notify.email.available.subheading", { media: strong(mediaLabel), title: strong(esc(data.title)) }),
       posterPath: data.posterPath,
       mediaType: data.mediaType,
-      ctaLabel: "Start Watching",
+      ctaLabel: t("notify.email.available.cta"),
       ctaHref: buildSiteUrl(cfg.siteUrl, deepLink),
       siteUrl: cfg.siteUrl,
     });
-    await sendOne(cfg, data.toEmail, `Now Available: ${data.title}`, html);
+    await sendOne(cfg, data.toEmail, t("notify.email.available.subject", { title: data.title }), html);
   } catch (err) {
     console.error("[email] Failed to send user available notification:", err instanceof Error ? err.message : err);
   }
@@ -687,25 +773,28 @@ export async function notifyAdminsDeletionVoteThreshold(data: {
     const to = await getAdminEmails();
     if (!to.length) return;
 
-    const mediaLabel = mediaLabelOf(data.mediaType);
-    const subject = `Deletion Vote Threshold Reached: ${data.title}`;
-    const html = richEmailHtml({
-      preheader: `${data.voteCount} users voted to remove ${data.title}.`,
-      accent: "amber",
-      heading: "Deletion Vote Threshold Reached",
-      subheading: `Enough users have voted to remove this ${mediaLabel.toLowerCase()} from the library.`,
-      posterPath: data.posterPath,
-      mediaType: data.mediaType,
-      details: [
-        ["Title", esc(data.title)],
-        ["Type", mediaLabel],
-        ["Votes", String(data.voteCount)],
-      ],
-      ctaLabel: "Review Votes",
-      ctaHref: buildSiteUrl(cfg.siteUrl, "/votes"),
-      siteUrl: cfg.siteUrl,
+    await sendManyLocalized(cfg, to, (lang) => {
+      const { t } = lang;
+      const mediaLabel = mediaLabelT(t, data.mediaType);
+      const html = richEmailHtml({
+        lang,
+        preheader: t("notify.email.deletionVote.preheader", { votes: String(data.voteCount), title: data.title }),
+        accent: "amber",
+        heading: t("notify.email.deletionVote.heading"),
+        subheading: t("notify.email.deletionVote.subheading", { media: mediaLabel.toLowerCase() }),
+        posterPath: data.posterPath,
+        mediaType: data.mediaType,
+        details: [
+          [t("notify.email.detail.title"), esc(data.title)],
+          [t("notify.email.detail.type"), mediaLabel],
+          [t("notify.email.detail.votes"), String(data.voteCount)],
+        ],
+        ctaLabel: t("notify.email.deletionVote.cta"),
+        ctaHref: buildSiteUrl(cfg.siteUrl, "/votes"),
+        siteUrl: cfg.siteUrl,
+      });
+      return { subject: t("notify.email.deletionVote.subject", { title: data.title }), html };
     });
-    await sendMany(cfg, to, subject, html);
   } catch (err) {
     console.error("[email] Failed to send deletion vote threshold notification:", err instanceof Error ? err.message : err);
   }
@@ -719,16 +808,21 @@ export async function notifyUserSecurityEventEmail(data: {
   subject: string;
   heading: string;
   message: string;
+  /** The recipient's stored User.locale (null → the instance default). */
+  locale?: string | null;
 }): Promise<void> {
   try {
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
+    const lang = langFor(data.locale);
+    const { t } = lang;
     const html = richEmailHtml({
+      lang,
       preheader: data.message,
       accent: "amber",
       heading: esc(data.heading),
-      subheading: `${esc(data.message)} If this wasn&#39;t you, change your password and review your two-factor settings now.`,
-      ctaLabel: cfg.siteUrl ? "Review your account" : undefined,
+      subheading: t("notify.email.security.subheading", { message: esc(data.message) }),
+      ctaLabel: cfg.siteUrl ? t("notify.email.security.cta") : undefined,
       ctaHref: cfg.siteUrl ? buildSiteUrl(cfg.siteUrl, "/profile#two-factor") : undefined,
       siteUrl: cfg.siteUrl,
     });
@@ -738,7 +832,9 @@ export async function notifyUserSecurityEventEmail(data: {
   }
 }
 
-export async function sendTestEmail(to: string): Promise<void> {
+// `locale` is the language to write the test email in (the settings route passes
+// the requesting admin's); omitted → the instance default.
+export async function sendTestEmail(to: string, locale?: string | null): Promise<void> {
   // Bypass the send toggle (but not the feature flag) so admins can verify the
   // SMTP/Resend transport before switching notification emails on.
   const cfg = await getEmailConfig({ ignoreSendToggle: true });
@@ -746,22 +842,27 @@ export async function sendTestEmail(to: string): Promise<void> {
   if (!isBackendConfigured(cfg)) {
     throw new Error(cfg.backend === "resend" ? "Resend API key not configured" : "SMTP not configured");
   }
+  const lang = langFor(locale);
+  const { t } = lang;
   const html = richEmailHtml({
-    preheader: "Your Summonarr email configuration is working.",
+    lang,
+    preheader: t("notify.email.test.preheader"),
     accent: "indigo",
-    heading: "Test Email",
-    subheading: `Your Summonarr email configuration is working correctly. Delivered via <strong style="color:#fafafa">${cfg.backend === "resend" ? "Resend" : "SMTP"}</strong>.`,
-    ctaLabel: cfg.siteUrl ? "Open Summonarr" : undefined,
+    heading: t("notify.email.test.heading"),
+    subheading: t("notify.email.test.subheading", { backend: strong(cfg.backend === "resend" ? "Resend" : "SMTP") }),
+    ctaLabel: cfg.siteUrl ? t("notify.email.test.cta") : undefined,
     ctaHref: cfg.siteUrl ? buildSiteUrl(cfg.siteUrl, "/") : undefined,
     siteUrl: cfg.siteUrl,
   });
-  await sendOne(cfg, to, "Summonarr — Test Email", html);
+  await sendOne(cfg, to, t("notify.email.test.subject"), html);
 }
 
 // Mails a one-time verification link to `to` for the Jellyfin self-service
 // notification-email flow. Throws when no transport is configured (the route
 // surfaces that to the user). The raw token travels only in this link.
-export async function sendNotificationEmailVerification(to: string, token: string): Promise<void> {
+// `locale` is the language to write it in (the route passes the requesting
+// user's); omitted → the instance default.
+export async function sendNotificationEmailVerification(to: string, token: string, locale?: string | null): Promise<void> {
   const cfg = await getEmailConfig();
   if (!cfg || !isBackendConfigured(cfg)) {
     throw new Error("Email transport is not configured on this server");
@@ -769,17 +870,24 @@ export async function sendNotificationEmailVerification(to: string, token: strin
   const base = (cfg.siteUrl || process.env.AUTH_URL || "").replace(/\/+$/, "");
   if (!base) throw new Error("No site URL is configured for the verification link");
   const verifyUrl = `${base}/api/profile/notification-email/confirm?token=${encodeURIComponent(token)}`;
+  const lang = langFor(locale);
+  const { t } = lang;
   const html = richEmailHtml({
-    preheader: "Confirm this email address for Summonarr notifications.",
+    lang,
+    preheader: t("notify.email.verify.preheader"),
     accent: "indigo",
-    heading: "Verify your notification email",
-    subheading:
-      "Someone asked to send Summonarr notifications to this address. If that was you, confirm below. If not, you can safely ignore this email — nothing will change.",
-    ctaLabel: "Confirm this email",
+    heading: t("notify.email.verify.heading"),
+    subheading: t("notify.email.verify.subheading"),
+    ctaLabel: t("notify.email.verify.cta"),
     ctaHref: verifyUrl,
     siteUrl: cfg.siteUrl,
   });
-  await sendOne(cfg, to, "Verify your Summonarr notification email", html);
+  await sendOne(cfg, to, t("notify.email.verify.subject"), html);
+}
+
+// Emphasis inside a subheading. The value must already be HTML-safe.
+function strong(html: string): string {
+  return `<strong style="color:#fafafa">${html}</strong>`;
 }
 
 function esc(str: string): string {

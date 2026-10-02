@@ -18,6 +18,7 @@ import { isPurgedRow } from "./account-lifecycle";
 import { parseAuthUrl } from "./auth-url";
 import { calendarTokenMatches, hashCalendarToken, isWellFormedCalendarToken } from "./calendar-token";
 import { buildIcsCalendar } from "./ics";
+import { translatorForUser } from "./i18n/server-locale";
 import {
   buildCalendarEvents,
   calendarWindow,
@@ -178,18 +179,27 @@ export function calendarFeedPath(token: string): string {
   return `/api/calendar/feed/${token}.ics`;
 }
 
-/** Build the whole .ics document for a scope. */
-export async function buildCalendarFeed(scope: CalendarScope, now: Date = new Date()): Promise<string> {
+/**
+ * Build the whole .ics document for a scope. `locale` is the feed owner's stored
+ * User.locale (null/omitted → the instance default): the calendar name and the
+ * event labels are written in it.
+ */
+export async function buildCalendarFeed(
+  scope: CalendarScope,
+  now: Date = new Date(),
+  locale?: string | null,
+): Promise<string> {
+  const tr = translatorForUser({ locale });
   const w = calendarWindow(now);
   const titles = dedupeTitles(await loadCalendarTitles(scope));
   const data = await loadCalendarData(titles, w);
-  const events = buildCalendarEvents(titles, data, w, calendarSiteUrl());
+  const events = buildCalendarEvents(titles, data, w, calendarSiteUrl(), tr);
   return buildIcsCalendar({
-    name: scope.kind === "all" ? "Summonarr – All requests" : "Summonarr – My releases",
+    name: scope.kind === "all" ? tr("notify.calendar.nameAll") : tr("notify.calendar.nameMine"),
     description:
       scope.kind === "all"
-        ? "Upcoming release dates for every open request on this Summonarr server."
-        : "Upcoming release dates for your Summonarr requests and watchlist.",
+        ? tr("notify.calendar.descriptionAll")
+        : tr("notify.calendar.descriptionMine"),
     refreshInterval: CALENDAR_REFRESH_INTERVAL,
     events,
     now,
@@ -200,6 +210,8 @@ export interface CalendarTokenOwner {
   id: string;
   role: string;
   permissions: bigint;
+  /** Stored UI language — the feed's labels are written in it. */
+  locale: string | null;
 }
 
 /**
@@ -220,11 +232,12 @@ export async function resolveCalendarToken(token: string): Promise<CalendarToken
       deactivatedAt: true,
       purgedAt: true,
       calendarTokenHash: true,
+      locale: true,
     },
   });
   if (!user || !calendarTokenMatches(user.calendarTokenHash, token)) return null;
   if (user.deactivatedAt != null || isPurgedRow(user)) return null;
-  return { id: user.id, role: user.role, permissions: user.permissions };
+  return { id: user.id, role: user.role, permissions: user.permissions, locale: user.locale ?? null };
 }
 
 // ─── Cache warm (runs inside the /api/sync/upcoming cron) ──────────────────

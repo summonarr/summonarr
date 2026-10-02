@@ -26,8 +26,51 @@ import { resolveUserQuota, parseQuotaLimit, type ResolvedQuota } from "@/lib/quo
 import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { emitSSE } from "@/lib/sse-emitter";
 import { isFeatureEnabled } from "@/lib/features";
+import { isLocale, type Locale } from "@/lib/i18n/locales";
+import { instanceDefaultLocale, localeForUser, translatorFor } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 export const dynamic = "force-dynamic";
+
+// ── Reply language ──────────────────────────────────────────────────────────
+// A slash-command or button reply is written in the INVOKING user's language:
+// Discord's own `interaction.locale` (the user's client language, e.g. "es-ES" →
+// "es") first, then their linked Summonarr account's stored locale, then the
+// instance default. An edit of the shared admin-channel message (the approve /
+// decline embed every admin sees) uses the instance default instead, like every
+// other shared-channel post (discord-notify.ts).
+function discordClientLocale(interaction: { locale?: unknown }): Locale | null {
+  const raw = typeof interaction.locale === "string" ? interaction.locale : "";
+  const primary = raw.trim().toLowerCase().split("-")[0];
+  return isLocale(primary) ? primary : null;
+}
+
+// Synchronous variant for paths that must not wait on the DB (the timeout and
+// the feature-disabled replies): Discord's locale, else the instance default.
+function interactionTranslatorSync(interaction: { locale?: unknown }): Translator {
+  return translatorFor(discordClientLocale(interaction) ?? instanceDefaultLocale());
+}
+
+async function interactionTranslator(interaction: { locale?: unknown }, discordUserId: string): Promise<Translator> {
+  const fromDiscord = discordClientLocale(interaction);
+  if (fromDiscord) return translatorFor(fromDiscord);
+  // Only when Discord sent no supported language: one read for the linked
+  // account's choice. A failed read falls back to the instance default.
+  const linked = await prisma.user
+    .findUnique({ where: { discordId: discordUserId }, select: { locale: true } })
+    .catch(() => null);
+  return translatorFor(localeForUser(linked));
+}
+
+// The quota window label ("week", "7 days", …) comes from quota.ts in English;
+// map the known shapes onto catalog keys, anything else passes through.
+function quotaWindowLabel(t: Translator, label: string | undefined): string {
+  if (label === undefined) return t("notify.bot.quotaWindow.period");
+  if (label === "day" || label === "week" || label === "month") return t(`notify.bot.quotaWindow.${label}`);
+  const days = /^(\d+) days$/.exec(label);
+  if (days) return t("notify.bot.quotaWindow.days", { days: days[1] });
+  return label;
+}
 
 const TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w185";
 const DISCORD_API = "https://discord.com/api/v10";
@@ -220,21 +263,21 @@ async function editOriginal(appId: string, token: string, payload: Record<string
   }
 }
 
-function buildResultsPayload(query: string, results: TmdbResult[], interactionId: string, discordUserId: string) {
+function buildResultsPayload(t: Translator, query: string, results: TmdbResult[], interactionId: string, discordUserId: string) {
   const embeds = results.map((r, i) => {
     const embed: Record<string, unknown> = {
       title: `${i + 1}. ${r.title} (${r.releaseYear})`,
       color: 0x5865f2,
     };
 
-    const typeLine = r.mediaType === "movie" ? "🎬 Movie" : "📺 TV Show";
+    const typeLine = r.mediaType === "movie" ? t("notify.bot.results.movie") : t("notify.bot.results.tv");
     const ratingLine = r.voteAverage > 0 ? `⭐ ${r.voteAverage.toFixed(1)}/10` : "";
 
     const statusParts: string[] = [];
-    if (r.plexAvailable)                                          statusParts.push("🟡 On Plex");
-    if (r.jellyfinAvailable)                                      statusParts.push("🔵 On Jellyfin");
-    if (!r.plexAvailable && !r.jellyfinAvailable && r.arrPending) statusParts.push("🟠 Approved — In Queue");
-    if (r.requested)                                              statusParts.push("✅ Already Requested");
+    if (r.plexAvailable)                                          statusParts.push(t("notify.bot.results.onPlex"));
+    if (r.jellyfinAvailable)                                      statusParts.push(t("notify.bot.results.onJellyfin"));
+    if (!r.plexAvailable && !r.jellyfinAvailable && r.arrPending) statusParts.push(t("notify.bot.results.inQueue"));
+    if (r.requested)                                              statusParts.push(t("notify.bot.results.requested"));
 
     const desc = [
       [typeLine, ratingLine].filter(Boolean).join("  ·  "),
@@ -252,13 +295,13 @@ function buildResultsPayload(query: string, results: TmdbResult[], interactionId
     components: results.map((_, i) => ({
       type: 2,
       style: 1,
-      label: `Select ${i + 1}`,
+      label: t("notify.bot.results.select", { n: i + 1 }),
       custom_id: `pick:${interactionId}:${discordUserId}:${i}`,
     })),
   }];
 
   return {
-    content: `Found **${results.length}** result(s) for **"${query}"**. Pick one:`,
+    content: t("notify.bot.results.found", { n: results.length, query }),
     embeds,
     components,
   };
@@ -268,13 +311,14 @@ function withDiscordTimeout(
   fn: () => Promise<void>,
   appId: string,
   token: string,
+  t: Translator,
   timeoutMs = 25_000,
 ): void {
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
     void editOriginal(appId, token, {
-      content: "This is taking longer than expected. Please try again.",
+      content: t("notify.bot.slow"),
     }).catch(() => {});
   }, timeoutMs);
 
@@ -283,7 +327,7 @@ function withDiscordTimeout(
       if (!timedOut) {
         console.error("[interactions] handler error:", err);
         void editOriginal(appId, token, {
-          content: "An unexpected error occurred. Please try again.",
+          content: t("notify.bot.unexpected"),
         }).catch(() => {});
       }
     })
@@ -303,6 +347,7 @@ async function handleCommand(interaction: any): Promise<void> {
 
   const channelId = interaction.channel_id as string | undefined;
   const memberRoles: string[] = interaction.member?.roles ?? [];
+  const t = await interactionTranslator(interaction, discordUserId);
 
   const [welcomeRow, requireLinkedRow, autoApproveRow] = await Promise.all([
     prisma.setting.findUnique({ where: { key: "discordWelcomeChannelId" } }),
@@ -318,11 +363,11 @@ async function handleCommand(interaction: any): Promise<void> {
   if (welcomeChannelId && channelId) {
     const inWelcome = channelId === welcomeChannelId;
     if (commandName === "link" && !inWelcome) {
-      await editOriginal(appId, token, { content: `The \`/link\` command can only be used in the designated welcome channel.` });
+      await editOriginal(appId, token, { content: t("notify.bot.linkWelcomeOnly") });
       return;
     }
     if ((commandName === "request" || commandName === "status") && inWelcome) {
-      await editOriginal(appId, token, { content: `The \`/${commandName}\` command is not available in this channel.` });
+      await editOriginal(appId, token, { content: t("notify.bot.commandNotHere", { command: commandName }) });
       return;
     }
   }
@@ -332,7 +377,7 @@ async function handleCommand(interaction: any): Promise<void> {
       const rlRow = await prisma.setting.findUnique({ where: { key: "rateLimitRequests" } });
       const rlLimit = parseRateLimit(rlRow?.value, 20);
       if (!checkRateLimit(`discord-request:${discordUserId}`, rlLimit, 60 * 1000)) {
-        await editOriginal(appId, token, { content: "You're making requests too quickly — please try again in a minute." });
+        await editOriginal(appId, token, { content: t("notify.bot.tooFast") });
         return;
       }
 
@@ -340,7 +385,7 @@ async function handleCommand(interaction: any): Promise<void> {
       if (maintRow?.value === "true") {
         const discordAdmin = await prisma.user.findFirst({ where: { discordId: discordUserId, role: "ADMIN" }, select: { id: true } });
         if (!discordAdmin) {
-          await editOriginal(appId, token, { content: "The site is currently under maintenance. Please try again later." });
+          await editOriginal(appId, token, { content: t("notify.bot.maintenance") });
           return;
         }
       }
@@ -351,7 +396,7 @@ async function handleCommand(interaction: any): Promise<void> {
           select: { id: true },
         });
         if (!linkedUser) {
-          await editOriginal(appId, token, { content: "You need to link your Discord account to a site account before making requests. Use `/link` with a token from your Profile page." });
+          await editOriginal(appId, token, { content: t("notify.bot.linkRequiredToRequest") });
           return;
         }
       }
@@ -367,13 +412,14 @@ async function handleCommand(interaction: any): Promise<void> {
         results = await attachAvailability(raw, await discordVisibleInstances(discordUserId));
       } catch (err) {
         console.error("[interactions] TMDB search error:", err);
-        await editOriginal(appId, token, { content: "Search failed. Please try again." });
+        await editOriginal(appId, token, { content: t("notify.bot.searchFailed") });
         return;
       }
 
       if (results.length === 0) {
-        const label = type === "movie" ? "movies" : "TV shows";
-        await editOriginal(appId, token, { content: `No ${label} found for **"${query}"**.` });
+        await editOriginal(appId, token, {
+          content: type === "movie" ? t("notify.bot.noResults.movie", { query }) : t("notify.bot.noResults.tv", { query }),
+        });
         return;
       }
 
@@ -385,7 +431,7 @@ async function handleCommand(interaction: any): Promise<void> {
         update: { data: JSON.stringify(pendingPayload), expiresAt: new Date(Date.now() + 5 * 60_000) },
       });
 
-      await editOriginal(appId, token, buildResultsPayload(query, results, interactionId, discordUserId));
+      await editOriginal(appId, token, buildResultsPayload(t, query, results, interactionId, discordUserId));
     }
 
     else if (commandName === "status") {
@@ -395,13 +441,13 @@ async function handleCommand(interaction: any): Promise<void> {
           select: { id: true },
         });
         if (!linkedCheck) {
-          await editOriginal(appId, token, { content: "You need to link your Discord account to a site account first. Use `/link` with a token from your Profile page." });
+          await editOriginal(appId, token, { content: t("notify.bot.linkRequired") });
           return;
         }
       }
       const user = await prisma.user.findUnique({ where: { discordId: discordUserId } });
       if (!user) {
-        await editOriginal(appId, token, { content: "You have no requests yet." });
+        await editOriginal(appId, token, { content: t("notify.bot.status.none") });
         return;
       }
       const requests = await prisma.mediaRequest.findMany({
@@ -411,7 +457,7 @@ async function handleCommand(interaction: any): Promise<void> {
         select: { title: true, mediaType: true, status: true, tmdbId: true },
       });
       if (!requests.length) {
-        await editOriginal(appId, token, { content: "You have no requests yet." });
+        await editOriginal(appId, token, { content: t("notify.bot.status.none") });
         return;
       }
 
@@ -430,15 +476,17 @@ async function handleCommand(interaction: any): Promise<void> {
       const sonarrQueuedSet = new Set(sonarrQueued.map(r => r.tmdbId));
 
       const emoji: Record<string, string> = { PENDING: "⏳", APPROVED: "🔄", DECLINED: "❌", AVAILABLE: "📺" };
+      const knownStatus = new Set(["PENDING", "DECLINED", "AVAILABLE"]);
       const lines = requests.map((r) => {
-        let statusLabel: string = r.status;
+        let statusLabel: string = knownStatus.has(r.status) ? t(`notify.bot.status.${r.status}`) : r.status;
         if (r.status === "APPROVED") {
           const inQueue = r.mediaType === "MOVIE" ? radarrQueuedSet.has(r.tmdbId) : sonarrQueuedSet.has(r.tmdbId);
-          statusLabel = inQueue ? "APPROVED — In Queue" : "APPROVED — Pending";
+          statusLabel = inQueue ? t("notify.bot.status.APPROVED_QUEUE") : t("notify.bot.status.APPROVED_PENDING");
         }
-        return `${emoji[r.status] ?? "❓"} **${r.title}** (${r.mediaType === "MOVIE" ? "Movie" : "TV"}) — ${statusLabel}`;
+        const media = r.mediaType === "MOVIE" ? t("notify.bot.status.movie") : t("notify.bot.status.tv");
+        return `${emoji[r.status] ?? "❓"} **${r.title}** (${media}) — ${statusLabel}`;
       });
-      await editOriginal(appId, token, { content: `**Your recent requests:**\n${lines.join("\n")}` });
+      await editOriginal(appId, token, { content: `${t("notify.bot.status.header")}\n${lines.join("\n")}` });
     }
 
     else if (commandName === "link") {
@@ -448,29 +496,29 @@ async function handleCommand(interaction: any): Promise<void> {
       // if entropy is ever lowered. Also caps audit-log noise and Discord
       // rate-limit budget burn from a guild member spamming /link FOOBAR.
       if (!checkRateLimit(`discord-link:${discordUserId}`, 10, 60_000)) {
-        await editOriginal(appId, token, { content: "Too many link attempts — try again in a minute." });
+        await editOriginal(appId, token, { content: t("notify.bot.link.tooMany") });
         return;
       }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const tokenValue = (data.options?.find((o: any) => o.name === "token")?.value as string ?? "").trim().toUpperCase();
       if (!tokenValue) {
-        await editOriginal(appId, token, { content: "Please provide your link token." });
+        await editOriginal(appId, token, { content: t("notify.bot.link.missingToken") });
         return;
       }
 
       const row = await prisma.discordLinkToken.findUnique({ where: { token: tokenValue }, include: { user: true } });
       if (!row) {
-        await editOriginal(appId, token, { content: "Could not link account: Invalid token." });
+        await editOriginal(appId, token, { content: t("notify.bot.link.invalid") });
         return;
       }
       if (row.expiresAt < new Date()) {
         await prisma.discordLinkToken.delete({ where: { token: tokenValue } });
-        await editOriginal(appId, token, { content: "Could not link account: Token has expired — generate a new one on your Profile page." });
+        await editOriginal(appId, token, { content: t("notify.bot.link.expired") });
         return;
       }
       if (row.discordId && row.discordId !== discordUserId) {
-        await editOriginal(appId, token, { content: "Could not link account: This token was generated for a different Discord account." });
+        await editOriginal(appId, token, { content: t("notify.bot.link.otherAccount") });
         return;
       }
       // Deactivation gate, same reasoning as the /request branch below: deactivation
@@ -480,12 +528,12 @@ async function handleCommand(interaction: any): Promise<void> {
       // sync-roles route exists to strip — and Discord is not session-backed, so
       // nothing upstream of this refuses it.
       if (row.user.deactivatedAt) {
-        await editOriginal(appId, token, { content: "Could not link account: This account has been deactivated." });
+        await editOriginal(appId, token, { content: t("notify.bot.link.deactivated") });
         return;
       }
       const existing = await prisma.user.findUnique({ where: { discordId: discordUserId } });
       if (existing && existing.id !== row.userId && !existing.email.endsWith("@discord.local")) {
-        await editOriginal(appId, token, { content: "Could not link account: This Discord account is already linked to another user." });
+        await editOriginal(appId, token, { content: t("notify.bot.link.alreadyLinked") });
         return;
       }
 
@@ -493,11 +541,11 @@ async function handleCommand(interaction: any): Promise<void> {
       try {
         const { migrated } = await mergeDiscordIntoWebAccount(row.userId, discordUserId);
         if (migrated > 0) {
-          transferNote = ` ${migrated} previous Discord request${migrated !== 1 ? "s" : ""} have been transferred to your account.`;
+          transferNote = ` ${t("notify.bot.link.transferred", { count: migrated })}`;
         }
       } catch (err) {
         console.error("[interactions] link account failed:", (err as Error).message);
-        await editOriginal(appId, token, { content: "Could not link account. Please try again or contact an admin." });
+        await editOriginal(appId, token, { content: t("notify.bot.link.failed") });
         return;
       }
 
@@ -507,11 +555,11 @@ async function handleCommand(interaction: any): Promise<void> {
       await prisma.discordLinkToken.deleteMany({ where: { token: tokenValue } });
       void assignDiscordRolesOnLink(discordUserId, row.user.email, row.user.role);
       const userName = row.user.name ?? row.user.email;
-      await editOriginal(appId, token, { content: `Your Discord account is now linked to **${userName}**'s Summonarr account!${transferNote} (Tip: your link token is single-use and was valid for 10 minutes — keep it private.)` });
+      await editOriginal(appId, token, { content: t("notify.bot.link.success", { name: userName, transfer: transferNote }) });
     }
   } catch (err) {
     console.error("[interactions] handleCommand error:", err);
-    await editOriginal(appId, token, { content: "An unexpected error occurred. Please try again." }).catch(() => {});
+    await editOriginal(appId, token, { content: t("notify.bot.unexpected") }).catch(() => {});
   }
 }
 
@@ -522,6 +570,10 @@ async function handleComponent(interaction: any): Promise<void> {
   const customId = interaction.data.custom_id as string;
   const discordUser = interaction.member?.user ?? interaction.user;
   const discordUserId = discordUser.id as string;
+  // The clicker's language for their own (ephemeral) replies; the admin-channel
+  // embed edits below use the instance default instead (`channelT`).
+  const t = await interactionTranslator(interaction, discordUserId);
+  const channelT = translatorFor(instanceDefaultLocale());
 
   try {
     if (customId.startsWith("pick:")) {
@@ -539,7 +591,7 @@ async function handleComponent(interaction: any): Promise<void> {
       if (!pending) {
         prisma.discordSearchCache.delete({ where: { queryKey: key } }).catch(() => {});
         await editOriginal(appId, token, {
-          content: "This search has expired. Please run `/request` again.",
+          content: t("notify.bot.pick.expired"),
           embeds: [],
           components: [],
         });
@@ -549,7 +601,7 @@ async function handleComponent(interaction: any): Promise<void> {
       const idx = parseInt(idxStr, 10);
       const selected = pending.results[idx];
       if (!selected) {
-        await editOriginal(appId, token, { content: "Invalid selection.", embeds: [], components: [] });
+        await editOriginal(appId, token, { content: t("notify.bot.pick.invalid"), embeds: [], components: [] });
         return;
       }
 
@@ -562,7 +614,7 @@ async function handleComponent(interaction: any): Promise<void> {
       if (componentMaintRow?.value === "true") {
         const discordAdmin = await prisma.user.findFirst({ where: { discordId: discordUserId, role: "ADMIN" }, select: { id: true } });
         if (!discordAdmin) {
-          await editOriginal(appId, token, { content: "The site is currently under maintenance. Please try again later.", embeds: [], components: [] });
+          await editOriginal(appId, token, { content: t("notify.bot.maintenance"), embeds: [], components: [] });
           return;
         }
       }
@@ -582,7 +634,7 @@ async function handleComponent(interaction: any): Promise<void> {
         });
         if (!linked) {
           await editOriginal(appId, token, {
-            content: "You need to link your Discord account to a site account before making requests. Use `/link` with a token from your Profile page.",
+            content: t("notify.bot.linkRequiredToRequest"),
             embeds: [],
             components: [],
           });
@@ -629,7 +681,7 @@ async function handleComponent(interaction: any): Promise<void> {
       // user keeps creating (and, with an auto-approve role, auto-approving) requests.
       if (dbUser.deactivatedAt) {
         confirmEmbed.color = 0xed4245;
-        confirmEmbed.description = `(${selected.releaseYear}) — Your account has been deactivated.`;
+        confirmEmbed.description = `(${selected.releaseYear}) — ${t("notify.bot.pick.deactivated")}`;
         await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
         return;
       }
@@ -643,7 +695,7 @@ async function handleComponent(interaction: any): Promise<void> {
       // bits could still create a request through Discord.
       if (!canRequest(effPerms, mediaType, false)) {
         confirmEmbed.color = 0xed4245;
-        confirmEmbed.description = `(${selected.releaseYear}) — You don't have permission to request this.`;
+        confirmEmbed.description = `(${selected.releaseYear}) — ${t("notify.bot.pick.noPermission")}`;
         await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
         return;
       }
@@ -653,7 +705,7 @@ async function handleComponent(interaction: any): Promise<void> {
       // created, or Discord becomes a bypass around the blacklist.
       if (await isBlacklisted(selected.id, mediaType)) {
         confirmEmbed.color = 0xed4245;
-        confirmEmbed.description = `(${selected.releaseYear}) — This title has been blocked by an administrator.`;
+        confirmEmbed.description = `(${selected.releaseYear}) — ${t("notify.bot.pick.blacklisted")}`;
         await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
         return;
       }
@@ -672,7 +724,7 @@ async function handleComponent(interaction: any): Promise<void> {
         }
         if (exceedsCap(cert, dbUser.maxContentRating)) {
           confirmEmbed.color = 0xed4245;
-          confirmEmbed.description = `(${selected.releaseYear}) — This title's rating exceeds your account's limit.`;
+          confirmEmbed.description = `(${selected.releaseYear}) — ${t("notify.bot.pick.rating")}`;
           await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
           return;
         }
@@ -745,7 +797,7 @@ async function handleComponent(interaction: any): Promise<void> {
           });
           if (count >= rq.limit) {
             confirmEmbed.color = 0xed4245;
-            confirmEmbed.description = `You have reached your request quota of ${rq.limit} per ${rq.windowLabel}.`;
+            confirmEmbed.description = t("notify.bot.pick.quota", { limit: rq.limit, window: quotaWindowLabel(t, rq.windowLabel) });
             await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
             return;
           }
@@ -767,7 +819,7 @@ async function handleComponent(interaction: any): Promise<void> {
       if (existing) {
         if (existing.permanentlyDeclined) {
           confirmEmbed.color = 0xed4245;
-          confirmEmbed.description = `(${selected.releaseYear}) — This request has been permanently denied.`;
+          confirmEmbed.description = `(${selected.releaseYear}) — ${t("notify.bot.pick.permanentlyDenied")}`;
           await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
           return;
         }
@@ -786,7 +838,7 @@ async function handleComponent(interaction: any): Promise<void> {
           staleDeclinedId = existing.id;
         } else {
           confirmEmbed.color = 0xfee75c;
-          confirmEmbed.description = `(${selected.releaseYear}) — Already requested.`;
+          confirmEmbed.description = `(${selected.releaseYear}) — ${t("notify.bot.pick.alreadyRequested")}`;
           await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
           return;
         }
@@ -861,7 +913,7 @@ async function handleComponent(interaction: any): Promise<void> {
           // could never accumulate. The requester's own contradictory vote is
           // already cleared by the userId-scoped delete above, which is the only
           // half the web route does.
-          note = "It's already in the library!";
+          note = t("notify.bot.pick.inLibrary");
           confirmEmbed.color = 0x57f287;
         } else if (mayAutoApprove) {
           // pendingNotifyAt arms the orchestrator's 90s download backstop so a dropped
@@ -924,10 +976,10 @@ async function handleComponent(interaction: any): Promise<void> {
             emitSSE({ type: "request:updated", requestId: request.id, status: "PENDING", userId: dbUser.id });
             // The push failed and the request rolled back to PENDING — don't tell
             // the user it's "being downloaded"; surface that an admin will review it.
-            note = "Your request was received, but couldn't be queued automatically — an admin will review it shortly.";
+            note = t("notify.bot.pick.arrFailed");
             confirmEmbed.color = 0xfee75c;
           } else {
-            note = "Your request was auto-approved and is being downloaded. You'll get a ping when it's ready!";
+            note = t("notify.bot.pick.autoApproved");
             confirmEmbed.color = 0x57f287;
           }
 
@@ -990,7 +1042,7 @@ async function handleComponent(interaction: any): Promise<void> {
           // Keep the admin request list live (every other creation path emits).
           emitSSE({ type: "request:new", requestId: createdRequest.id, userId: dbUser.id });
           if (mirrored) {
-            note = "Added — this title is already approved, so you'll be notified when it's ready.";
+            note = t("notify.bot.pick.mirrored");
             confirmEmbed.color = 0x57f287;
           } else {
             const pendingRequest = createdRequest;
@@ -1016,20 +1068,20 @@ async function handleComponent(interaction: any): Promise<void> {
               void notifyAdminsNewRequestPush({ title: selected.title, mediaType, requestedBy, requestId: pendingRequest.id, excludeUserId: dbUser.id });
               void notifyAdminsNewRequestDiscord({ requestId: pendingRequest.id, title: selected.title, mediaType, requestedBy, note: null, posterPath: selected.posterPath ?? null });
             }
-            note = "An admin will review your request.";
+            note = t("notify.bot.pick.pending");
             confirmEmbed.color = 0x57f287;
           }
         }
       } catch (err) {
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
           confirmEmbed.color = 0xfee75c;
-          confirmEmbed.description = `(${selected.releaseYear}) — Already requested.`;
+          confirmEmbed.description = `(${selected.releaseYear}) — ${t("notify.bot.pick.alreadyRequested")}`;
           await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
           return;
         }
         if (err instanceof Error && err.message === "QUOTA_EXCEEDED") {
           confirmEmbed.color = 0xed4245;
-          confirmEmbed.description = `You have reached your request quota of ${rq?.limit ?? 0} per ${rq?.windowLabel ?? "period"}.`;
+          confirmEmbed.description = t("notify.bot.pick.quota", { limit: rq?.limit ?? 0, window: quotaWindowLabel(t, rq?.windowLabel) });
           await editOriginal(appId, token, { content: "", embeds: [confirmEmbed], components: [] });
           return;
         }
@@ -1037,7 +1089,7 @@ async function handleComponent(interaction: any): Promise<void> {
       }
 
       confirmEmbed.description = `(${selected.releaseYear}) — ${note}`;
-      await editOriginal(appId, token, { content: "Request submitted!", embeds: [confirmEmbed], components: [] });
+      await editOriginal(appId, token, { content: t("notify.bot.pick.submitted"), embeds: [confirmEmbed], components: [] });
     }
 
     else if (customId.startsWith("admin_approve:") || customId.startsWith("admin_decline:")) {
@@ -1065,7 +1117,7 @@ async function handleComponent(interaction: any): Promise<void> {
           allowedHosts: DISCORD_HOSTS,
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: "⛔ You don't have permission to use these buttons.", flags: 64 }),
+          body: JSON.stringify({ content: t("notify.bot.admin.noPermission"), flags: 64 }),
           timeoutMs: 15_000,
         });
         return;
@@ -1079,7 +1131,7 @@ async function handleComponent(interaction: any): Promise<void> {
             allowedHosts: DISCORD_HOSTS,
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ content: "Service unavailable during maintenance.", flags: 64 }),
+            body: JSON.stringify({ content: t("notify.bot.admin.maintenance"), flags: 64 }),
             timeoutMs: 15_000,
           });
           return;
@@ -1090,7 +1142,7 @@ async function handleComponent(interaction: any): Promise<void> {
           allowedHosts: DISCORD_HOSTS,
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: "Too many attempts — please wait.", flags: 64 }),
+          body: JSON.stringify({ content: t("notify.bot.admin.tooMany"), flags: 64 }),
           timeoutMs: 15_000,
         });
         return;
@@ -1104,8 +1156,8 @@ async function handleComponent(interaction: any): Promise<void> {
       if (!request || request.status !== "PENDING") {
         const embed: Record<string, unknown> = {
           color: 0x71767B,
-          title: request?.title ?? "Request",
-          description: "This request has already been handled.",
+          title: request?.title ?? channelT("notify.bot.admin.requestFallback"),
+          description: channelT("notify.bot.admin.handled"),
           timestamp: new Date().toISOString(),
         };
         await editOriginal(appId, token, { embeds: [embed], components: [] });
@@ -1128,7 +1180,7 @@ async function handleComponent(interaction: any): Promise<void> {
           const embed: Record<string, unknown> = {
             color: 0x71767B,
             title: request.title,
-            description: "This request has already been handled.",
+            description: channelT("notify.bot.admin.handled"),
             timestamp: new Date().toISOString(),
           };
           await editOriginal(appId, token, { embeds: [embed], components: [] });
@@ -1191,10 +1243,12 @@ async function handleComponent(interaction: any): Promise<void> {
         }, { name: "interactions:admin-approve-90s-download-check" });
         const embed: Record<string, unknown> = {
           color: arrFailed ? 0xFEE75C : 0x57F287,
-          title: arrFailed ? `⚠️ Approved (arr failed) — ${request.title}` : `✅ Approved — ${request.title}`,
+          title: arrFailed
+            ? channelT("notify.bot.admin.approvedArrFailedTitle", { title: request.title })
+            : channelT("notify.bot.admin.approvedTitle", { title: request.title }),
           description: arrFailed
-            ? `Approved by **${adminName}** but could not be added to arr — please add manually.`
-            : `Approved by **${adminName}**`,
+            ? channelT("notify.bot.admin.approvedByArrFailed", { admin: adminName })
+            : channelT("notify.bot.admin.approvedBy", { admin: adminName }),
           timestamp: new Date().toISOString(),
         };
         if (request.posterPath) embed.thumbnail = { url: `${TMDB_POSTER_BASE}${request.posterPath}` };
@@ -1210,7 +1264,7 @@ async function handleComponent(interaction: any): Promise<void> {
           const embed: Record<string, unknown> = {
             color: 0x71767B,
             title: request.title,
-            description: "This request has already been handled.",
+            description: channelT("notify.bot.admin.handled"),
             timestamp: new Date().toISOString(),
           };
           await editOriginal(appId, token, { embeds: [embed], components: [] });
@@ -1232,19 +1286,19 @@ async function handleComponent(interaction: any): Promise<void> {
         }
         const embed: Record<string, unknown> = {
           color: 0xED4245,
-          title: `❌ Declined — ${request.title}`,
-          description: `Declined by **${adminName}**`,
+          title: channelT("notify.bot.admin.declinedTitle", { title: request.title }),
+          description: channelT("notify.bot.admin.declinedBy", { admin: adminName }),
           timestamp: new Date().toISOString(),
         };
         if (request.posterPath) embed.thumbnail = { url: `${TMDB_POSTER_BASE}${request.posterPath}` };
         await editOriginal(appId, token, { embeds: [embed], components: [] });
       }
     } else {
-      await editOriginal(appId, token, { content: "This button is no longer active." }).catch(() => {});
+      await editOriginal(appId, token, { content: t("notify.bot.inactiveButton") }).catch(() => {});
     }
   } catch (err) {
     console.error("[interactions] handleComponent error:", err);
-    await editOriginal(appId, token, { content: "An unexpected error occurred.", embeds: [], components: [] }).catch(() => {});
+    await editOriginal(appId, token, { content: t("notify.bot.unexpectedShort"), embeds: [], components: [] }).catch(() => {});
   }
 }
 
@@ -1300,7 +1354,7 @@ export async function POST(req: NextRequest) {
   // PING stays exempt (above) so Discord's endpoint verification keeps passing while
   // the feature is off; real interactions get an ephemeral explanation (type 4 + flags 64).
   if (!(await isFeatureEnabled("feature.integration.discord"))) {
-    return NextResponse.json({ type: 4, data: { content: "The Discord integration is currently disabled.", flags: 64 } });
+    return NextResponse.json({ type: 4, data: { content: interactionTranslatorSync(interaction)("notify.bot.disabled"), flags: 64 } });
   }
 
   // Replay guard (defense-in-depth beyond the 5s timestamp window above): a captured,
@@ -1327,7 +1381,7 @@ export async function POST(req: NextRequest) {
     const cmdAppId = interaction.application_id as string;
     const cmdToken = interaction.token as string;
     // type=5 defers the response (ephemeral); the actual reply is sent via editOriginal
-    withDiscordTimeout(() => handleCommand(interaction), cmdAppId, cmdToken);
+    withDiscordTimeout(() => handleCommand(interaction), cmdAppId, cmdToken, interactionTranslatorSync(interaction));
     return NextResponse.json({ type: 5, data: { flags: 64 } });
   }
 
@@ -1335,7 +1389,7 @@ export async function POST(req: NextRequest) {
     const cmpAppId = interaction.application_id as string;
     const cmpToken = interaction.token as string;
     // type=6 acknowledges component interaction with no visible change; reply follows from editOriginal
-    withDiscordTimeout(() => handleComponent(interaction), cmpAppId, cmpToken);
+    withDiscordTimeout(() => handleComponent(interaction), cmpAppId, cmpToken, interactionTranslatorSync(interaction));
     return NextResponse.json({ type: 6 });
   }
 

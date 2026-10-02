@@ -48,7 +48,7 @@ async function fanOutEmails(targets: EmailTarget[], status: "APPROVED" | "DECLIN
       // would otherwise still get emailed by a later batch approve/decline.
       // Mirrors the same guard just added to the Discord/push plural notifiers.
       where: { id: { in: userIds }, deactivatedAt: null },
-      select: { id: true, email: true, notificationEmail: true, emailOnApproved: true, emailOnDeclined: true },
+      select: { id: true, email: true, notificationEmail: true, emailOnApproved: true, emailOnDeclined: true, locale: true },
     });
     const userMap = new Map(users.map((u) => [u.id, u]));
     for (const t of targets) {
@@ -58,10 +58,10 @@ async function fanOutEmails(targets: EmailTarget[], status: "APPROVED" | "DECLIN
       if (!to) continue;
       if (status === "APPROVED") {
         if (!u.emailOnApproved) continue;
-        void notifyUserRequestApprovedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, posterPath: t.posterPath, tmdbId: t.tmdbId ?? undefined });
+        void notifyUserRequestApprovedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, posterPath: t.posterPath, tmdbId: t.tmdbId ?? undefined, locale: u.locale });
       } else {
         if (!u.emailOnDeclined) continue;
-        void notifyUserRequestDeclinedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, adminNote: adminNote ?? null, posterPath: t.posterPath });
+        void notifyUserRequestDeclinedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, adminNote: adminNote ?? null, posterPath: t.posterPath, locale: u.locale });
       }
     }
   } catch (err) {
@@ -112,6 +112,8 @@ async function writeBatchInboxRows(
           tmdbId: t.tmdbId ?? null,
           mediaType: t.mediaType,
           posterPath: t.posterPath ?? null,
+          // Re-rendered from type + mediaType in the reader's language.
+          data: { v: 1 },
         }),
       ),
     });

@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { PageHeader } from "@/components/ui/design";
 import { NotificationList, type NotificationListItem } from "@/components/notifications/notification-list";
 import { getTranslator } from "@/lib/i18n/server";
+import { renderNotification } from "@/lib/notification-render";
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +18,7 @@ export default async function NotificationsPage() {
   const [rows, total] = await Promise.all([
     prisma.notification.findMany({
       where: { userId: session.user.id },
-      select: { id: true, type: true, title: true, body: true, tmdbId: true, mediaType: true, posterPath: true, readAt: true, createdAt: true },
+      select: { id: true, type: true, title: true, body: true, tmdbId: true, mediaType: true, posterPath: true, readAt: true, createdAt: true, data: true },
       // Must match the API cursor ordering in /api/notifications (createdAt
       // desc, id desc) so the client's keyset cursor cannot skip a same-timestamp
       // row at the first-page boundary — sync createMany writes a batch of
@@ -28,8 +29,11 @@ export default async function NotificationsPage() {
     prisma.notification.count({ where: { userId: session.user.id } }),
   ]);
 
-  const items: NotificationListItem[] = rows.map((n) => ({
+  // Rendered in the viewer's language from the row's stored data, exactly as
+  // GET /api/notifications does for the pages loaded after this one.
+  const items: NotificationListItem[] = rows.map(({ data, ...n }) => ({
     ...n,
+    ...renderNotification({ ...n, data }, t),
     createdAt: n.createdAt.toISOString(),
     readAt: n.readAt ? n.readAt.toISOString() : null,
   }));

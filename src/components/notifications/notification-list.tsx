@@ -8,6 +8,7 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { notificationHref } from "@/lib/notification-links";
+import { requestBodyKey } from "@/lib/notification-render";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
@@ -25,29 +26,15 @@ export interface NotificationListItem {
   createdAt: string;
 }
 
-// Request-status rows are re-rendered from their type + media type so they read
-// in the viewer's language; the stored body is the server's English copy (and
-// stays the fallback for every other type, e.g. issue replies that quote text).
-const REQUEST_BODY_KEYS: Record<string, { movie: string; tv: string }> = {
-  REQUEST_APPROVED: {
-    movie: "personal.notifications.body.approvedMovie",
-    tv: "personal.notifications.body.approvedTv",
-  },
-  REQUEST_AVAILABLE: {
-    movie: "personal.notifications.body.availableMovie",
-    tv: "personal.notifications.body.availableTv",
-  },
-  REQUEST_DECLINED: {
-    movie: "personal.notifications.body.declinedMovie",
-    tv: "personal.notifications.body.declinedTv",
-  },
-};
-
+// The server already renders every row's body in the viewer's language
+// (renderNotification, from the row's stored data — issue replies and
+// resolutions included), so `body` is used as-is. Request-status rows are also
+// re-rendered here from type + media type, with the same keys the server uses:
+// that keeps rows written before the `data` column existed localized too.
 // Exported for the header bell, so both surfaces localize the same rows.
 export function notificationBody(n: Pick<NotificationListItem, "type" | "body" | "mediaType">, t: Translator): string {
-  const keys = REQUEST_BODY_KEYS[n.type];
-  if (!keys || n.mediaType == null) return n.body;
-  return t(n.mediaType === "MOVIE" ? keys.movie : keys.tv);
+  const key = requestBodyKey(n.type, n.mediaType);
+  return key ? t(key) : n.body;
 }
 
 const POST = (body: string) => ({ method: "POST", headers: { "Content-Type": "application/json" }, body });
