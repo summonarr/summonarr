@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.28.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.29.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -170,7 +170,7 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Changelog
 
-### Unreleased
+### v0.29.0
 
 **Added**
 
@@ -181,6 +181,10 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 - When anyone on the server reads a language other than English — including visitors whose language comes from their browser — the daily library cache job fetches translations ahead of time, so pages and the calendar feed don't wait for them.
 - **Original language and country** on detail pages are named in your language.
 - **Discord slash commands** show their descriptions and the Movie / TV Show choices in each Discord user's language. Command names stay in English, so `/link token:<code>` still works for everyone. Existing installs re-register the commands on their next restart.
+
+**Changed**
+
+- The server reports API version 4, so the iOS app can offer two-factor management, the personal calendar feed and the watchlist auto-request setting from its Profile screen. Older apps keep working.
 
 **Fixed**
 
@@ -782,7 +786,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.28.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.29.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
