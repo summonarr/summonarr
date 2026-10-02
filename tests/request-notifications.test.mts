@@ -142,13 +142,9 @@ shadowPrismaModel(prisma, "user", {
     // chokepoint that drops removed users from all four channels at once. It
     // asks for exactly the disabled ids; an empty result means everyone is
     // active, which is what these fan-out tests assume unless stated otherwise.
-    if ((args as { select?: { deactivatedAt?: boolean } }).select?.deactivatedAt) {
+    if (args.where.deactivatedAt !== undefined) {
       disabledRecipientQueries.push(args);
-      return (args.where.id?.in ?? []).map((id) => ({
-        id,
-        deactivatedAt: disabledRequesterIds.includes(id) ? new Date("2026-07-01T00:00:00.000Z") : null,
-        locale: null,
-      }));
+      return disabledRequesterIds.map((id) => ({ id }));
     }
     if (args.where.notifyOnAvailable === true) {
       discordAvailableQueries.push(args);
@@ -734,7 +730,7 @@ test("a DISABLED requester reaches NO channel — one gate read and nothing else
   await waitFor(() => activeGateReads.length === 1, "disabled-account gate read");
   await quiesce();
 
-  assert.deepEqual(activeGateReads[0], { where: { id: "u-gone" }, select: { deactivatedAt: true, locale: true } });
+  assert.deepEqual(activeGateReads[0], { where: { id: "u-gone" }, select: { deactivatedAt: true } });
   // Not one channel resolved a recipient, and no inbox row was written.
   assert.equal(notifCreates.length, 0, "in-app");
   assert.equal(discordUserReads.length, 0, "discord");

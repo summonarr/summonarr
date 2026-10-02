@@ -4,11 +4,13 @@ import { coalesce } from "./concurrency";
 import { processSingleton } from "./process-singleton";
 import { prisma } from "./prisma";
 import {
+  fetchCollectionTranslations,
   fetchPersonTranslations,
   fetchTitleTranslations,
   getMovieGenres,
   getTVGenres,
   tmdbLanguageFor,
+  type CollectionTranslations,
   type PersonTranslations,
   type TitleTranslations,
 } from "./tmdb";
@@ -186,6 +188,7 @@ export async function localizeMedia<T extends TmdbMedia>(items: T[], locale: Loc
   if (locale === "en" || items.length === 0) return items;
   const language = tmdbLanguageFor(locale);
   if (!language) return items;
+  noteLocaleSeen(locale);
   try {
     const [cached, genreNames] = await Promise.all([
       translationsFor(items, { fetchMisses: true }),
@@ -222,75 +225,87 @@ export async function cachedLocalizedTitles(
   return out;
 }
 
+/** A title as a notification carries it: the stored English text plus, when known, its TMDB identity. */
+export interface TitleRef {
+  title: string;
+  tmdbId?: number | null;
+  mediaType?: string | null;
+}
+export type TitleResolver = (ref: TitleRef, locale: Locale) => string;
+const englishTitles: TitleResolver = (ref) => ref.title;
+
 /**
- * Notification rows (`{ requestedBy, tmdbId, mediaType, title }`) with each
- * `title` in its REQUESTER's language — the stored `User.locale`, else the
- * instance default. Notifications have no viewer and no response to protect,
- * so misses are fetched (bounded like every other read). Rows without a tmdbId,
- * or whose requester reads English, come back unchanged; any failure returns
- * the rows as given. Display only: the stored request keeps its English title.
+ * For senders that write one message per RECIPIENT LANGUAGE (email groups,
+ * push payloads, Discord posts, the in-app inbox): resolves translations for
+ * `refs` ONCE and returns a synchronous `(ref, locale) → title` for the render.
+ * `locales` are the recipients' resolved languages; English, a ref without a
+ * tmdbId, or any failure yields the stored English title. All-English
+ * recipients cost nothing — no DB read, no fetch. Misses are fetched (these
+ * paths have no viewer waiting), bounded like every other read.
+ *
+ * Display only: never write the result back to a request, issue or audit row.
  */
-export async function localizeNotificationTitles<T extends { requestedBy: string; title?: string; tmdbId?: number | null; mediaType?: string }>(
-  rows: T[],
-  // Each requester's stored User.locale, when the caller already read it (the
-  // batch claim does) — otherwise read here.
-  storedLocales?: ReadonlyMap<string, string | null>,
-): Promise<T[]> {
-  if (rows.length === 0) return rows;
+export async function titleResolver(refs: readonly TitleRef[], locales: Iterable<Locale>): Promise<TitleResolver> {
+  const wanted = new Set([...locales].filter((l) => l !== "en"));
+  const known = refs.filter((r) => typeof r.tmdbId === "number" && r.mediaType);
+  if (wanted.size === 0 || known.length === 0) return englishTitles;
   try {
-    const fallback = instanceDefaultLocale();
-    const stored =
-      storedLocales ??
-      new Map(
-        (
-          await prisma.user.findMany({
-            where: { id: { in: [...new Set(rows.map((r) => r.requestedBy))] } },
-            select: { id: true, locale: true },
-          })
-        ).map((u) => [u.id, u.locale ?? null]),
-      );
-    const localeOf = new Map(
-      rows.map((r) => {
-        const l = stored.get(r.requestedBy);
-        return [r.requestedBy, isLocale(l) ? l : fallback] as const;
-      }),
-    );
-    const wanted = rows.filter(
-      (r) => typeof r.tmdbId === "number" && r.mediaType && (localeOf.get(r.requestedBy) ?? fallback) !== "en",
-    );
-    if (wanted.length === 0) return rows;
     const cached = await translationsFor(
-      wanted.map((r) => ({ id: r.tmdbId as number, mediaType: r.mediaType as string })),
+      known.map((r) => ({ id: r.tmdbId as number, mediaType: r.mediaType as string })),
       { fetchMisses: true },
     );
-    return rows.map((r) => {
-      const locale = localeOf.get(r.requestedBy) ?? fallback;
-      if (locale === "en" || typeof r.tmdbId !== "number" || !r.mediaType) return r;
-      const title = cached.get(translationsKey(dbType(r.mediaType), r.tmdbId))?.[locale]?.title;
-      return title ? { ...r, title } : r;
-    });
+    return (ref, locale) => {
+      if (locale === "en" || typeof ref.tmdbId !== "number" || !ref.mediaType) return ref.title;
+      return cached.get(translationsKey(dbType(ref.mediaType), ref.tmdbId))?.[locale]?.title ?? ref.title;
+    };
   } catch (err) {
     console.warn("[tmdb-localize] notification titles failed:", err instanceof Error ? err.message : err);
-    return rows;
+    return englishTitles;
   }
 }
 
-/**
- * One title in `locale` (a stored `User.locale` value or null ⇒ the instance
- * default), for a single-recipient notification whose caller already read the
- * recipient's row. Returns `title` unchanged for English, no tmdbId, or any failure.
- */
-export async function localizedTitleFor(
-  ref: { tmdbId?: number | null; mediaType?: string; title: string },
-  storedLocale: string | null | undefined,
-): Promise<string> {
+/** One title for one recipient's stored `User.locale` (null ⇒ the instance default). */
+export async function localizedTitleFor(ref: TitleRef, storedLocale: string | null | undefined): Promise<string> {
   const locale = isLocale(storedLocale) ? storedLocale : instanceDefaultLocale();
-  if (locale === "en" || typeof ref.tmdbId !== "number" || !ref.mediaType) return ref.title;
+  return (await titleResolver([ref], [locale]))(ref, locale);
+}
+
+/** The instance default language — what a shared Discord channel post is written in. */
+export function channelLocale(): Locale {
+  return instanceDefaultLocale();
+}
+
+/**
+ * Stored rows (the in-app inbox) with `title` in the READER's language,
+ * rendered at read time so the inbox follows the reader's current choice.
+ */
+export async function localizeStoredTitles<T extends TitleRef>(rows: T[], locale: Locale): Promise<T[]> {
+  if (locale === "en" || rows.length === 0) return rows;
+  const resolve = await titleResolver(rows, [locale]);
+  return rows.map((r) => {
+    const title = resolve(r, locale);
+    return title === r.title ? r : { ...r, title };
+  });
+}
+
+/** A collection's name in `locale`, or `englishName` when untranslated. Never throws. */
+export async function localizedCollectionName(collectionId: number, englishName: string, locale: Locale): Promise<string> {
+  if (locale === "en") return englishName;
   try {
-    const cached = await translationsFor([{ id: ref.tmdbId, mediaType: ref.mediaType }], { fetchMisses: true });
-    return cached.get(translationsKey(dbType(ref.mediaType), ref.tmdbId))?.[locale]?.title ?? ref.title;
+    const key = `collection:${collectionId}:i18n:v1`;
+    const cached = await getCacheMany<CollectionTranslations>([key]);
+    const value =
+      cached.get(key) ??
+      (await coalesce(key, () =>
+        limited(async () => {
+          const v = await fetchCollectionTranslations(collectionId);
+          await setCache(key, v, TRANSLATIONS_TTL);
+          return v;
+        }),
+      ));
+    return value[locale as Exclude<Locale, "en">]?.name ?? englishName;
   } catch {
-    return ref.title;
+    return englishName;
   }
 }
 
@@ -318,6 +333,30 @@ export async function localizedBiography(personId: number, locale: Locale): Prom
 
 // ── Prewarm ─────────────────────────────────────────────────────────────────
 
+// A viewer whose language comes from their BROWSER (no stored choice) leaves no
+// trace in the User table, so the overlay records that a language was actually
+// served: one Setting row per language, stamped at most every SEEN_WRITE_EVERY_MS
+// per process (a page view must not cost a write). nonEnglishInUse() counts a
+// language seen within SEEN_WINDOW_MS.
+const SEEN_PREFIX = "contentLocaleSeen:";
+const SEEN_WRITE_EVERY_MS = 12 * 60 * 60 * 1000;
+const SEEN_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+const seenWrites = processSingleton("tmdb-localize:seenWrites", () => new Map<string, number>());
+
+function noteLocaleSeen(locale: Exclude<Locale, "en">): void {
+  const now = Date.now();
+  const last = seenWrites.get(locale);
+  if (last !== undefined && now - last < SEEN_WRITE_EVERY_MS) return;
+  seenWrites.set(locale, now);
+  const key = `${SEEN_PREFIX}${locale}`;
+  const value = new Date(now).toISOString();
+  // Best-effort bookkeeping: a failed write only means the prewarm may skip
+  // this language until the next stamp.
+  void Promise.resolve()
+    .then(() => prisma.setting.upsert({ where: { key }, update: { value }, create: { key, value } }))
+    .catch(() => {});
+}
+
 // Titles the daily prewarm fetches at most per run. At MAX_IN_FLIGHT parallel
 // fetches that is a few minutes of TMDB traffic.
 export const MAX_PREWARM_PER_RUN = 4_000;
@@ -325,14 +364,21 @@ const PREWARM_CHUNK = 500;
 
 /**
  * Whether anyone on this instance reads a non-English language: the instance
- * default, or an active account's stored choice. A browser-negotiated language
- * with no stored choice isn't seen here — those viewers warm titles as they
- * browse.
+ * default, an active account's stored choice, or a language the overlay served
+ * within the last 30 days (a browser-negotiated viewer with no stored choice).
  */
 export async function nonEnglishInUse(): Promise<boolean> {
   if (instanceDefaultLocale() !== "en") return true;
-  const n = await prisma.user.count({ where: { deactivatedAt: null, locale: { not: null, notIn: ["en"] } } });
-  return n > 0;
+  const [stored, seen] = await Promise.all([
+    prisma.user.count({ where: { deactivatedAt: null, locale: { not: null, notIn: ["en"] } } }),
+    prisma.setting.findMany({ where: { key: { startsWith: SEEN_PREFIX } }, select: { value: true } }),
+  ]);
+  if (stored > 0) return true;
+  const cutoff = Date.now() - SEEN_WINDOW_MS;
+  return seen.some((r) => {
+    const at = Date.parse(r.value);
+    return Number.isFinite(at) && at >= cutoff;
+  });
 }
 
 /**

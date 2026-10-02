@@ -38,8 +38,11 @@ const { shadowPrismaModel } = await import("./_helpers.mts");
 const {
   localizeMedia,
   cachedLocalizedTitles,
-  localizeNotificationTitles,
+  titleResolver,
   localizedTitleFor,
+  localizeStoredTitles,
+  localizedCollectionName,
+  nonEnglishInUse,
   localizedBiography,
   prewarmTitleTranslations,
 } = await import("../src/lib/tmdb-localize.ts");
@@ -53,13 +56,23 @@ const seed = (key: string, value: unknown) =>
   cacheRows.set(key, { key, data: JSON.stringify(value), cachedAt: new Date(), expiresAt: far() });
 // Accounts and their stored languages, for the notification and prewarm paths.
 let users: { id: string; locale: string | null; deactivatedAt: Date | null }[] = [];
-let userReads = 0;
 shadowPrismaModel(prisma, "user", {
   findMany: async (args: { where: { id: { in: string[] } } }) => {
-    userReads++;
     return users.filter((u) => args.where.id.in.includes(u.id));
   },
   count: async () => users.filter((u) => !u.deactivatedAt && u.locale && u.locale !== "en").length,
+});
+// Setting rows (the content-locale "seen" stamps).
+const settingRows = new Map<string, string>();
+const settingUpserts: string[] = [];
+shadowPrismaModel(prisma, "setting", {
+  findMany: async (args: { where: { key: { startsWith: string } } }) =>
+    [...settingRows].filter(([k]) => k.startsWith(args.where.key.startsWith)).map(([key, value]) => ({ key, value })),
+  upsert: async (args: { where: { key: string }; create: { key: string; value: string } }) => {
+    settingUpserts.push(args.where.key);
+    settingRows.set(args.where.key, args.create.value);
+    return args.create;
+  },
 });
 let library: { tmdbId: number; mediaType: string }[] = [];
 let requests: { tmdbId: number; mediaType: string }[] = [];
@@ -97,8 +110,9 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 beforeEach(() => {
+  settingRows.clear();
+  settingUpserts.length = 0;
   users = [];
-  userReads = 0;
   library = [];
   requests = [];
   delete process.env.SUMMONARR_DEFAULT_LOCALE;
@@ -243,41 +257,68 @@ test("calendar titles come from the cache only — a miss stays English and noth
   assert.equal((await cachedLocalizedTitles([{ tmdbId: 50, mediaType: "tv" }], "en")).size, 0);
 });
 
-test("notification titles follow each REQUESTER's stored language, else the instance default", async () => {
+test("titleResolver: one resolution per recipient language; English, unknown ids and English-only sets cost nothing", async () => {
   seed("movie:60:i18n:v2", { de: { title: "Der Film" }, it: { title: "Il film" } });
-  users = [
-    { id: "u-de", locale: "de", deactivatedAt: null },
-    { id: "u-none", locale: null, deactivatedAt: null },
-  ];
-  const rows = [
-    { requestedBy: "u-de", tmdbId: 60, mediaType: "MOVIE", title: "The Movie" },
-    { requestedBy: "u-none", tmdbId: 60, mediaType: "MOVIE", title: "The Movie" },
-    { requestedBy: "u-de", tmdbId: null, mediaType: "MOVIE", title: "No id" },
-  ];
-  let out = await localizeNotificationTitles(rows);
-  assert.deepEqual(out.map((r) => r.title), ["Der Film", "The Movie", "No id"]);
+  const ref = { tmdbId: 60, mediaType: "MOVIE", title: "The Movie" };
+  const noId = { tmdbId: null, mediaType: "MOVIE", title: "No id" };
+  const resolve = await titleResolver([ref, noId], ["de", "it", "en"]);
+  assert.deepEqual(
+    [resolve(ref, "de"), resolve(ref, "it"), resolve(ref, "en"), resolve(ref, "fr"), resolve(noId, "de")],
+    ["Der Film", "Il film", "The Movie", "The Movie", "No id"],
+  );
 
-  process.env.SUMMONARR_DEFAULT_LOCALE = "it";
-  out = await localizeNotificationTitles(rows);
-  assert.deepEqual(out.map((r) => r.title), ["Der Film", "Il film", "No id"], "a null locale reads the instance default");
-
-  // A caller that already read the locales passes them and costs no query.
-  userReads = 0;
-  out = await localizeNotificationTitles(rows, new Map([["u-de", "de"], ["u-none", "en"]]));
-  assert.equal(userReads, 0);
-  assert.deepEqual(out.map((r) => r.title), ["Der Film", "The Movie", "No id"]);
-
-  assert.equal(await localizedTitleFor({ tmdbId: 60, mediaType: "MOVIE", title: "The Movie" }, "de"), "Der Film");
-  assert.equal(await localizedTitleFor({ tmdbId: 60, mediaType: "MOVIE", title: "The Movie" }, "en"), "The Movie");
+  cacheReads = 0;
+  const english = await titleResolver([ref], ["en", "en"]);
+  assert.equal(english(ref, "en"), "The Movie");
+  assert.equal(cacheReads, 0, "an all-English recipient set never reads the cache");
+  assert.equal(fetched.length, 0);
 });
 
-test("an English recipient set never reads the cache or fetches", async () => {
-  users = [{ id: "u", locale: null, deactivatedAt: null }];
-  const rows = [{ requestedBy: "u", tmdbId: 70, mediaType: "TV", title: "Show" }];
-  const out = await localizeNotificationTitles(rows);
-  assert.equal(out, rows);
-  assert.equal(cacheReads, 0);
-  assert.equal(fetched.length, 0);
+test("localizedTitleFor: a null stored locale reads the instance default", async () => {
+  seed("tv:61:i18n:v2", { it: { title: "La serie" } });
+  const ref = { tmdbId: 61, mediaType: "TV", title: "The Show" };
+  assert.equal(await localizedTitleFor(ref, null), "The Show");
+  process.env.SUMMONARR_DEFAULT_LOCALE = "it";
+  assert.equal(await localizedTitleFor(ref, null), "La serie");
+  assert.equal(await localizedTitleFor(ref, "en"), "The Show", "a stored English choice wins over the default");
+});
+
+test("localizeStoredTitles: inbox rows in the reader's language, untouched for English", async () => {
+  seed("movie:62:i18n:v2", { pt: { title: "O Filme" } });
+  seed("movie:63:i18n:v2", {});
+  const rows = [
+    { id: "n1", title: "The Movie", tmdbId: 62, mediaType: "MOVIE" as const },
+    { id: "n2", title: "Untranslated", tmdbId: 63, mediaType: "MOVIE" as const },
+  ];
+  const out = await localizeStoredTitles(rows, "pt");
+  assert.deepEqual(out.map((r) => r.title), ["O Filme", "Untranslated"]);
+  assert.equal(out[1], rows[1], "an unchanged row is returned as-is");
+  assert.equal(await localizeStoredTitles(rows, "en"), rows);
+});
+
+test("a collection name is localized from /collection/<id>/translations and cached", async () => {
+  respond = (url) => {
+    assert.equal(url.pathname, "/3/collection/70/translations");
+    return json({ translations: [{ iso_639_1: "fr", iso_3166_1: "FR", data: { title: "Saga Truc" } }] });
+  };
+  assert.equal(await localizedCollectionName(70, "Thing Collection", "fr"), "Saga Truc");
+  assert.equal(await localizedCollectionName(70, "Thing Collection", "de"), "Thing Collection");
+  assert.equal(fetched.length, 1);
+  assert.equal(await localizedCollectionName(70, "Thing Collection", "en"), "Thing Collection");
+});
+
+test("a served language is stamped (throttled) and counts as in use; a stale stamp does not", async () => {
+  assert.equal(await nonEnglishInUse(), false);
+  seed("movie:64:i18n:v2", {});
+  // "pt": the throttle is per PROCESS, and no earlier test in this file serves
+  // Portuguese through localizeMedia.
+  await localizeMedia([movie(64)], "pt");
+  await localizeMedia([movie(64)], "pt");
+  await new Promise((r) => setTimeout(r, 0)); // the stamp is fire-and-forget
+  assert.deepEqual(settingUpserts, ["contentLocaleSeen:pt"], "stamped once, not per call");
+  assert.equal(await nonEnglishInUse(), true);
+  settingRows.set("contentLocaleSeen:pt", new Date(Date.now() - 31 * 86_400_000).toISOString());
+  assert.equal(await nonEnglishInUse(), false, "older than 30 days ⇒ not in use");
 });
 
 test("a biography is localized from /person/<id>/translations and cached; English is a no-op", async () => {

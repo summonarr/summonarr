@@ -7,6 +7,7 @@ import { encryptForDevice } from "@/lib/push-e2e";
 import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
 import { settleLimit } from "@/lib/concurrency";
 import { localeForUser, translatorFor } from "@/lib/i18n/server-locale";
+import { titleResolver, type TitleResolver } from "@/lib/tmdb-localize";
 import type { Locale } from "@/lib/i18n/locales";
 import type { Translator } from "@/lib/i18n/translate";
 import { issueTypeLabelT, mediaLabelT } from "@/lib/notify-i18n";
@@ -42,19 +43,25 @@ type PushPayload = {
 // Builds a notification once per recipient LOCALE (not once per device) and
 // attaches the matching generic APNs alert. `user` is the recipient row (or
 // anything carrying its stored `locale`); null/absent → the instance default.
-function localizedPayloads(build: (t: Translator) => Omit<PushPayload, "alert">) {
+function localizedPayloads(build: (t: Translator, locale: Locale) => Omit<PushPayload, "alert">) {
   const byLocale = new Map<Locale, PushPayload>();
   return (user: { locale?: string | null } | null | undefined): PushPayload => {
     const locale = localeForUser(user);
     let payload = byLocale.get(locale);
     if (!payload) {
       const t = translatorFor(locale);
-      const built = build(t);
+      const built = build(t, locale);
       payload = { ...built, alert: apnsAlert(built.category, t) };
       byLocale.set(locale, payload);
     }
     return payload;
   };
+}
+
+// The languages a set of recipients read — what titleResolver resolves media
+// titles for (guardrail 40a).
+function recipientLocales(users: readonly ({ locale?: string | null } | null | undefined)[]): Locale[] {
+  return users.map((u) => localeForUser(u));
 }
 
 // Recipient rows join the subscription to its user's stored locale.
@@ -540,6 +547,7 @@ function requestDeepLink(requestId: string | null | undefined): string | undefin
 export async function notifyAdminsNewRequestPush(data: {
   title: string;
   mediaType: string;
+  tmdbId?: number;
   requestedBy: string;
   requestId?: string;
   excludeUserId?: string;
@@ -551,9 +559,10 @@ export async function notifyAdminsNewRequestPush(data: {
     const subs = await getAdminSubscriptions(data.excludeUserId);
     if (!subs.length) return;
 
-    const payloadFor = localizedPayloads((t) => ({
+    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+    const payloadFor = localizedPayloads((t, locale) => ({
       title: t("notify.push.newRequest.title", { media: mediaLabelT(t, data.mediaType) }),
-      body: t("notify.push.newRequest.body", { title: data.title, user: data.requestedBy }),
+      body: t("notify.push.newRequest.body", { title: resolve(data, locale), user: data.requestedBy }),
       url: "/admin",
       category: "new_request",
       deepLink: requestDeepLink(data.requestId),
@@ -568,6 +577,8 @@ export async function notifyAdminsNewRequestPush(data: {
 export async function notifyUserIssueMessagePush(data: {
   userId: string;
   title: string;
+  tmdbId?: number;
+  mediaType?: string;
   body: string;
   issueId?: string;
 }) {
@@ -581,8 +592,9 @@ export async function notifyUserIssueMessagePush(data: {
     });
     if (!subs.length) return;
 
-    const payloadFor = localizedPayloads((t) => ({
-      title: t("notify.push.userIssueMessage.title", { title: data.title }),
+    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+    const payloadFor = localizedPayloads((t, locale) => ({
+      title: t("notify.push.userIssueMessage.title", { title: resolve(data, locale) }),
       body: data.body.length > 100 ? data.body.slice(0, 97) + "…" : data.body,
       url: data.issueId ? `/issues?selected=${data.issueId}` : "/issues",
       category: "issue_reply",
@@ -597,6 +609,8 @@ export async function notifyUserIssueMessagePush(data: {
 export async function notifyUserIssueResolvedPush(data: {
   userId: string;
   title: string;
+  tmdbId?: number;
+  mediaType?: string;
   resolution?: string | null;
   issueId?: string;
 }) {
@@ -611,8 +625,9 @@ export async function notifyUserIssueResolvedPush(data: {
     if (!subs.length) return;
 
     const resolution = data.resolution?.trim();
-    const payloadFor = localizedPayloads((t) => ({
-      title: t("notify.push.issueResolved.title", { title: data.title }),
+    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+    const payloadFor = localizedPayloads((t, locale) => ({
+      title: t("notify.push.issueResolved.title", { title: resolve(data, locale) }),
       body: resolution
         ? resolution.length > 100
           ? resolution.slice(0, 97) + "…"
@@ -630,6 +645,8 @@ export async function notifyUserIssueResolvedPush(data: {
 
 export async function notifyAdminsIssueMessagePush(data: {
   title: string;
+  tmdbId?: number;
+  mediaType?: string;
   userName: string;
   body: string;
   excludeUserId?: string;
@@ -647,10 +664,11 @@ export async function notifyAdminsIssueMessagePush(data: {
     });
     if (!subs.length) return;
 
-    const payloadFor = localizedPayloads((t) => ({
+    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+    const payloadFor = localizedPayloads((t, locale) => ({
       title: data.fromAdmin
-        ? t("notify.push.adminIssueMessage.titleFromAdmin", { title: data.title })
-        : t("notify.push.adminIssueMessage.title", { title: data.title }),
+        ? t("notify.push.adminIssueMessage.titleFromAdmin", { title: resolve(data, locale) })
+        : t("notify.push.adminIssueMessage.title", { title: resolve(data, locale) }),
       body: `${data.userName}: ${data.body.length > 80 ? data.body.slice(0, 77) + "…" : data.body}`,
       url: data.issueId ? `/admin/issues?selected=${data.issueId}` : "/admin/issues",
       category: "issue_reply",
@@ -676,6 +694,8 @@ export type AdminGrabPushOutcome =
 export async function notifyAdminGrabCompletedPush(data: {
   userId: string;
   title: string;
+  tmdbId?: number;
+  mediaType?: string;
   scope: string;
   seasonNumber?: number | null;
   episodeNumber?: number | null;
@@ -699,7 +719,8 @@ export async function notifyAdminGrabCompletedPush(data: {
     // retry forever.
     if (!ctx.keys && !subs.some((s) => s.platform === "ios")) return "skipped-no-keys";
 
-    const payloadFor = localizedPayloads((t) => {
+    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+    const payloadFor = localizedPayloads((t, locale) => {
       let scopeLabel = "";
       if (data.scope === "EPISODE" && data.seasonNumber != null && data.episodeNumber != null) {
         scopeLabel = ` S${String(data.seasonNumber).padStart(2, "0")}E${String(data.episodeNumber).padStart(2, "0")}`;
@@ -708,7 +729,7 @@ export async function notifyAdminGrabCompletedPush(data: {
       }
       return {
         title: t("notify.push.apnsTitle.grab_complete"),
-        body: t("notify.push.grab.body", { title: data.title, scope: scopeLabel }),
+        body: t("notify.push.grab.body", { title: resolve(data, locale), scope: scopeLabel }),
         url: `/issues?selected=${data.issueId}`,
         category: "grab_complete",
       };
@@ -725,30 +746,30 @@ export async function notifyAdminGrabCompletedPush(data: {
 
 type RequestPushInfo = { title: string; mediaType: string; tmdbId?: number };
 
-function approvedPayloads(r: RequestPushInfo) {
-  return localizedPayloads((t) => ({
+function approvedPayloads(r: RequestPushInfo, resolve: TitleResolver) {
+  return localizedPayloads((t, locale) => ({
     title: t("notify.push.approved.title"),
-    body: t("notify.push.approved.body", { media: mediaLabelT(t, r.mediaType), title: r.title }),
+    body: t("notify.push.approved.body", { media: mediaLabelT(t, r.mediaType), title: resolve(r, locale) }),
     url: "/requests",
     category: "approved",
     deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
   }));
 }
 
-function declinedPayloads(r: RequestPushInfo) {
-  return localizedPayloads((t) => ({
+function declinedPayloads(r: RequestPushInfo, resolve: TitleResolver) {
+  return localizedPayloads((t, locale) => ({
     title: t("notify.push.declined.title"),
-    body: t("notify.push.declined.body", { media: mediaLabelT(t, r.mediaType), title: r.title }),
+    body: t("notify.push.declined.body", { media: mediaLabelT(t, r.mediaType), title: resolve(r, locale) }),
     url: "/requests",
     category: "declined",
     deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
   }));
 }
 
-function availablePayloads(r: RequestPushInfo) {
-  return localizedPayloads((t) => ({
+function availablePayloads(r: RequestPushInfo, resolve: TitleResolver) {
+  return localizedPayloads((t, locale) => ({
     title: t("notify.push.available.title"),
-    body: t("notify.push.available.body", { media: mediaLabelT(t, r.mediaType), title: r.title }),
+    body: t("notify.push.available.body", { media: mediaLabelT(t, r.mediaType), title: resolve(r, locale) }),
     url: "/requests",
     category: "available",
     deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
@@ -774,7 +795,7 @@ export async function notifyUserRequestApprovedPush(data: {
     const subs = await prisma.pushSubscription.findMany({ where: { userId: data.userId } });
     if (!subs.length) return;
 
-    const payload = approvedPayloads(data)(user);
+    const payload = approvedPayloads(data, await titleResolver([data], recipientLocales([user])))(user);
 
     await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
   } catch (err) {
@@ -801,7 +822,7 @@ export async function notifyUserRequestDeclinedPush(data: {
     const subs = await prisma.pushSubscription.findMany({ where: { userId: data.userId } });
     if (!subs.length) return;
 
-    const payload = declinedPayloads(data)(user);
+    const payload = declinedPayloads(data, await titleResolver([data], recipientLocales([user])))(user);
 
     await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
   } catch (err) {
@@ -833,6 +854,7 @@ export async function notifyUsersRequestsAvailablePush(
     });
     if (!subs.length) return;
 
+    const resolve = await titleResolver(eligible, recipientLocales(users));
     const subsByUser = new Map<string, typeof subs>();
     for (const s of subs) {
       const arr = subsByUser.get(s.userId) ?? [];
@@ -843,7 +865,7 @@ export async function notifyUsersRequestsAvailablePush(
     const jobs = eligible.flatMap((r) => {
       const userSubs = subsByUser.get(r.requestedBy) ?? [];
       if (!userSubs.length) return [];
-      const payload = availablePayloads(r)(userById.get(r.requestedBy));
+      const payload = availablePayloads(r, resolve)(userById.get(r.requestedBy));
       // Send to every one of the user's devices, like the approved/declined pushes.
       return userSubs.map((s) => ({ sub: s, payload }));
     });
@@ -883,6 +905,7 @@ export async function notifyUsersRequestsApprovedPush(
     });
     if (!subs.length) return;
 
+    const resolve = await titleResolver(eligible, recipientLocales(users));
     const subsByUser = new Map<string, typeof subs>();
     for (const s of subs) {
       const arr = subsByUser.get(s.userId) ?? [];
@@ -892,7 +915,7 @@ export async function notifyUsersRequestsApprovedPush(
 
     const jobs = eligible.flatMap((r) => {
       const userSubs = subsByUser.get(r.requestedBy) ?? [];
-      const payload = approvedPayloads(r)(userById.get(r.requestedBy));
+      const payload = approvedPayloads(r, resolve)(userById.get(r.requestedBy));
       return userSubs.map((s) => ({ sub: s, payload }));
     });
     // Bounded fan-out (guardrail 31): batch approvals fan out requests × devices.
@@ -927,6 +950,7 @@ export async function notifyUsersRequestsDeclinedPush(
     });
     if (!subs.length) return;
 
+    const resolve = await titleResolver(eligible, recipientLocales(users));
     const subsByUser = new Map<string, typeof subs>();
     for (const s of subs) {
       const arr = subsByUser.get(s.userId) ?? [];
@@ -936,7 +960,7 @@ export async function notifyUsersRequestsDeclinedPush(
 
     const jobs = eligible.flatMap((r) => {
       const userSubs = subsByUser.get(r.requestedBy) ?? [];
-      const payload = declinedPayloads(r)(userById.get(r.requestedBy));
+      const payload = declinedPayloads(r, resolve)(userById.get(r.requestedBy));
       return userSubs.map((s) => ({ sub: s, payload }));
     });
     // Bounded fan-out (guardrail 31): batch declines fan out requests × devices.
@@ -948,6 +972,8 @@ export async function notifyUsersRequestsDeclinedPush(
 
 export async function notifyAdminsNewIssuePush(data: {
   title: string;
+  tmdbId?: number;
+  mediaType?: string;
   issueType: string;
   reportedBy: string;
   issueId?: string;
@@ -960,9 +986,10 @@ export async function notifyAdminsNewIssuePush(data: {
     const subs = await getIssueAdminSubscriptions({ excludeUserId: data.excludeUserId });
     if (!subs.length) return;
 
-    const payloadFor = localizedPayloads((t) => ({
+    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+    const payloadFor = localizedPayloads((t, locale) => ({
       title: t("notify.push.newIssue.title"),
-      body: t("notify.push.newIssue.body", { title: data.title, issue: issueTypeLabelT(t, data.issueType), user: data.reportedBy }),
+      body: t("notify.push.newIssue.body", { title: resolve(data, locale), issue: issueTypeLabelT(t, data.issueType), user: data.reportedBy }),
       url: data.issueId ? `/admin/issues?selected=${data.issueId}` : "/admin/issues",
       category: "new_issue",
     }));
@@ -1020,10 +1047,11 @@ export async function notifyAdminsDeletionVoteThresholdPush(data: {
     const subs = await getAdminSubscriptions();
     if (!subs.length) return;
 
-    const payloadFor = localizedPayloads((t) => ({
+    const resolve = await titleResolver([data], recipientLocales(subs.map((s) => s.user)));
+    const payloadFor = localizedPayloads((t, locale) => ({
       title: t("notify.push.deletionVote.title"),
       body: t("notify.push.deletionVote.body", {
-        title: data.title,
+        title: resolve(data, locale),
         media: mediaLabelT(t, data.mediaType),
         votes: String(data.voteCount),
       }),

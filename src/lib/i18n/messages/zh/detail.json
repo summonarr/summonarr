@@ -80,5 +80,7 @@
   "detail.status.canceled": "已取消",
   "detail.status.returningSeries": "续订中",
   "detail.status.ended": "已完结",
-  "detail.status.pilot": "试播集"
+  "detail.status.pilot": "试播集",
+  "detail.seasons.numbered": "第 {number} 季",
+  "detail.seasons.specials": "特别篇"
 }

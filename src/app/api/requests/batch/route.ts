@@ -61,7 +61,7 @@ async function fanOutEmails(targets: EmailTarget[], status: "APPROVED" | "DECLIN
         void notifyUserRequestApprovedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, posterPath: t.posterPath, tmdbId: t.tmdbId ?? undefined, locale: u.locale });
       } else {
         if (!u.emailOnDeclined) continue;
-        void notifyUserRequestDeclinedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, adminNote: adminNote ?? null, posterPath: t.posterPath, locale: u.locale });
+        void notifyUserRequestDeclinedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, tmdbId: t.tmdbId ?? undefined, adminNote: adminNote ?? null, posterPath: t.posterPath, locale: u.locale });
       }
     }
   } catch (err) {

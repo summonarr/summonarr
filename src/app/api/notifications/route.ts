@@ -4,7 +4,8 @@ import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
-import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { localeForRequest, translatorForRequest } from "@/lib/i18n/server-locale";
+import { localizeStoredTitles } from "@/lib/tmdb-localize";
 import { renderNotification } from "@/lib/notification-render";
 
 const PAGE_SIZE = 30;
@@ -52,8 +53,11 @@ export const GET = withAuth(async (req, _ctx, session) => {
   // `data` itself is never sent, so the item shape the iOS app decodes is
   // unchanged. Native clients resolve to the instance default (English unless
   // SUMMONARR_DEFAULT_LOCALE says otherwise), which renders the stored copy.
+  // The media title too, in the reader's language (guardrail 40a) — resolved
+  // here at read time from the row's tmdbId, never written back.
   const t = translatorForRequest(req);
-  const items = rows.map(({ data, ...row }) => ({ ...row, ...renderNotification({ ...row, data }, t) }));
+  const localized = await localizeStoredTitles(rows, localeForRequest(req));
+  const items = localized.map(({ data, ...row }) => ({ ...row, ...renderNotification({ ...row, data }, t) }));
   const last = items.length === PAGE_SIZE ? items[items.length - 1] : null;
   const nextCursor = last ? `${last.createdAt.toISOString()}|${last.id}` : null;
   return NextResponse.json({ items, unreadCount, total, nextCursor, pageSize: PAGE_SIZE });

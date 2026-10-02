@@ -481,6 +481,8 @@ export async function POST(req: NextRequest) {
           const outcome = await notifyAdminGrabCompletedPush({
             userId: grab.triggeredById,
             title: grab.title,
+            tmdbId: grab.tmdbId,
+            mediaType: grab.mediaType,
             scope: grab.scope,
             seasonNumber: grab.seasonNumber,
             episodeNumber: grab.episodeNumber,

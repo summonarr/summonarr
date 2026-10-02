@@ -176,14 +176,16 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 - **Five more languages:** French, German, Portuguese (Brazil), Italian and Simplified Chinese, alongside English and Spanish. Pick one from the appearance menu; browsers are matched automatically, and `SUMMONARR_DEFAULT_LOCALE` accepts the new codes (`fr`, `de`, `pt`, `it`, `zh`).
 - **Movie and TV details in your language.** Titles, overviews, taglines, posters, genres and episode names follow the language you picked, wherever TMDB has a translation; anything it lacks stays in English. Person pages show the biography and filmography in your language too.
-- **Notifications and the calendar feed use your language's titles.** Approved, declined and now-available notifications (email, push, Discord and the in-app inbox) and your personal calendar feed name each title in your language. Requests, admin notifications and Radarr/Sonarr keep the English title.
-- When anyone on the server reads a language other than English, the daily library cache job fetches translations ahead of time, so pages and the calendar feed don't wait for them.
+- **Notifications and the calendar feed use your language's titles.** Every request and issue notification (email, push, Discord and the in-app inbox), admin ones included, names the title in the language that message is written in, and your personal calendar feed does too. Posts to a shared Discord channel use the server's default language. Requests and Radarr/Sonarr keep the English title.
+- Collection names and the generic "Season N" / "Specials" season labels are translated too.
+- When anyone on the server reads a language other than English — including visitors whose language comes from their browser — the daily library cache job fetches translations ahead of time, so pages and the calendar feed don't wait for them.
 - **Original language and country** on detail pages are named in your language.
 - **Discord slash commands** show their descriptions and the Movie / TV Show choices in each Discord user's language. Command names stay in English, so `/link token:<code>` still works for everyone. Existing installs re-register the commands on their next restart.
 
 **Fixed**
 
 - German emails lowercased "Film" and "Serie" mid-sentence.
+- Two admin messages built from sentence fragments put stray spaces into Chinese and fixed the word order for every language; each is now one translatable sentence.
 
 ### v0.28.0
 

@@ -186,10 +186,12 @@ export const PATCH = withIssueAdmin(async (
     const selfAction = issue.reportedBy === session.user.id;
     void reporterActive.then((active) => {
       if (!active || selfAction) return;
-      notifyUserIssueResolved(issue.reportedBy, issue.title, issue.mediaType, sanitizedResolution ?? issue.resolution).catch(() => {});
+      notifyUserIssueResolved(issue.reportedBy, issue.title, issue.mediaType, sanitizedResolution ?? issue.resolution, issue.tmdbId).catch(() => {});
       notifyUserIssueResolvedPush({
         userId: issue.reportedBy,
         title: issue.title,
+        tmdbId: issue.tmdbId,
+        mediaType: issue.mediaType,
         resolution: sanitizedResolution ?? issue.resolution,
         issueId: id,
       }).catch(() => {});

@@ -10,6 +10,7 @@ import type { PlexCandidate, CandidatesResponse } from "@/app/api/admin/fix-matc
 import type { FileInfoInstance, FileInfoResponse } from "@/app/api/admin/fix-match/file-info/route";
 import { withBasePath } from "@/lib/base-path";
 import { runFixMatch } from "@/lib/client/fix-match";
+import { rich } from "@/components/settings/forms/rich";
 import { DEFAULT_MEDIA_INSTANCE, mediaInstanceLabel } from "@/lib/media-instances";
 import { useT } from "@/components/i18n/i18n-provider";
 
@@ -720,10 +721,12 @@ export function IssueFixMatchButton({
                   {anyFixDone && (
                     <div className="rounded-lg border border-zinc-700 bg-zinc-900 p-4 space-y-2">
                       <p className="text-xs text-zinc-400 leading-snug">
-                        {t("adminQueue.fixMatch.wrongMatchBefore")}{" "}
-                        <span className="font-medium text-zinc-200">{title}</span>{" "}
-                        <span className="font-mono text-zinc-500">#{tmdbId}</span>{" "}
-                        {t("adminQueue.fixMatch.wrongMatchAfter")}
+                        {/* One sentence with slots, so each language orders the words
+                            itself (a split before/after pair can't be reordered). */}
+                        {rich(t("adminQueue.fixMatch.wrongMatchPrompt"), {
+                          title: <span className="font-medium text-zinc-200">{title}</span>,
+                          id: <span className="font-mono text-zinc-500">#{tmdbId}</span>,
+                        })}
                       </p>
                       {addWrongState === "idle" && (
                         <button

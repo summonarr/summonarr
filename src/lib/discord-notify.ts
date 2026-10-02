@@ -5,6 +5,7 @@ import { hasPermission, Permission, effectivePermissions, parsePermissions } fro
 import { instanceDefaultLocale, localeForUser, translatorFor } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 import type { Locale } from "@/lib/i18n/locales";
+import { localizedTitleFor, titleResolver, type TitleRef } from "@/lib/tmdb-localize";
 import { discordIssueTypeLabelT, mediaLabelT } from "@/lib/notify-i18n";
 
 // Language rule: a DM is written in the linked user's language (their stored
@@ -219,6 +220,7 @@ export async function notifyAdminsNewRequestDiscord(data: {
   requestId: string;
   title: string;
   mediaType: string;
+  tmdbId?: number | null;
   requestedBy: string;
   note: string | null;
   posterPath: string | null;
@@ -234,9 +236,10 @@ export async function notifyAdminsNewRequestDiscord(data: {
 
     const t = channelTranslator();
     const label = mediaLabelT(t, data.mediaType);
+    const localTitle = await localizedTitleFor(data, null); // the channel's language
     const embed: Record<string, unknown> = {
       color: COLORS.pending,
-      title: t("notify.discord.newRequest.title", { title: escMd(data.title) }),
+      title: t("notify.discord.newRequest.title", { title: escMd(localTitle) }),
       description: [
         t("notify.discord.newRequest.description", { media: label, user: escMd(data.requestedBy) }),
         // Prefix every line so a multi-line note stays inside the blockquote.
@@ -280,6 +283,7 @@ export async function notifyAdminsNewIssueDiscord(data: {
   issueId: string;
   title: string;
   mediaType: string;
+  tmdbId?: number | null;
   issueType: string;
   reportedBy: string;
   note: string | null;
@@ -297,9 +301,10 @@ export async function notifyAdminsNewIssueDiscord(data: {
     const t = channelTranslator();
     const label = mediaLabelT(t, data.mediaType);
     const typeLabel = discordIssueTypeLabelT(t, data.issueType);
+    const localTitle = await localizedTitleFor(data, null); // the channel's language
     const embed: Record<string, unknown> = {
       color: COLORS.issue,
-      title: t("notify.discord.newIssue.title", { title: escMd(data.title) }),
+      title: t("notify.discord.newIssue.title", { title: escMd(localTitle) }),
       description: [
         t("notify.discord.newIssue.description", { media: label, issue: escMd(typeLabel), user: escMd(data.reportedBy) }),
         // Prefix every line so a multi-line note stays inside the blockquote.
@@ -418,7 +423,15 @@ async function sendDm(botToken: string, discordId: string, embed: Embed): Promis
 // `build` renders the embed in the language chosen for this delivery (see
 // recipientLocale): the shared notify channel → instance default, a DM → the
 // user's own locale.
-async function notifyUser(userId: string, build: (t: Translator, locale: Locale) => Embed, prefKey?: "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "notifyOnIssue"): Promise<void> {
+// `titleRef`: the media title the embed names, resolved in the language the
+// embed is written in — the instance default when it goes to the shared
+// channel, the user's own language in a DM (guardrail 40a). `build` receives it.
+async function notifyUser(
+  userId: string,
+  build: (t: Translator, locale: Locale, title: string) => Embed,
+  prefKey?: "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "notifyOnIssue",
+  titleRef?: TitleRef,
+): Promise<void> {
   try {
     const cfg = await getConfig();
     if (!cfg) return;
@@ -431,7 +444,8 @@ async function notifyUser(userId: string, build: (t: Translator, locale: Locale)
     if (prefKey && user[prefKey] === false) return;
 
     const locale = recipientLocale(!!cfg.channelId, user);
-    const embed = build(translatorFor(locale), locale);
+    const title = titleRef ? (await titleResolver([titleRef], [locale]))(titleRef, locale) : "";
+    const embed = build(translatorFor(locale), locale, title);
     if (cfg.channelId) {
       await postToChannel(cfg.botToken, cfg.channelId, user.discordId, embed);
     } else {
@@ -473,30 +487,30 @@ function declinedEmbed(t: Translator, title: string, mediaType: string, adminNot
   };
 }
 
-export async function notifyUserRequestApproved(userId: string, title: string, mediaType: string): Promise<void> {
-  await notifyUser(userId, (t) => approvedEmbed(t, title, mediaType), "notifyOnApproved");
+export async function notifyUserRequestApproved(userId: string, title: string, mediaType: string, tmdbId?: number | null): Promise<void> {
+  await notifyUser(userId, (t, _locale, local) => approvedEmbed(t, local, mediaType), "notifyOnApproved", { title, tmdbId, mediaType });
 }
 
-export async function notifyUserDownloadPending(userId: string, title: string, mediaType: string): Promise<void> {
-  await notifyUser(userId, (t) => ({
+export async function notifyUserDownloadPending(userId: string, title: string, mediaType: string, tmdbId?: number | null): Promise<void> {
+  await notifyUser(userId, (t, _locale, local) => ({
     color: COLORS.pending,
-    title: t("notify.discord.downloadPending.title", { title: escMd(title) }),
+    title: t("notify.discord.downloadPending.title", { title: escMd(local) }),
     description: t("notify.discord.downloadPending.description", { media: mediaLabelT(t, mediaType) }),
     timestamp: new Date().toISOString(),
-  }), "notifyOnApproved");
+  }), "notifyOnApproved", { title, tmdbId, mediaType });
 }
 
-export async function notifyUserRequestAvailable(userId: string, title: string, mediaType: string): Promise<void> {
-  await notifyUser(userId, (t) => availableEmbed(t, title, mediaType), "notifyOnAvailable");
+export async function notifyUserRequestAvailable(userId: string, title: string, mediaType: string, tmdbId?: number | null): Promise<void> {
+  await notifyUser(userId, (t, _locale, local) => availableEmbed(t, local, mediaType), "notifyOnAvailable", { title, tmdbId, mediaType });
 }
 
-export async function notifyUserAwaitingRelease(userId: string, title: string, mediaType: string, releaseDate: string | null): Promise<void> {
+export async function notifyUserAwaitingRelease(userId: string, title: string, mediaType: string, releaseDate: string | null, tmdbId?: number | null): Promise<void> {
   // Formatted in UTC: TMDB release dates and Sonarr firstAired are DATE values
   // carried as UTC midnight ("2024-05-01" / "…T00:00:00Z"), so the server's local
   // zone (any TZ west of UTC) would name the PREVIOUS day. Same convention as
   // formatDigitalRelease (format-release-date.ts).
   const parsed = releaseDate ? new Date(releaseDate) : null;
-  await notifyUser(userId, (t, locale) => {
+  await notifyUser(userId, (t, locale, local) => {
     const expected = parsed && !Number.isNaN(parsed.getTime())
       ? ` ${t("notify.discord.awaiting.expected", {
           date: parsed.toLocaleDateString(dateLocaleOf(locale), { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" }),
@@ -504,27 +518,38 @@ export async function notifyUserAwaitingRelease(userId: string, title: string, m
       : "";
     return {
       color: COLORS.pending,
-      title: t("notify.discord.awaiting.title", { title: escMd(title) }),
+      title: t("notify.discord.awaiting.title", { title: escMd(local) }),
       description: t("notify.discord.awaiting.description", { media: mediaLabelT(t, mediaType), expected }),
       timestamp: new Date().toISOString(),
     };
-  }, "notifyOnApproved");
+  }, "notifyOnApproved", { title, tmdbId, mediaType });
 }
 
-export async function notifyUserRequestDeclined(userId: string, title: string, mediaType: string, adminNote?: string | null): Promise<void> {
-  await notifyUser(userId, (t) => declinedEmbed(t, title, mediaType, adminNote), "notifyOnDeclined");
+export async function notifyUserRequestDeclined(userId: string, title: string, mediaType: string, adminNote?: string | null, tmdbId?: number | null): Promise<void> {
+  await notifyUser(userId, (t, _locale, local) => declinedEmbed(t, local, mediaType, adminNote), "notifyOnDeclined", { title, tmdbId, mediaType });
 }
 
-export async function notifyUserIssueMessage(userId: string, title: string, adminName: string, body: string): Promise<void> {
-  await notifyUser(userId, (t) => ({
+export async function notifyUserIssueMessage(
+  userId: string,
+  title: string,
+  adminName: string,
+  body: string,
+  media?: { tmdbId?: number | null; mediaType?: string | null },
+): Promise<void> {
+  await notifyUser(userId, (t, _locale, local) => ({
     color: 0x5865F2,
-    title: t("notify.discord.userIssueMessage.title", { title: escMd(title) }),
+    title: t("notify.discord.userIssueMessage.title", { title: escMd(local) }),
     description: `${t("notify.discord.userIssueMessage.description", { user: escMd(adminName) })}\n\n> ${escMd(body)}`,
     timestamp: new Date().toISOString(),
-  }), "notifyOnIssue");
+  }), "notifyOnIssue", { title, ...media });
 }
 
-export async function notifyAdminsIssueMessage(title: string, userName: string, body: string, opts: { excludeUserId?: string; fromAdmin?: boolean; restrictToUserId?: string } = {}): Promise<void> {
+export async function notifyAdminsIssueMessage(
+  title: string,
+  userName: string,
+  body: string,
+  opts: { excludeUserId?: string; fromAdmin?: boolean; restrictToUserId?: string; tmdbId?: number | null; mediaType?: string | null } = {},
+): Promise<void> {
   try {
     const cfg = await getConfig();
     if (!cfg) return;
@@ -556,13 +581,14 @@ export async function notifyAdminsIssueMessage(title: string, userName: string, 
     });
     if (!admins.length) return;
 
-    // Posted to the shared channel → the instance default language.
+    // Posted to the shared channel → the instance default language, title included.
     const t = channelTranslator();
+    const localTitle = await localizedTitleFor({ title, tmdbId: opts.tmdbId, mediaType: opts.mediaType }, null);
     const embed: Embed = {
       color: 0xFEE75C,
       title: opts.fromAdmin
-        ? t("notify.discord.adminIssueMessage.titleFromAdmin", { title: escMd(title) })
-        : t("notify.discord.adminIssueMessage.title", { title: escMd(title) }),
+        ? t("notify.discord.adminIssueMessage.titleFromAdmin", { title: escMd(localTitle) })
+        : t("notify.discord.adminIssueMessage.title", { title: escMd(localTitle) }),
       description: `${
         opts.fromAdmin
           ? t("notify.discord.adminIssueMessage.descriptionFromAdmin", { user: escMd(userName) })
@@ -583,22 +609,22 @@ export async function notifyAdminsIssueMessage(title: string, userName: string, 
   }
 }
 
-export async function notifyUserIssueResolved(userId: string, title: string, mediaType: string, resolution?: string | null): Promise<void> {
-  await notifyUser(userId, (t) => {
+export async function notifyUserIssueResolved(userId: string, title: string, mediaType: string, resolution?: string | null, tmdbId?: number | null): Promise<void> {
+  await notifyUser(userId, (t, _locale, local) => {
     const resolutionPart = resolution
       ? `\n\n${t("notify.discord.issueResolved.resolution", { resolution: escMd(resolution) })}`
       : "";
     return {
       color: COLORS.available,
-      title: t("notify.discord.issueResolved.title", { title: escMd(title) }),
+      title: t("notify.discord.issueResolved.title", { title: escMd(local) }),
       description: `${t("notify.discord.issueResolved.description", { media: mediaLabelT(t, mediaType) })}${resolutionPart}`,
       timestamp: new Date().toISOString(),
     };
-  }, "notifyOnIssue");
+  }, "notifyOnIssue", { title, tmdbId, mediaType });
 }
 
 export async function notifyUsersRequestsApproved(
-  requests: Array<{ requestedBy: string; title: string; mediaType: string }>
+  requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number | null }>
 ): Promise<void> {
   if (requests.length === 0) return;
   try {
@@ -615,12 +641,15 @@ export async function notifyUsersRequestsApproved(
     });
     const idMap = new Map(users.map((u) => [u.id, u.discordId!]));
     const userById = new Map(users.map((u) => [u.id, u]));
+    // Titles in the language each embed is written in (guardrail 40a).
+    const resolve = await titleResolver(requests, users.map((u) => recipientLocale(!!cfg.channelId, u)));
 
     const tasks = requests.map((r) => () => {
       const discordId = idMap.get(r.requestedBy);
       if (!discordId) return Promise.resolve();
-      const t = translatorFor(recipientLocale(!!cfg.channelId, userById.get(r.requestedBy)));
-      const embed = approvedEmbed(t, r.title, r.mediaType);
+      const locale = recipientLocale(!!cfg.channelId, userById.get(r.requestedBy));
+      const t = translatorFor(locale);
+      const embed = approvedEmbed(t, resolve(r, locale), r.mediaType);
       const send = cfg.channelId
         ? postToChannel(cfg.botToken, cfg.channelId, discordId, embed)
         : enqueueDm(() => sendDm(cfg.botToken, discordId, embed));
@@ -637,7 +666,7 @@ export async function notifyUsersRequestsApproved(
 }
 
 export async function notifyUsersRequestsAvailable(
-  requests: Array<{ requestedBy: string; title: string; mediaType: string }>
+  requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number | null }>
 ): Promise<void> {
   if (requests.length === 0) return;
   try {
@@ -651,12 +680,15 @@ export async function notifyUsersRequestsAvailable(
     });
     const idMap = new Map(users.map((u) => [u.id, u.discordId!]));
     const userById = new Map(users.map((u) => [u.id, u]));
+    // Titles in the language each embed is written in (guardrail 40a).
+    const resolve = await titleResolver(requests, users.map((u) => recipientLocale(!!cfg.channelId, u)));
 
     const tasks = requests.map((r) => () => {
       const discordId = idMap.get(r.requestedBy);
       if (!discordId) return Promise.resolve();
-      const t = translatorFor(recipientLocale(!!cfg.channelId, userById.get(r.requestedBy)));
-      const embed = availableEmbed(t, r.title, r.mediaType);
+      const locale = recipientLocale(!!cfg.channelId, userById.get(r.requestedBy));
+      const t = translatorFor(locale);
+      const embed = availableEmbed(t, resolve(r, locale), r.mediaType);
       const send = cfg.channelId
         ? postToChannel(cfg.botToken, cfg.channelId, discordId, embed)
         : enqueueDm(() => sendDm(cfg.botToken, discordId, embed));
@@ -673,7 +705,7 @@ export async function notifyUsersRequestsAvailable(
 }
 
 export async function notifyUsersRequestsDeclined(
-  requests: Array<{ requestedBy: string; title: string; mediaType: string }>,
+  requests: Array<{ requestedBy: string; title: string; mediaType: string; tmdbId?: number | null }>,
   adminNote?: string | null
 ): Promise<void> {
   if (requests.length === 0) return;
@@ -689,12 +721,15 @@ export async function notifyUsersRequestsDeclined(
     });
     const idMap = new Map(users.map((u) => [u.id, u.discordId!]));
     const userById = new Map(users.map((u) => [u.id, u]));
+    // Titles in the language each embed is written in (guardrail 40a).
+    const resolve = await titleResolver(requests, users.map((u) => recipientLocale(!!cfg.channelId, u)));
 
     const tasks = requests.map((r) => () => {
       const discordId = idMap.get(r.requestedBy);
       if (!discordId) return Promise.resolve();
-      const t = translatorFor(recipientLocale(!!cfg.channelId, userById.get(r.requestedBy)));
-      const embed = declinedEmbed(t, r.title, r.mediaType, adminNote);
+      const locale = recipientLocale(!!cfg.channelId, userById.get(r.requestedBy));
+      const t = translatorFor(locale);
+      const embed = declinedEmbed(t, resolve(r, locale), r.mediaType, adminNote);
       const send = cfg.channelId
         ? postToChannel(cfg.botToken, cfg.channelId, discordId, embed)
         : enqueueDm(() => sendDm(cfg.botToken, discordId, embed));

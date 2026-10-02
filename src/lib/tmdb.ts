@@ -1011,6 +1011,26 @@ export async function fetchPersonTranslations(id: number): Promise<PersonTransla
   return out;
 }
 
+// A collection's name in each of our languages, from /collection/<id>/translations
+// (one call answers every language); {} when nothing is translated.
+export type CollectionTranslations = Partial<Record<Exclude<Locale, "en">, { name: string }>>;
+export async function fetchCollectionTranslations(id: number): Promise<CollectionTranslations> {
+  const r = await tmdbFetch<{ translations?: { iso_639_1?: string; iso_3166_1?: string; data?: { title?: string; name?: string } }[] }>(
+    `/collection/${id}/translations`,
+  );
+  const byTag = new Map<string, string>();
+  for (const tr of r.translations ?? []) {
+    const name = (tr.data?.title ?? tr.data?.name ?? "").trim();
+    if (tr.iso_639_1 && tr.iso_3166_1 && name) byTag.set(`${tr.iso_639_1}-${tr.iso_3166_1}`, name);
+  }
+  const out: CollectionTranslations = {};
+  for (const [locale, tags] of Object.entries(TMDB_LANGUAGES) as [Exclude<Locale, "en">, readonly string[]][]) {
+    const name = tags.map((t) => byTag.get(t)).find(Boolean);
+    if (name) out[locale] = { name };
+  }
+  return out;
+}
+
 export async function getPersonDetails(id: number): Promise<PersonDetails> {
   // v2: shape grew (biography/birth/death/placeOfBirth + a larger credit cap) —
   // bump the key so pre-existing cached rows don't serve the old shape.

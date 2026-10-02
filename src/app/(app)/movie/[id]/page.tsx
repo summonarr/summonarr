@@ -32,7 +32,7 @@ import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
 import { isBlacklisted } from "@/lib/blacklist";
 import { DetailTitle } from "@/components/layout/detail-title";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
-import { localizeMedia } from "@/lib/tmdb-localize";
+import { localizeMedia, localizedCollectionName } from "@/lib/tmdb-localize";
 import { translateTmdbStatus } from "@/components/media/detail-status";
 
 export default async function MovieDetailPage({
@@ -61,7 +61,12 @@ export default async function MovieDetailPage({
   // Title, overview, tagline and genres in the viewer's language (English is a
   // no-op). The genre list below is fetched in the SAME language so the chips'
   // name → id links keep resolving.
-  const [media] = await localizeMedia([englishMedia], locale);
+  const [[media], collectionName] = await Promise.all([
+    localizeMedia([englishMedia], locale),
+    englishMedia.collectionId && englishMedia.collectionName
+      ? localizedCollectionName(englishMedia.collectionId, englishMedia.collectionName, locale)
+      : Promise.resolve(englishMedia.collectionName ?? null),
+  ]);
 
   // Which Plex/Jellyfin servers this viewer may see. Everything downstream keys off the two
   // library rows below — the availability badges, the ratings bar's Jellyfin score, and the
@@ -404,9 +409,9 @@ export default async function MovieDetailPage({
 
       {cast.length > 0 && <CastSection cast={cast} />}
 
-      {media.collectionId && media.collectionName && (
+      {media.collectionId && collectionName && (
         <CollectionRow
-          collectionName={media.collectionName}
+          collectionName={collectionName}
           items={collectionItems}
           currentId={media.id}
           showPlex={showPlex}

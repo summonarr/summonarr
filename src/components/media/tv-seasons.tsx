@@ -60,6 +60,17 @@ function formatRuntime(min: number | null, t: Translator): string | null {
     : t("detail.runtime.hoursMinutes", { hours: h, minutes: m });
 }
 
+// TMDB's season names are English and, almost always, generic ("Season 2",
+// "Specials") — those two read in the viewer's language; a real name ("Book
+// One: Water") is shown as TMDB has it. Localizing real names would cost a TMDB
+// call per season (guardrail 40a keeps the overlay to one call per title).
+function seasonLabel(season: { seasonNumber: number; name: string }, t: (key: string, vars?: Record<string, string | number>) => string): string {
+  const m = /^Season (\d+)$/.exec(season.name.trim());
+  if (m && Number(m[1]) === season.seasonNumber) return t("detail.seasons.numbered", { number: season.seasonNumber });
+  if (season.name.trim() === "Specials" && season.seasonNumber === 0) return t("detail.seasons.specials");
+  return season.name;
+}
+
 // Collapsible list of seasons. Episodes (and which ones are in the library) are
 // only fetched the first time a season is expanded.
 export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
@@ -192,7 +203,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                   {season.posterPath ? (
                     <Image
                       src={posterUrl(season.posterPath, "w342") ?? ""}
-                      alt={season.name}
+                      alt={seasonLabel(season, t)}
                       fill
                       sizes="44px"
                       className="object-cover"
@@ -219,7 +230,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                         margin: 0,
                       }}
                     >
-                      {season.name}
+                      {seasonLabel(season, t)}
                     </h3>
                     <span
                       className="ds-mono"

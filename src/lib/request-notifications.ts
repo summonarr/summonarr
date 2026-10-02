@@ -8,7 +8,6 @@ import { resolveUserNotificationEmail } from "./notification-email";
 import { claimAvailableNotificationWinners } from "./notify-available";
 import { createInAppNotification } from "./in-app-notify";
 import { buildNotificationData } from "./notification-data";
-import { localizedTitleFor } from "./tmdb-localize";
 
 interface RequestInfo {
   requestedBy: string;
@@ -295,13 +294,10 @@ export function notifyRequestStatusChange(
   // lookup covers all four channels; the batch "now available" path has its own
   // chokepoint in claimAvailableNotificationWinners.
   void prisma.user
-    .findUnique({ where: { id: requestedBy }, select: { deactivatedAt: true, locale: true } })
-    .then(async (u) => {
+    .findUnique({ where: { id: requestedBy }, select: { deactivatedAt: true } })
+    .then((u) => {
       if (u?.deactivatedAt) return;
-      // The title in the requester's language, for every channel at once
-      // (guardrail 40a; the stored request keeps its English title).
-      const title = await localizedTitleFor(request, u?.locale);
-      dispatchRequestStatusChange(status, title === request.title ? request : { ...request, title });
+      dispatchRequestStatusChange(status, request);
     })
     .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
 }
@@ -314,7 +310,7 @@ function dispatchRequestStatusChange(
 
   if (status === "APPROVED") {
     writeInAppNotification(requestedBy, "REQUEST_APPROVED", { title, mediaType, tmdbId, posterPath });
-    notifyUserRequestApproved(requestedBy, title, mediaType).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+    notifyUserRequestApproved(requestedBy, title, mediaType, tmdbId).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUserRequestApprovedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnApproved: true, locale: true } })
       .then((u) => {
@@ -326,7 +322,7 @@ function dispatchRequestStatusChange(
 
   if (status === "AVAILABLE") {
     writeInAppNotification(requestedBy, "REQUEST_AVAILABLE", { title, mediaType, tmdbId, posterPath });
-    notifyUserRequestAvailable(requestedBy, title, mediaType).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+    notifyUserRequestAvailable(requestedBy, title, mediaType, tmdbId).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUsersRequestsAvailablePush([{ requestedBy, title, mediaType, tmdbId }]).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnAvailable: true, locale: true } })
       .then((u) => {
@@ -338,12 +334,12 @@ function dispatchRequestStatusChange(
 
   if (status === "DECLINED") {
     writeInAppNotification(requestedBy, "REQUEST_DECLINED", { title, mediaType, tmdbId, posterPath });
-    notifyUserRequestDeclined(requestedBy, title, mediaType, request.adminNote).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+    notifyUserRequestDeclined(requestedBy, title, mediaType, request.adminNote, tmdbId).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUserRequestDeclinedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnDeclined: true, locale: true } })
       .then((u) => {
         const to = u && resolveUserNotificationEmail(u);
-        if (to && u.emailOnDeclined) notifyUserRequestDeclinedEmail({ toEmail: to, title, mediaType, adminNote: request.adminNote, posterPath, locale: u.locale });
+        if (to && u.emailOnDeclined) notifyUserRequestDeclinedEmail({ toEmail: to, title, mediaType, tmdbId, adminNote: request.adminNote, posterPath, locale: u.locale });
       })
       .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
   }

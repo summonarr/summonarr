@@ -47,12 +47,7 @@ const userFindManyArgs: unknown[] = [];
 shadowPrismaModel(prisma, "user", {
   findMany: async (args: { where: { id: { in: string[] } } }) => {
     userFindManyArgs.push(args);
-    // One read of every requester: who is disabled, and which language they read.
-    return args.where.id.in.map((id) => ({
-      id,
-      deactivatedAt: disabledUserIds.includes(id) ? new Date("2026-07-01T00:00:00.000Z") : null,
-      locale: null,
-    }));
+    return args.where.id.in.filter((id) => disabledUserIds.includes(id)).map((id) => ({ id }));
   },
 });
 
@@ -157,7 +152,7 @@ test("the disabled-recipient lookup runs once, deduped, and only when there are 
   await claimAvailableNotificationWinners([cand("a", "same"), cand("b", "same")]);
   assert.equal(userFindManyArgs.length, 1);
   assert.deepEqual(userFindManyArgs[0], {
-    where: { id: { in: ["same"] } },
-    select: { id: true, deactivatedAt: true, locale: true },
+    where: { id: { in: ["same"] }, deactivatedAt: { not: null } },
+    select: { id: true },
   });
 });

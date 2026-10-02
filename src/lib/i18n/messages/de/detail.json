@@ -80,5 +80,7 @@
   "detail.status.canceled": "Abgesetzt",
   "detail.status.returningSeries": "Wird fortgesetzt",
   "detail.status.ended": "Beendet",
-  "detail.status.pilot": "Pilotfolge"
+  "detail.status.pilot": "Pilotfolge",
+  "detail.seasons.numbered": "Staffel {number}",
+  "detail.seasons.specials": "Specials"
 }

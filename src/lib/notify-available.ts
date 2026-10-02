@@ -1,7 +1,6 @@
 import "server-only";
 import { Prisma } from "@/generated/prisma";
 import { prisma } from "./prisma";
-import { localizeNotificationTitles } from "./tmdb-localize";
 
 type MediaType = "MOVIE" | "TV";
 
@@ -94,19 +93,13 @@ export async function claimAvailableNotifications<T extends { id: string; reques
 
   // Only runs when there is actually something to deliver, so the steady-state
   // sync (zero winners) pays nothing for it.
-  // ONE read of the requesters serves both delivery concerns: who is disabled,
-  // and which language each one reads.
-  const requesters = await prisma.user.findMany({
-    where: { id: { in: [...new Set(claimed.map((r) => r.requestedBy))] } },
-    select: { id: true, deactivatedAt: true, locale: true },
+  const disabled = await prisma.user.findMany({
+    where: { id: { in: [...new Set(claimed.map((r) => r.requestedBy))] }, deactivatedAt: { not: null } },
+    select: { id: true },
   });
-  const disabledIds = new Set(requesters.filter((u) => u.deactivatedAt).map((u) => u.id));
-  const deliverable = disabledIds.size === 0 ? claimed : claimed.filter((r) => !disabledIds.has(r.requestedBy));
-  // Every delivery channel reads its title from these rows, so each requester's
-  // title is localized HERE, once (guardrail 40a). `claimed` stays as given —
-  // the transition consequences key off it and never display a title.
-  const localeByUser = new Map(requesters.map((u) => [u.id, u.locale ?? null]));
-  return { claimed, deliverable: await localizeNotificationTitles(deliverable, localeByUser) };
+  if (disabled.length === 0) return { claimed, deliverable: claimed };
+  const disabledIds = new Set(disabled.map((u) => u.id));
+  return { claimed, deliverable: claimed.filter((r) => !disabledIds.has(r.requestedBy)) };
 }
 
 /**
