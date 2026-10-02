@@ -4,12 +4,14 @@ import { prisma } from "@/lib/prisma";
 import { randomBytes } from "crypto";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { readJsonCappedOr } from "@/lib/body-size";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const DISCORD_SNOWFLAKE = /^\d{17,20}$/;
 
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`discord-link:${session.user.id}`, 5, 10 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
 
   let discordId: string | null = null;
@@ -24,7 +26,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const rawDiscordId = body.discordId === undefined || body.discordId === null ? "" : String(body.discordId).trim();
   if (rawDiscordId.length > 0) {
     if (!DISCORD_SNOWFLAKE.test(rawDiscordId)) {
-      return NextResponse.json({ error: "Invalid discordId" }, { status: 400 });
+      return NextResponse.json({ error: t("apiUser.discord.invalidDiscordId") }, { status: 400 });
     }
     discordId = rawDiscordId;
   }

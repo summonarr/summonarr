@@ -11,6 +11,7 @@ import {
   parseRecommendationSort,
   parseRecommendationType,
 } from "@/lib/recommendation-view";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Native-client mirror of the /for-you page: the FULL ranked per-user
 // recommendation set (the /api/home rail serves only the top slice), enriched
@@ -25,12 +26,13 @@ import {
 // surfaced it) — additive, so an older client that does not decode it is
 // unaffected.
 export const GET = withAuth(async (request, _ctx, session) => {
+  const t = translatorForRequest(request);
   if (!checkRateLimit(`recommendations:${session.user.id}`, 30, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequests") }, { status: 429 });
   }
 
   if (!(await isFeatureEnabled("feature.page.forYou"))) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
   }
 
   const params = request.nextUrl.searchParams;
@@ -55,6 +57,6 @@ export const GET = withAuth(async (request, _ctx, session) => {
     return NextResponse.json({ items, total: items.length, available: enriched.length });
   } catch (err) {
     console.error("[recommendations] Failed:", err);
-    return NextResponse.json({ error: "Failed to fetch" }, { status: 500 });
+    return NextResponse.json({ error: t("apiUser.common.fetchFailed") }, { status: 500 });
   }
 });

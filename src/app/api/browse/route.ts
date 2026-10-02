@@ -4,10 +4,12 @@ import { parsePageParam } from "@/lib/pagination";
 import { type DiscoverFilters } from "@/lib/tmdb";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { runBrowseQuery } from "@/lib/browse-query";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const GET = withAuth(async (request, _ctx, session) => {
+  const t = translatorForRequest(request);
   if (!checkRateLimit(`browse:${session.user.id}`, 30, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequests") }, { status: 429 });
   }
 
   const sp = request.nextUrl.searchParams;
@@ -42,6 +44,6 @@ export const GET = withAuth(async (request, _ctx, session) => {
     return NextResponse.json({ items, totalPages, page });
   } catch (err) {
     console.error("[browse] Failed:", err);
-    return NextResponse.json({ error: "Failed to fetch" }, { status: 500 });
+    return NextResponse.json({ error: t("apiUser.common.fetchFailed") }, { status: 500 });
   }
 });

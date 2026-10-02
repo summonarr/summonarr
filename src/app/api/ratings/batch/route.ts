@@ -4,6 +4,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { attachRatingsUnified } from "@/lib/omdb-availability";
 import type { TmdbMedia, MediaType } from "@/lib/tmdb-types";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const MAX_BATCH = 200;
 
@@ -13,8 +14,9 @@ type ReqItem = { id: number; type: MediaType; releaseDate: string | null };
 // for up to MAX_BATCH deduped tmdbId+type items in one blocking pass; used to
 // hydrate ratings across a grid of cards.
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`ratings-batch:${session.user.id}`, 10, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequests") }, { status: 429 });
   }
 
   const parsed = await readJsonCapped(req, 1048576);
@@ -23,11 +25,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
 
   const rawItems = (body as { items?: unknown })?.items;
   if (!Array.isArray(rawItems)) {
-    return NextResponse.json({ error: "Missing items array" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.ratings.itemsMissing") }, { status: 400 });
   }
   if (rawItems.length === 0) return NextResponse.json({ ratings: {} });
   if (rawItems.length > MAX_BATCH) {
-    return NextResponse.json({ error: `Too many items (max ${MAX_BATCH})` }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyItems", { max: MAX_BATCH }) }, { status: 400 });
   }
 
   const seen = new Set<string>();

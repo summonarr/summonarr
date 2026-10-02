@@ -5,6 +5,7 @@ import { decryptToken } from "@/lib/token-crypto";
 import { sendPushNotification } from "@/lib/web-push";
 import { sendApnsTestToUser, buildVapidContact } from "@/lib/push";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 type TestResult = {
   platform: "ios" | "web";
@@ -20,9 +21,10 @@ type TestResult = {
 // manual diagnostic behind the "Send test notification" button; it bypasses the
 // `feature.integration.push` flag and per-event preferences so the pipeline can
 // be verified before either is configured.
-export const POST = withAuth(async (_req, _ctx, session) => {
+export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`push-test:${session.user.id}`, 5, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequests") }, { status: 429 });
   }
 
   const subs = await prisma.pushSubscription.findMany({
@@ -30,7 +32,7 @@ export const POST = withAuth(async (_req, _ctx, session) => {
   });
   if (!subs.length) {
     return NextResponse.json(
-      { error: "No push subscription found for your account — register the app or subscribe in a browser first." },
+      { error: t("apiUser.push.noSubscription") },
       { status: 404 },
     );
   }
@@ -58,7 +60,7 @@ export const POST = withAuth(async (_req, _ctx, session) => {
           platform: "web",
           endpoint: s.endpoint.slice(0, 28) + "…",
           ok: false,
-          message: "VAPID keys not configured",
+          message: t("apiUser.push.vapidMissing"),
         })),
       );
     } else {

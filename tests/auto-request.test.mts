@@ -688,3 +688,44 @@ test("rememberPlexWatchlistToken never stores a token for a user without the per
   await plexWatchlist.rememberPlexWatchlistToken(optedOut.id, "tok-b");
   assert.equal(opsOf("account.upsert").length, before, "a full-account Plex credential is kept only when the cron would use it");
 });
+
+// ═══ language of the user-facing text ═════════════════════════════════════════
+
+async function addToWatchlistWith(u: DbUser, headers: Record<string, string>): Promise<Response> {
+  const token = await tokenFor(u);
+  const { cookie, ...rest } = headers;
+  const req = new NextRequest("http://localhost:3000/api/watchlist", {
+    method: "POST",
+    headers: { cookie: `${getSessionCookieName()}=${token}${cookie ? `; ${cookie}` : ""}`, "content-type": "application/json", ...rest },
+    body: JSON.stringify({ tmdbId: 603, mediaType: "MOVIE" }),
+  });
+  return inScope(() => postWatchlist(req, undefined));
+}
+
+test("i18n: autoRequest.message follows the request's language; the outcome and the stored note do not", async () => {
+  settings.set(FLAG, "true");
+  const en = await addToWatchlist(addUser());
+  const enBody = await en.json() as { autoRequest: { outcome: string; message: string } };
+  assert.equal(enBody.autoRequest.message, "Requested — waiting for approval");
+
+  const es = await addToWatchlistWith(addUser(), { cookie: "summonarr-locale=es" });
+  const esBody = await es.json() as { autoRequest: { outcome: string; message: string } };
+  assert.equal(esBody.autoRequest.outcome, "requested");
+  assert.equal(esBody.autoRequest.message, "Solicitado — pendiente de aprobación");
+  const notes = opsOf("mediaRequest.create").map((o) => (o.args as { data: { note: string } }).data.note);
+  assert.deepEqual(notes, ["Auto-requested from watchlist", "Auto-requested from watchlist"]);
+});
+
+test("i18n: a chokepoint refusal reaches autoRequest.message translated, and the watchlist 409 is translated too", async () => {
+  settings.set(FLAG, "true");
+  blacklisted = [{ tmdbId: 603, mediaType: "MOVIE" }];
+  const res = await addToWatchlistWith(addUser(), { "accept-language": "es" });
+  const body = await res.json() as { autoRequest: { outcome: string; message: string } };
+  assert.equal(body.autoRequest.outcome, "blacklisted");
+  assert.equal(body.autoRequest.message, "Un administrador ha bloqueado este título");
+
+  watchlistConflict = true;
+  const dup = await addToWatchlistWith(addUser(), { cookie: "summonarr-locale=es" });
+  assert.equal(dup.status, 409);
+  assert.deepEqual(await dup.json(), { error: "Ya está en tu lista de seguimiento" });
+});

@@ -5,14 +5,16 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit, auditContext } from "@/lib/audit";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { isFeatureEnabled } from "@/lib/features";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const DELETE = withAuth(async (
   req,
   { params }: { params: Promise<{ tmdbId: string }> },
   session
 ) => {
+  const t = translatorForRequest(req);
   if (!(await isFeatureEnabled("feature.page.votes"))) {
-    return NextResponse.json({ error: "Deletion voting is disabled" }, { status: 403 });
+    return NextResponse.json({ error: t("apiUser.votes.disabled") }, { status: 403 });
   }
 
   const maint = await maintenanceGuard(session);
@@ -20,11 +22,11 @@ export const DELETE = withAuth(async (
 
   const { tmdbId: rawId } = await params;
   const tmdbId = parseInt(rawId, 10);
-  if (isNaN(tmdbId)) return NextResponse.json({ error: "Invalid tmdbId" }, { status: 400 });
+  if (isNaN(tmdbId)) return NextResponse.json({ error: t("apiUser.votes.invalidTmdbId") }, { status: 400 });
 
   const mediaType = req.nextUrl.searchParams.get("mediaType");
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: "mediaType query param must be MOVIE or TV" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.votes.mediaTypeQueryInvalid") }, { status: 400 });
   }
 
   // Re-arm the one-shot threshold alert if removing this vote drops the tally
@@ -50,7 +52,7 @@ export const DELETE = withAuth(async (
   });
 
   if (deleted.count === 0) {
-    return NextResponse.json({ error: "Vote not found" }, { status: 404 });
+    return NextResponse.json({ error: t("apiUser.votes.notFound") }, { status: 404 });
   }
 
   return NextResponse.json({ ok: true });
@@ -61,20 +63,21 @@ export const PATCH = withAdmin(async (
   { params }: { params: Promise<{ tmdbId: string }> },
   session
 ) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   if (!checkRateLimit(`votes-dismiss:${session.user.id}`, 10, 60_000)) {
-    return NextResponse.json({ error: "Too many dismiss operations — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.votes.dismissRateLimited") }, { status: 429 });
   }
 
   const { tmdbId: rawId } = await params;
   const tmdbId = parseInt(rawId, 10);
-  if (isNaN(tmdbId)) return NextResponse.json({ error: "Invalid tmdbId" }, { status: 400 });
+  if (isNaN(tmdbId)) return NextResponse.json({ error: t("apiUser.votes.invalidTmdbId") }, { status: 400 });
 
   const mediaType = req.nextUrl.searchParams.get("mediaType");
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: "mediaType query param must be MOVIE or TV" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.votes.mediaTypeQueryInvalid") }, { status: 400 });
   }
 
   // Wrap delete + Setting cleanup in a single transaction so a "notified" flag never

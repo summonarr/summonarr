@@ -17,6 +17,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { getUserRecommendations } from "@/lib/recommendations";
 import { getFeatureFlags } from "@/lib/features";
 import { getRecentlyAddedForViewer, RECENTLY_ADDED_SIZE } from "@/lib/recently-added";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // The home feed for native clients, mirroring the web home page
 // (src/app/(app)/page.tsx): the trending "featured" titles plus the same rails
@@ -67,8 +68,9 @@ function settled<T>(r: PromiseSettledResult<T[]>): T[] {
 }
 
 export const GET = withAuth(async (request, _ctx, session) => {
+  const t = translatorForRequest(request);
   if (!checkRateLimit(`home:${session.user.id}`, 30, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequests") }, { status: 429 });
   }
 
   const hideAvailable = request.nextUrl.searchParams.get("hideAvailable") === "1";
@@ -197,6 +199,6 @@ export const GET = withAuth(async (request, _ctx, session) => {
     return NextResponse.json({ featured, carousels });
   } catch (err) {
     console.error("[home] Failed:", err);
-    return NextResponse.json({ error: "Failed to fetch" }, { status: 500 });
+    return NextResponse.json({ error: t("apiUser.common.fetchFailed") }, { status: 500 });
   }
 });

@@ -24,10 +24,11 @@ import {
   Permission,
 } from "@/lib/permissions";
 import { getMediaInstanceAccessLists, visibleInstancesFor } from "@/lib/media-visibility";
-import { resolveUserQuota, parseQuotaLimit } from "@/lib/quota";
+import { resolveUserQuota, parseQuotaLimit, translateQuotaWindow } from "@/lib/quota";
 import { logAudit, auditContext } from "@/lib/audit";
 import { mapLimit } from "@/lib/concurrency";
 import { readJsonCapped } from "@/lib/body-size";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Bulk request creation. Backs the collection "Request all" button and admin
 // "request on behalf of" flow. A single self-item or whole collection both go
@@ -105,11 +106,12 @@ export const POST = withPermission([
   Permission.REQUEST_MOVIE,
   Permission.REQUEST_TV,
 ])(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   if (!checkRateLimit(`bulk:${session.user.id}`, 10, 60_000)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
 
   const rawBody = await readJsonCapped<{ items?: unknown; onBehalfOfUserId?: unknown }>(req, 1048576);
@@ -117,20 +119,20 @@ export const POST = withPermission([
   const body = rawBody;
 
   if (!Array.isArray(body.items) || body.items.length === 0) {
-    return NextResponse.json({ error: "items must be a non-empty array" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.requests.bulk.itemsRequired") }, { status: 400 });
   }
   if (body.items.length > MAX_ITEMS) {
-    return NextResponse.json({ error: `Too many items (max ${MAX_ITEMS})` }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyItems", { max: MAX_ITEMS }) }, { status: 400 });
   }
 
   const parsed: { tmdbId: number; mediaType: MediaType }[] = [];
   for (const raw of body.items) {
     const it = raw as { tmdbId?: unknown; mediaType?: unknown };
     if (!Number.isInteger(it.tmdbId) || (it.tmdbId as number) <= 0) {
-      return NextResponse.json({ error: "each item needs a positive integer tmdbId" }, { status: 400 });
+      return NextResponse.json({ error: t("apiUser.requests.bulk.itemTmdbId") }, { status: 400 });
     }
     if (it.mediaType !== "MOVIE" && it.mediaType !== "TV") {
-      return NextResponse.json({ error: "each item mediaType must be MOVIE or TV" }, { status: 400 });
+      return NextResponse.json({ error: t("apiUser.requests.bulk.itemMediaType") }, { status: 400 });
     }
     parsed.push({ tmdbId: it.tmdbId as number, mediaType: it.mediaType });
   }
@@ -152,7 +154,7 @@ export const POST = withPermission([
   const isOnBehalf = onBehalfId !== null && onBehalfId !== session.user.id;
   if (isOnBehalf && !hasPermission(session.user.permissions, Permission.REQUEST_ON_BEHALF)) {
     return NextResponse.json(
-      { error: "You don't have permission to request on behalf of other users" },
+      { error: t("apiUser.requests.bulk.onBehalfForbidden") },
       { status: 403 },
     );
   }
@@ -177,11 +179,11 @@ export const POST = withPermission([
       mediaServerGrants: true,
     },
   });
-  if (!target) return NextResponse.json({ error: "Target user not found" }, { status: 404 });
+  if (!target) return NextResponse.json({ error: t("apiUser.requests.bulk.targetNotFound") }, { status: 404 });
   // A deactivated account can't sign in and shouldn't accumulate requests via the
   // on-behalf flow (the picker filters these out, but the id is client-supplied).
   if (target.deactivatedAt != null) {
-    return NextResponse.json({ error: "Target user is deactivated" }, { status: 422 });
+    return NextResponse.json({ error: t("apiUser.requests.bulk.targetDeactivated") }, { status: 422 });
   }
 
   const targetPerms = effectivePermissions(target.role, target.permissions);
@@ -206,7 +208,7 @@ export const POST = withPermission([
     (targetPerms & ~session.user.permissions) !== 0n
   ) {
     return NextResponse.json(
-      { error: "You can't request on behalf of a user with more permissions than you" },
+      { error: t("apiUser.requests.bulk.targetMorePermissions") },
       { status: 403 },
     );
   }
@@ -219,7 +221,7 @@ export const POST = withPermission([
     });
     if (reqLinked?.value === "true" && !target.discordId) {
       return NextResponse.json(
-        { error: "You must link your Discord account before making requests" },
+        { error: t("apiUser.common.discordLinkRequired") },
         { status: 403 },
       );
     }
@@ -589,9 +591,14 @@ export const POST = withPermission([
     } catch (err) {
       if (err instanceof QuotaExceeded) {
         const remaining = Math.max(0, err.limit - err.used);
-        const noun = err.mt === "MOVIE" ? "movie" : "TV";
         return NextResponse.json(
-          { error: `This would exceed the ${noun} quota of ${err.limit} per ${err.windowLabel} (${remaining} remaining).` },
+          {
+            error: t(err.mt === "MOVIE" ? "apiUser.requests.bulk.quotaMovie" : "apiUser.requests.bulk.quotaTv", {
+              limit: err.limit,
+              window: translateQuotaWindow(t, err.windowLabel),
+              remaining,
+            }),
+          },
           { status: 429 },
         );
       }

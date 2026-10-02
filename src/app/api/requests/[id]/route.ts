@@ -13,6 +13,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { scheduleDownloadCheck } from "@/lib/download-check";
 import { readJsonCapped } from "@/lib/body-size";
 import { maintenanceGuard } from "@/lib/maintenance";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const VALID_STATUSES = ["APPROVED", "DECLINED", "AVAILABLE", "PENDING"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
@@ -22,11 +23,12 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   { params }: { params: Promise<{ id: string }> },
   session
 ) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   if (!checkRateLimit(`admin-req:${session.user.id}`, 60, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
 
   const { id } = await params;
@@ -38,26 +40,26 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   const { status, retry, search, adminNote, permanent, qualityProfileId, qualityProfileName } = body;
 
   if (adminNote !== undefined && (typeof adminNote !== "string" || adminNote.length > 1000)) {
-    return NextResponse.json({ error: "adminNote must be a string under 1000 characters" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.adminNoteTooLong") }, { status: 400 });
   }
   // Optional one-time quality-profile override for the ARR push on approval. Only
   // consumed by the APPROVE transition below; ignored on other transitions. The
   // name is carried purely so the audit log reads "720p" instead of a bare id.
   if (qualityProfileId !== undefined && (!Number.isInteger(qualityProfileId) || qualityProfileId <= 0)) {
-    return NextResponse.json({ error: "qualityProfileId must be a positive integer" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.requests.qualityProfileIdInvalid") }, { status: 400 });
   }
   if (qualityProfileName !== undefined && (typeof qualityProfileName !== "string" || qualityProfileName.length > 100)) {
-    return NextResponse.json({ error: "qualityProfileName must be a string under 100 characters" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.requests.qualityProfileNameTooLong") }, { status: 400 });
   }
   const sanitizedAdminNote = sanitizeOptional(adminNote);
 
   const existing = await prisma.mediaRequest.findUnique({ where: { id }, include: { user: { select: { name: true, email: true } } } });
-  if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!existing) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
   if (search) {
     if (existing.status !== "APPROVED" && existing.status !== "AVAILABLE") {
       return NextResponse.json(
-        { error: "Search is only valid for APPROVED or AVAILABLE requests" },
+        { error: t("apiUser.requests.searchInvalidStatus") },
         { status: 400 }
       );
     }
@@ -68,7 +70,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       // nothing catches it — a concurrent delete answered 500 where the sibling
       // note-only path and DELETE both answer 404.
       const noteWrite = await prisma.mediaRequest.updateMany({ where: { id }, data: { adminNote: sanitizedAdminNote } });
-      if (noteWrite.count === 0) return NextResponse.json({ error: "Not found" }, { status: 404 });
+      if (noteWrite.count === 0) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
       // Audit the note change so silent edits via search/retry leave a trail.
       // The status-transition branches already audit via logAudit.
       if ((existing.adminNote ?? null) !== (sanitizedAdminNote ?? null)) {
@@ -101,14 +103,14 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   if (retry) {
     if (existing.status !== "APPROVED") {
       return NextResponse.json(
-        { error: "Retry is only valid for APPROVED requests" },
+        { error: t("apiUser.requests.retryInvalidStatus") },
         { status: 400 }
       );
     }
 
     if (adminNote !== undefined) {
       const noteWrite = await prisma.mediaRequest.updateMany({ where: { id }, data: { adminNote: sanitizedAdminNote } });
-      if (noteWrite.count === 0) return NextResponse.json({ error: "Not found" }, { status: 404 });
+      if (noteWrite.count === 0) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
       if ((existing.adminNote ?? null) !== (sanitizedAdminNote ?? null)) {
         void logAudit({
           userId: session.user.id,
@@ -154,7 +156,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   // same-status transition, so a standalone note edit needs its own path.
   if (status === undefined && adminNote !== undefined) {
     const r = await prisma.mediaRequest.updateMany({ where: { id }, data: { adminNote: sanitizedAdminNote } });
-    if (r.count === 0) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (r.count === 0) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
     if ((existing.adminNote ?? null) !== (sanitizedAdminNote ?? null)) {
       void logAudit({
         userId: session.user.id,
@@ -169,14 +171,14 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       where: { id },
       include: { user: { select: { name: true, email: true } } },
     });
-    if (!noted) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (!noted) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
     emitSSE({ type: "request:updated", requestId: id, status: noted.status, userId: existing.requestedBy });
     return NextResponse.json(noted);
   }
 
   if (!status || !VALID_STATUSES.includes(status as ValidStatus)) {
     return NextResponse.json(
-      { error: `status must be one of: ${VALID_STATUSES.join(", ")}` },
+      { error: t("apiUser.common.statusOneOf", { values: VALID_STATUSES.join(", ") }) },
       { status: 400 }
     );
   }
@@ -192,7 +194,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   const allowed = VALID_TRANSITIONS[currentStatus] ?? [];
   if (!allowed.includes(status)) {
     return NextResponse.json(
-      { error: `Cannot transition from ${currentStatus} to ${status}` },
+      { error: t("apiUser.requests.invalidTransition", { from: currentStatus, to: status }) },
       { status: 422 }
     );
   }
@@ -220,7 +222,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       },
     });
     if (claimed.count === 0) {
-      return NextResponse.json({ error: "Request was modified concurrently" }, { status: 409 });
+      return NextResponse.json({ error: t("apiUser.requests.modifiedConcurrently") }, { status: 409 });
     }
   } else if (status === "DECLINED" && existing.status !== "DECLINED") {
     // CAS on current status prevents double-decline races
@@ -238,7 +240,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       },
     });
     if (claimed.count === 0) {
-      return NextResponse.json({ error: "Request was modified concurrently" }, { status: 409 });
+      return NextResponse.json({ error: t("apiUser.requests.modifiedConcurrently") }, { status: 409 });
     }
   } else {
     // CAS on current status: the transition-table check ran against the stale
@@ -262,7 +264,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       },
     });
     if (claimed.count === 0) {
-      return NextResponse.json({ error: "Request was modified concurrently" }, { status: 409 });
+      return NextResponse.json({ error: t("apiUser.requests.modifiedConcurrently") }, { status: 409 });
     }
   }
 
@@ -270,7 +272,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     where: { id },
     include: { user: { select: { name: true, email: true } } },
   });
-  if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!updated) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
   emitSSE({ type: "request:updated", requestId: id, status: updated.status, userId: existing.requestedBy });
 
@@ -406,18 +408,19 @@ export const DELETE = withAuth(async (
   { params }: { params: Promise<{ id: string }> },
   session
 ) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   const { id } = await params;
   const existing = await prisma.mediaRequest.findUnique({ where: { id }, include: { user: { select: { name: true, email: true } } } });
-  if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!existing) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
   const isAdmin = hasPermission(session.user.permissions, Permission.MANAGE_REQUESTS);
   const isOwnerSelfCancel =
     existing.requestedBy === session.user.id && existing.status === "PENDING";
   if (!isAdmin && !isOwnerSelfCancel) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: t("apiUser.common.forbidden") }, { status: 403 });
   }
 
   if (isAdmin) {
@@ -426,7 +429,7 @@ export const DELETE = withAuth(async (
     // the row is already gone — report 404, matching the pre-read above.
     const { count } = await prisma.mediaRequest.deleteMany({ where: { id } });
     if (count === 0) {
-      return NextResponse.json({ error: "Not found" }, { status: 404 });
+      return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
     }
   } else {
     // Owner self-cancel: delete only if STILL pending. An admin may have approved
@@ -437,7 +440,7 @@ export const DELETE = withAuth(async (
       where: { id, requestedBy: session.user.id, status: "PENDING" },
     });
     if (count === 0) {
-      return NextResponse.json({ error: "Request was already actioned — refresh and try again." }, { status: 409 });
+      return NextResponse.json({ error: t("apiUser.requests.alreadyActioned") }, { status: 409 });
     }
   }
   emitSSE({ type: "request:deleted", requestId: id, userId: existing.requestedBy });

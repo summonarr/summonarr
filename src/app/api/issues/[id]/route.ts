@@ -17,6 +17,7 @@ import { emitSSE } from "@/lib/sse-emitter";
 import { logAudit, auditContext } from "@/lib/audit";
 import { sanitizeOptional, sanitizeText } from "@/lib/sanitize";
 import { maintenanceGuard } from "@/lib/maintenance";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const VALID_STATUSES = ["OPEN", "IN_PROGRESS", "RESOLVED"] as const;
 type ValidStatus = (typeof VALID_STATUSES)[number];
@@ -26,6 +27,7 @@ export const PATCH = withIssueAdmin(async (
   { params }: { params: Promise<{ id: string }> },
   session
 ) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
@@ -38,7 +40,7 @@ export const PATCH = withIssueAdmin(async (
   const { status, resolution, refetch } = body;
 
   const issue = await prisma.issue.findUnique({ where: { id } });
-  if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!issue) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
   if (refetch) {
     // Refuse a RESOLVED issue BEFORE contacting Radarr/Sonarr, as the sibling Replace
@@ -46,7 +48,7 @@ export const PATCH = withIssueAdmin(async (
     // flipping the status back — by then the search has already queued a download for
     // a closed issue (a stale tab, a native client, a direct API call).
     if (issue.status === "RESOLVED") {
-      return NextResponse.json({ error: "Issue is resolved — reopen it before refetching" }, { status: 409 });
+      return NextResponse.json({ error: t("apiUser.issues.resolvedBeforeRefetch") }, { status: 409 });
     }
     // Which Radarr/Sonarr instance holds the copy this issue is about. Issue has no
     // arrInstance column — the same title can sit on several instances — so the caller
@@ -59,7 +61,7 @@ export const PATCH = withIssueAdmin(async (
     // Validated, never coerced — a bad slug must not silently retarget the default.
     const instance = typeof body.instance === "string" ? body.instance.trim() : "";
     if (!isValidInstanceSlug(instance)) {
-      return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
+      return NextResponse.json({ error: t("apiUser.common.invalidInstance") }, { status: 400 });
     }
     try {
       if (issue.mediaType === "MOVIE") {
@@ -99,20 +101,20 @@ export const PATCH = withIssueAdmin(async (
       return NextResponse.json({ ...(updated ?? issue), arrError: null });
     } catch (err) {
       console.error("[arr] Issue refetch failed:", err);
-      return NextResponse.json({ ...issue, arrError: "Arr service request failed" });
+      return NextResponse.json({ ...issue, arrError: t("apiUser.issues.arrFailed") });
     }
   }
 
   if (status && !VALID_STATUSES.includes(status as ValidStatus)) {
     return NextResponse.json(
-      { error: `status must be one of: ${VALID_STATUSES.join(", ")}` },
+      { error: t("apiUser.common.statusOneOf", { values: VALID_STATUSES.join(", ") }) },
       { status: 400 }
     );
   }
 
   if (resolution !== undefined) {
     if (typeof resolution !== "string" || resolution.length > 1000) {
-      return NextResponse.json({ error: "resolution must be a string under 1000 characters" }, { status: 400 });
+      return NextResponse.json({ error: t("apiUser.issues.resolutionTooLong") }, { status: 400 });
     }
   }
   const sanitizedResolution = sanitizeOptional(resolution);
@@ -122,7 +124,7 @@ export const PATCH = withIssueAdmin(async (
   // (no status change) — so an empty resolution riding alongside a valid status
   // transition never blocks that transition (a native client may send both fields).
   if (resolution !== undefined && sanitizedResolution == null && !status) {
-    return NextResponse.json({ error: "resolution must not be empty" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.issues.resolutionEmpty") }, { status: 400 });
   }
 
   const updateData: { status?: ValidStatus; resolution?: string | null } = {};
@@ -146,7 +148,7 @@ export const PATCH = withIssueAdmin(async (
     });
     if (result.count === 0) {
       return NextResponse.json(
-        { error: "status-conflict", message: "Issue was modified concurrently. Refresh and try again." },
+        { error: "status-conflict", message: t("apiUser.issues.modifiedConcurrently") },
         { status: 409 }
       );
     }
@@ -154,11 +156,11 @@ export const PATCH = withIssueAdmin(async (
     // updateMany (not update) so a concurrent delete returns count:0 instead of
     // throwing an unhandled P2025.
     const r = await prisma.issue.updateMany({ where: { id }, data: updateData });
-    if (r.count === 0) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (r.count === 0) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
   }
 
   const updated = await prisma.issue.findUnique({ where: { id } });
-  if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!updated) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
   emitSSE({ type: "issue:updated", issueId: id, status: updated.status, userId: issue.reportedBy });
 
@@ -213,6 +215,7 @@ export const DELETE = withIssueAdmin(async (
   { params }: { params: Promise<{ id: string }> },
   session
 ) => {
+  const t = translatorForRequest(req);
   // The last mutation in the issues/votes family that was missing this, and not
   // a harmless omission: withIssueAdmin is authoritative on MANAGE_ISSUES, while
   // maintenanceGuard exempts only the ADMIN superbit — and the ISSUE_ADMIN
@@ -224,7 +227,7 @@ export const DELETE = withIssueAdmin(async (
 
   const { id } = await params;
   const issue = await prisma.issue.findUnique({ where: { id } });
-  if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!issue) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
   const ctx = auditContext(req, session);
   await prisma.$transaction(async (tx) => {

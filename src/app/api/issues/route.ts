@@ -14,6 +14,7 @@ import { sanitizeOptional } from "@/lib/sanitize";
 import { isFeatureEnabled } from "@/lib/features";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getVisibleServerInstances } from "@/lib/media-visibility";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const VALID_ISSUE_TYPES = ["BAD_VIDEO", "WRONG_AUDIO", "MISSING_SUBTITLES", "WRONG_MATCH", "OTHER"] as const;
 const VALID_SCOPES = ["FULL", "SEASON", "EPISODE"] as const;
@@ -49,8 +50,9 @@ export const GET = withAuth(async (req, _ctx, session) => {
 });
 
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!(await isFeatureEnabled("feature.page.issues"))) {
-    return NextResponse.json({ error: "Issue reporting is disabled" }, { status: 403 });
+    return NextResponse.json({ error: t("apiUser.issues.disabled") }, { status: 403 });
   }
 
   const maint = await maintenanceGuard(session);
@@ -59,7 +61,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const rlRow = await prisma.setting.findUnique({ where: { key: "rateLimitIssues" } });
   const rlLimit = parseRateLimit(rlRow?.value, 10);
   if (!checkRateLimit(`issues:${session.user.id}`, rlLimit, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
 
   const parsed = await readJsonCapped<{
@@ -81,46 +83,46 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const { mediaType, tmdbId, issueType, scope, seasonNumber, episodeNumber, note } = body;
 
   if (!mediaType || !tmdbId || !issueType) {
-    return NextResponse.json({ error: "mediaType, tmdbId, and issueType are required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.issues.fieldsRequired") }, { status: 400 });
   }
 
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: "mediaType must be MOVIE or TV" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.mediaTypeInvalid") }, { status: 400 });
   }
 
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
-    return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
   }
 
   if (!VALID_ISSUE_TYPES.includes(issueType as (typeof VALID_ISSUE_TYPES)[number])) {
-    return NextResponse.json({ error: `issueType must be one of: ${VALID_ISSUE_TYPES.join(", ")}` }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.issues.issueTypeOneOf", { values: VALID_ISSUE_TYPES.join(", ") }) }, { status: 400 });
   }
 
   const resolvedScope = (scope ?? "FULL") as (typeof VALID_SCOPES)[number];
   if (!VALID_SCOPES.includes(resolvedScope)) {
-    return NextResponse.json({ error: `scope must be one of: ${VALID_SCOPES.join(", ")}` }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.issues.scopeOneOf", { values: VALID_SCOPES.join(", ") }) }, { status: 400 });
   }
 
   if (note !== undefined && (typeof note !== "string" || note.length > 1000)) {
-    return NextResponse.json({ error: "note must be a string under 1000 characters" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.issues.noteTooLong") }, { status: 400 });
   }
   const sanitizedNote = sanitizeOptional(note);
 
   if (resolvedScope === "SEASON" || resolvedScope === "EPISODE") {
     if (!Number.isInteger(seasonNumber) || (seasonNumber as number) < 1) {
-      return NextResponse.json({ error: "seasonNumber is required for SEASON or EPISODE scope" }, { status: 400 });
+      return NextResponse.json({ error: t("apiUser.issues.seasonRequired") }, { status: 400 });
     }
     if ((seasonNumber as number) > MAX_SEASON_EPISODE) {
-      return NextResponse.json({ error: `seasonNumber must be ${MAX_SEASON_EPISODE} or less` }, { status: 400 });
+      return NextResponse.json({ error: t("apiUser.issues.seasonTooLarge", { max: MAX_SEASON_EPISODE }) }, { status: 400 });
     }
   }
 
   if (resolvedScope === "EPISODE") {
     if (!Number.isInteger(episodeNumber) || (episodeNumber as number) < 1) {
-      return NextResponse.json({ error: "episodeNumber is required for EPISODE scope" }, { status: 400 });
+      return NextResponse.json({ error: t("apiUser.issues.episodeRequired") }, { status: 400 });
     }
     if ((episodeNumber as number) > MAX_SEASON_EPISODE) {
-      return NextResponse.json({ error: `episodeNumber must be ${MAX_SEASON_EPISODE} or less` }, { status: 400 });
+      return NextResponse.json({ error: t("apiUser.issues.episodeTooLarge", { max: MAX_SEASON_EPISODE }) }, { status: 400 });
     }
   }
 
@@ -128,7 +130,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   // not from the client. See votes/route.ts for how the cache tiers work.
   const verified = await resolveMediaMeta(tmdbId, mediaType as "MOVIE" | "TV");
   if (!verified) {
-    return NextResponse.json({ error: "Could not verify media with TMDB" }, { status: 422 });
+    return NextResponse.json({ error: t("apiUser.common.tmdbUnverified") }, { status: 422 });
   }
 
   // Resolve tvdbId server-side from the verified tmdbId for TV. May be null if
@@ -158,7 +160,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     }),
   ]);
   if (!plexHit && !jellyfinHit) {
-    return NextResponse.json({ error: "This title isn't in the library — issues can only be filed for available media." }, { status: 422 });
+    return NextResponse.json({ error: t("apiUser.issues.notInLibrary") }, { status: 422 });
   }
 
   const issue = await prisma.issue.create({
