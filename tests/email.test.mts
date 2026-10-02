@@ -409,7 +409,7 @@ test("notifyUserRequestAvailableEmail: single send, tmdb deep link, CRLF scrubbe
   const sent = sentEmails()[0];
   assert.equal(sent.to, "user@example.com");
   assert.equal(sent.subject, "Now Available: Dune");
-  assert.ok(sent.html.includes("https://summonarr.example.com/movie/550"), "CTA deep-links to the media page");
+  assert.ok(sent.html.includes('href="https://summonarr.example.com/movie/550"'), "CTA deep-links to the media page");
   assert.equal(userFindManyCalls.length, 0); // user notifiers never query recipients
 
   // Header-injection scrubbing happens caller-side (safeHeader/safeSubject),
@@ -438,7 +438,7 @@ test("a recipient with locale 'es' gets a Spanish email; a null locale stays Eng
   assert.ok(es.html.includes('<html lang="es">'));
   assert.ok(es.html.includes("Empezar a ver"), "CTA label translated");
   assert.ok(es.html.includes("Enviado por"), "footer translated");
-  assert.ok(es.html.includes("https://summonarr.example.com/movie/550"), "links are never translated");
+  assert.ok(es.html.includes('href="https://summonarr.example.com/movie/550"'), "links are never translated");
   assert.equal(en.subject, "Now Available: Dune");
   assert.ok(en.html.includes('<html lang="en">'));
   assert.ok(en.html.includes("Start Watching") && en.html.includes("Sent by"));
