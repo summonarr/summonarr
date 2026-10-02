@@ -53,7 +53,7 @@ export function calendarTokenMatches(storedHash: string | null | undefined, toke
  * the bare token is accepted too.
  */
 export function tokenFromFeedSegment(segment: string): string {
-  let s = segment;
+  let s: string;
   try {
     s = decodeURIComponent(segment);
   } catch {
