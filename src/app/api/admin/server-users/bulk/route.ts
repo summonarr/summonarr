@@ -8,15 +8,17 @@ import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { settleLimit } from "@/lib/concurrency";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit, auditContext } from "@/lib/audit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Cap concurrent Jellyfin policy pushes so a large server-user list doesn't
 // saturate the Prisma pool / burst the Jellyfin admin API in one shot.
 const POLICY_PUSH_CONCURRENCY = 8;
 
 export const POST = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   // Each call pushes a policy to every Jellyfin user, so cap it at 5 per minute per admin.
   if (!checkRateLimit(`server-users-bulk:${session.user.id}`, 5, 60_000)) {
-    return NextResponse.json({ error: "Too many bulk operations — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.serverUsers.tooManyBulk") }, { status: 429 });
   }
 
   const parsed = await readJsonCapped<{ source?: string; downloadsEnabled?: boolean }>(req, 16384);
@@ -27,13 +29,13 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
   // Plex is intentionally not supported — its sharing API has no working remote toggle.
   if (source !== "jellyfin") {
-    return NextResponse.json({ error: "source must be 'jellyfin'" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.serverUsers.sourceJellyfin") }, { status: 400 });
   }
   // Validate at runtime (the parsed body's generic type isn't runtime-checked): a
   // non-boolean would reach Prisma's Boolean? column and the Jellyfin policy push
   // as a 500. Mirrors [id]/route.ts.
   if (typeof body.downloadsEnabled !== "boolean") {
-    return NextResponse.json({ error: "downloadsEnabled must be a boolean" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.downloadsEnabledBoolean") }, { status: 400 });
   }
   const downloadsEnabled = body.downloadsEnabled;
 

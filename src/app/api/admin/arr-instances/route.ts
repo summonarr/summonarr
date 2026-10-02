@@ -15,6 +15,7 @@ import {
 import { settleLimit } from "@/lib/concurrency";
 import { buildArrInstanceRegistryWrite, getArrInstances } from "@/lib/arr-instance-registry";
 import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Admin management surface for the full Radarr/Sonarr instance list (multi-
 // instance support): the registry metadata (slug/name/routing/access) AND each
@@ -87,13 +88,14 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
 });
 
 export const POST = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const parsed = await readJsonCapped<SavePayload>(req, 64 * 1024);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
   const service = body.service;
   if (service !== "radarr" && service !== "sonarr") {
-    return NextResponse.json({ error: "service must be radarr or sonarr" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.serviceRadarrOrSonarr") }, { status: 400 });
   }
   // Require the array explicitly. Coercing a missing/malformed `instances` to []
   // reads downstream as "the admin removed every named instance" and deleteMany's
@@ -101,12 +103,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // which are unrecoverable. A body that doesn't say is not a body that means
   // "delete everything".
   if (!Array.isArray(body.instances)) {
-    return NextResponse.json({ error: "instances must be an array" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.instancesArray") }, { status: 400 });
   }
   const instances = body.instances;
   for (const inst of instances) {
     if (typeof inst?.slug !== "string" || !isValidInstanceSlug(inst.slug)) {
-      return NextResponse.json({ error: `invalid instance slug: ${inst?.slug}` }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.common.invalidSlug", { slug: String(inst?.slug) }) }, { status: 400 });
     }
     // Validate BEFORE any write: the save loop below is not transactional, so a
     // mid-loop rejection would leave earlier instances' rows already applied.
@@ -115,13 +117,13 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     if (inst.minimumAvailability !== undefined && inst.minimumAvailability !== null) {
       const v = String(inst.minimumAvailability);
       if (v !== "" && v !== "announced" && v !== "inCinemas" && v !== "released") {
-        return NextResponse.json({ error: `invalid minimumAvailability for ${inst.slug}: ${v}` }, { status: 400 });
+        return NextResponse.json({ error: t("apiAdmin.arrInstances.invalidMinimumAvailability", { slug: inst.slug, value: String(v) }) }, { status: 400 });
       }
     }
     if (inst.languageProfileId !== undefined && inst.languageProfileId !== null && inst.languageProfileId !== "") {
       const n = Number(inst.languageProfileId);
       if (!Number.isInteger(n) || n < 1) {
-        return NextResponse.json({ error: `invalid languageProfileId for ${inst.slug}` }, { status: 400 });
+        return NextResponse.json({ error: t("apiAdmin.arrInstances.invalidLanguageProfileId", { slug: inst.slug }) }, { status: 400 });
       }
     }
   }
@@ -255,7 +257,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         : await testSonarrConnection(url, apiKey);
       testResults[inst.slug] = { version };
     } catch {
-      testResults[inst.slug] = { error: `${service} connection failed` };
+      testResults[inst.slug] = { error: t("apiAdmin.arrInstances.connectionFailed", { service }) };
     }
   });
 

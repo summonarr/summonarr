@@ -6,29 +6,33 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { isFeatureEnabled } from "@/lib/features";
 import { validateCleanupSettingsPatch } from "@/lib/library-cleanup";
 import { CLEANUP_FEATURE_KEY, loadCleanupSettings } from "@/lib/library-cleanup-data";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 // Library cleanup rules (ADMIN). GET returns the rules in force; PATCH takes a
 // partial object keyed by field name (unwatchedEnabled, unwatchedDays, …) and
 // refuses the WHOLE patch on any bad value — nothing is repaired on write.
 
-async function disabled(): Promise<NextResponse | null> {
+async function disabled(t: Translator): Promise<NextResponse | null> {
   return (await isFeatureEnabled(CLEANUP_FEATURE_KEY))
     ? null
-    : NextResponse.json({ error: "Library cleanup is disabled" }, { status: 404 });
+    : NextResponse.json({ error: t("apiAdmin.cleanup.disabled") }, { status: 404 });
 }
 
-export const GET = withAdmin(async () => {
-  const off = await disabled();
+export const GET = withAdmin(async (req) => {
+  const t = translatorForRequest(req);
+  const off = await disabled(t);
   if (off) return off;
   return NextResponse.json({ settings: await loadCleanupSettings() });
 });
 
 export const PATCH = withAdmin(async (req, _ctx, session) => {
-  const off = await disabled();
+  const t = translatorForRequest(req);
+  const off = await disabled(t);
   if (off) return off;
   const parsed = await readJsonCapped<Record<string, unknown>>(req, 4096);
   if (parsed instanceof NextResponse) return parsed;
-  const result = validateCleanupSettingsPatch(parsed);
+  const result = validateCleanupSettingsPatch(parsed, t);
   if ("error" in result) return NextResponse.json({ error: result.error }, { status: 400 });
 
   await prisma.$transaction(

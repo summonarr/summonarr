@@ -1396,3 +1396,49 @@ test("clear-cache never wipes a user's shelf — UserRecommendation is left for 
     "clearing them would blank every For You page for up to 12h to save the same staleness window",
   );
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// i18n — admin API messages follow the requester's language; no hints = English
+// ════════════════════════════════════════════════════════════════════════════
+
+test("i18n (user-delete self): the locale cookie or Accept-Language → Spanish; no hints → the English literal", async () => {
+  const admin = await mintSession("ADMIN");
+  const self = async (extra: Record<string, string>) => {
+    const res = await userDelete(
+      req(`http://localhost:3000/api/admin/users/${admin.userId}`, { method: "DELETE", headers: { ...admin.header, ...extra } }),
+      ctxFor(admin.userId),
+    );
+    assert.equal(res.status, 400);
+    return (await res.json()) as { error: string };
+  };
+  assert.deepEqual(await self({}), { error: "Cannot delete your own account" });
+  assert.deepEqual(await self({ cookie: "summonarr-locale=es" }), { error: "No puedes eliminar tu propia cuenta" });
+  assert.deepEqual(await self({ "accept-language": "es-MX,es;q=0.9" }), { error: "No puedes eliminar tu propia cuenta" });
+  // A native client keeps the instance default even with a Spanish phone.
+  assert.deepEqual(await self({ "accept-language": "es", "x-summonarr-client": "ios; build=40" }), { error: "Cannot delete your own account" });
+});
+
+test("i18n (Jellyfin terminate, unconfigured): Spanish error, same status, still no fetch or audit", async () => {
+  const admin = await mintSession("ADMIN");
+  const res = await jellyfinTerminate(req("http://localhost:3000/api/admin/play-history/terminate-jellyfin-session", { method: "POST", headers: { ...admin.header, "content-type": "application/json", cookie: "summonarr-locale=es" }, body: JSON.stringify({ sessionKey: "jf-play-key" }) }), undefined);
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "El servidor Jellyfin no está configurado" });
+  assert.equal(fetchCalls.length, 0);
+  await flush();
+  assert.equal(auditAttempts.length, 0);
+});
+
+test("i18n (role-change validation): a templated message keeps its dynamic part in Spanish", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedUser("USER");
+  const patch = (extra: Record<string, string>) => userPatch(
+    req(`http://localhost:3000/api/admin/users/${targetId}`, { method: "PATCH", headers: { ...admin.header, "content-type": "application/json", ...extra }, body: JSON.stringify({ movieQuotaLimit: -1 }) }),
+    ctxFor(targetId),
+  );
+  const en = await patch({});
+  assert.equal(en.status, 400);
+  assert.deepEqual(await en.json(), { error: "movieQuotaLimit must be a non-negative integer or null" });
+  const es = await patch({ "accept-language": "es" });
+  assert.equal(es.status, 400);
+  assert.deepEqual(await es.json(), { error: "movieQuotaLimit debe ser un número entero no negativo o null" });
+});

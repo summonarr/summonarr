@@ -30,6 +30,8 @@ import { settleLimit } from "@/lib/concurrency";
 import { effectivePermissions, parseMediaServerGrants } from "@/lib/permissions";
 import { visibleInstancesFor, type VisibleServerInstances } from "@/lib/media-visibility";
 import { deduplicatePlexRowsByRatingKey } from "@/lib/plex-dedupe";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 // Advisory-lock id 2000 — distinct from the 2001-2011 ids the other cron warm/sync routes
 // use (TRASH_SYNC_LOCK_ID is 2010). An advisory lock is a Postgres-held named mutex.
@@ -126,14 +128,15 @@ const droppedTmdbIds = <T extends { tmdbId: number }>(input: T[], kept: T[]): nu
 };
 
 export async function POST(request: NextRequest) {
+  const t = translatorForRequest(request);
   const actor = await getCronActor(request);
   if (!actor) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.common.forbidden") }, { status: 403 });
   }
 
   return withCronRunRecording("sync:full", () => withAdvisoryLock(
     SYNC_ORCHESTRATOR_LOCK_ID,
-    (signal: AbortSignal) => runSyncOrchestrator(actor, signal),
+    (signal: AbortSignal) => runSyncOrchestrator(actor, t, signal),
     () => NextResponse.json({ skipped: true, reason: "sync already running" }, { status: 200 }),
   ));
 }
@@ -147,7 +150,7 @@ const sanitizeStr = (s: string | null | undefined, maxLen = 1000): string | null
   return s.replace(/[<>]/g, "").replace(/\0/g, "").slice(0, maxLen) || null;
 };
 
-async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Promise<NextResponse> {
+async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: AbortSignal): Promise<NextResponse> {
   // withAdvisoryLock aborts at DEFAULT_WORK_TIMEOUT_MS (30 min) and RELEASES the
   // lock; it cannot cancel this function (guardrail 41). Left unobserved, a run
   // past 30 minutes would carry on lock-free while the next trigger acquired the
@@ -1760,7 +1763,7 @@ async function runSyncOrchestrator(actor: CronActor, signal?: AbortSignal): Prom
       sonarrWanted,
       // `error` is what the admin SyncButton surfaces; failedSources is for logs.
       ...(failedSources.length > 0
-        ? { failedSources, error: `Sync degraded — ${failedSources.join(", ")} failed to refresh` }
+        ? { failedSources, error: t("apiAdmin.sync.degraded", { sources: failedSources.join(", ") }) }
         : {}),
       // Both source lists are omitted when empty, matching failedSources above:
       // absent means "nothing skipped", which is the correct reading for an

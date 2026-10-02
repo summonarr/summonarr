@@ -5,6 +5,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { logAudit, auditContext } from "@/lib/audit";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { invalidateBlacklistCache } from "@/lib/blacklist";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Admin-managed request blacklist. A blacklisted (tmdbId, mediaType) pair is
 // hidden from discovery (attachAllAvailability's default filter) and rejected at
@@ -23,6 +24,7 @@ export const GET = withAdmin(async () => {
 });
 
 export const POST = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const parsed = await readJsonCapped<{
     tmdbId?: number;
     mediaType?: string;
@@ -33,16 +35,16 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const { tmdbId, mediaType, title, reason } = parsed;
 
   if (typeof tmdbId !== "number" || !Number.isInteger(tmdbId) || tmdbId <= 0) {
-    return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.tmdbIdPositive") }, { status: 400 });
   }
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: "mediaType must be MOVIE or TV" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.mediaTypeMovieOrTv") }, { status: 400 });
   }
   if (title !== undefined && (typeof title !== "string" || title.length > 500)) {
-    return NextResponse.json({ error: "title must be a string under 500 characters" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.titleTooLong") }, { status: 400 });
   }
   if (reason !== undefined && (typeof reason !== "string" || reason.length > 500)) {
-    return NextResponse.json({ error: "reason must be a string under 500 characters" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.reasonTooLong") }, { status: 400 });
   }
 
   const item = await prisma.blacklistItem.upsert({
@@ -64,11 +66,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 });
 
 export const DELETE = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const sp = req.nextUrl.searchParams;
   const tmdbId = Number(sp.get("tmdbId"));
   const mediaType = sp.get("mediaType");
   if (!Number.isInteger(tmdbId) || tmdbId <= 0 || (mediaType !== "MOVIE" && mediaType !== "TV")) {
-    return NextResponse.json({ error: "tmdbId and mediaType are required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.tmdbIdAndMediaTypeRequired") }, { status: 400 });
   }
   const deleted = await prisma.blacklistItem.deleteMany({ where: { tmdbId, mediaType } });
   invalidateBlacklistCache();

@@ -7,13 +7,15 @@ import { getPlexConfig } from "@/lib/plex-config";
 import { getJellyfinTVEpisodes, type JellyfinTVEpisodeData } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { isCronAuthorized, replaceEpisodeCacheForSource, withCronRunRecording } from "@/lib/cron-auth";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Allow up to 5 minutes: fetching every episode of a large TV library is slow.
 export const maxDuration = 300;
 
 export async function POST(request: NextRequest) {
+  const t = translatorForRequest(request);
   if (!(await isCronAuthorized(request))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.common.forbidden") }, { status: 403 });
   }
   return withCronRunRecording("tv-episodes-sync", () => syncTvEpisodes());
 }

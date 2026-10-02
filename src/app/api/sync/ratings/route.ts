@@ -6,6 +6,7 @@ import { fetchMdblistBatch, isMdblistQuotaLocked } from "@/lib/mdblist";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { prisma } from "@/lib/prisma";
 import type { TmdbMedia } from "@/lib/tmdb-types";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const BATCH = 5;
 
@@ -52,8 +53,9 @@ async function warmBatch(
 }
 
 export async function POST(request: NextRequest) {
+  const t = translatorForRequest(request);
   if (!(await isCronAuthorized(request))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.common.forbidden") }, { status: 403 });
   }
 
   const [mdblistKey, omdbKey] = await Promise.all([

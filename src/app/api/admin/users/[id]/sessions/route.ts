@@ -5,18 +5,20 @@ import { revokeSessionById, revokeAllUserSessions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { isIndefiniteDeadline } from "@/lib/session-lifetime";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
 export const GET = withAdmin(async (
-  _req,
+  req,
   { params }: RouteParams,
   _session
 ) => {
+  const t = translatorForRequest(req);
   const { id } = await params;
 
   const target = await prisma.user.findUnique({ where: { id }, select: { id: true } });
-  if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
 
   const sessions = await prisma.authSession.findMany({
     where: { userId: id },
@@ -46,13 +48,14 @@ export const DELETE = withAdmin(async (
   { params }: RouteParams,
   session
 ) => {
+  const t = translatorForRequest(req);
   const { id } = await params;
 
   const target = await prisma.user.findUnique({
     where: { id },
     select: { id: true, name: true, email: true },
   });
-  if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
 
   const parsed = await readJsonCapped<{ sessionId?: string; all?: boolean }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
@@ -86,7 +89,7 @@ export const DELETE = withAdmin(async (
       select: { userId: true, deviceLabel: true },
     });
     if (!record || record.userId !== id) {
-      return NextResponse.json({ error: "Not found" }, { status: 404 });
+      return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
     }
 
     await revokeSessionById(body.sessionId);
@@ -108,5 +111,5 @@ export const DELETE = withAdmin(async (
     return NextResponse.json({ ok: true, revoked: body.sessionId });
   }
 
-  return NextResponse.json({ error: "Provide sessionId or all: true" }, { status: 400 });
+  return NextResponse.json({ error: t("apiAdmin.users.provideSessionId") }, { status: 400 });
 });

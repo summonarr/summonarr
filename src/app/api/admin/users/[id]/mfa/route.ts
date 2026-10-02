@@ -7,6 +7,7 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission } from "@/lib/permissions";
 import { clearMfaLockoutInTx, deleteAllMfaInTx, getMfaState } from "@/lib/mfa/mfa-store";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 class TargetBecameAdminError extends Error {}
 
@@ -25,13 +26,14 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   { params }: { params: Promise<{ id: string }> },
   session,
 ) => {
+  const t = translatorForRequest(req);
   const { id } = await params;
   if (!checkRateLimit(`admin-user-mfa-reset:${session.user.id}`, 10, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many attempts — please wait a minute." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.common.tooManyAttempts") }, { status: 429 });
   }
   if (id === session.user.id) {
     return NextResponse.json(
-      { error: "Use your profile page to change your own two-factor settings." },
+      { error: t("apiAdmin.users.useProfileForOwnMfa") },
       { status: 400 },
     );
   }
@@ -40,9 +42,9 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
     where: { id },
     select: { role: true, name: true, email: true },
   });
-  if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
   if (target.role === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
-    return NextResponse.json({ error: "Only an admin can reset an admin's two-factor" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.users.onlyAdminResetMfa") }, { status: 403 });
   }
 
   const before = await getMfaState(id);
@@ -64,7 +66,7 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
     });
   } catch (err) {
     if (err instanceof TargetBecameAdminError) {
-      return NextResponse.json({ error: "Only an admin can reset an admin's two-factor" }, { status: 403 });
+      return NextResponse.json({ error: t("apiAdmin.users.onlyAdminResetMfa") }, { status: 403 });
     }
     throw err;
   }

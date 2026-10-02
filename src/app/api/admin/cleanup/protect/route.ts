@@ -6,35 +6,38 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { isFeatureEnabled } from "@/lib/features";
 import { CLEANUP_FEATURE_KEY } from "@/lib/library-cleanup-data";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 // Per-title "never a cleanup candidate" pins (ADMIN).
 //   POST   → protect   { tmdbId, mediaType, title?, reason? }
 //   DELETE → unprotect ?tmdbId=&mediaType=  (query params — DELETE bodies are
 //            stripped by some proxies, same as the blacklist route)
 
-async function disabled(): Promise<NextResponse | null> {
+async function disabled(t: Translator): Promise<NextResponse | null> {
   return (await isFeatureEnabled(CLEANUP_FEATURE_KEY))
     ? null
-    : NextResponse.json({ error: "Library cleanup is disabled" }, { status: 404 });
+    : NextResponse.json({ error: t("apiAdmin.cleanup.disabled") }, { status: 404 });
 }
 
 export const POST = withAdmin(async (req, _ctx, session) => {
-  const off = await disabled();
+  const t = translatorForRequest(req);
+  const off = await disabled(t);
   if (off) return off;
   const parsed = await readJsonCapped<{ tmdbId?: unknown; mediaType?: unknown; title?: unknown; reason?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const { tmdbId, mediaType, title, reason } = parsed;
   if (typeof tmdbId !== "number" || !Number.isInteger(tmdbId) || tmdbId <= 0) {
-    return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.tmdbIdPositive") }, { status: 400 });
   }
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: "mediaType must be MOVIE or TV" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.mediaTypeMovieOrTv") }, { status: 400 });
   }
   if (title !== undefined && (typeof title !== "string" || title.length > 500)) {
-    return NextResponse.json({ error: "title must be a string under 500 characters" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.titleTooLong") }, { status: 400 });
   }
   if (reason !== undefined && (typeof reason !== "string" || reason.length > 500)) {
-    return NextResponse.json({ error: "reason must be a string under 500 characters" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.reasonTooLong") }, { status: 400 });
   }
   const data = {
     title: sanitizeOptional(title as string | undefined) ?? null,
@@ -58,13 +61,14 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 });
 
 export const DELETE = withAdmin(async (req, _ctx, session) => {
-  const off = await disabled();
+  const t = translatorForRequest(req);
+  const off = await disabled(t);
   if (off) return off;
   const sp = req.nextUrl.searchParams;
   const tmdbId = Number(sp.get("tmdbId"));
   const mediaType = sp.get("mediaType");
   if (!Number.isInteger(tmdbId) || tmdbId <= 0 || (mediaType !== "MOVIE" && mediaType !== "TV")) {
-    return NextResponse.json({ error: "tmdbId and mediaType are required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.tmdbIdAndMediaTypeRequired") }, { status: 400 });
   }
   const removed = await prisma.cleanupProtection.deleteMany({ where: { tmdbId, mediaType } });
   if (removed.count > 0) {

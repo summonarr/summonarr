@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Cache "sources" map to TmdbCache key prefixes — plus, below, the derived
 // tables that hold denormalized copies of the same upstream data (TmdbMediaCore,
@@ -45,19 +46,20 @@ function isSource(v: string): v is Source {
 }
 
 export const DELETE = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   // Per-admin rate limit on this destructive TmdbCache wipe. Clearing forces every
   // page load to re-fetch from upstream (TMDB / MDBList / OMDB), so looping it is a
   // self-inflicted refetch storm that burns their rate limits. 5 per 5-min window
   // stops a compromised session (or a double-click) from looping the wipe.
   if (!checkRateLimit(`admin-clear-cache:${session.user.id}`, 5, 5 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many cache clears — try again shortly." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.cache.tooManyClears") }, { status: 429 });
   }
   const url = new URL(req.url);
   const sourceParam = url.searchParams.get("source") ?? "all";
 
   if (!isSource(sourceParam)) {
     return NextResponse.json(
-      { error: `Unknown source "${sourceParam}". Expected one of: tmdb, mdblist, omdb, all` },
+      { error: t("apiAdmin.cache.unknownSource", { source: String(sourceParam) }) },
       { status: 400 },
     );
   }

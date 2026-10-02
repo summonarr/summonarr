@@ -19,6 +19,8 @@ import { parseIpAllowlist, isValidIpOrCidr } from "@/lib/ip-allowlist";
 import { stripUrlUserinfo, validateServerUrl } from "@/lib/server-url";
 import { WATCH_GRADE_SETTING_KEYS, watchGradeCrossFieldError, watchGradeSettingError } from "@/lib/watch-grade";
 import { mergedWatchGradeSettings } from "@/lib/watch-grade-data";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 const SETTINGS_SCHEMA = [
   ["siteTitle",                     false],
@@ -270,6 +272,29 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
+// The connectivity-test messages are recorded in English (the rollback audit row
+// stores testResults verbatim — audit details are data, never translated) and
+// translated only on the way out. An upstream-supplied message (an SMTP error's
+// own text) has no entry and passes through unchanged.
+const TEST_RESULT_MESSAGE_KEYS: Record<string, string> = {
+  "Plex token is invalid or could not be reached": "apiAdmin.settings.test.plexToken",
+  "Radarr connection failed": "apiAdmin.settings.test.radarr",
+  "Sonarr connection failed": "apiAdmin.settings.test.sonarr",
+  "Radarr 4K connection failed": "apiAdmin.settings.test.radarr4k",
+  "Sonarr 4K connection failed": "apiAdmin.settings.test.sonarr4k",
+  "Jellyfin connection failed": "apiAdmin.common.jellyfinConnectionFailed",
+  "Email test failed. Check your email settings.": "apiAdmin.settings.test.email",
+};
+
+function localizeTestResults(results: Record<string, unknown>, t: Translator): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(results)) {
+    const key = typeof v === "string" && k.endsWith("Error") ? TEST_RESULT_MESSAGE_KEYS[v] : undefined;
+    out[k] = key ? t(key) : v;
+  }
+  return out;
+}
+
 export const GET = withAdmin(async (_req, _ctx, _session) => {
   const rows = await prisma.setting.findMany({
     where: { key: { in: [...ALLOWED_KEYS] } },
@@ -287,8 +312,9 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
 });
 
 export const PATCH = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`admin-settings:${session.user.id}`, 10, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.common.tooManyRequestsLater") }, { status: 429 });
   }
 
   const parsed = await readJsonCapped<Record<string, string>>(req, 65536);
@@ -302,7 +328,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     if (last !== undefined && now - last < KEY_COOLDOWN_MS) {
       const retryAfterMs = KEY_COOLDOWN_MS - (now - last);
       return NextResponse.json(
-        { error: `Setting "${key}" was modified too recently — wait ${Math.ceil(retryAfterMs / 1000)}s`, retryAfterMs },
+        { error: t("apiAdmin.settings.cooldown", { key, seconds: Math.ceil(retryAfterMs / 1000) }), retryAfterMs },
         { status: 429 }
       );
     }
@@ -360,14 +386,14 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     // looked "Saved" in the UI while nothing was written anywhere.
     if (typeof value !== "string") {
       return NextResponse.json(
-        { error: `Setting "${key}" must be a string` },
+        { error: t("apiAdmin.settings.mustBeString", { key }) },
         { status: 400 },
       );
     }
     const maxLen = MAX_LENGTHS[key as AllowedKey] ?? DEFAULT_MAX_LENGTH;
     if (value.length > maxLen) {
       return NextResponse.json(
-        { error: `Setting "${key}" must be ${maxLen} characters or fewer` },
+        { error: t("apiAdmin.settings.tooLong", { key, max: maxLen }) },
         { status: 400 },
       );
     }
@@ -378,9 +404,9 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       // Shared with /api/admin/media-instances so the default-instance keys and
       // the per-instance keys reject the exact same shapes (scheme, embedded
       // credentials). Length is already enforced by the per-key check above.
-      const urlErr = validateServerUrl(value, { httpsOnly: HTTPS_ONLY_URL_KEYS.has(key) });
+      const urlErr = validateServerUrl(value, { httpsOnly: HTTPS_ONLY_URL_KEYS.has(key) }, t);
       if (urlErr) {
-        return NextResponse.json({ error: `Setting "${key}" ${urlErr}` }, { status: 400 });
+        return NextResponse.json({ error: t("apiAdmin.settings.invalidUrl", { key, reason: urlErr }) }, { status: 400 });
       }
     }
 
@@ -402,7 +428,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
             return NextResponse.json(
               {
                 error: "invalid-url",
-                message: "Donation URL must be https://",
+                message: t("apiAdmin.settings.donationHttps"),
               },
               { status: 400 },
             );
@@ -411,7 +437,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
           return NextResponse.json(
             {
               error: "invalid-url",
-              message: "Donation URL must be https://",
+              message: t("apiAdmin.settings.donationHttps"),
             },
             { status: 400 },
           );
@@ -421,7 +447,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
 
     if (isSecretShapedKey(key) && CONTROL_CHAR_RE.test(value)) {
       return NextResponse.json(
-        { error: `Setting "${key}" contains invalid control characters` },
+        { error: t("apiAdmin.settings.controlChars", { key }) },
         { status: 400 },
       );
     }
@@ -430,7 +456,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       const bad = parseIpAllowlist(value).find((t) => !isValidIpOrCidr(t));
       if (bad) {
         return NextResponse.json(
-          { error: `Setting "${key}" has an invalid IP or CIDR: "${bad}"` },
+          { error: t("apiAdmin.settings.invalidIp", { key, value: String(bad) }) },
           { status: 400 },
         );
       }
@@ -444,7 +470,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       const n = parseInt(value, 10);
       if (!Number.isFinite(n) || n < 1 || n > 10_000) {
         return NextResponse.json(
-          { error: `"${key}" must be an integer between 1 and 10000` },
+          { error: t("apiAdmin.settings.intRange10000", { key }) },
           { status: 400 },
         );
       }
@@ -458,7 +484,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     if (key === "apnsRelayKey") {
       if (value.length < 8 || value.length > 200 || !/^[\x21-\x7e]+$/.test(value) || value.includes(",")) {
         return NextResponse.json(
-          { error: `Setting "${key}" must be 8–200 printable ASCII characters with no whitespace or commas` },
+          { error: t("apiAdmin.settings.printableAscii", { key }) },
           { status: 400 },
         );
       }
@@ -469,14 +495,14 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     if (key === "recommendedIosBuild") {
       if (!/^\d+$/.test(value)) {
         return NextResponse.json(
-          { error: `Setting "${key}" must be an integer between 1 and 1000000` },
+          { error: t("apiAdmin.settings.intRangeMillion", { key }) },
           { status: 400 },
         );
       }
       const n = parseInt(value, 10);
       if (!Number.isFinite(n) || n < 1 || n > 1_000_000) {
         return NextResponse.json(
-          { error: `Setting "${key}" must be an integer between 1 and 1000000` },
+          { error: t("apiAdmin.settings.intRangeMillion", { key }) },
           { status: 400 },
         );
       }
@@ -487,7 +513,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     if (key === "radarrMinimumAvailability" || key === "radarr4kMinimumAvailability") {
       if (value !== "announced" && value !== "inCinemas" && value !== "released") {
         return NextResponse.json(
-          { error: `"${key}" must be announced, inCinemas, or released` },
+          { error: t("apiAdmin.settings.minimumAvailability", { key }) },
           { status: 400 },
         );
       }
@@ -498,7 +524,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       const n = parseInt(value, 10);
       if (!/^\d+$/.test(value) || !Number.isInteger(n) || n < 1) {
         return NextResponse.json(
-          { error: `"${key}" must be a positive integer` },
+          { error: t("apiAdmin.settings.positiveInt", { key }) },
           { status: 400 },
         );
       }
@@ -512,7 +538,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       const n = parseInt(value, 10);
       if (!/^\d+$/.test(value) || !Number.isInteger(n) || n < 7 || n > 3650) {
         return NextResponse.json(
-          { error: `"${key}" must be an integer between 7 and 3650 (days)` },
+          { error: t("apiAdmin.settings.daysRange", { key }) },
           { status: 400 },
         );
       }
@@ -520,7 +546,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
 
     // Watch-grade tuning. The bounds live beside the read-side parser, so a value
     // accepted here can never be silently replaced by the default on read.
-    const watchGradeError = watchGradeSettingError(key, value);
+    const watchGradeError = watchGradeSettingError(key, value, t);
     if (watchGradeError) {
       return NextResponse.json({ error: watchGradeError }, { status: 400 });
     }
@@ -531,7 +557,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     if (key === "discordClientId" || key === "discordGuildId") {
       if (!/^\d{17,20}$/.test(value)) {
         return NextResponse.json(
-          { error: `Setting "${key}" must be a numeric Discord snowflake` },
+          { error: t("apiAdmin.settings.snowflake", { key }) },
           { status: 400 },
         );
       }
@@ -577,10 +603,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     if (effectiveEnabled && !effectiveAllowlistNonEmpty) {
       return NextResponse.json(
         {
-          error:
-            "The machine-session API cannot be enabled with an empty IP allowlist. " +
-            "Set machineSessionAllowedIps (or keep it non-empty) so any holder " +
-            "of CRON_SECRET cannot mint an admin session from any IP.",
+          error: t("apiAdmin.settings.machineSessionAllowlist"),
         },
         { status: 400 },
       );
@@ -594,7 +617,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   // stored + incoming values, so a PATCH of one key that breaks another is caught.
   const touchesWatchGrade = Object.values(WATCH_GRADE_SETTING_KEYS).some((key) => body[key] !== undefined);
   if (touchesWatchGrade) {
-    const conflict = watchGradeCrossFieldError(await mergedWatchGradeSettings(body));
+    const conflict = watchGradeCrossFieldError(await mergedWatchGradeSettings(body), t);
     if (conflict) return NextResponse.json({ error: conflict }, { status: 400 });
   }
 
@@ -756,7 +779,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     });
   } catch (err) {
     console.error("[audit] Settings transaction failed:", err);
-    return NextResponse.json({ error: "Audit logging failed" }, { status: 500 });
+    return NextResponse.json({ error: t("apiAdmin.settings.auditFailed") }, { status: 500 });
   }
   // Feature flags are memoized (features.ts); drop the memo so a toggle in this
   // write is visible on the very next check instead of after the TTL.
@@ -1018,7 +1041,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
   }
 
   return NextResponse.json(
-    { ok: !testFailed, ...testResults },
+    { ok: !testFailed, ...localizeTestResults(testResults, t) },
     testFailed ? { status: 422 } : undefined,
   );
 });

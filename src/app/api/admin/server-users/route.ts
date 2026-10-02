@@ -3,6 +3,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const GET = withAdmin(async (_req, _ctx, _session) => {
   const [users, autoDisableRow] = await Promise.all([
@@ -40,13 +41,14 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
 });
 
 export const PATCH = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const parsed = await readJsonCapped<{ autoDisableNew?: boolean }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
   if (body.autoDisableNew !== undefined) {
     if (typeof body.autoDisableNew !== "boolean") {
-      return NextResponse.json({ error: "autoDisableNew must be a boolean" }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.serverUsers.autoDisableNewBoolean") }, { status: 400 });
     }
     const newValue = body.autoDisableNew ? "true" : "false";
 

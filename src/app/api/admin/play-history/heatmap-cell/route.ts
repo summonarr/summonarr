@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { getHeatmapCellDetail, type HeatmapCellQuery } from "@/lib/play-history";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Drill-down behind the click popover on the activity heatmaps. Returns the
 // per-cell aggregate (plays, transcode mix, watch time, quality/network) for a
@@ -10,11 +11,12 @@ import { getHeatmapCellDetail, type HeatmapCellQuery } from "@/lib/play-history"
 // Query: mode=day&day=YYYY-MM-DD | mode=hour&dow=0-6&hour=0-23
 //        [&userId=…] [&source=plex|jellyfin] [&mediaType=MOVIE|TV] [&days=N]
 export const GET = withAdmin(async (req) => {
+  const t = translatorForRequest(req);
   const { searchParams } = new URL(req.url);
   const mode = searchParams.get("mode");
 
   if (mode !== "day" && mode !== "hour") {
-    return NextResponse.json({ error: "mode must be 'day' or 'hour'" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.heatmap.mode") }, { status: 400 });
   }
 
   const query: HeatmapCellQuery = { mode };
@@ -22,7 +24,7 @@ export const GET = withAdmin(async (req) => {
   if (mode === "day") {
     const day = searchParams.get("day") ?? "";
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-      return NextResponse.json({ error: "day must be YYYY-MM-DD" }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.heatmap.day") }, { status: 400 });
     }
     query.day = day;
   } else {
@@ -34,10 +36,10 @@ export const GET = withAdmin(async (req) => {
     const dow = dowRaw == null || dowRaw === "" ? NaN : Number(dowRaw);
     const hour = hourRaw == null || hourRaw === "" ? NaN : Number(hourRaw);
     if (!Number.isInteger(dow) || dow < 0 || dow > 6) {
-      return NextResponse.json({ error: "dow must be 0-6" }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.heatmap.dow") }, { status: 400 });
     }
     if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
-      return NextResponse.json({ error: "hour must be 0-23" }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.heatmap.hour") }, { status: 400 });
     }
     query.dow = dow;
     query.hour = hour;

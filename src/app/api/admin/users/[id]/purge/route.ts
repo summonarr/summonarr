@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission } from "@/lib/permissions";
 import { purgeUserDataInTx, NotDeactivatedError } from "@/lib/account-lifecycle";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // POST /api/admin/users/[id]/purge — IRREVERSIBLY scrub a disabled account's
 // personal data.
@@ -28,24 +29,25 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
   { params }: { params: Promise<{ id: string }> },
   session,
 ) => {
+  const t = translatorForRequest(req);
   const { id } = await params;
   if (!checkRateLimit(`admin-user-purge:${session.user.id}`, 5, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many attempts — please wait a minute." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.common.tooManyAttempts") }, { status: 429 });
   }
 
   const target = await prisma.user.findUnique({
     where: { id },
     select: { role: true, name: true, email: true, deactivatedAt: true, purgedAt: true },
   });
-  if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
 
   if (target.role === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
-    return NextResponse.json({ error: "Only an admin can purge an admin account" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.users.onlyAdminPurge") }, { status: 403 });
   }
   if (target.purgedAt) return NextResponse.json({ ok: true }); // idempotent
   if (!target.deactivatedAt) {
     return NextResponse.json(
-      { error: "Disable this account before purging its data." },
+      { error: t("apiAdmin.users.disableBeforePurge") },
       { status: 400 },
     );
   }
@@ -67,7 +69,7 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
     if (err instanceof NotDeactivatedError) {
       // Re-activated between our read and the tx.
       return NextResponse.json(
-        { error: "Disable this account before purging its data." },
+        { error: t("apiAdmin.users.disableBeforePurge") },
         { status: 400 },
       );
     }

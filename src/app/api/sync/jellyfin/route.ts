@@ -14,6 +14,7 @@ import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, replaceEpisodeCacheFor
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
 import { sonarrIncompleteKeys } from "@/lib/arr-availability";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // 2 hours — intentionally wider than the 1-hour sync interval so one missed run is survivable
 const RECENT_WINDOW_MS = 2 * 60 * 60 * 1000;
@@ -25,9 +26,10 @@ const RECENT_WINDOW_MS = 2 * 60 * 60 * 1000;
 const PER_SERIES_EPISODE_REFRESH_MAX = 50;
 
 export async function POST(request: NextRequest) {
+  const t = translatorForRequest(request);
   const actor = await getCronActor(request);
   if (!actor) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.common.forbidden") }, { status: 403 });
   }
 
   return withCronRunRecording("jellyfin-sync", () => syncJellyfin(request, actor));
@@ -50,6 +52,7 @@ export async function POST(request: NextRequest) {
 // the recentOnly path's tmdbId-scoped delete removes another server's episodes
 // for a show both of them hold.
 async function syncJellyfin(request: NextRequest, actor: CronActor) {
+  const t = translatorForRequest(request);
   const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
   if (rawBody instanceof NextResponse) return rawBody;
   const recentOnly = rawBody.full !== true;
@@ -60,7 +63,7 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
   const instance: MediaInstanceKey =
     typeof rawBody.instance === "string" ? rawBody.instance : DEFAULT_MEDIA_INSTANCE;
   if (instance !== DEFAULT_MEDIA_INSTANCE && !isValidMediaInstanceSlug(instance)) {
-    return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.invalidInstance") }, { status: 400 });
   }
 
   // getMediaInstances, NOT getSyncableMediaInstances: the latter probes each
@@ -77,7 +80,7 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
   ]);
 
   if (!jellyfinConfig.url || !jellyfinConfig.apiKey) {
-    return NextResponse.json({ error: "Jellyfin server not configured" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.jellyfinNotConfigured") }, { status: 400 });
   }
 
   // The slug must be REGISTERED, not merely shape-valid: leftover Setting rows
@@ -87,7 +90,7 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
   // the default — take the episode-cache-owner branch and wipe the shared
   // TVEpisodeCache's jellyfin rows in favour of a ghost server's holdings.
   if (instance !== DEFAULT_MEDIA_INSTANCE && !jellyfinInstances.some((i) => i.slug === instance)) {
-    return NextResponse.json({ error: "Unknown Jellyfin instance" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.sync.unknownJellyfinInstance") }, { status: 400 });
   }
 
   const baseUrl = jellyfinConfig.url.replace(/\/$/, "");
@@ -109,7 +112,7 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[sync/jellyfin] Failed to fetch library:", msg);
     return NextResponse.json(
-      { error: "Could not reach Jellyfin server" },
+      { error: t("apiAdmin.sync.jellyfinUnreachable") },
       { status: 502 }
     );
   }

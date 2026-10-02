@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Raw Jellyfin user shape — every field optional so no user is dropped while parsing.
 interface RawJellyfinUser {
@@ -33,18 +34,19 @@ function jellyfinHeaders(apiKey: string): Record<string, string> {
 }
 
 export const GET = withAdmin(async (req, _ctx, _session) => {
+  const t = translatorForRequest(req);
   // Which server to diagnose. The live /Users fetch and the DB count below must
   // describe the SAME server, or `gap` compares one server's users against
   // every server's rows. Defaults to "" (the default server), so a
   // single-server deployment needs no parameter.
   const instance = new URL(req.url).searchParams.get("instance") ?? DEFAULT_MEDIA_INSTANCE;
   if (instance !== DEFAULT_MEDIA_INSTANCE && !isValidMediaInstanceSlug(instance)) {
-    return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.invalidInstance") }, { status: 400 });
   }
   const { url, apiKey } = await getJellyfinConfig(instance);
 
   if (!url || !apiKey) {
-    return NextResponse.json({ error: "Jellyfin not configured" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.jellyfinNotConfiguredShort") }, { status: 400 });
   }
 
   const base = url.replace(/\/$/, "");

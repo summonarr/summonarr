@@ -6,6 +6,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import type { AuditAction, Prisma } from "@/generated/prisma";
 import { AUDIT_ACTIONS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const VALID_ACTIONS: AuditAction[] = AUDIT_ACTIONS;
 
@@ -36,6 +37,7 @@ function escapeCSV(value: string): string {
 }
 
 export const GET = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const url = req.nextUrl;
   const format = url.searchParams.get("format") === "json" ? "json" : "csv";
   const action = url.searchParams.get("action") as AuditAction | null;
@@ -65,14 +67,14 @@ export const GET = withAdmin(async (req, _ctx, session) => {
     if (dateFrom) {
       const d = new Date(dateFrom);
       if (isNaN(d.getTime())) {
-        return NextResponse.json({ error: "Invalid dateFrom" }, { status: 400 });
+        return NextResponse.json({ error: t("apiAdmin.auditLog.invalidDateFrom") }, { status: 400 });
       }
       where.createdAt.gte = d;
     }
     if (dateTo) {
       const end = new Date(dateTo);
       if (isNaN(end.getTime())) {
-        return NextResponse.json({ error: "Invalid dateTo" }, { status: 400 });
+        return NextResponse.json({ error: t("apiAdmin.auditLog.invalidDateTo") }, { status: 400 });
       }
       end.setDate(end.getDate() + 1);
       where.createdAt.lt = end;
@@ -100,7 +102,7 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   // this line is synchronous, so the placement is equivalent for concurrent callers, and it still
   // precedes the paper-trail `auditLog.create` below — a throttled request writes and reads nothing.
   if (!checkRateLimit(`audit-log-export:${session.user.id}`, 3, 3_600_000)) {
-    return NextResponse.json({ error: "Too many exports — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.auditLog.tooManyExports") }, { status: 429 });
   }
 
   const date = new Date().toISOString().slice(0, 10);

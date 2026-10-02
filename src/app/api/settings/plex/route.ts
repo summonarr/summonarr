@@ -5,14 +5,16 @@ import { prisma } from "@/lib/prisma";
 import { getPlexUser } from "@/lib/plex";
 import { logAudit } from "@/lib/audit";
 import { getClientIp } from "@/lib/rate-limit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const POST = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const parsed = await readJsonCapped<{ authToken?: string }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
   if (!body.authToken || typeof body.authToken !== "string") {
-    return NextResponse.json({ error: "authToken is required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.settings.authTokenRequired") }, { status: 400 });
   }
 
   const authToken = body.authToken;
@@ -26,7 +28,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   } catch (err) {
     console.error("[settings/plex] Plex token validation failed:", err);
     return NextResponse.json(
-      { error: "Plex token is invalid or plex.tv could not be reached" },
+      { error: t("apiAdmin.settings.plexTokenInvalid") },
       { status: 422 },
     );
   }

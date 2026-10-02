@@ -4,19 +4,21 @@ import { listSpecs, describeSchemaError } from "@/lib/trash";
 import { isValidInstanceSlug } from "@/lib/arr-instances";
 import type { ArrVariant } from "@/lib/arr";
 import type { TrashService } from "@/generated/prisma";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const GET = withAdmin(async (req, _ctx, _session) => {
+  const t = translatorForRequest(req);
   const serviceRaw = req.nextUrl.searchParams.get("service");
   const service: TrashService | null =
     serviceRaw === "radarr" ? "RADARR" : serviceRaw === "sonarr" ? "SONARR" : null;
   if (!service) {
-    return NextResponse.json({ error: "service must be radarr or sonarr" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.serviceRadarrOrSonarr") }, { status: 400 });
   }
   // ?variant= is an instance slug ("" default, "4k", named); "hd" is the legacy default spelling.
   const rawVariant = req.nextUrl.searchParams.get("variant") ?? "";
   const variant: ArrVariant = rawVariant === "hd" ? "" : rawVariant.trim();
   if (!isValidInstanceSlug(variant)) {
-    return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.invalidInstance") }, { status: 400 });
   }
 
   try {

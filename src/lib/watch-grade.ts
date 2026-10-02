@@ -57,6 +57,8 @@
 //     Cutoffs must be strictly descending: the settings route refuses anything
 //     else, and a stored set that isn't falls back to the defaults on read.
 
+import type { Translator } from "./i18n/translate";
+
 export type WatchGradeLetter = "A" | "B" | "C" | "D" | "F";
 
 // A play below the watched threshold earns half credit once it was a real
@@ -163,11 +165,17 @@ function parseBounded(value: string | null | undefined, field: keyof WatchGradeS
 
 // Validation message for a watch-grade Setting write, or null when the value is
 // acceptable (or the key isn't a watch-grade key at all).
-export function watchGradeSettingError(key: string, value: string): string | null {
+export function watchGradeSettingError(key: string, value: string, t?: Translator): string | null {
   const field = fieldForKey(key);
   if (!field) return null;
   if (parseBounded(value, field) !== null) return null;
   const b = SETTING_BOUNDS[field];
+  if (t) {
+    const vars = { key, min: b.min, max: b.max };
+    if (b.zero === "for no limit") return t("apiAdmin.watchGrade.rangeOrZeroNoLimit", vars);
+    if (b.zero === "to turn it off") return t("apiAdmin.watchGrade.rangeOrZeroOff", vars);
+    return t("apiAdmin.watchGrade.range", vars);
+  }
   return `"${key}" must be an integer between ${b.min} and ${b.max}${b.zero ? `, or 0 ${b.zero}` : ""}`;
 }
 
@@ -180,8 +188,10 @@ export function watchGradeSettingError(key: string, value: string): string | nul
 //     turn every B into an A.
 export function watchGradeCrossFieldError(
   settings: Pick<WatchGradeSettings, "graceDays" | "windowDays"> & BandSettings,
+  t?: Translator,
 ): string | null {
   if (settings.windowDays > 0 && settings.windowDays <= settings.graceDays) {
+    if (t) return t("apiAdmin.watchGrade.windowVsGrace", { window: settings.windowDays, grace: settings.graceDays });
     return (
       `The grade window (${settings.windowDays} days) must be longer than the grace period ` +
       `(${settings.graceDays} days), or 0 for no limit — otherwise no request can ever be scored`
@@ -190,6 +200,11 @@ export function watchGradeCrossFieldError(
   const bands = watchGradeBands(settings);
   for (let i = 0; i < 3; i++) {
     if (bands[i].min <= bands[i + 1].min) {
+      if (t) {
+        return t("apiAdmin.watchGrade.cutoffOrder", {
+          letter: bands[i].letter, min: bands[i].min, nextLetter: bands[i + 1].letter, nextMin: bands[i + 1].min,
+        });
+      }
       return (
         `The ${bands[i].letter} cutoff (${bands[i].min}%) must be higher than the ` +
         `${bands[i + 1].letter} cutoff (${bands[i + 1].min}%)`

@@ -1419,3 +1419,16 @@ test("guardrail 14a: a wanted row on an UNCONFIGURED Sonarr does not hold (stale
   await settleFireAndForget();
   assert.equal(casCalls, 1, "a wanted row on the DEFAULT instance does not hold a request on another instance");
 });
+
+test("i18n: the admin Resync's error follows the caller's language; cron (no hints) stays English", async () => {
+  const es = await postPlexSync(plexReq({ headers: { ...AS_CRON, cookie: "summonarr-locale=es" } }));
+  assert.equal(es.status, 400);
+  assert.deepEqual(await bodyOf(es), { error: "El servidor Plex no está configurado" });
+  const jf = await postJellyfinSync(jfReq({ headers: { ...AS_CRON, "accept-language": "es-ES" } }));
+  assert.equal(jf.status, 400);
+  assert.deepEqual(await bodyOf(jf), { error: "El servidor Jellyfin no está configurado" });
+  const en = await postPlexSync(plexReq({ headers: AS_CRON }));
+  assert.deepEqual(await bodyOf(en), { error: "Plex server not configured" });
+  await settleFireAndForget();
+  assert.equal(fetchCalls.length, 0);
+});
