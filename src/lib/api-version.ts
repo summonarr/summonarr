@@ -16,12 +16,20 @@
 //     GET /api/requests/instances, and the native OIDC handshake
 //     (JSON /api/auth/oidc/start + POST /api/auth/sign-in/oidc).
 //
-// v3 is ADDITIVE: MIN_API_VERSION stays 1, so nothing is dropped and no client
-// is locked out. It exists so a native client can ASK whether these routes are
-// here before offering them, instead of advertising a screen that 404s. That is
-// the guardrail-25 posture — feature-gate on the reported version, don't raise
-// the floor.
-export const API_VERSION = 3;
+// v4: account surfaces a native client offers from Profile — two-factor
+//     management (/api/profile/mfa/**, TOTP + recovery codes), the personal
+//     iCal feed (/api/profile/calendar), and the watchlist auto-request
+//     preference (/api/profile/auto-request). The 2FA SIGN-IN challenge is not
+//     part of this: it is reactive (the 401 itself announces it), so clients
+//     handle it at any version.
+//
+// v3 and v4 are ADDITIVE: MIN_API_VERSION stays 1, so nothing is dropped and no
+// client is locked out. They exist so a native client can ASK whether these
+// routes are here before offering them, instead of advertising a screen that
+// 404s (or, for a feature flag a pre-v4 server doesn't know, reads as on). That
+// is the guardrail-25 posture — feature-gate on the reported version, don't
+// raise the floor.
+export const API_VERSION = 4;
 
 // Oldest contract version the server still answers. Bump only when you drop
 // backward-compatible support for an old client contract.
