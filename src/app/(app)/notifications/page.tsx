@@ -2,7 +2,8 @@ import { requireAppSession } from "@/lib/require-app-session";
 import { prisma } from "@/lib/prisma";
 import { PageHeader } from "@/components/ui/design";
 import { NotificationList, type NotificationListItem } from "@/components/notifications/notification-list";
-import { getTranslator } from "@/lib/i18n/server";
+import { getLocale, getTranslator } from "@/lib/i18n/server";
+import { localizeStoredTitles } from "@/lib/tmdb-localize";
 import { renderNotification } from "@/lib/notification-render";
 
 export const dynamic = "force-dynamic";
@@ -31,7 +32,8 @@ export default async function NotificationsPage() {
 
   // Rendered in the viewer's language from the row's stored data, exactly as
   // GET /api/notifications does for the pages loaded after this one.
-  const items: NotificationListItem[] = rows.map(({ data, ...n }) => ({
+  const localized = await localizeStoredTitles(rows, await getLocale());
+  const items: NotificationListItem[] = localized.map(({ data, ...n }) => ({
     ...n,
     ...renderNotification({ ...n, data }, t),
     createdAt: n.createdAt.toISOString(),

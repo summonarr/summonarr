@@ -80,5 +80,7 @@
   "detail.status.canceled": "Canceled",
   "detail.status.returningSeries": "Returning Series",
   "detail.status.ended": "Ended",
-  "detail.status.pilot": "Pilot"
+  "detail.status.pilot": "Pilot",
+  "detail.seasons.numbered": "Season {number}",
+  "detail.seasons.specials": "Specials"
 }

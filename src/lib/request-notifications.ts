@@ -310,7 +310,7 @@ function dispatchRequestStatusChange(
 
   if (status === "APPROVED") {
     writeInAppNotification(requestedBy, "REQUEST_APPROVED", { title, mediaType, tmdbId, posterPath });
-    notifyUserRequestApproved(requestedBy, title, mediaType).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+    notifyUserRequestApproved(requestedBy, title, mediaType, tmdbId).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUserRequestApprovedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnApproved: true, locale: true } })
       .then((u) => {
@@ -322,7 +322,7 @@ function dispatchRequestStatusChange(
 
   if (status === "AVAILABLE") {
     writeInAppNotification(requestedBy, "REQUEST_AVAILABLE", { title, mediaType, tmdbId, posterPath });
-    notifyUserRequestAvailable(requestedBy, title, mediaType).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+    notifyUserRequestAvailable(requestedBy, title, mediaType, tmdbId).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUsersRequestsAvailablePush([{ requestedBy, title, mediaType, tmdbId }]).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnAvailable: true, locale: true } })
       .then((u) => {
@@ -334,12 +334,12 @@ function dispatchRequestStatusChange(
 
   if (status === "DECLINED") {
     writeInAppNotification(requestedBy, "REQUEST_DECLINED", { title, mediaType, tmdbId, posterPath });
-    notifyUserRequestDeclined(requestedBy, title, mediaType, request.adminNote).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+    notifyUserRequestDeclined(requestedBy, title, mediaType, request.adminNote, tmdbId).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUserRequestDeclinedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnDeclined: true, locale: true } })
       .then((u) => {
         const to = u && resolveUserNotificationEmail(u);
-        if (to && u.emailOnDeclined) notifyUserRequestDeclinedEmail({ toEmail: to, title, mediaType, adminNote: request.adminNote, posterPath, locale: u.locale });
+        if (to && u.emailOnDeclined) notifyUserRequestDeclinedEmail({ toEmail: to, title, mediaType, tmdbId, adminNote: request.adminNote, posterPath, locale: u.locale });
       })
       .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
   }

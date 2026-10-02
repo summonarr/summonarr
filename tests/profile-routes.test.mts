@@ -826,7 +826,7 @@ test("locale PATCH stores a supported locale on the caller's own row", async () 
 
 test("locale PATCH refuses an unsupported or malformed locale and writes nothing", async () => {
   const { token } = await mintSession();
-  for (const body of [{ locale: "fr" }, { locale: "ES" }, { locale: 1 }, {}]) {
+  for (const body of [{ locale: "ru" }, { locale: "ES" }, { locale: 1 }, {}]) {
     const res = await patchLocale(token, body);
     assert.equal(res.status, 400, JSON.stringify(body));
   }

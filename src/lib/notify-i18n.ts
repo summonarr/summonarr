@@ -8,6 +8,12 @@
 
 import type { Translator } from "./i18n/translate";
 
+// A label dropped mid-sentence ("a new movie request") is lowercased — except
+// in German, where nouns stay capitalized ("eine neue Film-Anfrage", not "film").
+export function inlineLabel(label: string, locale: string): string {
+  return locale === "de" ? label : label.toLocaleLowerCase(locale);
+}
+
 export function mediaLabelT(t: Translator, mediaType: string): string {
   return mediaType === "MOVIE" ? t("notify.media.movie") : t("notify.media.tv");
 }

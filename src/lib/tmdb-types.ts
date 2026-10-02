@@ -71,6 +71,10 @@ export interface TmdbMedia {
   // ISO 3166-1 codes for the same origin data (productionCountries holds
   // DISPLAY names) — the anime auto-route predicate matches "JP" against these.
   originCountryCodes?: string[];
+  // ISO codes for `productionCountries`, index-aligned, so the detail page can
+  // name the country in the viewer's language. Absent on rows cached before it
+  // existed — fall back to the English `productionCountries` name.
+  productionCountryCodes?: string[];
   homepage?: string | null;
   budget?: number | null;
   revenue?: number | null;
@@ -222,15 +226,35 @@ export function stillUrl(path: string | null, size: "w185" | "w300" | "original"
   return path && path.startsWith("/") ? `${IMAGE_BASE}/${size}${path}` : null;
 }
 
-// ISO-code → English display name, with the raw code as fallback. Intl.DisplayNames is available in
-// both the Node and browser runtimes; lazily constructed and reused.
-let _languageNames: Intl.DisplayNames | null = null;
-export function languageName(code: string | null | undefined): string | null {
-  if (!code) return null;
+// ISO code → display name in `locale` (English by default), with the raw code
+// as fallback. Intl.DisplayNames exists in both Node and the browser, but call
+// these from SERVER code only when rendering: Node's and the browser's ICU data
+// can word a name differently, which would be a hydration mismatch (guardrail 16).
+// One formatter per (type, locale), built lazily and reused.
+const _displayNames = new Map<string, Intl.DisplayNames>();
+function displayName(type: "language" | "region", code: string, locale: string): string {
   try {
-    _languageNames ??= new Intl.DisplayNames(["en"], { type: "language" });
-    return _languageNames.of(code) ?? code;
+    let dn = _displayNames.get(`${type}:${locale}`);
+    if (!dn) {
+      dn = new Intl.DisplayNames([locale], { type });
+      _displayNames.set(`${type}:${locale}`, dn);
+    }
+    const name = dn.of(type === "region" ? code.toUpperCase() : code);
+    // Intl echoes an unknown code back unchanged — that's the raw-code fallback,
+    // not a name, so it is returned as given.
+    if (!name || name === code || name === code.toUpperCase()) return code;
+    // Several languages write language names in lower case ("français",
+    // "español"); these are shown as standalone labels, so start upper-case.
+    return name.charAt(0).toLocaleUpperCase(locale) + name.slice(1);
   } catch {
     return code;
   }
+}
+
+export function languageName(code: string | null | undefined, locale = "en"): string | null {
+  return code ? displayName("language", code, locale) : null;
+}
+
+export function regionName(code: string | null | undefined, locale = "en"): string | null {
+  return code ? displayName("region", code, locale) : null;
 }

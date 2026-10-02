@@ -145,9 +145,9 @@ export async function runDownloadCheck(target: DownloadCheckTarget, opts: Downlo
   if (requester?.deactivatedAt) return;
 
   if (!released) {
-    await notifyUserAwaitingRelease(requestedBy, title, mediaType, soonestReleaseDate);
+    await notifyUserAwaitingRelease(requestedBy, title, mediaType, soonestReleaseDate, tmdbId);
   } else {
-    await notifyUserDownloadPending(requestedBy, title, mediaType);
+    await notifyUserDownloadPending(requestedBy, title, mediaType, tmdbId);
   }
 }
 

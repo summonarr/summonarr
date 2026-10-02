@@ -1,4 +1,4 @@
-import { getTVDetails, getTVCredits, getTVSuggestions, getTVGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
+import { getTVDetails, tmdbLanguageFor, getTVCredits, getTVSuggestions, getTVGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
 import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
 import { Request4kButton } from "@/components/media/request-4k-button";
@@ -23,7 +23,7 @@ import { generateRequestToken } from "@/lib/request-token";
 import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { DetailExtras } from "@/components/media/detail-extras";
-import { languageName } from "@/lib/tmdb-types";
+import { languageName, regionName } from "@/lib/tmdb-types";
 import { formatDigitalRelease } from "@/lib/format-release-date";
 import { Chip } from "@/components/ui/design";
 import { canRequest, hasPermission, Permission } from "@/lib/permissions";
@@ -31,6 +31,7 @@ import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
 import { isBlacklisted } from "@/lib/blacklist";
 import { DetailTitle } from "@/components/layout/detail-title";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
+import { localizeMedia } from "@/lib/tmdb-localize";
 import { translateTmdbStatus } from "@/components/media/detail-status";
 import { isFeatureEnabled } from "@/lib/features";
 
@@ -54,11 +55,15 @@ export default async function TVDetailPage({
   // title during a TMDB blip — same shape as person/[id]/page.tsx.
   const tmdbId = Number(id);
   if (!Number.isFinite(tmdbId) || tmdbId <= 0) notFound();
-  const media = await getTVDetails(tmdbId).catch((err: unknown) => {
+  const englishMedia = await getTVDetails(tmdbId).catch((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
     if (/failed: 404\b/.test(message)) notFound();
     throw err;
   });
+  // Title, overview, tagline and genres in the viewer's language (English is a
+  // no-op). The genre list below is fetched in the SAME language so the chips'
+  // name → id links keep resolving.
+  const [media] = await localizeMedia([englishMedia], locale);
 
   const provider = session.user.provider;
   const providerSources =
@@ -130,7 +135,7 @@ export default async function TVDetailPage({
       where: { tmdbId: media.id, source: { in: providerSources } },
       select: { seasonNumber: true, episodeNumber: true, source: true },
     }),
-    getTVGenres().catch(() => []),
+    getTVGenres(tmdbLanguageFor(locale)).catch(() => []),
     isBlacklisted(media.id, "TV"),
     isArrConfigured("sonarr", "4k"),
     prisma.mediaRequest.findFirst({
@@ -281,8 +286,8 @@ export default async function TVDetailPage({
                   ? t("detail.seasonCount", { count: media.numberOfSeasons })
                   : null,
                 formatDigitalRelease(media.releasedDigital, locale, (date) => t("detail.digitalRelease", { date })),
-                media.productionCountries?.[0],
-                languageName(media.originalLanguage),
+                regionName(media.productionCountryCodes?.[0], locale) ?? media.productionCountries?.[0],
+                languageName(media.originalLanguage, locale),
                 media.status ? translateTmdbStatus(media.status, t) : null,
               ]
                 .filter(Boolean)

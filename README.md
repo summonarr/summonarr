@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.28.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.29.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,27 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.29.0
+
+**Added**
+
+- **Five more languages:** French, German, Portuguese (Brazil), Italian and Simplified Chinese, alongside English and Spanish. Pick one from the appearance menu; browsers are matched automatically, and `SUMMONARR_DEFAULT_LOCALE` accepts the new codes (`fr`, `de`, `pt`, `it`, `zh`).
+- **Movie and TV details in your language.** Titles, overviews, taglines, posters, genres and episode names follow the language you picked, wherever TMDB has a translation; anything it lacks stays in English. Person pages show the biography and filmography in your language too.
+- **Notifications and the calendar feed use your language's titles.** Every request and issue notification (email, push, Discord and the in-app inbox), admin ones included, names the title in the language that message is written in, and your personal calendar feed does too. Posts to a shared Discord channel use the server's default language. Requests and Radarr/Sonarr keep the English title.
+- Collection names and the generic "Season N" / "Specials" season labels are translated too.
+- When anyone on the server reads a language other than English — including visitors whose language comes from their browser — the daily library cache job fetches translations ahead of time, so pages and the calendar feed don't wait for them.
+- **Original language and country** on detail pages are named in your language.
+- **Discord slash commands** show their descriptions and the Movie / TV Show choices in each Discord user's language. Command names stay in English, so `/link token:<code>` still works for everyone. Existing installs re-register the commands on their next restart.
+
+**Changed**
+
+- The server reports API version 4, so the iOS app can offer two-factor management, the personal calendar feed and the watchlist auto-request setting from its Profile screen. Older apps keep working.
+
+**Fixed**
+
+- German emails lowercased "Film" and "Serie" mid-sentence.
+- Two admin messages built from sentence fragments put stray spaces into Chinese and fixed the word order for every language; each is now one translatable sentence.
 
 ### v0.28.0
 
@@ -765,7 +786,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.28.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.29.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

@@ -8,6 +8,7 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { runFixMatch } from "@/lib/client/fix-match";
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { rich } from "@/components/settings/forms/rich";
 
 interface RequestSummary {
   total: number;
@@ -443,8 +444,12 @@ function BadMatchCard({ match }: { match: ClientBadMatch }) {
         >
           <span style={{ color: "var(--ds-success)", fontSize: 12 }}>✓</span>
           <p style={{ margin: 0, fontSize: 11, color: "var(--ds-success)" }}>
-            {t("adminManage.library.diff.arrConfirms", { id: arrTmdbId })}{" "}
-            <span className="font-semibold capitalize">{arrVerdict}</span> {t("adminManage.library.diff.hasWrongMatch")}
+            {/* One sentence with a {server} slot, so each language places the
+                name (and its spacing) itself — fragments joined with " " put
+                stray spaces into Chinese. */}
+            {rich(t("adminManage.library.diff.arrConfirmsWrong", { id: arrTmdbId }), {
+              server: <span className="font-semibold capitalize">{arrVerdict}</span>,
+            })}
           </p>
         </div>
       ) : (

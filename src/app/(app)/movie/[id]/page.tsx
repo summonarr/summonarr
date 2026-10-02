@@ -1,4 +1,4 @@
-import { getMovieDetails, getMovieCredits, getMovieSuggestions, getMovieCollection, getMovieGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
+import { getMovieDetails, tmdbLanguageFor, getMovieCredits, getMovieSuggestions, getMovieCollection, getMovieGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
 import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
 import { Request4kButton } from "@/components/media/request-4k-button";
@@ -24,7 +24,7 @@ import { generateRequestToken } from "@/lib/request-token";
 import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { DetailExtras } from "@/components/media/detail-extras";
-import { languageName } from "@/lib/tmdb-types";
+import { languageName, regionName } from "@/lib/tmdb-types";
 import { formatDigitalRelease } from "@/lib/format-release-date";
 import { Chip } from "@/components/ui/design";
 import { canRequest, hasPermission, Permission } from "@/lib/permissions";
@@ -32,6 +32,7 @@ import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
 import { isBlacklisted } from "@/lib/blacklist";
 import { DetailTitle } from "@/components/layout/detail-title";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
+import { localizeMedia, localizedCollectionName } from "@/lib/tmdb-localize";
 import { translateTmdbStatus } from "@/components/media/detail-status";
 
 export default async function MovieDetailPage({
@@ -52,11 +53,20 @@ export default async function MovieDetailPage({
   // doesn't claim an existing title was removed. Same shape as person/[id].
   const tmdbId = Number(id);
   if (!Number.isFinite(tmdbId) || tmdbId <= 0) notFound();
-  const media = await getMovieDetails(tmdbId).catch((err: unknown) => {
+  const englishMedia = await getMovieDetails(tmdbId).catch((err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
     if (/failed: 404\b/.test(message)) notFound();
     throw err;
   });
+  // Title, overview, tagline and genres in the viewer's language (English is a
+  // no-op). The genre list below is fetched in the SAME language so the chips'
+  // name → id links keep resolving.
+  const [[media], collectionName] = await Promise.all([
+    localizeMedia([englishMedia], locale),
+    englishMedia.collectionId && englishMedia.collectionName
+      ? localizedCollectionName(englishMedia.collectionId, englishMedia.collectionName, locale)
+      : Promise.resolve(englishMedia.collectionName ?? null),
+  ]);
 
   // Which Plex/Jellyfin servers this viewer may see. Everything downstream keys off the two
   // library rows below — the availability badges, the ratings bar's Jellyfin score, and the
@@ -107,7 +117,7 @@ export default async function MovieDetailPage({
     getMovieCredits(media.id).catch(() => []),
     getMovieSuggestions(media.id).catch(() => []),
     media.collectionId ? getMovieCollection(media.collectionId).catch(() => []) : Promise.resolve([]),
-    getMovieGenres().catch(() => []),
+    getMovieGenres(tmdbLanguageFor(locale)).catch(() => []),
     isBlacklisted(media.id, "MOVIE"),
     // 4K: show the "Request in 4K" action only when a 4K Radarr instance is
     // configured AND the viewer holds REQUEST_4K.
@@ -247,8 +257,8 @@ export default async function MovieDetailPage({
                 media.certification,
                 media.runtime ? t("detail.runtime.minutes", { minutes: media.runtime }) : null,
                 formatDigitalRelease(media.releasedDigital, locale, (date) => t("detail.digitalRelease", { date })),
-                media.productionCountries?.[0],
-                languageName(media.originalLanguage),
+                regionName(media.productionCountryCodes?.[0], locale) ?? media.productionCountries?.[0],
+                languageName(media.originalLanguage, locale),
                 media.status && media.status !== "Released" ? translateTmdbStatus(media.status, t) : null,
               ]
                 .filter(Boolean)
@@ -399,9 +409,9 @@ export default async function MovieDetailPage({
 
       {cast.length > 0 && <CastSection cast={cast} />}
 
-      {media.collectionId && media.collectionName && (
+      {media.collectionId && collectionName && (
         <CollectionRow
-          collectionName={media.collectionName}
+          collectionName={collectionName}
           items={collectionItems}
           currentId={media.id}
           showPlex={showPlex}

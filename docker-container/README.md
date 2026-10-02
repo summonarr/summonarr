@@ -131,7 +131,7 @@ The app refuses to boot in production if any of these are missing or invalid.
 | `TOKEN_ENCRYPTION_KEY` | **exactly 64 hex chars** (32 bytes)        | AES-256-GCM key for encrypting Plex/Jellyfin/Radarr/Sonarr API keys, SMTP passwords, push-subscription tokens, and OAuth accounts at rest. `openssl rand -hex 32`.                       |
 | `TRUST_PROXY`          | `"true"` (public) or unset (LAN)           | `true` behind a trusted reverse proxy — enables per-IP rate limiting from `X-Forwarded-For`. Anything else falls back to a single rate-limit bucket and the spoofable local-only Host guard. **Required for any internet-facing deployment:** when `AUTH_URL` is a public host the app refuses to boot in production without `TRUST_PROXY=true`. Forwarded client-IP headers (`X-Forwarded-For` / `X-Real-IP`) are read **only** when this is exactly `"true"`. |
 | `SUMMONARR_ALLOW_LOCAL_ONLY` | `"true"` to enable; default off      | **Required whenever `TRUST_PROXY` is not `"true"`** — production refuses to boot in local-only mode without it. Local-only mode is gated solely by the client-supplied, spoofable `Host` header, so it is safe only on a genuinely private host (LAN-only, loopback-bound, or firewalled). Set it to acknowledge that your network provides the access control. It cannot unlock a public `AUTH_URL`. |
-| `SUMMONARR_DEFAULT_LOCALE` | `en` (default) or `es` | Default interface language for browsers whose language isn't supported, and for emails, push notifications and Discord messages to users who have never picked a language. Each user can still choose their own language from the account menu. |
+| `SUMMONARR_DEFAULT_LOCALE` | `en` (default), `es`, `fr`, `de`, `pt` (Brazilian), `it` or `zh` (Simplified) | Default interface language for browsers whose language isn't supported, and for emails, push notifications and Discord messages to users who have never picked a language. Each user can still choose their own language from the account menu. |
 
 ### Strongly recommended in production
 
@@ -179,7 +179,7 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | ------------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BASE_PATH`                    | **build-time only**; starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`. Baked into the client bundle at build — setting it as a runtime env var on the prebuilt image has no effect. See [Sub-path deployment](#sub-path-deployment-base_path). |
 | `TRUSTED_PROXY_HOPS`           | integer; default `1`             | Number of trusted reverse proxies in front of the app. Selects which `X-Forwarded-For` entry (Nth from the right) is the real client IP for per-IP rate limiting. Only relevant when `TRUST_PROXY=true`; raise it if you chain proxies (e.g. Cloudflare → Nginx). |
-| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=0.28.0` (no `v` — the published tags are bare semver).                                                                                                   |
+| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=0.29.0` (no `v` — the published tags are bare semver).                                                                                                   |
 | `DELAYED_JOBS_MAX_PENDING`     | integer; default `500`           | Upper bound on queued+running jobs. Raise only if you see delayed-job drops in the logs.                                                                        |
 | `DELAYED_JOBS_MAX_QUEUE`       | integer; default `100`           | Max jobs waiting to be picked up (included in pending).                                                                                                         |
 | `DELAYED_JOBS_MAX_CONCURRENCY` | integer; default `4`             | Concurrent workers draining the queue.                                                                                                                          |
@@ -577,7 +577,7 @@ Before upgrading across a minor version, skim the commit history for `feat`/`per
 Pin to a specific version instead of `latest` by setting `SUMMONARR_VERSION` in `.env`:
 
 ```dotenv
-SUMMONARR_VERSION=0.28.0
+SUMMONARR_VERSION=0.29.0
 ```
 
 To pick up new variables added to `.env.example` between releases, re-fetch it side-by-side and diff:

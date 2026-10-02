@@ -54,7 +54,8 @@ test("SUMMONARR_DEFAULT_LOCALE sets the fallback; an invalid value is ignored", 
   process.env.SUMMONARR_DEFAULT_LOCALE = "es";
   assert.equal(instanceDefaultLocale(), "es");
   assert.equal(localeForRequest(req({})), "es");
-  assert.equal(localeForRequest(req({ "accept-language": "de" })), "es");
+  assert.equal(localeForRequest(req({ "accept-language": "ru" })), "es");
+  assert.equal(localeForRequest(req({ "accept-language": "de" })), "de");
   assert.equal(localeForRequest(req({ "x-summonarr-client": "ios" })), "es");
   process.env.SUMMONARR_DEFAULT_LOCALE = "klingon";
   assert.equal(instanceDefaultLocale(), "en");
@@ -64,7 +65,7 @@ test("notifications use the recipient's stored locale, else the instance default
   delete process.env.SUMMONARR_DEFAULT_LOCALE;
   assert.equal(localeForUser({ locale: "es" }), "es");
   assert.equal(localeForUser({ locale: null }), "en");
-  assert.equal(localeForUser({ locale: "fr" }), "en");
+  assert.equal(localeForUser({ locale: "ru" }), "en");
   assert.equal(localeForUser(null), "en");
   process.env.SUMMONARR_DEFAULT_LOCALE = "es";
   assert.equal(localeForUser({}), "es");

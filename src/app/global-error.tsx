@@ -10,8 +10,21 @@ import { createTranslator } from "@/lib/i18n/translate";
 // the crash page would cost far more than these few strings.
 import enShared from "@/lib/i18n/messages/en/shared.json";
 import esShared from "@/lib/i18n/messages/es/shared.json";
+import frShared from "@/lib/i18n/messages/fr/shared.json";
+import deShared from "@/lib/i18n/messages/de/shared.json";
+import ptShared from "@/lib/i18n/messages/pt/shared.json";
+import itShared from "@/lib/i18n/messages/it/shared.json";
+import zhShared from "@/lib/i18n/messages/zh/shared.json";
 
-const SHARED_MESSAGES: Record<Locale, Record<string, string>> = { en: enShared, es: esShared };
+const SHARED_MESSAGES: Record<Locale, Record<string, string>> = {
+  en: enShared,
+  es: esShared,
+  fr: frShared,
+  de: deShared,
+  pt: ptShared,
+  it: itShared,
+  zh: zhShared,
+};
 
 // The picker's cookie, else the browser language — the same precedence the
 // server applies (resolveLocale), read client-side because there is no

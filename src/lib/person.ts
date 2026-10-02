@@ -8,6 +8,8 @@ import { generateRequestToken } from "@/lib/request-token";
 import { getBlacklistSet, blacklistKey } from "@/lib/blacklist";
 import { getVisibleServerInstances } from "@/lib/media-visibility";
 import type { SummonarrSession } from "@/lib/api-auth";
+import { localizeMedia, localizedBiography } from "@/lib/tmdb-localize";
+import { getContentLocale } from "@/lib/i18n/server";
 
 // Fetch a person's filmography and enrich each credit with THIS viewer's
 // availability, request state, ratings, and a request token — the exact shape a
@@ -24,11 +26,24 @@ export async function getEnrichedPerson(
   // Integration flags passed explicitly (they default to TRUE when omitted), so a
   // disabled integration's leftover library rows badge nothing here — matching
   // the movie/TV detail pages.
-  const [person, plexEnabled, jellyfinEnabled] = await Promise.all([
+  const [englishPerson, plexEnabled, jellyfinEnabled, locale] = await Promise.all([
     getPersonDetails(personId),
     isFeatureEnabled("feature.integration.plex"),
     isFeatureEnabled("feature.integration.jellyfin"),
+    getContentLocale(),
   ]);
+  // Biography and credit titles/posters in the viewer's language (guardrail
+  // 40a; English is a no-op). Credits are localized BEFORE enrichment so every
+  // field added below sits on the localized card.
+  const [biography, localizedCredits] = await Promise.all([
+    localizedBiography(personId, locale),
+    localizeMedia(englishPerson.credits as unknown as TmdbMedia[], locale),
+  ]);
+  const person: PersonDetails = {
+    ...englishPerson,
+    ...(biography ? { biography } : {}),
+    credits: localizedCredits as unknown as PersonDetails["credits"],
+  };
   const { showPlex, showJellyfin } = getBadgeVisibility(session, {
     plex: plexEnabled,
     jellyfin: jellyfinEnabled,

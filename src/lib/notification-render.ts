@@ -12,7 +12,8 @@
 //     native client on an English instance — sees exactly what was stored.
 //   - A row WITHOUT data (written before the column existed), or with a type or
 //     data shape this module does not know, returns the stored title/body as-is.
-//   - The title is never translated: it is the media or issue title.
+//   - The title is not rendered here: it is the media title, which the two
+//     readers localize from the row's tmdbId (localizeStoredTitles, guardrail 40a).
 
 import type { Translator } from "./i18n/translate";
 

@@ -77,7 +77,10 @@ test("every translation keeps the English placeholders", () => {
 test("no catalog value is blank", () => {
   for (const locale of LOCALES) {
     for (const [key, value] of Object.entries(readCatalog(locale))) {
-      assert.ok(typeof value === "string" && value.trim() !== "", `${locale}: ${key}`);
+      // A digit-group separator may legitimately BE whitespace (French groups
+      // with a narrow no-break space), so that one key only has to be non-empty.
+      const ok = key === "media.filter.thousandsSeparator" ? value !== "" : value.trim() !== "";
+      assert.ok(typeof value === "string" && ok, `${locale}: ${key}`);
     }
   }
 });
@@ -115,10 +118,14 @@ test("negotiateLocale: primary subtag, q-values, q=0, fallback", () => {
   assert.equal(negotiateLocale(null), DEFAULT_LOCALE);
   assert.equal(negotiateLocale(""), DEFAULT_LOCALE);
   assert.equal(negotiateLocale("es-MX,es;q=0.9,en;q=0.8"), "es");
-  assert.equal(negotiateLocale("fr-FR,fr;q=0.9,es;q=0.5,en;q=0.4"), "es");
+  assert.equal(negotiateLocale("ru-RU,ru;q=0.9,es;q=0.5,en;q=0.4"), "es");
+  assert.equal(negotiateLocale("fr-FR,fr;q=0.9,es;q=0.5,en;q=0.4"), "fr");
+  assert.equal(negotiateLocale("pt-BR"), "pt");
+  assert.equal(negotiateLocale("zh-Hans-CN,zh;q=0.9"), "zh");
   assert.equal(negotiateLocale("en;q=0.2,es;q=0.8"), "es");
   assert.equal(negotiateLocale("es;q=0,en"), "en");
-  assert.equal(negotiateLocale("de,fr"), DEFAULT_LOCALE);
+  assert.equal(negotiateLocale("ru,ja"), DEFAULT_LOCALE);
+  assert.equal(negotiateLocale("ru,de,fr"), "de");
   // Equal q keeps header order.
   assert.equal(negotiateLocale("es,en"), "es");
   assert.equal(negotiateLocale("en,es"), "en");

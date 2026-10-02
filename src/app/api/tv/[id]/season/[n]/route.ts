@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { getTVSeasonEpisodes } from "@/lib/tmdb";
+import { getTVSeasonEpisodesLocalized, tmdbLanguageFor } from "@/lib/tmdb";
 import type { TmdbEpisode } from "@/lib/tmdb-types";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { settleLimit } from "@/lib/concurrency";
 import { getVisibleServerInstances, visibleEpisodeSourcesFor } from "@/lib/media-visibility";
-import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { localeForRequest, translatorForRequest } from "@/lib/i18n/server-locale";
 
 export interface TVSeasonResponse {
   episodes: TmdbEpisode[];
@@ -36,7 +36,7 @@ export const GET = withAuth(async (
 
   let episodes: TmdbEpisode[];
   try {
-    episodes = await getTVSeasonEpisodes(tmdbId, seasonNumber);
+    episodes = await getTVSeasonEpisodesLocalized(tmdbId, seasonNumber, tmdbLanguageFor(localeForRequest(req)));
   } catch {
     return NextResponse.json({ error: t("apiUser.tv.seasonFetchFailed") }, { status: 502 });
   }

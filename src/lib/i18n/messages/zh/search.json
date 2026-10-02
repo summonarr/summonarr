@@ -1,0 +1,9 @@
+{
+  "search.filter.all": "全部",
+  "search.filter.movies": "电影",
+  "search.filter.tv": "剧集",
+  "search.placeholder": "搜索电影、剧集、请求…",
+  "search.results": "搜索结果",
+  "search.unavailable": "搜索暂不可用，请重试。",
+  "search.noMatches": "无匹配结果"
+}

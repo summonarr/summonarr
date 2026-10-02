@@ -174,8 +174,8 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
 
     void reporterActive.then((active) => {
       if (!active) return;
-      void notifyUserIssueMessage(issue.reportedBy, issue.title, authorName, text).catch(() => {});
-      void notifyUserIssueMessagePush({ userId: issue.reportedBy, title: issue.title, body: text, issueId: id }).catch(() => {});
+      void notifyUserIssueMessage(issue.reportedBy, issue.title, authorName, text, { tmdbId: issue.tmdbId, mediaType: issue.mediaType }).catch(() => {});
+      void notifyUserIssueMessagePush({ userId: issue.reportedBy, title: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, body: text, issueId: id }).catch(() => {});
     });
     if (!selfAction) {
       createInAppNotification(issue.reportedBy, {
@@ -195,16 +195,16 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
         if (!(await reporterActive)) return; // same chokepoint as above
         const toEmail = resolveUserNotificationEmail(reporter);
         if (!toEmail) return;
-        return notifyUserIssueMessageEmail({ toEmail, issueTitle: issue.title, authorName, body: text, locale: reporter.locale });
+        return notifyUserIssueMessageEmail({ toEmail, issueTitle: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, authorName, body: text, locale: reporter.locale });
       })
       .catch(() => {});
-    void notifyAdminsIssueMessage(issue.title, authorName, text, adminOpts).catch(() => {});
-    void notifyAdminsIssueMessagePush({ title: issue.title, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
-    void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
+    void notifyAdminsIssueMessage(issue.title, authorName, text, { ...adminOpts, tmdbId: issue.tmdbId, mediaType: issue.mediaType }).catch(() => {});
+    void notifyAdminsIssueMessagePush({ title: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
+    void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
   } else {
-    void notifyAdminsIssueMessage(issue.title, authorName, text, adminOpts).catch(() => {});
-    void notifyAdminsIssueMessagePush({ title: issue.title, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
-    void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
+    void notifyAdminsIssueMessage(issue.title, authorName, text, { ...adminOpts, tmdbId: issue.tmdbId, mediaType: issue.mediaType }).catch(() => {});
+    void notifyAdminsIssueMessagePush({ title: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
+    void notifyAdminsIssueMessageEmail({ issueTitle: issue.title, tmdbId: issue.tmdbId, mediaType: issue.mediaType, userName: authorName, body: text, issueId: id, ...adminOpts }).catch(() => {});
   }
 
   return NextResponse.json(message, { status: 201 });

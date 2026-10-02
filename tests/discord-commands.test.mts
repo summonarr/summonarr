@@ -224,10 +224,58 @@ test("both registration paths publish byte-identical command JSON", () => {
   );
 });
 
+// The published body is the canonical schema plus Discord's *_localizations
+// fields; stripping those must give back DISCORD_SLASH_COMMANDS exactly.
+function stripLocalizations(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripLocalizations);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([k]) => !k.endsWith("_localizations"))
+        .map(([k, v]) => [k, stripLocalizations(v)]),
+    );
+  }
+  return value;
+}
+
 test("both paths publish the shared DISCORD_SLASH_COMMANDS definition verbatim", () => {
   const shared = JSON.parse(JSON.stringify(DISCORD_SLASH_COMMANDS));
-  assert.deepEqual(JSON.parse(manualPut.body), shared);
-  assert.deepEqual(JSON.parse(settingsPut.body), shared);
+  assert.deepEqual(stripLocalizations(JSON.parse(manualPut.body)), shared);
+  assert.deepEqual(stripLocalizations(JSON.parse(settingsPut.body)), shared);
+});
+
+test("descriptions and choice labels are localized for every UI language; names never are", async () => {
+  const { DISCORD_COMMAND_I18N } = await import("../src/lib/discord-register.ts");
+  const { CATALOGS } = await import("../src/lib/i18n/catalogs.ts");
+  const { LOCALES } = await import("../src/lib/i18n/locales.ts");
+  type Opt = { name: string; description: string; description_localizations?: Record<string, string>; name_localizations?: unknown; choices?: Array<{ name: string; value: string; name_localizations?: Record<string, string> }> };
+  type Cmd = { name: string; description: string; description_localizations?: Record<string, string>; name_localizations?: unknown; options?: Opt[] };
+  const published = JSON.parse(manualPut.body) as Cmd[];
+  const en = CATALOGS.en;
+  const expectedCodes = ["es-ES", "es-419", "fr", "de", "pt-BR", "it", "zh-CN"];
+  assert.equal(LOCALES.length, 7, "a new UI language needs a Discord locale mapping in discord-register.ts");
+  const check = (loc: Record<string, string> | undefined, enText: string, key: string, what: string) => {
+    assert.equal(en[key], enText, `${what}: the English catalog value must equal the schema text`);
+    assert.deepEqual(Object.keys(loc ?? {}).sort(), [...expectedCodes].sort(), `${what}: localized for every language`);
+    for (const [code, text] of Object.entries(loc ?? {})) {
+      assert.ok(text.length >= 1 && text.length <= 100, `${what} ${code}: Discord caps this at 100 chars`);
+    }
+  };
+  for (const cmd of published) {
+    const meta = DISCORD_COMMAND_I18N[cmd.name];
+    assert.ok(meta, `/${cmd.name} has no localization entry`);
+    assert.equal(cmd.name_localizations, undefined, `/${cmd.name}: command names must stay what users type`);
+    check(cmd.description_localizations, cmd.description, meta.description, `/${cmd.name}`);
+    for (const opt of cmd.options ?? []) {
+      const om = meta.options?.[opt.name];
+      assert.ok(om, `/${cmd.name} ${opt.name} has no localization entry`);
+      assert.equal(opt.name_localizations, undefined, `/${cmd.name} ${opt.name}: option names stay English`);
+      check(opt.description_localizations, opt.description, om.description, `/${cmd.name} ${opt.name}`);
+      for (const c of opt.choices ?? []) {
+        check(c.name_localizations, c.name, om.choices![c.value], `/${cmd.name} ${opt.name}=${c.value}`);
+      }
+    }
+  }
 });
 
 test("both paths PUT to the same commands endpoint on discord.com", () => {
@@ -300,8 +348,8 @@ test("the published command set preserves every name, description and option", (
       ],
     },
   ];
-  assert.deepEqual(JSON.parse(manualPut.body), expected);
-  assert.deepEqual(JSON.parse(settingsPut.body), expected);
+  assert.deepEqual(stripLocalizations(JSON.parse(manualPut.body)), expected);
+  assert.deepEqual(stripLocalizations(JSON.parse(settingsPut.body)), expected);
 });
 
 // ════════════════════════════════════════════════════════════════════════════

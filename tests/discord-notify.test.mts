@@ -124,6 +124,18 @@ shadowPrismaModel(prisma, "user", {
   },
 });
 
+// Cached TMDB title translations (guardrail 40a) — seeded per test; empty ⇒ every
+// title stays English and nothing is fetched.
+const translationRows = new Map<string, string>();
+shadowPrismaModel(prisma, "tmdbCache", {
+  findMany: async (args: { where: { key: { in: string[] } } }) =>
+    args.where.key.in
+      .filter((k) => translationRows.has(k))
+      .map((k) => ({ key: k, data: translationRows.get(k)!, cachedAt: new Date(), expiresAt: new Date(Date.now() + 86_400_000) })),
+  upsert: async () => ({}),
+  deleteMany: async () => ({ count: 0 }),
+});
+
 function setSettings(map: Record<string, string>): void {
   settings.clear();
   for (const [k, v] of Object.entries(map)) settings.set(k, v);
@@ -157,6 +169,7 @@ beforeEach(() => {
   userFindUniqueCalls.length = 0;
   userFindManyWheres.length = 0;
   respond = () => okJson({ id: "999999999999999999" });
+  translationRows.clear();
 });
 
 // ── gating short-circuits ───────────────────────────────────────────────────
@@ -292,6 +305,41 @@ test("a DM is written in the linked user's language; a shared-channel post uses 
     userFindUniqueRow = linkedUser();
     await notifyUserRequestApproved("u1", "Dune", "MOVIE");
     assert.equal((sent[0].body?.embeds as Array<Record<string, unknown>>)[0].title, "✅ Solicitud aprobada — Dune");
+  } finally {
+    if (before === undefined) delete process.env.SUMMONARR_DEFAULT_LOCALE;
+    else process.env.SUMMONARR_DEFAULT_LOCALE = before;
+  }
+});
+
+test("the media title follows the EMBED's language: the user's in a DM, the channel's in a shared post", async () => {
+  const before = process.env.SUMMONARR_DEFAULT_LOCALE;
+  delete process.env.SUMMONARR_DEFAULT_LOCALE;
+  translationRows.set("movie:438631:i18n:v2", JSON.stringify({ es: { title: "Duna" } }));
+  try {
+    setSettings({ discordBotToken: BOT });
+    userFindUniqueRow = linkedUser({ locale: "es" });
+    respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
+    await notifyUserRequestApproved("u1", "Dune", "MOVIE", 438631);
+    assert.equal((sent[1].body?.embeds as Array<Record<string, unknown>>)[0].title, "✅ Solicitud aprobada — Duna");
+
+    // A shared channel is read in the instance default — an English embed must
+    // not carry the Spanish requester's title.
+    sent.length = 0;
+    setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+    await notifyUserRequestApproved("u1", "Dune", "MOVIE", 438631);
+    assert.equal((sent[0].body?.embeds as Array<Record<string, unknown>>)[0].title, "✅ Request Approved — Dune");
+
+    // Batch path, same rule.
+    sent.length = 0;
+    userFindManyRows = [{ id: "u1", discordId: DID, locale: "es" }];
+    await notifyUsersRequestsApproved([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 }]);
+    assert.equal((sent[0].body?.embeds as Array<Record<string, unknown>>)[0].title, "✅ Request Approved — Dune");
+
+    // An instance default of "es" moves the channel — and its title — to Spanish.
+    sent.length = 0;
+    process.env.SUMMONARR_DEFAULT_LOCALE = "es";
+    await notifyUsersRequestsApproved([{ requestedBy: "u1", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 }]);
+    assert.equal((sent[0].body?.embeds as Array<Record<string, unknown>>)[0].title, "✅ Solicitud aprobada — Duna");
   } finally {
     if (before === undefined) delete process.env.SUMMONARR_DEFAULT_LOCALE;
     else process.env.SUMMONARR_DEFAULT_LOCALE = before;

@@ -11,7 +11,8 @@ import { settleLimit } from "@/lib/concurrency";
 import { localeForUser, translatorFor } from "@/lib/i18n/server-locale";
 import type { Locale } from "@/lib/i18n/locales";
 import type { Translator } from "@/lib/i18n/translate";
-import { issueTypeLabelT, mediaLabelT } from "@/lib/notify-i18n";
+import { inlineLabel, issueTypeLabelT, mediaLabelT } from "@/lib/notify-i18n";
+import { localizedTitleFor, titleResolver, type TitleRef } from "@/lib/tmdb-localize";
 
 // Every email is written in its RECIPIENT's language: the user-facing notifiers
 // take the recipient's stored `locale` (null → the instance default), and the
@@ -19,11 +20,15 @@ import { issueTypeLabelT, mediaLabelT } from "@/lib/notify-i18n";
 interface Lang {
   t: Translator;
   locale: Locale;
+  // A media title in this recipient language (guardrail 40a). Only the admin
+  // fan-outs that passed refs to sendManyLocalized resolve translations; for
+  // every other Lang it is the stored English title.
+  title: (ref: TitleRef) => string;
 }
 
 function langFor(locale: string | null | undefined): Lang {
   const resolved = localeForUser({ locale });
-  return { t: translatorFor(resolved), locale: resolved };
+  return { t: translatorFor(resolved), locale: resolved, title: (ref) => ref.title };
 }
 
 interface Recipient {
@@ -222,6 +227,8 @@ async function sendManyLocalized(
   cfg: EmailConfig,
   recipients: Recipient[],
   render: (lang: Lang) => { subject: string; html: string },
+  // The media titles the message names, resolved once for every group's language.
+  titleRefs: readonly TitleRef[] = [],
 ): Promise<void> {
   const groups = new Map<Locale, string[]>();
   for (const r of recipients) {
@@ -230,10 +237,11 @@ async function sendManyLocalized(
     list.push(r.to);
     groups.set(locale, list);
   }
+  const resolve = await titleResolver(titleRefs, groups.keys());
   let firstError: unknown = null;
   let failed = false;
   for (const [locale, to] of groups) {
-    const { subject, html } = render({ t: translatorFor(locale), locale });
+    const { subject, html } = render({ t: translatorFor(locale), locale, title: (ref) => resolve(ref, locale) });
     try {
       await sendMany(cfg, to, subject, html);
     } catch (err) {
@@ -494,16 +502,17 @@ export async function notifyAdminsNewRequest(data: {
     const to = await getAdminEmails(data.excludeUserId);
     if (!to.length) return;
 
-    const titleWithYear = data.releaseYear ? `${data.title} (${data.releaseYear})` : data.title;
     await sendManyLocalized(cfg, to, (lang) => {
       const { t } = lang;
+      const title = lang.title({ title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType });
+      const titleWithYear = data.releaseYear ? `${title} (${data.releaseYear})` : title;
       const mediaLabel = mediaLabelT(t, data.mediaType);
       const html = richEmailHtml({
         lang,
-        preheader: t("notify.email.newRequest.preheader", { user: data.requestedBy, media: mediaLabel.toLowerCase(), title: data.title }),
+        preheader: t("notify.email.newRequest.preheader", { user: data.requestedBy, media: inlineLabel(mediaLabel, lang.locale), title }),
         accent: "indigo",
         heading: t("notify.email.newRequest.heading"),
-        subheading: t("notify.email.newRequest.subheading", { media: mediaLabel.toLowerCase() }),
+        subheading: t("notify.email.newRequest.subheading", { media: inlineLabel(mediaLabel, lang.locale) }),
         posterPath: data.posterPath,
         mediaType: data.mediaType,
         details: [
@@ -516,8 +525,8 @@ export async function notifyAdminsNewRequest(data: {
         ctaHref: buildSiteUrl(cfg.siteUrl, "/"),
         siteUrl: cfg.siteUrl,
       });
-      return { subject: t("notify.email.newRequest.subject", { media: mediaLabel, title: data.title }), html };
-    });
+      return { subject: t("notify.email.newRequest.subject", { media: mediaLabel, title }), html };
+    }, [{ title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType }]);
   } catch (err) {
     console.error("[email] Failed to send new request notification:", err instanceof Error ? err.message : err);
   }
@@ -526,6 +535,7 @@ export async function notifyAdminsNewRequest(data: {
 export async function notifyAdminsNewIssue(data: {
   title: string;
   mediaType: string;
+  tmdbId?: number;
   issueType: string;
   reportedBy: string;
   note: string | null;
@@ -545,18 +555,19 @@ export async function notifyAdminsNewIssue(data: {
     const ctaPath = data.issueId ? `/admin/issues?selected=${data.issueId}` : "/admin/issues";
     await sendManyLocalized(cfg, to, (lang) => {
       const { t } = lang;
+      const title = lang.title({ title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType });
       const mediaLabel = mediaLabelT(t, data.mediaType);
       const issueLabel = issueTypeLabelT(t, data.issueType);
       const html = richEmailHtml({
         lang,
-        preheader: t("notify.email.newIssue.preheader", { user: data.reportedBy, issue: issueLabel.toLowerCase(), title: data.title }),
+        preheader: t("notify.email.newIssue.preheader", { user: data.reportedBy, issue: inlineLabel(issueLabel, lang.locale), title }),
         accent: "amber",
         heading: t("notify.email.newIssue.heading"),
-        subheading: t("notify.email.newIssue.subheading", { media: mediaLabel.toLowerCase() }),
+        subheading: t("notify.email.newIssue.subheading", { media: inlineLabel(mediaLabel, lang.locale) }),
         posterPath: data.posterPath,
         mediaType: data.mediaType,
         details: [
-          [t("notify.email.detail.title"), esc(data.title)],
+          [t("notify.email.detail.title"), esc(title)],
           [t("notify.email.detail.type"), mediaLabel],
           [t("notify.email.detail.issue"), esc(issueLabel)],
           [t("notify.email.detail.reportedBy"), esc(data.reportedBy)],
@@ -566,8 +577,8 @@ export async function notifyAdminsNewIssue(data: {
         ctaHref: buildSiteUrl(cfg.siteUrl, ctaPath),
         siteUrl: cfg.siteUrl,
       });
-      return { subject: t("notify.email.newIssue.subject", { title: data.title }), html };
-    });
+      return { subject: t("notify.email.newIssue.subject", { title }), html };
+    }, [{ title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType }]);
   } catch (err) {
     console.error("[email] Failed to send new issue notification:", err instanceof Error ? err.message : err);
   }
@@ -575,6 +586,8 @@ export async function notifyAdminsNewIssue(data: {
 
 export async function notifyAdminsIssueMessageEmail(data: {
   issueTitle: string;
+  tmdbId?: number;
+  mediaType?: string;
   userName: string;
   body: string;
   issueId: string;
@@ -594,19 +607,20 @@ export async function notifyAdminsIssueMessageEmail(data: {
 
     await sendManyLocalized(cfg, to, (lang) => {
       const { t } = lang;
+      const title = lang.title({ title: data.issueTitle, tmdbId: data.tmdbId, mediaType: data.mediaType });
       const subject = data.fromAdmin
-        ? t("notify.email.adminIssueMessage.subjectFromAdmin", { title: data.issueTitle })
-        : t("notify.email.adminIssueMessage.subject", { title: data.issueTitle });
+        ? t("notify.email.adminIssueMessage.subjectFromAdmin", { title })
+        : t("notify.email.adminIssueMessage.subject", { title });
       const html = richEmailHtml({
         lang,
-        preheader: t("notify.email.adminIssueMessage.preheader", { user: data.userName, title: data.issueTitle }),
+        preheader: t("notify.email.adminIssueMessage.preheader", { user: data.userName, title }),
         accent: "amber",
         heading: data.fromAdmin
           ? t("notify.email.adminIssueMessage.headingFromAdmin")
           : t("notify.email.adminIssueMessage.heading"),
         subheading: t("notify.email.adminIssueMessage.subheading", { user: esc(data.userName) }),
         details: [
-          [t("notify.email.detail.issue"), esc(data.issueTitle)],
+          [t("notify.email.detail.issue"), esc(title)],
           [t("notify.email.detail.from"), esc(data.userName)],
         ],
         bodyHtml: noteBlockHtml(data.body, t("notify.email.note.message")),
@@ -615,7 +629,7 @@ export async function notifyAdminsIssueMessageEmail(data: {
         siteUrl: cfg.siteUrl,
       });
       return { subject, html };
-    });
+    }, [{ title: data.issueTitle, tmdbId: data.tmdbId, mediaType: data.mediaType }]);
   } catch (err) {
     console.error("[email] Failed to send admin issue-message notification:", err instanceof Error ? err.message : err);
   }
@@ -624,6 +638,8 @@ export async function notifyAdminsIssueMessageEmail(data: {
 export async function notifyUserIssueMessageEmail(data: {
   toEmail: string;
   issueTitle: string;
+  tmdbId?: number;
+  mediaType?: string;
   authorName: string;
   body: string;
   /** The recipient's stored User.locale (null → the instance default). */
@@ -634,16 +650,17 @@ export async function notifyUserIssueMessageEmail(data: {
     if (!cfg || !isBackendConfigured(cfg)) return;
 
     const lang = langFor(data.locale);
+    const title = await localizedTitleFor({ title: data.issueTitle, tmdbId: data.tmdbId, mediaType: data.mediaType }, data.locale);
     const { t } = lang;
-    const subject = t("notify.email.userIssueMessage.subject", { title: data.issueTitle });
+    const subject = t("notify.email.userIssueMessage.subject", { title });
     const html = richEmailHtml({
       lang,
-      preheader: t("notify.email.userIssueMessage.preheader", { user: data.authorName, title: data.issueTitle }),
+      preheader: t("notify.email.userIssueMessage.preheader", { user: data.authorName, title }),
       accent: "indigo",
       heading: t("notify.email.userIssueMessage.heading"),
       subheading: t("notify.email.userIssueMessage.subheading", { user: esc(data.authorName) }),
       details: [
-        [t("notify.email.detail.issue"), esc(data.issueTitle)],
+        [t("notify.email.detail.issue"), esc(title)],
         [t("notify.email.detail.from"), esc(data.authorName)],
       ],
       bodyHtml: noteBlockHtml(data.body, t("notify.email.note.message")),
@@ -670,21 +687,22 @@ export async function notifyUserRequestApprovedEmail(data: {
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
     const lang = langFor(data.locale);
+    const title = await localizedTitleFor({ title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType }, data.locale);
     const { t } = lang;
     const mediaLabel = mediaLabelT(t, data.mediaType);
     const html = richEmailHtml({
       lang,
-      preheader: t("notify.email.approved.preheader", { media: mediaLabel.toLowerCase(), title: data.title }),
+      preheader: t("notify.email.approved.preheader", { media: inlineLabel(mediaLabel, lang.locale), title }),
       accent: "green",
       heading: t("notify.email.approved.heading"),
-      subheading: t("notify.email.approved.subheading", { media: strong(mediaLabel), title: strong(esc(data.title)) }),
+      subheading: t("notify.email.approved.subheading", { media: strong(mediaLabel), title: strong(esc(title)) }),
       posterPath: data.posterPath,
       mediaType: data.mediaType,
       ctaLabel: t("notify.email.cta.viewRequests"),
       ctaHref: buildSiteUrl(cfg.siteUrl, "/requests"),
       siteUrl: cfg.siteUrl,
     });
-    await sendOne(cfg, data.toEmail, t("notify.email.approved.subject", { media: mediaLabel, title: data.title }), html);
+    await sendOne(cfg, data.toEmail, t("notify.email.approved.subject", { media: mediaLabel, title }), html);
   } catch (err) {
     console.error("[email] Failed to send user approved notification:", err instanceof Error ? err.message : err);
   }
@@ -694,6 +712,7 @@ export async function notifyUserRequestDeclinedEmail(data: {
   toEmail: string;
   title: string;
   mediaType: string;
+  tmdbId?: number;
   adminNote?: string | null;
   posterPath?: string | null;
   /** The recipient's stored User.locale (null → the instance default). */
@@ -703,14 +722,15 @@ export async function notifyUserRequestDeclinedEmail(data: {
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
     const lang = langFor(data.locale);
+    const title = await localizedTitleFor({ title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType }, data.locale);
     const { t } = lang;
     const mediaLabel = mediaLabelT(t, data.mediaType);
     const html = richEmailHtml({
       lang,
-      preheader: t("notify.email.declined.preheader", { media: mediaLabel.toLowerCase(), title: data.title }),
+      preheader: t("notify.email.declined.preheader", { media: inlineLabel(mediaLabel, lang.locale), title }),
       accent: "red",
       heading: t("notify.email.declined.heading"),
-      subheading: t("notify.email.declined.subheading", { media: strong(mediaLabel), title: strong(esc(data.title)) }),
+      subheading: t("notify.email.declined.subheading", { media: strong(mediaLabel), title: strong(esc(title)) }),
       posterPath: data.posterPath,
       mediaType: data.mediaType,
       bodyHtml: noteBlockHtml(data.adminNote, t("notify.email.note.adminNote")),
@@ -718,7 +738,7 @@ export async function notifyUserRequestDeclinedEmail(data: {
       ctaHref: buildSiteUrl(cfg.siteUrl, "/requests"),
       siteUrl: cfg.siteUrl,
     });
-    await sendOne(cfg, data.toEmail, t("notify.email.declined.subject", { media: mediaLabel, title: data.title }), html);
+    await sendOne(cfg, data.toEmail, t("notify.email.declined.subject", { media: mediaLabel, title }), html);
   } catch (err) {
     console.error("[email] Failed to send user declined notification:", err instanceof Error ? err.message : err);
   }
@@ -737,23 +757,24 @@ export async function notifyUserRequestAvailableEmail(data: {
     const cfg = await getEmailConfig();
     if (!cfg || !isBackendConfigured(cfg)) return;
     const lang = langFor(data.locale);
+    const title = await localizedTitleFor({ title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType }, data.locale);
     const { t } = lang;
     const mediaLabel = mediaLabelT(t, data.mediaType);
     const mediaSlug = data.mediaType === "MOVIE" ? "movie" : "tv";
     const deepLink = data.tmdbId ? `/${mediaSlug}/${data.tmdbId}` : "/requests";
     const html = richEmailHtml({
       lang,
-      preheader: t("notify.email.available.preheader", { title: data.title }),
+      preheader: t("notify.email.available.preheader", { title }),
       accent: "green",
       heading: t("notify.email.available.heading"),
-      subheading: t("notify.email.available.subheading", { media: strong(mediaLabel), title: strong(esc(data.title)) }),
+      subheading: t("notify.email.available.subheading", { media: strong(mediaLabel), title: strong(esc(title)) }),
       posterPath: data.posterPath,
       mediaType: data.mediaType,
       ctaLabel: t("notify.email.available.cta"),
       ctaHref: buildSiteUrl(cfg.siteUrl, deepLink),
       siteUrl: cfg.siteUrl,
     });
-    await sendOne(cfg, data.toEmail, t("notify.email.available.subject", { title: data.title }), html);
+    await sendOne(cfg, data.toEmail, t("notify.email.available.subject", { title }), html);
   } catch (err) {
     console.error("[email] Failed to send user available notification:", err instanceof Error ? err.message : err);
   }
@@ -775,17 +796,18 @@ export async function notifyAdminsDeletionVoteThreshold(data: {
 
     await sendManyLocalized(cfg, to, (lang) => {
       const { t } = lang;
+      const title = lang.title({ title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType });
       const mediaLabel = mediaLabelT(t, data.mediaType);
       const html = richEmailHtml({
         lang,
-        preheader: t("notify.email.deletionVote.preheader", { votes: String(data.voteCount), title: data.title }),
+        preheader: t("notify.email.deletionVote.preheader", { votes: String(data.voteCount), title }),
         accent: "amber",
         heading: t("notify.email.deletionVote.heading"),
-        subheading: t("notify.email.deletionVote.subheading", { media: mediaLabel.toLowerCase() }),
+        subheading: t("notify.email.deletionVote.subheading", { media: inlineLabel(mediaLabel, lang.locale) }),
         posterPath: data.posterPath,
         mediaType: data.mediaType,
         details: [
-          [t("notify.email.detail.title"), esc(data.title)],
+          [t("notify.email.detail.title"), esc(title)],
           [t("notify.email.detail.type"), mediaLabel],
           [t("notify.email.detail.votes"), String(data.voteCount)],
         ],
@@ -793,8 +815,8 @@ export async function notifyAdminsDeletionVoteThreshold(data: {
         ctaHref: buildSiteUrl(cfg.siteUrl, "/votes"),
         siteUrl: cfg.siteUrl,
       });
-      return { subject: t("notify.email.deletionVote.subject", { title: data.title }), html };
-    });
+      return { subject: t("notify.email.deletionVote.subject", { title }), html };
+    }, [{ title: data.title, tmdbId: data.tmdbId, mediaType: data.mediaType }]);
   } catch (err) {
     console.error("[email] Failed to send deletion vote threshold notification:", err instanceof Error ? err.message : err);
   }
