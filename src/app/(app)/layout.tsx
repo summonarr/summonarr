@@ -11,6 +11,7 @@ import { MaintenanceBanner } from "@/components/layout/maintenance-banner";
 import { prisma } from "@/lib/prisma";
 import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
+import { getTranslator } from "@/lib/i18n/server";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getFeatureFlags, type FeatureFlags } from "@/lib/features";
 import { DONATION_SETTING_KEYS, hasDonationLinks } from "@/lib/donations";
@@ -92,6 +93,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     return <MaintenancePage message={maintenanceMessage} />;
   }
 
+  const t = await getTranslator();
   return (
     <RatingsVisibilityProvider hidden={hiddenRatingSources}>
     {/* Wraps Header/MobileNav as well as {children}: the detail pages
@@ -111,7 +113,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:px-3 focus:py-2 focus:rounded focus:outline-none focus:ring-2 focus:ring-[var(--ds-accent-ring)]"
         style={{ background: "var(--ds-bg-2)", color: "var(--ds-fg)", border: "1px solid var(--ds-border)" }}
       >
-        Skip to main content
+        {t("shared.skipToContent")}
       </a>
       <NavigationProgress />
       <Sidebar siteTitle={siteTitle} featureFlags={featureFlags} />

@@ -1252,13 +1252,13 @@ export function fmtBitrate(raw: number | null, source: string | null): string {
   return `${Math.round(kbps)} kbps`;
 }
 
-// Renders a localized timestamp. Locale + TZ depend on the client, so the
+// Renders a timestamp in the UI language and the viewer's timezone. TZ depends on the client, so the
 // caller must pass `mounted` (from useHasMounted) — pre-hydration we return
 // "" so SSR and the first client paint agree (guardrail 16).
-export function fmtTimestamp(iso: string | null, mounted: boolean): string {
+export function fmtTimestamp(iso: string | null, mounted: boolean, locale: string): string {
   if (!mounted) return "";
   if (!iso) return "—";
-  return new Date(iso).toLocaleString(undefined, {
+  return new Date(iso).toLocaleString(locale, {
     month: "short",
     day: "numeric",
     hour: "numeric",

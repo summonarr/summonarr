@@ -13,7 +13,7 @@ import {
 } from "@/components/admin/activity-ui";
 import { fmtMarkerOffset } from "./helpers";
 import type { HistoryRow } from "./types";
-import { useT } from "@/components/i18n/i18n-provider";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 export function DetailRow({
   play,
@@ -25,6 +25,7 @@ export function DetailRow({
   mounted: boolean;
 }) {
   const t = useT();
+  const locale = useLocale();
   // A "chain" is one viewing that was paused and resumed across several
   // sittings (segments). When grouping is on, the table shows one row per
   // chain, and every duration/timestamp in this panel covers the WHOLE chain —
@@ -45,8 +46,8 @@ export function DetailRow({
       ? Math.min(100, Math.round((effectivePlay / play.duration) * 100))
       : 0;
   const details: [string, React.ReactNode][] = [
-    [t("adminActivity.field.started"), fmtTimestamp(startedAt, mounted)],
-    [t("adminActivity.field.stopped"), fmtTimestamp(stoppedAt, mounted)],
+    [t("adminActivity.field.started"), fmtTimestamp(startedAt, mounted, locale)],
+    [t("adminActivity.field.stopped"), fmtTimestamp(stoppedAt, mounted, locale)],
     [t("adminActivity.field.totalDuration"), fmtDuration(play.duration)],
     [t("adminActivity.kpi.watchTime"), fmtDuration(effectivePlay)],
     [t("adminActivity.field.paused"), effectivePaused ? fmtDuration(effectivePaused) : "—"],

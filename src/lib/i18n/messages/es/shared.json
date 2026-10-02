@@ -44,5 +44,11 @@
   "shared.notFound.title": "No se encontró esa página",
   "shared.notFound.description": "Esa página no existe. Puede que se haya eliminado o que el enlace sea incorrecto.",
   "shared.notFound.browseMovies": "Explorar películas",
-  "shared.notFound.browseTv": "Explorar series"
+  "shared.notFound.browseTv": "Explorar series",
+  "shared.maintenance.title": "En mantenimiento",
+  "shared.signingOut": "Cerrando sesión…",
+  "shared.discordJoin.message": "Únete a nuestro servidor de Discord para solicitar contenido directamente desde Discord y luego {link}.",
+  "shared.discordJoin.linkAccount": "vincula tu cuenta",
+  "shared.discordJoin.join": "Unirse a Discord",
+  "shared.skipToContent": "Saltar al contenido principal"
 }

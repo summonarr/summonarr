@@ -8,6 +8,7 @@ import {
   statePageCtaStyle,
 } from "@/components/layout/state-page";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // Shown by (app)/layout.tsx INSTEAD of the whole app for non-admins while
 // maintenance mode is on — header and account menu included. So besides
@@ -17,6 +18,7 @@ import { withBasePath } from "@/lib/base-path";
 // non-admin login) otherwise has no way off this wall short of clearing
 // cookies by hand. That button is why this is a client component.
 export function MaintenancePage({ message }: { message?: string }) {
+  const t = useT();
   const [signingOut, setSigningOut] = useState(false);
 
   async function signOut() {
@@ -34,13 +36,13 @@ export function MaintenancePage({ message }: { message?: string }) {
     <StatePage
       frame="document"
       glyph={<Wrench style={{ width: 56, height: 56, color: "var(--ds-warning)" }} />}
-      title="Under maintenance"
-      description={message || "We're performing some maintenance. Please check back shortly."}
+      title={t("shared.maintenance.title")}
+      description={message || t("auth.login.maintenanceDefault")}
       primary={
         <>
           <a href={withBasePath("")} className={STATE_PAGE_CTA_CLASS} style={secondary}>
             <RefreshCw className="w-4 h-4" />
-            Try again
+            {t("shared.error.tryAgain")}
           </a>
           <button
             type="button"
@@ -50,7 +52,7 @@ export function MaintenancePage({ message }: { message?: string }) {
             style={secondary}
           >
             <LogOut className="w-4 h-4" />
-            {signingOut ? "Signing out…" : "Sign out"}
+            {signingOut ? t("shared.signingOut") : t("nav.signOut")}
           </button>
         </>
       }

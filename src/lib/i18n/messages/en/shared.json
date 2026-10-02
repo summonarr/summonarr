@@ -44,5 +44,11 @@
   "shared.notFound.title": "Couldn't find that page",
   "shared.notFound.description": "That page doesn't exist. It may have been removed, or the link may be wrong.",
   "shared.notFound.browseMovies": "Browse movies",
-  "shared.notFound.browseTv": "Browse TV"
+  "shared.notFound.browseTv": "Browse TV",
+  "shared.maintenance.title": "Under maintenance",
+  "shared.signingOut": "Signing out…",
+  "shared.discordJoin.message": "Join our Discord server to request media directly from Discord, then {link}.",
+  "shared.discordJoin.linkAccount": "link your account",
+  "shared.discordJoin.join": "Join Discord",
+  "shared.skipToContent": "Skip to main content"
 }

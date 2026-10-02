@@ -650,7 +650,7 @@ export function ActivityHistoryTable({
                             whiteSpace: "nowrap",
                           }}
                         >
-                          {fmtTimestamp(r.startedAt, mounted)}
+                          {fmtTimestamp(r.startedAt, mounted, locale)}
                           <div
                             className="ds-mono"
                             style={{
