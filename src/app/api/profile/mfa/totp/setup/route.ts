@@ -3,7 +3,7 @@ import { withAuth } from "@/lib/api-auth";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
 import { beginTotpEnrollment, getMfaState } from "@/lib/mfa/mfa-store";
-import { mfaPasswordStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
+import { mfaReauthStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { buildOtpauthUri } from "@/lib/mfa/totp";
 
 const ALREADY_ENABLED_MESSAGE = "An authenticator app is already set up. Remove it first to replace it.";
@@ -21,7 +21,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (maint) return maint;
   const parsed = await readJsonCapped<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024);
   if (parsed instanceof NextResponse) return parsed;
-  const user = await mfaPasswordStepUp(session, parsed.password);
+  const user = await mfaReauthStepUp(session, parsed.password);
   if (user instanceof NextResponse) return user;
 
   // Checked before the second factor so a 409 never spends a recovery code.

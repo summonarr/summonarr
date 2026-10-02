@@ -6,7 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { revokeOtherUserSessions } from "@/lib/auth";
 import { dropRecoveryCodesIfNoFactorInTx } from "@/lib/mfa/mfa-store";
-import { mfaPasswordStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
+import { mfaReauthStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 
 // DELETE /api/profile/mfa/totp — removes the authenticator app (enabled or a
@@ -20,7 +20,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   if (maint) return maint;
   const parsed = await readJsonCappedOr<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024, {});
   if (parsed instanceof NextResponse) return parsed;
-  const user = await mfaPasswordStepUp(session, parsed.password);
+  const user = await mfaReauthStepUp(session, parsed.password);
   if (user instanceof NextResponse) return user;
   const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor);
   if (proof instanceof NextResponse) return proof;

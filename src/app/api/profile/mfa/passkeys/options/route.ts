@@ -5,7 +5,7 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
 import { getMfaState, MAX_PASSKEYS_PER_USER, webAuthnUserHandle } from "@/lib/mfa/mfa-store";
 import { MFA_TOKEN_TTL_SECONDS, signPasskeyRegisterToken } from "@/lib/mfa/mfa-token";
-import { mfaPasswordStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
+import { mfaReauthStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { SUPPORTED_COSE_ALGS, webAuthnConfigFromEnv } from "@/lib/mfa/webauthn";
 
 // POST /api/profile/mfa/passkeys/options — step 1 of adding a passkey.
@@ -26,7 +26,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (!session.sessionId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   const parsed = await readJsonCapped<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024);
   if (parsed instanceof NextResponse) return parsed;
-  const user = await mfaPasswordStepUp(session, parsed.password);
+  const user = await mfaReauthStepUp(session, parsed.password);
   if (user instanceof NextResponse) return user;
 
   const state = await getMfaState(user.id);

@@ -5,7 +5,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { getMfaState, replaceRecoveryCodesInTx } from "@/lib/mfa/mfa-store";
-import { mfaPasswordStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
+import { mfaReauthStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 
 // POST /api/profile/mfa/recovery-codes — replaces every recovery code with ten
@@ -18,7 +18,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   if (maint) return maint;
   const parsed = await readJsonCapped<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024);
   if (parsed instanceof NextResponse) return parsed;
-  const user = await mfaPasswordStepUp(session, parsed.password);
+  const user = await mfaReauthStepUp(session, parsed.password);
   if (user instanceof NextResponse) return user;
 
   const state = await getMfaState(user.id);

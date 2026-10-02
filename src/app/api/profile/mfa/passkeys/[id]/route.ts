@@ -6,7 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { revokeOtherUserSessions } from "@/lib/auth";
 import { dropRecoveryCodesIfNoFactorInTx, sanitizePasskeyName } from "@/lib/mfa/mfa-store";
-import { mfaPasswordStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
+import { mfaReauthStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 
 // PATCH /api/profile/mfa/passkeys/[id] — rename one of the caller's passkeys.
@@ -25,7 +25,7 @@ export const PATCH = withAuth(async (
   if (typeof parsed.name !== "string" || parsed.name.trim().length === 0) {
     return NextResponse.json({ error: "A name is required" }, { status: 400 });
   }
-  const user = await mfaPasswordStepUp(session, parsed.password);
+  const user = await mfaReauthStepUp(session, parsed.password);
   if (user instanceof NextResponse) return user;
   const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor);
   if (proof instanceof NextResponse) return proof;
@@ -61,7 +61,7 @@ export const DELETE = withAuth(async (
   const { id } = await params;
   const parsed = await readJsonCappedOr<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024, {});
   if (parsed instanceof NextResponse) return parsed;
-  const user = await mfaPasswordStepUp(session, parsed.password);
+  const user = await mfaReauthStepUp(session, parsed.password);
   if (user instanceof NextResponse) return user;
   const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor);
   if (proof instanceof NextResponse) return proof;

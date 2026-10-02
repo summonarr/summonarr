@@ -323,7 +323,7 @@ function seedRecoveryCodes(userId: string, plain: string[]): void {
   for (const c of plain) codes.push({ id: `rc-${++seq}`, userId, codeHash: hashRecoveryCode(normalizeRecoveryCode(c)!), usedAt: null });
 }
 
-async function passwordStep(user: Row, headers: Record<string, string> = {}, extra: Row = {}) {
+async function credentialsSignInStep(user: Row, headers: Record<string, string> = {}, extra: Row = {}) {
   return call(credentialsRoute.POST as never, "/api/auth/sign-in/credentials", {
     body: { email: user.email, password: PASSWORD, ...extra },
     headers,
@@ -331,7 +331,7 @@ async function passwordStep(user: Row, headers: Record<string, string> = {}, ext
 }
 
 async function challengeFor(user: Row, headers: Record<string, string> = {}, extra: Row = {}) {
-  const res = await passwordStep(user, headers, extra);
+  const res = await credentialsSignInStep(user, headers, extra);
   assert.equal(res.status, 401);
   return (await res.json()) as {
     mfaRequired: boolean; methods: string[]; mfaToken: string; expiresInSeconds: number;
@@ -372,7 +372,7 @@ beforeEach(() => {
 
 test("an account WITHOUT 2FA gets the byte-identical password response (web): 200 + cookie, body deepEqual", async () => {
   const u = await seedUser();
-  const res = await passwordStep(u);
+  const res = await credentialsSignInStep(u);
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), {
     ok: true,
@@ -384,7 +384,7 @@ test("an account WITHOUT 2FA gets the byte-identical password response (web): 20
 
 test("an account WITHOUT 2FA gets the byte-identical password response (native): token fields, same key set", async () => {
   const u = await seedUser();
-  const res = await passwordStep(u, NATIVE);
+  const res = await credentialsSignInStep(u, NATIVE);
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.deepEqual(Object.keys(body).sort(), ["expiresInSeconds", "ok", "token", "tokenType", "user"]);
@@ -395,7 +395,7 @@ test("an account WITHOUT 2FA gets the byte-identical password response (native):
 test("a PENDING (unconfirmed) authenticator setup is not a second factor — sign-in is unchanged", async () => {
   const u = await seedUser();
   totps.push({ userId: u.id, secret: generateTotpSecret(), enabledAt: null, lastUsedStep: null, updatedAt: new Date() });
-  const res = await passwordStep(u);
+  const res = await credentialsSignInStep(u);
   assert.equal(res.status, 200);
 });
 
@@ -406,7 +406,7 @@ test("2FA account: the password step returns the challenge and mints NOTHING (no
   seedTotp(u.id as string);
   seedRecoveryCodes(u.id as string, ["AAAA-BBBB-CCCC-DDDD"]);
   for (const headers of [{}, NATIVE]) {
-    const res = await passwordStep(u, headers);
+    const res = await credentialsSignInStep(u, headers);
     assert.equal(res.status, 401);
     assert.equal(res.headers.get("cache-control"), "no-store");
     assert.deepEqual(setCookies(res), [], "no Set-Cookie of any kind");
@@ -432,7 +432,7 @@ test("a wrong password on a 2FA account is the ordinary 401 — no challenge is 
 test("a DISABLED 2FA account gets the disabled answer at the password step, never a challenge", async () => {
   const u = await seedUser({ deactivatedAt: new Date() });
   seedTotp(u.id as string);
-  const res = await passwordStep(u);
+  const res = await credentialsSignInStep(u);
   assert.equal(res.status, 403);
   assert.ok(!("mfaToken" in (await res.json())));
 });
@@ -796,7 +796,7 @@ test("turning 2FA off needs the password AND a fresh second factor, and the next
   const res = await call(profileMfa.DELETE as never, "/api/profile/mfa", { method: "DELETE", body: { password: PASSWORD, secondFactor: { method: "totp", code: currentCode(key) } }, headers: bearer(jwt) });
   assert.equal(res.status, 200);
   assert.deepEqual([totps.length, codes.length, passkeys.length], [0, 0, 0]);
-  assert.equal((await passwordStep(u)).status, 200);
+  assert.equal((await credentialsSignInStep(u)).status, 200);
 });
 
 // ── M1: every enrollment change on an account WITH 2FA needs a fresh factor ──
@@ -1149,7 +1149,7 @@ test("admin reset: removes every factor, signs the target out everywhere, audits
   assert.ok((target.sessionsRevokedAt as Date) instanceof Date, "cutoff stamped (revokeAllUserSessions)");
   await new Promise((r) => setImmediate(r));
   assert.ok(audit.some((a) => a.action === "MFA_RESET" && a.target === `user:${target.id}`));
-  assert.equal((await passwordStep(target)).status, 200, "next sign-in is password-only");
+  assert.equal((await credentialsSignInStep(target)).status, 200, "next sign-in is password-only");
 });
 
 test("admin reset: needs MANAGE_USERS, an ADMIN target needs the ADMIN bit, and never the caller's own account", async () => {

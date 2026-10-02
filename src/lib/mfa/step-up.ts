@@ -44,7 +44,7 @@ export async function mfaEligibleUser(session: SummonarrSession): Promise<StepUp
   return { id: user.id, name: user.name, email: user.email };
 }
 
-export async function mfaPasswordStepUp(session: SummonarrSession, password: unknown): Promise<StepUpUser | NextResponse> {
+export async function mfaReauthStepUp(session: SummonarrSession, password: unknown): Promise<StepUpUser | NextResponse> {
   if (!checkRateLimit(`mfa-stepup:${session.user.id}`, 10, 15 * 60 * 1000)) {
     return NextResponse.json(
       { error: "Too many attempts — please wait 15 minutes before trying again." },
@@ -125,7 +125,7 @@ function stepUpMethods(state: MfaState): string[] {
   return methods;
 }
 
-// Call AFTER mfaPasswordStepUp succeeded. Returns the proof, or the response to
+// Call AFTER mfaReauthStepUp succeeded. Returns the proof, or the response to
 // send. `state` may be passed in when the route already read it.
 export async function mfaSecondFactorStepUp(
   req: Request,
