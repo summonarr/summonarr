@@ -5,7 +5,8 @@ import { Loader2, Play, CheckCircle, XCircle, Clock } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import { formatDurationMs } from "@/lib/format-duration";
 import { useHasMounted } from "@/hooks/use-has-mounted";
-import { formatRelativeTime } from "@/lib/relative-time";
+import { formatRelativeTimeLocalized } from "@/lib/relative-time";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { withBasePath } from "@/lib/base-path";
 
 export interface CronJobInfo {
@@ -44,6 +45,8 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
   // server-rendered rows carry no reason, so scheduled failures show none.
   const [runErrors, setRunErrors] = useState<Record<string, string>>({});
   const mounted = useHasMounted();
+  const t = useT();
+  const locale = useLocale();
 
   async function triggerJob(endpoint: string, name: string) {
     setRunning((prev) => new Set(prev).add(name));
@@ -82,7 +85,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
         ),
       );
     } catch {
-      setRunError("Network error or unreadable response");
+      setRunError(t("settings.cron.networkError"));
       setJobs((prev) =>
         prev.map((j) =>
           j.name === name
@@ -104,14 +107,14 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-zinc-800 text-left">
-            <th scope="col" className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Job</th>
-            <th scope="col" className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Interval</th>
-            <th scope="col" className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Last Run</th>
+            <th scope="col" className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">{t("settings.cron.col.job")}</th>
+            <th scope="col" className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">{t("settings.cron.col.interval")}</th>
+            <th scope="col" className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">{t("settings.cron.col.lastRun")}</th>
             {/* Duration is the least useful column, so it's hidden on small
                 screens to let the rest of the table fit a ~440px phone without
                 sideways scrolling. */}
-            <th scope="col" className="hidden sm:table-cell py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Duration</th>
-            <th scope="col" className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">Status</th>
+            <th scope="col" className="hidden sm:table-cell py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">{t("settings.cron.col.duration")}</th>
+            <th scope="col" className="py-2 pr-4 text-xs font-semibold uppercase tracking-wider text-zinc-500">{t("settings.cron.col.status")}</th>
             <th scope="col" className="py-2 text-xs font-semibold uppercase tracking-wider text-zinc-500"></th>
           </tr>
         </thead>
@@ -127,11 +130,11 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                 <td className="py-3 pr-4 text-zinc-400 text-xs tabular-nums whitespace-nowrap">{job.interval}</td>
                 <td className="py-3 pr-4 text-zinc-400 text-xs tabular-nums whitespace-nowrap">
                   {job.lastRun ? (
-                    <span title={mounted ? new Date(job.lastRun).toLocaleString() : undefined}>
-                      {mounted ? formatRelativeTime(job.lastRun) : ""}
+                    <span title={mounted ? new Date(job.lastRun).toLocaleString(locale) : undefined}>
+                      {mounted ? formatRelativeTimeLocalized(job.lastRun, locale) : ""}
                     </span>
                   ) : (
-                    <span className="text-zinc-500">never</span>
+                    <span className="text-zinc-500">{t("settings.cron.never")}</span>
                   )}
                   {/* How OFTEN it ran, not just when. A single "last run" time
                       looks the same whether the job ran once or 400 times in
@@ -143,11 +146,11 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                       }`}
                       title={
                         job.runsLastHourCapped
-                          ? "At least this many runs in the last hour — the ledger keeps a bounded history, so the true count may be higher."
-                          : "Runs recorded in the last hour."
+                          ? t("settings.cron.runsCappedTitle")
+                          : t("settings.cron.runsTitle")
                       }
                     >
-                      {job.runsLastHourCapped ? `${job.runsLastHour}+` : job.runsLastHour} runs/h
+                      {t("settings.cron.runsPerHour", { runs: job.runsLastHourCapped ? `${job.runsLastHour}+` : job.runsLastHour })}
                     </div>
                   )}
                 </td>
@@ -157,13 +160,13 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                 <td className="py-3 pr-4">
                   {job.lastStatus === "ok" && (
                     <span className="flex items-center gap-1 text-green-400 text-xs">
-                      <CheckCircle className="w-3.5 h-3.5" /> OK
+                      <CheckCircle className="w-3.5 h-3.5" /> {t("settings.cron.ok")}
                     </span>
                   )}
                   {job.lastStatus === "error" && (
                     <>
                       <span className="flex items-center gap-1 text-red-400 text-xs" title={runErrors[job.name]}>
-                        <XCircle className="w-3.5 h-3.5" /> Error
+                        <XCircle className="w-3.5 h-3.5" /> {t("settings.cron.error")}
                       </span>
                       {runErrors[job.name] && (
                         <div className="text-[11px] text-zinc-500 mt-0.5 max-w-48 break-words">{runErrors[job.name]}</div>
@@ -185,9 +188,9 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                     className="h-9 px-2.5 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1.5"
                   >
                     {isRunning ? (
-                      <><Loader2 className="w-3 h-3 animate-spin" /> Running</>
+                      <><Loader2 className="w-3 h-3 animate-spin" /> {t("settings.cron.running")}</>
                     ) : (
-                      <><Play className="w-3 h-3" /> Run</>
+                      <><Play className="w-3 h-3" /> {t("settings.cron.run")}</>
                     )}
                   </Button>
                 </td>
