@@ -13,6 +13,9 @@ import {
   getSessionStream,
   clearSession,
 } from "@/lib/import-session";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { localizeBackupMessage } from "@/lib/backup-messages";
+import type { Translator } from "@/lib/i18n/translate";
 
 // Per-chunk size cap, the same as the sibling /api/setup/import-chunk route.
 // Without it, one huge chunk could run the server out of memory (OOM) while
@@ -24,17 +27,17 @@ export const runtime = "nodejs";
 
 const MIN_BACKUP_PASSWORD_LEN = 12;
 
-function passwordOrError(): { password: string } | NextResponse {
+function passwordOrError(t: Translator): { password: string } | NextResponse {
   const password = process.env.BACKUP_DB_PASSWORD ?? "";
   if (password.length === 0) {
     return NextResponse.json(
-      { error: "Backup is not configured. Set the BACKUP_DB_PASSWORD environment variable on the server." },
+      { error: t("apiAdmin.backup.notConfigured") },
       { status: 503 },
     );
   }
   if (password.length < MIN_BACKUP_PASSWORD_LEN) {
     return NextResponse.json(
-      { error: `BACKUP_DB_PASSWORD is too short (minimum ${MIN_BACKUP_PASSWORD_LEN} characters).` },
+      { error: t("apiAdmin.backup.passwordTooShort", { min: MIN_BACKUP_PASSWORD_LEN }) },
       { status: 503 },
     );
   }
@@ -49,7 +52,8 @@ function passwordOrError(): { password: string } | NextResponse {
 //   X-Chunk-Total   total chunks
 //   X-File-Size     total file size in bytes
 export const POST = withAdmin(async (req, _ctx, session) => {
-  const pw = passwordOrError();
+  const t = translatorForRequest(req);
+  const pw = passwordOrError(t);
   if (pw instanceof NextResponse) return pw;
   const { password } = pw;
 
@@ -59,17 +63,17 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const fileSize = Number(req.headers.get("x-file-size") ?? "");
 
   if (!uploadId || !Number.isFinite(chunkIndex) || !Number.isFinite(chunkTotal) || !Number.isFinite(fileSize)) {
-    return NextResponse.json({ error: "Missing or invalid upload headers." }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.backup.invalidUploadHeaders") }, { status: 400 });
   }
   if (fileSize > MAX_CIPHERTEXT_BYTES) {
     return NextResponse.json(
-      { error: `File exceeds the ${Math.round(MAX_CIPHERTEXT_BYTES / (1024 * 1024))} MB limit.` },
+      { error: t("apiAdmin.backup.fileTooLarge", { mb: Math.round(MAX_CIPHERTEXT_BYTES / (1024 * 1024)) }) },
       { status: 413 },
     );
   }
 
   if (!req.body) {
-    return NextResponse.json({ error: "Empty chunk body." }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.backup.emptyChunk") }, { status: 400 });
   }
 
   // Rate-limit the restore *attempt*, not each chunk: consume one slot when the
@@ -78,7 +82,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // partway through. Bounds how often a compromised admin can drive the
   // destructive TRUNCATE+INSERT / PBKDF2 import.
   if (chunkIndex === 0 && !checkRateLimit(`admin-db-import:${session.user.id}`, 5, 60 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many restore attempts — try again later." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.backup.tooManyRestores") }, { status: 429 });
   }
 
   // Header-only size check BEFORE claiming the single upload slot. startSession()
@@ -93,17 +97,17 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       const e = start.error;
       if (e.kind === "in-progress") {
         return NextResponse.json(
-          { error: "Another upload is already in progress. Wait for it to finish or cancel it." },
+          { error: t("apiAdmin.backup.uploadInProgress") },
           { status: 409 },
         );
       }
       if (e.kind === "size-too-large") {
         return NextResponse.json(
-          { error: `File exceeds the ${Math.round(e.max / (1024 * 1024))} MB limit.` },
+          { error: t("apiAdmin.backup.fileTooLarge", { mb: Math.round(e.max / (1024 * 1024)) }) },
           { status: 413 },
         );
       }
-      return NextResponse.json({ error: "Invalid upload parameters." }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.backup.invalidUploadParams") }, { status: 400 });
     }
   }
 
@@ -115,7 +119,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     // an oversized non-zero chunk strands the global slot until its TTL.
     await clearSession(uploadId);
     return NextResponse.json(
-      { error: `Chunk exceeds ${Math.round(MAX_CHUNK_BYTES / (1024 * 1024))} MB cap.` },
+      { error: t("apiAdmin.backup.chunkTooLarge", { mb: Math.round(MAX_CHUNK_BYTES / (1024 * 1024)) }) },
       { status: 413 },
     );
   }
@@ -123,24 +127,24 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (!append.ok) {
     const e = append.error;
     if (e.kind === "no-session") {
-      return NextResponse.json({ error: "No active upload session — start at chunk 0." }, { status: 409 });
+      return NextResponse.json({ error: t("apiAdmin.backup.noUploadSession") }, { status: 409 });
     }
     if (e.kind === "session-mismatch") {
-      return NextResponse.json({ error: "Upload-id does not match the active session." }, { status: 409 });
+      return NextResponse.json({ error: t("apiAdmin.backup.uploadIdMismatch") }, { status: 409 });
     }
     if (e.kind === "expired") {
-      return NextResponse.json({ error: "Upload session expired — restart from chunk 0." }, { status: 410 });
+      return NextResponse.json({ error: t("apiAdmin.backup.uploadExpired") }, { status: 410 });
     }
     if (e.kind === "out-of-order") {
-      return NextResponse.json({ error: `Out-of-order chunk. Next expected index: ${e.expected}.` }, { status: 409 });
+      return NextResponse.json({ error: t("apiAdmin.backup.outOfOrder", { expected: e.expected }) }, { status: 409 });
     }
     if (e.kind === "size-mismatch") {
       return NextResponse.json(
-        { error: `Upload incomplete: received ${e.received} of ${e.expected} declared bytes. Restart from chunk 0.` },
+        { error: t("apiAdmin.backup.incomplete", { received: e.received, expected: e.expected }) },
         { status: 400 },
       );
     }
-    return NextResponse.json({ error: "Chunk exceeds declared file size." }, { status: 413 });
+    return NextResponse.json({ error: t("apiAdmin.backup.chunkExceedsDeclared") }, { status: 413 });
   }
 
   if (!append.complete) {
@@ -156,7 +160,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const stream = getSessionStream(uploadId);
   if (!stream) {
     await clearSession(uploadId);
-    return NextResponse.json({ error: "Upload state lost between final chunk and import." }, { status: 500 });
+    return NextResponse.json({ error: t("apiAdmin.backup.uploadStateLost") }, { status: 500 });
   }
 
   let result;
@@ -175,7 +179,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         errors: result.errors,
       });
     }
-    return NextResponse.json({ error: result.error, complete: true }, { status: result.status });
+    return NextResponse.json({ error: localizeBackupMessage(result.error, t), complete: true }, { status: result.status });
   }
 
   // The DB restore already executed; a failed audit write must not 500 a
@@ -209,9 +213,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
 // DELETE: cancel the in-flight upload.
 export const DELETE = withAdmin(async (req, _ctx, _session) => {
+  const t = translatorForRequest(req);
   const uploadId = req.headers.get("x-upload-id") ?? "";
   if (!uploadId) {
-    return NextResponse.json({ error: "Missing X-Upload-Id." }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.backup.missingUploadId") }, { status: 400 });
   }
   await clearSession(uploadId);
   return NextResponse.json({ ok: true });

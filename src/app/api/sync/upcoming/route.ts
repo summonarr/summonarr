@@ -5,10 +5,12 @@ import { isCronAuthorized, BATCH_TX_TIMEOUT, batchCreateMany, withCronRunRecordi
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { warmCalendarCache, type CalendarWarmResult } from "@/lib/calendar-feed";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export async function POST(request: NextRequest) {
+  const t = translatorForRequest(request);
   if (!(await isCronAuthorized(request))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.common.forbidden") }, { status: 403 });
   }
 
   return withCronRunRecording("upcoming-cache", () => withAdvisoryLock(

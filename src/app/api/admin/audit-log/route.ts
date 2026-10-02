@@ -6,6 +6,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import type { AuditAction, Prisma } from "@/generated/prisma";
 import { AUDIT_ACTIONS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const VALID_ACTIONS: AuditAction[] = AUDIT_ACTIONS;
 
@@ -22,8 +23,9 @@ for (const action of AUDIT_ACTIONS) {
 }
 
 export const GET = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`admin-audit-list:${session.user.id}`, 60, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.common.tooManyRequests") }, { status: 429 });
   }
   const url = req.nextUrl;
   const pageSize = Math.min(50, Math.max(1, parseInt(url.searchParams.get("pageSize") ?? "50", 10) || 50));

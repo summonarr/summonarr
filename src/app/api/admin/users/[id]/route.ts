@@ -9,6 +9,7 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, parseInstanceGrants, serializeInstanceGrants, parseMediaServerGrants, serializeMediaServerGrants } from "@/lib/permissions";
 import { isValidContentRatingCap } from "@/lib/content-rating";
 import { deactivateUserInTx, LastAdminError } from "@/lib/account-lifecycle";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Thrown by the DELETE tx when the in-transaction role re-read shows the target became
 // ADMIN after the pre-tx authority check (guardrail 23: propagate, never swallow in-tx).
@@ -23,9 +24,10 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   { params }: { params: Promise<{ id: string }> },
   session
 ) => {
+  const t = translatorForRequest(req);
   const { id } = await params;
   if (!checkRateLimit(`admin-user-edit:${session.user.id}`, 20, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many attempts — please wait a minute." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.common.tooManyAttempts") }, { status: 429 });
   }
   const isSelf = id === session.user.id;
 
@@ -65,7 +67,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   if (!callerIsAdmin) {
     const targetForAuth = await prisma.user.findUnique({ where: { id }, select: { role: true } });
     if (targetForAuth?.role === "ADMIN") {
-      return NextResponse.json({ error: "Only an admin can modify an admin account" }, { status: 403 });
+      return NextResponse.json({ error: t("apiAdmin.users.onlyAdminModify") }, { status: 403 });
     }
   }
 
@@ -85,7 +87,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       QUOTA_FIELDS.some((k) => k in body);
     if (selfPrivilegeEdit) {
       return NextResponse.json(
-        { error: "Cannot change your own instance access, server visibility, quota, or content rating cap" },
+        { error: t("apiAdmin.users.cannotChangeOwnLimits") },
         { status: 403 },
       );
     }
@@ -94,15 +96,15 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   if ("mediaServer" in body) {
     const ms = body.mediaServer;
     if (ms !== null && ms !== "plex" && ms !== "jellyfin") {
-      return NextResponse.json({ error: "mediaServer must be 'plex', 'jellyfin', or null" }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.users.mediaServerInvalid") }, { status: 400 });
     }
     const prevMediaServer = await prisma.user.findUnique({ where: { id }, select: { mediaServer: true } });
-    if (!prevMediaServer) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (!prevMediaServer) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
     try {
       await prisma.user.update({ where: { id }, data: { mediaServer: ms } });
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
-        return NextResponse.json({ error: "Not found" }, { status: 404 });
+        return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
       }
       throw err;
     }
@@ -115,15 +117,15 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     const raw = body.maxContentRating;
     const mcr = raw == null || raw === "" ? null : raw; // empty select ⇒ clear the cap
     if (mcr !== null && !isValidContentRatingCap(mcr)) {
-      return NextResponse.json({ error: "maxContentRating must be a valid rating cap or null" }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.users.maxContentRatingInvalid") }, { status: 400 });
     }
     const prev = await prisma.user.findUnique({ where: { id }, select: { maxContentRating: true } });
-    if (!prev) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (!prev) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
     try {
       await prisma.user.update({ where: { id }, data: { maxContentRating: mcr } });
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
-        return NextResponse.json({ error: "Not found" }, { status: 404 });
+        return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
       }
       throw err;
     }
@@ -135,7 +137,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   if (body.permissions !== undefined) {
     const parsed = parseAndValidatePermissions(body.permissions);
     if (parsed === null) {
-      return NextResponse.json({ error: "permissions must be a decimal bitmask within the known permission set" }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.users.permissionsInvalid") }, { status: 400 });
     }
     // A stored mask of exactly 0 is the "row was never seeded" sentinel:
     // effectivePermissions() maps it back to the ROLE PRESET (permissions.ts).
@@ -147,21 +149,19 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     if (parsed === 0n) {
       return NextResponse.json(
         {
-          error:
-            "A mask of 0 means \"unseeded\" and resolves back to the role's default preset, not \"no access\". " +
-            "Leave at least one bit set, or disable the account to remove access entirely.",
+          error: t("apiAdmin.users.permissionsZero"),
         },
         { status: 400 },
       );
     }
     const targetUser = await prisma.user.findUnique({ where: { id }, select: { permissions: true, role: true, name: true, email: true } });
-    if (!targetUser) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (!targetUser) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
 
     // A non-admin MANAGE_USERS holder must not edit an admin's permissions or grant
     // the ADMIN superbit. The lockstep guards below stop role/bit desync; this stops
     // the escalation at its source (caller authority).
     if (!callerIsAdmin && (targetUser.role === "ADMIN" || (parsed & Permission.ADMIN) !== 0n)) {
-      return NextResponse.json({ error: "Only an admin can grant or modify admin access" }, { status: 403 });
+      return NextResponse.json({ error: t("apiAdmin.users.onlyAdminGrantAdmin") }, { status: 403 });
     }
 
     // MANAGE_USERS delegates managing OTHER accounts. Without this, a delegate could
@@ -169,14 +169,14 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     // MANAGE_REQUESTS, …) — session-refresh re-signs the JWT from the DB column, so the
     // self-grant lands on their very next request. Mirrors the role branch's isSelf gate.
     if (!callerIsAdmin && isSelf) {
-      return NextResponse.json({ error: "Cannot change your own permissions" }, { status: 403 });
+      return NextResponse.json({ error: t("apiAdmin.users.cannotChangeOwnPermissions") }, { status: 403 });
     }
 
     // Never let the editor strip the ADMIN bit from a role=ADMIN user — demote the
     // role first (which routes through the last-admin CAS below). Keeps the
     // "never lock out the last admin" invariant on a single code path.
     if (targetUser.role === "ADMIN" && (parsed & Permission.ADMIN) === 0n) {
-      return NextResponse.json({ error: "Demote this admin's role before removing the ADMIN permission." }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.users.demoteBeforeRemovingAdmin") }, { status: 400 });
     }
 
     // Inverse guard: never *grant* the ADMIN superbit to a non-admin-role user. The ADMIN
@@ -184,14 +184,14 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     // role=ADMIN (which the proxy backstop + withAdmin gate on). Promote the role first —
     // that routes through the same last-admin CAS rather than desyncing the bit from role.
     if (targetUser.role !== "ADMIN" && (parsed & Permission.ADMIN) !== 0n) {
-      return NextResponse.json({ error: "Promote this user's role to Admin before granting the ADMIN permission." }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.users.promoteBeforeGrantingAdmin") }, { status: 400 });
     }
 
     try {
       await prisma.user.update({ where: { id }, data: { permissions: parsed } });
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
-        return NextResponse.json({ error: "Not found" }, { status: 404 });
+        return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
       }
       throw err;
     }
@@ -206,16 +206,16 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   // User.instanceGrants and consulted by canRequestInstance/canAutoApproveInstance.
   if (body.instanceGrants !== undefined) {
     if (body.instanceGrants !== null && (typeof body.instanceGrants !== "object" || Array.isArray(body.instanceGrants))) {
-      return NextResponse.json({ error: "instanceGrants must be an object map or null" }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.users.instanceGrantsInvalid") }, { status: 400 });
     }
     const grants = serializeInstanceGrants(parseInstanceGrants(body.instanceGrants));
     const prev = await prisma.user.findUnique({ where: { id }, select: { instanceGrants: true, name: true, email: true } });
-    if (!prev) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (!prev) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
     try {
       await prisma.user.update({ where: { id }, data: { instanceGrants: grants } });
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
-        return NextResponse.json({ error: "Not found" }, { status: 404 });
+        return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
       }
       throw err;
     }
@@ -239,16 +239,16 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   // every grant instead of being rejected as malformed.
   if (body.mediaServerGrants !== undefined) {
     if (body.mediaServerGrants !== null && (typeof body.mediaServerGrants !== "object" || Array.isArray(body.mediaServerGrants))) {
-      return NextResponse.json({ error: "mediaServerGrants must be an object map or null" }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.users.mediaServerGrantsInvalid") }, { status: 400 });
     }
     const grants = serializeMediaServerGrants(parseMediaServerGrants(body.mediaServerGrants));
     const prev = await prisma.user.findUnique({ where: { id }, select: { mediaServerGrants: true, name: true, email: true } });
-    if (!prev) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (!prev) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
     try {
       await prisma.user.update({ where: { id }, data: { mediaServerGrants: grants } });
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
-        return NextResponse.json({ error: "Not found" }, { status: 404 });
+        return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
       }
       throw err;
     }
@@ -261,7 +261,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   if (quotaField !== undefined) {
     const val = body[quotaField];
     if (val !== null && val !== undefined && (typeof val !== "number" || !Number.isInteger(val) || val < 0 || val > 100_000)) {
-      return NextResponse.json({ error: `${quotaField} must be a non-negative integer or null` }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.users.quotaInvalid", { field: quotaField }) }, { status: 400 });
     }
     // A per-user LIMIT of 0 is a footgun that does the OPPOSITE of what it reads as.
     // resolveUserQuota() returns `{ limit: 0 }` for it, every enforcement site gates on
@@ -272,8 +272,7 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     if ((quotaField === "movieQuotaLimit" || quotaField === "tvQuotaLimit") && val === 0) {
       return NextResponse.json(
         {
-          error:
-            `${quotaField} of 0 would mean "unlimited", not "blocked". Leave it empty to use the global quota, set 1 or more for a limit, or clear the user's request permission to stop them requesting.`,
+          error: t("apiAdmin.users.quotaZero", { field: quotaField }),
         },
         { status: 400 },
       );
@@ -283,12 +282,12 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       where: { id },
       select: { movieQuotaLimit: true, movieQuotaDays: true, tvQuotaLimit: true, tvQuotaDays: true },
     });
-    if (!prevQuota) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (!prevQuota) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
     try {
       await prisma.user.update({ where: { id }, data: { [quotaField]: nextVal } });
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
-        return NextResponse.json({ error: "Not found" }, { status: 404 });
+        return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
       }
       throw err;
     }
@@ -300,15 +299,15 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   const notifKey = notifKeys.find(k => body[k] !== undefined);
   if (notifKey !== undefined) {
     if (typeof body[notifKey] !== "boolean") {
-      return NextResponse.json({ error: `${notifKey} must be a boolean` }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.users.notifBoolean", { field: notifKey }) }, { status: 400 });
     }
     const prevNotif = await prisma.user.findUnique({ where: { id }, select: { [notifKey]: true } });
-    if (!prevNotif) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (!prevNotif) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
     try {
       await prisma.user.update({ where: { id }, data: { [notifKey]: body[notifKey] } });
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") {
-        return NextResponse.json({ error: "Not found" }, { status: 404 });
+        return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
       }
       throw err;
     }
@@ -321,23 +320,23 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   // unrecognized keys. Surface that explicitly rather than falling through to the
   // role validator (which would return a misleading "role must be …").
   if (body.role === undefined) {
-    return NextResponse.json({ error: "No recognized fields in PATCH body" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.users.noRecognizedFields") }, { status: 400 });
   }
   if (isSelf) {
-    return NextResponse.json({ error: "Cannot change your own role" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.users.cannotChangeOwnRole") }, { status: 400 });
   }
   if (body.role !== "ADMIN" && body.role !== "USER" && body.role !== "ISSUE_ADMIN") {
-    return NextResponse.json({ error: "role must be ADMIN, ISSUE_ADMIN, or USER" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.users.roleInvalid") }, { status: 400 });
   }
 
   const target = await prisma.user.findUnique({ where: { id }, select: { id: true, role: true, name: true, email: true } });
-  if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
 
   // Only a full admin may promote a user TO admin or change an account that is
   // already admin (demotion, re-seed). Without this, a MANAGE_USERS holder could
   // PATCH {role:"ADMIN"} on any account and self-escalate to full control.
   if (!callerIsAdmin && (body.role === "ADMIN" || target.role === "ADMIN")) {
-    return NextResponse.json({ error: "Only an admin can grant or modify admin access" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.users.onlyAdminGrantAdmin") }, { status: 403 });
   }
 
   // The re-read, the caller-authority gate AND the write all run inside ONE
@@ -382,10 +381,10 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     return { kind: "ok" as const };
   });
   if (outcome.kind === "forbidden") {
-    return NextResponse.json({ error: "Only an admin can grant or modify admin access" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.users.onlyAdminGrantAdmin") }, { status: 403 });
   }
   if (outcome.kind === "last-admin") {
-    return NextResponse.json({ error: "Cannot demote the last admin" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.users.cannotDemoteLastAdmin") }, { status: 400 });
   }
 
   invalidateUserSession(id);
@@ -397,21 +396,22 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
 });
 
 export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
-  _req,
+  req,
   { params }: { params: Promise<{ id: string }> },
   session
 ) => {
+  const t = translatorForRequest(req);
   const { id } = await params;
   if (!checkRateLimit(`admin-user-delete:${session.user.id}`, 5, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many attempts — please wait a minute." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.common.tooManyAttempts") }, { status: 429 });
   }
 
   if (id === session.user.id) {
-    return NextResponse.json({ error: "Cannot delete your own account" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.users.cannotDeleteSelf") }, { status: 400 });
   }
 
   const target = await prisma.user.findUnique({ where: { id }, select: { role: true, name: true, email: true, deactivatedAt: true } });
-  if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
   // Idempotent, and load-bearing: re-running deactivateUserInTx on an already
   // disabled ADMIN would see its own row excluded from the active-admin count
   // and throw LastAdminError spuriously.
@@ -419,7 +419,7 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
 
   // A non-admin MANAGE_USERS holder must not delete/deactivate an admin account.
   if (target.role === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
-    return NextResponse.json({ error: "Only an admin can delete an admin account" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.users.onlyAdminDelete") }, { status: 403 });
   }
 
   const [requestCount, issueCount, voteCount] = await Promise.all([
@@ -454,10 +454,10 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
     });
   } catch (err) {
     if (err instanceof LastAdminError) {
-      return NextResponse.json({ error: "Cannot disable the last admin" }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.users.cannotDisableLastAdmin") }, { status: 400 });
     }
     if (err instanceof TargetBecameAdminError) {
-      return NextResponse.json({ error: "Only an admin can delete an admin account" }, { status: 403 });
+      return NextResponse.json({ error: t("apiAdmin.users.onlyAdminDelete") }, { status: 403 });
     }
     throw err;
   }
@@ -467,6 +467,6 @@ export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   // Account already disabled; a failed audit write must not 500 it (guardrail 26
   // — logAudit swallows write failures). Everything (requests/issues/votes, the
   // identity itself) is preserved — the account is off, not erased.
-  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_DEACTIVATE", target: `user:${id}`, details: { kind: "admin-disable", targetUser: target.name ?? target.email, targetEmail: target.email, before: { role: target.role }, historyPreserved: { mediaRequests: requestCount, issues: issueCount, deletionVotes: voteCount } }, ...auditContext(_req, session) });
+  void logAudit({ userId: session.user.id, userName: session.user.name ?? session.user.email, action: "USER_DEACTIVATE", target: `user:${id}`, details: { kind: "admin-disable", targetUser: target.name ?? target.email, targetEmail: target.email, before: { role: target.role }, historyPreserved: { mediaRequests: requestCount, issues: issueCount, deletionVotes: voteCount } }, ...auditContext(req, session) });
   return NextResponse.json({ ok: true });
 });

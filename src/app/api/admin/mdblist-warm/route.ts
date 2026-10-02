@@ -5,18 +5,21 @@ import { withAdvisoryLock, WARM_MDBLIST_LOCK_ID } from "@/lib/advisory-lock";
 import { prisma } from "@/lib/prisma";
 import { prewarmMdblistCache } from "@/lib/mdblist-prewarm";
 import { logAudit } from "@/lib/audit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 const COOLDOWN_MS = 5 * 60 * 1000;
 const COOLDOWN_KEY = "lastMdblistWarmAt";
 
-function busyResponse() {
+function busyResponse(t: Translator) {
   return NextResponse.json(
-    { ok: false, error: "MDBList warm already running", retryAfter: 30 },
+    { ok: false, error: t("apiAdmin.warm.mdblistRunning"), retryAfter: 30 },
     { status: 409, headers: { "Retry-After": "30" } },
   );
 }
 
 export const POST = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const body = await readJsonCappedOr<{ force?: boolean }>(req, 8192, {});
   if (body instanceof NextResponse) return body;
   const force = body.force === true;
@@ -56,7 +59,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
           const lastMs = row ? parseInt(row.value, 10) || 0 : 0;
           const remaining = COOLDOWN_MS - (now - lastMs);
           return NextResponse.json(
-            { error: `Triggered too recently — wait ${Math.ceil(remaining / 1000)}s` },
+            { error: t("apiAdmin.warm.cooldown", { seconds: Math.ceil(remaining / 1000) }) },
             { status: 429 }
           );
         }
@@ -76,6 +79,6 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
       return NextResponse.json(result);
     },
-    busyResponse,
+    () => busyResponse(t),
   );
 });

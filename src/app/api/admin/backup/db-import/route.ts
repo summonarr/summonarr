@@ -7,30 +7,33 @@ import {
   processBackupImport,
   MAX_CIPHERTEXT_BYTES,
 } from "@/lib/backup-import";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { localizeBackupMessage } from "@/lib/backup-messages";
 
 export const dynamic = "force-dynamic";
 
 const MIN_BACKUP_PASSWORD_LEN = 12;
 
 export const POST = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   // A full DB restore is a destructive TRUNCATE+INSERT and runs PBKDF2(600k) +
   // a long transaction per call. Cap it per admin so a stolen/compromised admin
   // cookie can't hammer the restore path (key-derivation CPU burn, repeated
   // destructive replaces) while still covering legitimate operator use.
   if (!checkRateLimit(`admin-db-import:${session.user.id}`, 5, 60 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many restore attempts — try again later." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.backup.tooManyRestores") }, { status: 429 });
   }
 
   const password = process.env.BACKUP_DB_PASSWORD ?? "";
   if (password.length === 0) {
     return NextResponse.json(
-      { error: "Backup is not configured. Set the BACKUP_DB_PASSWORD environment variable on the server." },
+      { error: t("apiAdmin.backup.notConfigured") },
       { status: 503 },
     );
   }
   if (password.length < MIN_BACKUP_PASSWORD_LEN) {
     return NextResponse.json(
-      { error: `BACKUP_DB_PASSWORD is too short (minimum ${MIN_BACKUP_PASSWORD_LEN} characters).` },
+      { error: t("apiAdmin.backup.passwordTooShort", { min: MIN_BACKUP_PASSWORD_LEN }) },
       { status: 503 },
     );
   }
@@ -39,7 +42,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (sizeCheck) return sizeCheck;
 
   if (!req.body) {
-    return NextResponse.json({ error: "Empty request body" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.backup.emptyBody") }, { status: 400 });
   }
 
   const result = await processBackupImport(req.body, password);
@@ -52,7 +55,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         errors: result.errors,
       });
     }
-    return NextResponse.json({ error: result.error }, { status: result.status });
+    return NextResponse.json({ error: localizeBackupMessage(result.error, t) }, { status: result.status });
   }
 
   // DB restore already executed; a failed audit write must not 500 a successful

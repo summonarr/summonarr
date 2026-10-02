@@ -3,6 +3,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { WATCH_GRADE_SETTING_KEYS, watchGradeCrossFieldError, watchGradeSettingError } from "@/lib/watch-grade";
 import { mergedWatchGradeSettings, previewWatchGradeSpread } from "@/lib/watch-grade-data";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const dynamic = "force-dynamic";
 
@@ -17,23 +18,24 @@ export const dynamic = "force-dynamic";
 // ADMIN only, like /api/settings: this is the settings form's companion, and it
 // grades every requester twice, so it isn't something to hand out wider.
 export const POST = withAdmin(async (req) => {
+  const t = translatorForRequest(req);
   const parsed = await readJsonCapped<Record<string, unknown>>(req, 16_384);
   if (parsed instanceof NextResponse) return parsed;
-  if (Array.isArray(parsed)) return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  if (Array.isArray(parsed)) return NextResponse.json({ error: t("apiAdmin.common.invalidBody") }, { status: 400 });
 
   for (const key of Object.values(WATCH_GRADE_SETTING_KEYS)) {
     const value = parsed[key];
     if (value === undefined) continue;
     if (typeof value !== "string") {
-      return NextResponse.json({ error: `Setting "${key}" must be a string` }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.settings.mustBeString", { key }) }, { status: 400 });
     }
     if (value.trim() === "") continue;
-    const error = watchGradeSettingError(key, value.trim());
+    const error = watchGradeSettingError(key, value.trim(), t);
     if (error) return NextResponse.json({ error }, { status: 400 });
   }
 
   const proposed = await mergedWatchGradeSettings(parsed);
-  const conflict = watchGradeCrossFieldError(proposed);
+  const conflict = watchGradeCrossFieldError(proposed, t);
   if (conflict) return NextResponse.json({ error: conflict }, { status: 400 });
 
   return NextResponse.json(await previewWatchGradeSpread(proposed));

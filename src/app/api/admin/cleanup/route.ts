@@ -4,15 +4,17 @@ import { prisma } from "@/lib/prisma";
 import { isFeatureEnabled } from "@/lib/features";
 import { loadArrLibraryIndex } from "@/lib/library-cleanup-arr";
 import { CLEANUP_FEATURE_KEY, computeCleanupReport } from "@/lib/library-cleanup-data";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Library cleanup report (ADMIN). Judges every library title against the
 // configured rules and returns the ones any rule matched — candidates first,
 // then the ones an exclusion holds back, with every matched rule and exclusion
 // named. Computed on demand: one listing per Radarr/Sonarr instance for sizes and
 // delete targets, plus a fixed set of DB aggregates. Nothing is written.
-export const GET = withAdmin(async () => {
+export const GET = withAdmin(async (req) => {
+  const t = translatorForRequest(req);
   if (!(await isFeatureEnabled(CLEANUP_FEATURE_KEY))) {
-    return NextResponse.json({ error: "Library cleanup is disabled" }, { status: 404 });
+    return NextResponse.json({ error: t("apiAdmin.cleanup.disabled") }, { status: 404 });
   }
   const arr = await loadArrLibraryIndex();
   const report = await computeCleanupReport(arr, new Date());

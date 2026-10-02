@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { isCronAuthorized } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Tracks the columns whose ABSENCE means a `db push` was skipped or refused —
 // in particular the multi-instance identity columns (guardrails 32/35), which
@@ -29,8 +30,9 @@ const EXPECTED: Record<string, string[]> = {
 // a cookie session, adds a same-origin + device-fingerprint check. A bare
 // `Bearer <CRON_SECRET>` never gets this far — withAdmin rejects it first (401).
 export const GET = withAdmin(async (request, _ctx, _session) => {
+  const t = translatorForRequest(request);
   if (!(await isCronAuthorized(request))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.common.forbidden") }, { status: 403 });
   }
 
   const rows = await prisma.$queryRaw<{ table_name: string; column_name: string; data_type: string }[]>`

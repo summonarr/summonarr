@@ -3,11 +3,13 @@ import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { warmActivityCache } from "@/lib/play-history";
 import { logAudit } from "@/lib/audit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const COOLDOWN_MS = 2 * 60 * 1000;
 const COOLDOWN_KEY = "lastActivityWarmAt";
 
-export const POST = withAdmin(async (_req, _ctx, session) => {
+export const POST = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const now = Date.now();
 
   // One atomic SQL statement claims the cooldown slot: it writes the new
@@ -28,7 +30,7 @@ export const POST = withAdmin(async (_req, _ctx, session) => {
     const remaining = COOLDOWN_MS - (now - lastMs);
     return NextResponse.json(
       {
-        error: `Activity cache warm triggered too recently — wait ${Math.ceil(remaining / 1000)}s`,
+        error: t("apiAdmin.warm.activityCooldown", { seconds: Math.ceil(remaining / 1000) }),
         retryAfter: Math.ceil(remaining / 1000),
       },
       { status: 429 }

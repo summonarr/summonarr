@@ -8,6 +8,7 @@ import { arrFetch } from "@/lib/arr";
 import { tmdbAuth, type TmdbAuth } from "@/lib/tmdb-auth";
 import { settleLimit } from "@/lib/concurrency";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const TMDB_HOSTS = ["api.themoviedb.org"];
 
@@ -384,6 +385,7 @@ async function resolveArrConfirmation(
 }
 
 export const GET = withIssueAdmin(async (request, _ctx, _session) => {
+  const t = translatorForRequest(request);
   const { searchParams } = new URL(request.url);
   const server             = searchParams.get("server");
   const mediaTypeRaw       = searchParams.get("mediaType");
@@ -404,10 +406,10 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
     : null;
 
   if (!server || !tmdbId || !mediaType || !correctTmdbId) {
-    return NextResponse.json({ error: "Missing required params" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.fixMatch.missingParams") }, { status: 400 });
   }
   if (server !== "plex" && server !== "jellyfin") {
-    return NextResponse.json({ error: "server must be 'plex' or 'jellyfin'" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.serverPlexOrJellyfin") }, { status: 400 });
   }
 
   // Which configured server's library row (and therefore whose ratingKey and
@@ -415,7 +417,7 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
   // so every pre-multi-server caller keeps its exact behaviour.
   const serverInstanceParam = searchParams.get("serverInstance");
   if (serverInstanceParam !== null && !isValidMediaInstanceSlug(serverInstanceParam)) {
-    return NextResponse.json({ error: `invalid serverInstance: ${serverInstanceParam}` }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.invalidServerInstance", { slug: String(serverInstanceParam) }) }, { status: 400 });
   }
   const serverInstance = serverInstanceParam ?? DEFAULT_MEDIA_INSTANCE;
 
@@ -441,7 +443,7 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
       }),
     ]);
     if (!jfItem?.jellyfinItemId) {
-      return NextResponse.json({ error: "Jellyfin item ID not found — re-sync first" }, { status: 404 });
+      return NextResponse.json({ error: t("apiAdmin.fixMatch.jellyfinItemNotFound") }, { status: 404 });
     }
     const plexHint =
       plexRows.find((r) => r.serverInstance === serverInstance && r.filePath)
@@ -489,7 +491,7 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
     ?? jellyfinRows.find((r) => r.filePath)
     ?? null;
   if (!item?.plexRatingKey) {
-    return NextResponse.json({ error: "Plex rating key not found — re-sync first" }, { status: 404 });
+    return NextResponse.json({ error: t("apiAdmin.fixMatch.plexRatingKeyNotFound") }, { status: 404 });
   }
   // Coerce to break taint from the DB-read string before interpolating into the
   // Plex admin-token URL below (rating keys are always integers).
@@ -497,7 +499,7 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
 
   const plexConfig = await getPlexConfig(serverInstance);
   if (!plexConfig.url || !plexConfig.token) {
-    return NextResponse.json({ error: "Plex server not configured" }, { status: 500 });
+    return NextResponse.json({ error: t("apiAdmin.common.plexNotConfigured") }, { status: 500 });
   }
 
   const serverUrl = plexConfig.url.replace(/\/$/, "");

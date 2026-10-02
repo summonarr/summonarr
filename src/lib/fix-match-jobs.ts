@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { processSingleton } from "./process-singleton";
+import type { Translator } from "./i18n/translate";
 
 // In-memory registry for background fix-match runs (guardrail 37a). A remap
 // waits on the media server for minutes — a Jellyfin series identify refreshes
@@ -109,13 +110,15 @@ export function findRunningFixMatchJob(key: string): FixMatchJob | null {
 }
 
 // Starts `run` detached (in the background) and returns the job record
-// immediately. A job with the same key that is still running is returned
+// immediately. `t` (the starting request's translator) phrases the registry's
+// own client-facing messages; without it they stay English. A job with the same key that is still running is returned
 // instead of started twice — a double-click or the Fix-all loop must never drive
 // two concurrent remaps of one title.
 export function startFixMatchJob(
   key: string,
   run: (report: FixMatchReport) => Promise<FixMatchJobResult>,
   now: number = Date.now(),
+  t?: Translator,
 ): FixMatchJob {
   prune(now);
   let running = 0;
@@ -125,7 +128,9 @@ export function startFixMatchJob(
   }
   if (running >= MAX_RUNNING_JOBS) {
     throw new FixMatchError(
-      "Too many fix-match operations are already running — wait for one to finish and try again.",
+      t
+        ? t("apiAdmin.fixMatch.tooManyRunning")
+        : "Too many fix-match operations are already running — wait for one to finish and try again.",
       429,
     );
   }
@@ -149,7 +154,7 @@ export function startFixMatchJob(
         job.errorStatus = err.status;
       } else {
         console.error("[fix-match] background job failed with an unmapped error:", err instanceof Error ? err.message : err);
-        job.error = "Fix-match operation failed";
+        job.error = t ? t("apiAdmin.fixMatch.failed") : "Fix-match operation failed";
         job.errorStatus = 502;
       }
     },

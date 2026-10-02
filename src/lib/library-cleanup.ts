@@ -17,6 +17,8 @@
 // history at all, the watch-based rules never match — an empty table is not
 // evidence that nobody watches anything.
 
+import type { Translator } from "./i18n/translate";
+
 export type CleanupMediaType = "MOVIE" | "TV";
 
 export type CleanupRule = "unwatched" | "neverWatched" | "votes";
@@ -121,24 +123,27 @@ export function parseCleanupSettings(raw: Readonly<Record<string, string | null 
 // value, it refuses the whole patch.
 export function validateCleanupSettingsPatch(
   body: unknown,
+  t?: Translator,
 ): { rows: Array<{ key: string; value: string }> } | { error: string } {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return { error: "Body must be an object" };
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { error: t ? t("apiAdmin.cleanup.bodyObject") : "Body must be an object" };
+  }
   const rows: Array<{ key: string; value: string }> = [];
   for (const [field, value] of Object.entries(body as Record<string, unknown>)) {
     if ((BOOLEAN_FIELDS as readonly string[]).includes(field)) {
-      if (typeof value !== "boolean") return { error: `${field} must be a boolean` };
+      if (typeof value !== "boolean") return { error: t ? t("apiAdmin.cleanup.fieldBoolean", { field }) : `${field} must be a boolean` };
       rows.push({ key: CLEANUP_SETTING_KEYS[field as BooleanField], value: String(value) });
     } else if ((NUMERIC_FIELDS as readonly string[]).includes(field)) {
       const { min, max } = CLEANUP_NUMERIC_BOUNDS[field as NumericField];
       if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
-        return { error: `${field} must be an integer between ${min} and ${max}` };
+        return { error: t ? t("apiAdmin.cleanup.fieldRange", { field, min, max }) : `${field} must be an integer between ${min} and ${max}` };
       }
       rows.push({ key: CLEANUP_SETTING_KEYS[field as NumericField], value: String(value) });
     } else {
-      return { error: `Unknown setting: ${field}` };
+      return { error: t ? t("apiAdmin.cleanup.unknownSetting", { field }) : `Unknown setting: ${field}` };
     }
   }
-  if (rows.length === 0) return { error: "Nothing to update" };
+  if (rows.length === 0) return { error: t ? t("apiAdmin.cleanup.nothingToUpdate") : "Nothing to update" };
   return { rows };
 }
 

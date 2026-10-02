@@ -15,11 +15,13 @@ import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/n
 import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
 import { sonarrIncompleteKeys } from "@/lib/arr-availability";
 import { deduplicatePlexRowsByRatingKey } from "@/lib/plex-dedupe";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export async function POST(request: NextRequest) {
+  const t = translatorForRequest(request);
   const actor = await getCronActor(request);
   if (!actor) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.common.forbidden") }, { status: 403 });
   }
 
   return withCronRunRecording("plex-sync", () => syncPlex(request, actor));
@@ -38,6 +40,7 @@ export async function POST(request: NextRequest) {
 // the cache alone — rewriting from this server alone would destroy every other
 // Plex server's episode rows until the next orchestrator run.
 async function syncPlex(request: NextRequest, actor: CronActor) {
+  const t = translatorForRequest(request);
   const rawBody = await readJsonCappedOr<Record<string, unknown>>(request, 8192, {});
   if (rawBody instanceof NextResponse) return rawBody;
   const recentOnly = rawBody.full !== true;
@@ -49,7 +52,7 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
   const instance: MediaInstanceKey =
     typeof rawBody.instance === "string" ? rawBody.instance : DEFAULT_MEDIA_INSTANCE;
   if (instance !== DEFAULT_MEDIA_INSTANCE && !isValidMediaInstanceSlug(instance)) {
-    return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.invalidInstance") }, { status: 400 });
   }
 
   // getMediaInstances, NOT getSyncableMediaInstances: the latter probes each
@@ -66,7 +69,7 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
   ]);
 
   if (!plexConfig.url || !plexConfig.token) {
-    return NextResponse.json({ error: "Plex server not configured" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.plexNotConfigured") }, { status: 400 });
   }
 
   // The slug must be REGISTERED, not merely shape-valid: leftover Setting rows
@@ -76,7 +79,7 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
   // the default — take the episode-cache-owner branch and rewrite the shared
   // TVEpisodeCache from a ghost server.
   if (instance !== DEFAULT_MEDIA_INSTANCE && !plexInstances.some((i) => i.slug === instance)) {
-    return NextResponse.json({ error: "Unknown Plex instance" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.sync.unknownPlexInstance") }, { status: 400 });
   }
 
   const serverUrl = plexConfig.url.replace(/\/$/, "");
@@ -124,7 +127,7 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[sync/plex] Failed to fetch library:", msg);
     return NextResponse.json(
-      { error: "Could not reach Plex server" },
+      { error: t("apiAdmin.sync.plexUnreachable") },
       { status: 502 }
     );
   }

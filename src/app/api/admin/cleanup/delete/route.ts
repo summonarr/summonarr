@@ -10,8 +10,9 @@ import { scheduleLibraryScan } from "@/lib/library-scan";
 import { mapLimit } from "@/lib/concurrency";
 import { ArrResponseError, arrErrorMessage } from "@/lib/arr";
 import { deleteArrEntry, loadArrLibraryIndex, resolveArrTargets, type ArrLibraryEntry } from "@/lib/library-cleanup-arr";
-import { CLEANUP_EXCLUSION_LABELS, cleanupKey, type CleanupMediaType } from "@/lib/library-cleanup";
+import { cleanupKey, type CleanupMediaType } from "@/lib/library-cleanup";
 import { CLEANUP_FEATURE_KEY, computeCleanupReport, type CleanupRow, type TitleKey } from "@/lib/library-cleanup-data";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Library cleanup delete (ADMIN) — the ONLY way anything in this feature is
 // removed, and only ever by an admin's explicit, two-step confirmation:
@@ -70,8 +71,9 @@ type Planned = { row: CleanupRow; targets: ArrLibraryEntry[] };
 type Skipped = { tmdbId: number; mediaType: CleanupMediaType; title: string | null; reason: string };
 
 export const POST = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!(await isFeatureEnabled(CLEANUP_FEATURE_KEY))) {
-    return NextResponse.json({ error: "Library cleanup is disabled" }, { status: 404 });
+    return NextResponse.json({ error: t("apiAdmin.cleanup.disabled") }, { status: 404 });
   }
   const execute = req.nextUrl.searchParams.get("execute") === "true";
   const parsed = await readJsonCapped<Body>(req, 65_536);
@@ -79,12 +81,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const items = parseItems(parsed.items);
   if (!items) {
     return NextResponse.json(
-      { error: `items must be 1–${MAX_ITEMS} objects of { tmdbId: positive integer, mediaType: "MOVIE" | "TV" }` },
+      { error: t("apiAdmin.cleanup.itemsInvalid", { max: MAX_ITEMS }) },
       { status: 400 },
     );
   }
   if (parsed.blacklist !== undefined && typeof parsed.blacklist !== "boolean") {
-    return NextResponse.json({ error: "blacklist must be a boolean" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.cleanup.blacklistBoolean") }, { status: 400 });
   }
   const blacklist = parsed.blacklist !== false;
 
@@ -101,17 +103,17 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   for (const it of items) {
     const row = rowByKey.get(cleanupKey(it.tmdbId, it.mediaType));
     if (!row) {
-      skipped.push({ ...it, title: null, reason: "No enabled cleanup rule matches this title (or it is not in the library)" });
+      skipped.push({ ...it, title: null, reason: t("apiAdmin.cleanup.noRuleMatches") });
     } else if (!row.candidate) {
       skipped.push({
         ...it, title: row.title,
-        reason: `Held back: ${row.excludedBy.map((x) => CLEANUP_EXCLUSION_LABELS[x]).join(", ")}`,
+        reason: t("apiAdmin.cleanup.heldBack", { exclusions: row.excludedBy.map((x) => t(`adminManage.cleanup.exclusionLabel.${x}`)).join(", ") }),
       });
     } else {
       // An instance whose listing failed may hold a copy we can't see, and a
       // partial removal would leave the title half-deleted. Refuse rather than guess.
       const down = failedServices.get(it.mediaType === "MOVIE" ? "radarr" : "sonarr");
-      if (down) skipped.push({ ...it, title: row.title, reason: `Could not read ${it.mediaType === "MOVIE" ? "Radarr" : "Sonarr"} instance(s): ${down.join(", ")}` });
+      if (down) skipped.push({ ...it, title: row.title, reason: t("apiAdmin.cleanup.arrUnreadable", { service: it.mediaType === "MOVIE" ? "Radarr" : "Sonarr", instances: down.join(", ") }) });
       else eligible.push(row);
     }
   }
@@ -122,7 +124,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     if (targets.length === 0) {
       skipped.push({
         tmdbId: row.tmdbId, mediaType: row.mediaType, title: row.title,
-        reason: `Not managed by any ${row.mediaType === "MOVIE" ? "Radarr" : "Sonarr"} instance — nothing to delete from here`,
+        reason: t("apiAdmin.cleanup.notManaged", { service: row.mediaType === "MOVIE" ? "Radarr" : "Sonarr" }),
       });
     } else {
       planned.push({ row, targets });
@@ -153,7 +155,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (typeof parsed.confirmTargets !== "number" || parsed.confirmTargets !== targetCount || targetCount === 0) {
     return NextResponse.json(
       {
-        error: targetCount === 0 ? "Nothing to delete" : "Confirmation required",
+        error: targetCount === 0 ? t("apiAdmin.cleanup.nothingToDelete") : t("apiAdmin.cleanup.confirmationRequired"),
         hint: `POST {"confirmTargets": ${targetCount}} with the same items to confirm.`,
         targetCount,
         items: plan,

@@ -6,31 +6,36 @@
 // reject the same shapes and neither may echo an embedded credential back to a
 // client.
 
+import type { Translator } from "./i18n/translate";
+
 export const SERVER_URL_MAX_LEN = 2000;
 
 // Returns an error message when the value is not an acceptable server URL, or
-// null when it passes. `value` is assumed already trimmed and non-empty.
+// null when it passes. `value` is assumed already trimmed and non-empty. The
+// message is a predicate ("must be …") the caller prefixes with the field; with
+// a translator it comes back in that language, without one it is English.
 export function validateServerUrl(
   value: string,
   opts: { httpsOnly?: boolean; maxLen?: number } = {},
+  t?: Translator,
 ): string | null {
   const maxLen = opts.maxLen ?? SERVER_URL_MAX_LEN;
-  if (value.length > maxLen) return `must be ${maxLen} characters or fewer`;
+  if (value.length > maxLen) return t ? t("apiAdmin.serverUrl.tooLong", { max: maxLen }) : `must be ${maxLen} characters or fewer`;
   let parsed: URL;
   try {
     parsed = new URL(value);
   } catch {
-    return "must be a valid URL";
+    return t ? t("apiAdmin.serverUrl.invalid") : "must be a valid URL";
   }
   if (opts.httpsOnly) {
-    if (parsed.protocol !== "https:") return "must be an https:// URL";
+    if (parsed.protocol !== "https:") return t ? t("apiAdmin.serverUrl.httpsOnly") : "must be an https:// URL";
   } else if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    return "must be an http(s) URL";
+    return t ? t("apiAdmin.serverUrl.httpOrHttps") : "must be an http(s) URL";
   }
   // Embedded credentials (user:pass@host) parse silently and would ship out on
   // every request — operators set credentials via the dedicated apiKey/token
   // field instead.
-  if (parsed.username || parsed.password) return "must not contain embedded credentials";
+  if (parsed.username || parsed.password) return t ? t("apiAdmin.serverUrl.credentials") : "must not contain embedded credentials";
   return null;
 }
 

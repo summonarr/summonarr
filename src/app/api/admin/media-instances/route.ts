@@ -10,6 +10,7 @@ import { settleLimit } from "@/lib/concurrency";
 import { getMediaInstances, buildMediaInstanceRegistryWrite } from "@/lib/media-instance-registry";
 import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { validateServerUrl, stripUrlUserinfo } from "@/lib/server-url";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Admin management surface for the full Plex/Jellyfin instance list (multi-
 // server support): the registry metadata (slug/name — deliberately thin, see
@@ -193,13 +194,14 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
 });
 
 export const POST = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const parsed = await readJsonCapped<SavePayload>(req, 64 * 1024);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
   const service = body.service;
   if (service !== "plex" && service !== "jellyfin") {
-    return NextResponse.json({ error: "service must be plex or jellyfin" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.mediaInstances.servicePlexOrJellyfin") }, { status: 400 });
   }
   // Require the array explicitly — see the identical rationale in
   // admin/arr-instances/route.ts: coercing a missing/malformed `instances` to
@@ -207,20 +209,20 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // Setting rows, including an unrecoverable encrypted token/key — and now
   // their library rows too.
   if (!Array.isArray(body.instances)) {
-    return NextResponse.json({ error: "instances must be an array" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.instancesArray") }, { status: 400 });
   }
   const instances = body.instances;
   for (const inst of instances) {
     if (typeof inst?.slug !== "string" || !isValidMediaInstanceSlug(inst.slug)) {
-      return NextResponse.json({ error: `invalid instance slug: ${inst?.slug}` }, { status: 400 });
+      return NextResponse.json({ error: t("apiAdmin.common.invalidSlug", { slug: String(inst?.slug) }) }, { status: 400 });
     }
     // Same URL rules as the /api/settings sibling: the value ships out on every
     // safeFetchAdminConfigured call, so reject a bad scheme or an embedded
     // credential here rather than storing it verbatim and echoing it back.
     const rawUrl = service === "plex" ? inst.serverUrl : inst.url;
     if (typeof rawUrl === "string" && rawUrl.trim().length > 0) {
-      const err = validateServerUrl(rawUrl.trim());
-      if (err) return NextResponse.json({ error: `Server URL for "${inst.slug}" ${err}` }, { status: 400 });
+      const err = validateServerUrl(rawUrl.trim(), {}, t);
+      if (err) return NextResponse.json({ error: t("apiAdmin.mediaInstances.invalidServerUrl", { slug: inst.slug, reason: err }) }, { status: 400 });
     }
   }
 
@@ -366,7 +368,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       try {
         const ok = await pingPlexToken(token);
         if (!ok) {
-          testResults[inst.slug] = { error: "Plex token check failed" };
+          testResults[inst.slug] = { error: t("apiAdmin.mediaInstances.plexTokenCheckFailed") };
           return;
         }
         // pingPlexToken only proves the TOKEN is valid at plex.tv — it never
@@ -375,7 +377,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         // swallows every error and returns null, so null IS the failure signal.
         const machineId = await getPlexMachineId(serverUrl, token, PLEX_IDENTITY_TIMEOUT_MS);
         if (!machineId) {
-          testResults[inst.slug] = { error: "Plex server unreachable" };
+          testResults[inst.slug] = { error: t("apiAdmin.mediaInstances.plexUnreachable") };
           return;
         }
         // /identity answers UNAUTHENTICATED on PMS, so a reachable server with
@@ -386,10 +388,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
           access === "ok"
             ? { ok: true }
             : access === "unauthorized"
-              ? { error: "Plex token not authorized on this server" }
-              : { error: "Plex server unreachable" };
+              ? { error: t("apiAdmin.mediaInstances.plexTokenNotAuthorized") }
+              : { error: t("apiAdmin.mediaInstances.plexUnreachable") };
       } catch {
-        testResults[inst.slug] = { error: "Plex connection failed" };
+        testResults[inst.slug] = { error: t("apiAdmin.mediaInstances.plexConnectionFailed") };
       }
     } else {
       const rows = await prisma.setting.findMany({
@@ -403,7 +405,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         await getJellyfinUserCount(url, apiKey);
         testResults[inst.slug] = { ok: true };
       } catch {
-        testResults[inst.slug] = { error: "Jellyfin connection failed" };
+        testResults[inst.slug] = { error: t("apiAdmin.common.jellyfinConnectionFailed") };
       }
     }
   });

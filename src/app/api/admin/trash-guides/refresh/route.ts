@@ -7,26 +7,29 @@ import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { isFeatureEnabled } from "@/lib/features";
 import type { TrashService } from "@/generated/prisma";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
-function busyResponse() {
+function busyResponse(t: Translator) {
   return NextResponse.json(
-    { ok: false, error: "Trash sync already running", retryAfter: 30 },
+    { ok: false, error: t("apiAdmin.trash.alreadyRunning"), retryAfter: 30 },
     { status: 409, headers: { "Retry-After": "30" } },
   );
 }
 
 export const POST = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   // Kill-switch parity with the nightly cron: refresh fans out to the configured
   // Radarr/Sonarr instances, so a disabled TRaSH integration must block it too.
   if (!(await isFeatureEnabled("trashGuidesEnabled"))) {
-    return NextResponse.json({ error: "TRaSH Guides integration is disabled" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.trash.disabled") }, { status: 403 });
   }
   // Per-admin rate limit. A refresh fans out to GitHub (catalog pull) AND to
   // Radarr/Sonarr; a tight loop risks GitHub 429s (breaking the fetch for everyone)
   // and piles mutations on the Arr servers. 10 per 5-minute window caps a
   // compromised session while covering legitimate manual refreshes.
   if (!checkRateLimit(`admin-trash-refresh:${session.user.id}`, 10, 5 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many refreshes — try again shortly." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.trash.tooManyRefreshes") }, { status: 429 });
   }
   // The body is optional: no body means "refresh both" (the UI sends none). But a
   // body that IS present must be valid JSON, so a typo can't quietly become "refresh both".
@@ -39,7 +42,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
   if (body.service !== undefined && body.service !== "radarr" && body.service !== "sonarr") {
     return NextResponse.json(
-      { error: "service must be 'radarr' or 'sonarr'" },
+      { error: t("apiAdmin.common.serviceRadarrOrSonarrQuoted") },
       { status: 400 },
     );
   }
@@ -98,6 +101,6 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         ...(schemaDiagnostic ? { schemaDiagnostic } : {}),
       });
     },
-    busyResponse,
+    () => busyResponse(t),
   );
 });

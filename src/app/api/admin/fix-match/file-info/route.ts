@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { arrFetch } from "@/lib/arr";
 import { getCache } from "@/lib/tmdb-cache";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // One configured server that holds this title, with the path it holds it at.
 export type FileInfoInstance = {
@@ -33,6 +34,7 @@ export type FileInfoResponse = {
 };
 
 export const GET = withIssueAdmin(async (request, _ctx, _session) => {
+  const t = translatorForRequest(request);
   const { searchParams } = new URL(request.url);
   const tmdbIdParam = searchParams.get("tmdbId");
   const tmdbId      = parseInt(tmdbIdParam ?? "", 10);
@@ -44,14 +46,14 @@ export const GET = withIssueAdmin(async (request, _ctx, _session) => {
     mediaTypeRaw === "MOVIE" || mediaTypeRaw === "TV" ? mediaTypeRaw : null;
 
   if (!Number.isInteger(tmdbId) || tmdbId <= 0 || !mediaType) {
-    return NextResponse.json({ error: "Missing params" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.fixMatch.missingParamsShort") }, { status: 400 });
   }
 
   // Absent ⇒ the default server, so a pre-multi-server caller sees exactly its
   // old plexFilePath/jellyfinFilePath/arrTmdbId values.
   const serverInstanceParam = searchParams.get("serverInstance");
   if (serverInstanceParam !== null && !isValidMediaInstanceSlug(serverInstanceParam)) {
-    return NextResponse.json({ error: `invalid serverInstance: ${serverInstanceParam}` }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.invalidServerInstance", { slug: String(serverInstanceParam) }) }, { status: 400 });
   }
   const serverInstance = serverInstanceParam ?? DEFAULT_MEDIA_INSTANCE;
 
