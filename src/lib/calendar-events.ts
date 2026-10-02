@@ -16,6 +16,8 @@
 // library table at all, and never says anything about availability.
 
 import type { IcsEvent } from "./ics";
+import type { Translator } from "./i18n/translate";
+import { translatorFor } from "./i18n/server-locale";
 
 export type CalendarMediaType = "movie" | "tv";
 
@@ -140,11 +142,9 @@ function describe(kind: string, url: string | undefined): string {
   return url ? `${kind}\n${url}` : kind;
 }
 
-const MOVIE_KINDS = [
-  { key: "primary", label: "Theatrical", text: "Theatrical release" },
-  { key: "digital", label: "Digital", text: "Digital release" },
-  { key: "physical", label: "Physical", text: "Physical release" },
-] as const;
+// Labels come from the notify.calendar.label.* / text.* catalog keys, in the
+// feed owner's language.
+const MOVIE_KINDS = ["primary", "digital", "physical"] as const;
 
 /** A TMDB placeholder episode name ("Episode 4") adds nothing to the summary. */
 function isPlaceholderName(name: string | null | undefined, episodeNumber: number): boolean {
@@ -159,13 +159,15 @@ function isPlaceholderName(name: string | null | undefined, episodeNumber: numbe
  * UID, and capped at MAX_CALENDAR_EVENTS (nearest dates kept).
  *
  * `siteUrl` is the absolute app root (AUTH_URL origin + BASE_PATH, no trailing
- * slash), or null to omit links.
+ * slash), or null to omit links. `tr` writes the event labels in the feed
+ * owner's language (English when omitted).
  */
 export function buildCalendarEvents(
   titles: readonly CalendarTitle[],
   data: CalendarSourceData,
   w: CalendarWindow,
   siteUrl: string | null,
+  tr: Translator = translatorFor("en"),
 ): IcsEvent[] {
   const events: IcsEvent[] = [];
   const seen = new Set<string>();
@@ -180,13 +182,13 @@ export function buildCalendarEvents(
       const dates = data.movies.get(t.tmdbId);
       if (!dates) continue;
       for (const kind of MOVIE_KINDS) {
-        const day = toDay(dates[kind.key]);
+        const day = toDay(dates[kind]);
         if (!inWindow(day, w)) continue;
         events.push({
-          uid: `movie-${t.tmdbId}-${kind.key === "primary" ? "theatrical" : kind.key}@summonarr`,
+          uid: `movie-${t.tmdbId}-${kind === "primary" ? "theatrical" : kind}@summonarr`,
           date: day,
-          summary: `${t.title} (${kind.label})`,
-          description: describe(kind.text, url),
+          summary: `${t.title} (${tr(`notify.calendar.label.${kind}`)})`,
+          description: describe(tr(`notify.calendar.text.${kind}`), url),
           url,
         });
       }
@@ -211,7 +213,7 @@ export function buildCalendarEvents(
         uid: `tv-${t.tmdbId}-s${ep.seasonNumber}e${ep.episodeNumber}@summonarr`,
         date: day,
         summary: `${t.title} ${code}${suffix}`,
-        description: describe("Episode air date", url),
+        description: describe(tr("notify.calendar.episodeAirDate"), url),
         url,
       });
     }
@@ -226,8 +228,8 @@ export function buildCalendarEvents(
       events.push({
         uid: `tv-${t.tmdbId}-s${s.seasonNumber}-premiere@summonarr`,
         date: day,
-        summary: `${t.title} – Season ${s.seasonNumber} premiere`,
-        description: describe("Season premiere", url),
+        summary: tr("notify.calendar.seasonPremiereSummary", { title: t.title, season: s.seasonNumber }),
+        description: describe(tr("notify.calendar.seasonPremiere"), url),
         url,
       });
     }
@@ -248,8 +250,8 @@ export function buildCalendarEvents(
         events.push({
           uid: `tv-${t.tmdbId}-next@summonarr`,
           date: nextDay,
-          summary: hasCode ? `${t.title}${code}${suffix}` : `${t.title} – New episode`,
-          description: describe("Episode air date", url),
+          summary: hasCode ? `${t.title}${code}${suffix}` : tr("notify.calendar.newEpisode", { title: t.title }),
+          description: describe(tr("notify.calendar.episodeAirDate"), url),
           url,
         });
       }

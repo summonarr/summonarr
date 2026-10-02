@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { normalizeEmail } from "@/lib/auth";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { isNotificationEmailEnabled, sendNotificationEmailVerification } from "@/lib/email";
+import { localeForRequest } from "@/lib/i18n/server-locale";
 import { tooManyRequests } from "@/lib/http";
 import {
   generateVerifyToken,
@@ -61,7 +62,8 @@ export const POST = withAuth(async (req, _ctx, session) => {
   });
 
   try {
-    await sendNotificationEmailVerification(email, token);
+    // Written in the requesting user's language (they are the recipient).
+    await sendNotificationEmailVerification(email, token, localeForRequest(req));
   } catch (err) {
     console.error("[notif-email] verification send failed:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Couldn't send the verification email — contact the server owner." }, { status: 502 });

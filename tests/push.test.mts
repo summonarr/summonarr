@@ -150,7 +150,10 @@ const {
   buildVapidContact,
   invalidateApnsRelayCache,
   APNS_ALERTS,
+  apnsAlertsFor,
 } = await import("../src/lib/push.ts");
+const { translatorFor } = await import("../src/lib/i18n/server-locale.ts");
+const { LOCALES } = await import("../src/lib/i18n/locales.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
 // Setting: one map serves the feature-flag read, the VAPID key read, and the
@@ -206,7 +209,7 @@ shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
 // PushSubscription: rows are filtered through a matcher covering exactly the
 // where-shapes push.ts issues, so recipient assertions are behavior-derived;
 // the raw args are captured for exact where-shape pins.
-type UserMeta = { role: string; permissions: bigint; notifyOnIssue?: boolean };
+type UserMeta = { role: string; permissions: bigint; notifyOnIssue?: boolean; locale?: string | null };
 type SubRow = {
   id: string;
   userId: string;
@@ -263,6 +266,7 @@ type UserRow = {
   pushOnApproved?: boolean;
   pushOnDeclined?: boolean;
   pushOnAvailable?: boolean;
+  locale?: string | null;
 };
 let userRows: UserRow[] = [];
 const userFindUniqueCalls: Array<{ where: { id: string }; select: Record<string, unknown> }> = [];
@@ -279,7 +283,7 @@ shadowPrismaModel(prisma, "user", {
     const prefKey = ["pushOnAvailable", "pushOnApproved", "pushOnDeclined"].find((k) => args.where[k] === true);
     return userRows
       .filter((u) => ids.includes(u.id) && (prefKey ? u[prefKey as keyof UserRow] === true : true))
-      .map((u) => ({ id: u.id }));
+      .map((u) => ({ id: u.id, locale: u.locale ?? null }));
   },
 });
 
@@ -689,6 +693,55 @@ test("every APNS_ALERTS entry satisfies the relay's alert rules", () => {
   assert.deepEqual(problems, []);
 });
 
+// The generic alert is sent in the recipient's language, so every locale's
+// table is cleartext the relay validates — pin them all, not only English.
+test("every locale's APNs alert table satisfies the relay's alert rules, and English IS APNS_ALERTS", () => {
+  assert.deepEqual(apnsAlertsFor(translatorFor("en")), APNS_ALERTS);
+  for (const locale of LOCALES) {
+    const table = apnsAlertsFor(translatorFor(locale));
+    assert.deepEqual(Object.keys(table).sort(), Object.keys(APNS_ALERTS).sort(), locale);
+    const problems = Object.entries(table).flatMap(([category, alert]) =>
+      [...alertViolations("title", alert.title), ...alertViolations("body", alert.body)].map((v) => `${locale}/${category}: ${v}`),
+    );
+    assert.deepEqual(problems, []);
+  }
+});
+
+test("a Spanish recipient gets Spanish push text (generic alert AND E2E rich text) with the payload shape unchanged", async () => {
+  const device = makeDevice();
+  userRows = [{ id: "u-es", pushOnApproved: true, locale: "es" }];
+  subRows = [
+    iosSub("u-es", "apns-token-es", {
+      e2e: device,
+      user: { role: "USER", permissions: 0n, notifyOnIssue: true, locale: "es" },
+    }),
+  ];
+
+  // Per-user pref read carries the locale.
+  await notifyUserRequestApprovedPush({ userId: "u-es", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 });
+  const approved = relayCalls[0].body;
+  assert.deepEqual(approved.payload.aps?.alert, { title: "Solicitud aprobada", body: "Abre Summonarr para ver los detalles" });
+  assert.equal(approved.collapseId, "approved");
+  assert.deepEqual(decryptE2e(device, approved.payload.e2e!), {
+    t: "Solicitud aprobada",
+    b: "Se aprobó tu solicitud de Dune (Película)",
+    u: "/media/movie/438631",
+  });
+
+  // Subscription-joined locale (the reporter's own row).
+  await notifyUserIssueResolvedPush({ userId: "u-es", title: "Dune", issueId: "iss1" });
+  const resolved = relayCalls[1].body;
+  assert.deepEqual(resolved.payload.aps?.alert, { title: "Incidencia resuelta", body: "Se resolvió una incidencia que reportaste" });
+  assert.deepEqual(decryptE2e(device, resolved.payload.e2e!), {
+    t: "Incidencia resuelta: Dune",
+    b: "Un administrador marcó como resuelta la incidencia que reportaste",
+  });
+  // Machine fields are never translated.
+  assert.equal(resolved.payload.url, "/issues?selected=iss1");
+  assert.equal(resolved.collapseId, "issue_resolved");
+  assert.deepEqual(errors, []);
+});
+
 test("every cleartext url a helper sends passes the relay's url rules — every category covered", async () => {
   const issueAdmin: UserMeta = { role: "ADMIN", permissions: 0n, notifyOnIssue: true };
   userRows = [{ id: "u-all", pushOnApproved: true, pushOnDeclined: true, pushOnAvailable: true }];
@@ -859,7 +912,7 @@ test("admin pushes go to MANAGE_REQUESTS holders only: ADMIN superbit and raw gr
   assert.deepEqual(subQueries[0], {
     // disabled accounts keep their PushSubscription rows (guardrail 33)
     where: { user: { deactivatedAt: null }, userId: { not: "u-requester" } },
-    include: { user: { select: { role: true, permissions: true } } },
+    include: { user: { select: { role: true, permissions: true, locale: true } } },
   });
   assert.deepEqual(
     relayCalls.map((c) => c.body.deviceToken).sort(),
@@ -924,7 +977,7 @@ test("issue pushes: notifyOnIssue rides the where clause, MANAGE_ISSUES the bitm
 
   assert.deepEqual(subQueries[0], {
     where: { userId: { not: "u-rep" }, user: { notifyOnIssue: true, deactivatedAt: null } },
-    include: { user: { select: { role: true, permissions: true } } },
+    include: { user: { select: { role: true, permissions: true, locale: true } } },
   });
   assert.deepEqual(
     relayCalls.map((c) => c.body.deviceToken).sort(),
@@ -958,13 +1011,13 @@ test("per-user pref gates read exactly their column and stop BEFORE the subscrip
 
   // pushOnApproved=false: the pref read happens, the subscription read doesn't.
   await notifyUserRequestApprovedPush({ userId: "u-pref", title: "Dune", mediaType: "MOVIE" });
-  assert.deepEqual(userFindUniqueCalls[0], { where: { id: "u-pref" }, select: { pushOnApproved: true } });
+  assert.deepEqual(userFindUniqueCalls[0], { where: { id: "u-pref" }, select: { pushOnApproved: true, locale: true } });
   assert.equal(subQueries.length, 0);
   assert.equal(fetchUrls.length, 0);
 
   // pushOnDeclined=true: its own column is read and the push goes out.
   await notifyUserRequestDeclinedPush({ userId: "u-pref", title: "Dune", mediaType: "MOVIE" });
-  assert.deepEqual(userFindUniqueCalls[1].select, { pushOnDeclined: true });
+  assert.deepEqual(userFindUniqueCalls[1].select, { pushOnDeclined: true, locale: true });
   assert.equal(subQueries.length, 1);
   assert.deepEqual(relayCalls.map((c) => c.body.deviceToken), ["token-pref"]);
   assert.equal(relayCalls[0].body.collapseId, "declined");
@@ -979,7 +1032,10 @@ test("issue-reply push to the reporter: notifyOnIssue where-shape, 100-char body
 
   // Recipient query: the user's own subs, gated on their notifyOnIssue pref in
   // the where itself (no include — no role filtering for the reporter).
-  assert.deepEqual(subQueries[0], { where: { userId: "u-rep", user: { notifyOnIssue: true } } });
+  assert.deepEqual(subQueries[0], {
+    where: { userId: "u-rep", user: { notifyOnIssue: true } },
+    include: { user: { select: { locale: true } } }, // the reporter's language
+  });
   assert.equal(relayCalls.length, 1);
   assert.equal(relayCalls[0].body.payload.url, "/issues?selected=iss-9");
   assert.equal(relayCalls[0].body.collapseId, "issue_reply");
@@ -1019,7 +1075,7 @@ test("available batch: deduped pref query, ALL of an eligible user's devices per
   assert.equal(userFindManyCalls.length, 1);
   assert.deepEqual(userFindManyCalls[0], {
     where: { id: { in: ["u1", "u2", "u3"] }, pushOnAvailable: true },
-    select: { id: true },
+    select: { id: true, locale: true },
   });
   // One subscription query over the eligible users only.
   assert.deepEqual(subQueries[0]?.where, { userId: { in: ["u1", "u3"] } });

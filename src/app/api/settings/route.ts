@@ -8,6 +8,7 @@ import { pingPlexToken } from "@/lib/plex";
 import { getJellyfinMediaFolders } from "@/lib/jellyfin";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { sendTestEmail } from "@/lib/email";
+import { localeForRequest } from "@/lib/i18n/server-locale";
 import { invalidatePublicKeyCache } from "@/app/api/interactions/route";
 import { getClientIp } from "@/lib/rate-limit";
 import { sanitizeText } from "@/lib/sanitize";
@@ -881,7 +882,8 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     const adminEmail = session.user.email;
     if (adminEmail) {
       try {
-        await sendTestEmail(adminEmail);
+        // Written in the requesting admin's language (they are the recipient).
+        await sendTestEmail(adminEmail, localeForRequest(req));
         testResults.smtpTested = true;
       } catch (err) {
         testResults.smtpError = err instanceof Error ? err.message : "Email test failed. Check your email settings.";

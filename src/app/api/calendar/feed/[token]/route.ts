@@ -70,7 +70,8 @@ export async function GET(
     return notFound();
   }
 
-  const body = await buildCalendarFeed(scope);
+  // Written in the feed owner's language (their stored User.locale).
+  const body = await buildCalendarFeed(scope, undefined, owner.locale);
   return new NextResponse(body, {
     status: 200,
     headers: {

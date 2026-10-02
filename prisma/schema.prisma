@@ -1502,6 +1502,13 @@ model Notification {
   mediaType  MediaType?
   posterPath String?    @db.VarChar(500)
   readAt     DateTime?
+  // The values `title`/`body` were built from (issue title, reply author and
+  // text, resolution …), so the inbox can re-render the row in the READER's
+  // language at read time (src/lib/notification-render.ts). `title`/`body`
+  // stay the English copy: the fallback for rows written before this column
+  // existed, and what an unknown type renders as. Nullable + additive, so
+  // `prisma db push` adds it without touching existing rows.
+  data       Json?
 
   @@index([userId, createdAt])
   // Serves the unread-count query (userId, readAt: null) without scanning all

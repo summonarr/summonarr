@@ -5,6 +5,7 @@ import { decryptToken } from "@/lib/token-crypto";
 import { sendPushNotification } from "@/lib/web-push";
 import { sendApnsTestToUser, buildVapidContact } from "@/lib/push";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { translatorForUser } from "@/lib/i18n/server-locale";
 
 type TestResult = {
   platform: "ios" | "web";
@@ -25,8 +26,11 @@ export const POST = withAuth(async (_req, _ctx, session) => {
     return NextResponse.json({ error: "Too many requests" }, { status: 429 });
   }
 
+  // The user's stored locale rides along so the test push is written in the
+  // recipient's language, like every real notification.
   const subs = await prisma.pushSubscription.findMany({
     where: { userId: session.user.id },
+    include: { user: { select: { locale: true } } },
   });
   if (!subs.length) {
     return NextResponse.json(
@@ -34,6 +38,7 @@ export const POST = withAuth(async (_req, _ctx, session) => {
       { status: 404 },
     );
   }
+  const t = translatorForUser(subs[0].user);
 
   const results: TestResult[] = [];
 
@@ -74,7 +79,7 @@ export const POST = withAuth(async (_req, _ctx, session) => {
                   auth: decryptToken(sub.auth, "PushSubscription.auth"),
                 },
               },
-              JSON.stringify({ title: "Summonarr", body: "Test notification — push is working!", url: "/" }),
+              JSON.stringify({ title: "Summonarr", body: t("notify.push.apnsBody.test"), url: "/" }),
               { contact: vapidContact, vapidPublicKey: cfg.vapidPublicKey, vapidPrivateKey: cfg.vapidPrivateKey },
             );
             return { platform: "web", endpoint: sub.endpoint.slice(0, 28) + "…", ok: true };

@@ -6,6 +6,10 @@ import { safeFetchAdminConfigured } from "@/lib/safe-fetch";
 import { encryptForDevice } from "@/lib/push-e2e";
 import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
 import { settleLimit } from "@/lib/concurrency";
+import { localeForUser, translatorFor } from "@/lib/i18n/server-locale";
+import type { Locale } from "@/lib/i18n/locales";
+import type { Translator } from "@/lib/i18n/translate";
+import { issueTypeLabelT, mediaLabelT } from "@/lib/notify-i18n";
 
 type VapidKeys = { publicKey: string; privateKey: string; contact: string };
 
@@ -22,7 +26,39 @@ class VapidPartialKeypairError extends Error {
 // Shape every notify* helper passes to sendPush. `title`/`body` are the rich web
 // text; `category` selects the GENERIC iOS alert (see APNS_ALERTS) so no titles
 // or usernames ever reach the central relay.
-type PushPayload = { title: string; body: string; url: string; category: ApnsCategory; deepLink?: string };
+//
+// Every payload is written in its RECIPIENT's language. `alert` is the generic
+// APNs text in that same language (APNS_ALERTS is the English table); a payload
+// built without it falls back to English.
+type PushPayload = {
+  title: string;
+  body: string;
+  url: string;
+  category: ApnsCategory;
+  deepLink?: string;
+  alert?: { title: string; body: string };
+};
+
+// Builds a notification once per recipient LOCALE (not once per device) and
+// attaches the matching generic APNs alert. `user` is the recipient row (or
+// anything carrying its stored `locale`); null/absent → the instance default.
+function localizedPayloads(build: (t: Translator) => Omit<PushPayload, "alert">) {
+  const byLocale = new Map<Locale, PushPayload>();
+  return (user: { locale?: string | null } | null | undefined): PushPayload => {
+    const locale = localeForUser(user);
+    let payload = byLocale.get(locale);
+    if (!payload) {
+      const t = translatorFor(locale);
+      const built = build(t);
+      payload = { ...built, alert: apnsAlert(built.category, t) };
+      byLocale.set(locale, payload);
+    }
+    return payload;
+  };
+}
+
+// Recipient rows join the subscription to its user's stored locale.
+const WITH_LOCALE = { user: { select: { locale: true } } } as const;
 
 // Row shape sendPush consumes — structurally satisfied by prisma.pushSubscription
 // findMany results (web rows have p256dh/auth; ios rows have deviceToken).
@@ -142,20 +178,38 @@ type ApnsCategory =
 // width characters, and a newline only in the body. A string that breaks a rule
 // makes the relay answer 400 for that whole category, so tests/push.test.mts
 // pins every entry against those rules — edit them there first.
-export const APNS_ALERTS: Record<ApnsCategory, { title: string; body: string }> = {
-  new_request: { title: "New request", body: "A new request needs review" },
-  approved: { title: "Request approved", body: "Open Summonarr to see details" },
-  declined: { title: "Request declined", body: "Open Summonarr to see details" },
-  available: { title: "Now available", body: "Something you requested is ready to watch" },
-  issue_reply: { title: "New reply", body: "There's new activity on an issue" },
-  issue_resolved: { title: "Issue resolved", body: "An issue you reported was resolved" },
-  new_issue: { title: "New issue", body: "A new issue was reported" },
-  grab_complete: { title: "Download complete", body: "A download has finished" },
-  manual_interaction: { title: "Manual import needed", body: "A download needs your attention" },
-  deletion_votes: { title: "Deletion votes", body: "A title reached the deletion-vote threshold" },
-  app_update: { title: "Update Summonarr", body: "A new version of the Summonarr app is available on the App Store" },
-  test: { title: "Summonarr", body: "Test notification — push is working!" },
-};
+//
+// The text lives in the notify.push.apnsTitle.* / apnsBody.* catalog keys and is
+// sent in the recipient's language; APNS_ALERTS is the English table, and
+// apnsAlertsFor(t) builds the table for any locale (the tests pin every locale's
+// entries against the relay rules).
+const APNS_CATEGORIES: readonly ApnsCategory[] = [
+  "new_request",
+  "approved",
+  "declined",
+  "available",
+  "issue_reply",
+  "issue_resolved",
+  "new_issue",
+  "grab_complete",
+  "manual_interaction",
+  "deletion_votes",
+  "app_update",
+  "test",
+];
+
+function apnsAlert(category: ApnsCategory, t: Translator): { title: string; body: string } {
+  return { title: t(`notify.push.apnsTitle.${category}`), body: t(`notify.push.apnsBody.${category}`) };
+}
+
+export function apnsAlertsFor(t: Translator): Record<ApnsCategory, { title: string; body: string }> {
+  return Object.fromEntries(APNS_CATEGORIES.map((c) => [c, apnsAlert(c, t)])) as Record<
+    ApnsCategory,
+    { title: string; body: string }
+  >;
+}
+
+export const APNS_ALERTS: Record<ApnsCategory, { title: string; body: string }> = apnsAlertsFor(translatorFor("en"));
 
 // Default relay operated by the app publisher. Overridable per-server via the
 // `apnsRelayUrl` Setting (e.g. to point at a self-hosted relay).
@@ -220,7 +274,7 @@ async function readApnsRelayConfig(): Promise<{ url: string; key: string }> {
 
 async function sendApns(subscription: PushRow, payload: PushPayload): Promise<boolean> {
   if (!subscription.deviceToken) return false;
-  const alert = APNS_ALERTS[payload.category];
+  const alert = payload.alert ?? APNS_ALERTS[payload.category];
   const apnsPayload: Record<string, unknown> = {
     aps: { alert: { title: alert.title, body: alert.body }, sound: "default" },
     url: payload.url,
@@ -328,18 +382,19 @@ export async function sendApnsTestToUser(
 ): Promise<Array<{ endpoint: string; label: string | null; ok: boolean }>> {
   const subs = await prisma.pushSubscription.findMany({
     where: { userId, platform: "ios" },
+    include: WITH_LOCALE,
   });
-  const payload: PushPayload = {
+  const payloadFor = localizedPayloads((t) => ({
     title: "Summonarr",
-    body: "Test notification — push is working! 🎉",
+    body: t("notify.push.test.bodyIos"),
     url: "/",
     category: "test",
-  };
+  }));
   return Promise.all(
     subs.map(async (s) => ({
       endpoint: s.endpoint.slice(0, 28) + "…",
       label: s.label ?? null,
-      ok: await sendApns(s, payload),
+      ok: await sendApns(s, payloadFor(s.user)),
     })),
   );
 }
@@ -358,16 +413,17 @@ export async function sendAppUpdateNoticeToAllIos(): Promise<{ sent: number; fai
     // into. Guardrail 33's two notification chokepoints are keyed on a request,
     // and a broadcast has none, so the filter has to live on this query.
     where: { platform: "ios", user: { deactivatedAt: null } },
+    include: WITH_LOCALE,
   });
-  const payload: PushPayload = {
-    title: "Update Summonarr",
-    body: "A new version of the Summonarr app is available on the App Store",
+  const payloadFor = localizedPayloads((t) => ({
+    title: t("notify.push.apnsTitle.app_update"),
+    body: t("notify.push.apnsBody.app_update"),
     url: "/",
     category: "app_update",
-  };
+  }));
   // Bounded fan-out (guardrail 31): the device list scales with the user base,
   // so cap in-flight relay POSTs instead of bursting them all at once.
-  const results = await settleLimit(subs, 8, (s) => sendApns(s, payload));
+  const results = await settleLimit(subs, 8, (s) => sendApns(s, payloadFor(s.user)));
   let sent = 0;
   let failed = 0;
   for (const r of results) {
@@ -396,7 +452,7 @@ async function getAdminSubscriptions(excludeUserId?: string) {
     // deactivate write set is exactly two fields), so its devices would keep
     // buzzing with other people's requests indefinitely.
     where: { user: { deactivatedAt: null }, ...(excludeUserId ? { userId: { not: excludeUserId } } : {}) },
-    include: { user: { select: { role: true, permissions: true } } },
+    include: { user: { select: { role: true, permissions: true, locale: true } } },
   });
   return subs.filter((s) => {
     const p = s.user?.permissions ?? 0;
@@ -418,7 +474,7 @@ async function getIssueAdminSubscriptions(opts: { excludeUserId?: string; restri
       ...userIdFilter,
       user: { notifyOnIssue: true, deactivatedAt: null }, // see getAdminSubscriptions
     },
-    include: { user: { select: { role: true, permissions: true } } },
+    include: { user: { select: { role: true, permissions: true, locale: true } } },
   });
   return subs.filter((s) => {
     const p = s.user?.permissions ?? 0;
@@ -495,16 +551,15 @@ export async function notifyAdminsNewRequestPush(data: {
     const subs = await getAdminSubscriptions(data.excludeUserId);
     if (!subs.length) return;
 
-    const mediaLabel = data.mediaType === "MOVIE" ? "Movie" : "TV Show";
-    const payload: PushPayload = {
-      title: `New ${mediaLabel} Request`,
-      body: `${data.title} — requested by ${data.requestedBy}`,
+    const payloadFor = localizedPayloads((t) => ({
+      title: t("notify.push.newRequest.title", { media: mediaLabelT(t, data.mediaType) }),
+      body: t("notify.push.newRequest.body", { title: data.title, user: data.requestedBy }),
       url: "/admin",
       category: "new_request",
       deepLink: requestDeepLink(data.requestId),
-    };
+    }));
 
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
   } catch (err) {
     console.error("[push] Failed to notify admins (request):", err);
   }
@@ -522,17 +577,18 @@ export async function notifyUserIssueMessagePush(data: {
 
     const subs = await prisma.pushSubscription.findMany({
       where: { userId: data.userId, user: { notifyOnIssue: true } },
+      include: WITH_LOCALE,
     });
     if (!subs.length) return;
 
-    const payload: PushPayload = {
-      title: `Admin replied on: ${data.title}`,
+    const payloadFor = localizedPayloads((t) => ({
+      title: t("notify.push.userIssueMessage.title", { title: data.title }),
       body: data.body.length > 100 ? data.body.slice(0, 97) + "…" : data.body,
       url: data.issueId ? `/issues?selected=${data.issueId}` : "/issues",
       category: "issue_reply",
-    };
+    }));
 
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
   } catch (err) {
     console.error("[push] Failed to notify user (issue message):", err);
   }
@@ -550,22 +606,23 @@ export async function notifyUserIssueResolvedPush(data: {
 
     const subs = await prisma.pushSubscription.findMany({
       where: { userId: data.userId, user: { notifyOnIssue: true } },
+      include: WITH_LOCALE,
     });
     if (!subs.length) return;
 
     const resolution = data.resolution?.trim();
-    const payload: PushPayload = {
-      title: `Issue resolved: ${data.title}`,
+    const payloadFor = localizedPayloads((t) => ({
+      title: t("notify.push.issueResolved.title", { title: data.title }),
       body: resolution
         ? resolution.length > 100
           ? resolution.slice(0, 97) + "…"
           : resolution
-        : "An admin marked your reported issue as resolved",
+        : t("notify.push.issueResolved.body"),
       url: data.issueId ? `/issues?selected=${data.issueId}` : "/issues",
       category: "issue_resolved",
-    };
+    }));
 
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
   } catch (err) {
     console.error("[push] Failed to notify user (issue resolved):", err);
   }
@@ -590,14 +647,16 @@ export async function notifyAdminsIssueMessagePush(data: {
     });
     if (!subs.length) return;
 
-    const payload: PushPayload = {
-      title: data.fromAdmin ? `Admin reply on issue: ${data.title}` : `User reply on issue: ${data.title}`,
+    const payloadFor = localizedPayloads((t) => ({
+      title: data.fromAdmin
+        ? t("notify.push.adminIssueMessage.titleFromAdmin", { title: data.title })
+        : t("notify.push.adminIssueMessage.title", { title: data.title }),
       body: `${data.userName}: ${data.body.length > 80 ? data.body.slice(0, 77) + "…" : data.body}`,
       url: data.issueId ? `/admin/issues?selected=${data.issueId}` : "/admin/issues",
       category: "issue_reply",
-    };
+    }));
 
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
   } catch (err) {
     console.error("[push] Failed to notify admins (issue message):", err);
   }
@@ -632,6 +691,7 @@ export async function notifyAdminGrabCompletedPush(data: {
     // account's surviving subscriptions must not be pinged.
     const subs = await prisma.pushSubscription.findMany({
       where: { userId: data.userId, user: { deactivatedAt: null } },
+      include: WITH_LOCALE,
     });
     if (!subs.length) return "skipped-no-subs";
     // Web devices need VAPID keys; iOS devices do not. With no keys and no iOS
@@ -639,27 +699,60 @@ export async function notifyAdminGrabCompletedPush(data: {
     // retry forever.
     if (!ctx.keys && !subs.some((s) => s.platform === "ios")) return "skipped-no-keys";
 
-    let scopeLabel = "";
-    if (data.scope === "EPISODE" && data.seasonNumber != null && data.episodeNumber != null) {
-      scopeLabel = ` S${String(data.seasonNumber).padStart(2, "0")}E${String(data.episodeNumber).padStart(2, "0")}`;
-    } else if (data.scope === "SEASON" && data.seasonNumber != null) {
-      scopeLabel = ` Season ${data.seasonNumber}`;
-    }
+    const payloadFor = localizedPayloads((t) => {
+      let scopeLabel = "";
+      if (data.scope === "EPISODE" && data.seasonNumber != null && data.episodeNumber != null) {
+        scopeLabel = ` S${String(data.seasonNumber).padStart(2, "0")}E${String(data.episodeNumber).padStart(2, "0")}`;
+      } else if (data.scope === "SEASON" && data.seasonNumber != null) {
+        scopeLabel = ` ${t("notify.push.grab.season", { season: data.seasonNumber })}`;
+      }
+      return {
+        title: t("notify.push.apnsTitle.grab_complete"),
+        body: t("notify.push.grab.body", { title: data.title, scope: scopeLabel }),
+        url: `/issues?selected=${data.issueId}`,
+        category: "grab_complete",
+      };
+    });
 
-    const payload: PushPayload = {
-      title: "Download complete",
-      body: `${data.title}${scopeLabel} has finished downloading`,
-      url: `/issues?selected=${data.issueId}`,
-      category: "grab_complete",
-    };
-
-    const results = await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
+    const results = await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
     const anyDelivered = results.some((r) => r.status === "fulfilled" && r.value === true);
     return anyDelivered ? "delivered" : "failed";
   } catch (err) {
     console.error("[push] Failed to notify admin (grab completed):", err);
     return "failed";
   }
+}
+
+type RequestPushInfo = { title: string; mediaType: string; tmdbId?: number };
+
+function approvedPayloads(r: RequestPushInfo) {
+  return localizedPayloads((t) => ({
+    title: t("notify.push.approved.title"),
+    body: t("notify.push.approved.body", { media: mediaLabelT(t, r.mediaType), title: r.title }),
+    url: "/requests",
+    category: "approved",
+    deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
+  }));
+}
+
+function declinedPayloads(r: RequestPushInfo) {
+  return localizedPayloads((t) => ({
+    title: t("notify.push.declined.title"),
+    body: t("notify.push.declined.body", { media: mediaLabelT(t, r.mediaType), title: r.title }),
+    url: "/requests",
+    category: "declined",
+    deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
+  }));
+}
+
+function availablePayloads(r: RequestPushInfo) {
+  return localizedPayloads((t) => ({
+    title: t("notify.push.available.title"),
+    body: t("notify.push.available.body", { media: mediaLabelT(t, r.mediaType), title: r.title }),
+    url: "/requests",
+    category: "available",
+    deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
+  }));
 }
 
 export async function notifyUserRequestApprovedPush(data: {
@@ -674,21 +767,14 @@ export async function notifyUserRequestApprovedPush(data: {
 
     const user = await prisma.user.findUnique({
       where: { id: data.userId },
-      select: { pushOnApproved: true },
+      select: { pushOnApproved: true, locale: true },
     });
     if (!user?.pushOnApproved) return;
 
     const subs = await prisma.pushSubscription.findMany({ where: { userId: data.userId } });
     if (!subs.length) return;
 
-    const mediaLabel = data.mediaType === "MOVIE" ? "Movie" : "TV Show";
-    const payload: PushPayload = {
-      title: "Request Approved",
-      body: `Your ${mediaLabel} request for ${data.title} has been approved`,
-      url: "/requests",
-      category: "approved",
-      deepLink: mediaDeepLink(data.mediaType, data.tmdbId),
-    };
+    const payload = approvedPayloads(data)(user);
 
     await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
   } catch (err) {
@@ -708,21 +794,14 @@ export async function notifyUserRequestDeclinedPush(data: {
 
     const user = await prisma.user.findUnique({
       where: { id: data.userId },
-      select: { pushOnDeclined: true },
+      select: { pushOnDeclined: true, locale: true },
     });
     if (!user?.pushOnDeclined) return;
 
     const subs = await prisma.pushSubscription.findMany({ where: { userId: data.userId } });
     if (!subs.length) return;
 
-    const mediaLabel = data.mediaType === "MOVIE" ? "Movie" : "TV Show";
-    const payload: PushPayload = {
-      title: "Request Declined",
-      body: `Your ${mediaLabel} request for ${data.title} was not approved`,
-      url: "/requests",
-      category: "declined",
-      deepLink: mediaDeepLink(data.mediaType, data.tmdbId),
-    };
+    const payload = declinedPayloads(data)(user);
 
     await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
   } catch (err) {
@@ -741,9 +820,10 @@ export async function notifyUsersRequestsAvailablePush(
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
       where: { id: { in: userIds }, pushOnAvailable: true },
-      select: { id: true },
+      select: { id: true, locale: true },
     });
     const eligibleIds = new Set(users.map((u) => u.id));
+    const userById = new Map(users.map((u) => [u.id, u]));
 
     const eligible = requests.filter((r) => eligibleIds.has(r.requestedBy));
     if (!eligible.length) return;
@@ -763,14 +843,7 @@ export async function notifyUsersRequestsAvailablePush(
     const jobs = eligible.flatMap((r) => {
       const userSubs = subsByUser.get(r.requestedBy) ?? [];
       if (!userSubs.length) return [];
-      const mediaLabel = r.mediaType === "MOVIE" ? "Movie" : "TV Show";
-      const payload: PushPayload = {
-        title: "Now Available",
-        body: `Your ${mediaLabel} ${r.title} is ready to watch`,
-        url: "/requests",
-        category: "available",
-        deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
-      };
+      const payload = availablePayloads(r)(userById.get(r.requestedBy));
       // Send to every one of the user's devices, like the approved/declined pushes.
       return userSubs.map((s) => ({ sub: s, payload }));
     });
@@ -797,9 +870,10 @@ export async function notifyUsersRequestsApprovedPush(
       // (guardrail 33), so a removed user keeps live push subscriptions and
       // would otherwise still get pinged by a later batch approve/decline.
       where: { id: { in: userIds }, pushOnApproved: true, deactivatedAt: null },
-      select: { id: true },
+      select: { id: true, locale: true },
     });
     const eligibleIds = new Set(users.map((u) => u.id));
+    const userById = new Map(users.map((u) => [u.id, u]));
 
     const eligible = requests.filter((r) => eligibleIds.has(r.requestedBy));
     if (!eligible.length) return;
@@ -818,14 +892,7 @@ export async function notifyUsersRequestsApprovedPush(
 
     const jobs = eligible.flatMap((r) => {
       const userSubs = subsByUser.get(r.requestedBy) ?? [];
-      const mediaLabel = r.mediaType === "MOVIE" ? "Movie" : "TV Show";
-      const payload: PushPayload = {
-        title: "Request Approved",
-        body: `Your ${mediaLabel} request for ${r.title} has been approved`,
-        url: "/requests",
-        category: "approved",
-        deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
-      };
+      const payload = approvedPayloads(r)(userById.get(r.requestedBy));
       return userSubs.map((s) => ({ sub: s, payload }));
     });
     // Bounded fan-out (guardrail 31): batch approvals fan out requests × devices.
@@ -847,9 +914,10 @@ export async function notifyUsersRequestsDeclinedPush(
     const users = await prisma.user.findMany({
       // deactivatedAt: null — see notifyUsersRequestsApprovedPush.
       where: { id: { in: userIds }, pushOnDeclined: true, deactivatedAt: null },
-      select: { id: true },
+      select: { id: true, locale: true },
     });
     const eligibleIds = new Set(users.map((u) => u.id));
+    const userById = new Map(users.map((u) => [u.id, u]));
 
     const eligible = requests.filter((r) => eligibleIds.has(r.requestedBy));
     if (!eligible.length) return;
@@ -868,14 +936,7 @@ export async function notifyUsersRequestsDeclinedPush(
 
     const jobs = eligible.flatMap((r) => {
       const userSubs = subsByUser.get(r.requestedBy) ?? [];
-      const mediaLabel = r.mediaType === "MOVIE" ? "Movie" : "TV Show";
-      const payload: PushPayload = {
-        title: "Request Declined",
-        body: `Your ${mediaLabel} request for ${r.title} was not approved`,
-        url: "/requests",
-        category: "declined",
-        deepLink: mediaDeepLink(r.mediaType, r.tmdbId),
-      };
+      const payload = declinedPayloads(r)(userById.get(r.requestedBy));
       return userSubs.map((s) => ({ sub: s, payload }));
     });
     // Bounded fan-out (guardrail 31): batch declines fan out requests × devices.
@@ -899,15 +960,14 @@ export async function notifyAdminsNewIssuePush(data: {
     const subs = await getIssueAdminSubscriptions({ excludeUserId: data.excludeUserId });
     if (!subs.length) return;
 
-    const issueLabel = data.issueType.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-    const payload: PushPayload = {
-      title: "New Issue Report",
-      body: `${data.title} — ${issueLabel} reported by ${data.reportedBy}`,
+    const payloadFor = localizedPayloads((t) => ({
+      title: t("notify.push.newIssue.title"),
+      body: t("notify.push.newIssue.body", { title: data.title, issue: issueTypeLabelT(t, data.issueType), user: data.reportedBy }),
       url: data.issueId ? `/admin/issues?selected=${data.issueId}` : "/admin/issues",
       category: "new_issue",
-    };
+    }));
 
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
   } catch (err) {
     console.error("[push] Failed to notify admins (issue):", err);
   }
@@ -934,14 +994,14 @@ export async function notifyAdminsManualInteractionRequiredPush(data: {
     const title = data.title.length > 100 ? data.title.slice(0, 97) + "…" : data.title;
     const name = data.instanceName?.trim();
     const where = name && name !== "Default" ? `${data.service} (${name})` : data.service;
-    const payload: PushPayload = {
-      title: `${where}: manual import needed`,
-      body: `${title} is stuck in the ${where} queue and needs a manual import`,
+    const payloadFor = localizedPayloads((t) => ({
+      title: t("notify.push.manual.title", { where }),
+      body: t("notify.push.manual.body", { title, where }),
       url: "/admin",
       category: "manual_interaction",
-    };
+    }));
 
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
   } catch (err) {
     console.error("[push] Failed to notify admins (manual interaction):", err);
   }
@@ -960,16 +1020,19 @@ export async function notifyAdminsDeletionVoteThresholdPush(data: {
     const subs = await getAdminSubscriptions();
     if (!subs.length) return;
 
-    const label = data.mediaType === "MOVIE" ? "Movie" : "TV Show";
-    const payload: PushPayload = {
-      title: "Deletion Vote Threshold Reached",
-      body: `${data.title} (${label}) has ${data.voteCount} deletion votes`,
+    const payloadFor = localizedPayloads((t) => ({
+      title: t("notify.push.deletionVote.title"),
+      body: t("notify.push.deletionVote.body", {
+        title: data.title,
+        media: mediaLabelT(t, data.mediaType),
+        votes: String(data.voteCount),
+      }),
       url: "/votes",
       category: "deletion_votes",
       deepLink: mediaDeepLink(data.mediaType, data.tmdbId),
-    };
+    }));
 
-    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payload)));
+    await Promise.allSettled(subs.map((s) => sendPush(ctx.keys, s, payloadFor(s.user))));
   } catch (err) {
     console.error("[push] Failed to notify admins (deletion vote):", err);
   }

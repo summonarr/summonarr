@@ -23,6 +23,7 @@ import enDetail from "./messages/en/detail.json";
 import enHome from "./messages/en/home.json";
 import enMedia from "./messages/en/media.json";
 import enNav from "./messages/en/nav.json";
+import enNotify from "./messages/en/notify.json";
 import enPersonal from "./messages/en/personal.json";
 import enProfile from "./messages/en/profile.json";
 import enRequest from "./messages/en/request.json";
@@ -42,6 +43,7 @@ import esDetail from "./messages/es/detail.json";
 import esHome from "./messages/es/home.json";
 import esMedia from "./messages/es/media.json";
 import esNav from "./messages/es/nav.json";
+import esNotify from "./messages/es/notify.json";
 import esPersonal from "./messages/es/personal.json";
 import esProfile from "./messages/es/profile.json";
 import esRequest from "./messages/es/request.json";
@@ -53,8 +55,8 @@ import esShared from "./messages/es/shared.json";
 import esTrash from "./messages/es/trash.json";
 
 export const CATALOGS: Record<Locale, Messages> = {
-  en: { ...enAdminActivity, ...enAdminManage, ...enAdminQueue, ...enAppearance, ...enAuth, ...enBrowse, ...enDetail, ...enHome, ...enMedia, ...enNav, ...enPersonal, ...enProfile, ...enRequest, ...enRequests, ...enSearch, ...enSettings, ...enSettingsForms, ...enShared, ...enTrash },
-  es: { ...esAdminActivity, ...esAdminManage, ...esAdminQueue, ...esAppearance, ...esAuth, ...esBrowse, ...esDetail, ...esHome, ...esMedia, ...esNav, ...esPersonal, ...esProfile, ...esRequest, ...esRequests, ...esSearch, ...esSettings, ...esSettingsForms, ...esShared, ...esTrash },
+  en: { ...enAdminActivity, ...enAdminManage, ...enAdminQueue, ...enAppearance, ...enAuth, ...enBrowse, ...enDetail, ...enHome, ...enMedia, ...enNav, ...enNotify, ...enPersonal, ...enProfile, ...enRequest, ...enRequests, ...enSearch, ...enSettings, ...enSettingsForms, ...enShared, ...enTrash },
+  es: { ...esAdminActivity, ...esAdminManage, ...esAdminQueue, ...esAppearance, ...esAuth, ...esBrowse, ...esDetail, ...esHome, ...esMedia, ...esNav, ...esNotify, ...esPersonal, ...esProfile, ...esRequest, ...esRequests, ...esSearch, ...esSettings, ...esSettingsForms, ...esShared, ...esTrash },
 };
 
 export const FALLBACK_MESSAGES: Messages = CATALOGS.en;

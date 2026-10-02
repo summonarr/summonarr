@@ -163,7 +163,7 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
       : prisma.user
           .findUnique({
             where: { id: issue.reportedBy },
-            select: { deactivatedAt: true, email: true, notificationEmail: true, notifyOnIssue: true },
+            select: { deactivatedAt: true, email: true, notificationEmail: true, notifyOnIssue: true, locale: true },
           })
           .catch(() => null);
     // Fails CLOSED — a null row (missing, or a failed read) means no notification.
@@ -182,6 +182,8 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
         tmdbId: issue.tmdbId,
         mediaType: issue.mediaType,
         posterPath: issue.posterPath,
+        // Re-rendered in the reader's language at read time (notification-render.ts).
+        data: { v: 1, author: authorName, text: text.slice(0, 400) },
       });
     }
     void reporter
@@ -190,7 +192,7 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
         if (!(await reporterActive)) return; // same chokepoint as above
         const toEmail = resolveUserNotificationEmail(reporter);
         if (!toEmail) return;
-        return notifyUserIssueMessageEmail({ toEmail, issueTitle: issue.title, authorName, body: text });
+        return notifyUserIssueMessageEmail({ toEmail, issueTitle: issue.title, authorName, body: text, locale: reporter.locale });
       })
       .catch(() => {});
     void notifyAdminsIssueMessage(issue.title, authorName, text, adminOpts).catch(() => {});

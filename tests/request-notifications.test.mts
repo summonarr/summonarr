@@ -402,6 +402,7 @@ test("batch inbox write: one createMany with skipDuplicates and buildNotificatio
       tmdbId: 438631,
       mediaType: "MOVIE",
       posterPath: "/d.jpg",
+      data: { v: 1 }, // re-rendered in the reader's language at read time
     },
     {
       userId: "u2",
@@ -411,6 +412,7 @@ test("batch inbox write: one createMany with skipDuplicates and buildNotificatio
       tmdbId: null,
       mediaType: "TV",
       posterPath: null,
+      data: { v: 1 },
     },
   ]);
   await writeAvailableInAppNotifications([]); // empty winner set is a no-op
@@ -458,6 +460,7 @@ test("email recipients: one deduped pref query; emailOnAvailable + deliverable-a
     email: true,
     notificationEmail: true,
     emailOnAvailable: true,
+    locale: true, // each mail is written in its recipient's language
   });
 
   await waitFor(() => resendPosts.length === 3, "three deliverable emails");
@@ -607,17 +610,19 @@ test("APPROVED: synchronous void, unconditional in-app row, discord+push+email l
     tmdbId: 438631,
     mediaType: "MOVIE",
     posterPath: "/d.jpg",
+    data: { v: 1 },
   });
 
   // Discord + push each reached their recipient resolution for this user.
   assert.equal(discordUserReads.length, 1);
   assert.equal(discordUserReads[0].where.id, "u-app");
-  assert.deepEqual(pushUserReads[0], { where: { id: "u-app" }, select: { pushOnApproved: true } });
+  assert.deepEqual(pushUserReads[0], { where: { id: "u-app" }, select: { pushOnApproved: true, locale: true } });
 
-  // Email leg read exactly the per-status pref column, then mailed the user.
+  // Email leg read exactly the per-status pref column (+ the recipient's
+  // language), then mailed the user.
   assert.deepEqual(emailUserReads[0], {
     where: { id: "u-app" },
-    select: { email: true, notificationEmail: true, emailOnApproved: true },
+    select: { email: true, notificationEmail: true, emailOnApproved: true, locale: true },
   });
   assert.equal(resendPosts[0].body.to, "app@example.com");
   assert.ok(resendPosts[0].body.subject.includes("Approved"), resendPosts[0].body.subject);
@@ -647,9 +652,10 @@ test("DECLINED with emailOnDeclined off: the inbox row is still written but no e
     tmdbId: null,
     mediaType: "TV",
     posterPath: null,
+    data: { v: 1 },
   });
-  assert.deepEqual(emailUserReads[0].select, { email: true, notificationEmail: true, emailOnDeclined: true });
-  assert.deepEqual(pushUserReads[0].select, { pushOnDeclined: true });
+  assert.deepEqual(emailUserReads[0].select, { email: true, notificationEmail: true, emailOnDeclined: true, locale: true });
+  assert.deepEqual(pushUserReads[0].select, { pushOnDeclined: true, locale: true });
   assert.equal(resendPosts.length, 0); // the opt-out gate lives in THIS module
   assert.deepEqual(errors, []);
 });
@@ -676,7 +682,7 @@ test("AVAILABLE: routes push through the batch helper and mails via emailOnAvail
   // The single-user AVAILABLE push reuses the batch fan-out (pushOnAvailable).
   assert.deepEqual(pushAvailableQueries[0].where.id?.in, ["u-av"]);
   assert.equal(discordUserReads.length, 1); // discord's per-user path also ran
-  assert.deepEqual(emailUserReads[0].select, { email: true, notificationEmail: true, emailOnAvailable: true });
+  assert.deepEqual(emailUserReads[0].select, { email: true, notificationEmail: true, emailOnAvailable: true, locale: true });
   assert.equal(resendPosts[0].body.to, "av@example.com");
   assert.deepEqual(errors, []);
 });

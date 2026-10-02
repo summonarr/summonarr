@@ -4,9 +4,11 @@ import { readJsonCappedOr } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { tooManyRequests } from "@/lib/http";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { renderNotification } from "@/lib/notification-render";
 
 const PAGE_SIZE = 30;
-const SELECT = { id: true, type: true, title: true, body: true, tmdbId: true, mediaType: true, posterPath: true, readAt: true, createdAt: true } as const;
+const SELECT = { id: true, type: true, title: true, body: true, tmdbId: true, mediaType: true, posterPath: true, readAt: true, createdAt: true, data: true } as const;
 
 // GET — the caller's in-app notifications (newest first), + unread and total
 // counts. Cursor-based (not offset): the list is live and client-mutated, so a
@@ -35,7 +37,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
       }
     }
   }
-  const [items, unreadCount, total] = await Promise.all([
+  const [rows, unreadCount, total] = await Promise.all([
     prisma.notification.findMany({
       where: { userId: session.user.id, ...cursorWhere },
       select: SELECT,
@@ -45,6 +47,13 @@ export const GET = withAuth(async (req, _ctx, session) => {
     prisma.notification.count({ where: { userId: session.user.id, readAt: null } }),
     prisma.notification.count({ where: { userId: session.user.id } }),
   ]);
+  // title/body are rendered in the caller's language from the row's stored
+  // `data` (notification-render.ts); a row without data keeps its stored text.
+  // `data` itself is never sent, so the item shape the iOS app decodes is
+  // unchanged. Native clients resolve to the instance default (English unless
+  // SUMMONARR_DEFAULT_LOCALE says otherwise), which renders the stored copy.
+  const t = translatorForRequest(req);
+  const items = rows.map(({ data, ...row }) => ({ ...row, ...renderNotification({ ...row, data }, t) }));
   const last = items.length === PAGE_SIZE ? items[items.length - 1] : null;
   const nextCursor = last ? `${last.createdAt.toISOString()}|${last.id}` : null;
   return NextResponse.json({ items, unreadCount, total, nextCursor, pageSize: PAGE_SIZE });

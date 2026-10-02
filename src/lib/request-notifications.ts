@@ -56,6 +56,8 @@ function writeInAppNotification(
     tmdbId: info.tmdbId ?? null,
     mediaType: info.mediaType,
     posterPath: info.posterPath ?? null,
+    // The body is re-rendered from type + mediaType in the reader's language.
+    data: { v: 1 },
   });
 }
 
@@ -150,6 +152,7 @@ export async function writeAvailableInAppNotifications(
           tmdbId: r.tmdbId ?? null,
           mediaType: r.mediaType,
           posterPath: r.posterPath ?? null,
+          data: { v: 1 },
         }),
       ),
       skipDuplicates: true,
@@ -178,7 +181,7 @@ export async function notifyUsersRequestsAvailableEmail(
   if (winners.length === 0) return;
   const userPrefs = await prisma.user.findMany({
     where: { id: { in: [...new Set(winners.map((w) => w.requestedBy))] } },
-    select: { id: true, email: true, notificationEmail: true, emailOnAvailable: true },
+    select: { id: true, email: true, notificationEmail: true, emailOnAvailable: true, locale: true },
   }).catch((err) => {
     console.error(`[${logScope}] email-pref fetch failed:`, err instanceof Error ? err.message : err);
     return [];
@@ -194,15 +197,16 @@ export async function notifyUsersRequestsAvailableEmail(
     const u = prefByUserId.get(w.requestedBy);
     if (!u || !u.emailOnAvailable) return [];
     const to = resolveUserNotificationEmail(u);
-    return to ? [{ w, to }] : [];
+    return to ? [{ w, to, locale: u.locale ?? null }] : [];
   });
-  await settleLimit(recipients, EMAIL_SEND_CONCURRENCY, async ({ w, to }) => {
+  await settleLimit(recipients, EMAIL_SEND_CONCURRENCY, async ({ w, to, locale }) => {
     await notifyUserRequestAvailableEmail({
       toEmail: to,
       title: w.title,
       mediaType: w.mediaType,
       posterPath: w.posterPath ?? null,
       tmdbId: w.tmdbId ?? undefined,
+      locale,
     }).catch((err) => console.error(`[${logScope}] email error:`, err instanceof Error ? err.message : err));
   });
 }
@@ -308,10 +312,10 @@ function dispatchRequestStatusChange(
     writeInAppNotification(requestedBy, "REQUEST_APPROVED", { title, mediaType, tmdbId, posterPath });
     notifyUserRequestApproved(requestedBy, title, mediaType).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUserRequestApprovedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnApproved: true } })
+    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnApproved: true, locale: true } })
       .then((u) => {
         const to = u && resolveUserNotificationEmail(u);
-        if (to && u.emailOnApproved) notifyUserRequestApprovedEmail({ toEmail: to, title, mediaType, posterPath, tmdbId });
+        if (to && u.emailOnApproved) notifyUserRequestApprovedEmail({ toEmail: to, title, mediaType, posterPath, tmdbId, locale: u.locale });
       })
       .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
   }
@@ -320,10 +324,10 @@ function dispatchRequestStatusChange(
     writeInAppNotification(requestedBy, "REQUEST_AVAILABLE", { title, mediaType, tmdbId, posterPath });
     notifyUserRequestAvailable(requestedBy, title, mediaType).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUsersRequestsAvailablePush([{ requestedBy, title, mediaType, tmdbId }]).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnAvailable: true } })
+    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnAvailable: true, locale: true } })
       .then((u) => {
         const to = u && resolveUserNotificationEmail(u);
-        if (to && u.emailOnAvailable) notifyUserRequestAvailableEmail({ toEmail: to, title, mediaType, posterPath, tmdbId });
+        if (to && u.emailOnAvailable) notifyUserRequestAvailableEmail({ toEmail: to, title, mediaType, posterPath, tmdbId, locale: u.locale });
       })
       .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
   }
@@ -332,10 +336,10 @@ function dispatchRequestStatusChange(
     writeInAppNotification(requestedBy, "REQUEST_DECLINED", { title, mediaType, tmdbId, posterPath });
     notifyUserRequestDeclined(requestedBy, title, mediaType, request.adminNote).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
     notifyUserRequestDeclinedPush({ userId: requestedBy, title, mediaType, tmdbId }).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnDeclined: true } })
+    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnDeclined: true, locale: true } })
       .then((u) => {
         const to = u && resolveUserNotificationEmail(u);
-        if (to && u.emailOnDeclined) notifyUserRequestDeclinedEmail({ toEmail: to, title, mediaType, adminNote: request.adminNote, posterPath });
+        if (to && u.emailOnDeclined) notifyUserRequestDeclinedEmail({ toEmail: to, title, mediaType, adminNote: request.adminNote, posterPath, locale: u.locale });
       })
       .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
   }

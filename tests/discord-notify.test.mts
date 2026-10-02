@@ -262,6 +262,42 @@ test("channel path: one targeted post with the <@id> mention allowed explicitly 
   assert.ok(String(embed.title).includes("Dune \\*Part\\* Two"));
 });
 
+// ── language ────────────────────────────────────────────────────────────────
+
+test("a DM is written in the linked user's language; a shared-channel post uses the instance default", async () => {
+  const before = process.env.SUMMONARR_DEFAULT_LOCALE;
+  delete process.env.SUMMONARR_DEFAULT_LOCALE;
+  try {
+    // DM to a Spanish user → Spanish.
+    setSettings({ discordBotToken: BOT });
+    userFindUniqueRow = linkedUser({ locale: "es" });
+    respond = (url) => (url.endsWith("/users/@me/channels") ? okJson({ id: "222222222222222222" }) : okJson({}));
+    await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+    const dm = (sent[1].body?.embeds as Array<Record<string, unknown>>)[0];
+    assert.equal(dm.title, "✅ Solicitud aprobada — Dune");
+    assert.ok(String(dm.description).startsWith("Tu solicitud (**Película**) se aprobó"), String(dm.description));
+    assert.ok((userFindUniqueCalls[0] as { select: Record<string, unknown> }).select.locale, "the locale rides the existing user read");
+
+    // Same Spanish user, but the notify channel is configured → everyone reads
+    // it, so it stays in the instance default (English here).
+    sent.length = 0;
+    setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
+    await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+    const shared = (sent[0].body?.embeds as Array<Record<string, unknown>>)[0];
+    assert.equal(shared.title, "✅ Request Approved — Dune");
+
+    // An instance default of "es" moves the shared channel to Spanish.
+    sent.length = 0;
+    process.env.SUMMONARR_DEFAULT_LOCALE = "es";
+    userFindUniqueRow = linkedUser();
+    await notifyUserRequestApproved("u1", "Dune", "MOVIE");
+    assert.equal((sent[0].body?.embeds as Array<Record<string, unknown>>)[0].title, "✅ Solicitud aprobada — Dune");
+  } finally {
+    if (before === undefined) delete process.env.SUMMONARR_DEFAULT_LOCALE;
+    else process.env.SUMMONARR_DEFAULT_LOCALE = before;
+  }
+});
+
 test("recipient gating: no linked account or an opted-out preference sends nothing; other prefs stay independent", async () => {
   setSettings({ discordBotToken: BOT, discordNotifyChannelId: CHANNEL });
 

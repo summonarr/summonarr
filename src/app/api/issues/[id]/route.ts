@@ -201,6 +201,8 @@ export const PATCH = withIssueAdmin(async (
         tmdbId: issue.tmdbId,
         mediaType: issue.mediaType,
         posterPath: issue.posterPath,
+        // Re-rendered in the reader's language at read time (notification-render.ts).
+        data: { v: 1, resolution: res ? res.slice(0, 400) : null },
       });
     }
   }

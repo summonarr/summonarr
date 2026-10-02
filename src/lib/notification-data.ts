@@ -4,6 +4,8 @@
 // field-mapping rules drifting: mediaType string→enum normalization, the
 // VarChar(500)/VarChar(1000) title/body caps, and the null defaults.
 
+import type { NotificationData } from "./notification-render";
+
 export interface InAppNotificationInput {
   type: string;
   title: string;
@@ -11,6 +13,10 @@ export interface InAppNotificationInput {
   tmdbId?: number | null;
   mediaType?: string | null;
   posterPath?: string | null;
+  // The values title/body were built from, so the inbox can re-render the row
+  // in the reader's language (notification-render.ts). Omitted → the row keeps
+  // its stored English text everywhere.
+  data?: NotificationData;
 }
 
 export function buildNotificationData(userId: string, n: InAppNotificationInput) {
@@ -27,5 +33,6 @@ export function buildNotificationData(userId: string, n: InAppNotificationInput)
     tmdbId: n.tmdbId ?? null,
     mediaType,
     posterPath: n.posterPath ?? null,
+    ...(n.data ? { data: n.data } : {}),
   };
 }
