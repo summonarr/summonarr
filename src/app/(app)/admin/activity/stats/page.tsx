@@ -5,6 +5,7 @@ import { getPlayHistoryStats } from "@/lib/play-history";
 import { PageHeader } from "@/components/ui/design";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
 import { ActivityStatsRedesign } from "@/components/admin/activity-stats-redesign";
+import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 
@@ -28,13 +29,16 @@ export default async function StatsPage({
       ? mediaTypeParam
       : undefined;
 
-  const stats = await getPlayHistoryStats({ days, source, mediaType });
+  const [stats, t] = await Promise.all([
+    getPlayHistoryStats({ days, source, mediaType }),
+    getTranslator(),
+  ]);
 
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Statistics"
-        subtitle="Deeper playback analytics across Plex and Jellyfin."
+        title={t("adminActivity.stats.title")}
+        subtitle={t("adminActivity.stats.subtitle")}
       />
       <ActivityFilterBar />
       <ActivityStatsRedesign stats={stats} days={days} />

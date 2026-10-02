@@ -13,6 +13,7 @@
 
 import type { Locale } from "./locales";
 import type { Messages } from "./translate";
+import enAdminActivity from "./messages/en/adminActivity.json";
 import enAppearance from "./messages/en/appearance.json";
 import enAuth from "./messages/en/auth.json";
 import enBrowse from "./messages/en/browse.json";
@@ -25,6 +26,8 @@ import enProfile from "./messages/en/profile.json";
 import enRequest from "./messages/en/request.json";
 import enRequests from "./messages/en/requests.json";
 import enSearch from "./messages/en/search.json";
+import enTrash from "./messages/en/trash.json";
+import esAdminActivity from "./messages/es/adminActivity.json";
 import esAppearance from "./messages/es/appearance.json";
 import esAuth from "./messages/es/auth.json";
 import esBrowse from "./messages/es/browse.json";
@@ -37,10 +40,11 @@ import esProfile from "./messages/es/profile.json";
 import esRequest from "./messages/es/request.json";
 import esRequests from "./messages/es/requests.json";
 import esSearch from "./messages/es/search.json";
+import esTrash from "./messages/es/trash.json";
 
 export const CATALOGS: Record<Locale, Messages> = {
-  en: { ...enAppearance, ...enAuth, ...enBrowse, ...enDetail, ...enHome, ...enMedia, ...enNav, ...enPersonal, ...enProfile, ...enRequest, ...enRequests, ...enSearch },
-  es: { ...esAppearance, ...esAuth, ...esBrowse, ...esDetail, ...esHome, ...esMedia, ...esNav, ...esPersonal, ...esProfile, ...esRequest, ...esRequests, ...esSearch },
+  en: { ...enAdminActivity, ...enAppearance, ...enAuth, ...enBrowse, ...enDetail, ...enHome, ...enMedia, ...enNav, ...enPersonal, ...enProfile, ...enRequest, ...enRequests, ...enSearch, ...enTrash },
+  es: { ...esAdminActivity, ...esAppearance, ...esAuth, ...esBrowse, ...esDetail, ...esHome, ...esMedia, ...esNav, ...esPersonal, ...esProfile, ...esRequest, ...esRequests, ...esSearch, ...esTrash },
 };
 
 export const FALLBACK_MESSAGES: Messages = CATALOGS.en;

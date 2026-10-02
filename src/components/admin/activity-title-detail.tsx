@@ -6,7 +6,8 @@
 
 import Link from "next/link";
 import { useHasMounted } from "@/hooks/use-has-mounted";
-import { formatRelativeTime } from "@/lib/relative-time";
+import { formatRelativeTimeLocalized } from "@/lib/relative-time";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import {
   ActivityCard,
   AreaChart,
@@ -68,18 +69,19 @@ export interface TitleDetailData {
   }[];
 }
 
-const STREAM_META: Record<string, { label: string; color: string }> = {
-  DirectPlay: { label: "Direct Play", color: "var(--ds-success)" },
-  DirectStream: { label: "Remux", color: "var(--ds-info)" },
-  Transcode: { label: "Transcode", color: "var(--ds-warning)" },
+// `labelKey` is a catalog key, translated at render.
+const STREAM_META: Record<string, { labelKey: string; color: string }> = {
+  DirectPlay: { labelKey: "adminActivity.method.directPlay", color: "var(--ds-success)" },
+  DirectStream: { labelKey: "adminActivity.method.remux", color: "var(--ds-info)" },
+  Transcode: { labelKey: "adminActivity.method.transcode", color: "var(--ds-warning)" },
 };
 
-function absTime(iso: string): string {
+function absTime(iso: string, locale: string): string {
   // Format in UTC so the server (its own time zone) and the browser (the
   // viewer's time zone) print the same date. Otherwise a play near midnight
   // could show different days and cause a React #418 hydration error. This is
   // the text shown before mount, and for the chart's day labels.
-  return new Date(iso).toLocaleDateString("en-US", {
+  return new Date(iso).toLocaleDateString(locale, {
     month: "short",
     day: "numeric",
     timeZone: "UTC",
@@ -88,12 +90,14 @@ function absTime(iso: string): string {
 
 export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
   const mounted = useHasMounted();
-  const when = (iso: string) => (mounted ? formatRelativeTime(iso) : absTime(iso));
+  const t = useT();
+  const locale = useLocale();
+  const when = (iso: string) => (mounted ? formatRelativeTimeLocalized(iso, locale) : absTime(iso, locale));
   const accent = "oklch(0.36 0.08 60)";
   const isTV = s.mediaType === "TV";
 
   const streamTypes = ["DirectPlay", "DirectStream", "Transcode"].map((m) => ({
-    label: STREAM_META[m].label,
+    label: t(STREAM_META[m].labelKey),
     count: s.transcodeRatio.find((r) => r.method === m)?.count ?? 0,
     color: STREAM_META[m].color,
   }));
@@ -103,7 +107,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
   return (
     <div className="ds-page-enter">
       <DetailHeader
-        back={{ href: "/admin/activity", label: "Back to activity" }}
+        back={{ href: "/admin/activity", label: t("adminActivity.detail.backToActivity") }}
         leading={
           <Poster
             src={s.posterSrc}
@@ -125,10 +129,10 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
               whiteSpace: "nowrap",
             }}
           >
-            {isTV ? "Television series" : "Feature film"}
+            {isTV ? t("adminActivity.title.tvSeries") : t("adminActivity.title.featureFilm")}
           </span>
         }
-        subtitle={`${s.year ? `${s.year} · ` : ""}TMDB ${s.tmdbId} · playback activity across ${s.uniqueViewers} viewers`}
+        subtitle={`${s.year ? `${s.year} · ` : ""}TMDB ${s.tmdbId} · ${t("adminActivity.title.acrossViewers", { count: s.uniqueViewers })}`}
         right={
           <div
             style={{
@@ -137,13 +141,13 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
               gap: 24,
             }}
           >
-            <HeaderStat label="Plays" value={s.totalPlays.toLocaleString("en-US")} />
+            <HeaderStat label={t("adminActivity.stat.plays")} value={s.totalPlays.toLocaleString(locale)} />
             <HeaderStat
-              label="Viewers"
-              value={s.uniqueViewers.toLocaleString("en-US")}
+              label={t("adminActivity.stat.viewers")}
+              value={s.uniqueViewers.toLocaleString(locale)}
             />
             <HeaderStat
-              label="Completion"
+              label={t("adminActivity.popover.completion")}
               value={`${s.avgCompletion}%`}
               tone={
                 s.avgCompletion >= 75
@@ -173,7 +177,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
             textDecoration: "none",
           }}
         >
-          Open in library
+          {t("adminActivity.title.openInLibrary")}
           <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden>
             <path
               d="M4 3h5v5M9 3l-6 6"
@@ -189,14 +193,14 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
       <div style={{ marginBottom: 22 }}>
         <ActivityCard>
           <SectionHeader
-            label="Plays per day · 90d"
-            sub={`${s.watchedCount} of last ${s.recentSampleSize} plays watched fully · recent sample`}
+            label={t("adminActivity.title.playsPerDay90")}
+            sub={t("adminActivity.title.watchedFully", { watched: s.watchedCount, sample: s.recentSampleSize })}
           />
           <AreaChart
             data={playsByDay}
             h={130}
-            labels={s.playsByDay.map((d) => absTime(`${d.day}T00:00:00Z`))}
-            valueSuffix=" plays"
+            labels={s.playsByDay.map((d) => absTime(`${d.day}T00:00:00Z`, locale))}
+            valueSuffix={t("adminActivity.common.playsSuffix")}
           />
         </ActivityCard>
       </div>
@@ -212,11 +216,11 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
       >
         <ActivityCard>
           <SectionHeader
-            label="Who watched"
+            label={t("adminActivity.title.whoWatched")}
             sub={
               s.topViewers.length < s.uniqueViewers
-                ? `top ${s.topViewers.length} of ${s.uniqueViewers.toLocaleString("en-US")} viewers`
-                : `${s.uniqueViewers.toLocaleString("en-US")} viewers`
+                ? t("adminActivity.title.topOfViewers", { top: s.topViewers.length, n: s.uniqueViewers.toLocaleString(locale) })
+                : t("adminActivity.title.viewersN", { count: s.uniqueViewers, n: s.uniqueViewers.toLocaleString(locale) })
             }
           />
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -319,15 +323,15 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
                   textAlign: "center",
                 }}
               >
-                No viewers yet
+                {t("adminActivity.title.noViewers")}
               </div>
             )}
           </div>
         </ActivityCard>
         <ActivityCard>
           <SectionHeader
-            label="Completion"
-            sub="recent sample"
+            label={t("adminActivity.popover.completion")}
+            sub={t("adminActivity.title.recentSample")}
           />
           <HorizontalBars
             items={s.completionHist}
@@ -336,7 +340,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
           />
         </ActivityCard>
         <ActivityCard>
-          <SectionHeader label="Stream type" sub="play method mix" />
+          <SectionHeader label={t("adminActivity.title.streamType")} sub={t("adminActivity.title.playMethodMix")} />
           <StreamTypeBars data={streamTypes} />
         </ActivityCard>
       </div>
@@ -351,7 +355,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
         }}
       >
         <ActivityCard>
-          <SectionHeader label="Resolutions" />
+          <SectionHeader label={t("adminActivity.title.resolutions")} />
           <HorizontalBars
             items={s.resolutionBreakdown.map((r) => ({
               label: r.resolution,
@@ -363,8 +367,8 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
         </ActivityCard>
         <ActivityCard>
           <SectionHeader
-            label="Platforms"
-            sub={`${s.platforms.length} unique`}
+            label={t("adminActivity.title.platforms")}
+            sub={t("adminActivity.title.unique", { count: s.platforms.length })}
           />
           <HorizontalBars
             items={s.platforms.slice(0, 6)}
@@ -397,13 +401,13 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
                   color: "var(--ds-fg)",
                 }}
               >
-                Play history
+                {t("adminActivity.title.playHistory")}
               </h2>
               <span
                 className="ds-mono"
                 style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
               >
-                latest {s.recentPlays.length} sessions
+                {t("adminActivity.title.latestSessions", { count: s.recentPlays.length })}
               </span>
             </div>
           </div>
@@ -417,18 +421,19 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
             >
               <thead>
                 <tr style={{ background: "var(--ds-bg-1)" }}>
-                  <Th label="User" />
-                  {isTV && <Th label="Episode" />}
-                  <Th label="Quality" />
-                  <Th label="Platform" />
-                  <Th label="Stream" />
-                  <Th label="Duration" align="right" />
-                  <Th label="When" align="right" />
+                  <Th label={t("adminActivity.field.user")} />
+                  {isTV && <Th label={t("adminActivity.field.episode")} />}
+                  <Th label={t("adminActivity.field.quality")} />
+                  <Th label={t("adminActivity.field.platform")} />
+                  <Th label={t("adminActivity.field.stream")} />
+                  <Th label={t("adminActivity.field.duration")} align="right" />
+                  <Th label={t("adminActivity.field.when")} align="right" />
                 </tr>
               </thead>
               <tbody>
                 {s.recentPlays.map((p, i) => {
                   const ml = methodLabel(
+                    t,
                     p.playMethod,
                     p.videoDecision,
                     p.audioDecision,
@@ -558,7 +563,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
                         color: "var(--ds-fg-subtle)",
                       }}
                     >
-                      No plays recorded
+                      {t("adminActivity.title.noPlays")}
                     </td>
                   </tr>
                 )}

@@ -1,5 +1,7 @@
 "use client";
 
+import { useT } from "@/components/i18n/i18n-provider";
+
 export function KpiStrip({
   profilesAvailable,
   profilesApplied,
@@ -19,38 +21,44 @@ export function KpiStrip({
   // an all-clear (a green "0 diffs / In sync with upstream").
   failed?: boolean;
 }) {
+  const t = useT();
   if (failed && !loading) {
-    const kpis = ["Profiles available", "Applied to instance", "Custom formats", "Drift"].map((label) => ({
+    const kpis = [
+      t("trash.kpi.profilesAvailable"),
+      t("trash.kpi.appliedToInstance"),
+      t("trash.kpi.customFormats"),
+      t("trash.kpi.drift"),
+    ].map((label) => ({
       label,
       value: "—",
-      hint: "Status unavailable",
+      hint: t("trash.kpi.statusUnavailable"),
       tint: "var(--ds-fg-muted)",
     }));
     return <KpiGrid kpis={kpis} />;
   }
   const kpis = [
     {
-      label: "Profiles available",
+      label: t("trash.kpi.profilesAvailable"),
       value: loading ? "…" : String(profilesAvailable),
-      hint: "from TRaSH-Guides",
+      hint: t("trash.kpi.fromTrash"),
       tint: "var(--ds-fg)",
     },
     {
-      label: "Applied to instance",
+      label: t("trash.kpi.appliedToInstance"),
       value: loading ? "…" : String(profilesApplied),
-      hint: `of ${profilesAvailable}`,
+      hint: t("trash.kpi.ofTotal", { total: profilesAvailable }),
       tint: profilesApplied > 0 ? "var(--ds-accent-text)" : "var(--ds-fg)",
     },
     {
-      label: "Custom formats",
+      label: t("trash.kpi.customFormats"),
       value: loading ? "…" : String(customFormatsTotal),
-      hint: `${customFormatsApplied} applied`,
+      hint: t("trash.kpi.appliedCount", { count: customFormatsApplied }),
       tint: "var(--ds-fg)",
     },
     {
-      label: "Drift",
-      value: loading ? "…" : drift === 0 ? "0 diffs" : `${drift} diff${drift !== 1 ? "s" : ""}`,
-      hint: drift === 0 ? "In sync with upstream" : "Review errors",
+      label: t("trash.kpi.drift"),
+      value: loading ? "…" : t("trash.kpi.diffs", { count: drift }),
+      hint: drift === 0 ? t("trash.kpi.inSync") : t("trash.kpi.reviewErrors"),
       tint: drift === 0 ? "var(--ds-success)" : "var(--ds-warning)",
     },
   ];

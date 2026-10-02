@@ -13,7 +13,8 @@ import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { withBasePath } from "@/lib/base-path";
-import { formatRelativeTime } from "@/lib/relative-time";
+import { formatRelativeTimeLocalized } from "@/lib/relative-time";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import {
   ActivityCard,
   Avatar,
@@ -60,6 +61,8 @@ export function ActivityHistoryTable({
   initialWatched?: "true" | "false";
 }) {
   const mounted = useHasMounted();
+  const t = useT();
+  const locale = useLocale();
 
   const [rows, setRows] = useState<HistoryRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -102,8 +105,8 @@ export function ActivityHistoryTable({
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    const t = setTimeout(() => setDebouncedSearch(search), 350);
-    return () => clearTimeout(t);
+    const timer = setTimeout(() => setDebouncedSearch(search), 350);
+    return () => clearTimeout(timer);
   }, [search]);
 
   useEffect(() => {
@@ -222,8 +225,9 @@ export function ActivityHistoryTable({
         if (err.name === "AbortError") return;
         console.error("[activity-history]", err);
         // The raw status lands in the console above; the table shows copy an
-        // admin can act on, with a Retry beside it.
-        setError("Couldn't load play history.");
+        // admin can act on, with a Retry beside it. Stored as a catalog key so
+        // the effect needs no translator dependency; translated at render.
+        setError("adminActivity.history.loadError");
         setLoading(false);
       });
 
@@ -260,12 +264,12 @@ export function ActivityHistoryTable({
         // wrong for a chain: the row vanished while its remaining segments
         // survived, and `total` counts DISTINCT chains so it had not changed at
         // all. Re-reading is the only thing that cannot disagree with the DB.
-        setReloadToken((t) => t + 1);
+        setReloadToken((n) => n + 1);
       } else {
-        setDeleteError("Couldn't delete this play record. Please try again.");
+        setDeleteError(t("adminActivity.history.deleteError"));
       }
     } catch {
-      setDeleteError("Couldn't delete this play record. Please try again.");
+      setDeleteError(t("adminActivity.history.deleteError"));
     } finally {
       setDeleting(false);
     }
@@ -346,37 +350,37 @@ export function ActivityHistoryTable({
             <thead>
               <tr style={{ background: "var(--ds-bg-1)" }}>
                 <Th width={28} />
-                <Th label="User" />
+                <Th label={t("adminActivity.field.user")} />
                 <Th
-                  label="Title"
+                  label={t("adminActivity.field.title")}
                   onSort={() => toggleSort("title")}
                   active={sortBy === "title"}
                   dir={sortDir}
                 />
                 <Th
-                  label="Started"
+                  label={t("adminActivity.field.started")}
                   onSort={() => toggleSort("startedAt")}
                   active={sortBy === "startedAt"}
                   dir={sortDir}
                 />
                 <Th
-                  label="Length"
+                  label={t("adminActivity.field.length")}
                   onSort={() => toggleSort("duration")}
                   active={sortBy === "duration"}
                   dir={sortDir}
                   align="right"
                 />
                 <Th
-                  label="Watched"
+                  label={t("adminActivity.field.watched")}
                   onSort={() => toggleSort("playDuration")}
                   active={sortBy === "playDuration"}
                   dir={sortDir}
                   align="right"
                 />
-                <Th label="Stream" />
-                <Th label="Quality" />
+                <Th label={t("adminActivity.field.stream")} />
+                <Th label={t("adminActivity.field.quality")} />
                 <Th
-                  label="Platform"
+                  label={t("adminActivity.field.platform")}
                   onSort={() => toggleSort("platform")}
                   active={sortBy === "platform"}
                   dir={sortDir}
@@ -395,7 +399,7 @@ export function ActivityHistoryTable({
                       color: "var(--ds-fg-subtle)",
                     }}
                   >
-                    Loading…
+                    {t("adminActivity.common.loading")}
                   </td>
                 </tr>
               ) : error ? (
@@ -408,11 +412,11 @@ export function ActivityHistoryTable({
                       color: "var(--ds-danger)",
                     }}
                   >
-                    <div role="alert">{error}</div>
+                    <div role="alert">{t(error)}</div>
                     <button
                       type="button"
                       className="ds-hover-tint"
-                      onClick={() => setReloadToken((t) => t + 1)}
+                      onClick={() => setReloadToken((n) => n + 1)}
                       style={{
                         marginTop: 10,
                         fontSize: 12,
@@ -423,7 +427,7 @@ export function ActivityHistoryTable({
                         color: "var(--ds-fg-muted)",
                       }}
                     >
-                      Retry
+                      {t("adminActivity.common.retry")}
                     </button>
                   </td>
                 </tr>
@@ -438,7 +442,7 @@ export function ActivityHistoryTable({
                       fontSize: 13,
                     }}
                   >
-                    No plays match these filters.
+                    {t("adminActivity.history.noMatch")}
                   </td>
                 </tr>
               ) : (
@@ -456,6 +460,7 @@ export function ActivityHistoryTable({
                         )
                       : 0;
                   const ml = methodLabel(
+                    t,
                     r.playMethod,
                     r.videoDecision,
                     r.audioDecision,
@@ -540,7 +545,7 @@ export function ActivityHistoryTable({
                             {r.serverInstance && (
                               <span
                                 className="ds-mono"
-                                title={`Played on the "${r.serverInstance}" ${r.source} server`}
+                                title={t("adminActivity.common.playedOnServer", { instance: r.serverInstance, source: r.source })}
                                 style={{
                                   fontSize: 9.5,
                                   padding: "1px 5px",
@@ -602,7 +607,7 @@ export function ActivityHistoryTable({
                                 {(r.segmentCount ?? 1) > 1 && (
                                   <span
                                     className="ds-mono"
-                                    title="Continued watch — toggle Group resumes off to see individual segments"
+                                    title={t("adminActivity.history.continuedTitle")}
                                     style={{
                                       fontSize: 9.5,
                                       padding: "2px 6px",
@@ -653,7 +658,7 @@ export function ActivityHistoryTable({
                               color: "var(--ds-fg-disabled)",
                             }}
                           >
-                            {mounted ? formatRelativeTime(r.startedAt) : ""}
+                            {mounted ? formatRelativeTimeLocalized(r.startedAt, locale) : ""}
                           </div>
                         </td>
                         <td
@@ -767,7 +772,7 @@ export function ActivityHistoryTable({
                           <button
                             onClick={() => setDeleteRow(r)}
                             className="history-delete"
-                            aria-label="Delete play"
+                            aria-label={t("adminActivity.history.deleteAria")}
                             style={{
                               background: "transparent",
                               border: "1px solid transparent",

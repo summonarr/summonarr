@@ -1,5 +1,6 @@
 import { SpecSection } from "@/components/admin/trash-guides/spec-section";
 import { NotConfiguredBanner } from "@/components/admin/trash-guides/not-configured-banner";
+import { getTranslator } from "@/lib/i18n/server";
 import { loadTrashPageContext, type TrashPageSearchParams } from "../_shared";
 
 export const dynamic = "force-dynamic";
@@ -10,6 +11,7 @@ export default async function NamingSizesPage({
   searchParams: TrashPageSearchParams;
 }) {
   const { service, variant, serviceConfigured } = await loadTrashPageContext(searchParams);
+  const t = await getTranslator();
 
   return (
     <div className="space-y-6 max-w-6xl">
@@ -19,8 +21,8 @@ export default async function NamingSizesPage({
         service={service}
         variant={variant}
         kind="NAMING"
-        title="Naming"
-        description="Naming schemes. Applying merges selected templates into Radarr/Sonarr's media-management config."
+        title={t("trash.section.naming.title")}
+        description={t("trash.section.naming.description")}
         disabled={!serviceConfigured}
       />
       <SpecSection
@@ -28,8 +30,8 @@ export default async function NamingSizesPage({
         service={service}
         variant={variant}
         kind="QUALITY_SIZE"
-        title="Quality Sizes"
-        description="TRaSH's recommended min/preferred/max size per quality. Applying overlays these onto Radarr/Sonarr's quality definitions — untouched qualities keep their current values."
+        title={t("trash.section.qualitySizes.title")}
+        description={t("trash.section.qualitySizes.description")}
         disabled={!serviceConfigured}
       />
     </div>

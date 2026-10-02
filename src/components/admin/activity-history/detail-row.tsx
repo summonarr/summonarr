@@ -13,6 +13,7 @@ import {
 } from "@/components/admin/activity-ui";
 import { fmtMarkerOffset } from "./helpers";
 import type { HistoryRow } from "./types";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export function DetailRow({
   play,
@@ -23,6 +24,7 @@ export function DetailRow({
   colSpan: number;
   mounted: boolean;
 }) {
+  const t = useT();
   // A "chain" is one viewing that was paused and resumed across several
   // sittings (segments). When grouping is on, the table shows one row per
   // chain, and every duration/timestamp in this panel covers the WHOLE chain —
@@ -43,24 +45,26 @@ export function DetailRow({
       ? Math.min(100, Math.round((effectivePlay / play.duration) * 100))
       : 0;
   const details: [string, React.ReactNode][] = [
-    ["Started", fmtTimestamp(startedAt, mounted)],
-    ["Stopped", fmtTimestamp(stoppedAt, mounted)],
-    ["Total length", fmtDuration(play.duration)],
-    ["Watch time", fmtDuration(effectivePlay)],
-    ["Paused", effectivePaused ? fmtDuration(effectivePaused) : "—"],
-    ["Progress", `${pct}%`],
-    ...(segments > 1 ? ([["Segments", `${segments} (grouped resume)`]] as [string, React.ReactNode][]) : []),
-    ["Device", play.device ?? "—"],
+    [t("adminActivity.field.started"), fmtTimestamp(startedAt, mounted)],
+    [t("adminActivity.field.stopped"), fmtTimestamp(stoppedAt, mounted)],
+    [t("adminActivity.field.totalDuration"), fmtDuration(play.duration)],
+    [t("adminActivity.kpi.watchTime"), fmtDuration(effectivePlay)],
+    [t("adminActivity.field.paused"), effectivePaused ? fmtDuration(effectivePaused) : "—"],
+    [t("adminActivity.field.progress"), `${pct}%`],
+    ...(segments > 1
+      ? ([[t("adminActivity.field.segments"), t("adminActivity.detail.segmentsValue", { count: segments })]] as [string, React.ReactNode][])
+      : []),
+    [t("adminActivity.field.device"), play.device ?? "—"],
     [
-      "IP address",
+      t("adminActivity.field.ipAddress"),
       play.ipAddress ? <IpInfo ip={play.ipAddress} inline /> : "—",
     ],
-    ["Container", play.container ?? "—"],
-    ["Bitrate", fmtBitrate(play.bitrate, play.source)],
-    ["Video codec", play.videoCodec ?? "—"],
-    ["Audio codec", play.audioCodec ?? "—"],
-    ["Video decision", play.videoDecision ?? "—"],
-    ["Audio decision", play.audioDecision ?? "—"],
+    [t("adminActivity.field.container"), play.container ?? "—"],
+    [t("adminActivity.field.bitrate"), fmtBitrate(play.bitrate, play.source)],
+    [t("adminActivity.field.videoCodec"), play.videoCodec ?? "—"],
+    [t("adminActivity.field.audioCodec"), play.audioCodec ?? "—"],
+    [t("adminActivity.field.videoDecision"), play.videoDecision ?? "—"],
+    [t("adminActivity.field.audioDecision"), play.audioDecision ?? "—"],
   ];
 
   // Network metadata. Plex-only — Jellyfin rows leave these null. Suppress
@@ -68,45 +72,45 @@ export function DetailRow({
   // of dashes that pads the panel for no reason.
   if (play.location || play.secure != null || play.relayed != null || play.bandwidth != null) {
     if (play.location) {
-      details.push(["Connection", play.location.toUpperCase()]);
+      details.push([t("adminActivity.field.connection"), play.location.toUpperCase()]);
     }
     if (play.secure != null) {
-      details.push(["Secure", play.secure ? "TLS" : "HTTP"]);
+      details.push([t("adminActivity.field.secure"), play.secure ? "TLS" : "HTTP"]);
     }
     if (play.relayed) {
-      details.push(["Relay", "via plex.tv"]);
+      details.push([t("adminActivity.field.relay"), t("adminActivity.detail.viaPlexTv")]);
     }
     if (play.bandwidth != null) {
       // Plex reports bandwidth in kbps; surface as Mbps for parity with the
       // rest of the panel.
       const mbps = play.bandwidth / 1000;
-      details.push(["Session bandwidth", `${mbps.toFixed(1)} Mbps`]);
+      details.push([t("adminActivity.field.sessionBandwidth"), `${mbps.toFixed(1)} Mbps`]);
     }
   }
 
   // Intro/credits markers (Plex includeMarkers=1). Same suppression rule.
   if (play.introStartMs != null && play.introEndMs != null) {
     details.push([
-      "Intro marker",
+      t("adminActivity.field.introMarker"),
       `${fmtMarkerOffset(play.introStartMs)} – ${fmtMarkerOffset(play.introEndMs)}`,
     ]);
   }
   if (play.creditsStartMs != null) {
     const tail = play.creditsEndMs != null && play.duration > 0
       && play.creditsEndMs >= play.duration * 1000 - 1000
-      ? "end"
+      ? t("adminActivity.detail.end")
       : play.creditsEndMs != null
         ? fmtMarkerOffset(play.creditsEndMs)
-        : "end";
+        : t("adminActivity.detail.end");
     details.push([
-      "Credits marker",
+      t("adminActivity.field.creditsMarker"),
       `${fmtMarkerOffset(play.creditsStartMs)} – ${tail}`,
     ]);
   }
 
   if (play.mediaType === "TV" && play.seasonNumber != null) {
     details.push([
-      "Episode",
+      t("adminActivity.field.episode"),
       `S${String(play.seasonNumber).padStart(2, "0")} · E${String(
         play.episodeNumber ?? 0,
       ).padStart(2, "0")}${play.episodeTitle ? ` — ${play.episodeTitle}` : ""}`,
@@ -129,7 +133,7 @@ export function DetailRow({
             marginBottom: 10,
           }}
         >
-          Session detail
+          {t("adminActivity.detail.sessionDetail")}
         </div>
         <div
           style={{
@@ -188,7 +192,7 @@ export function DetailRow({
                 whiteSpace: "nowrap",
               }}
             >
-              View title activity →
+              {t("adminActivity.detail.viewTitleActivity")}
             </Link>
           )}
           <Link
@@ -204,7 +208,7 @@ export function DetailRow({
               whiteSpace: "nowrap",
             }}
           >
-            User activity →
+            {t("adminActivity.detail.userActivity")}
           </Link>
         </div>
       </td>

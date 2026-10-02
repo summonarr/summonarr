@@ -4,10 +4,12 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Trash2, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // Confirm-then-DELETE control for a single play-history record; on success
 // navigates back to the activity history tab.
 export function DeletePlayButton({ id }: { id: string }) {
+  const t = useT();
   const router = useRouter();
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -38,20 +40,20 @@ export function DeletePlayButton({ id }: { id: string }) {
         className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-zinc-500 hover:text-red-400 border border-zinc-700 hover:border-red-500/50 rounded-lg transition-colors"
       >
         <Trash2 className="w-3.5 h-3.5" />
-        Delete record
+        {t("adminActivity.deletePlay.button")}
       </button>
     );
   }
 
   return (
     <div className="flex items-center gap-2">
-      <span className="text-xs text-zinc-400">Delete this play record?</span>
+      <span className="text-xs text-zinc-400">{t("adminActivity.deletePlay.confirm")}</span>
       <button
         onClick={() => setConfirming(false)}
         disabled={deleting}
         className="px-3 py-1.5 text-xs rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
       >
-        Cancel
+        {t("adminActivity.common.cancel")}
       </button>
       <button
         onClick={handleDelete}
@@ -59,9 +61,9 @@ export function DeletePlayButton({ id }: { id: string }) {
         className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-50"
       >
         {deleting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-        Delete
+        {t("adminActivity.common.delete")}
       </button>
-      {error && <span className="text-xs text-red-400">Delete failed</span>}
+      {error && <span className="text-xs text-red-400">{t("adminActivity.deletePlay.failed")}</span>}
     </div>
   );
 }

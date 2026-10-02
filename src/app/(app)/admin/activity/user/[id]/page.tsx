@@ -5,6 +5,7 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import { getUserPlayStats } from "@/lib/play-history";
 import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
 import { posterUrl } from "@/lib/tmdb-types";
+import { getTranslator } from "@/lib/i18n/server";
 import {
   addTitleResolutions,
   collectUnmappedPairs,
@@ -29,6 +30,7 @@ export default async function UserActivityPage({
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const { id } = await params;
+  const t = await getTranslator();
 
   // All three are independent side-effect-free reads keyed on the same id, so
   // run them concurrently; the notFound() check moves after the batch.
@@ -122,7 +124,7 @@ export default async function UserActivityPage({
     username: msUser.username,
     source: msUser.source,
     linkedLabel: msUser.user
-      ? `Linked to ${msUser.user.name ?? msUser.user.email}`
+      ? t("adminActivity.user.linkedTo", { name: msUser.user.name ?? msUser.user.email ?? "" })
       : null,
     email: msUser.email,
     totalPlays: stats.totalPlays,

@@ -4,6 +4,8 @@
 // label, and the page-number strip. The page and page-size state live in the
 // parent; this file only works out which numbers to show.
 
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+
 export function HistoryPagination({
   page,
   setPage,
@@ -19,6 +21,8 @@ export function HistoryPagination({
   total: number;
   totalPages: number;
 }) {
+  const t = useT();
+  const locale = useLocale();
   const startItem = total > 0 ? (page - 1) * limit + 1 : 0;
   const endItem = Math.min(page * limit, total);
   const pageRange: number[] = [];
@@ -50,11 +54,11 @@ export function HistoryPagination({
           className="ds-mono"
           style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
         >
-          Rows
+          {t("adminActivity.pagination.rows")}
         </span>
         <select
           value={limit}
-          aria-label="Rows per page"
+          aria-label={t("adminActivity.pagination.rowsPerPage")}
           onChange={(e) => setLimit(Number(e.target.value))}
           style={{
             fontFamily: "var(--font-mono)",
@@ -84,8 +88,12 @@ export function HistoryPagination({
           }}
         >
           {total > 0
-            ? `${startItem.toLocaleString("en-US")}–${endItem.toLocaleString("en-US")} of ${total.toLocaleString("en-US")}`
-            : "0 results"}
+            ? t("adminActivity.pagination.range", {
+                start: startItem.toLocaleString(locale),
+                end: endItem.toLocaleString(locale),
+                total: total.toLocaleString(locale),
+              })
+            : t("adminActivity.pagination.noResults")}
         </span>
       </div>
       <div
