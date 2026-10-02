@@ -8,6 +8,7 @@ import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
 import { Switch } from "@/components/ui/switch";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface MaintenanceFormProps {
   initialEnabled: boolean;
@@ -15,6 +16,7 @@ interface MaintenanceFormProps {
 }
 
 export function MaintenanceForm({ initialEnabled, initialMessage }: MaintenanceFormProps) {
+  const t = useT();
   const [enabled, setEnabled] = useState(initialEnabled);
   const [message, setMessage] = useState(initialMessage);
   const [status, setStatus] = useState<SaveStatus>("idle");
@@ -43,22 +45,22 @@ export function MaintenanceForm({ initialEnabled, initialMessage }: MaintenanceF
     <form onSubmit={handleSave} className="space-y-4">
       <div className="flex items-center gap-3">
         <Switch size="lg" variant="warning" checked={enabled} onCheckedChange={() => { setEnabled(!enabled); setStatus("idle"); }} />
-        <span className="text-sm text-zinc-300">{enabled ? "Maintenance mode is ON" : "Maintenance mode is OFF"}</span>
+        <span className="text-sm text-zinc-300">{enabled ? t("settings.form.maintenance.on") : t("settings.form.maintenance.off")}</span>
       </div>
       <div className="space-y-1.5">
-        <Label htmlFor="maintenance-message">Custom Message <span className="text-zinc-500 font-normal">(optional)</span></Label>
+        <Label htmlFor="maintenance-message">{t("settings.form.maintenance.messageLabel")} <span className="text-zinc-500 font-normal">{t("settings.form.common.optional")}</span></Label>
         <textarea
           id="maintenance-message"
           value={message}
           onChange={(e) => { setMessage(e.target.value); setStatus("idle"); }}
-          placeholder="We're performing some maintenance. Please check back shortly."
+          placeholder={t("settings.form.maintenance.messagePlaceholder")}
           rows={3}
           className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
         />
       </div>
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
-          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
+          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
         </Button>
         <SaveStatusMessage status={status} />
       </div>

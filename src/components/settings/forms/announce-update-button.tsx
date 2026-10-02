@@ -4,8 +4,10 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader2, AlertTriangle, Send } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export function AnnounceUpdateButton() {
+  const t = useT();
   const [phase, setPhase] = useState<"idle" | "confirm" | "sending" | "done" | "error">("idle");
   const [summary, setSummary] = useState<string | null>(null);
   // Timer that clears the result 10s after a send. Kept in a ref so it can be
@@ -31,14 +33,16 @@ export function AnnounceUpdateButton() {
         setPhase("done");
         const sent = data.sent ?? 0;
         const failed = data.failed ?? 0;
-        setSummary(`Sent to ${sent} device${sent === 1 ? "" : "s"}${failed > 0 ? `, ${failed} failed` : ""}`);
+        setSummary(failed > 0
+          ? `${t("settings.form.announce.sent", { count: sent })}${t("settings.form.announce.failedSuffix", { count: failed })}`
+          : t("settings.form.announce.sent", { count: sent }));
       } else {
         setPhase("error");
-        setSummary(typeof data.error === "string" ? data.error : "Failed to send update notice");
+        setSummary(typeof data.error === "string" ? data.error : t("settings.form.announce.sendFailed"));
       }
     } catch {
       setPhase("error");
-      setSummary("Failed to send update notice");
+      setSummary(t("settings.form.announce.sendFailed"));
     }
     resetTimer.current = setTimeout(() => { setPhase("idle"); setSummary(null); }, 10_000);
   }
@@ -50,10 +54,10 @@ export function AnnounceUpdateButton() {
           <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
           <div className="space-y-1.5">
             <p className="text-sm font-medium text-zinc-100">
-              Send an &quot;Update Summonarr&quot; notification to every registered iOS device?
+              {t("settings.form.announce.confirmTitle")}
             </p>
             <p className="text-xs text-zinc-400">
-              This goes to all users&apos; iOS devices at once and cannot be recalled. Limited to 2 sends per hour.
+              {t("settings.form.announce.confirmHelp")}
             </p>
           </div>
         </div>
@@ -63,7 +67,7 @@ export function AnnounceUpdateButton() {
             onClick={handleSend}
             className="bg-amber-600 text-black hover:bg-amber-600/90 h-7 px-4 text-xs"
           >
-            Send to all devices
+            {t("settings.form.announce.confirmSend")}
           </Button>
           <Button
             size="sm"
@@ -71,7 +75,7 @@ export function AnnounceUpdateButton() {
             onClick={() => setPhase("idle")}
             className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-7 px-3 text-xs"
           >
-            Cancel
+            {t("settings.form.common.cancel")}
           </Button>
         </div>
       </div>
@@ -89,7 +93,7 @@ export function AnnounceUpdateButton() {
           className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
         >
           {phase === "sending" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-          {phase === "sending" ? "Sending…" : "Send update notice to all iOS devices"}
+          {phase === "sending" ? t("settings.form.common.sending") : t("settings.form.announce.button")}
         </Button>
         {summary && (
           <span role={phase === "error" ? "alert" : "status"} aria-live={phase === "error" ? "assertive" : "polite"} className={`text-xs ${phase === "error" ? "text-red-400" : "text-green-400"}`}>
@@ -99,7 +103,7 @@ export function AnnounceUpdateButton() {
       </div>
       {phase === "idle" && (
         <p className="text-xs text-zinc-500">
-          Pushes a generic &quot;a new version is available on the App Store&quot; alert to every iOS device registered on this server.
+          {t("settings.form.announce.help")}
         </p>
       )}
     </div>

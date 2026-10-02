@@ -8,6 +8,7 @@ import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface DonationFormProps {
   initialPaypal: string;
@@ -19,6 +20,7 @@ interface DonationFormProps {
 }
 
 export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initialAmazon, initialPatreon, initialBuyMeACoffee }: DonationFormProps) {
+  const t = useT();
   const [paypal,        setPaypal]        = useState(initialPaypal);
   const [venmo,         setVenmo]         = useState(initialVenmo);
   const [zelle,         setZelle]         = useState(initialZelle);
@@ -59,7 +61,7 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
           id="donation-paypal"
           value={paypal}
           onChange={(e) => { setPaypal(e.target.value); setStatus("idle"); }}
-          placeholder="paypal.me/yourname or email address"
+          placeholder={t("settings.form.donation.paypalPlaceholder")}
           className="bg-zinc-800 border-zinc-700 text-sm"
         />
       </div>
@@ -69,7 +71,7 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
           id="donation-venmo"
           value={venmo}
           onChange={(e) => { setVenmo(e.target.value); setStatus("idle"); }}
-          placeholder="@your-venmo-handle"
+          placeholder={t("settings.form.donation.venmoPlaceholder")}
           className="bg-zinc-800 border-zinc-700 text-sm"
         />
       </div>
@@ -79,12 +81,12 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
           id="donation-zelle"
           value={zelle}
           onChange={(e) => { setZelle(e.target.value); setStatus("idle"); }}
-          placeholder="Email or phone number registered with Zelle"
+          placeholder={t("settings.form.donation.zellePlaceholder")}
           className="bg-zinc-800 border-zinc-700 text-sm"
         />
       </div>
       <div className="space-y-1.5">
-        <Label htmlFor="donation-amazon">Amazon Wishlist</Label>
+        <Label htmlFor="donation-amazon">{t("settings.form.donation.amazonLabel")}</Label>
         <Input
           id="donation-amazon"
           value={amazon}
@@ -99,7 +101,7 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
           id="donation-patreon"
           value={patreon}
           onChange={(e) => { setPatreon(e.target.value); setStatus("idle"); }}
-          placeholder="your-patreon-handle or full Patreon URL"
+          placeholder={t("settings.form.donation.patreonPlaceholder")}
           className="bg-zinc-800 border-zinc-700 text-sm"
         />
       </div>
@@ -109,13 +111,13 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
           id="donation-bmac"
           value={buyMeACoffee}
           onChange={(e) => { setBuyMeACoffee(e.target.value); setStatus("idle"); }}
-          placeholder="your-bmac-handle or full Buy Me a Coffee URL"
+          placeholder={t("settings.form.donation.bmacPlaceholder")}
           className="bg-zinc-800 border-zinc-700 text-sm"
         />
       </div>
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
-          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
+          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
         </Button>
         <SaveStatusMessage status={status} />
       </div>

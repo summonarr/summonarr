@@ -5,8 +5,10 @@ import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
 import { Switch } from "@/components/ui/switch";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export function EnableUserEmailsToggle({ initialEnabled }: { initialEnabled: boolean }) {
+  const t = useT();
   const [enabled, setEnabled] = useState(initialEnabled);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -34,7 +36,7 @@ export function EnableUserEmailsToggle({ initialEnabled }: { initialEnabled: boo
       const data: { ok?: boolean; error?: string } = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) {
         setEnabled(prev);
-        setError(data.error ?? "Failed to save");
+        setError(data.error ?? t("settings.form.common.saveFailed"));
         setStatus("error");
       } else {
         setStatus("ok");
@@ -42,7 +44,7 @@ export function EnableUserEmailsToggle({ initialEnabled }: { initialEnabled: boo
       }
     } catch {
       setEnabled(prev);
-      setError("Failed to save");
+      setError(t("settings.form.common.saveFailed"));
       setStatus("error");
     }
   }
@@ -50,11 +52,9 @@ export function EnableUserEmailsToggle({ initialEnabled }: { initialEnabled: boo
   return (
     <div className="flex items-center justify-between gap-4 py-3 border-t border-zinc-800">
       <div>
-        <p id={titleId} className="text-sm font-medium text-zinc-200">Send notification emails</p>
+        <p id={titleId} className="text-sm font-medium text-zinc-200">{t("settings.form.userEmails.title")}</p>
         <p id={descId} className="text-xs text-zinc-500 mt-0.5">
-          When enabled, users receive emails for approved, declined, and available events (based on their own preferences)
-          and admins receive new request, issue, and deletion-vote alerts. When disabled, no notification emails are sent
-          (saving the settings above still sends a configuration test email).
+          {t("settings.form.userEmails.help")}
         </p>
       </div>
       <div className="flex items-center gap-2 shrink-0">

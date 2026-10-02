@@ -5,12 +5,14 @@ import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
 import { Switch } from "@/components/ui/switch";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // Admin → Settings → Authentication: "Prompt administrators to set up two-factor"
 // (Setting key requireMfaForAdmins).
 // See src/lib/mfa/policy.ts for exactly what it enforces (an /admin redirect to
 // enrollment — never a sign-in lockout).
 export function RequireAdminMfaToggle({ initialRequired, envOverride }: { initialRequired: boolean; envOverride: boolean }) {
+  const t = useT();
   const [required, setRequired] = useState(initialRequired);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -38,7 +40,7 @@ export function RequireAdminMfaToggle({ initialRequired, envOverride }: { initia
       const data: { ok?: boolean; error?: string } = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) {
         setRequired(prev);
-        setError(data.error ?? "Failed to save");
+        setError(data.error ?? t("settings.form.common.saveFailed"));
         setStatus("error");
       } else {
         setStatus("ok");
@@ -46,7 +48,7 @@ export function RequireAdminMfaToggle({ initialRequired, envOverride }: { initia
       }
     } catch {
       setRequired(prev);
-      setError("Failed to save");
+      setError(t("settings.form.common.saveFailed"));
       setStatus("error");
     }
   }
@@ -54,12 +56,12 @@ export function RequireAdminMfaToggle({ initialRequired, envOverride }: { initia
   return (
     <div className="flex items-center justify-between gap-4 mt-4">
       <div>
-        <p id={titleId} className="text-sm font-medium text-zinc-200">Prompt administrators to set up two-factor</p>
+        <p id={titleId} className="text-sm font-medium text-zinc-200">{t("settings.form.requireAdminMfa.title")}</p>
         <p id={descId} className="text-xs text-zinc-500 mt-0.5">
-          Administrators who sign in with a password and have no second factor are redirected to set one up when they open an admin page. This is a nudge, not a lock: signing in is never blocked, and the API, the app and the rest of the site keep working without two-factor.
+          {t("settings.form.requireAdminMfa.help")}
           {envOverride && (
             <span className="block mt-1 text-amber-400">
-              Currently switched off by SUMMONARR_DISABLE_MFA_ENFORCEMENT=true on the server.
+              {t("settings.form.requireAdminMfa.envOverride", { env: "SUMMONARR_DISABLE_MFA_ENFORCEMENT=true" })}
             </span>
           )}
         </p>

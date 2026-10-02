@@ -9,6 +9,7 @@ import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
 import { Switch } from "@/components/ui/switch";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface MotdFormProps {
   initialEnabled: boolean;
@@ -17,6 +18,7 @@ interface MotdFormProps {
 }
 
 export function MotdForm({ initialEnabled, initialTitle, initialBody }: MotdFormProps) {
+  const t = useT();
   const [enabled, setEnabled] = useState(initialEnabled);
   const [title,  setTitle]  = useState(initialTitle);
   const [body,   setBody]   = useState(initialBody);
@@ -43,8 +45,8 @@ export function MotdForm({ initialEnabled, initialTitle, initialBody }: MotdForm
     <form onSubmit={handleSave} className="space-y-4">
       <div className="flex items-center justify-between gap-4 pb-4 border-b border-zinc-800">
         <div>
-          <p id="motd-enabled-label" className="text-sm font-medium text-zinc-200">Show popup to users</p>
-          <p id="motd-enabled-desc" className="text-xs text-zinc-500 mt-0.5">Disable to hide the popup without clearing the message content.</p>
+          <p id="motd-enabled-label" className="text-sm font-medium text-zinc-200">{t("settings.form.motd.showTitle")}</p>
+          <p id="motd-enabled-desc" className="text-xs text-zinc-500 mt-0.5">{t("settings.form.motd.showHelp")}</p>
         </div>
         <Switch
           checked={enabled}
@@ -54,29 +56,29 @@ export function MotdForm({ initialEnabled, initialTitle, initialBody }: MotdForm
         />
       </div>
       <div className="space-y-1.5">
-        <Label htmlFor="motd-title">Title <span className="text-zinc-500 font-normal">(optional)</span></Label>
+        <Label htmlFor="motd-title">{t("settings.form.motd.titleLabel")} <span className="text-zinc-500 font-normal">{t("settings.form.common.optional")}</span></Label>
         <Input
           id="motd-title"
           value={title}
           onChange={(e) => { setTitle(e.target.value); setMotdStatus("idle"); }}
-          placeholder="Welcome!"
+          placeholder={t("settings.form.motd.titlePlaceholder")}
           className="bg-zinc-800 border-zinc-700 text-sm"
         />
       </div>
       <div className="space-y-1.5">
-        <Label htmlFor="motd-body">Message</Label>
+        <Label htmlFor="motd-body">{t("settings.form.motd.messageLabel")}</Label>
         <textarea
           id="motd-body"
           value={body}
           onChange={(e) => { setBody(e.target.value); setMotdStatus("idle"); }}
-          placeholder="Enter your message here."
+          placeholder={t("settings.form.motd.messagePlaceholder")}
           rows={4}
           className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
         />
       </div>
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={motdStatus === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
-          {motdStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
+          {motdStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
         </Button>
         <SaveStatusMessage status={motdStatus} />
       </div>

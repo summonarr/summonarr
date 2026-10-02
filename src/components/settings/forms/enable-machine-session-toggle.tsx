@@ -5,6 +5,8 @@ import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
 import { Switch } from "@/components/ui/switch";
+import { useT } from "@/components/i18n/i18n-provider";
+import { rich } from "./rich";
 
 export function EnableMachineSessionToggle({
   initialEnabled,
@@ -13,6 +15,7 @@ export function EnableMachineSessionToggle({
   initialEnabled: boolean;
   initialAllowedIps: string;
 }) {
+  const t = useT();
   const [enabled, setEnabled] = useState(initialEnabled);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -45,7 +48,7 @@ export function EnableMachineSessionToggle({
       const data: { ok?: boolean; error?: string } = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) {
         setEnabled(prev);
-        setError(data.error ?? "Failed to save");
+        setError(data.error ?? t("settings.form.common.saveFailed"));
         setStatus("error");
       } else {
         setStatus("ok");
@@ -53,7 +56,7 @@ export function EnableMachineSessionToggle({
       }
     } catch {
       setEnabled(prev);
-      setError("Failed to save");
+      setError(t("settings.form.common.saveFailed"));
       setStatus("error");
     }
   }
@@ -73,11 +76,11 @@ export function EnableMachineSessionToggle({
         setIpStatus("ok");
         setTimeout(() => setIpStatus("idle"), 3000);
       } else {
-        setIpError(data.error ?? "Failed to save");
+        setIpError(data.error ?? t("settings.form.common.saveFailed"));
         setIpStatus("error");
       }
     } catch {
-      setIpError("Failed to save");
+      setIpError(t("settings.form.common.saveFailed"));
       setIpStatus("error");
     }
   }
@@ -88,9 +91,12 @@ export function EnableMachineSessionToggle({
     <div className="py-3 border-t border-zinc-800">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <p id={titleId} className="text-sm font-medium text-zinc-200">Machine session API</p>
+          <p id={titleId} className="text-sm font-medium text-zinc-200">{t("settings.form.machineSession.title")}</p>
           <p id={descId} className="text-xs text-zinc-500 mt-0.5">
-            Allow <code className="text-zinc-400">POST /api/auth/machine-session</code> to issue short-lived admin sessions via <code className="text-zinc-400">CRON_SECRET</code>. Used for automated screenshot capture and headless browser access.
+            {rich(t("settings.form.machineSession.help"), {
+              endpoint: <code className="text-zinc-400">POST /api/auth/machine-session</code>,
+              secret: <code className="text-zinc-400">CRON_SECRET</code>,
+            })}
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -122,10 +128,15 @@ export function EnableMachineSessionToggle({
       {(
         <div className="mt-3 pl-0.5">
           <label htmlFor="machine-session-ips" className="block text-xs font-medium text-zinc-300">
-            Allowed IP addresses
+            {t("settings.form.machineSession.ipsLabel")}
           </label>
           <p className="text-xs text-zinc-500 mt-0.5 mb-1.5">
-            Restrict which client IPs may mint a session. One or more IPs or CIDR ranges, comma or newline separated (e.g. <code className="text-zinc-400">10.0.0.5, 192.168.1.0/24</code>). <strong className="text-zinc-300">Required</strong> — the API cannot be enabled while this is empty, so set it before turning the switch on. Requires <code className="text-zinc-400">TRUST_PROXY=true</code> and a reverse proxy that sets <code className="text-zinc-400">X-Forwarded-For</code> — otherwise every request is rejected.
+            {rich(t("settings.form.machineSession.ipsHelp"), {
+              example: <code className="text-zinc-400">10.0.0.5, 192.168.1.0/24</code>,
+              required: <strong className="text-zinc-300">{t("settings.form.machineSession.required")}</strong>,
+              trustProxy: <code className="text-zinc-400">TRUST_PROXY=true</code>,
+              header: <code className="text-zinc-400">X-Forwarded-For</code>,
+            })}
           </p>
           <textarea
             id="machine-session-ips"
@@ -133,7 +144,7 @@ export function EnableMachineSessionToggle({
             onChange={(e) => setAllowedIps(e.target.value)}
             rows={2}
             spellCheck={false}
-            placeholder="e.g. 10.0.0.5, 192.168.1.0/24"
+            placeholder={t("settings.form.machineSession.ipsPlaceholder", { example: "10.0.0.5, 192.168.1.0/24" })}
             className="w-full rounded-md bg-zinc-900 border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-200 font-mono placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
           <div className="flex items-center gap-2 mt-1.5">
@@ -143,7 +154,7 @@ export function EnableMachineSessionToggle({
               disabled={!ipsDirty || ipStatus === "saving"}
               className="rounded-md bg-indigo-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-accent-fg)] disabled:opacity-40 disabled:cursor-not-allowed hover:bg-indigo-500"
             >
-              Save IPs
+              {t("settings.form.machineSession.saveIps")}
             </button>
             {ipStatus === "saving" && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500" />}
             {ipStatus === "ok"     && <CheckCircle className="w-3.5 h-3.5 text-green-400" />}
