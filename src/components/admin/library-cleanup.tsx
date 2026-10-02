@@ -9,6 +9,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 import { posterUrl } from "@/lib/tmdb-types";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -16,7 +17,6 @@ import { EmptyState, StatCard } from "@/components/ui/design";
 import { Poster } from "@/components/admin/activity-ui";
 import { FileX, Loader2, Shield, ShieldOff, Trash2 } from "@/components/icons";
 import {
-  CLEANUP_EXCLUSION_LABELS,
   CLEANUP_NUMERIC_BOUNDS,
   CLEANUP_RULE_LABELS,
   type CleanupExclusion,
@@ -104,6 +104,7 @@ async function readError(res: Response, fallback: string): Promise<string> {
 }
 
 export function LibraryCleanup() {
+  const t = useT();
   const [report, setReport] = useState<Report | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -127,7 +128,7 @@ export function LibraryCleanup() {
     try {
       const res = await fetch(withBasePath("/api/admin/cleanup"));
       if (!res.ok) {
-        setError(await readError(res, "Could not load the cleanup report"));
+        setError(await readError(res, t("adminManage.cleanup.error.load")));
         return;
       }
       const data = (await res.json()) as Report;
@@ -137,11 +138,11 @@ export function LibraryCleanup() {
       const live = new Set(data.rows.filter((r) => r.candidate).map(keyOf));
       setSelected((prev) => new Set([...prev].filter((k) => live.has(k))));
     } catch {
-      setError("Network error — could not load the cleanup report");
+      setError(t("adminManage.cleanup.error.loadNetwork"));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void load();
@@ -199,13 +200,13 @@ export function LibraryCleanup() {
         body: JSON.stringify(draft),
       });
       if (!res.ok) {
-        setError(await readError(res, "Could not save the rules"));
+        setError(await readError(res, t("adminManage.cleanup.error.save")));
         return;
       }
       setPlan(null);
       await load();
     } catch {
-      setError("Network error — the rules were not saved");
+      setError(t("adminManage.cleanup.error.saveNetwork"));
     } finally {
       setSavingRules(false);
     }
@@ -224,13 +225,13 @@ export function LibraryCleanup() {
           })
         : await fetch(withBasePath(`/api/admin/cleanup/protect?tmdbId=${row.tmdbId}&mediaType=${row.mediaType}`), { method: "DELETE" });
       if (!res.ok) {
-        setError(await readError(res, on ? "Could not protect the title" : "Could not remove the protection"));
+        setError(await readError(res, on ? t("adminManage.cleanup.error.protect") : t("adminManage.cleanup.error.unprotect")));
         return;
       }
       setPlan(null);
       await load();
     } catch {
-      setError("Network error — please try again");
+      setError(t("adminManage.cleanup.error.network"));
     } finally {
       setBusyKey(null);
     }
@@ -250,12 +251,12 @@ export function LibraryCleanup() {
         body: JSON.stringify({ items: itemsBody(), blacklist }),
       });
       if (!res.ok) {
-        setError(await readError(res, "The dry run failed"));
+        setError(await readError(res, t("adminManage.cleanup.error.dryRun")));
         return;
       }
       setPlan((await res.json()) as Plan);
     } catch {
-      setError("Network error — the dry run failed");
+      setError(t("adminManage.cleanup.error.dryRunNetwork"));
     } finally {
       setPlanning(false);
     }
@@ -274,12 +275,12 @@ export function LibraryCleanup() {
       if (res.status === 409) {
         // Something changed since the dry run — show the fresh plan instead.
         const fresh = (await res.json().catch(() => null)) as (Plan & { error?: string }) | null;
-        setError("The selection changed since the dry run. Review the updated plan and confirm again.");
+        setError(t("adminManage.cleanup.error.changed"));
         if (fresh?.items) setPlan({ targetCount: fresh.targetCount, reclaimableBytes: plan.reclaimableBytes, items: fresh.items, skipped: fresh.skipped ?? [] });
         return;
       }
       if (!res.ok) {
-        setError(await readError(res, "The delete failed"));
+        setError(await readError(res, t("adminManage.cleanup.error.delete")));
         return;
       }
       setResult((await res.json()) as ExecResult);
@@ -287,7 +288,7 @@ export function LibraryCleanup() {
       setSelected(new Set());
       await load();
     } catch {
-      setError("Network error — check Radarr/Sonarr before retrying, some titles may already be gone");
+      setError(t("adminManage.cleanup.error.deleteNetwork"));
     } finally {
       setExecuting(false);
     }
@@ -296,12 +297,12 @@ export function LibraryCleanup() {
   if (loading && !report) {
     return (
       <div className="flex items-center gap-2" style={{ color: "var(--ds-fg-subtle)", fontSize: 13 }}>
-        <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} /> Judging the library…
+        <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} /> {t("adminManage.cleanup.judging")}
       </div>
     );
   }
   if (!report || !draft) {
-    return <p style={{ color: "var(--ds-danger)", fontSize: 13 }}>{error || "Could not load the cleanup report"}</p>;
+    return <p style={{ color: "var(--ds-danger)", fontSize: 13 }}>{error || t("adminManage.cleanup.error.load")}</p>;
   }
 
   const anyRuleOn = report.settings.unwatchedEnabled || report.settings.neverWatchedEnabled || report.settings.votesEnabled;
@@ -314,110 +315,110 @@ export function LibraryCleanup() {
   return (
     <div className="flex flex-col gap-6">
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
-        <StatCard label="Candidates" value={report.totals.candidates} hint="match a rule, nothing holds them" />
-        <StatCard label="Held back" value={report.totals.held} hint="match a rule, but excluded" />
-        <StatCard label="Reclaimable" value={formatBytes(report.totals.reclaimableBytes)} hint="across all candidates" />
-        <StatCard label="Library titles" value={report.libraryTitles} hint="judged across every server" />
+        <StatCard label={t("adminManage.cleanup.stat.candidates")} value={report.totals.candidates} hint={t("adminManage.cleanup.stat.candidatesHint")} />
+        <StatCard label={t("adminManage.cleanup.stat.held")} value={report.totals.held} hint={t("adminManage.cleanup.stat.heldHint")} />
+        <StatCard label={t("adminManage.cleanup.stat.reclaimable")} value={formatBytes(report.totals.reclaimableBytes)} hint={t("adminManage.cleanup.stat.reclaimableHint")} />
+        <StatCard label={t("adminManage.cleanup.stat.libraryTitles")} value={report.libraryTitles} hint={t("adminManage.cleanup.stat.libraryTitlesHint")} />
       </div>
 
       {!report.playHistoryTracked && (
         <p role="status" className="rounded-md bg-amber-500/15 text-amber-400" style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>
-          Play history tracking is off, so the two watch rules can&apos;t match anything. Turn it on in Settings → Features.
+          {t("adminManage.cleanup.trackingOff")}
         </p>
       )}
       {report.arrErrors.length > 0 && (
         <p role="status" className="rounded-md bg-amber-500/15 text-amber-400" style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>
-          Could not read {report.arrErrors.map((e) => instanceLabel(e.service, e.instance)).join(", ")}: sizes are incomplete and
-          titles on those services can&apos;t be deleted until it&apos;s reachable.
+          {t("adminManage.cleanup.arrErrors", { list: report.arrErrors.map((e) => instanceLabel(e.service, e.instance)).join(", ") })}
         </p>
       )}
 
       {/* ── rules ───────────────────────────────────────────────────── */}
       <section className="flex flex-col gap-3" style={panel} aria-labelledby="cleanup-rules">
-        <h2 id="cleanup-rules" style={{ fontSize: 14, fontWeight: 600, color: "var(--ds-fg)", margin: 0 }}>Rules</h2>
+        <h2 id="cleanup-rules" style={{ fontSize: 14, fontWeight: 600, color: "var(--ds-fg)", margin: 0 }}>{t("adminManage.cleanup.rules")}</h2>
         <p style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>
-          A title is a candidate when ANY enabled rule matches and NO exclusion applies. Watch rules only count the time
-          play history has been recording{report.historyStart ? ` (since ${day(report.historyStart)})` : ""}. Nothing is
-          ever deleted automatically.
+          {report.historyStart
+            ? t("adminManage.cleanup.rulesHelpSince", { date: day(report.historyStart) })
+            : t("adminManage.cleanup.rulesHelp")}
         </p>
         <div className="flex flex-col gap-2" style={{ fontSize: 13, color: "var(--ds-fg)" }}>
           <label className="flex flex-wrap items-center gap-2">
-            <Switch checked={draft.unwatchedEnabled} onCheckedChange={(v) => setBool("unwatchedEnabled", v)} aria-label="Unwatched rule" />
-            Not played by anyone for
-            <input type="number" style={inputStyle} min={1} max={3650} value={draft.unwatchedDays} onChange={(e) => setNum("unwatchedDays", e.target.value)} aria-label="Unwatched days" />
-            days
+            <Switch checked={draft.unwatchedEnabled} onCheckedChange={(v) => setBool("unwatchedEnabled", v)} aria-label={t("adminManage.cleanup.rule.unwatchedAria")} />
+            {t("adminManage.cleanup.rule.unwatchedBefore")}
+            <input type="number" style={inputStyle} min={1} max={3650} value={draft.unwatchedDays} onChange={(e) => setNum("unwatchedDays", e.target.value)} aria-label={t("adminManage.cleanup.rule.unwatchedDaysAria")} />
+            {t("adminManage.cleanup.days")}
           </label>
           <label className="flex flex-wrap items-center gap-2">
-            <Switch checked={draft.neverWatchedEnabled} onCheckedChange={(v) => setBool("neverWatchedEnabled", v)} aria-label="Never-watched rule" />
-            Never played at all, and in the library for
-            <input type="number" style={inputStyle} min={1} max={3650} value={draft.neverWatchedDays} onChange={(e) => setNum("neverWatchedDays", e.target.value)} aria-label="Never-watched days" />
-            days
+            <Switch checked={draft.neverWatchedEnabled} onCheckedChange={(v) => setBool("neverWatchedEnabled", v)} aria-label={t("adminManage.cleanup.rule.neverWatchedAria")} />
+            {t("adminManage.cleanup.rule.neverWatchedBefore")}
+            <input type="number" style={inputStyle} min={1} max={3650} value={draft.neverWatchedDays} onChange={(e) => setNum("neverWatchedDays", e.target.value)} aria-label={t("adminManage.cleanup.rule.neverWatchedDaysAria")} />
+            {t("adminManage.cleanup.days")}
           </label>
           <label className="flex flex-wrap items-center gap-2">
-            <Switch checked={draft.votesEnabled} onCheckedChange={(v) => setBool("votesEnabled", v)} aria-label="Deletion votes rule" />
-            At least
-            <input type="number" style={inputStyle} min={1} max={1000} value={draft.votesMin} onChange={(e) => setNum("votesMin", e.target.value)} aria-label="Minimum deletion votes" />
-            deletion votes
+            <Switch checked={draft.votesEnabled} onCheckedChange={(v) => setBool("votesEnabled", v)} aria-label={t("adminManage.cleanup.rule.votesAria")} />
+            {t("adminManage.cleanup.rule.votesBefore")}
+            <input type="number" style={inputStyle} min={1} max={1000} value={draft.votesMin} onChange={(e) => setNum("votesMin", e.target.value)} aria-label={t("adminManage.cleanup.rule.votesMinAria")} />
+            {t("adminManage.cleanup.rule.votesAfter")}
           </label>
         </div>
-        <h3 style={{ fontSize: 13, fontWeight: 600, color: "var(--ds-fg)", margin: "4px 0 0" }}>Always excluded</h3>
+        <h3 style={{ fontSize: 13, fontWeight: 600, color: "var(--ds-fg)", margin: "4px 0 0" }}>{t("adminManage.cleanup.alwaysExcluded")}</h3>
         <div className="flex flex-col gap-2" style={{ fontSize: 13, color: "var(--ds-fg)" }}>
           <label className="flex flex-wrap items-center gap-2">
-            Added less than
-            <input type="number" style={inputStyle} min={0} max={3650} value={draft.minAgeDays} onChange={(e) => setNum("minAgeDays", e.target.value)} aria-label="Minimum age in days" />
-            days ago (0 = off)
+            {t("adminManage.cleanup.excl.minAgeBefore")}
+            <input type="number" style={inputStyle} min={0} max={3650} value={draft.minAgeDays} onChange={(e) => setNum("minAgeDays", e.target.value)} aria-label={t("adminManage.cleanup.excl.minAgeAria")} />
+            {t("adminManage.cleanup.excl.minAgeAfter")}
           </label>
           <label className="flex flex-wrap items-center gap-2">
-            A request fulfilled in the last
-            <input type="number" style={inputStyle} min={0} max={3650} value={draft.recentRequestDays} onChange={(e) => setNum("recentRequestDays", e.target.value)} aria-label="Recently fulfilled request days" />
-            days (0 = off)
+            {t("adminManage.cleanup.excl.recentBefore")}
+            <input type="number" style={inputStyle} min={0} max={3650} value={draft.recentRequestDays} onChange={(e) => setNum("recentRequestDays", e.target.value)} aria-label={t("adminManage.cleanup.excl.recentAria")} />
+            {t("adminManage.cleanup.excl.recentAfter")}
           </label>
           <label className="flex flex-wrap items-center gap-2">
-            <Switch checked={draft.excludeAiring} onCheckedChange={(v) => setBool("excludeAiring", v)} aria-label="Exclude airing shows" />
-            Shows that are still airing
+            <Switch checked={draft.excludeAiring} onCheckedChange={(v) => setBool("excludeAiring", v)} aria-label={t("adminManage.cleanup.excl.airingAria")} />
+            {t("adminManage.cleanup.excl.airing")}
           </label>
           <p style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>
-            Also always held back: a pending or approved request, anyone&apos;s watchlist, something playing right now,
-            and titles you protect.
+            {t("adminManage.cleanup.excl.alsoHeld")}
           </p>
         </div>
         <div>
           <Button size="sm" onClick={saveRules} disabled={!dirty || savingRules}>
             {savingRules ? <Loader2 className="animate-spin" /> : null}
-            Save rules
+            {t("adminManage.cleanup.saveRules")}
           </Button>
         </div>
       </section>
 
       {/* ── filters + bulk action ───────────────────────────────────── */}
       <div className="flex flex-wrap items-center gap-2" style={{ fontSize: 13 }}>
-        <select style={selectStyle} value={view} onChange={(e) => setView(e.target.value as typeof view)} aria-label="Show">
-          <option value="candidates">Candidates</option>
-          <option value="held">Held back</option>
-          <option value="all">All matched</option>
+        <select style={selectStyle} value={view} onChange={(e) => setView(e.target.value as typeof view)} aria-label={t("adminManage.cleanup.filter.show")}>
+          <option value="candidates">{t("adminManage.cleanup.stat.candidates")}</option>
+          <option value="held">{t("adminManage.cleanup.stat.held")}</option>
+          <option value="all">{t("adminManage.cleanup.filter.allMatched")}</option>
         </select>
-        <select style={selectStyle} value={typeFilter} onChange={(e) => setTypeFilter(e.target.value as typeof typeFilter)} aria-label="Media type">
-          <option value="all">Movies &amp; TV</option>
-          <option value="MOVIE">Movies</option>
-          <option value="TV">TV</option>
+        <select style={selectStyle} value={typeFilter} onChange={(e) => setTypeFilter(e.target.value as typeof typeFilter)} aria-label={t("adminManage.cleanup.filter.mediaType")}>
+          <option value="all">{t("adminManage.cleanup.filter.moviesAndTv")}</option>
+          <option value="MOVIE">{t("nav.movies")}</option>
+          <option value="TV">{t("adminManage.cleanup.tv")}</option>
         </select>
-        <select style={selectStyle} value={ruleFilter} onChange={(e) => setRuleFilter(e.target.value as typeof ruleFilter)} aria-label="Rule">
-          <option value="any">Any rule</option>
+        <select style={selectStyle} value={ruleFilter} onChange={(e) => setRuleFilter(e.target.value as typeof ruleFilter)} aria-label={t("adminManage.cleanup.filter.rule")}>
+          <option value="any">{t("adminManage.cleanup.filter.anyRule")}</option>
           {(Object.keys(CLEANUP_RULE_LABELS) as CleanupRule[]).map((r) => (
-            <option key={r} value={r}>{CLEANUP_RULE_LABELS[r]}</option>
+            <option key={r} value={r}>{t(`adminManage.cleanup.ruleLabel.${r}`)}</option>
           ))}
         </select>
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value.slice(0, 200))}
-          placeholder="Filter by title…"
-          aria-label="Filter by title"
+          placeholder={t("adminManage.cleanup.filter.titlePlaceholder")}
+          aria-label={t("adminManage.cleanup.filter.title")}
           style={{ ...inputStyle, width: 200 }}
         />
         <div className="flex-1" />
         <Button size="sm" variant="destructive" onClick={dryRun} disabled={selectedRows.length === 0 || planning || executing}>
           {planning ? <Loader2 className="animate-spin" /> : <Trash2 />}
-          Delete selected ({selectedRows.length}{selectedRows.length > 0 ? ` · ${formatBytes(selectedBytes)}` : ""})
+          {selectedRows.length > 0
+            ? t("adminManage.cleanup.deleteSelectedSize", { count: selectedRows.length, size: formatBytes(selectedBytes) })
+            : t("adminManage.cleanup.deleteSelected", { count: 0 })}
         </Button>
       </div>
 
@@ -427,30 +428,33 @@ export function LibraryCleanup() {
       {plan && (
         <section className="flex flex-col gap-3 rounded-md bg-red-500/10" style={{ padding: 16, border: "1px solid var(--ds-border)" }} aria-labelledby="cleanup-plan">
           <h2 id="cleanup-plan" className="text-red-400" style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>
-            Dry run: {plan.targetCount} deletion{plan.targetCount === 1 ? "" : "s"} across {plan.items.length} title{plan.items.length === 1 ? "" : "s"} · {formatBytes(plan.reclaimableBytes)}
+            {t("adminManage.cleanup.plan.title", {
+              deletions: t("adminManage.cleanup.plan.deletions", { count: plan.targetCount }),
+              titles: t("adminManage.cleanup.plan.titles", { count: plan.items.length }),
+              size: formatBytes(plan.reclaimableBytes),
+            })}
           </h2>
           <p style={{ fontSize: 12, color: "var(--ds-fg)", margin: 0 }}>
-            Each title is removed from every Radarr/Sonarr instance below WITH its files, and added to that instance&apos;s
-            import-list exclusions. This cannot be undone from Summonarr.
+            {t("adminManage.cleanup.plan.warning")}
           </p>
           <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: "var(--ds-fg)" }}>
             {plan.items.map((it) => (
               <li key={keyOf(it)}>
-                {it.title} — {it.targets.map((t) => `${instanceLabel(t.service, t.instance)} (${formatBytes(t.sizeOnDisk)})`).join(", ")}
+                {it.title} — {it.targets.map((tg) => `${instanceLabel(tg.service, tg.instance)} (${formatBytes(tg.sizeOnDisk)})`).join(", ")}
               </li>
             ))}
           </ul>
           {plan.skipped.length > 0 && (
             <div style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>
-              Skipped:
+              {t("adminManage.cleanup.plan.skipped")}
               <ul style={{ margin: 0, paddingLeft: 18 }}>
                 {plan.skipped.map((s) => <li key={keyOf(s)}>{s.title ?? `${s.mediaType} ${s.tmdbId}`} — {s.reason}</li>)}
               </ul>
             </div>
           )}
           <label className="flex items-center gap-2" style={{ fontSize: 13, color: "var(--ds-fg)" }}>
-            <Switch checked={blacklist} onCheckedChange={setBlacklist} aria-label="Blacklist deleted titles" />
-            Also blacklist them, so nobody can request them again until you lift it
+            <Switch checked={blacklist} onCheckedChange={setBlacklist} aria-label={t("adminManage.cleanup.plan.blacklistAria")} />
+            {t("adminManage.cleanup.plan.blacklist")}
           </label>
           <div className="flex gap-2">
             <button
@@ -468,9 +472,9 @@ export function LibraryCleanup() {
               }}
             >
               {executing ? <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} /> : <Trash2 style={{ width: 14, height: 14 }} />}
-              Delete {plan.targetCount} now
+              {t("adminManage.cleanup.plan.deleteNow", { count: plan.targetCount })}
             </button>
-            <Button size="sm" variant="outline" onClick={() => setPlan(null)} disabled={executing}>Cancel</Button>
+            <Button size="sm" variant="outline" onClick={() => setPlan(null)} disabled={executing}>{t("adminManage.common.cancel")}</Button>
           </div>
         </section>
       )}
@@ -478,15 +482,15 @@ export function LibraryCleanup() {
       {result && (
         <section className="flex flex-col gap-2" style={panel} aria-labelledby="cleanup-result">
           <h2 id="cleanup-result" style={{ fontSize: 14, fontWeight: 600, color: "var(--ds-fg)", margin: 0 }}>
-            Deleted {result.deletedCount}
-            {result.partialCount > 0 ? `, partly deleted ${result.partialCount}` : ""}
-            {result.failedCount > 0 ? `, failed ${result.failedCount}` : ""}
+            {t("adminManage.cleanup.result.deleted", { count: result.deletedCount })}
+            {result.partialCount > 0 ? t("adminManage.cleanup.result.partial", { count: result.partialCount }) : ""}
+            {result.failedCount > 0 ? t("adminManage.cleanup.result.failed", { count: result.failedCount }) : ""}
           </h2>
           <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: "var(--ds-fg)" }}>
             {result.results.map((r) => (
               <li key={keyOf(r)}>
-                <span className={r.status === "deleted" ? "text-green-400" : "text-red-400"}>{r.status}</span> — {r.title}
-                {r.failed.length > 0 ? ` (failed on ${r.failed.map((f) => `${f.target}: ${f.error}`).join("; ")})` : ""}
+                <span className={r.status === "deleted" ? "text-green-400" : "text-red-400"}>{t(`adminManage.cleanup.status.${r.status}`)}</span> — {r.title}
+                {r.failed.length > 0 ? ` ${t("adminManage.cleanup.result.failedOn", { list: r.failed.map((f) => `${f.target}: ${f.error}`).join("; ") })}` : ""}
               </li>
             ))}
           </ul>
@@ -497,8 +501,8 @@ export function LibraryCleanup() {
       {visible.length === 0 ? (
         <EmptyState
           icon={FileX}
-          title={anyRuleOn ? "Nothing here" : "No rules enabled"}
-          description={anyRuleOn ? "No title matches the current rules and filters." : "Enable at least one rule above to find cleanup candidates."}
+          title={anyRuleOn ? t("adminManage.cleanup.empty.title") : t("adminManage.cleanup.empty.noRulesTitle")}
+          description={anyRuleOn ? t("adminManage.cleanup.empty.description") : t("adminManage.cleanup.empty.noRulesDescription")}
         />
       ) : (
         <div style={{ overflowX: "auto", border: "1px solid var(--ds-border)", borderRadius: 10 }}>
@@ -508,20 +512,20 @@ export function LibraryCleanup() {
                 <th style={{ padding: "8px 10px", width: 32 }}>
                   <input
                     type="checkbox"
-                    aria-label="Select every visible candidate"
+                    aria-label={t("adminManage.cleanup.selectAll")}
                     checked={selectableVisible.length > 0 && selectableVisible.every((r) => selected.has(keyOf(r)))}
                     onChange={toggleAllVisible}
                     disabled={selectableVisible.length === 0}
                   />
                 </th>
-                <th style={{ padding: "8px 10px" }}>Title</th>
-                <th style={{ padding: "8px 10px" }}>On</th>
-                <th style={{ padding: "8px 10px" }}>Added</th>
-                <th style={{ padding: "8px 10px" }}>Last played</th>
-                <th style={{ padding: "8px 10px", textAlign: "right" }}>Plays</th>
-                <th style={{ padding: "8px 10px", textAlign: "right" }}>Votes</th>
-                <th style={{ padding: "8px 10px", textAlign: "right" }}>Size</th>
-                <th style={{ padding: "8px 10px" }}>Why</th>
+                <th style={{ padding: "8px 10px" }}>{t("adminManage.cleanup.col.title")}</th>
+                <th style={{ padding: "8px 10px" }}>{t("adminManage.cleanup.col.on")}</th>
+                <th style={{ padding: "8px 10px" }}>{t("adminManage.cleanup.col.added")}</th>
+                <th style={{ padding: "8px 10px" }}>{t("adminManage.cleanup.col.lastPlayed")}</th>
+                <th style={{ padding: "8px 10px", textAlign: "right" }}>{t("adminManage.cleanup.col.plays")}</th>
+                <th style={{ padding: "8px 10px", textAlign: "right" }}>{t("adminManage.cleanup.col.votes")}</th>
+                <th style={{ padding: "8px 10px", textAlign: "right" }}>{t("adminManage.cleanup.col.size")}</th>
+                <th style={{ padding: "8px 10px" }}>{t("adminManage.cleanup.col.why")}</th>
                 <th style={{ padding: "8px 10px" }} />
               </tr>
             </thead>
@@ -535,10 +539,10 @@ export function LibraryCleanup() {
                     <td style={{ padding: "6px 10px" }}>
                       <input
                         type="checkbox"
-                        aria-label={`Select ${r.title}`}
+                        aria-label={t("adminManage.cleanup.select", { title: r.title })}
                         checked={selected.has(k)}
                         disabled={!deletable}
-                        title={deletable ? undefined : r.candidate ? "Not managed by Radarr/Sonarr — nothing to delete from here" : "Held back by an exclusion"}
+                        title={deletable ? undefined : r.candidate ? t("adminManage.cleanup.notManaged") : t("adminManage.cleanup.heldByExclusion")}
                         onChange={() => toggle(k)}
                       />
                     </td>
@@ -548,8 +552,8 @@ export function LibraryCleanup() {
                         <div>
                           <div style={{ fontWeight: 500 }}>{r.title}{r.year ? <span style={{ color: "var(--ds-fg-subtle)" }}> ({r.year})</span> : null}</div>
                           <div style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
-                            {r.mediaType === "MOVIE" ? "Movie" : "TV"}
-                            {r.idleDays !== null ? ` · idle ${r.idleDays}d` : ""}
+                            {r.mediaType === "MOVIE" ? t("adminManage.cleanup.movie") : t("adminManage.cleanup.tv")}
+                            {r.idleDays !== null ? ` · ${t("adminManage.cleanup.idle", { days: r.idleDays })}` : ""}
                           </div>
                         </div>
                       </div>
@@ -557,21 +561,21 @@ export function LibraryCleanup() {
                     <td style={{ padding: "6px 10px", fontSize: 11, color: "var(--ds-fg-muted)" }}>
                       <div>{r.servers.join(", ")}</div>
                       <div style={{ color: "var(--ds-fg-subtle)" }}>
-                        {r.arr.length > 0 ? r.arr.map((a) => instanceLabel(a.service, a.instance)).join(", ") : "not in Radarr/Sonarr"}
+                        {r.arr.length > 0 ? r.arr.map((a) => instanceLabel(a.service, a.instance)).join(", ") : t("adminManage.cleanup.notInArr")}
                       </div>
                     </td>
                     <td className="ds-mono" style={{ padding: "6px 10px", fontSize: 12 }}>{day(r.addedAt)}</td>
-                    <td className="ds-mono" style={{ padding: "6px 10px", fontSize: 12 }}>{r.lastPlayedAt ? day(r.lastPlayedAt) : "never"}</td>
+                    <td className="ds-mono" style={{ padding: "6px 10px", fontSize: 12 }}>{r.lastPlayedAt ? day(r.lastPlayedAt) : t("adminManage.cleanup.never")}</td>
                     <td className="ds-mono" style={{ padding: "6px 10px", fontSize: 12, textAlign: "right" }}>{r.playCount}</td>
                     <td className="ds-mono" style={{ padding: "6px 10px", fontSize: 12, textAlign: "right" }}>{r.votes}</td>
                     <td className="ds-mono" style={{ padding: "6px 10px", fontSize: 12, textAlign: "right" }}>{formatBytes(r.sizeOnDisk)}</td>
                     <td style={{ padding: "6px 10px" }}>
                       <div className="flex flex-wrap gap-1">
                         {r.matched.map((m) => (
-                          <span key={m} className="rounded bg-red-500/15 text-red-400" style={{ padding: "1px 6px", fontSize: 11 }}>{CLEANUP_RULE_LABELS[m]}</span>
+                          <span key={m} className="rounded bg-red-500/15 text-red-400" style={{ padding: "1px 6px", fontSize: 11 }}>{t(`adminManage.cleanup.ruleLabel.${m}`)}</span>
                         ))}
                         {r.excludedBy.map((x) => (
-                          <span key={x} className="rounded bg-sky-500/15 text-sky-400" style={{ padding: "1px 6px", fontSize: 11 }}>{CLEANUP_EXCLUSION_LABELS[x]}</span>
+                          <span key={x} className="rounded bg-sky-500/15 text-sky-400" style={{ padding: "1px 6px", fontSize: 11 }}>{t(`adminManage.cleanup.exclusionLabel.${x}`)}</span>
                         ))}
                       </div>
                     </td>
@@ -581,10 +585,10 @@ export function LibraryCleanup() {
                         variant="ghost"
                         onClick={() => setProtected(r, !isProtected)}
                         disabled={busyKey === k}
-                        aria-label={isProtected ? `Unprotect ${r.title}` : `Protect ${r.title}`}
+                        aria-label={isProtected ? t("adminManage.cleanup.unprotectTitle", { title: r.title }) : t("adminManage.cleanup.protectTitle", { title: r.title })}
                       >
                         {busyKey === k ? <Loader2 className="animate-spin" /> : isProtected ? <ShieldOff /> : <Shield />}
-                        {isProtected ? "Unprotect" : "Protect"}
+                        {isProtected ? t("adminManage.cleanup.unprotect") : t("adminManage.cleanup.protect")}
                       </Button>
                     </td>
                   </tr>
@@ -599,17 +603,17 @@ export function LibraryCleanup() {
       {report.protected.length > 0 && (
         <section className="flex flex-col gap-2" style={panel} aria-labelledby="cleanup-protected">
           <h2 id="cleanup-protected" style={{ fontSize: 14, fontWeight: 600, color: "var(--ds-fg)", margin: 0 }}>
-            Protected ({report.protected.length})
+            {t("adminManage.cleanup.protectedCount", { count: report.protected.length })}
           </h2>
           {report.protected.map((p) => (
             <div key={keyOf(p)} className="flex items-center justify-between" style={{ fontSize: 13, color: "var(--ds-fg)" }}>
               <span>
                 {p.title ?? `${p.mediaType} ${p.tmdbId}`}
-                <span style={{ color: "var(--ds-fg-subtle)" }}> · {p.mediaType === "MOVIE" ? "Movie" : "TV"} · since {day(p.createdAt)}</span>
+                <span style={{ color: "var(--ds-fg-subtle)" }}> · {p.mediaType === "MOVIE" ? t("adminManage.cleanup.movie") : t("adminManage.cleanup.tv")} · {t("adminManage.cleanup.since", { date: day(p.createdAt) })}</span>
               </span>
               <Button size="xs" variant="ghost" onClick={() => setProtected(p, false)} disabled={busyKey === keyOf(p)}>
                 {busyKey === keyOf(p) ? <Loader2 className="animate-spin" /> : <ShieldOff />}
-                Unprotect
+                {t("adminManage.cleanup.unprotect")}
               </Button>
             </div>
           ))}

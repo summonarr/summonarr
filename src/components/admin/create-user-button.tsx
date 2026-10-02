@@ -9,11 +9,13 @@ import { StyledSelect } from "@/components/ui/styled-select";
 import { Dialog, DialogBackdrop, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import { Loader2, Check, UserPlus, AlertTriangle } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // Admin "Create user" — the only in-app path to a local username/password account
 // (public registration closes after the first user). Posts to POST /api/admin/users
 // and refreshes the server-rendered user table on success.
 export function CreateUserButton() {
+  const t = useT();
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
@@ -46,7 +48,7 @@ export function CreateUserButton() {
       });
       const data: { email?: string; error?: string } = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(data.error ?? "Failed to create user");
+        setError(data.error ?? t("adminManage.createUser.failed"));
         return;
       }
       setCreated(data.email ?? email.trim());
@@ -54,7 +56,7 @@ export function CreateUserButton() {
       setOpen(false);
       router.refresh();
     } catch {
-      setError("Failed to create user");
+      setError(t("adminManage.createUser.failed"));
     } finally {
       setLoading(false);
     }
@@ -73,12 +75,12 @@ export function CreateUserButton() {
         className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
       >
         <UserPlus className="w-4 h-4" />
-        Create user
+        {t("adminManage.createUser.button")}
       </Button>
       {created && (
         <span role="status" aria-live="polite" className="flex items-center gap-1 text-xs text-green-400">
           <Check className="w-3 h-3" />
-          Created {created}
+          {t("adminManage.createUser.created", { email: created })}
         </span>
       )}
 
@@ -96,9 +98,9 @@ export function CreateUserButton() {
                 scrolls itself — otherwise a short viewport (landscape phone,
                 on-screen keyboard) hides the submit button. */}
             <div className="min-h-0 flex-1 overflow-y-auto p-6">
-            <DialogTitle>Create local user</DialogTitle>
+            <DialogTitle>{t("adminManage.createUser.title")}</DialogTitle>
             <p className="mt-1 text-sm text-zinc-400">
-              A username/password account. Registration is otherwise closed after the first user.
+              {t("adminManage.createUser.description")}
             </p>
             <form
               className="mt-4 flex flex-col gap-3"
@@ -109,30 +111,30 @@ export function CreateUserButton() {
             >
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="cu-name">
-                  Name <span className="font-normal text-zinc-500">(optional)</span>
+                  {t("adminManage.createUser.name")} <span className="font-normal text-zinc-500">{t("adminManage.createUser.optional")}</span>
                 </Label>
                 <Input
                   id="cu-name"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="Jane Doe"
+                  placeholder={t("adminManage.createUser.namePlaceholder")}
                   maxLength={100}
                 />
               </div>
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="cu-email">Email</Label>
+                <Label htmlFor="cu-email">{t("adminManage.createUser.email")}</Label>
                 <Input
                   id="cu-email"
                   type="email"
                   autoComplete="off"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="user@example.com"
+                  placeholder={t("adminManage.createUser.emailPlaceholder")}
                 />
               </div>
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="cu-password">
-                  Password <span className="font-normal text-zinc-500">(min 8 characters)</span>
+                  {t("adminManage.createUser.password")} <span className="font-normal text-zinc-500">{t("adminManage.createUser.passwordHint")}</span>
                 </Label>
                 <Input
                   id="cu-password"
@@ -144,11 +146,11 @@ export function CreateUserButton() {
                 />
               </div>
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="cu-role">Role</Label>
+                <Label htmlFor="cu-role">{t("adminManage.createUser.role")}</Label>
                 <StyledSelect id="cu-role" value={role} onChange={(e) => setRole(e.target.value)}>
-                  <option value="USER">User</option>
-                  <option value="ISSUE_ADMIN">Issue Admin</option>
-                  <option value="ADMIN">Admin</option>
+                  <option value="USER">{t("adminManage.users.role.USER")}</option>
+                  <option value="ISSUE_ADMIN">{t("adminManage.users.role.ISSUE_ADMIN")}</option>
+                  <option value="ADMIN">{t("adminManage.users.role.ADMIN")}</option>
                 </StyledSelect>
               </div>
               {error && (
@@ -166,11 +168,11 @@ export function CreateUserButton() {
                   disabled={loading}
                   className="border-zinc-700 text-zinc-400 hover:text-zinc-100"
                 >
-                  Cancel
+                  {t("adminManage.common.cancel")}
                 </Button>
                 <Button type="submit" size="sm" disabled={!canSubmit} className="gap-1.5">
                   {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
-                  Create user
+                  {t("adminManage.createUser.button")}
                 </Button>
               </div>
             </form>

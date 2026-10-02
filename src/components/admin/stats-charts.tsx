@@ -1,11 +1,14 @@
 "use client";
 
+import { useT } from "@/components/i18n/i18n-provider";
+
 interface MonthData {
   month: string;
   count: number;
 }
 
 export function StatsCharts({ data }: { data: MonthData[] }) {
+  const t = useT();
   const max = Math.max(...data.map((d) => d.count), 1);
 
   return (
@@ -21,7 +24,7 @@ export function StatsCharts({ data }: { data: MonthData[] }) {
               <div
                 className="w-full max-w-[32px] bg-indigo-600 rounded-t transition-all hover:bg-indigo-500"
                 style={{ height: `${Math.max(height, 2)}%` }}
-                title={`${d.month}: ${d.count} requests`}
+                title={`${d.month}: ${t("adminManage.stats.requestCount", { count: d.count })}`}
               />
             </div>
             <span className="text-[10px] text-zinc-500 tabular-nums">{label}</span>

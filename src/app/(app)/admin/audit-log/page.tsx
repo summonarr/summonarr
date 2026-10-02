@@ -5,6 +5,7 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import { AuditLogView } from "@/components/admin/audit-log-table";
 import { requireFeature } from "@/lib/features";
 import type { AuditAction, Prisma } from "@/generated/prisma";
+import { getTranslator } from "@/lib/i18n/server";
 import { PageHeader } from "@/components/ui/design";
 import { AUDIT_ACTIONS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
@@ -103,11 +104,13 @@ export default async function AuditLogPage({
     provider: l.provider,
   }));
 
+  const t = await getTranslator();
+
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Audit Log"
-        subtitle="Track admin actions and system changes"
+        title={t("adminManage.audit.title")}
+        subtitle={t("adminManage.audit.subtitle")}
       />
 
       <AuditLogView
