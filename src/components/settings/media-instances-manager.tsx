@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2, Trash2, RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // Admin UI for the EXTRA (named) Plex or Jellyfin servers, one service per
 // component. The default server keeps its own form (PlexConnectForm /
@@ -72,6 +73,7 @@ function InstanceLibraryPicker({
   value: string;
   onChange: (next: string) => void;
 }) {
+  const t = useT();
   const [items, setItems] = useState<{ key: string; title: string }[] | null>(null);
   const [state, setState] = useState<"idle" | "loading" | "error">("idle");
   const [error, setError] = useState("");
@@ -88,7 +90,7 @@ function InstanceLibraryPicker({
       const data: unknown = await res.json().catch(() => null);
       if (!res.ok) {
         const msg = data && typeof data === "object" && "error" in data ? String((data as { error: unknown }).error) : "";
-        setError(msg || "Could not load libraries");
+        setError(msg || t("settings.media.librariesLoadFailed"));
         setState("error");
         return;
       }
@@ -107,7 +109,7 @@ function InstanceLibraryPicker({
       );
       setState("idle");
     } catch {
-      setError("Could not load libraries");
+      setError(t("settings.media.librariesLoadFailed"));
       setState("error");
     }
   }
@@ -122,7 +124,7 @@ function InstanceLibraryPicker({
   return (
     <div className="pt-1">
       <div className="flex items-center gap-2">
-        <span className="text-sm text-zinc-300">Libraries</span>
+        <span className="text-sm text-zinc-300">{t("settings.media.libraries")}</span>
         {canLoad && (
           <button
             type="button"
@@ -130,15 +132,15 @@ function InstanceLibraryPicker({
             disabled={state === "loading"}
             className="text-xs text-zinc-400 underline disabled:opacity-50"
           >
-            {state === "loading" ? "Loading…" : items ? "Reload" : "Choose libraries"}
+            {state === "loading" ? t("settings.media.loading") : items ? t("settings.media.reload") : t("settings.media.chooseLibraries")}
           </button>
         )}
       </div>
       {!canLoad && (
-        <p className="text-xs text-zinc-500">Save this server first, then its libraries can be listed.</p>
+        <p className="text-xs text-zinc-500">{t("settings.media.saveFirst")}</p>
       )}
       {state === "error" && <p className="text-xs text-red-400">{error}</p>}
-      {items && items.length === 0 && <p className="text-xs text-zinc-500">No libraries found on this server.</p>}
+      {items && items.length === 0 && <p className="text-xs text-zinc-500">{t("settings.media.noLibraries")}</p>}
       {items && items.length > 0 && (
         <div className="mt-1 space-y-1">
           {items.map((i) => (
@@ -150,9 +152,9 @@ function InstanceLibraryPicker({
         </div>
       )}
       {selected.size === 0 ? (
-        <p className="text-xs text-zinc-500">Nothing selected — every library on this server is synced.</p>
+        <p className="text-xs text-zinc-500">{t("settings.media.nothingSelected")}</p>
       ) : (
-        <p className="text-xs text-zinc-500">{selected.size} selected — only these are synced.</p>
+        <p className="text-xs text-zinc-500">{t("settings.media.selected", { count: selected.size })}</p>
       )}
     </div>
   );
@@ -203,6 +205,7 @@ function toDraft(v: InstanceView, service: MediaServerService): Draft {
 const isNamed = (slug: string) => slug !== "";
 
 export function MediaInstancesManager({ service }: { service: MediaServerService }) {
+  const t = useT();
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [loaded, setLoaded] = useState(false);
   // A failed initial GET leaves `drafts` empty, which is indistinguishable from
@@ -278,7 +281,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
     for (const d of drafts) {
       if (!SLUG_RE.test(d.slug)) {
         setStatus("error");
-        setMessage(`Invalid slug "${d.slug}" — use lowercase letters/digits, starting with a letter.`);
+        setMessage(t("settings.media.invalidSlug", { slug: d.slug }));
         return;
       }
     }
@@ -286,7 +289,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
     for (const d of drafts) {
       if (seen.has(d.slug)) {
         setStatus("error");
-        setMessage(`Duplicate slug "${d.slug}".`);
+        setMessage(t("settings.instances.duplicateSlug", { slug: d.slug }));
         return;
       }
       seen.add(d.slug);
@@ -335,36 +338,35 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
         setDirty(false);
         setTests(data.testResults ?? {});
         setStatus("ok");
-        setMessage("Saved");
+        setMessage(t("settings.common.saved"));
       } else {
         setStatus("error");
-        setMessage(data.error ?? "Failed to save");
+        setMessage(data.error ?? t("settings.common.failedToSave"));
       }
     } catch {
       setStatus("error");
-      setMessage("Failed to save");
+      setMessage(t("settings.common.failedToSave"));
     }
   }
 
   const label = service === "plex" ? "Plex" : "Jellyfin";
-  const urlLabel = service === "plex" ? "Plex server URL" : "Jellyfin server URL";
-  const tokenLabel = service === "plex" ? "Admin token" : "API key";
+  const urlLabel = t("settings.media.serverUrl", { label });
+  const tokenLabel = service === "plex" ? t("settings.media.adminToken") : t("settings.media.apiKey");
 
   if (!loaded) {
-    return <p className="text-sm text-zinc-500 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />Loading instances…</p>;
+    return <p className="text-sm text-zinc-500 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />{t("settings.instances.loading")}</p>;
   }
 
   return (
     <div className="space-y-4">
       <div>
-        <h3 className="font-semibold" style={{ fontSize: 14, color: "var(--ds-fg)", margin: 0 }}>{label} — additional servers</h3>
+        <h3 className="font-semibold" style={{ fontSize: 14, color: "var(--ds-fg)", margin: 0 }}>{t("settings.media.heading", { label })}</h3>
         <p className="text-xs text-zinc-500 mt-1">
-          Extra {label} servers (e.g. a friend&apos;s separate server, or a second library). Availability and activity are combined across
-          every configured server of this type.
+          {t("settings.media.intro", { label })}
         </p>
       </div>
 
-      {drafts.length === 0 && <p className="text-sm text-zinc-500">No additional {label} servers configured.</p>}
+      {drafts.length === 0 && <p className="text-sm text-zinc-500">{t("settings.media.none", { label })}</p>}
 
       {drafts.map((d, idx) => {
         const test = tests[d.slug];
@@ -372,7 +374,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
           <div key={idx} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
             <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
               <div className="space-y-1.5">
-                <Label htmlFor={`${service}-${idx}-slug`}>Slug</Label>
+                <Label htmlFor={`${service}-${idx}-slug`}>{t("settings.instances.slug")}</Label>
                 <Input
                   id={`${service}-${idx}-slug`}
                   value={d.slug}
@@ -381,15 +383,15 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                   placeholder="remote"
                   className="bg-zinc-800 border-zinc-700 font-mono text-sm disabled:opacity-60"
                 />
-                {!d.isNew && <p className="text-xs text-zinc-500">Slug is fixed once created.</p>}
+                {!d.isNew && <p className="text-xs text-zinc-500">{t("settings.instances.slugFixed")}</p>}
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor={`${service}-${idx}-name`}>Display name</Label>
+                <Label htmlFor={`${service}-${idx}-name`}>{t("settings.instances.displayName")}</Label>
                 <Input
                   id={`${service}-${idx}-name`}
                   value={d.name}
                   onChange={(e) => update(idx, { name: e.target.value })}
-                  placeholder="Friend's server"
+                  placeholder={t("settings.media.namePlaceholder")}
                   className="bg-zinc-800 border-zinc-700 text-sm"
                 />
               </div>
@@ -422,7 +424,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
 
             {service === "plex" && (
               <div className="space-y-1.5">
-                <Label htmlFor={`${service}-${idx}-email`}>Admin email <span className="text-zinc-500">(optional)</span></Label>
+                <Label htmlFor={`${service}-${idx}-email`}>{t("settings.media.adminEmail")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
                 <Input
                   id={`${service}-${idx}-email`}
                   type="email"
@@ -447,11 +449,9 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                     onChange={(e) => update(idx, { restrictSignIn: e.target.checked })}
                   />
                   <span>
-                    Restrict sign-in to synced members
+                    {t("settings.media.restrictSignIn")}
                     <span className="block text-xs text-zinc-500">
-                      Only accounts this server has already synced into Summonarr — or anyone who has signed in
-                      before — may sign in. Unchecking lets ANY valid account on this Jellyfin server sign in and
-                      create a Summonarr account (not recommended).
+                      {t("settings.media.restrictSignInHelp")}
                     </span>
                   </span>
                 </label>
@@ -490,10 +490,10 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                 default's; stripping is a conditional startsWith, so an
                 inherited prefix that doesn't match is already a no-op. */}
             <div className="pt-1 space-y-2">
-              <p className="text-sm text-zinc-300">Library path prefixes <span className="text-xs text-zinc-500">(optional)</span></p>
+              <p className="text-sm text-zinc-300">{t("settings.media.pathPrefixes")} <span className="text-xs text-zinc-500">{t("settings.common.optional")}</span></p>
               <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
                 <div className="space-y-1.5">
-                  <Label htmlFor={`${service}-${idx}-movie-prefix`}>Movie path prefix</Label>
+                  <Label htmlFor={`${service}-${idx}-movie-prefix`}>{t("settings.media.moviePrefix")}</Label>
                   <Input
                     id={`${service}-${idx}-movie-prefix`}
                     value={d.moviePathStripPrefix}
@@ -503,7 +503,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label htmlFor={`${service}-${idx}-tv-prefix`}>TV path prefix</Label>
+                  <Label htmlFor={`${service}-${idx}-tv-prefix`}>{t("settings.media.tvPrefix")}</Label>
                   <Input
                     id={`${service}-${idx}-tv-prefix`}
                     value={d.tvPathStripPrefix}
@@ -514,9 +514,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                 </div>
               </div>
               <p className="text-xs text-zinc-500">
-                Library-folder prefix stripped from this server&apos;s file paths when matching them against
-                other servers (bad-match detection, library diff). Blank inherits the main server&apos;s
-                prefixes — set these only if this server&apos;s folder layout differs.
+                {t("settings.media.pathPrefixesHelp")}
               </p>
             </div>
 
@@ -536,17 +534,16 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                   onChange={(e) => update(idx, { restricted: e.target.checked })}
                 />
                 <span>
-                  Restricted (needs a grant)
+                  {t("settings.instances.restricted")}
                   <span className="block text-xs text-zinc-500">
-                    Only users granted access to this server see its library as available. Leave off to
-                    combine it into everyone&apos;s availability, like the main server. Admins always see it.
+                    {t("settings.media.restrictedHelp")}
                   </span>
                 </span>
               </label>
             </div>
 
             <div className="flex items-center justify-between pt-1">
-              {test?.ok && <span className="text-xs text-green-400 flex items-center gap-1"><CheckCircle className="w-3.5 h-3.5" />Connected</span>}
+              {test?.ok && <span className="text-xs text-green-400 flex items-center gap-1"><CheckCircle className="w-3.5 h-3.5" />{t("settings.common.connected")}</span>}
               {test?.error && <span className="text-xs text-red-400 flex items-center gap-1"><XCircle className="w-3.5 h-3.5" />{test.error}</span>}
               {!test && <span />}
               {confirmRemove !== idx && (
@@ -558,7 +555,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                   onClick={() => (d.isNew ? removeInstance(idx) : setConfirmRemove(idx))}
                   className="flex items-center gap-1 text-xs text-red-400 hover:text-[var(--ds-danger-hover)]"
                 >
-                  <Trash2 className="w-3.5 h-3.5" />Remove
+                  <Trash2 className="w-3.5 h-3.5" />{t("settings.common.remove")}
                 </button>
               )}
             </div>
@@ -573,9 +570,8 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
             {confirmRemove === idx && (
               <div className="rounded-md border border-red-500/40 bg-red-500/10 p-3 space-y-2">
                 <p className="text-xs text-red-400">
-                  Remove <strong>{d.name.trim() || d.slug || "this server"}</strong>? On <strong>Save</strong> this deletes
-                  its cached library items, its active sessions, and its stored URL + {tokenLabel} (encrypted —
-                  not recoverable), and marks its media-server users departed. <strong>Play history is preserved.</strong>
+                  {t("settings.media.confirmRemove", { name: d.name.trim() || d.slug || t("settings.media.thisServer"), token: tokenLabel })}{" "}
+                  <strong>{t("settings.media.confirmRemoveKept")}</strong>
                 </p>
                 <div className="flex items-center gap-2">
                   <button
@@ -584,14 +580,14 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                     autoFocus
                     className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />Remove server
+                    <Trash2 className="w-3.5 h-3.5" />{t("settings.media.removeServer")}
                   </button>
                   <button
                     type="button"
                     onClick={() => setConfirmRemove(null)}
                     className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
                   >
-                    Cancel
+                    {t("settings.common.cancel")}
                   </button>
                 </div>
               </div>
@@ -602,19 +598,19 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
 
       <div className="flex flex-wrap items-center gap-3">
         <Button type="button" variant="outline" onClick={addInstance} className="border-zinc-600 text-zinc-300 hover:text-zinc-100 h-8 px-3 text-xs">
-          + Add {label} server
+          {t("settings.media.add", { label })}
         </Button>
         <Button type="button" onClick={save} disabled={status === "saving" || loadFailed} className="bg-indigo-600 hover:bg-indigo-500 h-8 px-3 text-xs">
-          {status === "saving" ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Saving…</> : "Save & Test"}
+          {status === "saving" ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />{t("settings.common.saving")}</> : t("settings.instances.saveAndTest")}
         </Button>
         {confirmRefresh ? (
           <span className="flex items-center gap-2 text-xs text-zinc-400">
-            Discard unsaved changes?
-            <button type="button" onClick={load} className="text-red-400 hover:underline font-medium">Discard</button>
-            <button type="button" onClick={() => setConfirmRefresh(false)} className="text-zinc-500 hover:text-zinc-100">Cancel</button>
+            {t("settings.media.discardPrompt")}
+            <button type="button" onClick={load} className="text-red-400 hover:underline font-medium">{t("settings.media.discard")}</button>
+            <button type="button" onClick={() => setConfirmRefresh(false)} className="text-zinc-500 hover:text-zinc-100">{t("settings.common.cancel")}</button>
           </span>
         ) : (
-          <button type="button" onClick={() => (dirty ? setConfirmRefresh(true) : load())} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-100"><RefreshCw className="w-3 h-3" />Refresh</button>
+          <button type="button" onClick={() => (dirty ? setConfirmRefresh(true) : load())} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-100"><RefreshCw className="w-3 h-3" />{t("settings.common.refresh")}</button>
         )}
         {status === "ok" && <span className="min-w-0 text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4 shrink-0" />{message}</span>}
         {status === "error" && <span className="min-w-0 break-words text-sm text-red-400 flex items-center gap-1.5"><XCircle className="w-4 h-4 shrink-0" />{message}</span>}
@@ -622,7 +618,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
       {loadFailed && (
         <p className="text-sm text-red-400 flex items-center gap-1.5">
           <XCircle className="w-4 h-4 shrink-0" />
-          Couldn&apos;t load the current servers — saving is disabled so an empty list can&apos;t wipe them. Hit Refresh.
+          {t("settings.media.loadFailed")}
         </p>
       )}
     </div>

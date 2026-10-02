@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { Switch } from "@/components/ui/switch";
+import { useT } from "@/components/i18n/i18n-provider";
 
 type SaveStatus = "idle" | "saving" | "ok" | "error";
 
@@ -41,6 +42,7 @@ export function PlayHistorySettingsForm({
   const [retentionDays, setRetentionDays] = useState(initialRetentionDays);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState<string | null>(null);
+  const t = useT();
   const enabledId = useId();
   const plexId = useId();
   const jellyfinId = useId();
@@ -70,11 +72,11 @@ export function PlayHistorySettingsForm({
         // Only the success tick fades; an error stays until the next save.
         setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
       } else {
-        setError(data?.error ?? `Save failed (${res.status})`);
+        setError(data?.error ?? t("settings.common.saveFailedStatus", { status: res.status }));
         setStatus("error");
       }
     } catch {
-      setError("Network error — please try again");
+      setError(t("settings.common.networkError"));
       setStatus("error");
     }
   }
@@ -84,7 +86,7 @@ export function PlayHistorySettingsForm({
       <div className="flex items-center gap-3">
         <Switch id={enabledId} size="lg" checked={enabled} onCheckedChange={() => setEnabled(!enabled)} />
         <Label htmlFor={enabledId} className="cursor-pointer">
-          Enable play history tracking
+          {t("settings.playHistory.enable")}
         </Label>
       </div>
 
@@ -92,17 +94,17 @@ export function PlayHistorySettingsForm({
         <>
           <div className="space-y-3 pl-1">
             <div className="flex items-center gap-3">
-              <Switch id={plexId} aria-label="Track Plex play history" checked={plexEnabled} onCheckedChange={() => setPlexEnabled(!plexEnabled)} />
+              <Switch id={plexId} aria-label={t("settings.playHistory.trackPlex")} checked={plexEnabled} onCheckedChange={() => setPlexEnabled(!plexEnabled)} />
               <Label htmlFor={plexId} className="cursor-pointer text-sm text-zinc-300">Plex</Label>
             </div>
             <div className="flex items-center gap-3">
-              <Switch id={jellyfinId} aria-label="Track Jellyfin play history" checked={jellyfinEnabled} onCheckedChange={() => setJellyfinEnabled(!jellyfinEnabled)} />
+              <Switch id={jellyfinId} aria-label={t("settings.playHistory.trackJellyfin")} checked={jellyfinEnabled} onCheckedChange={() => setJellyfinEnabled(!jellyfinEnabled)} />
               <Label htmlFor={jellyfinId} className="cursor-pointer text-sm text-zinc-300">Jellyfin</Label>
             </div>
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="watched-threshold">Watched Threshold (%)</Label>
+            <Label htmlFor="watched-threshold">{t("settings.playHistory.watchedThreshold")}</Label>
             <Input
               id="watched-threshold"
               type="number"
@@ -112,11 +114,11 @@ export function PlayHistorySettingsForm({
               onChange={(e) => { setWatchedThreshold(e.target.value); setStatus("idle"); }}
               className="bg-zinc-800 border-zinc-700 text-sm w-32"
             />
-            <p className="text-xs text-zinc-500">Minimum percentage of media that must be played to count as &quot;watched&quot;</p>
+            <p className="text-xs text-zinc-500">{t("settings.playHistory.watchedThresholdHelp")}</p>
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="completion-threshold">Completion Threshold (%)</Label>
+            <Label htmlFor="completion-threshold">{t("settings.playHistory.completionThreshold")}</Label>
             <Input
               id="completion-threshold"
               type="number"
@@ -126,11 +128,11 @@ export function PlayHistorySettingsForm({
               onChange={(e) => { setCompletionThreshold(e.target.value); setStatus("idle"); }}
               className="bg-zinc-800 border-zinc-700 text-sm w-32"
             />
-            <p className="text-xs text-zinc-500">Cumulative watch percentage across one viewing arc to count as a completion in &quot;Popular on Server&quot;. Stricter than the per-session Watched threshold.</p>
+            <p className="text-xs text-zinc-500">{t("settings.playHistory.completionThresholdHelp")}</p>
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="arc-gap-days">Arc Gap (days)</Label>
+            <Label htmlFor="arc-gap-days">{t("settings.playHistory.arcGap")}</Label>
             <Input
               id="arc-gap-days"
               type="number"
@@ -140,11 +142,11 @@ export function PlayHistorySettingsForm({
               onChange={(e) => { setArcGapDays(e.target.value); setStatus("idle"); }}
               className="bg-zinc-800 border-zinc-700 text-sm w-32"
             />
-            <p className="text-xs text-zinc-500">Sessions on the same media farther apart than this start a new viewing arc. A weekend chunked watch stays one arc; a months-later rewatch starts a new one.</p>
+            <p className="text-xs text-zinc-500">{t("settings.playHistory.arcGapHelp")}</p>
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="polling-interval">Polling Interval (seconds)</Label>
+            <Label htmlFor="polling-interval">{t("settings.playHistory.pollingInterval")}</Label>
             <Input
               id="polling-interval"
               type="number"
@@ -157,11 +159,11 @@ export function PlayHistorySettingsForm({
               onChange={(e) => { setPollingInterval(e.target.value); setStatus("idle"); }}
               className="bg-zinc-800 border-zinc-700 text-sm w-32"
             />
-            <p className="text-xs text-zinc-500">How often to check for active sessions (default: 5s). The live cadence comes from the PLAY_HISTORY_SYNC_INTERVAL environment variable and applies on container restart — saving here records the value but does not change it.</p>
+            <p className="text-xs text-zinc-500">{t("settings.playHistory.pollingIntervalHelp")}</p>
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="retention-days">Data Retention (days)</Label>
+            <Label htmlFor="retention-days">{t("settings.playHistory.retention")}</Label>
             <Input
               id="retention-days"
               type="number"
@@ -170,13 +172,13 @@ export function PlayHistorySettingsForm({
               onChange={(e) => { setRetentionDays(e.target.value); setStatus("idle"); }}
               className="bg-zinc-800 border-zinc-700 text-sm w-32"
             />
-            <p className="text-xs text-zinc-500">Delete play history older than this many days. 0 = keep forever.</p>
+            <p className="text-xs text-zinc-500">{t("settings.playHistory.retentionHelp")}</p>
           </div>
 
           <div className="space-y-2 pt-2 border-t border-zinc-800">
-            <h3 className="text-sm font-medium text-zinc-300 pt-2">How tracking works</h3>
+            <h3 className="text-sm font-medium text-zinc-300 pt-2">{t("settings.playHistory.howTitle")}</h3>
             <p className="text-xs text-zinc-500">
-              Play history is tracked automatically by polling your Plex and Jellyfin servers every few seconds for active sessions. No configuration is needed in Plex or Jellyfin — it uses the same server connection already configured above.
+              {t("settings.playHistory.howBody")}
             </p>
           </div>
         </>
@@ -185,7 +187,7 @@ export function PlayHistorySettingsForm({
       <div className="flex items-center gap-3 pt-2">
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
           {status === "saving" ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : null}
-          Save
+          {t("settings.common.save")}
         </Button>
         {status === "ok" && <CheckCircle className="w-4 h-4 text-green-500" />}
         {status === "error" && <XCircle className="w-4 h-4 shrink-0 text-red-500" aria-hidden="true" />}

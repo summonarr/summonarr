@@ -9,6 +9,8 @@ import {
   type FeatureFlags,
 } from "@/lib/features";
 import { Switch } from "@/components/ui/switch";
+import { useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 
 type SaveStatus = "idle" | "saving" | "ok" | "error";
 
@@ -45,7 +47,26 @@ interface FeaturesFormProps {
 // never overwrites it.
 const FLUSH_DELAY_MS = 400;
 
+// Feature labels/descriptions live in the registry (src/lib/features.ts) in
+// English; the catalogs carry a translation per flag under a slug of its key
+// ("feature.behavior.watchGrades" -> "behavior_watchGrades"). A flag added to
+// the registry without catalog entries falls back to the registry's English
+// rather than rendering a raw key (tests/i18n-settings-features.test.mts pins
+// that every current flag has both).
+function featureText(t: Translator, feature: FeatureDefinition): { label: string; description: string } {
+  const slug = feature.key.replace(/^feature\./, "").replaceAll(".", "_");
+  const labelKey = `settings.featureLabel.${slug}`;
+  const descKey = `settings.featureDesc.${slug}`;
+  const label = t(labelKey);
+  const description = t(descKey);
+  return {
+    label: label === labelKey ? feature.label : label,
+    description: description === descKey ? feature.description : description,
+  };
+}
+
 export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
+  const t = useT();
   const [flags, setFlags] = useState<FeatureFlags>(initialFlags);
   const [statusByKey, setStatusByKey] = useState<Record<string, SaveStatus>>({});
   const [errorByKey, setErrorByKey] = useState<Record<string, string>>({});
@@ -128,10 +149,10 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
           });
           const data: { ok?: boolean; error?: string } = await res.json().catch(() => ({}));
           success = res.ok && data.ok === true;
-          if (!success) message = data.error ?? `Save failed (${res.status})`;
+          if (!success) message = data.error ?? t("settings.common.saveFailedStatus", { status: res.status });
         } catch {
           success = false;
-          message = "Network error — the change was not saved";
+          message = t("settings.features.networkError");
         } finally {
           for (const [key] of batch) inFlightKeys.current.delete(key);
         }
@@ -225,14 +246,15 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
             {group.features.map((feature, idx) => {
               const enabled = flags[feature.key] ?? feature.defaultEnabled;
               const status = statusByKey[feature.key] ?? "idle";
+              const text = featureText(t, feature);
               return (
                 <div
                   key={feature.key}
                   className={`flex items-start justify-between gap-4 ${idx === 0 ? "pb-3" : "py-3"}`}
                 >
                   <div className="min-w-0">
-                    <p className="text-sm font-medium text-zinc-200">{feature.label}</p>
-                    <p className="text-xs text-zinc-500 mt-0.5">{feature.description}</p>
+                    <p className="text-sm font-medium text-zinc-200">{text.label}</p>
+                    <p className="text-xs text-zinc-500 mt-0.5">{text.description}</p>
                     {feature.note && (
                       <p className="text-xs text-amber-400 mt-1">{feature.note}</p>
                     )}
@@ -247,12 +269,12 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
                       <XCircle
                         role="img"
                         className="w-3.5 h-3.5 text-red-400"
-                        aria-label={errorByKey[feature.key] ?? "Save failed"}
+                        aria-label={errorByKey[feature.key] ?? t("settings.common.saveFailed")}
                       />
                     )}
                     <Switch
                       checked={enabled}
-                      aria-label={`Toggle ${feature.label}`}
+                      aria-label={t("settings.features.toggle", { label: text.label })}
                       onCheckedChange={() => toggle(feature.key)}
                     />
                   </div>
