@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { requireFeature } from "@/lib/features";
 import { OpenApiViewer } from "@/components/admin/openapi-viewer";
+import { getTranslator } from "@/lib/i18n/server";
 import { PageHeader } from "@/components/ui/design";
 
 export const dynamic = "force-dynamic";
@@ -15,12 +16,13 @@ export default async function ApiDocsPage() {
   if (!session || isTokenExpired(session) || !hasPermission(session.user.permissions, Permission.ADMIN)) {
     redirect("/");
   }
+  const t = await getTranslator();
 
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="API Docs"
-        subtitle="OpenAPI 3.0 reference for all Summonarr endpoints. Each request authenticates with your session cookie; use Copy as curl to call an endpoint from a terminal."
+        title={t("adminManage.apiDocs.title")}
+        subtitle={t("adminManage.apiDocs.subtitle")}
       />
       <div
         className="overflow-hidden"

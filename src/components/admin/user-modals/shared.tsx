@@ -83,10 +83,11 @@ export interface User {
   watchGrade: WatchGradeSummary | null;
 }
 
-export const roleLabel: Record<User["role"], string> = {
-  ADMIN:       "Admin",
-  ISSUE_ADMIN: "Issue Admin",
-  USER:        "User",
+// Catalog keys for the role names — translated at render (useT), never here.
+export const roleLabelKey: Record<User["role"], string> = {
+  ADMIN:       "adminManage.users.role.ADMIN",
+  ISSUE_ADMIN: "adminManage.users.role.ISSUE_ADMIN",
+  USER:        "adminManage.users.role.USER",
 };
 
 export function AdminToggleRow({ label, checked, onChange, disabled }: { label: string; checked: boolean; onChange: () => void; disabled: boolean }) {

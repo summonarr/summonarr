@@ -10,6 +10,7 @@ import { TTL, getCache, setCache } from "@/lib/tmdb-cache";
 import { inferGroupMounts } from "@/lib/bad-matches";
 import { LibraryDiffClient, type DiffItem, type ClientBadMatch } from "@/components/admin/library-diff-client";
 import { EmptyState, PageHeader } from "@/components/ui/design";
+import { getLocale, getTranslator } from "@/lib/i18n/server";
 import { Library } from "@/components/icons";
 import {
   DEFAULT_MEDIA_INSTANCE,
@@ -363,6 +364,7 @@ export default async function LibraryDiffPage({
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const { type, server: highlightServer, tmdbId: highlightTmdbIdStr, mediaType: highlightMediaType } = await searchParams;
+  const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
   const activeType = type === "movie" ? "MOVIE" : type === "tv" ? "TV" : null;
   const highlightTmdbId = highlightTmdbIdStr ? parseInt(highlightTmdbIdStr, 10) : null;
   const highlightKey = highlightTmdbId && highlightMediaType
@@ -705,18 +707,18 @@ export default async function LibraryDiffPage({
   // makes one row exactly one title. (The type tabs below stay row-based on
   // purpose — they label the cards actually rendered, one per server.)
   const stats = [
-    { label: "Plex Library",     value: plexSet.size,     color: "var(--ds-plex-text)" },
-    { label: "Jellyfin Library", value: jellyfinSet.size, color: "var(--ds-jellyfin-text)" },
-    { label: "In Sync",          value: inSyncCount,      color: "var(--ds-success)"  },
-    { label: "Differences",      value: (plexSet.size - inSyncCount) + (jellyfinSet.size - inSyncCount), color: "var(--ds-danger)" },
-    { label: "Bad Matches",      value: allRawBadMatches.length, color: "var(--ds-warning)" },
+    { label: t("adminManage.library.stat.plex"),     value: plexSet.size,     color: "var(--ds-plex-text)" },
+    { label: t("adminManage.library.stat.jellyfin"), value: jellyfinSet.size, color: "var(--ds-jellyfin-text)" },
+    { label: t("adminManage.library.stat.inSync"),          value: inSyncCount,      color: "var(--ds-success)"  },
+    { label: t("adminManage.library.stat.differences"),      value: (plexSet.size - inSyncCount) + (jellyfinSet.size - inSyncCount), color: "var(--ds-danger)" },
+    { label: t("adminManage.library.stat.badMatches"),      value: allRawBadMatches.length, color: "var(--ds-warning)" },
   ];
 
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Library Diff"
-        subtitle="Media present on one server but missing from the other."
+        title={t("adminManage.library.title")}
+        subtitle={t("adminManage.library.subtitle")}
         right={
           <div className="flex items-center gap-2 flex-wrap">
             <ResyncLibraryButton plexConfigured={plexSyncConfigured} jellyfinConfigured={jellyfinSyncConfigured} />
@@ -780,8 +782,7 @@ export default async function LibraryDiffPage({
             fontSize: 12.5,
           }}
         >
-          Library exceeds {LIBRARY_ITEM_CAP.toLocaleString()} items — results are
-          truncated and the diff may be incomplete.
+          {t("adminManage.library.capped", { cap: LIBRARY_ITEM_CAP.toLocaleString(locale) })}
         </div>
       )}
 
@@ -790,11 +791,11 @@ export default async function LibraryDiffPage({
           icon={Library}
           title={
             !plexConfigured && !jellyfinConfigured
-              ? "Neither Plex nor Jellyfin has been synced yet"
-              : `Only ${plexConfigured ? "Plex" : "Jellyfin"} has been synced`
+              ? t("adminManage.library.oneSided.neither")
+              : t("adminManage.library.oneSided.only", { server: plexConfigured ? "Plex" : "Jellyfin" })
           }
-          description="A library diff needs both servers. Run a sync first."
-          cta={{ href: "/admin", label: "Run a sync" }}
+          description={t("adminManage.library.oneSided.description")}
+          cta={{ href: "/admin", label: t("adminManage.library.oneSided.cta") }}
         />
       ) : (
         <>
@@ -810,17 +811,17 @@ export default async function LibraryDiffPage({
             }}
           >
             <TypeTab
-              label={`All (${rawOnlyPlex.length + rawOnlyJellyfin.length})`}
+              label={t("adminManage.library.tab.all", { count: rawOnlyPlex.length + rawOnlyJellyfin.length })}
               href="/admin/library"
               active={!activeType}
             />
             <TypeTab
-              label={`Movies (${rawOnlyPlex.filter((i) => i.mediaType === "MOVIE").length + rawOnlyJellyfin.filter((i) => i.mediaType === "MOVIE").length})`}
+              label={t("adminManage.library.tab.movies", { count: rawOnlyPlex.filter((i) => i.mediaType === "MOVIE").length + rawOnlyJellyfin.filter((i) => i.mediaType === "MOVIE").length })}
               href="/admin/library?type=movie"
               active={activeType === "MOVIE"}
             />
             <TypeTab
-              label={`TV Shows (${rawOnlyPlex.filter((i) => i.mediaType === "TV").length + rawOnlyJellyfin.filter((i) => i.mediaType === "TV").length})`}
+              label={t("adminManage.library.tab.tv", { count: rawOnlyPlex.filter((i) => i.mediaType === "TV").length + rawOnlyJellyfin.filter((i) => i.mediaType === "TV").length })}
               href="/admin/library?type=tv"
               active={activeType === "TV"}
             />

@@ -6,6 +6,8 @@ import { getArrDiskSpace } from "@/lib/arr-stats";
 import { StatsCharts } from "@/components/admin/stats-charts";
 import { requireFeature } from "@/lib/features";
 import { PageHeader, StatCard } from "@/components/ui/design";
+import { getLocale, getTranslator } from "@/lib/i18n/server";
+import type { Translator } from "@/lib/i18n/translate";
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +15,7 @@ export default async function StatsPage() {
   await requireFeature("feature.admin.stats");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
+  const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
 
   const [
     statusCounts, mediaTypeCounts, issueStatusCounts,
@@ -121,33 +124,33 @@ export default async function StatsPage() {
   }
 
   function formatRuntime(minutes: number) {
-    if (minutes <= 0) return "0h";
+    if (minutes <= 0) return t("adminManage.stats.runtimeHours", { hours: 0 });
     const days = Math.floor(minutes / 1440);
     const hours = Math.round((minutes % 1440) / 60);
-    if (days > 0) return `${days}d ${hours}h`;
-    return `${hours}h`;
+    if (days > 0) return t("adminManage.stats.runtimeDays", { days, hours });
+    return t("adminManage.stats.runtimeHours", { hours });
   }
 
   const statCards = [
-    { label: "Total Requests", value: totalRequests },
-    { label: "Pending", value: pendingRequests },
-    { label: "Approved", value: approvedRequests },
-    { label: "Available", value: availableRequests },
-    { label: "Declined", value: declinedRequests },
-    { label: "Movies", value: movieRequests },
-    { label: "TV Shows", value: tvRequests },
-    { label: "Users", value: totalUsers },
-    { label: "Plex Items", value: plexItems },
-    { label: "Jellyfin Items", value: jellyfinItems },
-    { label: "Issues", value: totalIssues },
-    { label: "Open Issues", value: openIssues },
+    { label: t("adminManage.stats.totalRequests"), value: totalRequests },
+    { label: t("requests.status.pending"), value: pendingRequests },
+    { label: t("requests.status.approved"), value: approvedRequests },
+    { label: t("requests.status.available"), value: availableRequests },
+    { label: t("requests.status.declined"), value: declinedRequests },
+    { label: t("nav.movies"), value: movieRequests },
+    { label: t("nav.tvShows"), value: tvRequests },
+    { label: t("adminManage.stats.users"), value: totalUsers },
+    { label: t("adminManage.stats.plexItems"), value: plexItems },
+    { label: t("adminManage.stats.jellyfinItems"), value: jellyfinItems },
+    { label: t("adminManage.stats.issues"), value: totalIssues },
+    { label: t("adminManage.stats.openIssues"), value: openIssues },
   ];
 
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Statistics"
-        subtitle="Server and request analytics"
+        title={t("adminManage.stats.title")}
+        subtitle={t("adminManage.stats.subtitle")}
       />
 
       <div
@@ -158,14 +161,14 @@ export default async function StatsPage() {
           <StatCard
             key={s.label}
             label={s.label}
-            value={s.value.toLocaleString()}
+            value={s.value.toLocaleString(locale)}
             mono
           />
         ))}
       </div>
 
       {libraryServers.length > 0 && (
-        <StatsSection title="Library">
+        <StatsSection title={t("adminManage.stats.library")}>
           <div
             className="grid grid-cols-1 lg:grid-cols-2"
             style={{ gap: 16 }}
@@ -178,6 +181,8 @@ export default async function StatsPage() {
                 series={s.series}
                 episodes={s.episodes}
                 runtime={formatRuntime(s.runtimeMin)}
+                t={t}
+                locale={locale}
               />
             ))}
           </div>
@@ -195,7 +200,7 @@ export default async function StatsPage() {
               margin: "0 0 6px",
             }}
           >
-            Average Fulfillment Time
+            {t("adminManage.stats.avgFulfillment")}
           </p>
           <p
             className="font-semibold"
@@ -207,10 +212,10 @@ export default async function StatsPage() {
             }}
           >
             {avgHours < 1
-              ? `${Math.round(avgHours * 60)} minutes`
+              ? t("adminManage.stats.minutes", { value: Math.round(avgHours * 60) })
               : avgHours < 24
-                ? `${avgHours.toFixed(1)} hours`
-                : `${(avgHours / 24).toFixed(1)} days`}
+                ? t("adminManage.stats.hours", { value: avgHours.toFixed(1) })
+                : t("adminManage.stats.days", { value: (avgHours / 24).toFixed(1) })}
           </p>
           <p
             className="ds-mono"
@@ -220,19 +225,19 @@ export default async function StatsPage() {
               marginTop: 6,
             }}
           >
-            From request creation to available
+            {t("adminManage.stats.avgFulfillmentHint")}
           </p>
         </StatsSection>
       )}
 
       {monthData.length > 0 && (
-        <StatsSection title="Requests Over Time">
+        <StatsSection title={t("adminManage.stats.requestsOverTime")}>
           <StatsCharts data={monthData} />
         </StatsSection>
       )}
 
       {topRequesters.length > 0 && (
-        <StatsSection title="Top Requesters">
+        <StatsSection title={t("adminManage.stats.topRequesters")}>
           <div className="flex flex-col" style={{ gap: 6 }}>
             {topRequesters.map((u, i) => (
               <div
@@ -262,7 +267,7 @@ export default async function StatsPage() {
                     fontVariantNumeric: "tabular-nums",
                   }}
                 >
-                  {Number(u.count)} requests
+                  {t("adminManage.stats.requestCount", { count: Number(u.count) })}
                 </span>
               </div>
             ))}
@@ -271,7 +276,7 @@ export default async function StatsPage() {
       )}
 
       {(diskSpace.radarr || diskSpace.sonarr || diskSpace.extra.length > 0) && (
-        <StatsSection title="Disk Space">
+        <StatsSection title={t("adminManage.stats.diskSpace")}>
           <div className="flex flex-col" style={{ gap: 16 }}>
             {diskSpace.radarr && (
               <DiskGroup label="Radarr" items={diskSpace.radarr} formatBytes={formatBytes} />
@@ -330,19 +335,23 @@ function LibraryServerCard({
   series,
   episodes,
   runtime,
+  t,
+  locale,
 }: {
   name: string;
   movies: number;
   series: number;
   episodes: number;
   runtime: string;
+  t: Translator;
+  locale: string;
 }) {
   const metrics = [
-    { label: "Titles", value: (movies + series).toLocaleString() },
-    { label: "Movies", value: movies.toLocaleString() },
-    { label: "Series", value: series.toLocaleString() },
-    { label: "Episodes", value: episodes.toLocaleString() },
-    { label: "Episode Runtime", value: runtime },
+    { label: t("adminManage.stats.titles"), value: (movies + series).toLocaleString(locale) },
+    { label: t("nav.movies"), value: movies.toLocaleString(locale) },
+    { label: t("adminManage.stats.series"), value: series.toLocaleString(locale) },
+    { label: t("adminManage.stats.episodes"), value: episodes.toLocaleString(locale) },
+    { label: t("adminManage.stats.episodeRuntime"), value: runtime },
   ];
   return (
     <div

@@ -2,6 +2,7 @@ import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { requireFeature } from "@/lib/features";
+import { getTranslator } from "@/lib/i18n/server";
 import { PageHeader } from "@/components/ui/design";
 import { LibraryCleanup } from "@/components/admin/library-cleanup";
 
@@ -15,12 +16,13 @@ export default async function LibraryCleanupPage() {
   await requireFeature("feature.admin.cleanup");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
+  const t = await getTranslator();
 
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Library Cleanup"
-        subtitle="Find what nobody watches, and remove it from Radarr/Sonarr after a dry run"
+        title={t("adminManage.cleanup.title")}
+        subtitle={t("adminManage.cleanup.subtitle")}
       />
       <LibraryCleanup />
     </div>

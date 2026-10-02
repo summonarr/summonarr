@@ -5,6 +5,7 @@ import { Lock, Download, Upload } from "@/components/icons";
 import { BackupUI } from "@/components/admin/backup-ui";
 import { requireFeature } from "@/lib/features";
 import { PageHeader } from "@/components/ui/design";
+import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 
@@ -12,12 +13,13 @@ export default async function BackupPage() {
   await requireFeature("feature.admin.backup");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
+  const t = await getTranslator();
 
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Backup & Restore"
-        subtitle="Export · Import · Encrypted at rest"
+        title={t("adminManage.backup.title")}
+        subtitle={t("adminManage.backup.subtitle")}
       />
 
       <div
@@ -41,7 +43,7 @@ export default async function BackupPage() {
           }}
         />
         <div style={{ fontSize: 12.5, color: "var(--ds-fg-muted)", lineHeight: 1.6 }}>
-          Full-DB backups are always encrypted with the server&apos;s{" "}
+          {t("adminManage.backup.notice.before")}{" "}
           <code
             className="ds-mono"
             style={{
@@ -54,8 +56,7 @@ export default async function BackupPage() {
           >
             BACKUP_DB_PASSWORD
           </code>{" "}
-          environment variable (AES-256). Only someone with shell access to the server can decrypt the resulting
-          file. Plain SQL dumps are rejected on import.
+          {t("adminManage.backup.notice.after")}
         </div>
       </div>
 
@@ -65,18 +66,18 @@ export default async function BackupPage() {
       >
         <BackupCard
           icon={<Download style={{ width: 16, height: 16 }} />}
-          title="Database Export"
-          tag="Full DB · Encrypted · One file"
-          description="Download a complete encrypted SQL dump of every table — settings, accounts, library caches, audit logs, password hashes. Use this for full server migration or disaster recovery."
+          title={t("adminManage.backup.export.title")}
+          tag={t("adminManage.backup.export.tag")}
+          description={t("adminManage.backup.export.description")}
         >
           <BackupUI mode="db-export" />
         </BackupCard>
 
         <BackupCard
           icon={<Upload style={{ width: 16, height: 16 }} />}
-          title="Database Restore"
-          tag="From *.sql.enc · Drop-in replacement"
-          description="Restore from a previously exported encrypted backup. Every table in the dump is truncated and re-inserted atomically — the database returns to the exact state at backup time. Failure rolls back."
+          title={t("adminManage.backup.restore.title")}
+          tag={t("adminManage.backup.restore.tag")}
+          description={t("adminManage.backup.restore.description")}
         >
           <BackupUI mode="db-import" />
         </BackupCard>
@@ -100,7 +101,7 @@ export default async function BackupPage() {
             marginBottom: 8,
           }}
         >
-          Operational notes
+          {t("adminManage.backup.notes.title")}
         </div>
         <ul
           style={{
@@ -111,11 +112,11 @@ export default async function BackupPage() {
             lineHeight: 1.8,
           }}
         >
-          <li>Exports are synchronous; large DBs may take up to 30s to generate.</li>
-          <li>Restore is destructive: every listed table is truncated before re-insert, all in a single transaction. Any failure rolls back the entire restore — no half-restored state.</li>
-          <li>Schema migrations are <em>not</em> run on import. Restore only into a server running the same version.</li>
+          <li>{t("adminManage.backup.notes.sync")}</li>
+          <li>{t("adminManage.backup.notes.destructive")}</li>
+          <li>{t("adminManage.backup.notes.migrations")}</li>
           <li>
-            Both actions emit{" "}
+            {t("adminManage.backup.notes.auditBefore")}{" "}
             <code
               className="ds-mono"
               style={{
@@ -141,7 +142,7 @@ export default async function BackupPage() {
             >
               BACKUP_IMPORT
             </code>{" "}
-            audit events.
+            {t("adminManage.backup.notes.auditAfter")}
           </li>
         </ul>
       </div>

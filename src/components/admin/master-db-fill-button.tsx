@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Database, Loader2, AlertTriangle } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 type Phase = "idle" | "confirm" | "phase1" | "phase2" | "done" | "error";
 
@@ -14,6 +15,8 @@ export function MasterDbFillButton({
   plexConfigured: boolean;
   jellyfinConfigured: boolean;
 }) {
+  const t = useT();
+  const locale = useLocale();
   const [phase, setPhase] = useState<Phase>("idle");
   const [summary, setSummary] = useState<string | null>(null);
   // The end-of-run reset has to be cancellable: a rerun started inside the 15-20s
@@ -46,7 +49,7 @@ export function MasterDbFillButton({
 
       if (targets.length === 0) {
         setPhase("error");
-        setSummary("No media servers configured — set up Plex or Jellyfin first");
+        setSummary(t("adminManage.library.fill.noServers"));
         scheduleReset(15_000);
         return;
       }
@@ -66,12 +69,12 @@ export function MasterDbFillButton({
               | { scanned?: { movies: number; tv: number }; error?: string }
               | null;
             if (!res.ok || data?.error) {
-              return { ok: false, text: `${name} ${data?.error ?? `failed (${res.status})`}` };
+              return { ok: false, text: `${name} ${data?.error ?? t("adminManage.library.btn.failedStatus", { status: res.status })}` };
             }
             const count = (data?.scanned?.movies ?? 0) + (data?.scanned?.tv ?? 0);
-            return { ok: true, text: `${name} ${count.toLocaleString("en-US")} items` };
+            return { ok: true, text: `${name} ${t("adminManage.library.btn.items", { count, formatted: count.toLocaleString(locale) })}` };
           } catch {
-            return { ok: false, text: `${name} network error` };
+            return { ok: false, text: `${name} ${t("adminManage.library.btn.networkError")}` };
           }
         }),
       );
@@ -80,7 +83,7 @@ export function MasterDbFillButton({
       // stop rather than running phase 2 over nothing and calling it a success.
       if (!outcomes.some((o) => o.ok)) {
         setPhase("error");
-        setSummary(`Library sync failed — ${outcomes.map((o) => o.text).join(" · ")}`);
+        setSummary(t("adminManage.library.fill.libraryFailedWith", { detail: outcomes.map((o) => o.text).join(" · ") }));
         scheduleReset(15_000);
         return;
       }
@@ -91,7 +94,7 @@ export function MasterDbFillButton({
       libraryDegraded = outcomes.some((o) => !o.ok);
     } catch {
       setPhase("error");
-      setSummary("Library sync failed — check server logs");
+      setSummary(t("adminManage.library.fill.libraryFailed"));
       scheduleReset(15_000);
       return;
     }
@@ -102,7 +105,7 @@ export function MasterDbFillButton({
       const warmData = (await warmRes.json().catch(() => ({}))) as { fetched?: number; backfilled?: number; skipped?: number; failed?: number; error?: string };
       if (!warmRes.ok || warmData.error) {
         setPhase("error");
-        setSummary(warmData.error ?? `TMDB warm failed (${warmRes.status})`);
+        setSummary(warmData.error ?? t("adminManage.library.fill.warmFailedStatus", { status: warmRes.status }));
         scheduleReset(15_000);
         return;
       }
@@ -114,11 +117,11 @@ export function MasterDbFillButton({
       const skipped    = warmData.skipped    ?? 0;
       const failed     = warmData.failed     ?? 0;
       const tmdbParts: string[] = [];
-      if (fetched    > 0) tmdbParts.push(`${fetched.toLocaleString("en-US")} fetched`);
-      if (backfilled > 0) tmdbParts.push(`${backfilled.toLocaleString("en-US")} backfilled`);
-      if (skipped    > 0) tmdbParts.push(`${skipped.toLocaleString("en-US")} already cached`);
-      if (failed     > 0) tmdbParts.push(`${failed.toLocaleString("en-US")} failed`);
-      parts.push(`TMDB: ${tmdbParts.join(", ") || "0 items"}`);
+      if (fetched    > 0) tmdbParts.push(t("adminManage.library.fill.fetched", { value: fetched.toLocaleString(locale) }));
+      if (backfilled > 0) tmdbParts.push(t("adminManage.library.fill.backfilled", { value: backfilled.toLocaleString(locale) }));
+      if (skipped    > 0) tmdbParts.push(t("adminManage.library.fill.cached", { value: skipped.toLocaleString(locale) }));
+      if (failed     > 0) tmdbParts.push(t("adminManage.library.fill.failed", { value: failed.toLocaleString(locale) }));
+      parts.push(`TMDB: ${tmdbParts.join(", ") || t("adminManage.library.btn.items", { count: 0, formatted: "0" })}`);
       // A summary that names a failed server or failed TMDB items must not
       // render green — the two together read as "this worked" over the top of
       // "this did not".
@@ -126,7 +129,7 @@ export function MasterDbFillButton({
       setSummary(parts.join(" · "));
     } catch {
       setPhase("error");
-      setSummary("TMDB warm failed — check server logs");
+      setSummary(t("adminManage.library.fill.warmFailed"));
     }
     scheduleReset(20_000);
   }
@@ -138,14 +141,14 @@ export function MasterDbFillButton({
           <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
           <div className="space-y-1.5">
             <p className="text-sm font-medium text-zinc-100">
-              This will re-scan your entire Plex and Jellyfin libraries, then fetch TMDB metadata for every item.
+              {t("adminManage.library.fill.confirmTitle")}
             </p>
             <ul className="text-xs text-zinc-400 space-y-0.5 list-disc list-inside">
-              <li>Phase 1 — full library scan (fills contentRating, addedAt, communityRating)</li>
-              <li>Phase 2 — TMDB metadata warm (populates TmdbMediaCore table)</li>
+              <li>{t("adminManage.library.fill.phase1Desc")}</li>
+              <li>{t("adminManage.library.fill.phase2Desc")}</li>
             </ul>
             <p className="text-xs text-amber-400">
-              Large libraries may take several minutes. Intended for initial setup — routine syncs handle this automatically going forward.
+              {t("adminManage.library.fill.confirmNote")}
             </p>
           </div>
         </div>
@@ -155,7 +158,7 @@ export function MasterDbFillButton({
             onClick={handleFill}
             className="bg-amber-600 text-black hover:bg-amber-600/90 h-7 px-4 text-xs"
           >
-            Run Full Fill
+            {t("adminManage.library.fill.run")}
           </Button>
           <Button
             size="sm"
@@ -163,7 +166,7 @@ export function MasterDbFillButton({
             onClick={() => setPhase("idle")}
             className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-7 px-3 text-xs"
           >
-            Cancel
+            {t("adminManage.common.cancel")}
           </Button>
         </div>
       </div>
@@ -172,8 +175,8 @@ export function MasterDbFillButton({
 
   const loading = phase === "phase1" || phase === "phase2";
   const phaseLabel =
-    phase === "phase1" ? "Syncing libraries (1/2)…" :
-    phase === "phase2" ? "Warming TMDB cache (2/2)…" :
+    phase === "phase1" ? t("adminManage.library.fill.phase1") :
+    phase === "phase2" ? t("adminManage.library.fill.phase2") :
     null;
 
   return (
@@ -189,7 +192,7 @@ export function MasterDbFillButton({
           {loading
             ? <Loader2 className="w-4 h-4 animate-spin" />
             : <Database className="w-4 h-4" />}
-          {phaseLabel ?? "Initial DB Fill"}
+          {phaseLabel ?? t("adminManage.library.fill.button")}
         </Button>
         {summary && (
           <span className={`text-xs ${phase === "error" ? "text-red-400" : "text-green-400"}`}>
@@ -199,7 +202,7 @@ export function MasterDbFillButton({
       </div>
       {phase === "idle" && (
         <p className="text-xs text-zinc-500">
-          Full library scan + TMDB metadata seed. One-time operation for new installs.
+          {t("adminManage.library.fill.hint")}
         </p>
       )}
     </div>

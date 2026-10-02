@@ -7,6 +7,7 @@ import { FixMatchButton } from "@/components/admin/fix-match-button";
 import { posterUrl } from "@/lib/tmdb-types";
 import { runFixMatch } from "@/lib/client/fix-match";
 import { mediaInstanceLabel } from "@/lib/media-instances";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 interface RequestSummary {
   total: number;
@@ -89,9 +90,10 @@ function MediaCard({
   highlight?: boolean;
   server?: "plex" | "jellyfin";
 }) {
+  const t = useT();
   const thumb        = posterUrl(item.posterPath, "w342");
   const displayTitle = item.title || `TMDB #${item.tmdbId}`;
-  const typeLabel    = item.mediaType === "MOVIE" ? "MOVIE" : "TV";
+  const typeLabel    = item.mediaType === "MOVIE" ? t("adminManage.library.diff.movie") : t("adminManage.library.diff.tv");
   const arrName      = item.mediaType === "MOVIE" ? "Radarr" : "Sonarr";
 
   // The default instance keeps the exact legacy id so any existing
@@ -141,7 +143,7 @@ function MediaCard({
               fontSize: 9,
             }}
           >
-            POSTER
+            {t("adminManage.library.diff.poster")}
           </div>
         )}
       </div>
@@ -239,7 +241,7 @@ function MediaCard({
             {item.relPath}
             {item.relPathFromArr && (
               <span className="not-italic" style={{ fontFamily: "inherit", color: "var(--ds-fg-disabled)", marginLeft: 6 }}>
-                (Sonarr path)
+                {t("adminManage.library.diff.sonarrPath")}
               </span>
             )}
           </p>
@@ -248,7 +250,7 @@ function MediaCard({
         {item.arrMismatch && item.arrTmdbId !== null ? (
           <div style={{ marginTop: 2 }} className="flex items-center gap-2 flex-wrap">
             <span className="ds-mono" style={{ fontSize: 10, color: "var(--ds-warning)" }}>
-              {arrName}: TMDB #{item.arrTmdbId} ⚠ MISMATCH
+              {t("adminManage.library.diff.arrMismatch", { arr: arrName, id: item.arrTmdbId })}
             </span>
             {server && (
               <FixMatchButton
@@ -258,7 +260,7 @@ function MediaCard({
                 mediaType={item.mediaType}
                 correctTmdbId={item.arrTmdbId}
                 arrTmdbId={item.arrTmdbId}
-                label={`Fix ${server === "plex" ? "Plex" : "Jellyfin"} → #${item.arrTmdbId}`}
+                label={t("adminManage.library.diff.fixShort", { server: server === "plex" ? "Plex" : "Jellyfin", id: item.arrTmdbId })}
               />
             )}
           </div>
@@ -268,7 +270,7 @@ function MediaCard({
           </span>
         ) : item.relPath ? (
           <span className="ds-mono" style={{ marginTop: 2, fontSize: 10, color: "var(--ds-fg-subtle)" }}>
-            Not in {arrName}
+            {t("adminManage.library.diff.notInArr", { arr: arrName })}
           </span>
         ) : null}
 
@@ -278,7 +280,7 @@ function MediaCard({
               className="ds-mono uppercase"
               style={{ fontSize: 10, color: "var(--ds-fg-subtle)", letterSpacing: "0.04em" }}
             >
-              {item.requests.total} request{item.requests.total !== 1 ? "s" : ""}
+              {t("adminManage.library.diff.requests", { count: item.requests.total })}
             </span>
             {item.requests.statuses.map((s) => (
               <span
@@ -286,7 +288,7 @@ function MediaCard({
                 className={statusChip(s)}
                 style={{ fontSize: 9.5, padding: "1px 6px" }}
               >
-                {s}
+                {t(`requests.status.${s.toLowerCase()}`)}
               </span>
             ))}
           </div>
@@ -404,6 +406,7 @@ function sideLabel(service: "plex" | "jellyfin", serverInstance: string): string
 }
 
 function BadMatchCard({ match }: { match: ClientBadMatch }) {
+  const t = useT();
   const { arrVerdict, arrTmdbId } = match;
   const plexCorrectId     = arrTmdbId ?? match.jellyfin.tmdbId;
   const jellyfinCorrectId = arrTmdbId ?? match.plex.tmdbId;
@@ -440,8 +443,8 @@ function BadMatchCard({ match }: { match: ClientBadMatch }) {
         >
           <span style={{ color: "var(--ds-success)", fontSize: 12 }}>✓</span>
           <p style={{ margin: 0, fontSize: 11, color: "var(--ds-success)" }}>
-            Radarr/Sonarr confirms TMDB #{arrTmdbId} is correct —{" "}
-            <span className="font-semibold capitalize">{arrVerdict}</span> has the wrong match.
+            {t("adminManage.library.diff.arrConfirms", { id: arrTmdbId })}{" "}
+            <span className="font-semibold capitalize">{arrVerdict}</span> {t("adminManage.library.diff.hasWrongMatch")}
           </p>
         </div>
       ) : (
@@ -458,8 +461,8 @@ function BadMatchCard({ match }: { match: ClientBadMatch }) {
           <span style={{ color: "var(--ds-fg-subtle)", fontSize: 12 }}>?</span>
           <p style={{ margin: 0, fontSize: 11, color: "var(--ds-fg-muted)" }}>
             {arrTmdbId === null
-              ? "Radarr/Sonarr doesn't have this file — both servers shown, pick the correct one."
-              : "Both servers disagree with Radarr/Sonarr — manual review needed."}
+              ? t("adminManage.library.diff.arrMissing")
+              : t("adminManage.library.diff.arrDisagree")}
           </p>
         </div>
       )}
@@ -484,16 +487,16 @@ function BadMatchCard({ match }: { match: ClientBadMatch }) {
                 mediaType={match.plex.mediaType}
                 correctTmdbId={plexCorrectId}
                 arrTmdbId={match.arrTmdbId}
-                label={`Fix Plex → TMDB #${plexCorrectId}`}
+                label={t("adminManage.library.diff.fix", { server: "Plex", id: plexCorrectId })}
               />
             ) : (
               <span className="ds-mono" style={{ fontSize: 9.5, color: "var(--ds-fg-subtle)" }}>
-                Re-sync to enable fix
+                {t("adminManage.library.diff.resyncToFix")}
               </span>
             )
           ) : (
             <span className="ds-mono" style={{ fontSize: 9.5, color: "var(--ds-success)" }}>
-              Correct match ✓
+              {t("adminManage.library.diff.correctMatch")}
             </span>
           )}
         </div>
@@ -517,16 +520,16 @@ function BadMatchCard({ match }: { match: ClientBadMatch }) {
                 mediaType={match.jellyfin.mediaType}
                 correctTmdbId={jellyfinCorrectId}
                 arrTmdbId={match.arrTmdbId}
-                label={`Fix Jellyfin → TMDB #${jellyfinCorrectId}`}
+                label={t("adminManage.library.diff.fix", { server: "Jellyfin", id: jellyfinCorrectId })}
               />
             ) : (
               <span className="ds-mono" style={{ fontSize: 9.5, color: "var(--ds-fg-subtle)" }}>
-                Re-sync to enable fix
+                {t("adminManage.library.diff.resyncToFix")}
               </span>
             )
           ) : (
             <span className="ds-mono" style={{ fontSize: 9.5, color: "var(--ds-success)" }}>
-              Correct match ✓
+              {t("adminManage.library.diff.correctMatch")}
             </span>
           )}
         </div>
@@ -536,6 +539,7 @@ function BadMatchCard({ match }: { match: ClientBadMatch }) {
 }
 
 function FixAllArrButton({ matches }: { matches: ClientBadMatch[] }) {
+  const t = useT();
   const router  = useRouter();
   const fixable = matches.filter((m) => m.arrVerdict !== null && m.arrTmdbId !== null);
 
@@ -595,9 +599,9 @@ function FixAllArrButton({ matches }: { matches: ClientBadMatch[] }) {
         color: "var(--ds-success)",
       }}
     >
-      {state === "idle"    && `Fix all ${fixable.length} where Arr agrees`}
-      {state === "running" && `Fixing ${progress.done}/${progress.total}…`}
-      {state === "done"    && `Done — ${progress.total - progress.failed}/${progress.total} fixed`}
+      {state === "idle"    && t("adminManage.library.diff.fixAll", { count: fixable.length })}
+      {state === "running" && t("adminManage.library.diff.fixing", { done: progress.done, total: progress.total })}
+      {state === "done"    && t("adminManage.library.diff.fixDone", { fixed: progress.total - progress.failed, total: progress.total })}
     </button>
   );
 }
@@ -661,11 +665,13 @@ function DiffColumn({
   highlightServer: string | null;
   highlightKey: string | null;
 }) {
+  const t = useT();
+  const locale = useLocale();
   const otherConfiguredMsg = otherServer === "plex"
-    ? "Plex has all of Jellyfin's content."
-    : "Jellyfin has all of Plex's content.";
+    ? t("adminManage.library.diff.plexHasAll")
+    : t("adminManage.library.diff.jellyfinHasAll");
   const emptyMsg = !configured
-    ? `${server === "plex" ? "Plex" : "Jellyfin"} not synced.`
+    ? t("adminManage.library.diff.notSynced", { server: server === "plex" ? "Plex" : "Jellyfin" })
     : otherConfiguredMsg;
 
   return (
@@ -690,8 +696,9 @@ function DiffColumn({
           className="ds-mono"
           style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", letterSpacing: "0.04em" }}
         >
-          {items.length} ITEM{items.length !== 1 ? "S" : ""}
-          {items.length !== totalBefore ? ` / ${totalBefore}` : ""}
+          {items.length !== totalBefore
+            ? t("adminManage.library.diff.itemsOf", { count: items.length, total: totalBefore })
+            : t("adminManage.library.diff.items", { count: items.length })}
         </span>
       </div>
 
@@ -701,8 +708,7 @@ function DiffColumn({
           className="ds-mono"
           style={{ fontSize: 11, color: "var(--ds-fg-subtle)", marginBottom: 8 }}
         >
-          Showing the first {RENDER_CAP.toLocaleString("en-US")} of{" "}
-          {items.length.toLocaleString("en-US")} — narrow the search to see the rest.
+          {t("adminManage.library.diff.renderCap", { cap: RENDER_CAP.toLocaleString(locale), total: items.length.toLocaleString(locale) })}
         </p>
       )}
       {items.length === 0 ? (
@@ -716,7 +722,7 @@ function DiffColumn({
             fontSize: 13,
           }}
         >
-          {filtersActive ? "No items match your filters." : emptyMsg}
+          {filtersActive ? t("adminManage.library.diff.noFilterMatch") : emptyMsg}
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -761,6 +767,7 @@ export function LibraryDiffClient({
   highlightServer:    string | null;
   highlightKey:       string | null;
 }) {
+  const t = useT();
   const [search,        setSearch]        = useState("");
   const [arrFilter,     setArrFilter]     = useState<ArrFilter>("all");
   const [requestFilter, setRequestFilter] = useState<RequestFilter>("all");
@@ -800,10 +807,10 @@ export function LibraryDiffClient({
   const filtersActive = !!search.trim() || arrFilter !== "all" || requestFilter !== "all";
 
   const arrFilterOptions: { value: ArrFilter; label: string }[] = [
-    { value: "all",        label: "All" },
-    { value: "mismatch",   label: "Arr mismatch" },
-    { value: "not_in_arr", label: "Not in Arr" },
-    { value: "matches",    label: "Arr matches" },
+    { value: "all",        label: t("adminManage.library.diff.filter.all") },
+    { value: "mismatch",   label: t("adminManage.library.diff.filter.mismatch") },
+    { value: "not_in_arr", label: t("adminManage.library.diff.filter.notInArr") },
+    { value: "matches",    label: t("adminManage.library.diff.filter.matches") },
   ];
 
   return (
@@ -811,8 +818,8 @@ export function LibraryDiffClient({
       <div className="flex flex-wrap items-center gap-2">
         <input
           type="search"
-          placeholder="Search title or path…"
-          aria-label="Search title or path"
+          placeholder={t("adminManage.library.diff.searchPlaceholder")}
+          aria-label={t("adminManage.library.diff.search")}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="focus:outline-none"
@@ -844,7 +851,7 @@ export function LibraryDiffClient({
           active={requestFilter === "has_requests"}
           onClick={() => setRequestFilter((f) => (f === "all" ? "has_requests" : "all"))}
         >
-          Has requests
+          {t("adminManage.library.diff.filter.hasRequests")}
         </ArrFilterButton>
       </div>
 
@@ -864,14 +871,16 @@ export function LibraryDiffClient({
                 fontWeight: 600,
               }}
             >
-              Suspected bad matches
+              {t("adminManage.library.diff.badMatches")}
             </span>
             <span
               className="ds-mono"
               style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", letterSpacing: "0.04em" }}
             >
-              {filteredBadMatches.length} ITEM{filteredBadMatches.length !== 1 ? "S" : ""}
-              {filteredBadMatches.length !== badMatches.length && ` / ${badMatches.length}`} · SAME FILE · DIFFERENT TMDB ID
+              {filteredBadMatches.length !== badMatches.length
+                ? t("adminManage.library.diff.itemsOf", { count: filteredBadMatches.length, total: badMatches.length })
+                : t("adminManage.library.diff.items", { count: filteredBadMatches.length })}
+              {" · "}{t("adminManage.library.diff.badMatchesHint")}
             </span>
             <div style={{ marginLeft: "auto" }}>
               <FixAllArrButton matches={filteredBadMatches} />
@@ -892,7 +901,7 @@ export function LibraryDiffClient({
 
       <div className="ds-two-up" style={{ gap: 20 }}>
         <DiffColumn
-          label="Plex only"
+          label={t("adminManage.library.diff.plexOnly")}
           tint={PLEX_TINT}
           items={filteredPlex}
           totalBefore={onlyPlex.length}
@@ -904,7 +913,7 @@ export function LibraryDiffClient({
           highlightKey={highlightKey}
         />
         <DiffColumn
-          label="Jellyfin only"
+          label={t("adminManage.library.diff.jellyfinOnly")}
           tint={JELLYFIN_TINT}
           items={filteredJellyfin}
           totalBefore={onlyJellyfin.length}

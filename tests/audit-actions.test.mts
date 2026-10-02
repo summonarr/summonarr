@@ -9,6 +9,7 @@
 // group split and unique labels that the filter dropdown relies on.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { AuditAction } from "@/generated/prisma";
 import {
   AUDIT_ACTIONS,
@@ -89,4 +90,19 @@ test("spot checks: security-salient labels and groups are exact", () => {
   assert.equal(ACTION_GROUP.AUTH_LOGIN, "auth");
   assert.equal(ACTION_GROUP.USER_DELETE, "admin");
   assert.equal(ACTION_GROUP.LIBRARY_SYNC, "system");
+});
+
+test("every action has a translated badge label in every catalog, matching ACTION_LABELS in English", () => {
+  // The table renders `adminManage.audit.action.<ACTION>` — a missing key would
+  // show the raw dotted id. English must say exactly what ACTION_LABELS says so
+  // the export (which reads ACTION_LABELS) and the screen agree.
+  const read = (locale: string): Record<string, string> =>
+    JSON.parse(readFileSync(new URL(`../src/lib/i18n/messages/${locale}/adminManage.json`, import.meta.url), "utf8"));
+  const en = read("en");
+  const es = read("es");
+  for (const action of AUDIT_ACTIONS) {
+    const key = `adminManage.audit.action.${action}`;
+    assert.equal(en[key], ACTION_LABELS[action].label, `en ${key}`);
+    assert.ok(typeof es[key] === "string" && es[key].trim() !== "", `es ${key}`);
+  }
 });

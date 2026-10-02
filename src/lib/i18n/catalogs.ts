@@ -13,6 +13,7 @@
 
 import type { Locale } from "./locales";
 import type { Messages } from "./translate";
+import enAdminManage from "./messages/en/adminManage.json";
 import enAdminQueue from "./messages/en/adminQueue.json";
 import enAppearance from "./messages/en/appearance.json";
 import enAuth from "./messages/en/auth.json";
@@ -29,6 +30,7 @@ import enSearch from "./messages/en/search.json";
 import enSettings from "./messages/en/settings.json";
 import enSettingsForms from "./messages/en/settingsForms.json";
 import enShared from "./messages/en/shared.json";
+import esAdminManage from "./messages/es/adminManage.json";
 import esAdminQueue from "./messages/es/adminQueue.json";
 import esAppearance from "./messages/es/appearance.json";
 import esAuth from "./messages/es/auth.json";
@@ -47,8 +49,8 @@ import esSettingsForms from "./messages/es/settingsForms.json";
 import esShared from "./messages/es/shared.json";
 
 export const CATALOGS: Record<Locale, Messages> = {
-  en: { ...enAdminQueue, ...enAppearance, ...enAuth, ...enBrowse, ...enDetail, ...enHome, ...enMedia, ...enNav, ...enPersonal, ...enProfile, ...enRequest, ...enRequests, ...enSearch, ...enSettings, ...enSettingsForms, ...enShared },
-  es: { ...esAdminQueue, ...esAppearance, ...esAuth, ...esBrowse, ...esDetail, ...esHome, ...esMedia, ...esNav, ...esPersonal, ...esProfile, ...esRequest, ...esRequests, ...esSearch, ...esSettings, ...esSettingsForms, ...esShared },
+  en: { ...enAdminManage, ...enAdminQueue, ...enAppearance, ...enAuth, ...enBrowse, ...enDetail, ...enHome, ...enMedia, ...enNav, ...enPersonal, ...enProfile, ...enRequest, ...enRequests, ...enSearch, ...enSettings, ...enSettingsForms, ...enShared },
+  es: { ...esAdminManage, ...esAdminQueue, ...esAppearance, ...esAuth, ...esBrowse, ...esDetail, ...esHome, ...esMedia, ...esNav, ...esPersonal, ...esProfile, ...esRequest, ...esRequests, ...esSearch, ...esSettings, ...esSettingsForms, ...esShared },
 };
 
 export const FALLBACK_MESSAGES: Messages = CATALOGS.en;
