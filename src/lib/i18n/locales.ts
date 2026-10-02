@@ -6,7 +6,12 @@
 // routes, and prefixing every path would break the native client's API paths,
 // webhook URLs and every bookmarked link.
 
-export const LOCALES = ["en", "es"] as const;
+// "pt" is Brazilian Portuguese and "zh" Simplified Chinese — the defaults Intl
+// picks for those bare tags, so dates and numbers format to match the copy.
+// Every catalog must carry exactly English's keys, plural variants included,
+// so a language whose plurals need categories English lacks (few/many: ru, pl…)
+// can't be added without first widening that rule.
+export const LOCALES = ["en", "es", "fr", "de", "pt", "it", "zh"] as const;
 export type Locale = (typeof LOCALES)[number];
 
 export const DEFAULT_LOCALE: Locale = "en";
@@ -20,6 +25,11 @@ export const LOCALE_COOKIE = "summonarr-locale";
 export const LOCALE_LABELS: Record<Locale, string> = {
   en: "English",
   es: "Español",
+  fr: "Français",
+  de: "Deutsch",
+  pt: "Português (Brasil)",
+  it: "Italiano",
+  zh: "简体中文",
 };
 
 export function isLocale(value: unknown): value is Locale {

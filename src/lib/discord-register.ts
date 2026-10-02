@@ -2,11 +2,13 @@ import "server-only";
 import { createHash } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
-import { DISCORD_SLASH_COMMANDS } from "@/lib/discord-commands";
+import { DISCORD_SLASH_COMMANDS, type DiscordSlashCommand } from "@/lib/discord-commands";
+import { LOCALES, type Locale } from "@/lib/i18n/locales";
+import { CATALOGS } from "@/lib/i18n/catalogs";
 
 // Shared Discord slash-command registration. The admin "Register commands"
 // button, the settings save, and the boot-time self-heal below all PUT the canonical
-// DISCORD_SLASH_COMMANDS array (a FULL REPLACE) to the guild scope when a Guild
+// DISCORD_SLASH_COMMANDS array, with its localizations, (a FULL REPLACE) to the guild scope when a Guild
 // ID is set — instant, per-server — or the global scope otherwise.
 
 const DISCORD_API = "https://discord.com/api/v10";
@@ -16,6 +18,96 @@ const DISCORD_HOSTS = ["discord.com"];
 // the schema that was last registered successfully, keyed so the boot sync can
 // tell "already current" from "needs a re-push" without a Discord round-trip.
 export const DISCORD_SCHEMA_HASH_KEY = "discordCommandsSchemaHash";
+
+// ── Localized picker text ───────────────────────────────────────────────────
+// Discord shows each user the command descriptions (and choice labels) in their
+// client language when the schema carries *_localizations. Only DESCRIPTIONS
+// and CHOICE LABELS are localized — never command or option NAMES: those are
+// what people type (the profile page tells users to run `/link token:<code>`),
+// and a localized name would make that instruction wrong for half the server.
+// Interactions are dispatched on the default name either way.
+//
+// The English text stays in DISCORD_SLASH_COMMANDS (the dependency-free schema);
+// each localized string comes from the catalog key named here, whose English
+// value must equal the schema's (pinned by tests/discord-commands.test.mts).
+
+// Our locale → Discord's locale codes (https://discord.com/developers/docs/reference#locales).
+const DISCORD_LOCALES: Record<Exclude<Locale, "en">, readonly string[]> = {
+  es: ["es-ES", "es-419"],
+  fr: ["fr"],
+  de: ["de"],
+  pt: ["pt-BR"],
+  it: ["it"],
+  zh: ["zh-CN"],
+};
+
+// command → its description key, plus per-option description and choice keys.
+export const DISCORD_COMMAND_I18N: Record<string, {
+  description: string;
+  options?: Record<string, { description: string; choices?: Record<string, string> }>;
+}> = {
+  request: {
+    description: "notify.discordCommand.request.description",
+    options: {
+      type: {
+        description: "notify.discordCommand.request.type.description",
+        choices: { movie: "notify.discordCommand.request.type.movie", tv: "notify.discordCommand.request.type.tv" },
+      },
+      query: { description: "notify.discordCommand.request.query.description" },
+    },
+  },
+  status: { description: "notify.discordCommand.status.description" },
+  link: {
+    description: "notify.discordCommand.link.description",
+    options: { token: { description: "notify.discordCommand.link.token.description" } },
+  },
+};
+
+function localizationsFor(key: string | undefined): Record<string, string> | undefined {
+  if (!key) return undefined;
+  const out: Record<string, string> = {};
+  for (const locale of LOCALES) {
+    if (locale === "en") continue;
+    const text = CATALOGS[locale][key];
+    if (!text) continue;
+    for (const code of DISCORD_LOCALES[locale]) out[code] = text;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+export function localizeDiscordCommands(commands: readonly DiscordSlashCommand[]): unknown[] {
+  return commands.map((cmd) => {
+    const meta = DISCORD_COMMAND_I18N[cmd.name];
+    return {
+      ...cmd,
+      ...(localizationsFor(meta?.description) ? { description_localizations: localizationsFor(meta?.description) } : {}),
+      ...(cmd.options
+        ? {
+            options: cmd.options.map((opt) => {
+              const om = meta?.options?.[opt.name];
+              const desc = localizationsFor(om?.description);
+              return {
+                ...opt,
+                ...(desc ? { description_localizations: desc } : {}),
+                ...(opt.choices
+                  ? {
+                      choices: opt.choices.map((c) => {
+                        const names = localizationsFor(om?.choices?.[c.value]);
+                        return names ? { ...c, name_localizations: names } : c;
+                      }),
+                    }
+                  : {}),
+              };
+            }),
+          }
+        : {}),
+    };
+  });
+}
+
+// What every registration path publishes: the canonical schema plus its
+// localizations. Computed once — the catalogs are static.
+export const REGISTERED_DISCORD_COMMANDS = localizeDiscordCommands(DISCORD_SLASH_COMMANDS);
 
 export function discordCommandsUrl(clientId: string, guildId?: string | null): string {
   return guildId
@@ -27,7 +119,7 @@ export function putDiscordCommands(botToken: string, clientId: string, guildId?:
   return safeFetchTrusted(discordCommandsUrl(clientId, guildId), {
     method: "PUT",
     headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify(DISCORD_SLASH_COMMANDS),
+    body: JSON.stringify(REGISTERED_DISCORD_COMMANDS),
     allowedHosts: DISCORD_HOSTS,
     timeoutMs: 15_000,
   });
@@ -38,7 +130,7 @@ export function putDiscordCommands(botToken: string, clientId: string, guildId?:
 // identical.
 export function discordSchemaHash(guildId: string | null): string {
   return createHash("sha256")
-    .update(JSON.stringify(DISCORD_SLASH_COMMANDS))
+    .update(JSON.stringify(REGISTERED_DISCORD_COMMANDS))
     .update(guildId ? `guild:${guildId}` : "global")
     .digest("hex");
 }

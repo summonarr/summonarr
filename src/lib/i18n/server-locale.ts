@@ -39,11 +39,17 @@ export function translatorFor(locale: Locale): Translator {
 // A request with none of these (every unit test) gets the instance default,
 // which is English unless SUMMONARR_DEFAULT_LOCALE says otherwise.
 export function localeForRequest(req: Request): Locale {
-  const fromCookie = localeCookieFrom(req.headers.get("cookie"));
+  return localeForHeaders(req.headers);
+}
+
+// The same rule over a bare header bag — next/headers' headers() in a server
+// component or helper that has no Request in hand (getContentLocale).
+export function localeForHeaders(h: { get(name: string): string | null; has(name: string): boolean }): Locale {
+  const fromCookie = localeCookieFrom(h.get("cookie"));
   if (isLocale(fromCookie)) return fromCookie;
   const fallback = instanceDefaultLocale();
-  if (req.headers.has("x-summonarr-client")) return fallback;
-  return negotiateLocale(req.headers.get("accept-language"), fallback);
+  if (h.has("x-summonarr-client")) return fallback;
+  return negotiateLocale(h.get("accept-language"), fallback);
 }
 
 export function translatorForRequest(req: Request): Translator {

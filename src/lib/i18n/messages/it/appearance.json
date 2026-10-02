@@ -1,0 +1,14 @@
+{
+  "appearance.theme": "Tema",
+  "appearance.dark": "Scuro",
+  "appearance.light": "Chiaro",
+  "appearance.accent": "Colore principale",
+  "appearance.accentColor": "Colore principale",
+  "appearance.accent.indigo": "Indaco",
+  "appearance.accent.amber": "Ambra",
+  "appearance.accent.emerald": "Smeraldo",
+  "appearance.accent.cyan": "Ciano",
+  "appearance.accent.rose": "Rosa",
+  "appearance.accent.mono": "Mono",
+  "appearance.language": "Lingua"
+}

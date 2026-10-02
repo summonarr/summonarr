@@ -5,6 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { LOCALES } from "../src/lib/i18n/locales.ts";
 import {
   Permission,
   KNOWN_MASK,
@@ -365,7 +366,7 @@ test("every permission bit is editable in the admin permission editor", () => {
 test("every editable permission bit has a translated label in every catalog", () => {
   // The editor renders `adminManage.perm.bit.<KEY>` — a dynamic key the i18n
   // usage scan can't see, so a bit added without a label would show the raw id.
-  for (const locale of ["en", "es"]) {
+  for (const locale of LOCALES) {
     const catalog = JSON.parse(readFileSync(`src/lib/i18n/messages/${locale}/adminManage.json`, "utf8")) as Record<string, string>;
     for (const key of Object.keys(Permission)) {
       if (key === "ADMIN") continue;

@@ -17,6 +17,7 @@ import {
   ACTION_LABELS,
   type AuditGroup,
 } from "../src/lib/audit-actions.ts";
+import { LOCALES } from "../src/lib/i18n/locales.ts";
 
 const ENUM_VALUES = Object.values(AuditAction).sort();
 
@@ -99,10 +100,12 @@ test("every action has a translated badge label in every catalog, matching ACTIO
   const read = (locale: string): Record<string, string> =>
     JSON.parse(readFileSync(new URL(`../src/lib/i18n/messages/${locale}/adminManage.json`, import.meta.url), "utf8"));
   const en = read("en");
-  const es = read("es");
+  const others = LOCALES.filter((l) => l !== "en").map((l) => [l, read(l)] as const);
   for (const action of AUDIT_ACTIONS) {
     const key = `adminManage.audit.action.${action}`;
     assert.equal(en[key], ACTION_LABELS[action].label, `en ${key}`);
-    assert.ok(typeof es[key] === "string" && es[key].trim() !== "", `es ${key}`);
+    for (const [locale, cat] of others) {
+      assert.ok(typeof cat[key] === "string" && cat[key].trim() !== "", `${locale} ${key}`);
+    }
   }
 });

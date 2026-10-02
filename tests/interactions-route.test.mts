@@ -479,7 +479,7 @@ test("replies follow the invoker's Discord locale (es-ES → Spanish); no locale
 
 test("with no usable Discord locale, the linked account's stored language is used", async () => {
   appUsers = [{ id: "u-es", email: "es@example.com", discordId: "123456789012345678", locale: "es" }];
-  await post({ ...command("status"), locale: "fr" }); // unsupported → fall back to the linked user
+  await post({ ...command("status"), locale: "ru" }); // unsupported → fall back to the linked user
   await waitFor(() => discordEdits.length > 0);
   // The linked user has no requests in this harness.
   assert.equal(discordEdits[0].content, "Todavía no tienes solicitudes.");

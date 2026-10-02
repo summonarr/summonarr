@@ -170,6 +170,19 @@ Summonarr is self-hosted: the developer operates no servers and collects no data
 
 ## Changelog
 
+### Unreleased
+
+**Added**
+
+- **Five more languages:** French, German, Portuguese (Brazil), Italian and Simplified Chinese, alongside English and Spanish. Pick one from the appearance menu; browsers are matched automatically, and `SUMMONARR_DEFAULT_LOCALE` accepts the new codes (`fr`, `de`, `pt`, `it`, `zh`).
+- **Movie and TV details in your language.** Titles, overviews, taglines, genres and episode names follow the language you picked, wherever TMDB has a translation; anything it lacks stays in English. Requests, notifications and Radarr/Sonarr keep using the English title.
+- **Original language and country** on detail pages are named in your language.
+- **Discord slash commands** show their descriptions and the Movie / TV Show choices in each Discord user's language. Command names stay in English, so `/link token:<code>` still works for everyone. Existing installs re-register the commands on their next restart.
+
+**Fixed**
+
+- German emails lowercased "Film" and "Serie" mid-sentence.
+
 ### v0.28.0
 
 **Added**

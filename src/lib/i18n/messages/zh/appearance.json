@@ -1,0 +1,14 @@
+{
+  "appearance.theme": "主题",
+  "appearance.dark": "深色",
+  "appearance.light": "浅色",
+  "appearance.accent": "强调色",
+  "appearance.accentColor": "强调色",
+  "appearance.accent.indigo": "靛蓝",
+  "appearance.accent.amber": "琥珀",
+  "appearance.accent.emerald": "翡翠绿",
+  "appearance.accent.cyan": "青色",
+  "appearance.accent.rose": "玫瑰红",
+  "appearance.accent.mono": "单色",
+  "appearance.language": "语言"
+}

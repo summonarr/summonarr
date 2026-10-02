@@ -8,8 +8,10 @@ import { getBlacklistSet, blacklistKey } from "./blacklist";
 import { getUserHiddenSet } from "./hidden";
 import { getVisibleServerInstancesForUserId } from "./media-visibility";
 import type { TmdbMedia } from "./tmdb-types";
+import { localizeMedia } from "./tmdb-localize";
+import { getContentLocale } from "./i18n/server";
 
-// All five enrichment passes run in parallel against the same input slice; results are merged by
+// All five enrichment passes (plus the content-language overlay) run in parallel against the same input slice; results are merged by
 // composite key so no pass can accidentally overwrite a field written by another.
 export async function attachAllAvailability(
   items: TmdbMedia[],
@@ -40,7 +42,10 @@ export async function attachAllAvailability(
     getVisibleServerInstancesForUserId(userId),
   ]);
 
-  const [withPlex, withJellyfin, withArr, withRequests, withRatings] = await Promise.all([
+  // The viewer's language for TMDB text (titles, overviews), resolved from the
+  // request like the UI's own language. English — and any call outside a request
+  // scope — is a no-op that returns `items` itself.
+  const [withPlex, withJellyfin, withArr, withRequests, withRatings, localized] = await Promise.all([
     attachPlexAvailability(items, visible.plex),
     attachJellyfinAvailability(items, visible.jellyfin),
     attachArrPending(items, { include4k: options?.show4k ?? false }),
@@ -48,6 +53,7 @@ export async function attachAllAvailability(
     options?.skipRatings
       ? Promise.resolve(items)
       : attachRatingsUnified(items, { blocking: options?.blockRatings ?? false }),
+    getContentLocale().then((locale) => localizeMedia(items, locale)),
   ]);
 
   const plexMap     = new Map(withPlex.map((i)     => [`${i.id}:${i.mediaType}`, i.plexAvailable]));
@@ -55,12 +61,25 @@ export async function attachAllAvailability(
   const arrMap      = new Map(withArr.map((i)       => [`${i.id}:${i.mediaType}`, { arrPending: i.arrPending, arr4kPending: i.arr4kPending, arr4kAvailable: i.arr4kAvailable }]));
   const reqMap      = new Map(withRequests.map((i)  => [`${i.id}:${i.mediaType}`, { requested: i.requested, requestedByMe: i.requestedByMe }]));
   const ratingsMap  = new Map(withRatings.map((i)   => [`${i.id}:${i.mediaType}`, i]));
+  const textMap     = localized === items ? null : new Map(localized.map((i) => [`${i.id}:${i.mediaType}`, i]));
 
   const enriched = items.map((item) => {
     const k = `${item.id}:${item.mediaType}`;
     const arr = arrMap.get(k);
+    const text = textMap?.get(k);
     return {
       ...(ratingsMap.get(k) ?? item),
+      // Only the overlay's own fields — never let it overwrite enrichment.
+      ...(text
+        ? {
+            title: text.title,
+            overview: text.overview,
+            tagline: text.tagline,
+            originalTitle: text.originalTitle,
+            genres: text.genres,
+            genreList: text.genreList,
+          }
+        : {}),
       plexAvailable:     plexMap.get(k)           ?? false,
       jellyfinAvailable: jellyfinMap.get(k)        ?? false,
       arrPending:        arr?.arrPending           ?? false,

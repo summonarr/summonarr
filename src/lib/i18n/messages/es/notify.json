@@ -253,5 +253,13 @@
   "notify.calendar.episodeAirDate": "Fecha de emisión del episodio",
   "notify.calendar.seasonPremiere": "Estreno de temporada",
   "notify.calendar.seasonPremiereSummary": "{title} – Estreno de la temporada {season}",
-  "notify.calendar.newEpisode": "{title} – Nuevo episodio"
+  "notify.calendar.newEpisode": "{title} – Nuevo episodio",
+  "notify.discordCommand.request.description": "Solicita una película o serie para añadirla a la biblioteca",
+  "notify.discordCommand.request.type.description": "Película o serie",
+  "notify.discordCommand.request.type.movie": "Película",
+  "notify.discordCommand.request.type.tv": "Serie",
+  "notify.discordCommand.request.query.description": "Título que buscar",
+  "notify.discordCommand.status.description": "Consulta el estado de tus solicitudes recientes",
+  "notify.discordCommand.link.description": "Vincula tu cuenta de Discord con tu cuenta de Summonarr",
+  "notify.discordCommand.link.token.description": "Token de vinculación de tu página de perfil"
 }

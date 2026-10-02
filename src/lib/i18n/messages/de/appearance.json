@@ -1,0 +1,14 @@
+{
+  "appearance.theme": "Design",
+  "appearance.dark": "Dunkel",
+  "appearance.light": "Hell",
+  "appearance.accent": "Akzent",
+  "appearance.accentColor": "Akzentfarbe",
+  "appearance.accent.indigo": "Indigo",
+  "appearance.accent.amber": "Bernstein",
+  "appearance.accent.emerald": "Smaragd",
+  "appearance.accent.cyan": "Cyan",
+  "appearance.accent.rose": "Rosé",
+  "appearance.accent.mono": "Mono",
+  "appearance.language": "Sprache"
+}

@@ -11,7 +11,7 @@ import { settleLimit } from "@/lib/concurrency";
 import { localeForUser, translatorFor } from "@/lib/i18n/server-locale";
 import type { Locale } from "@/lib/i18n/locales";
 import type { Translator } from "@/lib/i18n/translate";
-import { issueTypeLabelT, mediaLabelT } from "@/lib/notify-i18n";
+import { inlineLabel, issueTypeLabelT, mediaLabelT } from "@/lib/notify-i18n";
 
 // Every email is written in its RECIPIENT's language: the user-facing notifiers
 // take the recipient's stored `locale` (null → the instance default), and the
@@ -500,10 +500,10 @@ export async function notifyAdminsNewRequest(data: {
       const mediaLabel = mediaLabelT(t, data.mediaType);
       const html = richEmailHtml({
         lang,
-        preheader: t("notify.email.newRequest.preheader", { user: data.requestedBy, media: mediaLabel.toLowerCase(), title: data.title }),
+        preheader: t("notify.email.newRequest.preheader", { user: data.requestedBy, media: inlineLabel(mediaLabel, lang.locale), title: data.title }),
         accent: "indigo",
         heading: t("notify.email.newRequest.heading"),
-        subheading: t("notify.email.newRequest.subheading", { media: mediaLabel.toLowerCase() }),
+        subheading: t("notify.email.newRequest.subheading", { media: inlineLabel(mediaLabel, lang.locale) }),
         posterPath: data.posterPath,
         mediaType: data.mediaType,
         details: [
@@ -549,10 +549,10 @@ export async function notifyAdminsNewIssue(data: {
       const issueLabel = issueTypeLabelT(t, data.issueType);
       const html = richEmailHtml({
         lang,
-        preheader: t("notify.email.newIssue.preheader", { user: data.reportedBy, issue: issueLabel.toLowerCase(), title: data.title }),
+        preheader: t("notify.email.newIssue.preheader", { user: data.reportedBy, issue: inlineLabel(issueLabel, lang.locale), title: data.title }),
         accent: "amber",
         heading: t("notify.email.newIssue.heading"),
-        subheading: t("notify.email.newIssue.subheading", { media: mediaLabel.toLowerCase() }),
+        subheading: t("notify.email.newIssue.subheading", { media: inlineLabel(mediaLabel, lang.locale) }),
         posterPath: data.posterPath,
         mediaType: data.mediaType,
         details: [
@@ -674,7 +674,7 @@ export async function notifyUserRequestApprovedEmail(data: {
     const mediaLabel = mediaLabelT(t, data.mediaType);
     const html = richEmailHtml({
       lang,
-      preheader: t("notify.email.approved.preheader", { media: mediaLabel.toLowerCase(), title: data.title }),
+      preheader: t("notify.email.approved.preheader", { media: inlineLabel(mediaLabel, lang.locale), title: data.title }),
       accent: "green",
       heading: t("notify.email.approved.heading"),
       subheading: t("notify.email.approved.subheading", { media: strong(mediaLabel), title: strong(esc(data.title)) }),
@@ -707,7 +707,7 @@ export async function notifyUserRequestDeclinedEmail(data: {
     const mediaLabel = mediaLabelT(t, data.mediaType);
     const html = richEmailHtml({
       lang,
-      preheader: t("notify.email.declined.preheader", { media: mediaLabel.toLowerCase(), title: data.title }),
+      preheader: t("notify.email.declined.preheader", { media: inlineLabel(mediaLabel, lang.locale), title: data.title }),
       accent: "red",
       heading: t("notify.email.declined.heading"),
       subheading: t("notify.email.declined.subheading", { media: strong(mediaLabel), title: strong(esc(data.title)) }),
@@ -781,7 +781,7 @@ export async function notifyAdminsDeletionVoteThreshold(data: {
         preheader: t("notify.email.deletionVote.preheader", { votes: String(data.voteCount), title: data.title }),
         accent: "amber",
         heading: t("notify.email.deletionVote.heading"),
-        subheading: t("notify.email.deletionVote.subheading", { media: mediaLabel.toLowerCase() }),
+        subheading: t("notify.email.deletionVote.subheading", { media: inlineLabel(mediaLabel, lang.locale) }),
         posterPath: data.posterPath,
         mediaType: data.mediaType,
         details: [

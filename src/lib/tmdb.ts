@@ -9,13 +9,14 @@ import { syncTmdbMediaCore, upsertTmdbMediaCore } from "./tmdb-core-sync";
 import { fetchUnifiedRatings } from "./omdb-availability";
 import type { MdblistRatings } from "./mdblist";
 import { tmdbAuth } from "./tmdb-auth";
+import type { Locale } from "./i18n/locales";
 import type {
   TmdbMedia, MediaType, CastMember, PersonDetails, PersonCredit,
   Genre, DiscoverFilters, WatchProvider, TmdbSeason, TmdbEpisode,
 } from "./tmdb-types";
-// languageName is the ONE ISO-639 → English display-name helper (the detail
-// pages use the same export). Don't add a private copy here.
-import { languageName } from "./tmdb-types";
+// languageName / regionName are the ONE ISO-code → display-name helpers (the
+// detail pages use the same exports, in the viewer's locale). Don't add a private copy here.
+import { languageName, regionName } from "./tmdb-types";
 
 // Merge a unified ratings payload (fetchUnifiedRatings) onto a media object.
 // `trailerUrl` must never displace an already-extracted TMDB YouTube trailerKey
@@ -257,17 +258,10 @@ interface PagedResponse<T> {
   total_results: number;
 }
 
-// Best-effort ISO-code → English display name. Intl.DisplayNames is available in the Node runtime;
-// fall back to the raw code if the lookup throws or returns nothing. (The
-// language counterpart is `languageName` from ./tmdb-types.)
-let regionNames: Intl.DisplayNames | null = null;
+// Best-effort ISO-code → English display name (stored in the cache; the detail
+// page localizes from `productionCountryCodes` instead).
 function displayRegion(code: string): string {
-  try {
-    regionNames ??= new Intl.DisplayNames(["en"], { type: "region" });
-    return regionNames.of(code.toUpperCase()) ?? code;
-  } catch {
-    return code;
-  }
+  return regionName(code) ?? code;
 }
 
 function extractKeywords(raw?: RawKeywords): { id: number; name: string }[] | undefined {
@@ -323,6 +317,7 @@ function normalizeMovie(r: RawMovie): TmdbMedia {
   }
   if (r.production_countries?.length) {
     media.productionCountries = r.production_countries.map((c) => c.name || displayRegion(c.iso_3166_1));
+    media.productionCountryCodes = r.production_countries.map((c) => c.iso_3166_1);
     // ISO codes alongside the display names — the anime auto-route matches "JP".
     media.originCountryCodes = r.production_countries.map((c) => c.iso_3166_1);
   }
@@ -366,8 +361,10 @@ function normalizeTV(r: RawTV): TmdbMedia {
   }
   if (r.production_countries?.length) {
     media.productionCountries = r.production_countries.map((c) => c.name || displayRegion(c.iso_3166_1));
+    media.productionCountryCodes = r.production_countries.map((c) => c.iso_3166_1);
   } else if (r.origin_country?.length) {
     media.productionCountries = r.origin_country.map(displayRegion);
+    media.productionCountryCodes = r.origin_country;
   }
   // ISO codes alongside the display names — origin_country IS codes; the anime
   // auto-route matches "JP" against these (the display-name mapping above lost
@@ -887,6 +884,36 @@ export async function getTVCredits(id: number): Promise<CastMember[]> {
   return result;
 }
 
+// The season in another language: TMDB's `language=` answer merged over the
+// English list episode by episode. TMDB fills an untranslated episode name with
+// a generic "Épisode 3" and leaves the overview blank, so a blank overview keeps
+// the English one. English (language null) is the plain cached path.
+export async function getTVSeasonEpisodesLocalized(
+  tmdbId: number,
+  seasonNumber: number,
+  language: string | null,
+): Promise<TmdbEpisode[]> {
+  const english = await getTVSeasonEpisodes(tmdbId, seasonNumber);
+  if (!language || english.length === 0) return english;
+  const key = `tv:${tmdbId}:season:${seasonNumber}:${language}`;
+  let local = await getCache<{ n: number; name: string; overview: string }[]>(key);
+  if (!local) {
+    try {
+      const r = await tmdbFetch<{ episodes?: RawEpisode[] }>(`/tv/${tmdbId}/season/${seasonNumber}`, { language });
+      local = (r.episodes ?? []).map((e) => ({ n: e.episode_number, name: (e.name ?? "").trim(), overview: (e.overview ?? "").trim() }));
+      if (local.length > 0) await setCache(key, local, TTL.DETAILS);
+    } catch {
+      return english; // a failed translation never fails the season
+    }
+  }
+  const byNumber = new Map(local.map((e) => [e.n, e]));
+  return english.map((e) => {
+    const l = byNumber.get(e.episodeNumber);
+    if (!l) return e;
+    return { ...e, name: l.name || e.name, overview: l.overview || e.overview };
+  });
+}
+
 export async function getTVSeasonEpisodes(
   tmdbId: number,
   seasonNumber: number,
@@ -1035,24 +1062,93 @@ export async function getPersonDetails(id: number): Promise<PersonDetails> {
   return result;
 }
 
-export async function getMovieGenres(): Promise<Genre[]> {
-  const key = "genres:movie";
+// `language` is a TMDB language tag (tmdbLanguageFor) — omitted, the list is
+// English under the original cache key, so every existing caller and the
+// warm-list-cache cron are unchanged.
+export async function getMovieGenres(language?: string | null): Promise<Genre[]> {
+  return getGenres("movie", language);
+}
+
+export async function getTVGenres(language?: string | null): Promise<Genre[]> {
+  return getGenres("tv", language);
+}
+
+async function getGenres(type: "movie" | "tv", language?: string | null): Promise<Genre[]> {
+  const key = `genres:${type}${language ? `:${language}` : ""}`;
   const cached = await getCache<Genre[]>(key);
   if (cached) return cached;
 
-  const r = await tmdbFetch<{ genres: Genre[] }>("/genre/movie/list", {});
+  const r = await tmdbFetch<{ genres: Genre[] }>(`/genre/${type}/list`, language ? { language } : {});
   await setCache(key, r.genres, TTL.GENRES);
   return r.genres;
 }
 
-export async function getTVGenres(): Promise<Genre[]> {
-  const key = "genres:tv";
-  const cached = await getCache<Genre[]>(key);
-  if (cached) return cached;
+// ── Localized TMDB content ──────────────────────────────────────────────────
+// Every cached TMDB payload is English and stays that way (stored requests,
+// notifications, the *arr pushes and the ratings pipeline all read it). Other
+// languages are an OVERLAY applied at display time by tmdb-localize.ts.
 
-  const r = await tmdbFetch<{ genres: Genre[] }>("/genre/tv/list", {});
-  await setCache(key, r.genres, TTL.GENRES);
-  return r.genres;
+// The TMDB translation tags tried, in order, for each non-English UI locale.
+// "pt" is Brazilian and "zh" Simplified, like the UI catalogs; Traditional
+// Chinese (zh-TW/zh-HK) is never used for "zh".
+export const TMDB_LANGUAGES: Record<Exclude<Locale, "en">, readonly string[]> = {
+  es: ["es-ES", "es-MX"],
+  fr: ["fr-FR", "fr-CA"],
+  de: ["de-DE", "de-AT", "de-CH"],
+  pt: ["pt-BR", "pt-PT"],
+  it: ["it-IT"],
+  zh: ["zh-CN", "zh-SG"],
+};
+
+// The tag sent as TMDB's `language=` parameter, or null for English (which is
+// TMDB's default and the cached form).
+export function tmdbLanguageFor(locale: Locale): string | null {
+  return locale === "en" ? null : TMDB_LANGUAGES[locale][0];
+}
+
+export interface TitleTranslation {
+  title?: string;
+  overview?: string;
+  tagline?: string;
+}
+export type TitleTranslations = Partial<Record<Exclude<Locale, "en">, TitleTranslation>>;
+
+interface RawTranslations {
+  translations?: {
+    iso_639_1?: string;
+    iso_3166_1?: string;
+    data?: { title?: string; name?: string; overview?: string; tagline?: string };
+  }[];
+}
+
+// One /translations call answers EVERY language; it's trimmed to ours here so a
+// cached row is a few KB, not the ~50 KB TMDB returns for a popular title. An
+// empty string means "not translated" and is dropped — the overlay then keeps
+// the English field. A title with no usable translation yields {}.
+export async function fetchTitleTranslations(mediaType: MediaType, id: number): Promise<TitleTranslations> {
+  const path = mediaType === "movie" ? `/movie/${id}/translations` : `/tv/${id}/translations`;
+  const r = await tmdbFetch<RawTranslations>(path);
+  const byTag = new Map<string, NonNullable<NonNullable<RawTranslations["translations"]>[number]["data"]>>();
+  for (const tr of r.translations ?? []) {
+    if (tr.iso_639_1 && tr.iso_3166_1 && tr.data) byTag.set(`${tr.iso_639_1}-${tr.iso_3166_1}`, tr.data);
+  }
+  const out: TitleTranslations = {};
+  for (const [locale, tags] of Object.entries(TMDB_LANGUAGES) as [Exclude<Locale, "en">, readonly string[]][]) {
+    const entry: TitleTranslation = {};
+    // Field by field: es-ES may carry a title but no overview that es-MX has.
+    for (const tag of tags) {
+      const d = byTag.get(tag);
+      if (!d) continue;
+      const title = (d.title ?? d.name ?? "").trim();
+      const overview = (d.overview ?? "").trim();
+      const tagline = (d.tagline ?? "").trim();
+      if (!entry.title && title) entry.title = title;
+      if (!entry.overview && overview) entry.overview = overview;
+      if (!entry.tagline && tagline) entry.tagline = tagline;
+    }
+    if (entry.title || entry.overview || entry.tagline) out[locale] = entry;
+  }
+  return out;
 }
 
 export async function getWatchProviders(type: "movie" | "tv", region = "US"): Promise<WatchProvider[]> {
