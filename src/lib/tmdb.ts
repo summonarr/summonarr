@@ -990,6 +990,27 @@ export async function getTVCalendarInfo(tmdbId: number): Promise<TvCalendarInfo>
   });
 }
 
+// A person's biography in each of our languages, from /person/<id>/translations
+// (one call answers every language). Same trimming and region preference as
+// fetchTitleTranslations; {} when nothing is translated.
+export type PersonTranslations = Partial<Record<Exclude<Locale, "en">, { biography: string }>>;
+export async function fetchPersonTranslations(id: number): Promise<PersonTranslations> {
+  const r = await tmdbFetch<{ translations?: { iso_639_1?: string; iso_3166_1?: string; data?: { biography?: string } }[] }>(
+    `/person/${id}/translations`,
+  );
+  const byTag = new Map<string, string>();
+  for (const tr of r.translations ?? []) {
+    const bio = (tr.data?.biography ?? "").trim();
+    if (tr.iso_639_1 && tr.iso_3166_1 && bio) byTag.set(`${tr.iso_639_1}-${tr.iso_3166_1}`, bio);
+  }
+  const out: PersonTranslations = {};
+  for (const [locale, tags] of Object.entries(TMDB_LANGUAGES) as [Exclude<Locale, "en">, readonly string[]][]) {
+    const bio = tags.map((t) => byTag.get(t)).find(Boolean);
+    if (bio) out[locale] = { biography: bio };
+  }
+  return out;
+}
+
 export async function getPersonDetails(id: number): Promise<PersonDetails> {
   // v2: shape grew (biography/birth/death/placeOfBirth + a larger credit cap) —
   // bump the key so pre-existing cached rows don't serve the old shape.
@@ -1110,26 +1131,62 @@ export interface TitleTranslation {
   title?: string;
   overview?: string;
   tagline?: string;
+  // A poster whose artwork is in this language (title text on it), when TMDB
+  // has one; absent ⇒ keep the default poster.
+  posterPath?: string;
 }
 export type TitleTranslations = Partial<Record<Exclude<Locale, "en">, TitleTranslation>>;
 
-interface RawTranslations {
-  translations?: {
-    iso_639_1?: string;
-    iso_3166_1?: string;
-    data?: { title?: string; name?: string; overview?: string; tagline?: string };
-  }[];
+interface RawTranslationsEntry {
+  iso_639_1?: string;
+  iso_3166_1?: string;
+  data?: { title?: string; name?: string; overview?: string; tagline?: string };
+}
+interface RawImage {
+  file_path?: string;
+  iso_639_1?: string | null;
+  iso_3166_1?: string | null;
+  vote_average?: number;
+  vote_count?: number;
+}
+interface RawTranslatedDetails {
+  translations?: { translations?: RawTranslationsEntry[] };
+  images?: { posters?: RawImage[] };
 }
 
-// One /translations call answers EVERY language; it's trimmed to ours here so a
-// cached row is a few KB, not the ~50 KB TMDB returns for a popular title. An
-// empty string means "not translated" and is dropped — the overlay then keeps
-// the English field. A title with no usable translation yields {}.
+// Every language's poster we could use, asked for in one parameter.
+const POSTER_LANGUAGES = [...new Set(Object.values(TMDB_LANGUAGES).flat().map((tag) => tag.split("-")[0]))].join(",");
+
+// The best poster in one of `tags`' languages. A poster tagged with a region
+// must match one of the tags (so "zh" never picks a zh-TW Traditional poster);
+// an untagged-region poster counts for the language — except Chinese, where the
+// script can't be told without the region.
+function pickLanguagePoster(posters: RawImage[], tags: readonly string[]): string | undefined {
+  const langs = new Set(tags.map((t) => t.split("-")[0]));
+  const regions = new Set(tags.map((t) => t.split("-")[1]));
+  const ok = posters.filter((p) => {
+    if (!p.file_path || !p.iso_639_1 || !langs.has(p.iso_639_1)) return false;
+    if (p.iso_3166_1) return regions.has(p.iso_3166_1);
+    return p.iso_639_1 !== "zh";
+  });
+  ok.sort((a, b) => (b.vote_average ?? 0) - (a.vote_average ?? 0) || (b.vote_count ?? 0) - (a.vote_count ?? 0));
+  return ok[0]?.file_path;
+}
+
+// ONE call answers every language: the details endpoint with translations and
+// the language-tagged posters appended. Trimmed to our locales so a cached row
+// is a few KB, not the ~50 KB TMDB returns for a popular title. An empty string
+// means "not translated" and is dropped — the overlay then keeps the English
+// field. A title with nothing usable yields {}.
 export async function fetchTitleTranslations(mediaType: MediaType, id: number): Promise<TitleTranslations> {
-  const path = mediaType === "movie" ? `/movie/${id}/translations` : `/tv/${id}/translations`;
-  const r = await tmdbFetch<RawTranslations>(path);
-  const byTag = new Map<string, NonNullable<NonNullable<RawTranslations["translations"]>[number]["data"]>>();
-  for (const tr of r.translations ?? []) {
+  const path = mediaType === "movie" ? `/movie/${id}` : `/tv/${id}`;
+  const r = await tmdbFetch<RawTranslatedDetails>(path, {
+    append_to_response: "translations,images",
+    include_image_language: POSTER_LANGUAGES,
+  });
+  const posters = r.images?.posters ?? [];
+  const byTag = new Map<string, NonNullable<RawTranslationsEntry["data"]>>();
+  for (const tr of r.translations?.translations ?? []) {
     if (tr.iso_639_1 && tr.iso_3166_1 && tr.data) byTag.set(`${tr.iso_639_1}-${tr.iso_3166_1}`, tr.data);
   }
   const out: TitleTranslations = {};
@@ -1146,7 +1203,9 @@ export async function fetchTitleTranslations(mediaType: MediaType, id: number): 
       if (!entry.overview && overview) entry.overview = overview;
       if (!entry.tagline && tagline) entry.tagline = tagline;
     }
-    if (entry.title || entry.overview || entry.tagline) out[locale] = entry;
+    const poster = pickLanguagePoster(posters, tags);
+    if (poster) entry.posterPath = poster;
+    if (entry.title || entry.overview || entry.tagline || entry.posterPath) out[locale] = entry;
   }
   return out;
 }

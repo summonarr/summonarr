@@ -8,6 +8,7 @@ import { resolveUserNotificationEmail } from "./notification-email";
 import { claimAvailableNotificationWinners } from "./notify-available";
 import { createInAppNotification } from "./in-app-notify";
 import { buildNotificationData } from "./notification-data";
+import { localizedTitleFor } from "./tmdb-localize";
 
 interface RequestInfo {
   requestedBy: string;
@@ -294,10 +295,13 @@ export function notifyRequestStatusChange(
   // lookup covers all four channels; the batch "now available" path has its own
   // chokepoint in claimAvailableNotificationWinners.
   void prisma.user
-    .findUnique({ where: { id: requestedBy }, select: { deactivatedAt: true } })
-    .then((u) => {
+    .findUnique({ where: { id: requestedBy }, select: { deactivatedAt: true, locale: true } })
+    .then(async (u) => {
       if (u?.deactivatedAt) return;
-      dispatchRequestStatusChange(status, request);
+      // The title in the requester's language, for every channel at once
+      // (guardrail 40a; the stored request keeps its English title).
+      const title = await localizedTitleFor(request, u?.locale);
+      dispatchRequestStatusChange(status, title === request.title ? request : { ...request, title });
     })
     .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
 }

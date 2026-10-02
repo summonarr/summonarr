@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prewarmLibraryCache } from "@/lib/tmdb-prewarm";
 import { prewarmSuggestionEdges } from "@/lib/recommendation-graph";
+import { prewarmTitleTranslations } from "@/lib/tmdb-localize";
 import { logAudit } from "@/lib/audit";
 import { withAdvisoryLock, WARM_LIBRARY_LOCK_ID } from "@/lib/advisory-lock";
 import { getCronActor, recordCronRun } from "@/lib/cron-auth";
@@ -28,6 +29,7 @@ export async function POST(request: NextRequest) {
       const startTime = Date.now();
       let result;
       let edges;
+      let translations;
       try {
         result = await prewarmLibraryCache({ signal });
         // Same walk, same cadence: while this cron is fetching each library
@@ -37,6 +39,11 @@ export async function POST(request: NextRequest) {
         // its own try/catch — a throw here belongs in the same failure bucket as
         // a details-walk throw, and the ledger write below already covers it.
         edges = await prewarmSuggestionEdges({ signal });
+        // Titles, overviews and posters in the languages people on this server
+        // read (guardrail 40a) — library, requests and watchlists, so list pages
+        // and the iCal feed are localized without a first-view fetch. A no-op
+        // unless someone reads a non-English language.
+        translations = await prewarmTitleTranslations({ signal });
       } catch (err) {
         // Record the failed run before re-throwing. Otherwise the cron history
         // would still show the last successful run and look healthy.
@@ -50,7 +57,7 @@ export async function POST(request: NextRequest) {
       // kept in the Setting table, not AuditLog, so scheduled runs don't flood
       // the audit log. `ok` comes from the real failure count, so a run that
       // finished with failures shows as an error instead of a green tick.
-      const failed = result.failed + edges.failed;
+      const failed = result.failed + edges.failed + translations.failed;
       await recordCronRun("library", durationMs, failed === 0);
 
       if (authCtx.trigger !== "cron") {
@@ -59,7 +66,7 @@ export async function POST(request: NextRequest) {
           userName: authCtx.userName,
           action: "CACHE_WARM",
           target: "library",
-          details: { ...result, edges, durationMs, trigger: authCtx.trigger },
+          details: { ...result, edges, translations, durationMs, trigger: authCtx.trigger },
         });
       }
 
@@ -73,8 +80,9 @@ export async function POST(request: NextRequest) {
         ok: failed === 0,
         ...result,
         edges,
+        translations,
         ...(failed > 0
-          ? { error: `${result.failed} of ${result.total} library items and ${edges.failed} of ${edges.sources} suggestion sources failed to warm` }
+          ? { error: `${result.failed} of ${result.total} library items, ${edges.failed} of ${edges.sources} suggestion sources and ${translations.failed} title translations failed to warm` }
           : {}),
         timestamp: new Date().toISOString(),
       }, failed > 0 ? { headers: { "X-Cron-Degraded": String(failed) } } : undefined);

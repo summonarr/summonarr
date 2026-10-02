@@ -75,6 +75,7 @@ export async function attachAllAvailability(
             title: text.title,
             overview: text.overview,
             tagline: text.tagline,
+            posterPath: text.posterPath,
             originalTitle: text.originalTitle,
             genres: text.genres,
             genreList: text.genreList,

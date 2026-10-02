@@ -18,7 +18,8 @@ import { isPurgedRow } from "./account-lifecycle";
 import { parseAuthUrl } from "./auth-url";
 import { calendarTokenMatches, hashCalendarToken, isWellFormedCalendarToken } from "./calendar-token";
 import { buildIcsCalendar } from "./ics";
-import { translatorForUser } from "./i18n/server-locale";
+import { localeForUser, translatorForUser } from "./i18n/server-locale";
+import { cachedLocalizedTitles } from "./tmdb-localize";
 import {
   buildCalendarEvents,
   calendarWindow,
@@ -191,7 +192,17 @@ export async function buildCalendarFeed(
 ): Promise<string> {
   const tr = translatorForUser({ locale });
   const w = calendarWindow(now);
-  const titles = dedupeTitles(await loadCalendarTitles(scope));
+  const englishTitles = dedupeTitles(await loadCalendarTitles(scope));
+  // Event titles in the owner's language, from cached translations only — the
+  // feed never reaches TMDB per poll; the library prewarm fills these rows
+  // (guardrail 40a). Untranslated titles stay English.
+  const localized = await cachedLocalizedTitles(englishTitles, localeForUser({ locale }));
+  const titles = localized.size === 0
+    ? englishTitles
+    : englishTitles.map((t) => {
+        const title = localized.get(`${t.mediaType}:${t.tmdbId}`);
+        return title ? { ...t, title } : t;
+      });
   const data = await loadCalendarData(titles, w);
   const events = buildCalendarEvents(titles, data, w, calendarSiteUrl(), tr);
   return buildIcsCalendar({
