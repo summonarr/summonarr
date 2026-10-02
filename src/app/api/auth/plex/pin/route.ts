@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { PLEX_CLIENT_ID } from "@/lib/plex";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const PLEX_PIN_HEADERS = {
   "X-Plex-Client-Identifier": PLEX_CLIENT_ID,
@@ -14,7 +15,8 @@ const PLEX_PIN_HEADERS = {
   Accept: "application/json",
 };
 
-export const POST = withAdmin(async (_req, _ctx, _session) => {
+export const POST = withAdmin(async (req, _ctx, _session) => {
+  const t = translatorForRequest(req);
   const res = await safeFetchTrusted("https://plex.tv/api/v2/pins", {
     allowedHosts: ["plex.tv"],
     method: "POST",
@@ -27,21 +29,22 @@ export const POST = withAdmin(async (_req, _ctx, _session) => {
   });
 
   if (!res.ok) {
-    return NextResponse.json({ error: "plex pin create failed" }, { status: 502 });
+    return NextResponse.json({ error: t("apiAuth.plex.pinCreateFailedLower") }, { status: 502 });
   }
 
   const data = (await res.json()) as { id?: number; code?: string };
   if (typeof data.id !== "number" || typeof data.code !== "string") {
-    return NextResponse.json({ error: "plex pin response malformed" }, { status: 502 });
+    return NextResponse.json({ error: t("apiAuth.plex.pinMalformedLower") }, { status: 502 });
   }
   return NextResponse.json({ id: data.id, code: data.code });
 });
 
 export const GET = withAdmin(async (req, _ctx, _session) => {
+  const t = translatorForRequest(req);
   const idRaw = req.nextUrl.searchParams.get("id");
   const id = idRaw ? Number(idRaw) : NaN;
   if (!Number.isInteger(id) || id <= 0) {
-    return NextResponse.json({ error: "invalid id" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.plex.invalidId") }, { status: 400 });
   }
 
   const res = await safeFetchTrusted(`https://plex.tv/api/v2/pins/${id}`, {
@@ -51,7 +54,7 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   });
 
   if (!res.ok) {
-    return NextResponse.json({ error: "plex pin poll failed" }, { status: 502 });
+    return NextResponse.json({ error: t("apiAuth.plex.pinPollFailed") }, { status: 502 });
   }
 
   // Returning a Plex authToken from a GET is normally avoided (it can end up in

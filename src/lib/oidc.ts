@@ -211,10 +211,27 @@ export async function exchangeNativeOidcCode(
   state: string,
   flowState: OidcFlowState,
 ): Promise<OidcClaims> {
+  return exchangeOidcCode(
+    buildOidcExchangeUrl(flowState, new URLSearchParams({ code, state })),
+    flowState,
+  );
+}
+
+// The URL handed to openid-client's authorizationCodeGrant. It sends the token
+// request's `redirect_uri` as this URL with its query stripped, so the ORIGIN
+// and PATH must be the signed `flowState.redirectUri` the authorization was
+// issued against — never the incoming request's URL. In Next 16 `req.url` is
+// built from the server's bind address (e.g. http://0.0.0.0:3000 under the
+// Docker image's HOSTNAME=0.0.0.0), not the public AUTH_URL, so passing it made
+// every web OIDC exchange fail with invalid_grant. Only the IdP's callback
+// params (code, state, iss, error, …) are copied over.
+export function buildOidcExchangeUrl(
+  flowState: OidcFlowState,
+  callbackParams: URLSearchParams,
+): URL {
   const url = new URL(flowState.redirectUri);
-  url.searchParams.set("code", code);
-  url.searchParams.set("state", state);
-  return exchangeOidcCode(url, flowState);
+  for (const [key, value] of callbackParams) url.searchParams.set(key, value);
+  return url;
 }
 
 export async function exchangeOidcCode(

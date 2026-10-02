@@ -175,6 +175,12 @@ for (const m of ["account", "setting", "auditLog", "mediaServerUser", "plexToken
     updateMany: async () => ({ count: 0 }), deleteMany: async () => ({ count: 0 }),
   });
 }
+// Two-factor factor tables: none of this file's accounts has 2FA, so the
+// credentials route's MFA lookup finds nothing and takes the unchanged path
+// (tests/mfa-signin-routes.test.mts covers the 2FA branch).
+shadowPrismaModel(prisma, "userTotp", { findUnique: async () => null });
+shadowPrismaModel(prisma, "webAuthnCredential", { findMany: async () => [] });
+shadowPrismaModel(prisma, "mfaRecoveryCode", { count: async () => 0 });
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) =>
   Array.isArray(arg) ? Promise.all(arg) : (arg as (tx: unknown) => Promise<unknown>)(prisma));
 shadowPrismaClientMethod(prisma, "$queryRaw", async () => []);

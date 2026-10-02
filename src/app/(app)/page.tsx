@@ -18,11 +18,13 @@ import { HideAvailableToggle } from "@/components/media/hide-available-toggle";
 import { requireAppSession } from "@/lib/require-app-session";
 import { getFeatureFlags } from "@/lib/features";
 import { getUserRecommendations } from "@/lib/recommendations";
+import { getRecentlyAddedForViewer, RECENTLY_ADDED_SIZE } from "@/lib/recently-added";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { PageHeader, EmptyState } from "@/components/ui/design";
 import { AlertTriangle } from "@/components/icons";
+import { getTranslator } from "@/lib/i18n/server";
 
 const RAIL_SIZE = 14;
 const RAIL_OVERFETCH = 20;
@@ -110,13 +112,22 @@ export default async function DiscoverPage({
 }: {
   searchParams: Promise<Record<string, string>>;
 }) {
-  const [sp, session, flags] = await Promise.all([searchParams, requireAppSession(), getFeatureFlags()]);
+  const [sp, session, flags, t] = await Promise.all([searchParams, requireAppSession(), getFeatureFlags(), getTranslator()]);
   const hideAvailable = sp.hideAvailable === "1";
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  // Integration flags passed explicitly: they default to TRUE when omitted, which
+  // left a disabled integration's leftover library rows driving these rails while
+  // the /movies and /tv pages they link to (browse-query.ts) ignored them.
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, {
+    plex: flags["feature.integration.plex"],
+    jellyfin: flags["feature.integration.jellyfin"],
+  });
   const vis = { showPlex, showJellyfin };
   const upcomingEnabled = flags["feature.page.upcoming"];
   const topEnabled = flags["feature.page.top"];
   const forYouEnabled = flags["feature.page.forYou"];
+  // Every title on this rail is on the viewer's own server by construction, so
+  // with Hide Available on it could only ever read "all available" — skip it.
+  const recentEnabled = flags["feature.page.recentlyAdded"] && !hideAvailable;
 
   // Start the 4K-visibility read concurrently with the TMDB fan-out; awaited
   // just before attachAllAvailability consumes it. The no-op catch only marks
@@ -134,6 +145,7 @@ export default async function DiscoverPage({
     topMoviesRes,
     topTVRes,
     forYouRes,
+    recentRes,
   ] = await Promise.allSettled([
     getTrending(),
     getPopularMovies(),
@@ -149,6 +161,15 @@ export default async function DiscoverPage({
     forYouEnabled
       ? getUserRecommendations(session.user.id)
       : Promise.resolve([] as TmdbMedia[]),
+    // Library reads scoped to the servers this viewer may see (guardrail 35),
+    // cached per visible-server set — never a TMDB call. Mirrors
+    // src/app/api/home/route.ts — keep the two in sync.
+    recentEnabled
+      ? getRecentlyAddedForViewer(session, {
+          plex: flags["feature.integration.plex"],
+          jellyfin: flags["feature.integration.jellyfin"],
+        })
+      : Promise.resolve([] as TmdbMedia[]),
   ]);
 
   const trending  = settled(trendingRes);
@@ -159,6 +180,7 @@ export default async function DiscoverPage({
   const topMovies = settled(topMoviesRes).slice(0, RAIL_OVERFETCH);
   const topTV     = settled(topTVRes).slice(0, RAIL_OVERFETCH);
   const forYou    = settled(forYouRes).slice(0, RAIL_OVERFETCH);
+  const recent    = settled(recentRes);
 
   // Enrich the full RAIL_OVERFETCH window (not just RAIL_SIZE): project() drops
   // available/hidden items then backfills toward RAIL_SIZE from the tail, so the
@@ -172,6 +194,9 @@ export default async function DiscoverPage({
     { raw: topMovies, limit: RAIL_OVERFETCH },
     { raw: topTV, limit: RAIL_OVERFETCH },
     { raw: forYou, limit: RAIL_OVERFETCH },
+    // Last, so a title also on a TMDB rail keeps that richer record (overview,
+    // backdrop) in the shared enriched map. Already capped at its overfetch.
+    { raw: recent, limit: recent.length },
   ];
   const displaySet = dedupeUnion(candidateLists.map((c) => c.raw.slice(0, c.limit)));
   const show4k = await show4kPromise;
@@ -190,21 +215,25 @@ export default async function DiscoverPage({
     (m) => !featuredKeys.has(`${m.mediaType}-${m.id}`),
   );
   const railsBase: { title: string; subtitle: string; href?: string; raw: TmdbMedia[]; items: TmdbMedia[] }[] = [
-    ...(forYouEnabled
-      ? [{ title: "For You", subtitle: "Picked based on what you watch", href: "/for-you", raw: forYou, items: project(forYou, emap, hideAvailable, RAIL_SIZE, vis) }]
+    // No "See all": the only full list (/admin/activity/recent) is admin-only.
+    ...(recentEnabled
+      ? [{ title: t("home.rail.recent.title"), subtitle: t("home.rail.recent.subtitle"), raw: recent, items: project(recent, emap, hideAvailable, RECENTLY_ADDED_SIZE, vis) }]
       : []),
-    { title: "Popular Movies",   subtitle: "Most popular on TMDB",                  href: "/movies",   raw: popMovies, items: project(popMovies, emap, hideAvailable, RAIL_SIZE, vis) },
-    { title: "Popular TV",       subtitle: "Most popular TV shows",                 href: "/tv",       raw: popTV, items: project(popTV,     emap, hideAvailable, RAIL_SIZE, vis) },
+    ...(forYouEnabled
+      ? [{ title: t("home.rail.forYou.title"), subtitle: t("home.rail.forYou.subtitle"), href: "/for-you", raw: forYou, items: project(forYou, emap, hideAvailable, RAIL_SIZE, vis) }]
+      : []),
+    { title: t("home.rail.popularMovies.title"), subtitle: t("home.rail.popularMovies.subtitle"), href: "/movies",   raw: popMovies, items: project(popMovies, emap, hideAvailable, RAIL_SIZE, vis) },
+    { title: t("home.rail.popularTv.title"), subtitle: t("home.rail.popularTv.subtitle"), href: "/tv",       raw: popTV, items: project(popTV,     emap, hideAvailable, RAIL_SIZE, vis) },
     ...(upcomingEnabled
       ? [
-          { title: "Upcoming Movies", subtitle: "Hitting theaters soon",  href: "/upcoming", raw: upMovies, items: project(upMovies, emap, hideAvailable, RAIL_SIZE, vis) },
-          { title: "On The Air TV",   subtitle: "New episodes this week", href: "/upcoming", raw: upTV, items: project(upTV,     emap, hideAvailable, RAIL_SIZE, vis) },
+          { title: t("home.rail.upcomingMovies.title"), subtitle: t("home.rail.upcomingMovies.subtitle"), href: "/upcoming", raw: upMovies, items: project(upMovies, emap, hideAvailable, RAIL_SIZE, vis) },
+          { title: t("home.rail.onTheAir.title"), subtitle: t("home.rail.onTheAir.subtitle"), href: "/upcoming", raw: upTV, items: project(upTV,     emap, hideAvailable, RAIL_SIZE, vis) },
         ]
       : []),
     ...(topEnabled
       ? [
-          { title: "Top Rated Movies", subtitle: "Highest-rated films of all time", href: "/top", raw: topMovies, items: project(topMovies, emap, hideAvailable, RAIL_SIZE, vis) },
-          { title: "Top Rated TV",     subtitle: "Highest-rated shows of all time", href: "/top", raw: topTV, items: project(topTV,     emap, hideAvailable, RAIL_SIZE, vis) },
+          { title: t("home.rail.topMovies.title"), subtitle: t("home.rail.topMovies.subtitle"), href: "/top", raw: topMovies, items: project(topMovies, emap, hideAvailable, RAIL_SIZE, vis) },
+          { title: t("home.rail.topTv.title"), subtitle: t("home.rail.topTv.subtitle"), href: "/top", raw: topTV, items: project(topTV,     emap, hideAvailable, RAIL_SIZE, vis) },
         ]
       : []),
   ];
@@ -229,8 +258,8 @@ export default async function DiscoverPage({
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
 
       <PageHeader
-        title="Discover"
-        subtitle="What’s popular on TMDB right now"
+        title={t("home.title")}
+        subtitle={t("home.subtitle")}
         right={
           <Suspense>
             <HideAvailableToggle active={hideAvailable} />
@@ -246,8 +275,8 @@ export default async function DiscoverPage({
         <div style={{ marginBottom: 36 }}>
           <EmptyState
             icon={AlertTriangle}
-            title="Trending unavailable"
-            description="TMDB returned nothing. Check that TMDB_READ_TOKEN is set in your environment; if it is, TMDB may be unreachable right now."
+            title={t("home.trendingUnavailable.title")}
+            description={t("home.trendingUnavailable.description")}
           />
         </div>
       ) : (
@@ -257,7 +286,7 @@ export default async function DiscoverPage({
               {featuredMovie && (
                 <DiscoverHero
                   media={featuredMovie}
-                  label="Trending movie"
+                  label={t("home.hero.trendingMovie")}
                   showPlex={showPlex}
                   showJellyfin={showJellyfin}
                 />
@@ -265,7 +294,7 @@ export default async function DiscoverPage({
               {featuredTV && (
                 <DiscoverHero
                   media={featuredTV}
-                  label="Trending TV"
+                  label={t("home.hero.trendingTv")}
                   showPlex={showPlex}
                   showJellyfin={showJellyfin}
                 />
@@ -273,8 +302,8 @@ export default async function DiscoverPage({
             </div>
           )}
           <DiscoverRow
-            title="Trending this week"
-            subtitle={`${trendingRest.length} results`}
+            title={t("home.trending.title")}
+            subtitle={t("home.trending.results", { count: trendingRest.length })}
             items={trendingRest}
             showPlex={showPlex}
             showJellyfin={showJellyfin}

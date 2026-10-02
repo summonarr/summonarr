@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Plus, Check, Loader2, Ban } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useToast } from "@/components/ui/toast";
+import { useT } from "@/components/i18n/i18n-provider";
 import { DetailActionButton, DetailActionStatus } from "./detail-action-button";
 
 // Secondary "Request in 4K" action shown on movie/TV detail pages when a 4K
@@ -30,6 +31,7 @@ export function Request4kButton({
   blacklisted?: boolean;
 }) {
   const { toast } = useToast();
+  const t = useT();
   const router = useRouter();
   const [state, setState] = useState<"idle" | "loading" | "requested" | "error">(
     requested ? "requested" : "idle",
@@ -56,7 +58,7 @@ export function Request4kButton({
       }
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setMsg(data.error ?? "Something went wrong");
+        setMsg(data.error ?? t("request.somethingWrong"));
         setState("error");
         return;
       }
@@ -68,10 +70,10 @@ export function Request4kButton({
         return;
       }
       setState("requested");
-      toast({ title: "Requested in 4K", variant: "success" });
+      toast({ title: t("request.requested4kToast"), variant: "success" });
       router.refresh();
     } catch {
-      setMsg("Network error — please try again");
+      setMsg(t("request.networkError"));
       setState("error");
     }
   }
@@ -81,7 +83,7 @@ export function Request4kButton({
     return (
       <DetailActionStatus variant="accent-soft">
         <Check style={{ width: 14, height: 14 }} />
-        Available in 4K
+        {t("request.availableIn4k")}
       </DetailActionStatus>
     );
   }
@@ -90,7 +92,7 @@ export function Request4kButton({
     return (
       <DetailActionStatus variant="accent-soft">
         <Check style={{ width: 14, height: 14 }} />
-        4K Requested
+        {t("request.requested4k")}
       </DetailActionStatus>
     );
   }
@@ -104,7 +106,7 @@ export function Request4kButton({
     return (
       <DetailActionStatus variant="muted">
         <Ban style={{ width: 14, height: 14 }} />
-        Not available to request
+        {t("request.notAvailableToRequest")}
       </DetailActionStatus>
     );
   }
@@ -122,7 +124,7 @@ export function Request4kButton({
         ) : (
           <Plus style={{ width: 14, height: 14 }} />
         )}
-        Request in 4K
+        {t("request.requestIn4k")}
       </DetailActionButton>
       {state === "error" && msg && (
         <span className="ds-mono" style={{ fontSize: 11, color: "var(--ds-danger)" }}>

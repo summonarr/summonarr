@@ -1,4 +1,5 @@
-import { adminNavItems, userNavItems, type NavItem } from "@/lib/nav-items";
+import { adminNavItems, navItemLabel, userNavItems, type NavItem } from "@/lib/nav-items";
+import type { Translator } from "@/lib/i18n/translate";
 
 export type Crumb = { label: string; href?: string };
 
@@ -32,22 +33,26 @@ function titleCaseSegment(pathname: string): string | null {
  * last crumb falls back to "Detail"/"Person" — that is also what the first
  * render shows on both server and browser, so hydration matches.
  */
-export function breadcrumbFor(pathname: string, detailTitle?: string | null): Crumb[] {
+export function breadcrumbFor(
+  pathname: string,
+  detailTitle: string | null | undefined,
+  t: Translator,
+): Crumb[] {
   if (pathname.startsWith("/movie/")) {
-    return [{ label: "Movies", href: "/movies" }, { label: detailTitle || "Detail" }];
+    return [{ label: t("nav.movies"), href: "/movies" }, { label: detailTitle || t("nav.crumb.detail") }];
   }
   if (pathname.startsWith("/tv/")) {
-    return [{ label: "TV Shows", href: "/tv" }, { label: detailTitle || "Detail" }];
+    return [{ label: t("nav.tvShows"), href: "/tv" }, { label: detailTitle || t("nav.crumb.detail") }];
   }
   // People have no list page to link back to, so the parent crumb is a label.
   if (pathname.startsWith("/person/")) {
-    return [{ label: "People" }, { label: detailTitle || "Person" }];
+    return [{ label: t("nav.crumb.people") }, { label: detailTitle || t("nav.crumb.person") }];
   }
   if (pathname === "/my-stats/wrapped" || pathname.startsWith("/my-stats/wrapped/")) {
-    return [{ label: "My Stats", href: "/my-stats" }, { label: "Wrapped" }];
+    return [{ label: t("nav.myStats"), href: "/my-stats" }, { label: t("nav.crumb.wrapped") }];
   }
   if (pathname === "/notifications" || pathname.startsWith("/notifications/")) {
-    return [{ label: "Notifications" }];
+    return [{ label: t("nav.crumb.notifications") }];
   }
 
   const all: readonly NavItem[] = [...userNavItems, ...adminNavItems];
@@ -58,6 +63,6 @@ export function breadcrumbFor(pathname: string, detailTitle?: string | null): Cr
     // Prefer the longest href so /admin/issues wins over /admin.
     .sort((a, b) => b.href.length - a.href.length)[0];
 
-  if (match) return [{ label: match.label }];
+  if (match) return [{ label: navItemLabel(match, t) }];
   return [{ label: titleCaseSegment(pathname) ?? "—" }];
 }

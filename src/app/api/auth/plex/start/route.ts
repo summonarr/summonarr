@@ -7,6 +7,7 @@ import {
 import { assertBodyBytesUnderCap, checkBodySize } from "@/lib/body-size";
 import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Server-side PIN creation for the Plex sign-in flow. Returns the PIN id +
 // code AND sets a short-lived signed cookie binding the pinId to this
@@ -26,9 +27,10 @@ function isSecureCookieContext(): boolean {
 }
 
 export async function POST(req: NextRequest) {
+  const t = translatorForRequest(req);
   const ipKey = getClientIpKey(req.headers);
   if (!checkRateLimit(`plex-start:${ipKey}`, 20, 5 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.common.tooManyRequests") }, { status: 429 });
   }
 
   const headerCheck = checkBodySize(req, MAX_START_BODY_BYTES);
@@ -43,12 +45,12 @@ export async function POST(req: NextRequest) {
     try {
       decoded = JSON.parse(new TextDecoder().decode(raw));
     } catch {
-      return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+      return NextResponse.json({ error: t("apiAuth.common.invalidJson") }, { status: 400 });
     }
     // A valid-JSON non-object (`null`, a bare number) would otherwise throw on
     // the property reads below and 500 this unauthenticated route.
     if (decoded === null || typeof decoded !== "object" || Array.isArray(decoded)) {
-      return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+      return NextResponse.json({ error: t("apiAuth.common.invalidJson") }, { status: 400 });
     }
     body = decoded as Record<string, unknown>;
   }
@@ -58,7 +60,7 @@ export async function POST(req: NextRequest) {
       ? body.clientId
       : null;
   if (!clientId) {
-    return NextResponse.json({ error: "clientId required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.plex.clientIdRequired") }, { status: 400 });
   }
 
   const platform = typeof body.platform === "string" ? body.platform.slice(0, 32) : "Web";
@@ -93,15 +95,15 @@ export async function POST(req: NextRequest) {
   });
 
   if (!res) {
-    return NextResponse.json({ error: "Plex PIN create failed" }, { status: 502 });
+    return NextResponse.json({ error: t("apiAuth.plex.pinCreateFailed") }, { status: 502 });
   }
   if (!res.ok) {
     console.error("[auth/plex/start] plex.tv returned", res.status);
-    return NextResponse.json({ error: "Plex PIN create failed" }, { status: 502 });
+    return NextResponse.json({ error: t("apiAuth.plex.pinCreateFailed") }, { status: 502 });
   }
   const data = (await res.json()) as { id?: number; code?: string };
   if (typeof data.id !== "number" || typeof data.code !== "string") {
-    return NextResponse.json({ error: "Plex PIN response malformed" }, { status: 502 });
+    return NextResponse.json({ error: t("apiAuth.plex.pinMalformed") }, { status: 502 });
   }
 
   const cookieValue = await signPlexFlowCookie({

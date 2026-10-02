@@ -9,11 +9,13 @@ import { HideAvailableToggle } from "@/components/media/hide-available-toggle";
 import { requireAppSession } from "@/lib/require-app-session";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
-import { requireFeature } from "@/lib/features";
+import { isFeatureEnabled, requireFeature } from "@/lib/features";
 import { LiveRefresh } from "@/components/live-refresh";
 import { PageHeader, EmptyState } from "@/components/ui/design";
 import { PaginationBar } from "@/components/media/pagination-bar";
 import { AlertTriangle, Calendar } from "@/components/icons";
+import Link from "next/link";
+import { getTranslator } from "@/lib/i18n/server";
 
 // One screenful, matching POPULAR_PER_PAGE. See the note at the slice below for
 // why this page needed bounding at all.
@@ -49,9 +51,20 @@ export default async function UpcomingPage({
   searchParams: Promise<Record<string, string>>;
 }) {
   await requireFeature("feature.page.upcoming");
-  const [sp, session] = await Promise.all([searchParams, requireAppSession()]);
+  const [sp, session, plexEnabled, jellyfinEnabled, calendarEnabled, t] = await Promise.all([
+    searchParams,
+    requireAppSession(),
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+    isFeatureEnabled("feature.integration.calendar"),
+    getTranslator(),
+  ]);
   const hideAvailable = sp.hideAvailable === "1";
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  // Integration flags passed explicitly — they default to TRUE when omitted.
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, {
+    plex: plexEnabled,
+    jellyfin: jellyfinEnabled,
+  });
   const raw: TmdbMedia[] = [];
   let loadFailed = false;
   try {
@@ -120,16 +133,42 @@ export default async function UpcomingPage({
     <div className="ds-page-enter">
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
       <PageHeader
-        title="Upcoming"
+        title={t("nav.upcoming")}
         subtitle={
           items.length > 0
-            ? `${(page - 1) * UPCOMING_PER_PAGE + 1}–${(page - 1) * UPCOMING_PER_PAGE + pageItems.length} of ${items.length} premiering soon`
-            : "Movies and TV shows premiering soon"
+            ? t("browse.upcoming.rangeSubtitle", {
+                from: (page - 1) * UPCOMING_PER_PAGE + 1,
+                to: (page - 1) * UPCOMING_PER_PAGE + pageItems.length,
+                total: items.length,
+              })
+            : t("browse.upcoming.subtitle")
         }
         right={
-          <Suspense>
-            <HideAvailableToggle active={hideAvailable} />
-          </Suspense>
+          <div className="flex flex-wrap items-center gap-2">
+            {calendarEnabled && (
+              <Link
+                href="/profile#calendar-feed"
+                title={t("browse.upcoming.subscribeTitle")}
+                className="ds-tap ds-hover-tint inline-flex items-center gap-1.5 font-medium"
+                style={{
+                  padding: "5px 12px",
+                  minHeight: 32,
+                  borderRadius: 6,
+                  fontSize: 12,
+                  background: "var(--ds-bg-2)",
+                  color: "var(--ds-fg-muted)",
+                  border: "1px solid var(--ds-border)",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                <Calendar className="w-3.5 h-3.5" />
+                {t("browse.upcoming.subscribe")}
+              </Link>
+            )}
+            <Suspense>
+              <HideAvailableToggle active={hideAvailable} />
+            </Suspense>
+          </div>
         }
       />
 
@@ -137,34 +176,34 @@ export default async function UpcomingPage({
         loadFailed ? (
           <EmptyState
             icon={AlertTriangle}
-            title="Couldn’t load upcoming titles"
-            description="TMDB is temporarily unavailable. Please try again shortly."
-            cta={{ href: "/upcoming", label: "Retry" }}
+            title={t("browse.upcoming.loadFailed.title")}
+            description={t("browse.upcoming.loadFailed.description")}
+            cta={{ href: "/upcoming", label: t("browse.retry") }}
           />
         ) : raw.length === 0 ? (
           // The TMDB helpers swallow outages into [] and an empty cache plus an
           // empty answer lands here too, so this can't be blamed on the token.
           <EmptyState
             icon={AlertTriangle}
-            title="Upcoming titles unavailable"
-            description="TMDB returned nothing. If you’re an admin, check that TMDB_READ_TOKEN is set."
-            cta={{ href: "/upcoming", label: "Retry" }}
+            title={t("browse.upcoming.unavailable.title")}
+            description={t("browse.upcoming.unavailable.description")}
+            cta={{ href: "/upcoming", label: t("browse.retry") }}
           />
         ) : hideAvailable ? (
           <EmptyState
             icon={Calendar}
-            title="No upcoming titles to show"
-            description="Everything upcoming is already available on your servers."
-            cta={{ href: "/upcoming", label: "Show available titles" }}
+            title={t("browse.upcoming.none.title")}
+            description={t("browse.upcoming.none.allAvailable")}
+            cta={{ href: "/upcoming", label: t("browse.showAvailable") }}
           />
         ) : (
           // raw had titles but none survived enrichment: the user has hidden
           // every one of them.
           <EmptyState
             icon={Calendar}
-            title="No upcoming titles to show"
-            description="You’ve hidden every upcoming title."
-            cta={{ href: "/hidden", label: "Manage hidden titles" }}
+            title={t("browse.upcoming.none.title")}
+            description={t("browse.upcoming.none.allHidden")}
+            cta={{ href: "/hidden", label: t("browse.manageHidden") }}
           />
         )
       ) : (

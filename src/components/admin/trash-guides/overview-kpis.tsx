@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { KpiStrip } from "./kpi-strip";
 import type { SpecStatus, TrashService } from "./types";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface OverviewKpisProps {
   service: TrashService;
@@ -12,19 +13,24 @@ interface OverviewKpisProps {
 }
 
 export function OverviewKpis({ service, refreshKey = 0 }: OverviewKpisProps) {
+  const t = useT();
   const [specs, setSpecs] = useState<SpecStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
     try {
-      const res = await fetch(withBasePath(`/api/admin/trash-guides/status?service=${service.toLowerCase()}`));
+      const res = await fetch(withBasePath(`/api/admin/trash-guides/status?service=${service.toLowerCase()}`), { signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as { specs?: SpecStatus[] };
+      // A superseded request (service switched / refreshKey bumped) must not
+      // overwrite the newer one's KPIs or flip loading off early.
+      if (signal?.aborted) return;
       setSpecs(data.specs ?? []);
       setFailed(false);
     } catch {
+      if (signal?.aborted) return;
       setSpecs([]);
       setFailed(true);
     }
@@ -32,7 +38,9 @@ export function OverviewKpis({ service, refreshKey = 0 }: OverviewKpisProps) {
   }, [service]);
 
   useEffect(() => {
-    void load();
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => controller.abort();
   }, [load, refreshKey]);
 
   const profilesAvailable = specs.filter((s) => s.kind === "QUALITY_PROFILE").length;
@@ -44,12 +52,12 @@ export function OverviewKpis({ service, refreshKey = 0 }: OverviewKpisProps) {
   const serviceLabel = service === "SONARR" ? "Sonarr" : "Radarr";
 
   return (
-    <section aria-label={`${serviceLabel} TRaSH-Guides status`}>
+    <section aria-label={t("trash.kpi.statusAria", { service: serviceLabel })}>
       <p
         className="ds-mono uppercase"
         style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", letterSpacing: "0.08em", margin: "0 0 8px" }}
       >
-        {serviceLabel} · default instance
+        {t("trash.kpi.defaultInstance", { service: serviceLabel })}
       </p>
       <KpiStrip
         profilesAvailable={profilesAvailable}

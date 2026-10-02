@@ -3,8 +3,10 @@
 import { useState, useEffect } from "react";
 import { Zap } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export function ActivityWarmButton() {
+  const t = useT();
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
   const [cooldown, setCooldown] = useState(0);
@@ -25,18 +27,18 @@ export function ActivityWarmButton() {
       };
 
       if (res.ok) {
-        setMessage({ text: typeof data.warmed === "number" ? `Warmed ${data.warmed} entries` : "Cache warmed", type: "success" });
+        setMessage({ text: typeof data.warmed === "number" ? t("adminActivity.warm.warmedEntries", { count: data.warmed }) : t("adminActivity.warm.warmed"), type: "success" });
         setCooldown(120);
       } else {
         setMessage({
-          text: data.error || "Failed to warm cache",
+          text: data.error || t("adminActivity.warm.failed"),
           type: "error",
         });
         if (data.retryAfter) setCooldown(data.retryAfter);
       }
     } catch {
       setMessage({
-        text: "Couldn't reach the server — try again",
+        text: t("adminActivity.warm.unreachable"),
         type: "error",
       });
     } finally {
@@ -60,13 +62,13 @@ export function ActivityWarmButton() {
       <button
         onClick={handleWarm}
         disabled={loading || cooldown > 0}
-        aria-label={cooldown > 0 ? `Warm activity cache — wait ${cooldown}s` : "Warm activity cache"}
-        title={cooldown > 0 ? `Wait ${cooldown}s` : "Rebuild the cached play-history stats behind this dashboard"}
+        aria-label={cooldown > 0 ? t("adminActivity.warm.ariaWait", { seconds: cooldown }) : t("adminActivity.warm.aria")}
+        title={cooldown > 0 ? t("adminActivity.warm.wait", { seconds: cooldown }) : t("adminActivity.warm.title")}
         className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 disabled:bg-zinc-800 disabled:opacity-50 transition-colors"
       >
         <Zap className="w-4 h-4 text-amber-500 shrink-0" aria-hidden="true" />
         <span className="text-xs font-medium text-zinc-200">
-          {loading ? "Warming…" : "Warm cache"}
+          {loading ? t("adminActivity.warm.warming") : t("adminActivity.warm.button")}
         </span>
       </button>
       <span

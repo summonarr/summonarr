@@ -6,6 +6,8 @@ import { wrapEncryptStream, BackupCryptoError } from "@/lib/backup-crypto";
 import { BACKUP_TABLES, BACKUP_ENUMS, computeSchemaFingerprint } from "@/lib/backup-schema";
 import { tokenEncryptionKeyFingerprint } from "@/lib/token-crypto";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { localizeBackupMessage } from "@/lib/backup-messages";
 
 export const dynamic = "force-dynamic";
 
@@ -285,24 +287,25 @@ function buildSqlStream(
 const MIN_BACKUP_PASSWORD_LEN = 12;
 
 export const GET = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   // Per-admin rate limit on a full encrypted database export. Streams the ENTIRE
   // database (~20 min), the highest-value exfiltration target in the app — one pull
   // hands an attacker every user, session, encrypted secret, and play-history record.
   // 5/hour stops a compromised admin cookie from draining the box while covering
   // legitimate manual backups.
   if (!checkRateLimit(`admin-db-export:${session.user.id}`, 5, 60 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many backup exports — try again later." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.backup.tooManyExports") }, { status: 429 });
   }
   const password = process.env.BACKUP_DB_PASSWORD ?? "";
   if (password.length === 0) {
     return NextResponse.json(
-      { error: "Backup is not configured. Set the BACKUP_DB_PASSWORD environment variable on the server." },
+      { error: t("apiAdmin.backup.notConfigured") },
       { status: 503 },
     );
   }
   if (password.length < MIN_BACKUP_PASSWORD_LEN) {
     return NextResponse.json(
-      { error: `BACKUP_DB_PASSWORD is too short (minimum ${MIN_BACKUP_PASSWORD_LEN} characters).` },
+      { error: t("apiAdmin.backup.passwordTooShort", { min: MIN_BACKUP_PASSWORD_LEN }) },
       { status: 503 },
     );
   }
@@ -312,7 +315,7 @@ export const GET = withAdmin(async (req, _ctx, session) => {
     body = wrapEncryptStream(buildSqlStream(session.user.id), password);
   } catch (err) {
     if (err instanceof BackupCryptoError) {
-      return NextResponse.json({ error: err.message }, { status: err.status });
+      return NextResponse.json({ error: localizeBackupMessage(err.message, t) }, { status: err.status });
     }
     throw err;
   }

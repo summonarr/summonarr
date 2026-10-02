@@ -8,6 +8,7 @@ import { parseIpAllowlist, isIpAllowed } from "@/lib/ip-allowlist";
 import { signSessionJwt } from "@/lib/session-jwt";
 import { serializeSessionCookie } from "@/lib/session-cookie";
 import { serializePermissions } from "@/lib/permissions";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -23,6 +24,7 @@ const MAX_EXPIRES_IN = 900;
 const DEFAULT_EXPIRES_IN = 900;
 
 export async function POST(req: NextRequest) {
+  const t = translatorForRequest(req);
   const callerIp = getClientIp(req.headers);
   // Throttle per IP as defense-in-depth against CRON_SECRET brute-force (on top
   // of the timing-safe compare below). Legitimate machine sessions are minted
@@ -30,13 +32,13 @@ export async function POST(req: NextRequest) {
   // ipBucketKey for the THROTTLE (an IPv6 /64 holder must not rotate past it);
   // the exact callerIp is kept for the isIpAllowed check + audit rows below.
   if (!checkRateLimit(`machine-session:${ipBucketKey(callerIp)}`, 10, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.common.tooManyRequests") }, { status: 429 });
   }
 
   // Machine session is opt-in; disabled by default to prevent accidental programmatic access
   const featureRow = await prisma.setting.findUnique({ where: { key: "enableMachineSession" } });
   if (featureRow?.value !== "true") {
-    return NextResponse.json({ error: "Machine session API is disabled" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAuth.machine.disabled") }, { status: 403 });
   }
 
   // Optional IP allowlist. When set, only listed IPs/CIDRs may mint a session —
@@ -47,19 +49,19 @@ export async function POST(req: NextRequest) {
   const allowRow = await prisma.setting.findUnique({ where: { key: "machineSessionAllowedIps" } });
   const allowlist = parseIpAllowlist(allowRow?.value);
   if (allowlist.length > 0 && !isIpAllowed(callerIp, allowlist)) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAuth.common.forbidden") }, { status: 403 });
   }
 
   const cronSecret = process.env.CRON_SECRET;
   if (!cronSecret) {
-    return NextResponse.json({ error: "Not configured" }, { status: 503 });
+    return NextResponse.json({ error: t("apiAuth.machine.notConfigured") }, { status: 503 });
   }
   const authHeader = req.headers.get("authorization") ?? "";
   if (
     !authHeader.startsWith("Bearer ") ||
     !safeCompare(authHeader.slice(7), cronSecret)
   ) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ error: t("apiAuth.common.unauthorized") }, { status: 401 });
   }
 
   let expiresIn = DEFAULT_EXPIRES_IN;
@@ -94,18 +96,18 @@ export async function POST(req: NextRequest) {
 
   if (!user) {
     return NextResponse.json(
-      { error: requestedUserId ? "User not found" : "No admin user found" },
+      { error: requestedUserId ? t("apiAuth.machine.userNotFound") : t("apiAuth.machine.noAdmin") },
       { status: 404 },
     );
   }
   if (requestedUserId && user.role !== "ADMIN") {
     return NextResponse.json(
-      { error: "Requested user is not an admin" },
+      { error: t("apiAuth.machine.notAdmin") },
       { status: 403 },
     );
   }
   if (user.deactivatedAt) {
-    return NextResponse.json({ error: "Account is disabled" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAuth.machine.accountDisabled") }, { status: 403 });
   }
 
   const sessionId = randomUUID();

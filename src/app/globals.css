@@ -538,8 +538,9 @@ a:focus-visible > .ds-chip-link { color: var(--ds-fg); border-color: var(--ds-ac
    MediaCard already puts its Plex/Jellyfin availability chips — identical
    coordinates, and the rank badge wins on z-index, so it clipped the label on
    every card in the grid. Push the chips clear of the badge instead of moving
-   the rank somewhere less legible. /for-you reuses the class for the same
-   reason: its top-left "not interested" button sits on the chips too. */
+   the rank somewhere less legible. /for-you does NOT use this class: MediaCard
+   already moves the chips DOWN when it is given an overlayAction, and adding
+   this rightward shift on top stranded them mid-poster. */
 .ds-ranked-card [data-media-chips] { left: 2rem; }
 
 /* ───── Settings section anchors ─────

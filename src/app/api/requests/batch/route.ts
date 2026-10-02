@@ -16,6 +16,8 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { readJsonCapped } from "@/lib/body-size";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { settleLimit } from "@/lib/concurrency";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 // Cap concurrent ARR pushes (guardrail 31) — mirrors the bulk route's
 // ARR_CONCURRENCY so a large batch approve doesn't burst every Radarr/Sonarr
@@ -46,7 +48,7 @@ async function fanOutEmails(targets: EmailTarget[], status: "APPROVED" | "DECLIN
       // would otherwise still get emailed by a later batch approve/decline.
       // Mirrors the same guard just added to the Discord/push plural notifiers.
       where: { id: { in: userIds }, deactivatedAt: null },
-      select: { id: true, email: true, notificationEmail: true, emailOnApproved: true, emailOnDeclined: true },
+      select: { id: true, email: true, notificationEmail: true, emailOnApproved: true, emailOnDeclined: true, locale: true },
     });
     const userMap = new Map(users.map((u) => [u.id, u]));
     for (const t of targets) {
@@ -56,10 +58,10 @@ async function fanOutEmails(targets: EmailTarget[], status: "APPROVED" | "DECLIN
       if (!to) continue;
       if (status === "APPROVED") {
         if (!u.emailOnApproved) continue;
-        void notifyUserRequestApprovedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, posterPath: t.posterPath, tmdbId: t.tmdbId ?? undefined });
+        void notifyUserRequestApprovedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, posterPath: t.posterPath, tmdbId: t.tmdbId ?? undefined, locale: u.locale });
       } else {
         if (!u.emailOnDeclined) continue;
-        void notifyUserRequestDeclinedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, adminNote: adminNote ?? null, posterPath: t.posterPath });
+        void notifyUserRequestDeclinedEmail({ toEmail: to, title: t.title, mediaType: t.mediaType, adminNote: adminNote ?? null, posterPath: t.posterPath, locale: u.locale });
       }
     }
   } catch (err) {
@@ -110,6 +112,8 @@ async function writeBatchInboxRows(
           tmdbId: t.tmdbId ?? null,
           mediaType: t.mediaType,
           posterPath: t.posterPath ?? null,
+          // Re-rendered from type + mediaType in the reader's language.
+          data: { v: 1 },
         }),
       ),
     });
@@ -119,11 +123,12 @@ async function writeBatchInboxRows(
 }
 
 export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   if (!checkRateLimit(`batch:${session.user.id}`, 10, 60_000)) {
-    return NextResponse.json({ error: "Too many batch operations — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.requests.batch.rateLimited") }, { status: 429 });
   }
 
   const parsed = await readJsonCapped<{ ids?: unknown; status?: unknown; adminNote?: unknown; permanent?: unknown }>(req, 1048576);
@@ -133,19 +138,19 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
   const { ids, status, adminNote, permanent } = body;
 
   if (!Array.isArray(ids) || ids.length === 0 || ids.length > 100) {
-    return NextResponse.json({ error: "ids must be a non-empty array of up to 100 items" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.requests.batch.idsInvalid") }, { status: 400 });
   }
   if (!ids.every((id) => typeof id === "string")) {
-    return NextResponse.json({ error: "ids must be strings" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.requests.batch.idsStrings") }, { status: 400 });
   }
   if (!VALID_STATUSES.includes(status as ValidStatus)) {
-    return NextResponse.json({ error: "status must be APPROVED or DECLINED" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.requests.batch.statusInvalid") }, { status: 400 });
   }
   if (adminNote !== undefined && (typeof adminNote !== "string" || adminNote.length > 1000)) {
-    return NextResponse.json({ error: "adminNote must be a string under 1000 characters" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.adminNoteTooLong") }, { status: 400 });
   }
   if (permanent !== undefined && typeof permanent !== "boolean") {
-    return NextResponse.json({ error: "permanent must be a boolean" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.requests.batch.permanentBoolean") }, { status: 400 });
   }
 
   const typedIds = ids as string[];
@@ -157,7 +162,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
   // so an admin can't blast 100 users' requests into the permanent state in a single click.
   if (typedPermanent && typedIds.length > 25) {
     return NextResponse.json(
-      { error: "permanent-batch-too-large", message: "Permanent declines are limited to 25 at a time." },
+      { error: "permanent-batch-too-large", message: t("apiUser.requests.batch.permanentTooMany") },
       { status: 400 },
     );
   }
@@ -243,7 +248,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     // In `approved` order, not completion order, so the reported list is stable.
     failures = approved
       .filter((r) => failedIds.has(r.id))
-      .map((r) => ({ id: r.id, title: r.title, error: failureReasons.get(r.id) ?? "Arr request failed" }));
+      .map((r) => ({ id: r.id, title: r.title, error: failureReasons.get(r.id) ?? t("apiUser.requests.batch.arrFailedDefault") }));
 
     // Roll back rows whose ARR push failed so they aren't stuck APPROVED with no ARR backing.
     if (failedIds.size > 0) {
@@ -343,16 +348,17 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
   // Both are omitted when every push landed, so a clean batch reads as before.
   return NextResponse.json({
     ok: true,
-    ...(failures.length > 0 ? { failed: failures, arrError: summarizeArrFailures(failures) } : {}),
+    ...(failures.length > 0 ? { failed: failures, arrError: summarizeArrFailures(failures, t) } : {}),
   });
 });
 
 // Names the first few failures with their reasons and counts the rest, so a
 // 100-row batch can't produce an unbounded message.
-function summarizeArrFailures(failures: { title: string; error: string }[]): string {
+function summarizeArrFailures(failures: { title: string; error: string }[], t: Translator): string {
   const SHOWN = 3;
-  const listed = failures.slice(0, SHOWN).map((f) => `"${f.title}": ${f.error}`);
-  const more = failures.length > SHOWN ? `; and ${failures.length - SHOWN} more` : "";
-  const noun = failures.length === 1 ? "1 request" : `${failures.length} requests`;
-  return `${noun} couldn't be sent to Radarr/Sonarr and went back to Pending — ${listed.join("; ")}${more}`;
+  const list = failures.slice(0, SHOWN).map((f) => `"${f.title}": ${f.error}`).join("; ");
+  const count = failures.length;
+  return count > SHOWN
+    ? t("apiUser.requests.batch.arrFailedMore", { count, list, more: count - SHOWN })
+    : t("apiUser.requests.batch.arrFailed", { count, list });
 }

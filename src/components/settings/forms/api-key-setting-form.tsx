@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // The placeholder /api/settings sends instead of a stored secret, and ignores
 // when it comes back in a PATCH (route.ts `MASKED_VALUE` — keep the two equal).
@@ -28,6 +29,7 @@ export function ApiKeySettingForm({
   inputId: string;
   help: React.ReactNode;
 }) {
+  const t = useT();
   const [apiKey, setApiKey] = useState(initialApiKey);
   // The value the server currently holds (as far as this form knows). The test
   // endpoint checks the SAVED key, not what's typed in the box — so testing an
@@ -79,7 +81,7 @@ export function ApiKeySettingForm({
       const saved = await persistKey();
       if (!saved) {
         setTestStatus("error");
-        setTestMessage("Save failed — key not tested");
+        setTestMessage(t("settings.form.apiKey.saveFailedUntested"));
         return;
       }
     }
@@ -91,10 +93,10 @@ export function ApiKeySettingForm({
       });
       const data = (await res.json().catch(() => ({ ok: false }))) as { ok: boolean; message?: string; error?: string };
       setTestStatus(data.ok ? "ok" : "error");
-      setTestMessage(data.ok ? (data.message ?? "Connected") : (data.error ?? "Test failed"));
+      setTestMessage(data.ok ? (data.message ?? t("settings.form.common.connected")) : (data.error ?? t("settings.form.common.testFailed")));
     } catch {
       setTestStatus("error");
-      setTestMessage("Test failed");
+      setTestMessage(t("settings.form.common.testFailed"));
     }
   }
 
@@ -118,11 +120,11 @@ export function ApiKeySettingForm({
       </div>
       <div className="flex items-center gap-3 flex-wrap">
         <Button type="submit" disabled={busy} className="bg-indigo-600 hover:bg-indigo-500">
-          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
+          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
         </Button>
         <Button type="button" variant="outline" onClick={handleTest} disabled={busy} className="border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-2">
           {testStatus === "testing" ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-          {dirty ? "Save & Test" : "Test API"}
+          {dirty ? t("settings.form.common.saveAndTest") : t("settings.form.apiKey.test")}
         </Button>
         <SaveStatusMessage status={status === "saved" ? "ok" : status} />
         {testStatus === "ok"    && <span role="status" aria-live="polite" className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />{testMessage}</span>}

@@ -5,6 +5,7 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { getJellyfinSessions, terminateJellyfinSession } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Admin terminate-playback endpoint for Jellyfin. Mirrors the Plex route: it
 // sends the "Stop" playstate command (POST /Sessions/{id}/Playing/Stop), which
@@ -21,6 +22,7 @@ import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-in
 // Jellyfin server to use (multi-server support); when omitted it falls back to
 // the default server so older admin UI builds keep working.
 export const POST = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const parsed = await readJsonCapped<{ sessionKey?: unknown; serverInstance?: unknown; reason?: unknown }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
@@ -31,11 +33,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     : "Session terminated by an administrator.";
 
   if (!sessionKey) {
-    return NextResponse.json({ error: "sessionKey is required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.terminate.sessionKeyRequired") }, { status: 400 });
   }
 
   if (body.serverInstance !== undefined && (typeof body.serverInstance !== "string" || !isValidMediaInstanceSlug(body.serverInstance))) {
-    return NextResponse.json({ error: `invalid serverInstance: ${String(body.serverInstance)}` }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.invalidServerInstance", { slug: String(body.serverInstance) }) }, { status: 400 });
   }
   const serverInstance = typeof body.serverInstance === "string" ? body.serverInstance : DEFAULT_MEDIA_INSTANCE;
 
@@ -45,7 +47,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
   if (!serverUrl || !apiKey) {
     return NextResponse.json(
-      { error: "Jellyfin server is not configured" },
+      { error: t("apiAdmin.terminate.jellyfinNotConfigured") },
       { status: 400 },
     );
   }
@@ -55,7 +57,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     sessions = await getJellyfinSessions(serverUrl, apiKey);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: `Jellyfin unreachable: ${msg}` }, { status: 502 });
+    return NextResponse.json({ error: t("apiAdmin.terminate.jellyfinUnreachable", { detail: msg }) }, { status: 502 });
   }
 
   // The card's sessionKey is the PlaySessionId; match on that, but also accept
@@ -65,7 +67,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   );
   if (!match || !match.sessionId) {
     return NextResponse.json(
-      { error: "Session not found in /Sessions (already stopped?)" },
+      { error: t("apiAdmin.terminate.jellyfinSessionNotFound") },
       { status: 404 },
     );
   }
@@ -92,7 +94,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
   if (!result.ok) {
     return NextResponse.json(
-      { error: `Jellyfin rejected terminate request (status ${result.status})` },
+      { error: t("apiAdmin.terminate.jellyfinRejected", { status: String(result.status) }) },
       { status: 502 },
     );
   }

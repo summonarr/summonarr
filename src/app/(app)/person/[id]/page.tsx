@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { requireAppSession } from "@/lib/require-app-session";
 import { getEnrichedPerson } from "@/lib/person";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
+import { isFeatureEnabled } from "@/lib/features";
 import { PersonView } from "@/components/media/person-view";
 import { DetailTitle } from "@/components/layout/detail-title";
 
@@ -28,7 +29,14 @@ export default async function PersonPage({
     throw err;
   });
 
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  const [plexEnabled, jellyfinEnabled] = await Promise.all([
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+  ]);
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, {
+    plex: plexEnabled,
+    jellyfin: jellyfinEnabled,
+  });
   return (
     <>
       {/* Renders nothing — publishes the name so the header breadcrumb can

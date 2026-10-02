@@ -120,6 +120,8 @@ const auditRows: Array<Record<string, unknown>> = [];
 // shape + the guardrail-28 "unlink, never hard-delete" property.
 type TxOp = { op: string; args?: unknown };
 let txOps: TxOp[] = [];
+// Options passed to each interactive $transaction, in call order.
+let txOptsSeen: Array<{ timeout?: number } | undefined> = [];
 
 function makeTx() {
   const rec = (op: string) => (args?: unknown) => { txOps.push({ op, args }); return Promise.resolve({ count: 0 }); };
@@ -139,6 +141,11 @@ function makeTx() {
     hiddenItem: { deleteMany: rec("hiddenItem.deleteMany") },
     notification: { deleteMany: rec("notification.deleteMany") },
     userRecommendation: { deleteMany: rec("userRecommendation.deleteMany") },
+    verificationToken: { deleteMany: rec("verificationToken.deleteMany") },
+    // Two-factor credentials — purge and the admin 2FA reset share this write set.
+    userTotp: { deleteMany: rec("userTotp.deleteMany") },
+    webAuthnCredential: { deleteMany: rec("webAuthnCredential.deleteMany") },
+    mfaRecoveryCode: { deleteMany: rec("mfaRecoveryCode.deleteMany") },
     // The TMDB reset's graph half. Both live in ONE transaction so an unstamped
     // node can never be observed alongside its still-present edges (or, far
     // worse, the reverse) — see the route's comment.
@@ -269,7 +276,8 @@ const fakePrisma = {
       return args.data;
     },
   },
-  $transaction: async (arg: unknown, _opts?: { timeout?: number }) => {
+  $transaction: async (arg: unknown, opts?: { timeout?: number }) => {
+    if (typeof arg === "function") txOptsSeen.push(opts);
     if (typeof arg === "function") return (arg as (t: unknown) => Promise<unknown>)(makeTx());
     return Promise.all(arg as Promise<unknown>[]);
   },
@@ -300,6 +308,7 @@ const { NextRequest } = await import("next/server");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
 
+const { BATCH_TX_TIMEOUT } = await import("../src/lib/cron-auth.ts");
 const { DELETE: clearCache } = await import("../src/app/api/admin/clear-cache/route.ts");
 const { DELETE: playHistoryDelete } = await import("../src/app/api/play-history/[id]/route.ts");
 const { PATCH: userPatch, DELETE: userDelete } = await import("../src/app/api/admin/users/[id]/route.ts");
@@ -378,6 +387,7 @@ const ctxFor = (id: string): Ctx => ({ params: Promise.resolve({ id }) });
 const flush = () => new Promise((r) => setTimeout(r, 5));
 
 beforeEach(() => {
+  txOptsSeen = [];
   auditThrows = false;
   casRows = 1;
   txAuthDeleteThrows = false;
@@ -747,6 +757,8 @@ test("reactivate: clears deactivatedAt via the guarded updateMany and audits USE
   assert.match(sql, /"purgedAt" IS NULL/);
   assert.match(sql, /"deactivatedAt" IS NOT NULL/);
   assert.match(sql, /email <> 'deleted-' \|\| id \|\| '@deleted\.invalid'/); // the legacy-tombstone guard
+  // A re-enabled account must not revive a calendar feed URL issued before it was disabled.
+  assert.match(sql, /"calendarTokenHash" = NULL/);
   assert.deepEqual(values, [targetId]); // id travels as a bind param
   assert.equal(usersById.get(targetId)?.deactivatedAt, null);
   await flush();
@@ -828,6 +840,13 @@ test("purge of a disabled account scrubs it, keeps the row, and audits USER_PURG
   assert.equal(data.email, `deleted-${targetId}@deleted.invalid`);
   assert.equal(data.passwordHash, null);
   assert.ok(data.purgedAt instanceof Date);
+  // Guardrail 6d: an erasure removes the two-factor credentials too — the
+  // encrypted TOTP secret, every passkey and every recovery-code hash.
+  for (const op of ["userTotp.deleteMany", "webAuthnCredential.deleteMany", "mfaRecoveryCode.deleteMany"]) {
+    const found = txOps.find((o) => o.op === op);
+    assert.ok(found, `purge must issue ${op}`);
+    assert.deepEqual(found.args, { where: { userId: targetId } });
+  }
 
   await flush();
   assert.equal(auditRows.length, 1);
@@ -1324,6 +1343,21 @@ test("clear-cache source=tmdb also resets grid metadata and the suggestion graph
   );
 });
 
+test("clear-cache graph reset passes BATCH_TX_TIMEOUT — a large graph must not hit Prisma's 5s default", async () => {
+  const admin = await mintSession("ADMIN");
+  const res = await clearCache(
+    req("http://localhost:3000/api/admin/clear-cache?source=tmdb", { method: "DELETE", headers: admin.header }),
+    undefined,
+  );
+  assert.equal(res.status, 200);
+  assert.equal(txOptsSeen.length, 1, "exactly one interactive transaction (the graph unstamp+delete)");
+  assert.equal(
+    txOptsSeen[0]?.timeout,
+    BATCH_TX_TIMEOUT,
+    "an unbounded updateMany + deleteMany over ~800k edge rows needs the library-sized timeout (guardrail 4)",
+  );
+});
+
 test("clear-cache source=mdblist resets the stored quality verdicts, and leaves the suggestion graph alone", async () => {
   const admin = await mintSession("ADMIN");
   tmdbDeleteCount = 4;
@@ -1361,4 +1395,50 @@ test("clear-cache never wipes a user's shelf — UserRecommendation is left for 
     0,
     "clearing them would blank every For You page for up to 12h to save the same staleness window",
   );
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// i18n — admin API messages follow the requester's language; no hints = English
+// ════════════════════════════════════════════════════════════════════════════
+
+test("i18n (user-delete self): the locale cookie or Accept-Language → Spanish; no hints → the English literal", async () => {
+  const admin = await mintSession("ADMIN");
+  const self = async (extra: Record<string, string>) => {
+    const res = await userDelete(
+      req(`http://localhost:3000/api/admin/users/${admin.userId}`, { method: "DELETE", headers: { ...admin.header, ...extra } }),
+      ctxFor(admin.userId),
+    );
+    assert.equal(res.status, 400);
+    return (await res.json()) as { error: string };
+  };
+  assert.deepEqual(await self({}), { error: "Cannot delete your own account" });
+  assert.deepEqual(await self({ cookie: "summonarr-locale=es" }), { error: "No puedes eliminar tu propia cuenta" });
+  assert.deepEqual(await self({ "accept-language": "es-MX,es;q=0.9" }), { error: "No puedes eliminar tu propia cuenta" });
+  // A native client keeps the instance default even with a Spanish phone.
+  assert.deepEqual(await self({ "accept-language": "es", "x-summonarr-client": "ios; build=40" }), { error: "Cannot delete your own account" });
+});
+
+test("i18n (Jellyfin terminate, unconfigured): Spanish error, same status, still no fetch or audit", async () => {
+  const admin = await mintSession("ADMIN");
+  const res = await jellyfinTerminate(req("http://localhost:3000/api/admin/play-history/terminate-jellyfin-session", { method: "POST", headers: { ...admin.header, "content-type": "application/json", cookie: "summonarr-locale=es" }, body: JSON.stringify({ sessionKey: "jf-play-key" }) }), undefined);
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "El servidor Jellyfin no está configurado" });
+  assert.equal(fetchCalls.length, 0);
+  await flush();
+  assert.equal(auditAttempts.length, 0);
+});
+
+test("i18n (role-change validation): a templated message keeps its dynamic part in Spanish", async () => {
+  const admin = await mintSession("ADMIN");
+  const targetId = seedUser("USER");
+  const patch = (extra: Record<string, string>) => userPatch(
+    req(`http://localhost:3000/api/admin/users/${targetId}`, { method: "PATCH", headers: { ...admin.header, "content-type": "application/json", ...extra }, body: JSON.stringify({ movieQuotaLimit: -1 }) }),
+    ctxFor(targetId),
+  );
+  const en = await patch({});
+  assert.equal(en.status, 400);
+  assert.deepEqual(await en.json(), { error: "movieQuotaLimit must be a non-negative integer or null" });
+  const es = await patch({ "accept-language": "es" });
+  assert.equal(es.status, 400);
+  assert.deepEqual(await es.json(), { error: "movieQuotaLimit debe ser un número entero no negativo o null" });
 });

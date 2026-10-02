@@ -10,6 +10,7 @@ import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { settleLimit } from "@/lib/concurrency";
 import { isFeatureEnabled } from "@/lib/features";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Cap cold-cache TMDB detail fetches per page — a cold page can otherwise fan out
 // dozens of concurrent /movie & /tv lookups. Matches the TMDB list-page discipline.
@@ -27,11 +28,12 @@ type EnrichedMedia = TmdbMedia & {
 };
 
 export const GET = withAuth(async (request, _ctx, session) => {
+  const t = translatorForRequest(request);
   if (!(await isFeatureEnabled("feature.page.popular"))) {
-    return NextResponse.json({ error: "Popular is disabled" }, { status: 403 });
+    return NextResponse.json({ error: t("apiUser.browse.popularDisabled") }, { status: 403 });
   }
   if (!checkRateLimit(`popular:${session.user.id}`, 30, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequests") }, { status: 429 });
   }
 
   const sp = request.nextUrl.searchParams;
@@ -134,6 +136,6 @@ export const GET = withAuth(async (request, _ctx, session) => {
     });
   } catch (err) {
     console.error("[popular] Failed:", err);
-    return NextResponse.json({ error: "Failed to fetch" }, { status: 500 });
+    return NextResponse.json({ error: t("apiUser.common.fetchFailed") }, { status: 500 });
   }
 });

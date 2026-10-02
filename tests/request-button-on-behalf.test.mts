@@ -51,7 +51,10 @@ const mod = (await import(`data:text/javascript;base64,${Buffer.from(js).toStrin
 };
 const { ON_BEHALF_MESSAGES, onBehalfMessage } = mod;
 
-const COLLAPSED = "Already requested or available for that user";
+// The map's values are i18n keys (src/lib/i18n/messages/en/request.json);
+// the component translates them at render.
+const COLLAPSED = "request.onBehalf.collapsed";
+const CREATED = "request.onBehalf.created";
 
 function bulkItemResultMembers(): string[] {
   const src = readFileSync(BULK_ROUTE, "utf8");
@@ -80,6 +83,15 @@ test("every bulk ItemResult outcome has its own on-behalf message", () => {
   }
 });
 
+test("every on-behalf message key exists in the English catalog", () => {
+  const catalog = JSON.parse(
+    readFileSync(resolve(ROOT, "src/lib/i18n/messages/en/request.json"), "utf8"),
+  ) as Record<string, string>;
+  for (const key of [...Object.values(ON_BEHALF_MESSAGES), COLLAPSED]) {
+    assert.ok(Object.hasOwn(catalog, key), `missing catalog key ${key}`);
+  }
+});
+
 test("non-created outcomes are NOT reported as 'already requested or available'", () => {
   for (const r of ["no-permission", "rating-blocked", "blacklisted", "error", "skipped-declined"]) {
     const msg = onBehalfMessage(r, 0);
@@ -92,20 +104,20 @@ test("non-created outcomes are NOT reported as 'already requested or available'"
 });
 
 test("created / auto-approved read as success; already-* keep their own lines", () => {
-  assert.equal(onBehalfMessage("created", 1), "Requested for user ✓");
-  assert.match(onBehalfMessage("auto-approved", 1), /✓$/);
+  assert.equal(onBehalfMessage("created", 1), CREATED);
+  assert.equal(onBehalfMessage("auto-approved", 1), "request.onBehalf.autoApproved");
   assert.equal(onBehalfMessage("already-requested", 0), ON_BEHALF_MESSAGES["already-requested"]);
   assert.equal(onBehalfMessage("already-available", 0), ON_BEHALF_MESSAGES["already-available"]);
 });
 
 test("older server without `results` falls back to the created-based line", () => {
-  assert.equal(onBehalfMessage(undefined, 1), "Requested for user ✓");
+  assert.equal(onBehalfMessage(undefined, 1), CREATED);
   assert.equal(onBehalfMessage(undefined, 0), COLLAPSED);
   assert.equal(onBehalfMessage(undefined, undefined), COLLAPSED);
   // An outcome this build does not know (a newer server) also falls back
   // rather than reading a prototype key or throwing.
   assert.equal(onBehalfMessage("constructor", 0), COLLAPSED);
-  assert.equal(onBehalfMessage("some-future-outcome", 1), "Requested for user ✓");
+  assert.equal(onBehalfMessage("some-future-outcome", 1), CREATED);
 });
 
 test("submitOnBehalf actually reads results[0].result off the bulk response", () => {

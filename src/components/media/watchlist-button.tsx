@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Bookmark, BookmarkCheck, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useToast } from "@/components/ui/toast";
+import { useT } from "@/components/i18n/i18n-provider";
 import { DetailActionButton } from "./detail-action-button";
 
 // "Add to Watchlist" toggle for movie/TV detail pages. Personal save-for-later,
@@ -19,6 +20,7 @@ export function WatchlistButton({
   initialOnWatchlist: boolean;
 }) {
   const { toast } = useToast();
+  const t = useT();
   const [on, setOn] = useState(initialOnWatchlist);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState("");
@@ -43,13 +45,27 @@ export function WatchlistButton({
       if (!res.ok && res.status !== 409) {
         const data = await res.json().catch(() => ({}));
         setOn(!next); // rollback
-        setMsg(data.error ?? "Something went wrong");
+        setMsg(data.error ?? t("request.somethingWrong"));
       } else {
-        toast({ title: next ? "Added to watchlist" : "Removed from watchlist", variant: "success" });
+        toast({ title: next ? t("detail.watchlist.added") : t("detail.watchlist.removed"), variant: "success" });
+        // Watchlist auto-request: the add may also have filed a request. The
+        // field is present only when auto-request applied; a refusal (quota,
+        // blacklisted, already available…) never fails the add itself.
+        if (next && res.status === 201) {
+          const data = (await res.json().catch(() => ({}))) as {
+            autoRequest?: { requested?: boolean; outcome?: string; message?: string };
+          };
+          const ar = data.autoRequest;
+          if (ar?.requested) {
+            toast({ title: t("detail.watchlist.autoRequested", { message: ar.message ?? t("detail.watchlist.requested") }), variant: "success" });
+          } else if (ar && ar.outcome !== "already-requested" && ar.outcome !== "already-available") {
+            toast({ title: t("detail.watchlist.notAutoRequested", { message: ar.message ?? t("request.somethingWrong") }) });
+          }
+        }
       }
     } catch {
       setOn(!next); // rollback
-      setMsg("Network error — please try again");
+      setMsg(t("request.networkError"));
     } finally {
       setLoading(false);
     }
@@ -63,7 +79,7 @@ export function WatchlistButton({
         disabled={loading}
         busy={loading}
         aria-pressed={on}
-        aria-label={on ? "Remove from watchlist" : "Add to watchlist"}
+        aria-label={on ? t("detail.watchlist.removeLabel") : t("detail.watchlist.addLabel")}
       >
         {loading ? (
           <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
@@ -72,7 +88,7 @@ export function WatchlistButton({
         ) : (
           <Bookmark style={{ width: 14, height: 14 }} />
         )}
-        {on ? "On Watchlist" : "Add to Watchlist"}
+        {on ? t("detail.watchlist.on") : t("detail.watchlist.add")}
       </DetailActionButton>
       {msg && (
         <span className="ds-mono" style={{ fontSize: 11, color: "var(--ds-danger)" }}>

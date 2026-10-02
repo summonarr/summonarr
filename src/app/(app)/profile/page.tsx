@@ -10,8 +10,19 @@ import { PushDevices } from "@/components/profile/push-devices";
 import { AuthSessions } from "@/components/profile/auth-sessions";
 import { ChangePassword } from "@/components/profile/change-password";
 import { DeleteAccount } from "@/components/profile/delete-account";
+import { AutoRequestPrefs } from "@/components/profile/auto-request-prefs";
+import { CalendarFeed } from "@/components/profile/calendar-feed";
+import { isFeatureEnabled } from "@/lib/features";
+import { canAutoRequest, hasPermission, Permission } from "@/lib/permissions";
+import { WATCHLIST_AUTO_REQUEST_FEATURE_KEY } from "@/lib/auto-request";
+import { CALENDAR_FEATURE_KEY } from "@/lib/calendar-feed";
+import { TwoFactorSettings } from "@/components/profile/two-factor";
+import { getMfaState } from "@/lib/mfa/mfa-store";
+import { adminMfaPolicyApplies, REQUIRE_MFA_FOR_ADMINS_KEY } from "@/lib/mfa/policy";
+import { webAuthnConfigFromEnv } from "@/lib/mfa/webauthn";
 import { User } from "@/components/icons";
 import { PageHeader } from "@/components/ui/design";
+import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +36,7 @@ export default async function ProfilePage() {
   const session = await authActive();
   if (!session) redirect("/login");
 
-  const [user, hasPassword, discordInviteSetting, pushDevices, maxPushSetting, authSessions, emailEnabled] = await Promise.all([
+  const [user, hasPassword, discordInviteSetting, pushDevices, maxPushSetting, authSessions, emailEnabled, calendarEnabled] = await Promise.all([
     prisma.user.findUnique({
       where: { id: session.user.id },
       select: {
@@ -35,6 +46,8 @@ export default async function ProfilePage() {
         emailOnApproved: true, emailOnAvailable: true, emailOnDeclined: true,
         pushOnApproved: true, pushOnAvailable: true, pushOnDeclined: true,
         notifyOnIssue: true,
+        plexWatchlistAutoRequest: true,
+        calendarTokenHash: true, calendarTokenCreatedAt: true,
       },
     }),
     prisma.user.count({
@@ -59,16 +72,41 @@ export default async function ProfilePage() {
       },
     }),
     isNotificationEmailEnabled(),
+    isFeatureEnabled(CALENDAR_FEATURE_KEY),
   ]);
+  // Watchlist auto-request section: only for a user who can use it. The
+  // permission check is free; the flag and token reads only run for them.
+  const autoRequestPermitted =
+    canAutoRequest(session.user.permissions, "MOVIE") || canAutoRequest(session.user.permissions, "TV");
+  const [autoRequestEnabled, plexAccount] = autoRequestPermitted
+    ? await Promise.all([
+        isFeatureEnabled(WATCHLIST_AUTO_REQUEST_FEATURE_KEY),
+        prisma.account.findFirst({ where: { userId: session.user.id, provider: "plex" }, select: { id: true } }),
+      ])
+    : [false, null];
   const discordInviteUrl = discordInviteSetting?.value || null;
+
+  // Two-factor is offered only to local-credentials accounts (guardrail 6d).
+  const mfaAvailable = session.user.provider === "credentials" && hasPassword;
+  const [mfaState, requireMfaRow] = mfaAvailable
+    ? await Promise.all([
+        getMfaState(session.user.id),
+        prisma.setting.findUnique({ where: { key: REQUIRE_MFA_FOR_ADMINS_KEY } }),
+      ])
+    : [null, null];
+  const mfaRequired =
+    !!mfaState &&
+    !mfaState.enabled &&
+    adminMfaPolicyApplies({ role: session.user.role, provider: session.user.provider, settingValue: requireMfaRow?.value });
   const pushCap = parseRateLimit(maxPushSetting?.value, DEFAULT_MAX_PUSH_SUBSCRIPTIONS);
   const currentSessionId = session.sessionId;
+  const t = await getTranslator();
 
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Profile"
-        subtitle="Manage your account and integrations"
+        title={t("profile.title")}
+        subtitle={t("profile.subtitle")}
       />
 
       <div className="max-w-2xl lg:max-w-6xl lg:grid lg:grid-cols-2 lg:gap-6">
@@ -116,7 +154,7 @@ export default async function ProfilePage() {
 
           <ProfileCard
             title="Discord"
-            description="Link your Discord account to request media directly from Discord."
+            description={t("profile.discord.description")}
           >
             <DiscordLinkSection
               linkedDiscordId={user?.discordId ?? null}
@@ -126,16 +164,41 @@ export default async function ProfilePage() {
 
           {session.user.provider === "credentials" && (
             <ProfileCard
-              title="Change Password"
-              description="Update your local login password."
+              title={t("profile.password.title")}
+              description={t("profile.password.description")}
             >
               <ChangePassword hasPassword={hasPassword} />
             </ProfileCard>
           )}
 
+          {mfaState && (
+            <ProfileCard
+              id="two-factor"
+              title={t("profile.mfa.title")}
+              description={t("profile.mfa.description")}
+            >
+              <TwoFactorSettings
+                required={mfaRequired}
+                initial={{
+                  enabled: mfaState.enabled,
+                  totpEnabled: mfaState.totpEnabled,
+                  passkeys: mfaState.passkeys.map((p) => ({
+                    id: p.id,
+                    name: p.name,
+                    backedUp: p.backedUp,
+                    createdAt: p.createdAt.toISOString(),
+                    lastUsedAt: p.lastUsedAt?.toISOString() ?? null,
+                  })),
+                  recoveryCodesRemaining: mfaState.recoveryRemaining,
+                  webauthnAvailable: webAuthnConfigFromEnv() !== null,
+                }}
+              />
+            </ProfileCard>
+          )}
+
           <ProfileCard
-            title="Active Sessions"
-            description="Devices currently signed in. Revoke any session you don't recognize."
+            title={t("profile.sessions.title")}
+            description={t("profile.sessions.description")}
           >
             <AuthSessions
               sessions={authSessions.map((s) => ({
@@ -146,8 +209,8 @@ export default async function ProfilePage() {
           </ProfileCard>
 
           <ProfileCard
-            title="Close Account"
-            description="Close your account and block sign-in. Only an administrator can restore it."
+            title={t("profile.close.title")}
+            description={t("profile.close.description")}
           >
             <DeleteAccount requiresPassword={hasPassword} />
           </ProfileCard>
@@ -158,8 +221,8 @@ export default async function ProfilePage() {
           style={{ gap: 20 }}
         >
           <ProfileCard
-            title="Notification Preferences"
-            description="Choose which notifications you receive on each channel."
+            title={t("profile.notifications.title")}
+            description={t("profile.notifications.description")}
           >
             <NotificationPrefs
               emailEnabled={emailEnabled}
@@ -192,12 +255,38 @@ export default async function ProfilePage() {
             />
           </ProfileCard>
 
+          {autoRequestEnabled && (
+            <ProfileCard
+              title={t("profile.autoRequest.title")}
+              description={t("profile.autoRequest.description")}
+            >
+              <AutoRequestPrefs
+                initialPlexWatchlist={user?.plexWatchlistAutoRequest ?? true}
+                plexConnected={plexAccount !== null}
+              />
+            </ProfileCard>
+          )}
+
           <ProfileCard
-            title="Push Devices"
-            description="Devices registered for push notifications. Remove any you no longer use."
+            title={t("profile.push.title")}
+            description={t("profile.push.description")}
           >
             <PushDevices devices={pushDevices} cap={pushCap} />
           </ProfileCard>
+
+          {calendarEnabled && (
+            <ProfileCard
+              id="calendar-feed"
+              title={t("profile.calendar.title")}
+              description={t("profile.calendar.description")}
+            >
+              <CalendarFeed
+                enabled={!!user?.calendarTokenHash}
+                createdAt={user?.calendarTokenHash ? (user.calendarTokenCreatedAt?.toISOString() ?? null) : null}
+                canSubscribeAll={hasPermission(session.user.permissions, Permission.MANAGE_REQUESTS)}
+              />
+            </ProfileCard>
+          )}
         </div>
       </div>
     </div>
@@ -205,17 +294,21 @@ export default async function ProfilePage() {
 }
 
 function ProfileCard({
+  id,
   title,
   description,
   children,
 }: {
+  id?: string;
   title?: string;
   description?: string;
   children: React.ReactNode;
 }) {
   return (
     <section
+      id={id}
       style={{
+        scrollMarginTop: 80,
         padding: 20,
         background: "var(--ds-bg-2)",
         border: "1px solid var(--ds-border)",

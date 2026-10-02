@@ -13,20 +13,23 @@ import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
 import { prisma } from "@/lib/prisma";
-import { requireFeature } from "@/lib/features";
+import { isFeatureEnabled, requireFeature } from "@/lib/features";
 import { PageHeader, EmptyState, SectionHeader } from "@/components/ui/design";
 import { AlertTriangle, Filter, Film, Tv, type IconComponent } from "@/components/icons";
+import { getTranslator } from "@/lib/i18n/server";
+import type { Translator } from "@/lib/i18n/translate";
 
 const PER_PAGE = 36;
 
 type SortBy = "imdb" | "letterboxd" | "rt" | "trakt" | "mdblist";
 
-const SORT_LABELS: Record<SortBy, string> = {
-  imdb: "IMDb rating",
-  letterboxd: "Letterboxd rating",
-  rt: "Rotten Tomatoes score",
-  trakt: "Trakt rating",
-  mdblist: "MDBList composite score",
+// Catalog keys, translated at render time (module scope has no request locale).
+const SORT_LABEL_KEYS: Record<SortBy, string> = {
+  imdb: "browse.top.sort.imdb",
+  letterboxd: "browse.top.sort.letterboxd",
+  rt: "browse.top.sort.rt",
+  trakt: "browse.top.sort.trakt",
+  mdblist: "browse.top.sort.mdblist",
 };
 
 function sortByRating(items: TmdbMedia[], sortBy: SortBy): TmdbMedia[] {
@@ -147,7 +150,13 @@ export default async function TopRatedPage({
   searchParams: Promise<Record<string, string>>;
 }) {
   await requireFeature("feature.page.top");
-  const [sp, session] = await Promise.all([searchParams, requireAppSession()]);
+  const [sp, session, plexEnabled, jellyfinEnabled, t] = await Promise.all([
+    searchParams,
+    requireAppSession(),
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+    getTranslator(),
+  ]);
   const hideAvailable = sp.hideAvailable === "1";
   const mediaType     = sp.mediaType || undefined;
   const minImdb       = sp.minImdb   || undefined;
@@ -157,7 +166,11 @@ export default async function TopRatedPage({
   const validSorts = new Set<SortBy>(["imdb", "letterboxd", "rt", "trakt", "mdblist"]);
   const sortBy: SortBy = validSorts.has(sp.sortBy as SortBy) ? (sp.sortBy as SortBy) : "imdb";
   const page = Math.max(1, parseInt(sp.page ?? "1", 10) || 1);
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  // Integration flags passed explicitly — they default to TRUE when omitted.
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, {
+    plex: plexEnabled,
+    jellyfin: jellyfinEnabled,
+  });
 
   const filterOpts = { hideAvailable, showPlex, showJellyfin, minImdb, minVotes, fromYear, toYear };
   const hasFilters = !!(hideAvailable || minImdb || minVotes || fromYear || toYear);
@@ -246,9 +259,9 @@ export default async function TopRatedPage({
   const sourceCount = [rawTmdbMovies.length || rawTmdbTV.length, rawTraktMovies.length || rawTraktTV.length, rawMdbMovies.length || rawMdbTV.length].filter(Boolean).length;
 
   const subtitleBits = [
-    `Sorted by ${SORT_LABELS[sortBy]}`,
-    sourceCount > 1 ? `${sourceCount} sources` : null,
-    `${allMovies.length + allTV.length} titles`,
+    t("browse.top.sortedBy", { label: t(SORT_LABEL_KEYS[sortBy]) }),
+    sourceCount > 1 ? t("browse.top.sources", { count: sourceCount }) : null,
+    t("browse.top.titles", { count: allMovies.length + allTV.length }),
   ].filter(Boolean) as string[];
 
   // When nothing survived in EITHER visible section, one empty state for the
@@ -259,7 +272,7 @@ export default async function TopRatedPage({
   return (
     <div className="ds-page-enter">
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
-      <PageHeader title="Top Rated" subtitle={subtitleBits.join(" · ")} />
+      <PageHeader title={t("nav.topRated")} subtitle={subtitleBits.join(" · ")} />
 
       <Suspense>
         <TopFilterBar
@@ -275,7 +288,7 @@ export default async function TopRatedPage({
       </Suspense>
 
       {bothEmpty ? (
-        sectionEmptyState(showMovies ? Film : Tv, page, hasFilters, retryHref)
+        sectionEmptyState(t, showMovies ? Film : Tv, page, hasFilters, retryHref)
       ) : (
         <>
           {showMovies && (
@@ -283,19 +296,19 @@ export default async function TopRatedPage({
             // own mt-8 puts it 32px below the grid, like every other page.
             <section style={{ marginBottom: showTV ? 40 : 0 }}>
               <SectionHeader
-                title="Movies"
+                title={t("nav.movies")}
                 right={
                   // Gated on this page's slice too: past the shorter
                   // section's last page it would read "37–20 of 20".
                   totalMovieCount > 0 && movies.length > 0 ? (
                     <RangeLabel>
-                      {`${offset + 1}–${Math.min(offset + movies.length, totalMovieCount)} of ${totalMovieCount}`}
+                      {t("browse.rangeOf", { from: offset + 1, to: Math.min(offset + movies.length, totalMovieCount), total: totalMovieCount })}
                     </RangeLabel>
                   ) : undefined
                 }
               />
               {movies.length === 0 ? (
-                sectionEmptyState(Film, page, hasFilters, retryHref)
+                sectionEmptyState(t, Film, page, hasFilters, retryHref)
               ) : (
                 <div className="ds-media-grid">
                   {movies.map((media) => (
@@ -315,19 +328,19 @@ export default async function TopRatedPage({
           {showTV && (
             <section>
               <SectionHeader
-                title="TV Shows"
+                title={t("nav.tvShows")}
                 right={
                   // Gated on this page's slice too: past the shorter
                   // section's last page it would read "37–20 of 20".
                   totalTvCount > 0 && tv.length > 0 ? (
                     <RangeLabel>
-                      {`${offset + 1}–${Math.min(offset + tv.length, totalTvCount)} of ${totalTvCount}`}
+                      {t("browse.rangeOf", { from: offset + 1, to: Math.min(offset + tv.length, totalTvCount), total: totalTvCount })}
                     </RangeLabel>
                   ) : undefined
                 }
               />
               {tv.length === 0 ? (
-                sectionEmptyState(Tv, page, hasFilters, retryHref)
+                sectionEmptyState(t, Tv, page, hasFilters, retryHref)
               ) : (
                 <div className="ds-media-grid">
                   {tv.map((media) => (
@@ -370,30 +383,30 @@ function RangeLabel({ children }: { children: React.ReactNode }) {
 // With no filter set, an empty page 1 means the sources came back empty (each
 // fetch swallows its outage into []), so it must not blame filters the user
 // never applied.
-function sectionEmptyState(icon: IconComponent, page: number, hasFilters: boolean, retryHref: string) {
+function sectionEmptyState(t: Translator, icon: IconComponent, page: number, hasFilters: boolean, retryHref: string) {
   if (page > 1) {
     return (
       <EmptyState
         icon={icon}
-        title="No more results on this page"
-        description="Try going back to the first page."
-        cta={{ href: "/top", label: "Back to page 1" }}
+        title={t("browse.empty.noMoreResults.title")}
+        description={t("browse.empty.noMoreResults.description")}
+        cta={{ href: "/top", label: t("browse.empty.backToPage1") }}
       />
     );
   }
   return hasFilters ? (
     <EmptyState
       icon={Filter}
-      title="No results match these filters"
-      description="Try removing one or two filters to see more."
-      cta={{ href: "/top", label: "Clear filters" }}
+      title={t("browse.empty.noFilterMatch.title")}
+      description={t("browse.empty.noFilterMatch.description")}
+      cta={{ href: "/top", label: t("browse.clearFilters") }}
     />
   ) : (
     <EmptyState
       icon={AlertTriangle}
-      title="Couldn’t load top-rated titles"
-      description="The rating sources returned nothing. Please try again shortly."
-      cta={{ href: retryHref, label: "Retry" }}
+      title={t("browse.top.loadFailed.title")}
+      description={t("browse.top.loadFailed.description")}
+      cta={{ href: retryHref, label: t("browse.retry") }}
     />
   );
 }

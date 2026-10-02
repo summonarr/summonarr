@@ -5,12 +5,14 @@ import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
 import { settleLimit } from "@/lib/concurrency";
 import { BATCH_TX_TIMEOUT, batchCreateMany, isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const FETCH_CONCURRENCY = 5;
 
 export async function POST(req: NextRequest) {
+  const t = translatorForRequest(req);
   if (!(await isCronAuthorized(req))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.common.forbidden") }, { status: 403 });
   }
 
   return withCronRunRecording("radarr-sync", async () => {
@@ -58,7 +60,7 @@ export async function POST(req: NextRequest) {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[sync/radarr] failed:", msg);
-      return NextResponse.json({ error: "Radarr sync failed" }, { status: 502 });
+      return NextResponse.json({ error: t("apiAdmin.sync.radarrFailed") }, { status: 502 });
     }
 
     return NextResponse.json({ wanted, available });

@@ -284,7 +284,20 @@ const ARR_FETCH_TIMEOUT_MS = 30_000;
 const ARR_FETCH_MAX_BYTES = 50 * 1024 * 1024;
 
 export async function arrFetch<T>(cfg: ArrCfg, path: string, options: RequestInit = {}): Promise<T> {
+  const res = await arrRequest(cfg, path, options);
+  return res.json() as Promise<T>;
+}
 
+// arrFetch for a call whose success answer carries no JSON body — Radarr's and
+// Sonarr's DELETE /movie|series/{id} answer 200 with an empty body, which
+// res.json() would throw on. Same transport, timeout, body cap and error
+// contract as arrFetch (ArrResponseError on non-2xx); the body is drained.
+export async function arrFetchNoContent(cfg: ArrCfg, path: string, options: RequestInit = {}): Promise<void> {
+  const res = await arrRequest(cfg, path, options);
+  await res.text().catch(() => "");
+}
+
+async function arrRequest(cfg: ArrCfg, path: string, options: RequestInit): Promise<Response> {
   const { signal, method, body } = options;
   const res = await safeFetchAdminConfigured(`${cfg.url}${path}`, {
     method,
@@ -300,8 +313,7 @@ export async function arrFetch<T>(cfg: ArrCfg, path: string, options: RequestIni
     console.error(`[arr] ${sanitizeForLog(path)} → ${res.status}`);
     throw new ArrResponseError(res.status, text);
   }
-
-  return res.json() as Promise<T>;
+  return res;
 }
 
 function isDuplicate(err: unknown): boolean {
@@ -832,15 +844,17 @@ export async function isSeriesWantedInSonarr(tmdbId: number, variant: ArrVariant
     // Interpolated into the query — hold the never-schema-checked lookup value
     // to the same positive-integer contract isSeriesDownloadedInSonarr applies.
     if (!Number.isInteger(tvdbId) || tvdbId <= 0) return false;
-    const library = await arrFetch<{ tvdbId: number; statistics?: { episodeFileCount: number } }[]>(
+    const library = await arrFetch<({ tvdbId: number } & SonarrSeriesStatsRow)[]>(
       cfg, `/api/v3/series?tvdbId=${tvdbId}`
     );
     const match = library.find((s) => s.tvdbId === tvdbId);
-    // Guard `statistics` like getSonarrWantedTmdbIds and isSeriesDownloadedInSonarr
-    // do: one anomalous /api/v3/series row without the block would throw, hit the
-    // catch below, and report `wantedLive: false` with no error — silently
-    // misleading the arr-state diagnostic that CLAUDE.md points operators at.
-    return !!match && (match.statistics?.episodeFileCount ?? 0) === 0;
+    // "Wanted" is "not COMPLETE" (guardrail 14a) — the same sonarrSeriesCompletion
+    // verdict the sync writer stores a SonarrWantedItem row from. The old
+    // `episodeFileCount === 0` test read a partly downloaded series (5 of 24
+    // aired episodes) as not wanted, so the arr-state diagnostic's `wantedLive`
+    // contradicted the wanted row holding the request APPROVED. The helper also
+    // tolerates a row with no `statistics` block (missing stats read as wanted).
+    return !!match && !sonarrSeriesCompletion(match).complete;
   } catch {
     return false;
   }
@@ -1131,7 +1145,11 @@ export async function isSeriesDownloadingInSonarr(tmdbId: number, variant: ArrVa
   if (!cfg) return false;
   try {
     const series = await lookupSeriesByTmdbId<{ tmdbId?: number; tvdbId: number }>(cfg, tmdbId);
-    if (!series) return false;
+    // An unresolved lookup is UNKNOWN, not "not in queue": a degraded Sonarr
+    // `tmdb:` lookup plus a transient TMDB cross-reference failure also land
+    // here, and a confident false fires a spurious "download pending" notify
+    // for a series Sonarr may be actively downloading.
+    if (!series) return null;
     const { tvdbId } = series;
     // Hold the never-schema-checked lookup value to the same positive-integer
     // contract as isSeriesWantedInSonarr/isSeriesDownloadedInSonarr: a

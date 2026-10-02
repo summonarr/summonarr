@@ -940,63 +940,63 @@ License: Apache-2.0 AND LGPL-3.0-or-later
 
 ------------------------------------------------------------------------------
 
-@next/env@16.3.5
+@next/env@16.3.6
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-darwin-arm64@16.3.5
+@next/swc-darwin-arm64@16.3.6
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-darwin-x64@16.3.5
+@next/swc-darwin-x64@16.3.6
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-arm64-gnu@16.3.5
+@next/swc-linux-arm64-gnu@16.3.6
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-arm64-musl@16.3.5
+@next/swc-linux-arm64-musl@16.3.6
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-x64-gnu@16.3.5
+@next/swc-linux-x64-gnu@16.3.6
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-linux-x64-musl@16.3.5
+@next/swc-linux-x64-musl@16.3.6
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-win32-arm64-msvc@16.3.5
+@next/swc-win32-arm64-msvc@16.3.6
 License: MIT
 
 (No license file shipped in the package.)
 
 ------------------------------------------------------------------------------
 
-@next/swc-win32-x64-msvc@16.3.5
+@next/swc-win32-x64-msvc@16.3.6
 License: MIT
 
 (No license file shipped in the package.)
@@ -4688,7 +4688,7 @@ MIT License
 
 ------------------------------------------------------------------------------
 
-@types/node@26.6.2
+@types/node@26.6.3
 License: MIT
 
 MIT License
@@ -6852,7 +6852,7 @@ DEALINGS IN THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-fast-uri@3.1.7
+fast-uri@3.1.8
 License: BSD-3-Clause
 
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
@@ -7794,7 +7794,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-next@16.3.5
+next@16.3.6
 License: MIT
 
 The MIT License (MIT)

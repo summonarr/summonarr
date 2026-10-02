@@ -1,6 +1,8 @@
 import "server-only";
 
 import { prisma } from "./prisma";
+import { verifyIdentifierPrefixFor } from "./notification-email-verify";
+import { deleteAllMfaInTx } from "./mfa/mfa-store";
 
 // The encryption extension in ./prisma changes the client's type, so the
 // generated Prisma.TransactionClient is NOT assignable to the interactive-tx
@@ -112,8 +114,13 @@ export async function reactivateUser(id: string): Promise<boolean> {
   // `purgedAt IS NULL` term alone is NOT enough: rows scrubbed before that
   // column existed carry the tombstone email with a null `purgedAt` (see
   // isPurgedRow), and re-enabling one produces an unusable zombie account.
+  //
+  // The calendar feed URL is cleared too: it is a bearer credential handed out
+  // before the account was disabled, and re-enabling must not silently revive a
+  // link that may have leaked in the meantime. The user can generate a new one.
   const rows = await prisma.$executeRaw`
-    UPDATE "User" SET "deactivatedAt" = NULL
+    UPDATE "User" SET "deactivatedAt" = NULL,
+      "calendarTokenHash" = NULL, "calendarTokenCreatedAt" = NULL
     WHERE id = ${id}
       AND "purgedAt" IS NULL
       AND "deactivatedAt" IS NOT NULL
@@ -174,6 +181,12 @@ export async function purgeUserDataInTx(
   // anonymize the row in place (keeps requests/votes/issues linked).
   await tx.account.deleteMany({ where: { userId: id } });
   await tx.authSession.deleteMany({ where: { userId: id } });
+  // Two-factor credentials (guardrail 6d): the encrypted TOTP secret, every
+  // passkey public key and every recovery-code hash. They authenticate nothing
+  // once the password is nulled below, but they are this person's credential
+  // data and an erasure must not leave it behind. Same write set as the admin
+  // reset and the self-service disable.
+  await deleteAllMfaInTx(tx, id);
   // Orphaned device + Discord-link rows would otherwise outlive the anonymized
   // row and keep delivering pushes (to a possibly handed-down device) or leave
   // dangling unique link/merge rows. Remove them in the same transaction.
@@ -201,6 +214,12 @@ export async function purgeUserDataInTx(
   // and this is not in it. Leaving it behind meant an irreversible "delete my data"
   // purge kept a per-user profile of exactly the kind erasure is meant to remove.
   await tx.userRecommendation.deleteMany({ where: { userId: id } });
+  // A pending notification-email verification carries the candidate address in its
+  // identifier, and the confirm link stays redeemable for its TTL — left behind, a
+  // click after the purge would write that address back onto the scrubbed row.
+  await tx.verificationToken.deleteMany({
+    where: { identifier: { startsWith: verifyIdentifierPrefixFor(id) } },
+  });
   // Re-check deactivation atomically in the same statement that scrubs the row.
   // The precondition read at the top of this function is several awaited
   // deletes ago — a concurrent reactivate can clear deactivatedAt in that

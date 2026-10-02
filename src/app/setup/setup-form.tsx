@@ -5,10 +5,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // First-run admin account form; registers then auto-signs in. There is no
 // self-registration variant — /register redirects to /setup or /login.
 export function SetupForm() {
+  const t = useT();
   const [form, setForm] = useState({ name: "", email: "", password: "", confirm: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -22,7 +24,7 @@ export function SetupForm() {
     setError("");
 
     if (form.password !== form.confirm) {
-      setError("Passwords do not match");
+      setError(t("auth.setup.error.mismatch"));
       return;
     }
 
@@ -37,7 +39,7 @@ export function SetupForm() {
 
       const data = await res.json();
       if (!res.ok) {
-        setError(data.error ?? "Registration failed");
+        setError(data.error ?? t("auth.setup.error.registrationFailed"));
         setLoading(false);
         return;
       }
@@ -53,7 +55,7 @@ export function SetupForm() {
       });
 
       if (!result.ok) {
-        setError("Account created — please sign in");
+        setError(t("auth.setup.error.createdSignIn"));
         window.location.href = withBasePath("/login");
         return;
       }
@@ -63,7 +65,7 @@ export function SetupForm() {
       // and a second click re-POSTed /api/auth/register.
       window.location.href = withBasePath("/");
     } catch {
-      setError("Something went wrong, please try again");
+      setError(t("auth.setup.error.generic"));
       setLoading(false);
     }
   }
@@ -71,48 +73,48 @@ export function SetupForm() {
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div className="space-y-1.5">
-        <Label htmlFor="name">Display name</Label>
+        <Label htmlFor="name">{t("auth.setup.displayName")}</Label>
         <Input
           id="name"
           value={form.name}
           onChange={(e) => set("name", e.target.value)}
-          placeholder="Your name"
+          placeholder={t("auth.setup.displayNamePlaceholder")}
         />
       </div>
 
       <div className="space-y-1.5">
-        <Label htmlFor="email">Email <span className="text-red-400">*</span></Label>
+        <Label htmlFor="email">{t("auth.field.email")} <span className="text-red-400">*</span></Label>
         <Input
           id="email"
           type="email"
           value={form.email}
           onChange={(e) => set("email", e.target.value)}
-          placeholder="admin@example.com"
+          placeholder={t("auth.setup.emailPlaceholder")}
           required
         />
       </div>
 
       <div className="space-y-1.5">
-        <Label htmlFor="password">Password <span className="text-red-400">*</span></Label>
+        <Label htmlFor="password">{t("auth.field.password")} <span className="text-red-400">*</span></Label>
         <Input
           id="password"
           type="password"
           value={form.password}
           onChange={(e) => set("password", e.target.value)}
-          placeholder="Min. 8 characters"
+          placeholder={t("auth.setup.passwordPlaceholder")}
           minLength={8}
           required
         />
       </div>
 
       <div className="space-y-1.5">
-        <Label htmlFor="confirm">Confirm password <span className="text-red-400">*</span></Label>
+        <Label htmlFor="confirm">{t("auth.setup.confirmPassword")} <span className="text-red-400">*</span></Label>
         <Input
           id="confirm"
           type="password"
           value={form.confirm}
           onChange={(e) => set("confirm", e.target.value)}
-          placeholder="Repeat your password"
+          placeholder={t("auth.setup.confirmPlaceholder")}
           required
         />
       </div>
@@ -128,7 +130,7 @@ export function SetupForm() {
         disabled={loading}
         className="w-full min-h-11 mt-2"
       >
-        {loading ? "Creating account…" : "Create admin account"}
+        {loading ? t("auth.setup.creating") : t("auth.setup.create")}
       </Button>
     </form>
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -8,6 +8,7 @@ import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface RateLimitFormProps {
   initialRegister: string;
@@ -17,15 +18,23 @@ interface RateLimitFormProps {
 }
 
 export function RateLimitForm({ initialRegister, initialRequests, initialIssues, initialMaxPushSubscriptions }: RateLimitFormProps) {
+  const t = useT();
   const [register, setRegister] = useState(initialRegister);
   const [requests, setRequests] = useState(initialRequests);
   const [issues, setIssues] = useState(initialIssues);
   const [maxPushSubscriptions, setMaxPushSubscriptions] = useState(initialMaxPushSubscriptions);
   const [status, setStatus] = useState<SaveStatus>("idle");
+  // An earlier save's idle timer must not fire into a later save (it would
+  // re-enable Save mid-flight or hide the new result early).
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+  }, []);
   const [message, setMessage] = useState("");
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    if (idleTimer.current) clearTimeout(idleTimer.current);
     setStatus("saving");
     setMessage("");
     try {
@@ -43,20 +52,20 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
       if (res.ok && data.ok !== false) {
         setStatus("ok");
       } else {
-        setMessage(data.error ?? "Failed to save");
+        setMessage(data.error ?? t("settings.form.common.saveFailed"));
         setStatus("error");
       }
     } catch {
       setStatus("error");
     }
-    setTimeout(() => setStatus("idle"), 3000);
+    idleTimer.current = setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
   }
 
   return (
     <form onSubmit={handleSave} className="space-y-4">
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="space-y-1.5">
-          <Label htmlFor="rl-register">Registrations <span className="text-zinc-500 font-normal">per 15 min</span></Label>
+          <Label htmlFor="rl-register">{t("settings.form.rateLimit.registrations")} <span className="text-zinc-500 font-normal">{t("settings.form.rateLimit.per15Min")}</span></Label>
           <Input
             id="rl-register"
             type="number"
@@ -68,7 +77,7 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="rl-requests">Requests <span className="text-zinc-500 font-normal">per min</span></Label>
+          <Label htmlFor="rl-requests">{t("settings.form.rateLimit.requests")} <span className="text-zinc-500 font-normal">{t("settings.form.rateLimit.perMin")}</span></Label>
           <Input
             id="rl-requests"
             type="number"
@@ -80,7 +89,7 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="rl-issues">Issue reports <span className="text-zinc-500 font-normal">per min</span></Label>
+          <Label htmlFor="rl-issues">{t("settings.form.rateLimit.issues")} <span className="text-zinc-500 font-normal">{t("settings.form.rateLimit.perMin")}</span></Label>
           <Input
             id="rl-issues"
             type="number"
@@ -92,10 +101,10 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
           />
         </div>
       </div>
-      <p className="text-xs text-zinc-500">Each limit must be between 1 and 10000 — these limiters cannot be turned off.</p>
+      <p className="text-xs text-zinc-500">{t("settings.form.rateLimit.help")}</p>
       <div className="border-t border-zinc-800 pt-4">
         <div className="space-y-1.5 max-w-[180px]">
-          <Label htmlFor="rl-push-subs">Push devices <span className="text-zinc-500 font-normal">max per user</span></Label>
+          <Label htmlFor="rl-push-subs">{t("settings.form.rateLimit.pushDevices")} <span className="text-zinc-500 font-normal">{t("settings.form.rateLimit.maxPerUser")}</span></Label>
           <Input
             id="rl-push-subs"
             type="number"
@@ -105,14 +114,14 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
             placeholder="5"
             className="bg-zinc-800 border-zinc-700 text-sm"
           />
-          <p className="text-xs text-zinc-500">Maximum push-notification devices per account. Oldest is evicted automatically. Set to 0 for no limit.</p>
+          <p className="text-xs text-zinc-500">{t("settings.form.rateLimit.pushHelp")}</p>
         </div>
       </div>
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
-          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
+          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
         </Button>
-        <SaveStatusMessage status={status} errorLabel={message || "Failed to save"} />
+        <SaveStatusMessage status={status} errorLabel={message || t("settings.form.common.saveFailed")} />
       </div>
     </form>
   );

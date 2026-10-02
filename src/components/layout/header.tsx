@@ -26,6 +26,7 @@ async function signOutAndRedirect(callbackUrl: string) {
   window.location.href = withBasePath(callbackUrl);
 }
 import { breadcrumbFor } from "@/components/layout/breadcrumb-label";
+import { useT } from "@/components/i18n/i18n-provider";
 import { useDetailTitle } from "@/components/layout/detail-title";
 import { AppearanceMenu } from "@/components/theme/appearance-menu";
 import Image from "next/image";
@@ -50,6 +51,7 @@ export function SearchBar({
   autoFocus?: boolean;
   onAfterSelect?: () => void;
 }) {
+  const t = useT();
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
@@ -122,13 +124,23 @@ export function SearchBar({
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     abortRef.current?.abort();
+    // Detach the aborted request so its `finally` can't clear the pending
+    // state this query sets below.
+    abortRef.current = null;
     if (!query.trim()) {
       setResults([]);
       setSearchFailed(false);
+      setLoading(false);
       setActiveIndex(-1);
       setOpen(false);
       return;
     }
+
+    // Pending from the moment the query changes, not from when the debounced
+    // fetch starts — otherwise the 350ms window renders "No matches" (or the
+    // previous query's "Search is unavailable") for a search that hasn't run.
+    setLoading(true);
+    setSearchFailed(false);
 
     debounceRef.current = setTimeout(async () => {
       abortRef.current?.abort();
@@ -199,9 +211,9 @@ export function SearchBar({
   }
 
   const filterLabels: { value: MediaFilter; label: string }[] = [
-    { value: "all", label: "All" },
-    { value: "movie", label: "Movies" },
-    { value: "tv", label: "TV" },
+    { value: "all", label: t("search.filter.all") },
+    { value: "movie", label: t("search.filter.movies") },
+    { value: "tv", label: t("search.filter.tv") },
   ];
 
   const fieldHeight = variant === "full" ? 36 : 32;
@@ -235,7 +247,7 @@ export function SearchBar({
         <input
           ref={inputRef}
           type="search"
-          aria-label="Search"
+          aria-label={t("nav.search")}
           role="combobox"
           aria-expanded={open && (Boolean(query.trim()) || results.length > 0)}
           aria-controls={listboxId}
@@ -245,7 +257,7 @@ export function SearchBar({
               ? `${optionIdBase}-option-${activeIndex}`
               : undefined
           }
-          placeholder="Search movies, TV, requests…"
+          placeholder={t("search.placeholder")}
           value={query}
           onChange={(e) => {
             setQuery(e.target.value);
@@ -277,7 +289,7 @@ export function SearchBar({
         <div
           id={listboxId}
           role="listbox"
-          aria-label="Search results"
+          aria-label={t("search.results")}
           style={{
             position: "absolute",
             top: "calc(100% + 6px)",
@@ -335,7 +347,7 @@ export function SearchBar({
                 color: "var(--ds-fg-subtle)",
               }}
             >
-              {searchFailed ? "Search is unavailable. Try again." : "No matches"}
+              {searchFailed ? t("search.unavailable") : t("search.noMatches")}
             </div>
           ) : (
             results.map((media, i) => {
@@ -433,6 +445,7 @@ export function SearchBar({
 
 // Desktop top bar: breadcrumb, search, push toggle, and the account dropdown.
 export function Header() {
+  const t = useT();
   const pathname = usePathname();
   const router = useRouter();
   const { session } = useSummonarrSession();
@@ -457,7 +470,7 @@ export function Header() {
     .toUpperCase();
 
   const detailTitle = useDetailTitle();
-  const crumbs = breadcrumbFor(pathname, detailTitle);
+  const crumbs = breadcrumbFor(pathname, detailTitle, t);
 
   return (
     <header
@@ -472,7 +485,7 @@ export function Header() {
       }}
     >
       {/* Breadcrumb */}
-      <nav aria-label="Breadcrumb" className="min-w-0">
+      <nav aria-label={t("nav.breadcrumb")} className="min-w-0">
         <ol className="flex items-center min-w-0 m-0 p-0 list-none" style={{ gap: 6 }}>
           {crumbs.map((c, i) => {
             const last = i === crumbs.length - 1;
@@ -534,7 +547,7 @@ export function Header() {
           {/* 36px hit box around a 28px avatar — the visual stays small, the
               target clears the 32–36px minimum the other header controls use. */}
           <DropdownMenuTrigger
-            aria-label="Account menu"
+            aria-label={t("nav.accountMenu")}
             className="inline-flex items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
             style={{ width: 36, height: 36 }}
           >
@@ -582,11 +595,11 @@ export function Header() {
             </div>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => router.push("/profile")}>
-              Profile
+              {t("nav.profile")}
             </DropdownMenuItem>
             {canOpenSettings && (
               <DropdownMenuItem onClick={() => router.push("/settings")}>
-                Settings
+                {t("nav.settings")}
               </DropdownMenuItem>
             )}
             <DropdownMenuSeparator />
@@ -596,7 +609,7 @@ export function Header() {
               variant="destructive"
               onClick={() => signOutAndRedirect("/login")}
             >
-              Sign out
+              {t("nav.signOut")}
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>

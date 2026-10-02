@@ -1,25 +1,27 @@
 "use client";
 
 import Link from "next/link";
+import { useT } from "@/components/i18n/i18n-provider";
 
 const TABS = [
-  { id: "site",          label: "Site" },
-  { id: "media",         label: "Media" },
-  { id: "notifications", label: "Notifications" },
-  { id: "integrations",  label: "Integrations" },
-  { id: "features",      label: "Features" },
-  { id: "system",        label: "System" },
+  { id: "site",          i18nKey: "settings.tab.site" },
+  { id: "media",         i18nKey: "settings.tab.media" },
+  { id: "notifications", i18nKey: "settings.tab.notifications" },
+  { id: "integrations",  i18nKey: "settings.tab.integrations" },
+  { id: "features",      i18nKey: "settings.tab.features" },
+  { id: "system",        i18nKey: "settings.tab.system" },
 ] as const;
 
 export type TabId = typeof TABS[number]["id"];
 
 // Top-level settings tab bar; each tab links to /settings?tab=<id>.
 export function SettingsTabNav({ activeTab }: { activeTab: TabId }) {
+  const t = useT();
   return (
     // Wraps onto a second line on narrow screens. A sideways-scrolling row
     // hid the last tab ("System") with no hint that it could scroll.
     <nav
-      aria-label="Settings sections"
+      aria-label={t("settings.tab.ariaLabel")}
       className="flex flex-wrap gap-1 max-w-full"
       style={{
         padding: 2,
@@ -28,7 +30,7 @@ export function SettingsTabNav({ activeTab }: { activeTab: TabId }) {
         borderRadius: 8,
       }}
     >
-      {TABS.map(({ id, label }) => {
+      {TABS.map(({ id, i18nKey }) => {
         const active = activeTab === id;
         return (
           <Link
@@ -46,7 +48,7 @@ export function SettingsTabNav({ activeTab }: { activeTab: TabId }) {
               color: active ? "var(--ds-fg)" : "var(--ds-fg-muted)",
             }}
           >
-            {label}
+            {t(i18nKey)}
           </Link>
         );
       })}

@@ -8,6 +8,7 @@ import { CheckCircle, XCircle, Loader2, RefreshCcw } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus, LoadStatus } from "./shared";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface JellyfinMediaFolder {
   id: string;
@@ -23,6 +24,7 @@ interface JellyfinLibraryPickerProps {
 }
 
 function JellyfinLibraryPicker({ initialSelected, folders, loadStatus, errorMessage }: JellyfinLibraryPickerProps) {
+  const t = useT();
   const [selected, setSelected] = useState<Set<string>>(
     () => new Set(initialSelected.split(",").map((k) => k.trim()).filter(Boolean))
   );
@@ -55,22 +57,22 @@ function JellyfinLibraryPicker({ initialSelected, folders, loadStatus, errorMess
 
   return (
     <div className="border-t border-zinc-800 pt-4 space-y-3">
-      <p className="text-sm font-medium text-zinc-300">Library Selection</p>
+      <p className="text-sm font-medium text-zinc-300">{t("settings.form.library.librarySelection")}</p>
       {loadStatus === "idle" && (
-        <p className="text-xs text-zinc-500">Click &quot;Save &amp; Test&quot; to load libraries from your Jellyfin server.</p>
+        <p className="text-xs text-zinc-500">{t("settings.form.library.loadHint", { server: "Jellyfin" })}</p>
       )}
       {loadStatus === "loading" && (
         <p className="text-xs text-zinc-500 flex items-center gap-1.5">
-          <Loader2 className="w-3 h-3 animate-spin" />Loading libraries…
+          <Loader2 className="w-3 h-3 animate-spin" />{t("settings.form.library.loadingLibraries")}
         </p>
       )}
       {loadStatus === "error" && (
-        <p className="text-xs text-red-400">{errorMessage || "Could not load Jellyfin libraries — check server URL and API key above."}</p>
+        <p className="text-xs text-red-400">{errorMessage || t("settings.form.library.connectFailed", { server: "Jellyfin" })}</p>
       )}
       {loadStatus === "loaded" && (
         <>
           {folders.length === 0 ? (
-            <p className="text-xs text-zinc-500">No movie or TV libraries found.</p>
+            <p className="text-xs text-zinc-500">{t("settings.form.library.noLibraries")}</p>
           ) : (
             <div className="space-y-2">
               {folders.map((f) => (
@@ -85,14 +87,14 @@ function JellyfinLibraryPicker({ initialSelected, folders, loadStatus, errorMess
                     {f.name}
                   </span>
                   <span className="text-xs px-1.5 py-0.5 rounded bg-zinc-700 text-zinc-400">
-                    {f.collectionType === "movies" ? "Movies" : "TV"}
+                    {f.collectionType === "movies" ? t("search.filter.movies") : t("search.filter.tv")}
                   </span>
                 </label>
               ))}
             </div>
           )}
           {selected.size === 0 && folders.length > 0 && (
-            <p className="text-xs text-zinc-500">No libraries selected — all libraries will be synced.</p>
+            <p className="text-xs text-zinc-500">{t("settings.form.library.noneSelected")}</p>
           )}
           <div className="flex items-center gap-3 pt-1">
             <Button
@@ -101,7 +103,7 @@ function JellyfinLibraryPicker({ initialSelected, folders, loadStatus, errorMess
               disabled={saveStatus === "saving"}
               className="bg-indigo-600 hover:bg-indigo-500"
             >
-              {saveStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save Library Selection"}
+              {saveStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.library.saveSelection")}
             </Button>
             <SaveStatusMessage status={saveStatus} />
           </div>
@@ -120,6 +122,7 @@ interface JellyfinSyncFormProps {
 }
 
 export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLibraries }: JellyfinSyncFormProps) {
+  const t = useT();
   const [url,    setUrl]    = useState(initialUrl);
   const [apiKey, setApiKey] = useState(initialApiKey);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "testing" | "ok" | "error">("idle");
@@ -141,8 +144,8 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
       const res = await fetch(withBasePath("/api/settings/jellyfin/libraries"));
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
-        const message = body?.error ?? "Could not connect to Jellyfin server";
-        setLibrariesError(message);
+        const message = body?.error;
+        setLibrariesError(message ?? "");
         setLibrariesStatus("error");
         return { ok: false, count: 0, error: message };
       }
@@ -151,10 +154,9 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
       setLibrariesStatus("loaded");
       return { ok: true, count: data.length };
     } catch {
-      const message = "Could not connect to Jellyfin server";
-      setLibrariesError(message);
+      setLibrariesError("");
       setLibrariesStatus("error");
-      return { ok: false, count: 0, error: message };
+      return { ok: false, count: 0 };
     }
   }, []);
 
@@ -182,10 +184,10 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
       if (!saveOk) {
         // A 422 with `jellyfinError` means the server tried the new URL/key, the
         // test failed, and it put the old settings back — nothing was saved.
-        setSaveErrorMessage(body.jellyfinError ?? body.error ?? "Failed to save");
+        setSaveErrorMessage(body.jellyfinError ?? body.error ?? t("settings.form.common.saveFailed"));
       }
     } catch {
-      setSaveErrorMessage("Failed to save");
+      setSaveErrorMessage(t("settings.form.common.saveFailed"));
     }
     if (!saveOk) {
       setSaveStatus("error");
@@ -199,7 +201,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
       setSaveStatus("ok");
       setTimeout(() => setSaveStatus("idle"), 4000);
     } else {
-      setSaveErrorMessage(result.error ?? "Could not connect to Jellyfin server");
+      setSaveErrorMessage(result.error ?? t("settings.form.library.connectFailed", { server: "Jellyfin" }));
       setSaveStatus("error");
     }
   }
@@ -231,7 +233,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
       <form onSubmit={handleSave} className="space-y-4">
         <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-4 lg:space-y-0">
           <div className="space-y-1.5">
-            <Label htmlFor="jellyfin-url">Jellyfin Server URL</Label>
+            <Label htmlFor="jellyfin-url">{t("settings.form.jellyfin.serverUrl")}</Label>
             <Input
               id="jellyfin-url"
               type="url"
@@ -242,17 +244,17 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="jellyfin-api-key">API Key</Label>
+            <Label htmlFor="jellyfin-api-key">{t("settings.form.common.apiKey")}</Label>
             <Input
               id="jellyfin-api-key"
               type="password"
               value={apiKey}
               onChange={(e) => { setApiKey(e.target.value); setSaveStatus("idle"); }}
-              placeholder="Generate one in Jellyfin → Dashboard → API Keys"
+              placeholder={t("settings.form.jellyfin.apiKeyPlaceholder")}
               className="bg-zinc-800 border-zinc-700 font-mono text-sm"
             />
             <p className="text-xs text-zinc-500">
-              Generate an API key under Jellyfin Dashboard → Advanced → API Keys.
+              {t("settings.form.jellyfin.apiKeyHelp")}
             </p>
           </div>
         </div>
@@ -263,25 +265,25 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
             className="bg-indigo-600 hover:bg-indigo-500"
           >
             {saveStatus === "saving" ? (
-              <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</>
+              <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</>
             ) : saveStatus === "testing" ? (
-              <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Testing…</>
+              <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.testing")}</>
             ) : (
-              "Save & Test"
+              t("settings.form.common.saveAndTest")
             )}
           </Button>
           {saveStatus === "ok" && (
             <span role="status" aria-live="polite" className="flex items-center gap-1.5 text-sm text-green-400">
               <CheckCircle className="w-4 h-4" />
-              Connected
+              {t("settings.form.common.connected")}
               {librariesCount !== null && (
-                <span className="text-zinc-500">({librariesCount} {librariesCount === 1 ? "library" : "libraries"} loaded)</span>
+                <span className="text-zinc-500">{t("settings.form.library.librariesLoaded", { count: librariesCount })}</span>
               )}
             </span>
           )}
           {saveStatus === "error" && (
             <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400">
-              <XCircle className="w-4 h-4" />{saveErrorMessage || "Failed"}
+              <XCircle className="w-4 h-4" />{saveErrorMessage || t("settings.form.common.failed")}
             </span>
           )}
 
@@ -294,9 +296,9 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
               className="border-zinc-700 text-zinc-300 hover:text-zinc-100"
             >
               {syncStatus === "running" ? (
-                <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Syncing…</>
+                <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.syncing")}</>
               ) : (
-                <><RefreshCcw className="w-4 h-4 mr-2" />Sync Library</>
+                <><RefreshCcw className="w-4 h-4 mr-2" />{t("settings.form.jellyfin.syncLibrary")}</>
               )}
             </Button>
           )}
@@ -305,15 +307,15 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
         {syncStatus === "done" && syncResult && (
           <span role="status" aria-live="polite" className="flex items-center gap-1.5 text-sm text-green-400">
             <CheckCircle className="w-4 h-4" />
-            {syncResult.marked} marked available
+            {t("settings.form.common.markedAvailable", { count: syncResult.marked })}
             <span className="text-zinc-500">
-              ({syncResult.scanned.movies} movies, {syncResult.scanned.tv} shows scanned)
+              {t("settings.form.library.scanned", { movies: syncResult.scanned.movies, tv: syncResult.scanned.tv })}
             </span>
           </span>
         )}
         {syncStatus === "error" && (
           <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400">
-            <XCircle className="w-4 h-4" />Sync failed — check server URL and API key
+            <XCircle className="w-4 h-4" />{t("settings.form.jellyfin.syncFailed")}
           </span>
         )}
       </form>

@@ -14,5 +14,5 @@ import { useMediaQuery } from "@/hooks/use-media-query";
 export function DesktopIssueThread({ issueId }: { issueId: string }) {
   const isDesktop = useMediaQuery("(min-width: 1280px)");
   if (isDesktop !== true) return null;
-  return <IssueThread issueId={issueId} variant="panel" />;
+  return <IssueThread key={issueId} issueId={issueId} variant="panel" />;
 }

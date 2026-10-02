@@ -4,18 +4,21 @@ import { withAdvisoryLock, WARM_OMDB_LOCK_ID } from "@/lib/advisory-lock";
 import { prisma } from "@/lib/prisma";
 import { prewarmOmdbCache } from "@/lib/omdb-prewarm";
 import { logAudit } from "@/lib/audit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 const COOLDOWN_MS = 5 * 60 * 1000;
 const COOLDOWN_KEY = "lastOmdbWarmAt";
 
-function busyResponse() {
+function busyResponse(t: Translator) {
   return NextResponse.json(
-    { ok: false, error: "OMDB warm already running", retryAfter: 30 },
+    { ok: false, error: t("apiAdmin.warm.omdbRunning"), retryAfter: 30 },
     { status: 409, headers: { "Retry-After": "30" } },
   );
 }
 
-export const POST = withAdmin(async (_req, _ctx, session) => {
+export const POST = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   // Same advisory lock as /api/cron/warm-omdb — an admin click while the cron
   // warm is running must not double-burn the OMDB free-tier daily quota. The
   // cooldown CAS lives INSIDE the lock so a lock-busy 409 can't consume the
@@ -41,7 +44,7 @@ export const POST = withAdmin(async (_req, _ctx, session) => {
         const lastMs = row ? parseInt(row.value, 10) || 0 : 0;
         const remaining = COOLDOWN_MS - (now - lastMs);
         return NextResponse.json(
-          { error: `Triggered too recently — wait ${Math.ceil(remaining / 1000)}s` },
+          { error: t("apiAdmin.warm.cooldown", { seconds: Math.ceil(remaining / 1000) }) },
           { status: 429 }
         );
       }
@@ -60,6 +63,6 @@ export const POST = withAdmin(async (_req, _ctx, session) => {
 
       return NextResponse.json(result);
     },
-    busyResponse,
+    () => busyResponse(t),
   );
 });

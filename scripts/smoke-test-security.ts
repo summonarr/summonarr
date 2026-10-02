@@ -1,5 +1,5 @@
 // Smoke test for the security audit remediation foundation modules.
-// Run with: npx tsx scripts/smoke-test-security.ts
+// Run with: npm run smoke:security (node + tests/_loader.mjs for the @/* alias)
 //
 // Verifies the runtime behaviour of:
 //   - src/lib/ssrf.ts        (resolveToSafeUrl rejects IPv6 unique-local

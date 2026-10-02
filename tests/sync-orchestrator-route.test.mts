@@ -127,6 +127,7 @@ type ReqRow = {
   status: ReqStatus; notifiedAvailable: boolean;
   pendingNotifyAt: Date | null; availableAt: Date | null;
   qualityProfileId: number | null; createdAt: Date; lastArrPushAt: Date | null; tvdbId: number | null;
+  cleanedUpAt: Date | null;
 };
 const requests = new Map<string, ReqRow>();
 function seedRequest(r: Partial<ReqRow> & { id: string; tmdbId: number; mediaType: MediaType; requestedBy: string; status: ReqStatus }): void {
@@ -134,6 +135,7 @@ function seedRequest(r: Partial<ReqRow> & { id: string; tmdbId: number; mediaTyp
     arrInstance: "", title: `title-${r.id}`, posterPath: null, notifiedAvailable: false,
     pendingNotifyAt: null, availableAt: null, qualityProfileId: null,
     createdAt: new Date("2026-01-01T00:00:00.000Z"), lastArrPushAt: null, tvdbId: null,
+    cleanedUpAt: null,
     ...r,
   });
 }
@@ -143,6 +145,7 @@ type ReqWhere = {
   status?: ReqStatus | { in?: ReqStatus[]; not?: ReqStatus };
   notifiedAvailable?: boolean;
   OR?: Array<{ lastArrPushAt?: null | { lte?: Date } }>;
+  cleanedUpAt?: null;
 };
 function reqMatches(row: ReqRow, where: ReqWhere | undefined): boolean {
   if (!where) return true;
@@ -156,6 +159,7 @@ function reqMatches(row: ReqRow, where: ReqWhere | undefined): boolean {
     }
   }
   if (where.notifiedAvailable !== undefined && row.notifiedAvailable !== where.notifiedAvailable) return false;
+  if (where.cleanedUpAt === null && row.cleanedUpAt !== null) return false;
   if (where.OR) {
     const any = where.OR.some((c) => {
       if (c.lastArrPushAt === null) return row.lastArrPushAt === null;
@@ -219,6 +223,7 @@ const rawStatements: Array<{ sql: string; values: unknown[] }> = [];
 // Every Setting key read via findUnique, in order — pins the registry read count.
 const settingFindUniqueKeys: string[] = [];
 const mediaRequestUpdateManyCalls: Array<{ where?: ReqWhere; data: Record<string, unknown> }> = [];
+const mediaRequestFindUniqueIds: string[] = [];
 // clearDeletionVotesForTmdbs' two writes (one deletionVote.deleteMany per
 // mediaType + one setting.deleteMany for the `deletionVoteNotified:` keys). Both
 // delegates already existed as silent no-ops; recording them is what makes the
@@ -300,6 +305,13 @@ const fakePrisma = {
         if (reqMatches(r, args.where)) { Object.assign(r, args.data); count++; }
       }
       return { count };
+    },
+    // runDownloadCheck's status re-read (the pendingNotifyAt backstop). Recorded
+    // so a test can tell whether the backstop ran for a row at all.
+    findUnique: async (args: { where: { id: string } }) => {
+      mediaRequestFindUniqueIds.push(args.where.id);
+      const r = requests.get(args.where.id);
+      return r ? { ...r } : null;
     },
     update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
       const r = requests.get(args.where.id);
@@ -659,6 +671,7 @@ beforeEach(() => {
   tmdbCacheDeleteManyCalls.length = 0;
   mediaRequestFindManyWheres.length = 0;
   mediaRequestUpdateManyCalls.length = 0;
+  mediaRequestFindUniqueIds.length = 0;
   deletionVoteDeleteWheres.length = 0;
   settingDeleteManyWheres.length = 0;
   userFindManyCalls.length = 0;
@@ -2484,6 +2497,63 @@ test("source-pinning: the ARR-available pass EXCLUDES a pinned user outright, le
   assert.ok(!notifiedUserIds().includes("u-pinned"), "pinned user was notified off an unreached library");
 });
 
+// ── the pendingNotifyAt "download pending" backstop ─────────────────────────
+// It must run AFTER the Radarr/Sonarr refresh: a download that imported since the
+// last tick has left the queue AND is missing from the run-start cache, so an
+// early check read "not downloading" and DMed "hasn't started downloading" about
+// a file already on disk (then the second ARR pass DMed "now available").
+
+test("backstop: an overdue row whose file landed in the FRESH arr cache is never checked or DMed (pinned user)", async () => {
+  configureBothServers();
+  respond = bothServersRespond([], []);
+  // Visible only from the SECOND radarrAvailableItem read — i.e. imported since the
+  // last run, invisible to the run-start snapshot.
+  arrAvailableRows.push({ model: "radarrAvailableItem", tmdbId: 880, arrInstance: "", fromCall: 2 });
+  pinUser("u-pinned", "plex"); // the ARR passes leave a pinned user APPROVED
+  const armed = new Date(Date.now() - 60 * 60 * 1000);
+  seedRequest({ id: "r-done", tmdbId: 880, mediaType: "MOVIE", requestedBy: "u-pinned", status: "APPROVED", pendingNotifyAt: armed });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  assert.equal(arrAvailableReadCounts.radarrAvailableItem, 2, "precondition: the second ARR pass read the fresh cache");
+  assert.ok(!mediaRequestFindUniqueIds.includes("r-done"),
+    "a title on disk in the freshly synced cache finished downloading — the backstop must not run for it");
+  assert.equal(requests.get("r-done")!.pendingNotifyAt, armed,
+    "the backstop was consumed (the old sweep blind-cleared it and DMed 'download pending')");
+});
+
+test("backstop: an overdue row with nothing on disk goes through runDownloadCheck's status re-read + APPROVED-scoped CAS consume", async () => {
+  configureBothServers();
+  respond = bothServersRespond([], []);
+  const armed = new Date(Date.now() - 60 * 60 * 1000);
+  seedRequest({ id: "r-stuck", tmdbId: 881, mediaType: "MOVIE", requestedBy: "u-1", status: "APPROVED", pendingNotifyAt: armed });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  assert.ok(mediaRequestFindUniqueIds.includes("r-stuck"), "the backstop must re-read the row's status before notifying");
+  const consume = mediaRequestUpdateManyCalls.find(
+    (c) => (c.where as { id?: unknown } | undefined)?.id === "r-stuck",
+  );
+  assert.ok(consume, "the backstop must clear pendingNotifyAt via updateMany, not a blind update by id");
+  assert.deepEqual(consume.where, { id: "r-stuck", status: "APPROVED", pendingNotifyAt: { not: null } },
+    "a CAS consume: an overlapping 90s job for the same row must not also DM");
+  assert.equal(requests.get("r-stuck")!.pendingNotifyAt, null);
+});
+
+test("backstop: it sits AFTER the Radarr/Sonarr refresh and the second ARR marking pass", () => {
+  const src = readFileSync("src/app/api/sync/route.ts", "utf-8");
+  const backstop = src.indexOf("await runConcurrent(overdue,");
+  assert.ok(backstop > 0, "the overdue sweep must still exist");
+  assert.ok(src.indexOf('windDownBefore("Sonarr")') < backstop, "the backstop must follow the arr cache refresh");
+  assert.ok(src.indexOf("const nowAvailableSecond") < backstop, "the backstop must follow the second ARR pass");
+  assert.ok(!/isMovieDownloadingInRadarr|isSeriesDownloadingInSonarr/.test(src),
+    "the orchestrator must go through runDownloadCheck, not a private copy of the check");
+});
+
 // ── guardrail 41: the run must wind down when its lock times out ────────────
 // STRUCTURAL, not behavioural, and deliberately so: withAdvisoryLock's abort is
 // a 30-MINUTE real timer, and the route gives no seam to shorten it. What can be
@@ -2675,4 +2745,65 @@ test("guardrail 14a: the hold is per INSTANCE — a wanted row on the default So
 
   assert.equal(requests.get("req-default")?.status, "APPROVED", "held: its own instance lists the series as wanted");
   assert.equal(requests.get("req-anime")?.status, "AVAILABLE", "not held: the anime instance has no wanted row (nothing tracks it there), so library presence decides");
+});
+
+// ── Library cleanup: a deleted title is never re-pushed ─────────────────────
+// An admin deleting a title through /admin/cleanup removes it from Radarr AND
+// every library. Left alone, the next sync reads that absence as a lost file,
+// demotes the AVAILABLE request to APPROVED, and the run after that re-pushes it
+// to Radarr — re-downloading what was just deleted. The cleanup stamps
+// MediaRequest.cleanedUpAt, and the demote's CAS skips a stamped row. Two runs, because
+// the re-push reads the request the previous run demoted.
+function cleanupScenario(): void {
+  settings.set("plexServerUrl", PLEX_BASE);
+  settings.set("plexAdminToken", "plex-admin-token-1");
+  configureRadarr();
+  const plex = plexResponder([]); // the title is gone from Plex…
+  const radarr = radarrResponder([]); // …and from Radarr
+  respond = (url) => (url.origin === RADARR_ORIGIN ? radarr(url) : plex(url));
+  seedUser("u-clean", {});
+}
+const radarrAddAttempts = () =>
+  fetchCalls.filter((c) => c.url.origin === RADARR_ORIGIN && !(c.url.pathname === "/api/v3/movie" && c.method === "GET"));
+
+test("cleanup: a request whose title an admin deleted stays AVAILABLE and is never pushed back to Radarr", async () => {
+  cleanupScenario();
+  seedRequest({
+    id: "req-cleaned", tmdbId: 950, mediaType: "MOVIE", requestedBy: "u-clean", status: "AVAILABLE",
+    notifiedAvailable: true, cleanedUpAt: new Date("2026-09-01T00:00:00.000Z"),
+  });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  assert.equal(requests.get("req-cleaned")?.status, "AVAILABLE", "a cleaned-up title is not a lost file — no demote");
+  assert.deepEqual(radarrAddAttempts().map((c) => c.url.pathname), [], "nothing may re-add a title the admin deleted");
+});
+
+test("cleanup counterpart: the SAME title without the stamp is demoted and then re-pushed — the stamp is what stops it", async () => {
+  // Without this the test above would also pass against a sync that never
+  // demotes anything at all.
+  cleanupScenario();
+  seedRequest({ id: "req-lost", tmdbId: 950, mediaType: "MOVIE", requestedBy: "u-clean", status: "AVAILABLE", notifiedAvailable: true });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+  assert.equal(requests.get("req-lost")?.status, "APPROVED", "a genuinely lost file is demoted");
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+  assert.ok(radarrAddAttempts().length > 0, "…and the next run tries to put it back in Radarr");
+});
+
+test("cleanup: the stamp is checked in the demote's CAS WHERE, so a stamp landing mid-run still wins", async () => {
+  cleanupScenario();
+  seedRequest({ id: "req-race", tmdbId: 951, mediaType: "MOVIE", requestedBy: "u-clean", status: "AVAILABLE", notifiedAvailable: true });
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+
+  const demote = mediaRequestUpdateManyCalls.find((c) => c.data.status === "APPROVED");
+  assert.ok(demote, "the demote ran");
+  assert.equal(demote.where?.cleanedUpAt, null, "the demote's where must carry cleanedUpAt: null");
 });

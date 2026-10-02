@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -8,6 +8,7 @@ import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface SessionFormProps {
   initialDefaultDuration: string;
@@ -16,13 +17,21 @@ interface SessionFormProps {
 }
 
 export function SessionForm({ initialDefaultDuration, initialMobileDuration, initialMaxDuration }: SessionFormProps) {
+  const t = useT();
   const [defaultDuration, setDefaultDuration] = useState(initialDefaultDuration);
   const [mobileDuration,  setMobileDuration]  = useState(initialMobileDuration);
   const [maxDuration,     setMaxDuration]     = useState(initialMaxDuration);
   const [status, setStatus] = useState<SaveStatus>("idle");
+  // An earlier save's idle timer must not fire into a later save (it would
+  // re-enable Save mid-flight or hide the new result early).
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+  }, []);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    if (idleTimer.current) clearTimeout(idleTimer.current);
     setStatus("saving");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
@@ -39,14 +48,14 @@ export function SessionForm({ initialDefaultDuration, initialMobileDuration, ini
     } catch {
       setStatus("error");
     }
-    setTimeout(() => setStatus("idle"), 3000);
+    idleTimer.current = setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
   }
 
   return (
     <form onSubmit={handleSave} className="space-y-4">
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="space-y-1.5">
-          <Label htmlFor="session-default">Desktop session <span className="text-zinc-500 font-normal">seconds</span></Label>
+          <Label htmlFor="session-default">{t("settings.form.session.desktop")} <span className="text-zinc-500 font-normal">{t("settings.form.session.seconds")}</span></Label>
           <Input
             id="session-default"
             type="number"
@@ -58,7 +67,7 @@ export function SessionForm({ initialDefaultDuration, initialMobileDuration, ini
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="session-mobile">Mobile session <span className="text-zinc-500 font-normal">seconds</span></Label>
+          <Label htmlFor="session-mobile">{t("settings.form.session.mobile")} <span className="text-zinc-500 font-normal">{t("settings.form.session.seconds")}</span></Label>
           <Input
             id="session-mobile"
             type="number"
@@ -70,7 +79,7 @@ export function SessionForm({ initialDefaultDuration, initialMobileDuration, ini
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="session-max">Remember me <span className="text-zinc-500 font-normal">seconds</span></Label>
+          <Label htmlFor="session-max">{t("settings.form.session.rememberMe")} <span className="text-zinc-500 font-normal">{t("settings.form.session.seconds")}</span></Label>
           <Input
             id="session-max"
             type="number"
@@ -83,11 +92,11 @@ export function SessionForm({ initialDefaultDuration, initialMobileDuration, ini
         </div>
       </div>
       <p className="text-xs text-zinc-500">
-        Desktop default: 3600 (1 h). Mobile default: 604800 (7 days). Remember me: 2592000 (30 days). A session lasts its full configured duration — there is no inactivity timeout — and the iOS app stays signed in until the session is revoked. Changes apply to new logins only.
+        {t("settings.form.session.help")}
       </p>
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
-          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
+          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
         </Button>
         <SaveStatusMessage status={status} />
       </div>

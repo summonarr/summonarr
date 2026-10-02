@@ -121,7 +121,10 @@ export default async function MediaActivityPage({
     resolutionBreakdown: stats.resolutionBreakdown,
     platforms,
     completionHist,
-    playsByDay: padPlaysByDay(stats.playsByDay, PLAYS_BY_DAY_WINDOW_DAYS),
+    // getMediaPlayStats' cutoff is a rolling `now - 90d`, which spans 91 UTC
+    // calendar days (both edges partial) — pad one extra so the oldest edge's
+    // rows aren't fetched and then dropped from the chart.
+    playsByDay: padPlaysByDay(stats.playsByDay, PLAYS_BY_DAY_WINDOW_DAYS + 1),
     recentPlays: stats.recentPlays.slice(0, 14).map((p) => ({
       id: p.id,
       username: p.mediaServerUser.username,

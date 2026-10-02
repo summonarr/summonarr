@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.27.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.28.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,25 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.28.0
+
+**Added**
+
+- **Two-factor sign-in** for accounts that sign in with a Summonarr password: an authenticator app, passkeys or security keys, and single-use recovery codes. Set it up on your Profile page under Two-factor authentication. Changing an existing setup asks for a second factor as well as your password, repeated wrong codes lock code sign-in for a while (a passkey still works), and admins can reset a user's two-factor. An optional setting prompts administrators to set it up. Plex, Jellyfin and OIDC sign-ins keep using their provider's own security.
+- **Watchlist auto-request.** Users with the new auto-request permission get a request filed automatically when they add a title to their Summonarr watchlist or, if they opt in, their Plex watchlist. A title that was declined or deleted is never filed again. Off until an admin turns on the feature.
+- **Library Cleanup** admin page: lists titles that match your rules (not watched in N days, never watched, enough deletion votes) and skips anything recently added, requested, watchlisted, playing or still airing. Deleting is always a preview first and then a confirmation, removes the title from every Radarr/Sonarr instance, and a deleted title is never re-downloaded by the next sync. Nothing is deleted automatically. Off until an admin turns on the feature.
+- **Personal calendar feed:** subscribe to an iCal link of upcoming release and air dates for your requests and watchlist from any calendar app. The link stops working when you change your password.
+- **Recently Added** shelf on the home page, showing the newest titles on the servers you can see.
+- **Spanish.** Pick a language from the appearance menu. Pages, error messages, emails, push, in-app and Discord notifications and the calendar feed follow it. English remains the default; `SUMMONARR_DEFAULT_LOCALE` sets the instance default.
+
+**Fixed**
+
+- OIDC sign-in failed on the web when Summonarr listened on a different address from `AUTH_URL`.
+- For You: cards no longer shift or differ in height, a title you just requested no longer disappears from the shelf, the "not interested" control appears on every touch device, and hiding a title can be undone from the toast.
+- Admin Activity shows the right title when a session's media type is ambiguous; the overdue-download check no longer flags titles that are already on disk; Jellyfin fix-match only confirms a copy by its own check; TV Discover sorts no longer fall back to movie-only orders.
+- Settings forms no longer show a stale "Saved" status, the site URL and Discord settings can be cleared, the login page shows the server's error, and the audit log groups entries by your local date.
+- Updated `next` to 16.3.6 for a critical security fix (GHSA-vcvr-r3jv-pc5j).
 
 ### v0.27.1
 
@@ -746,7 +765,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.27.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.28.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

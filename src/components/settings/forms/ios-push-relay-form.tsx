@@ -8,6 +8,7 @@ import { Loader2, Trash2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface IosPushRelayFormProps {
   initialRelayUrl: string;
@@ -16,6 +17,7 @@ interface IosPushRelayFormProps {
 }
 
 export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialRecommendedBuild }: IosPushRelayFormProps) {
+  const t = useT();
   const [relayUrl, setRelayUrl] = useState(initialRelayUrl);
   const [relayKey, setRelayKey] = useState(initialRelayKey);
   const [recommendedBuild, setRecommendedBuild] = useState(initialRecommendedBuild);
@@ -66,7 +68,7 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
   return (
     <form onSubmit={handleSave} className="space-y-4">
       <div className="space-y-1.5">
-        <Label htmlFor="apns-relay-url">Relay URL</Label>
+        <Label htmlFor="apns-relay-url">{t("settings.form.iosPush.relayUrl")}</Label>
         <Input
           id="apns-relay-url"
           type="url"
@@ -76,11 +78,11 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
           className="bg-zinc-800 border-zinc-700 font-mono text-sm"
         />
         <p className="text-xs text-zinc-500">
-          Must be https://. Leave blank to use the default relay operated by the app publisher.
+          {t("settings.form.iosPush.relayUrlHelp")}
         </p>
       </div>
       <div className="space-y-1.5">
-        <Label htmlFor="apns-relay-key">Relay key <span className="text-zinc-500 font-normal">(optional)</span></Label>
+        <Label htmlFor="apns-relay-key">{t("settings.form.iosPush.relayKey")} <span className="text-zinc-500 font-normal">{t("settings.form.common.optional")}</span></Label>
         <div className="flex items-center gap-2">
           <Input
             id="apns-relay-key"
@@ -99,18 +101,17 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
               className="border-zinc-700 text-zinc-400 hover:text-zinc-100 shrink-0 gap-1.5"
             >
               <Trash2 className="w-3.5 h-3.5" />
-              Remove
+              {t("settings.form.common.remove")}
             </Button>
           )}
         </div>
         <p className="text-xs text-zinc-500">
-          Sent as a Bearer token on every relay request when the relay requires auth (8–200 characters, no spaces).
-          A key also gives this server its own per-device rate-limit budget on the relay, so use a distinct key for each server.
-          {keyIsSet && " A key is currently set — click Remove and Save to clear it."}
+          {t("settings.form.iosPush.relayKeyHelp")}
+          {keyIsSet && ` ${t("settings.form.iosPush.keyIsSet")}`}
         </p>
       </div>
       <div className="space-y-1.5 max-w-[220px]">
-        <Label htmlFor="recommended-ios-build">Recommended iOS build <span className="text-zinc-500 font-normal">(optional)</span></Label>
+        <Label htmlFor="recommended-ios-build">{t("settings.form.iosPush.recommendedBuild")} <span className="text-zinc-500 font-normal">{t("settings.form.common.optional")}</span></Label>
         <Input
           id="recommended-ios-build"
           type="number"
@@ -118,18 +119,18 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
           max="1000000"
           value={recommendedBuild}
           onChange={(e) => { setRecommendedBuild(e.target.value); setStatus("idle"); }}
-          placeholder="e.g. 42"
+          placeholder={t("settings.form.iosPush.recommendedBuildPlaceholder")}
           className="bg-zinc-800 border-zinc-700 text-sm"
         />
         <p className="text-xs text-zinc-500">
-          iOS builds below this number show a dismissible update prompt after sign-in. Leave blank to disable.
+          {t("settings.form.iosPush.recommendedBuildHelp")}
         </p>
       </div>
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
-          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
+          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
         </Button>
-        <SaveStatusMessage status={status} errorLabel={errorMessage || "Failed to save"} />
+        <SaveStatusMessage status={status} errorLabel={errorMessage || t("settings.form.common.saveFailed")} />
       </div>
     </form>
   );

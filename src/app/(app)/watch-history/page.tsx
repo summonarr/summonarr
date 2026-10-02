@@ -3,6 +3,7 @@ import { getMyWatchHistory } from "@/lib/my-watch-history";
 import { isFeatureEnabled } from "@/lib/features";
 import { PageHeader } from "@/components/ui/design";
 import { WatchHistoryList } from "@/components/watch-history/watch-history-list";
+import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +13,7 @@ export const dynamic = "force-dynamic";
 // GET /api/play-history/mine which the client list refetches through.
 export default async function WatchHistoryPage() {
   const session = await requireAppSession();
+  const t = await getTranslator();
   const [initial, issuesEnabled] = await Promise.all([
     getMyWatchHistory(session.user.id),
     // Row-level "Report issue" buttons only render when the issues feature is
@@ -28,8 +30,8 @@ export default async function WatchHistoryPage() {
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Watch History"
-        subtitle="What you've watched on the server"
+        title={t("personal.history.title")}
+        subtitle={t("personal.history.subtitle")}
       />
       <WatchHistoryList
         initial={initial}

@@ -47,7 +47,7 @@ test("/issues page mounts the thread through DesktopIssueThread, never IssueThre
   const page = readFileSync(new URL("../src/app/(app)/issues/page.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(page, /from "@\/components\/issues\/issue-thread"/);
   assert.doesNotMatch(page, /<IssueThread\b/);
-  assert.match(page, /<DesktopIssueThread issueId=\{selectedIssue\.id\} \/>/);
+  assert.match(page, /<DesktopIssueThread key=\{selectedIssue\.id\} issueId=\{selectedIssue\.id\} \/>/);
 });
 
 test("desktop wrapper and mobile drawer gate on complementary media queries via useMediaQuery", () => {

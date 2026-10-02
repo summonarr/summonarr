@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { AccountDeactivatedError, findOrCreateOidcUser, PROVIDER_REBIND_REQUIRED, PROVIDER_SETUP_REQUIRED, signInAndMintSession, buildDeviceMeta, normalizeEmail } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import {
+  buildOidcExchangeUrl,
   exchangeOidcCode,
   isNativeOidcState,
   isOidcConfigured,
@@ -13,6 +14,7 @@ import {
 import { serializeSessionCookie } from "@/lib/session-cookie";
 import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 import { safeInternalPath } from "@/lib/safe-url";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 function readStateCookie(req: NextRequest): string | null {
   const header = req.headers.get("cookie");
@@ -36,12 +38,13 @@ function clearStateCookieHeader(): string {
 // buildLoginRedirect does. No-op when BASE_PATH is unset (the default).
 const basePath = process.env.BASE_PATH ?? "";
 
-function loginErrorRedirect(_req: NextRequest, code: string): NextResponse {
+function loginErrorRedirect(req: NextRequest, code: string): NextResponse {
   // AUTH_URL is guaranteed set by the early guard in GET; fail closed otherwise
   // rather than deriving the base from an attacker-influenceable request Host.
   const base = process.env.AUTH_URL;
   if (!base) {
-    return NextResponse.json({ error: "Server misconfigured: AUTH_URL is not set" }, { status: 500 });
+    const t = translatorForRequest(req);
+    return NextResponse.json({ error: t("apiAuth.common.authUrlMissing") }, { status: 500 });
   }
   const url = new URL(`${basePath}/login`, base);
   url.searchParams.set("error", code);
@@ -65,9 +68,10 @@ function nativeCallbackRedirect(params: Record<string, string>): NextResponse {
 }
 
 export async function GET(req: NextRequest) {
+  const t = translatorForRequest(req);
   const authUrl = process.env.AUTH_URL;
   if (!authUrl) {
-    return NextResponse.json({ error: "Server misconfigured: AUTH_URL is not set" }, { status: 500 });
+    return NextResponse.json({ error: t("apiAuth.common.authUrlMissing") }, { status: 500 });
   }
 
   // Detected before the refusals below: a native flow's browser sheet cannot
@@ -113,7 +117,13 @@ export async function GET(req: NextRequest) {
 
   let claims;
   try {
-    claims = await exchangeOidcCode(new URL(req.url), flowState);
+    // Rebuild the exchange URL from the SIGNED redirectUri, not req.url — see
+    // buildOidcExchangeUrl for why the request's own origin cannot be trusted
+    // to match the redirect_uri sent at /start.
+    claims = await exchangeOidcCode(
+      buildOidcExchangeUrl(flowState, req.nextUrl.searchParams),
+      flowState,
+    );
   } catch (err) {
     console.error("[oidc/callback] code exchange failed:", err instanceof Error ? err.message : err);
     return loginErrorRedirect(req, "oidc_exchange_failed");

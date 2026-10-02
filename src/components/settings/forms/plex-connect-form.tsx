@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -8,6 +8,8 @@ import { CheckCircle, XCircle, Loader2, Unlink, Download } from "@/components/ic
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus, LoadStatus } from "./shared";
+import { useT } from "@/components/i18n/i18n-provider";
+import { rich } from "./rich";
 
 interface PlexSection {
   key: string;
@@ -23,10 +25,17 @@ interface PlexLibraryPickerProps {
 }
 
 function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage }: PlexLibraryPickerProps) {
+  const t = useT();
   const [selected, setSelected] = useState<Set<string>>(
     () => new Set(initialSelected.split(",").map((k) => k.trim()).filter(Boolean))
   );
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  // An earlier save's idle timer must not fire into a later save (it would
+  // re-enable Save mid-flight or hide the new result early).
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+  }, []);
 
   function toggle(key: string) {
     setSelected((prev) => {
@@ -38,6 +47,7 @@ function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage
   }
 
   async function handleSave() {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
     setSaveStatus("saving");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
@@ -50,27 +60,27 @@ function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage
     } catch {
       setSaveStatus("error");
     }
-    setTimeout(() => setSaveStatus("idle"), 3000);
+    idleTimer.current = setTimeout(() => setSaveStatus((s) => (s === "ok" ? "idle" : s)), 3000);
   }
 
   return (
     <div className="border-t border-zinc-800 pt-4 space-y-3">
-      <p className="text-sm font-medium text-zinc-300">Library Selection</p>
+      <p className="text-sm font-medium text-zinc-300">{t("settings.form.library.librarySelection")}</p>
       {loadStatus === "idle" && (
-        <p className="text-xs text-zinc-500">Click &quot;Save &amp; Test&quot; to load libraries from your Plex server.</p>
+        <p className="text-xs text-zinc-500">{t("settings.form.library.loadHint", { server: "Plex" })}</p>
       )}
       {loadStatus === "loading" && (
         <p className="text-xs text-zinc-500 flex items-center gap-1.5">
-          <Loader2 className="w-3 h-3 animate-spin" />Loading libraries…
+          <Loader2 className="w-3 h-3 animate-spin" />{t("settings.form.library.loadingLibraries")}
         </p>
       )}
       {loadStatus === "error" && (
-        <p className="text-xs text-red-400">{errorMessage || "Could not load Plex libraries — check server URL above."}</p>
+        <p className="text-xs text-red-400">{errorMessage || t("settings.form.library.connectFailed", { server: "Plex" })}</p>
       )}
       {loadStatus === "loaded" && (
         <>
           {sections.length === 0 ? (
-            <p className="text-xs text-zinc-500">No movie or TV libraries found.</p>
+            <p className="text-xs text-zinc-500">{t("settings.form.library.noLibraries")}</p>
           ) : (
             <div className="space-y-2">
               {sections.map((s) => (
@@ -85,14 +95,14 @@ function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage
                     {s.title}
                   </span>
                   <span className="text-xs px-1.5 py-0.5 rounded bg-zinc-700 text-zinc-400">
-                    {s.type === "movie" ? "Movies" : "TV"}
+                    {s.type === "movie" ? t("search.filter.movies") : t("search.filter.tv")}
                   </span>
                 </label>
               ))}
             </div>
           )}
           {selected.size === 0 && sections.length > 0 && (
-            <p className="text-xs text-zinc-500">No libraries selected — all libraries will be synced.</p>
+            <p className="text-xs text-zinc-500">{t("settings.form.library.noneSelected")}</p>
           )}
           <div className="flex items-center gap-3 pt-1">
             <Button
@@ -101,7 +111,7 @@ function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage
               disabled={saveStatus === "saving"}
               className="bg-indigo-600 hover:bg-indigo-500"
             >
-              {saveStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save Library Selection"}
+              {saveStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.library.saveSelection")}
             </Button>
             <SaveStatusMessage status={saveStatus} />
           </div>
@@ -121,6 +131,7 @@ interface PlexConnectFormProps {
 // Connects Plex with Plex's PIN sign-in: the admin approves a short code on plex.tv
 // and the resulting admin token is saved in the Setting table (not an env var).
 export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLibraries, siteUrl }: PlexConnectFormProps) {
+  const t = useT();
   const [connectedEmail, setConnectedEmail] = useState(initialEmail);
   const [status, setStatus] = useState<"idle" | "waiting" | "saving" | "error">("idle");
   const [error, setError] = useState("");
@@ -145,8 +156,8 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
       const res = await fetch(withBasePath("/api/settings/plex/libraries"));
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
-        const message = body?.error ?? "Could not connect to Plex server";
-        setLibrariesError(message);
+        const message = body?.error;
+        setLibrariesError(message ?? "");
         setLibrariesStatus("error");
         return { ok: false, count: 0, error: message };
       }
@@ -155,10 +166,9 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
       setLibrariesStatus("loaded");
       return { ok: true, count: data.length };
     } catch {
-      const message = "Could not connect to Plex server";
-      setLibrariesError(message);
+      setLibrariesError("");
       setLibrariesStatus("error");
-      return { ok: false, count: 0, error: message };
+      return { ok: false, count: 0 };
     }
   }, []);
 
@@ -181,7 +191,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
       pinId = data.id;
       pinCode = data.code;
     } catch {
-      setError("Could not start Plex sign-in. Please try again.");
+      setError(t("settings.form.plex.startFailed"));
       setStatus("error");
       return;
     }
@@ -203,7 +213,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
         flow: "settings", pinId, state,
       }));
     } catch {
-      setError("Could not store sign-in state. Disable private browsing and try again.");
+      setError(t("settings.form.plex.storeFailed"));
       setStatus("error");
       return;
     }
@@ -223,7 +233,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
     } catch {
       // Handled by the error lines below.
     }
-    setError("Failed to disconnect");
+    setError(t("settings.form.plex.disconnectFailed"));
     setStatus("error");
   }
 
@@ -243,10 +253,10 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
       const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
       saveOk = res.ok && body.ok !== false;
       if (!saveOk) {
-        setServerErrorMessage(body.error ?? "Failed to save server URL");
+        setServerErrorMessage(body.error ?? t("settings.form.plex.saveUrlFailed"));
       }
     } catch {
-      setServerErrorMessage("Failed to save server URL");
+      setServerErrorMessage(t("settings.form.plex.saveUrlFailed"));
     }
     if (!saveOk) {
       setServerStatus("error");
@@ -258,9 +268,10 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
     if (result.ok) {
       setLibrariesCount(result.count);
       setServerStatus("ok");
-      setTimeout(() => setServerStatus("idle"), 4000);
+      // Only clear an "ok" — a later Save & Test may already be in flight.
+      setTimeout(() => setServerStatus((s) => (s === "ok" ? "idle" : s)), 4000);
     } else {
-      setServerErrorMessage(result.error ?? "Could not connect to Plex server");
+      setServerErrorMessage(result.error ?? t("settings.form.library.connectFailed", { server: "Plex" }));
       setServerStatus("error");
     }
   }
@@ -289,7 +300,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
         <div className="flex items-center justify-between gap-3 rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-3">
           <div className="flex items-center gap-2 text-sm min-w-0">
             <CheckCircle className="w-4 h-4 text-green-400 shrink-0" />
-            <span className="text-zinc-300 min-w-0 truncate" title={connectedEmail}>Connected as <span className="text-zinc-100 font-medium">{connectedEmail}</span></span>
+            <span className="text-zinc-300 min-w-0 truncate" title={connectedEmail}>{rich(t("settings.form.plex.connectedAs"), { email: <span className="text-zinc-100 font-medium">{connectedEmail}</span> })}</span>
           </div>
           <button
             onClick={handleDisconnect}
@@ -297,13 +308,12 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
             className="shrink-0 flex items-center gap-1 text-xs text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-50"
           >
             <Unlink className="w-3 h-3" />
-            Disconnect
+            {t("settings.form.plex.disconnect")}
           </button>
         </div>
       ) : (
         <p className="text-sm text-zinc-400">
-          Connect your Plex admin account. Only users you share your Plex server with will be
-          able to sign in.
+          {t("settings.form.plex.intro")}
         </p>
       )}
 
@@ -314,11 +324,11 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
           className="bg-[#e5a00d] hover:bg-[#f0ac14] text-black font-semibold"
         >
           {status === "waiting" ? (
-            <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Waiting for Plex…</>
+            <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.plex.waiting")}</>
           ) : status === "saving" ? (
-            <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</>
+            <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</>
           ) : (
-            "Connect Plex Account"
+            t("settings.form.plex.connect")
           )}
         </Button>
       )}
@@ -333,7 +343,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
         <div className="border-t border-zinc-800 pt-4 space-y-4">
           <form onSubmit={handleSaveServerUrl} className="space-y-3">
             <div className="space-y-1.5">
-              <Label htmlFor="plex-server-url">Plex Server URL</Label>
+              <Label htmlFor="plex-server-url">{t("settings.form.plex.serverUrl")}</Label>
               <Input
                 id="plex-server-url"
                 type="url"
@@ -343,7 +353,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
                 className="bg-zinc-800 border-zinc-700 font-mono text-sm"
               />
               <p className="text-xs text-zinc-500">
-                Local address of your Plex Media Server — used to sync library availability.
+                {t("settings.form.plex.serverUrlHelp")}
               </p>
             </div>
             <div className="flex items-center gap-3 flex-wrap">
@@ -353,25 +363,25 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
                 className="bg-indigo-600 hover:bg-indigo-500"
               >
                 {serverStatus === "saving" ? (
-                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</>
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</>
                 ) : serverStatus === "testing" ? (
-                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Testing…</>
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.testing")}</>
                 ) : (
-                  "Save & Test"
+                  t("settings.form.common.saveAndTest")
                 )}
               </Button>
               {serverStatus === "ok" && (
                 <span role="status" aria-live="polite" className="flex items-center gap-1.5 text-sm text-green-400">
                   <CheckCircle className="w-4 h-4" />
-                  Connected
+                  {t("settings.form.common.connected")}
                   {librariesCount !== null && (
-                    <span className="text-zinc-500">({librariesCount} {librariesCount === 1 ? "library" : "libraries"} loaded)</span>
+                    <span className="text-zinc-500">{t("settings.form.library.librariesLoaded", { count: librariesCount })}</span>
                   )}
                 </span>
               )}
               {serverStatus === "error" && (
                 <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400">
-                  <XCircle className="w-4 h-4" />{serverErrorMessage || "Failed"}
+                  <XCircle className="w-4 h-4" />{serverErrorMessage || t("settings.form.common.failed")}
                 </span>
               )}
             </div>
@@ -388,23 +398,23 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
                   className="border-zinc-700 text-zinc-300 hover:text-zinc-100"
                 >
                   {importStatus === "running" ? (
-                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Importing…</>
+                    <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.arr.importing")}</>
                   ) : (
-                    <><Download className="w-4 h-4 mr-2" />Import from Plex</>
+                    <><Download className="w-4 h-4 mr-2" />{t("settings.form.arr.importFrom", { service: "Plex" })}</>
                   )}
                 </Button>
                 {importStatus === "done" && importResult && (
                   <span role="status" aria-live="polite" className="flex items-center gap-1.5 text-sm text-green-400">
                     <CheckCircle className="w-4 h-4" />
-                    {importResult.marked} marked available
+                    {t("settings.form.common.markedAvailable", { count: importResult.marked })}
                     <span className="text-zinc-500">
-                      ({importResult.scanned.movies} movies, {importResult.scanned.tv} shows scanned)
+                      {t("settings.form.library.scanned", { movies: importResult.scanned.movies, tv: importResult.scanned.tv })}
                     </span>
                   </span>
                 )}
                 {importStatus === "error" && (
                   <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400">
-                    <XCircle className="w-4 h-4" />Import failed — check server URL
+                    <XCircle className="w-4 h-4" />{t("settings.form.plex.importFailed")}
                   </span>
                 )}
               </div>

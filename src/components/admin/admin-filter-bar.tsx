@@ -1,27 +1,29 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import { useT } from "@/components/i18n/i18n-provider";
 
+// Labels are i18n keys, translated at render.
 const STATUS_TABS = [
-  { label: "All",       value: "" },
-  { label: "Pending",   value: "PENDING" },
-  { label: "Approved",  value: "APPROVED" },
-  { label: "Declined",  value: "DECLINED" },
-  { label: "Available", value: "AVAILABLE" },
+  { labelKey: "requests.filter.all",       value: "" },
+  { labelKey: "requests.status.pending",   value: "PENDING" },
+  { labelKey: "requests.status.approved",  value: "APPROVED" },
+  { labelKey: "requests.status.declined",  value: "DECLINED" },
+  { labelKey: "requests.status.available", value: "AVAILABLE" },
 ];
 
 const TYPE_TABS = [
-  { label: "All",    value: "" },
-  { label: "Movies", value: "MOVIE" },
-  { label: "TV",     value: "TV" },
+  { labelKey: "requests.filter.all",  value: "" },
+  { labelKey: "search.filter.movies", value: "MOVIE" },
+  { labelKey: "search.filter.tv",     value: "TV" },
 ];
 
 const SORT_OPTIONS = [
-  { label: "Newest first",  value: "newest"    },
-  { label: "Oldest first",  value: "oldest"    },
-  { label: "Title A–Z",     value: "title"     },
-  { label: "Year (newest)", value: "year-desc" },
-  { label: "Year (oldest)", value: "year-asc"  },
+  { labelKey: "adminQueue.sort.newest",   value: "newest"    },
+  { labelKey: "adminQueue.sort.oldest",   value: "oldest"    },
+  { labelKey: "adminQueue.sort.title",    value: "title"     },
+  { labelKey: "adminQueue.sort.yearDesc", value: "year-desc" },
+  { labelKey: "adminQueue.sort.yearAsc",  value: "year-asc"  },
 ];
 
 interface AdminFilterBarProps {
@@ -34,6 +36,7 @@ interface AdminFilterBarProps {
 
 export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentType, currentSort }: AdminFilterBarProps) {
   const router = useRouter();
+  const t = useT();
 
   function navigate(status: string, sort: string, type: string) {
     const params = new URLSearchParams();
@@ -78,7 +81,7 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentT
                 cursor: "pointer",
               }}
             >
-              {tab.label}
+              {t(tab.labelKey)}
               <span
                 className="ds-mono"
                 style={{
@@ -127,7 +130,7 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentT
                   cursor: "pointer",
                 }}
               >
-                {tab.label}
+                {t(tab.labelKey)}
               </button>
             );
           })}
@@ -136,7 +139,7 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentT
         <select
           value={currentSort}
           onChange={(e) => navigate(currentStatus, e.target.value, currentType)}
-          aria-label="Sort requests"
+          aria-label={t("adminQueue.sort.label")}
           className="focus:outline-none focus:ring-1"
           style={{
             padding: "5px 10px",
@@ -150,7 +153,7 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentT
         >
           {SORT_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
-              {opt.label}
+              {t(opt.labelKey)}
             </option>
           ))}
         </select>

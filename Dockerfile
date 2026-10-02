@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # ── Stage 1: deps ─────────────────────────────────────────────────────────────
-FROM node:26.9.0-alpine3.23@sha256:7ac378c99d5b8251735073080eb6d803ce87f9b79a37230d9c13e7ed0db76227 AS deps
+FROM node:26.9.0-alpine3.23@sha256:9dac39bfd053b458593c44a099d2667994c8fa9e1a8c10bc7ff2f3d97b62412d AS deps
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -25,7 +25,7 @@ RUN --mount=type=cache,target=/root/.npm \
 # @prisma/adapter-pg (Driver Adapter mode), not the native query engine — so
 # it is safe and much faster to generate on $BUILDPLATFORM and copy the
 # output into the target-arch builder stage.
-FROM --platform=$BUILDPLATFORM node:26.9.0-alpine3.23@sha256:7ac378c99d5b8251735073080eb6d803ce87f9b79a37230d9c13e7ed0db76227 AS prisma-gen
+FROM --platform=$BUILDPLATFORM node:26.9.0-alpine3.23@sha256:9dac39bfd053b458593c44a099d2667994c8fa9e1a8c10bc7ff2f3d97b62412d AS prisma-gen
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -52,7 +52,7 @@ ENV DATABASE_URL="postgresql://build:build@localhost:5432/build?schema=public"
 RUN npx prisma generate
 
 # ── Stage 2: builder ──────────────────────────────────────────────────────────
-FROM node:26.9.0-alpine3.23@sha256:7ac378c99d5b8251735073080eb6d803ce87f9b79a37230d9c13e7ed0db76227 AS builder
+FROM node:26.9.0-alpine3.23@sha256:9dac39bfd053b458593c44a099d2667994c8fa9e1a8c10bc7ff2f3d97b62412d AS builder
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -86,7 +86,7 @@ RUN rm -rf .next/standalone/node_modules/@img/sharp-libvips-linux-* \
 # Install ONLY what the entrypoint needs at boot (prisma CLI for `db push`,
 # plus dotenv and pg), pinned to the lockfile's exact versions.
 # No build tools needed — prisma has no native addons (engines are pre-compiled binaries).
-FROM node:26.9.0-alpine3.23@sha256:7ac378c99d5b8251735073080eb6d803ce87f9b79a37230d9c13e7ed0db76227 AS migrate-deps
+FROM node:26.9.0-alpine3.23@sha256:9dac39bfd053b458593c44a099d2667994c8fa9e1a8c10bc7ff2f3d97b62412d AS migrate-deps
 WORKDIR /app
 
 RUN apk upgrade --no-cache
@@ -95,7 +95,7 @@ COPY scripts/prune-lockfile.mjs ./scripts/prune-lockfile.mjs
 # prisma + dotenv + pg, hash-pinned: prune-lockfile.mjs carves them plus
 # their transitive closure out of the repo lockfile so `npm ci` installs the
 # vetted resolutions instead of re-resolving at build time (OpenSSF
-# Scorecard: Pinned-Dependencies). Overrides (hono, @hono/node-server, …)
+# Scorecard: Pinned-Dependencies). Overrides (mysql2, deepmerge-ts, …)
 # come from the root package.json automatically — the previous inline copy
 # of that list had already drifted from it. These node_modules ship into the
 # runner image, so build-time resolution here was a real supply-chain gap.
@@ -130,7 +130,7 @@ RUN out=$(DATABASE_URL="postgresql://smoke:smoke@127.0.0.1:9/smoke" \
       echo "[migrate-deps] smoke test FAILED: pruned prisma CLI cannot reach P1001 — module graph is broken"; exit 1; }
 
 # ── Stage 4: runner ───────────────────────────────────────────────────────────
-FROM node:26.9.0-alpine3.23@sha256:7ac378c99d5b8251735073080eb6d803ce87f9b79a37230d9c13e7ed0db76227 AS runner
+FROM node:26.9.0-alpine3.23@sha256:9dac39bfd053b458593c44a099d2667994c8fa9e1a8c10bc7ff2f3d97b62412d AS runner
 WORKDIR /app
 
 # Upgrade Alpine packages (fixes libssl3/libcrypto3/busybox/musl CVEs).

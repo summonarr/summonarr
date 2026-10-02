@@ -9,6 +9,8 @@ import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import type { SaveStatus } from "./shared";
+import { useT } from "@/components/i18n/i18n-provider";
+import { rich } from "./rich";
 
 interface DiscordBotFormProps {
   initialBotToken: string;
@@ -30,6 +32,9 @@ interface DiscordBotFormProps {
 }
 
 export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildId, initialPublicKey, initialAutoApproveRoles, initialRequireLinkedAccount, initialRequireLinkedAccountSite, initialAdminRequestChannelId, initialWelcomeChannelId, initialNotifyChannelId, initialInviteUrl, initialLinkedRoleId, initialPlexRoleId, initialJellyfinRoleId, initialAdminRoleId, initialIssueAdminRoleId }: DiscordBotFormProps) {
+  const t = useT();
+  // Highlights a Discord UI term inside a translated guide sentence.
+  const hl = (node: React.ReactNode) => <span className="text-zinc-300">{node}</span>;
   const [botToken,          setBotToken]          = useState(initialBotToken);
   const [clientId,          setClientId]          = useState(initialClientId);
   const [guildId,           setGuildId]           = useState(initialGuildId);
@@ -106,7 +111,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
     const saved = savedRef.current;
     const changed = Object.fromEntries(fields.filter(([key, current]) => current !== saved[key]).map(([key, current]) => [key, current]));
     if (Object.keys(changed).length === 0) {
-      setMessage("No changes to save");
+      setMessage(t("settings.form.discord.noChanges"));
       setStatus("ok");
       setTimeout(() => setStatus("idle"), 5000);
       return;
@@ -123,14 +128,14 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
 
       if (res.ok && data.ok) {
         Object.assign(saved, changed);
-        setMessage("Saved · Restart the bot for changes to take effect");
+        setMessage(t("settings.form.discord.savedRestart"));
         setStatus("ok");
       } else {
-        setMessage(data.error ?? "Failed to save");
+        setMessage(data.error ?? t("settings.form.common.saveFailed"));
         setStatus("error");
       }
     } catch {
-      setMessage("Failed to save");
+      setMessage(t("settings.form.common.saveFailed"));
       setStatus("error");
     }
     setTimeout(() => setStatus("idle"), 5000);
@@ -145,7 +150,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
           aria-expanded={guideOpen}
           className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium text-zinc-300 hover:bg-zinc-800 transition-colors"
         >
-          <span>Setup guide</span>
+          <span>{t("settings.form.discord.guide.title")}</span>
           <ChevronDown aria-hidden className={`w-4 h-4 text-zinc-500 transition-transform duration-200 ${guideOpen ? "rotate-180" : ""}`} />
         </button>
 
@@ -153,8 +158,8 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
           <div className="px-4 pb-4 pt-1 border-t border-zinc-700 space-y-4 text-sm text-zinc-400">
 
             <div className="space-y-1">
-              <p className="font-semibold text-zinc-200">1. Create a Discord application</p>
-              <p>Go to the Discord Developer Portal and create a new application.</p>
+              <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s1.title")}</p>
+              <p>{t("settings.form.discord.guide.s1.body")}</p>
               <a
                 href="https://discord.com/developers/applications"
                 target="_blank"
@@ -166,111 +171,107 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
             </div>
 
             <div className="space-y-1">
-              <p className="font-semibold text-zinc-200">2. Get the Bot Token</p>
+              <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s2.title")}</p>
               <p>
-                Go to <span className="text-zinc-300">Bot</span> in the left sidebar. Click{" "}
-                <span className="text-zinc-300">Reset Token</span> and copy the value — paste it into
-                the <span className="text-zinc-300">Bot Token</span> field below.
+                {rich(t("settings.form.discord.guide.s2.body"), { bot: hl("Bot"), reset: hl("Reset Token"), field: hl(t("settings.form.discord.botToken")) })}
               </p>
               <p className="text-zinc-500 text-xs">
-                Also check that <strong className="text-zinc-400">Requires OAuth2 Code Grant</strong> is <strong className="text-zinc-400">OFF</strong> — if enabled, the invite URL will fail with a &quot;code grant&quot; error.
+                {rich(t("settings.form.discord.guide.s2.note"), {
+                  grant: <strong className="text-zinc-400">Requires OAuth2 Code Grant</strong>,
+                  off: <strong className="text-zinc-400">OFF</strong>,
+                })}
               </p>
             </div>
 
             <div className="space-y-1">
-              <p className="font-semibold text-zinc-200">3. Copy the Client ID and Public Key</p>
+              <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s3.title")}</p>
               <p>
-                Go to <span className="text-zinc-300">General Information</span>. Copy the{" "}
-                <span className="text-zinc-300">Application ID</span> into the Client ID field below, and
-                copy the <span className="text-zinc-300">Public Key</span> into the Public Key field below.
-                The Public Key is required to verify that interactions come from Discord.
+                {rich(t("settings.form.discord.guide.s3.body"), { page: hl("General Information"), appId: hl("Application ID"), publicKey: hl("Public Key") })}
               </p>
             </div>
 
             <div className="space-y-1">
-              <p className="font-semibold text-zinc-200">4. Set the Guild (Server) ID</p>
+              <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s4.title")}</p>
               <p>
-                Enable <span className="text-zinc-300">Developer Mode</span> in Discord user settings
-                (Appearance → Advanced). Right-click your server icon and select{" "}
-                <span className="text-zinc-300">Copy Server ID</span>. Paste it in the{" "}
-                <span className="text-zinc-300">Guild (Server) ID</span> field below.
+                {rich(t("settings.form.discord.guide.s4.body"), { devMode: hl("Developer Mode"), copyId: hl("Copy Server ID"), field: hl(t("settings.form.discord.guildId")) })}
               </p>
               <p className="text-zinc-500 text-xs">
-                Required — without it, commands are registered globally and take up to 1 hour to appear.
+                {t("settings.form.discord.guide.s4.note")}
               </p>
             </div>
 
             <div className="space-y-1">
-              <p className="font-semibold text-zinc-200">5. Save settings &amp; register slash commands</p>
-              <p>Save the fields below, then click <span className="text-zinc-300">Register Slash Commands</span> below. You should see a confirmation that commands were registered to your guild.</p>
+              <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s5.title")}</p>
+              <p>{rich(t("settings.form.discord.guide.s5.body"), { register: hl(t("settings.form.discord.register")) })}</p>
             </div>
 
             <div className="space-y-1">
-              <p className="font-semibold text-zinc-200">6. Set the Interactions Endpoint URL</p>
+              <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s6.title")}</p>
               <p>
-                Go back to <span className="text-zinc-300">General Information</span> in the Developer Portal.
-                Set the <span className="text-zinc-300">Interactions Endpoint URL</span> to:
+                {rich(t("settings.form.discord.guide.s6.body"), { page: hl("General Information"), field: hl("Interactions Endpoint URL") })}
               </p>
               <code className="block break-all bg-zinc-900 border border-zinc-700 rounded px-3 py-2 text-xs font-mono text-zinc-300 mt-1">
                 {interactionsEndpoint}
               </code>
               <p className="text-zinc-500 text-xs mt-1">
-                Discord will send a verification ping — your app must respond with a valid PONG for the URL to be accepted. Make sure the Public Key is saved first (step 3). Click <strong className="text-zinc-400">Save Changes</strong>.
+                {rich(t("settings.form.discord.guide.s6.note"), { save: <strong className="text-zinc-400">Save Changes</strong> })}
               </p>
             </div>
 
             <div className="space-y-1">
-              <p className="font-semibold text-zinc-200">7. Invite the bot to your server</p>
+              <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s7.title")}</p>
               <p>
-                Go to <span className="text-zinc-300">OAuth2 → URL Generator</span>. Check the{" "}
-                <span className="text-zinc-300">bot</span> and{" "}
-                <span className="text-zinc-300">applications.commands</span> scopes. Under Bot Permissions
-                check <span className="text-zinc-300">Send Messages</span>,{" "}
-                <span className="text-zinc-300">Embed Links</span>, and{" "}
-                <span className="text-zinc-300">View Channels</span>.
-                Copy the <strong className="text-zinc-400">Generated URL</strong> and open it to add the bot to your server.
+                {rich(t("settings.form.discord.guide.s7.body"), {
+                  generator: hl("OAuth2 → URL Generator"),
+                  bot: hl("bot"),
+                  commands: hl("applications.commands"),
+                  send: hl("Send Messages"),
+                  embed: hl("Embed Links"),
+                  view: hl("View Channels"),
+                  url: <strong className="text-zinc-400">Generated URL</strong>,
+                })}
               </p>
               <p className="text-zinc-500 text-xs">
-                Use the OAuth2 URL Generator — do not use the &quot;Discord Provided Link&quot; from the Installation page.
+                {t("settings.form.discord.guide.s7.note")}
               </p>
             </div>
 
             <div className="space-y-1">
-              <p className="font-semibold text-zinc-200">8. Set up a notification channel <span className="text-zinc-500 font-normal">(optional)</span></p>
+              <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s8.title")} <span className="text-zinc-500 font-normal">{t("settings.form.common.optional")}</span></p>
               <p>
-                Instead of sending approval and download notifications as DMs, the bot can post them in a dedicated channel and ping the user with an <span className="text-zinc-300">@mention</span>.
+                {rich(t("settings.form.discord.guide.s8.body"), { mention: hl("@mention") })}
               </p>
               <ol className="list-decimal list-inside space-y-1 text-zinc-400 text-sm pl-1">
                 <li>
-                  In Discord, create or choose a channel (e.g. <span className="text-zinc-300">#requests</span> or <span className="text-zinc-300">#notifications</span>).
+                  {rich(t("settings.form.discord.guide.s8.step1"), { a: hl("#requests"), b: hl("#notifications") })}
                 </li>
                 <li>
-                  Right-click the channel → <span className="text-zinc-300">Edit Channel</span> → <span className="text-zinc-300">Permissions</span>. Make sure the bot role has <span className="text-zinc-300">View Channel</span> and <span className="text-zinc-300">Send Messages</span> enabled. If the channel is private, you must explicitly add the bot role.
+                  {rich(t("settings.form.discord.guide.s8.step2"), { edit: hl("Edit Channel"), perms: hl("Permissions"), view: hl("View Channel"), send: hl("Send Messages") })}
                 </li>
                 <li>
-                  Enable <span className="text-zinc-300">Developer Mode</span> in Discord user settings (<span className="text-zinc-300">App Settings → Advanced</span>).
+                  {rich(t("settings.form.discord.guide.s8.step3"), { devMode: hl("Developer Mode"), path: hl("App Settings → Advanced") })}
                 </li>
                 <li>
-                  Right-click the channel name → <span className="text-zinc-300">Copy Channel ID</span>.
+                  {rich(t("settings.form.discord.guide.s8.step4"), { copy: hl("Copy Channel ID") })}
                 </li>
                 <li>
-                  Paste it into the <span className="text-zinc-300">Notification Channel ID</span> field below and save.
+                  {rich(t("settings.form.discord.guide.s8.step5"), { field: hl(t("settings.form.discord.notifyChannel")) })}
                 </li>
               </ol>
               <p className="text-zinc-500 text-xs mt-1">
-                Leave the field blank to keep using DMs instead. When a channel is set, every notification is posted there as <code className="text-zinc-400">@Username message</code> so the user gets a ping.
+                {rich(t("settings.form.discord.guide.s8.note"), { format: <code className="text-zinc-400">@Username message</code> })}
               </p>
             </div>
 
             <div className="rounded-md bg-zinc-900 border border-zinc-700 px-3 py-3 space-y-1">
-              <p className="font-semibold text-zinc-300 text-xs uppercase tracking-wide mb-2">Available slash commands</p>
+              <p className="font-semibold text-zinc-300 text-xs uppercase tracking-wide mb-2">{t("settings.form.discord.guide.commands")}</p>
               <div className="space-y-1.5 text-xs font-mono">
                 <p><span className="text-indigo-400">/request</span> <span className="text-zinc-500">type:Movie|TV Show  query:&lt;title&gt;</span></p>
-                <p className="text-zinc-500 pl-3">Search and request a movie or TV show — no account linking required</p>
+                <p className="text-zinc-500 pl-3">{t("settings.form.discord.guide.cmdRequest")}</p>
                 <p className="mt-1"><span className="text-indigo-400">/status</span></p>
-                <p className="text-zinc-500 pl-3">Check your recent request statuses</p>
+                <p className="text-zinc-500 pl-3">{t("settings.form.discord.guide.cmdStatus")}</p>
                 <p className="mt-1"><span className="text-indigo-400">/link</span> <span className="text-zinc-500">token:&lt;8-char code&gt;</span></p>
-                <p className="text-zinc-500 pl-3">Link your Discord account to your web account — generate the token on your Profile page</p>
+                <p className="text-zinc-500 pl-3">{t("settings.form.discord.guide.cmdLink")}</p>
               </div>
             </div>
 
@@ -280,7 +281,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
 
       <div
         role="tablist"
-        aria-label="Discord bot settings"
+        aria-label={t("settings.form.discord.tabsLabel")}
         className="flex gap-1 border-b border-zinc-800"
         onKeyDown={(e) => {
           if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
@@ -292,22 +293,22 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
           e.currentTarget.querySelector<HTMLButtonElement>(`[data-tab="${next}"]`)?.focus();
         }}
       >
-        {(["core", "channels", "roles"] as const).map((t) => (
+        {(["core", "channels", "roles"] as const).map((id) => (
           <button
-            key={t}
+            key={id}
             type="button"
             role="tab"
-            data-tab={t}
-            aria-selected={tab === t}
-            tabIndex={tab === t ? 0 : -1}
-            onClick={() => setTab(t)}
+            data-tab={id}
+            aria-selected={tab === id}
+            tabIndex={tab === id ? 0 : -1}
+            onClick={() => setTab(id)}
             className={`px-4 py-2 text-sm font-medium capitalize transition-colors border-b-2 -mb-px ${
-              tab === t
+              tab === id
                 ? "border-indigo-500 text-zinc-100"
                 : "border-transparent text-zinc-500 hover:text-zinc-300"
             }`}
           >
-            {t}
+            {t(`settings.form.discord.tab.${id}`)}
           </button>
         ))}
       </div>
@@ -317,7 +318,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
         {tab === "core" && (
           <>
             <div className="space-y-1.5">
-              <Label htmlFor="discord-token">Bot Token</Label>
+              <Label htmlFor="discord-token">{t("settings.form.discord.botToken")}</Label>
               <Input
                 id="discord-token"
                 type="password"
@@ -326,11 +327,11 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                 placeholder="••••••••••••••••"
                 className="bg-zinc-800 border-zinc-700 font-mono text-sm"
               />
-              <p className="text-xs text-zinc-500">From the Bot page of your Discord application (step 2).</p>
+              <p className="text-xs text-zinc-500">{t("settings.form.discord.botTokenHelp")}</p>
             </div>
             <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-4 lg:space-y-0">
               <div className="space-y-1.5">
-                <Label htmlFor="discord-client-id">Application (Client) ID</Label>
+                <Label htmlFor="discord-client-id">{t("settings.form.discord.clientId")}</Label>
                 <Input
                   id="discord-client-id"
                   value={clientId}
@@ -338,10 +339,10 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   placeholder="123456789012345678"
                   className="bg-zinc-800 border-zinc-700 font-mono text-sm"
                 />
-                <p className="text-xs text-zinc-500">From the General Information page (step 3).</p>
+                <p className="text-xs text-zinc-500">{t("settings.form.discord.clientIdHelp")}</p>
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="discord-guild-id">Guild (Server) ID</Label>
+                <Label htmlFor="discord-guild-id">{t("settings.form.discord.guildId")}</Label>
                 <Input
                   id="discord-guild-id"
                   value={guildId}
@@ -349,11 +350,11 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   placeholder="123456789012345678"
                   className="bg-zinc-800 border-zinc-700 font-mono text-sm"
                 />
-                <p className="text-xs text-zinc-500">Your Discord server ID (step 4). Required for instant slash command registration.</p>
+                <p className="text-xs text-zinc-500">{t("settings.form.discord.guildIdHelp")}</p>
               </div>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="discord-public-key">Public Key</Label>
+              <Label htmlFor="discord-public-key">{t("settings.form.discord.publicKey")}</Label>
               <Input
                 id="discord-public-key"
                 value={publicKey}
@@ -361,10 +362,10 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                 placeholder="f8cf3a985f811b4e…"
                 className="bg-zinc-800 border-zinc-700 font-mono text-sm"
               />
-              <p className="text-xs text-zinc-500">From General Information → Public Key (step 3). Required for HTTP interaction signature verification.</p>
+              <p className="text-xs text-zinc-500">{t("settings.form.discord.publicKeyHelp")}</p>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="discord-auto-approve-roles">Auto-Approve Role IDs</Label>
+              <Label htmlFor="discord-auto-approve-roles">{t("settings.form.discord.autoApproveRoles")}</Label>
               <Input
                 id="discord-auto-approve-roles"
                 value={autoApproveRoles}
@@ -373,8 +374,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                 className="bg-zinc-800 border-zinc-700 font-mono text-sm"
               />
               <p className="text-xs text-zinc-500">
-                Comma-separated Discord role IDs. Members with any of these roles will have their requests auto-approved and sent to download — without admin review.
-                Right-click a role in Discord (Developer Mode on) to copy its ID.
+                {t("settings.form.discord.autoApproveRolesHelp")}
               </p>
             </div>
             <div className="flex items-start gap-3">
@@ -386,10 +386,13 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                 className="mt-0.5 h-4 w-4 rounded border-zinc-600 bg-zinc-800 accent-indigo-500"
               />
               <div>
-                <Label htmlFor="discord-require-linked-account" className="cursor-pointer">Require linked site account for Discord requests</Label>
+                <Label htmlFor="discord-require-linked-account" className="cursor-pointer">{t("settings.form.discord.requireLinked")}</Label>
                 <p className="text-xs text-zinc-500 mt-1">
-                  When enabled, Discord users must link their account via <code className="text-zinc-400">/link</code> before using <code className="text-zinc-400">/request</code> or <code className="text-zinc-400">/status</code>.
-                  Members with an Auto-Approve role are exempt — they can request without linking.
+                  {rich(t("settings.form.discord.requireLinkedHelp"), {
+                    link: <code className="text-zinc-400">/link</code>,
+                    request: <code className="text-zinc-400">/request</code>,
+                    status: <code className="text-zinc-400">/status</code>,
+                  })}
                 </p>
               </div>
             </div>
@@ -402,10 +405,9 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                 className="mt-0.5 h-4 w-4 rounded border-zinc-600 bg-zinc-800 accent-indigo-500"
               />
               <div>
-                <Label htmlFor="discord-require-linked-account-site" className="cursor-pointer">Require linked Discord account for site requests</Label>
+                <Label htmlFor="discord-require-linked-account-site" className="cursor-pointer">{t("settings.form.discord.requireLinkedSite")}</Label>
                 <p className="text-xs text-zinc-500 mt-1">
-                  When enabled, users logged into the site must also link a Discord account before they can submit requests.
-                  Leave off to allow site users to request without Discord.
+                  {t("settings.form.discord.requireLinkedSiteHelp")}
                 </p>
               </div>
             </div>
@@ -416,7 +418,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
           <>
             <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-4 lg:space-y-0">
               <div className="space-y-1.5">
-                <Label htmlFor="discord-admin-request-channel">Admin Request Channel ID</Label>
+                <Label htmlFor="discord-admin-request-channel">{t("settings.form.discord.adminChannel")}</Label>
                 <Input
                   id="discord-admin-request-channel"
                   value={adminRequestChannelId}
@@ -425,11 +427,14 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   className="bg-zinc-800 border-zinc-700 font-mono text-sm"
                 />
                 <p className="text-xs text-zinc-500">
-                  Optional. When set, every new pending request is posted to this channel as an embed with <strong className="text-zinc-400">Approve</strong> and <strong className="text-zinc-400">Decline</strong> buttons.
+                  {rich(t("settings.form.discord.adminChannelHelp"), {
+                    approve: <strong className="text-zinc-400">{t("settings.form.discord.approve")}</strong>,
+                    decline: <strong className="text-zinc-400">{t("settings.form.discord.decline")}</strong>,
+                  })}
                 </p>
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="discord-welcome-channel">Welcome Channel ID</Label>
+                <Label htmlFor="discord-welcome-channel">{t("settings.form.discord.welcomeChannel")}</Label>
                 <Input
                   id="discord-welcome-channel"
                   value={welcomeChannelId}
@@ -438,13 +443,17 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   className="bg-zinc-800 border-zinc-700 font-mono text-sm"
                 />
                 <p className="text-xs text-zinc-500">
-                  Optional. When set, <code className="text-zinc-400">/link</code> can only be used in this channel, and <code className="text-zinc-400">/request</code> / <code className="text-zinc-400">/status</code> are blocked there.
+                  {rich(t("settings.form.discord.welcomeChannelHelp"), {
+                    link: <code className="text-zinc-400">/link</code>,
+                    request: <code className="text-zinc-400">/request</code>,
+                    status: <code className="text-zinc-400">/status</code>,
+                  })}
                 </p>
               </div>
             </div>
             <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-4 lg:space-y-0">
               <div className="space-y-1.5">
-                <Label htmlFor="discord-notify-channel">Notification Channel ID</Label>
+                <Label htmlFor="discord-notify-channel">{t("settings.form.discord.notifyChannel")}</Label>
                 <Input
                   id="discord-notify-channel"
                   value={notifyChannelId}
@@ -453,11 +462,11 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   className="bg-zinc-800 border-zinc-700 font-mono text-sm"
                 />
                 <p className="text-xs text-zinc-500">
-                  Optional. Approval and download notifications post here and the user is pinged with <code className="text-zinc-400">@mention</code>. Leave blank to send DMs.
+                  {rich(t("settings.form.discord.notifyChannelHelp"), { mention: <code className="text-zinc-400">@mention</code> })}
                 </p>
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="discord-invite-url">Server Invite URL</Label>
+                <Label htmlFor="discord-invite-url">{t("settings.form.discord.inviteUrl")}</Label>
                 <Input
                   id="discord-invite-url"
                   value={inviteUrl}
@@ -466,7 +475,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   className="bg-zinc-800 border-zinc-700 text-sm"
                 />
                 <p className="text-xs text-zinc-500">
-                  Optional. Permanent invite link. When set, users without a linked Discord account are prompted to join.
+                  {t("settings.form.discord.inviteUrlHelp")}
                 </p>
               </div>
             </div>
@@ -477,7 +486,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
           <>
             <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-4 lg:space-y-0">
               <div className="space-y-1.5">
-                <Label htmlFor="discord-linked-role-id">Linked Role ID</Label>
+                <Label htmlFor="discord-linked-role-id">{t("settings.form.discord.linkedRole")}</Label>
                 <Input
                   id="discord-linked-role-id"
                   value={linkedRoleId}
@@ -486,11 +495,11 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   className="bg-zinc-800 border-zinc-700 font-mono text-sm"
                 />
                 <p className="text-xs text-zinc-500">
-                  Optional. Assigned to every user when they link their Discord account — grants access to general server channels.
+                  {t("settings.form.discord.linkedRoleHelp")}
                 </p>
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="discord-plex-role-id">Plex Role ID</Label>
+                <Label htmlFor="discord-plex-role-id">{t("settings.form.discord.plexRole")}</Label>
                 <Input
                   id="discord-plex-role-id"
                   value={plexRoleId}
@@ -498,12 +507,12 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   placeholder="123456789012345678"
                   className="bg-zinc-800 border-zinc-700 font-mono text-sm"
                 />
-                <p className="text-xs text-zinc-500">Optional. Assigned to users who linked via a Plex account.</p>
+                <p className="text-xs text-zinc-500">{t("settings.form.discord.plexRoleHelp")}</p>
               </div>
             </div>
             <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-4 lg:space-y-0">
               <div className="space-y-1.5">
-                <Label htmlFor="discord-jellyfin-role-id">Jellyfin Role ID</Label>
+                <Label htmlFor="discord-jellyfin-role-id">{t("settings.form.discord.jellyfinRole")}</Label>
                 <Input
                   id="discord-jellyfin-role-id"
                   value={jellyfinRoleId}
@@ -511,10 +520,10 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   placeholder="123456789012345678"
                   className="bg-zinc-800 border-zinc-700 font-mono text-sm"
                 />
-                <p className="text-xs text-zinc-500">Optional. Assigned to users who linked via a Jellyfin account.</p>
+                <p className="text-xs text-zinc-500">{t("settings.form.discord.jellyfinRoleHelp")}</p>
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="discord-admin-role-id">Admin Role ID</Label>
+                <Label htmlFor="discord-admin-role-id">{t("settings.form.discord.adminRole")}</Label>
                 <Input
                   id="discord-admin-role-id"
                   value={adminRoleId}
@@ -522,11 +531,11 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   placeholder="123456789012345678"
                   className="bg-zinc-800 border-zinc-700 font-mono text-sm"
                 />
-                <p className="text-xs text-zinc-500">Optional. Assigned to Admin-role users when they link.</p>
+                <p className="text-xs text-zinc-500">{t("settings.form.discord.adminRoleHelp")}</p>
               </div>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="discord-issue-admin-role-id">Issue Admin Role ID</Label>
+              <Label htmlFor="discord-issue-admin-role-id">{t("settings.form.discord.issueAdminRole")}</Label>
               <Input
                 id="discord-issue-admin-role-id"
                 value={issueAdminRoleId}
@@ -535,7 +544,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                 className="bg-zinc-800 border-zinc-700 font-mono text-sm"
               />
               <p className="text-xs text-zinc-500">
-                Optional. Assigned to Issue Admin-role users when they link.
+                {t("settings.form.discord.issueAdminRoleHelp")}
               </p>
             </div>
           </>
@@ -543,7 +552,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
 
         <div className="flex items-center gap-3">
           <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
-            {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
+            {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
           </Button>
           <SaveStatusMessage status={status} okLabel={message} errorLabel={message} />
         </div>
@@ -564,24 +573,24 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                 const data: { ok?: boolean; error?: string; message?: string } = await res.json().catch(() => ({}));
                 if (data.ok) {
                   setRegStatus("ok");
-                  setRegMessage(data.message ?? "Commands registered");
+                  setRegMessage(data.message ?? t("settings.form.discord.registered"));
                 } else {
                   setRegStatus("error");
-                  setRegMessage(data.error ?? "Failed");
+                  setRegMessage(data.error ?? t("settings.form.common.failed"));
                 }
               } catch {
                 setRegStatus("error");
-                setRegMessage("Request failed");
+                setRegMessage(t("settings.form.common.requestFailed"));
               }
               setTimeout(() => setRegStatus("idle"), 6000);
             }}
           >
-            {regStatus === "loading" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Registering…</> : "Register Slash Commands"}
+            {regStatus === "loading" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.discord.registering")}</> : t("settings.form.discord.register")}
           </Button>
           {regStatus === "ok"    && <span role="status" aria-live="polite" className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />{regMessage}</span>}
           {regStatus === "error" && <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />{regMessage}</span>}
         </div>
-        <p className="text-xs text-zinc-500 mt-1.5">Re-registers slash commands with Discord. Run this after changing Guild ID or Bot Token.</p>
+        <p className="text-xs text-zinc-500 mt-1.5">{t("settings.form.discord.registerHelp")}</p>
       </div>
 
       <div className="border-t border-zinc-800 pt-4">
@@ -602,21 +611,21 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   setSyncRolesMessage(data.error);
                 } else {
                   setSyncRolesStatus("ok");
-                  setSyncRolesMessage(`Synced ${data.synced ?? 0} user${data.synced !== 1 ? "s" : ""}`);
+                  setSyncRolesMessage(t("settings.form.discord.syncedUsers", { count: data.synced ?? 0 }));
                 }
               } catch {
                 setSyncRolesStatus("error");
-                setSyncRolesMessage("Request failed");
+                setSyncRolesMessage(t("settings.form.common.requestFailed"));
               }
               setTimeout(() => setSyncRolesStatus("idle"), 6000);
             }}
           >
-            {syncRolesStatus === "loading" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Syncing…</> : "Sync Discord Roles"}
+            {syncRolesStatus === "loading" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.syncing")}</> : t("settings.form.discord.syncRoles")}
           </Button>
           {syncRolesStatus === "ok"    && <span role="status" aria-live="polite" className="flex items-center gap-1.5 text-sm text-green-400"><CheckCircle className="w-4 h-4" />{syncRolesMessage}</span>}
           {syncRolesStatus === "error" && <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400"><XCircle className="w-4 h-4" />{syncRolesMessage}</span>}
         </div>
-        <p className="text-xs text-zinc-500 mt-1.5">Assigns the Linked, Plex, and Jellyfin roles to all users who have already linked their Discord account. Run this once after configuring role IDs to backfill existing users.</p>
+        <p className="text-xs text-zinc-500 mt-1.5">{t("settings.form.discord.syncRolesHelp")}</p>
       </div>
     </div>
   );

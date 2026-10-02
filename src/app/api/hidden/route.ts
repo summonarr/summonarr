@@ -6,14 +6,16 @@ import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { sanitizeOptional } from "@/lib/sanitize";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const PAGE_SIZE = 60;
 const SELECT = { tmdbId: true, mediaType: true, title: true, posterPath: true, createdAt: true } as const;
 
 // GET — the caller's own "not interested" list (newest first).
 export const GET = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`hidden-list:${session.user.id}`, 60, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequests") }, { status: 429 });
   }
 
   const sp = req.nextUrl.searchParams;
@@ -38,8 +40,9 @@ export const GET = withAuth(async (req, _ctx, session) => {
 // already has them); we do NOT verify against TMDB so a "not interested" tap is
 // instant and never fails on an upstream outage.
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`hidden:${session.user.id}`, 60, 60_000)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
 
   const parsed = await readJsonCapped<{ tmdbId?: number; mediaType?: string; title?: string; posterPath?: string }>(req, 16384);
@@ -47,13 +50,13 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const { tmdbId, mediaType } = parsed;
 
   if (!tmdbId || !mediaType) {
-    return NextResponse.json({ error: "tmdbId and mediaType are required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdMediaTypeRequired") }, { status: 400 });
   }
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
-    return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
   }
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: "mediaType must be MOVIE or TV" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.mediaTypeInvalid") }, { status: 400 });
   }
 
   const title = (sanitizeOptional(parsed.title) ?? "").slice(0, 500);
@@ -70,7 +73,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json(item, { status: 201 });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-      return NextResponse.json({ error: "Already hidden" }, { status: 409 });
+      return NextResponse.json({ error: t("apiUser.hidden.alreadyHidden") }, { status: 409 });
     }
     throw err;
   }
@@ -79,18 +82,19 @@ export const POST = withAuth(async (req, _ctx, session) => {
 // DELETE — un-hide ?tmdbId=&mediaType=. deleteMany so a missing row is an
 // idempotent no-op success (toggle-off).
 export const DELETE = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`hidden-del:${session.user.id}`, 60, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequests") }, { status: 429 });
   }
 
   const sp = req.nextUrl.searchParams;
   const tmdbId = Number(sp.get("tmdbId"));
   const mediaType = sp.get("mediaType");
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
-    return NextResponse.json({ error: "tmdbId must be a positive integer" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
   }
   if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: "mediaType must be MOVIE or TV" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.mediaTypeInvalid") }, { status: 400 });
   }
 
   await prisma.hiddenItem.deleteMany({ where: { userId: session.user.id, tmdbId, mediaType } });

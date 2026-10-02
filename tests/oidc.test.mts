@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { SignJWT } from "jose";
 import {
   OIDC_STATE_COOKIE,
+  buildOidcExchangeUrl,
   isOidcConfigured,
   signOidcStateCookie,
   verifyOidcStateCookie,
@@ -231,4 +232,20 @@ test("sign throws without NEXTAUTH_SECRET; verify fails closed to null", async (
   } finally {
     process.env.NEXTAUTH_SECRET = SECRET;
   }
+});
+
+test("buildOidcExchangeUrl pins origin+path to the signed redirectUri, not the request URL", () => {
+  // In Next 16 req.url carries the server bind origin (http://0.0.0.0:3000 in
+  // the Docker image), which openid-client would send as redirect_uri and the
+  // IdP would reject as invalid_grant.
+  const reqUrl = new URL("http://0.0.0.0:3000/api/auth/oidc/callback?code=c0de&state=st_9f2c1a7b&iss=https%3A%2F%2Fidp.example");
+  const url = buildOidcExchangeUrl(STATE, reqUrl.searchParams);
+  assert.equal(url.origin + url.pathname, STATE.redirectUri);
+  assert.equal(url.searchParams.get("code"), "c0de");
+  assert.equal(url.searchParams.get("state"), "st_9f2c1a7b");
+  assert.equal(url.searchParams.get("iss"), "https://idp.example");
+  // What openid-client derives as redirect_uri (query stripped).
+  const stripped = new URL(url);
+  stripped.search = "";
+  assert.equal(stripped.href, STATE.redirectUri);
 });

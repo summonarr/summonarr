@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface SchemaObject {
   $ref?: string;
@@ -59,9 +60,9 @@ const METHOD_COLOR: Record<string, string> = {
   delete: "var(--ds-danger)",
 };
 
-const SECURITY_LABEL: Record<string, string> = {
-  session: "Session cookie",
-  cronSecret: "CRON_SECRET bearer",
+const SECURITY_LABEL_KEY: Record<string, string> = {
+  session: "adminManage.apiDocs.security.session",
+  cronSecret: "adminManage.apiDocs.security.cronSecret",
 };
 
 function stripRef(ref: string): string {
@@ -136,6 +137,7 @@ interface FlatOp {
 }
 
 export function OpenApiViewer() {
+  const t = useT();
   const [spec, setSpec] = useState<OpenApiSpec | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
@@ -147,19 +149,19 @@ export function OpenApiViewer() {
     let cancelled = false;
     fetch(withBasePath("/api/openapi"))
       .then((res) => {
-        if (!res.ok) throw new Error(`Failed to load spec (${res.status})`);
+        if (!res.ok) throw new Error(t("adminManage.apiDocs.loadFailedStatus", { status: res.status }));
         return res.json();
       })
       .then((data: OpenApiSpec) => {
         if (!cancelled) setSpec(data);
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load spec");
+        if (!cancelled) setError(err instanceof Error ? err.message : t("adminManage.apiDocs.loadFailed"));
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [t]);
 
   const ops = useMemo<FlatOp[]>(() => {
     if (!spec) return [];
@@ -186,14 +188,14 @@ export function OpenApiViewer() {
   if (error) {
     return (
       <div style={{ padding: "1.5rem", color: "var(--ds-danger)" }}>
-        Could not load the API spec: {error}
+        {t("adminManage.apiDocs.loadError", { error })}
       </div>
     );
   }
 
   if (!spec) {
     return (
-      <div style={{ padding: "1.5rem", color: "var(--ds-fg-muted)" }}>Loading API spec…</div>
+      <div style={{ padding: "1.5rem", color: "var(--ds-fg-muted)" }}>{t("adminManage.apiDocs.loading")}</div>
     );
   }
 
@@ -203,9 +205,9 @@ export function OpenApiViewer() {
 
   const securityLabel = (op: Operation): string => {
     const sec = op.security ?? globalSecurity;
-    if (sec.length === 0) return "Public";
+    if (sec.length === 0) return t("adminManage.apiDocs.public");
     const schemes = [...new Set(sec.flatMap((entry) => Object.keys(entry)))];
-    return schemes.map((s) => SECURITY_LABEL[s] ?? s).join(" or ");
+    return schemes.map((s) => (SECURITY_LABEL_KEY[s] ? t(SECURITY_LABEL_KEY[s]) : s)).join(t("adminManage.apiDocs.or"));
   };
 
   const copyCurl = async (method: string, path: string, op: Operation) => {
@@ -267,7 +269,7 @@ export function OpenApiViewer() {
   const tagOrder = (spec.tags ?? []).map((t) => t.name);
   const groups = new Map<string, FlatOp[]>();
   for (const entry of filtered) {
-    const tag = entry.op.tags?.[0] ?? "Other";
+    const tag = entry.op.tags?.[0] ?? t("adminManage.apiDocs.other");
     const bucket = groups.get(tag);
     if (bucket) bucket.push(entry);
     else groups.set(tag, [entry]);
@@ -285,15 +287,15 @@ export function OpenApiViewer() {
         </p>
       )}
       <p style={{ color: "var(--ds-fg-subtle)", marginBottom: "1rem", fontSize: 13 }}>
-        {spec.info.title} · v{spec.info.version} · {ops.length} endpoints
+        {spec.info.title} · v{spec.info.version} · {t("adminManage.apiDocs.endpoints", { count: ops.length })}
       </p>
 
       <input
         type="search"
         value={filter}
         onChange={(e) => setFilter(e.target.value)}
-        placeholder="Filter endpoints by path or summary…"
-        aria-label="Filter endpoints"
+        placeholder={t("adminManage.apiDocs.filterPlaceholder")}
+        aria-label={t("adminManage.apiDocs.filter")}
         style={{
           width: "100%",
           padding: "0.5rem 0.75rem",
@@ -307,7 +309,7 @@ export function OpenApiViewer() {
       />
 
       {orderedTags.length === 0 && (
-        <p style={{ color: "var(--ds-fg-muted)" }}>No endpoints match “{filter}”.</p>
+        <p style={{ color: "var(--ds-fg-muted)" }}>{t("adminManage.apiDocs.noMatch", { filter })}</p>
       )}
 
       {orderedTags.map((tag) => {
@@ -405,7 +407,7 @@ export function OpenApiViewer() {
                         }}
                       >
                         <div style={{ marginBottom: "0.6rem", color: "var(--ds-fg-muted)" }}>
-                          <strong style={{ color: "var(--ds-fg)" }}>Auth:</strong>{" "}
+                          <strong style={{ color: "var(--ds-fg)" }}>{t("adminManage.apiDocs.auth")}</strong>{" "}
                           {securityLabel(op)}
                         </div>
 
@@ -424,7 +426,7 @@ export function OpenApiViewer() {
                                 marginBottom: "0.3rem",
                               }}
                             >
-                              Parameters
+                              {t("adminManage.apiDocs.parameters")}
                             </div>
                             {op.parameters.map((p) => (
                               <div
@@ -435,7 +437,7 @@ export function OpenApiViewer() {
                                 <span style={{ color: "var(--ds-fg-subtle)" }}>({p.in})</span>{" "}
                                 {typeLabel(p.schema)}
                                 {p.required && (
-                                  <span style={{ color: "var(--ds-danger)" }}> · required</span>
+                                  <span style={{ color: "var(--ds-danger)" }}> · {t("adminManage.apiDocs.required")}</span>
                                 )}
                               </div>
                             ))}
@@ -451,9 +453,9 @@ export function OpenApiViewer() {
                                 marginBottom: "0.3rem",
                               }}
                             >
-                              Request body
+                              {t("adminManage.apiDocs.requestBody")}
                               {op.requestBody.required && (
-                                <span style={{ color: "var(--ds-danger)" }}> · required</span>
+                                <span style={{ color: "var(--ds-danger)" }}> · {t("adminManage.apiDocs.required")}</span>
                               )}
                             </div>
                             <pre
@@ -488,7 +490,7 @@ export function OpenApiViewer() {
                               marginBottom: "0.3rem",
                             }}
                           >
-                            Responses
+                            {t("adminManage.apiDocs.responses")}
                           </div>
                           {Object.entries(op.responses ?? {}).map(([code, resp]) => (
                             <div
@@ -523,13 +525,13 @@ export function OpenApiViewer() {
                             cursor: "pointer",
                           }}
                         >
-                          {copiedKey === key ? "Copied!" : "Copy as curl"}
+                          {copiedKey === key ? t("adminManage.apiDocs.copied") : t("adminManage.apiDocs.copyCurl")}
                         </button>
 
                         {revealed?.key === key && (
                           <div style={{ marginTop: "0.5rem" }}>
                             <p style={{ color: "var(--ds-warning)", fontSize: 12, margin: "0 0 0.3rem" }}>
-                              Clipboard unavailable — select the command below and copy it manually.
+                              {t("adminManage.apiDocs.clipboardUnavailable")}
                             </p>
                             <pre
                               style={{

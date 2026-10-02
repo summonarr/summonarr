@@ -2,6 +2,28 @@ import { prisma } from "@/lib/prisma";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { isFeatureEnabled } from "@/lib/features";
 import { hasPermission, Permission, effectivePermissions, parsePermissions } from "@/lib/permissions";
+import { instanceDefaultLocale, localeForUser, translatorFor } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
+import type { Locale } from "@/lib/i18n/locales";
+import { discordIssueTypeLabelT, mediaLabelT } from "@/lib/notify-i18n";
+
+// Language rule: a DM is written in the linked user's language (their stored
+// User.locale, else the instance default); anything posted to a SHARED channel
+// (the notify channel, the admin channel) is read by everyone there, so it uses
+// the instance default (SUMMONARR_DEFAULT_LOCALE, English when unset).
+function channelTranslator(): Translator {
+  return translatorFor(instanceDefaultLocale());
+}
+
+function recipientLocale(viaChannel: boolean, user: { locale?: string | null } | null | undefined): Locale {
+  return viaChannel ? instanceDefaultLocale() : localeForUser(user);
+}
+
+// BCP 47 tag for date formatting. English keeps the "en-US" it always used
+// ("May 1, 2024").
+function dateLocaleOf(locale: Locale): string {
+  return locale === "en" ? "en-US" : locale;
+}
 
 const DISCORD_API = "https://discord.com/api/v10";
 const TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w185";
@@ -210,12 +232,13 @@ export async function notifyAdminsNewRequestDiscord(data: {
     if (!cfg.discordBotToken || !cfg.discordAdminRequestChannelId) return;
     if (!isValidSnowflake(cfg.discordAdminRequestChannelId)) return;
 
-    const label = data.mediaType === "MOVIE" ? "Movie" : "TV Show";
+    const t = channelTranslator();
+    const label = mediaLabelT(t, data.mediaType);
     const embed: Record<string, unknown> = {
       color: COLORS.pending,
-      title: `📥 New Request — ${escMd(data.title)}`,
+      title: t("notify.discord.newRequest.title", { title: escMd(data.title) }),
       description: [
-        `**${label}** · requested by **${escMd(data.requestedBy)}**`,
+        t("notify.discord.newRequest.description", { media: label, user: escMd(data.requestedBy) }),
         // Prefix every line so a multi-line note stays inside the blockquote.
         data.note ? `\n> ${escMd(data.note).replace(/\n/g, "\n> ")}` : "",
       ].filter(Boolean).join(""),
@@ -228,8 +251,8 @@ export async function notifyAdminsNewRequestDiscord(data: {
     const components = [{
       type: 1,
       components: [
-        { type: 2, style: 3, label: "Approve", custom_id: `admin_approve:${data.requestId}`, emoji: { name: "✅" } },
-        { type: 2, style: 4, label: "Decline", custom_id: `admin_decline:${data.requestId}`, emoji: { name: "❌" } },
+        { type: 2, style: 3, label: t("notify.discord.newRequest.approve"), custom_id: `admin_approve:${data.requestId}`, emoji: { name: "✅" } },
+        { type: 2, style: 4, label: t("notify.discord.newRequest.decline"), custom_id: `admin_decline:${data.requestId}`, emoji: { name: "❌" } },
       ],
     }];
 
@@ -248,14 +271,6 @@ export async function notifyAdminsNewRequestDiscord(data: {
     console.error("[discord-notify] notifyAdminsNewRequestDiscord failed:", err);
   }
 }
-
-const ISSUE_TYPE_LABELS: Record<string, string> = {
-  BAD_VIDEO: "Bad video",
-  WRONG_AUDIO: "Wrong audio",
-  MISSING_SUBTITLES: "Missing subtitles",
-  WRONG_MATCH: "Wrong match",
-  OTHER: "Other",
-};
 
 // Posts a new issue to the admin Discord channel (the same channel as new
 // requests). Channel-wide, not per-user, so it takes no excludeUserId — mirrors
@@ -279,13 +294,14 @@ export async function notifyAdminsNewIssueDiscord(data: {
     if (!cfg.discordBotToken || !cfg.discordAdminRequestChannelId) return;
     if (!isValidSnowflake(cfg.discordAdminRequestChannelId)) return;
 
-    const label = data.mediaType === "MOVIE" ? "Movie" : "TV Show";
-    const typeLabel = ISSUE_TYPE_LABELS[data.issueType] ?? data.issueType;
+    const t = channelTranslator();
+    const label = mediaLabelT(t, data.mediaType);
+    const typeLabel = discordIssueTypeLabelT(t, data.issueType);
     const embed: Record<string, unknown> = {
       color: COLORS.issue,
-      title: `🛠️ New Issue — ${escMd(data.title)}`,
+      title: t("notify.discord.newIssue.title", { title: escMd(data.title) }),
       description: [
-        `**${label}** · ${escMd(typeLabel)} · reported by **${escMd(data.reportedBy)}**`,
+        t("notify.discord.newIssue.description", { media: label, issue: escMd(typeLabel), user: escMd(data.reportedBy) }),
         // Prefix every line so a multi-line note stays inside the blockquote.
         data.note ? `\n> ${escMd(data.note).replace(/\n/g, "\n> ")}` : "",
       ].filter(Boolean).join(""),
@@ -399,18 +415,23 @@ async function sendDm(botToken: string, discordId: string, embed: Embed): Promis
   }
 }
 
-async function notifyUser(userId: string, embed: Embed, prefKey?: "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "notifyOnIssue"): Promise<void> {
+// `build` renders the embed in the language chosen for this delivery (see
+// recipientLocale): the shared notify channel → instance default, a DM → the
+// user's own locale.
+async function notifyUser(userId: string, build: (t: Translator, locale: Locale) => Embed, prefKey?: "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "notifyOnIssue"): Promise<void> {
   try {
     const cfg = await getConfig();
     if (!cfg) return;
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { discordId: true, notifyOnApproved: true, notifyOnAvailable: true, notifyOnDeclined: true, notifyOnIssue: true },
+      select: { discordId: true, notifyOnApproved: true, notifyOnAvailable: true, notifyOnDeclined: true, notifyOnIssue: true, locale: true },
     });
     if (!user?.discordId) return;
     if (prefKey && user[prefKey] === false) return;
 
+    const locale = recipientLocale(!!cfg.channelId, user);
+    const embed = build(translatorFor(locale), locale);
     if (cfg.channelId) {
       await postToChannel(cfg.botToken, cfg.channelId, user.discordId, embed);
     } else {
@@ -421,75 +442,86 @@ async function notifyUser(userId: string, embed: Embed, prefKey?: "notifyOnAppro
   }
 }
 
-function mediaLabel(mediaType: string): string {
-  return mediaType === "MOVIE" ? "Movie" : "TV Show";
+function approvedEmbed(t: Translator, title: string, mediaType: string): Embed {
+  return {
+    color: COLORS.approved,
+    title: t("notify.discord.approved.title", { title: escMd(title) }),
+    description: t("notify.discord.approved.description", { media: mediaLabelT(t, mediaType) }),
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function availableEmbed(t: Translator, title: string, mediaType: string): Embed {
+  return {
+    color: COLORS.available,
+    title: t("notify.discord.available.title", { title: escMd(title) }),
+    description: t("notify.discord.available.description", { media: mediaLabelT(t, mediaType) }),
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function declinedEmbed(t: Translator, title: string, mediaType: string, adminNote?: string | null): Embed {
+  const base = t("notify.discord.declined.description", { media: mediaLabelT(t, mediaType) });
+  const description = adminNote
+    ? `${base}\n\n${t("notify.discord.declined.note", { note: escMd(adminNote) })}`
+    : base;
+  return {
+    color: COLORS.declined,
+    title: t("notify.discord.declined.title", { title: escMd(title) }),
+    description,
+    timestamp: new Date().toISOString(),
+  };
 }
 
 export async function notifyUserRequestApproved(userId: string, title: string, mediaType: string): Promise<void> {
-  await notifyUser(userId, {
-    color: COLORS.approved,
-    title: `✅ Request Approved — ${escMd(title)}`,
-    description: `Your **${mediaLabel(mediaType)}** request has been approved and is being downloaded. We'll let you know when it's ready!`,
-    timestamp: new Date().toISOString(),
-  }, "notifyOnApproved");
+  await notifyUser(userId, (t) => approvedEmbed(t, title, mediaType), "notifyOnApproved");
 }
 
 export async function notifyUserDownloadPending(userId: string, title: string, mediaType: string): Promise<void> {
-  await notifyUser(userId, {
+  await notifyUser(userId, (t) => ({
     color: COLORS.pending,
-    title: `⏳ Download Pending — ${escMd(title)}`,
-    description: `Your **${mediaLabel(mediaType)}** request is approved but hasn't started downloading yet — it may be pending a release or indexer search. We'll notify you when it's ready.`,
+    title: t("notify.discord.downloadPending.title", { title: escMd(title) }),
+    description: t("notify.discord.downloadPending.description", { media: mediaLabelT(t, mediaType) }),
     timestamp: new Date().toISOString(),
-  }, "notifyOnApproved");
+  }), "notifyOnApproved");
 }
 
 export async function notifyUserRequestAvailable(userId: string, title: string, mediaType: string): Promise<void> {
-  await notifyUser(userId, {
-    color: COLORS.available,
-    title: `🎉 Now Available — ${escMd(title)}`,
-    description: `Your **${mediaLabel(mediaType)}** request has finished downloading and should be available to watch shortly!`,
-    timestamp: new Date().toISOString(),
-  }, "notifyOnAvailable");
+  await notifyUser(userId, (t) => availableEmbed(t, title, mediaType), "notifyOnAvailable");
 }
 
 export async function notifyUserAwaitingRelease(userId: string, title: string, mediaType: string, releaseDate: string | null): Promise<void> {
-  const label = mediaLabel(mediaType);
   // Formatted in UTC: TMDB release dates and Sonarr firstAired are DATE values
   // carried as UTC midnight ("2024-05-01" / "…T00:00:00Z"), so the server's local
   // zone (any TZ west of UTC) would name the PREVIOUS day. Same convention as
   // formatDigitalRelease (format-release-date.ts).
   const parsed = releaseDate ? new Date(releaseDate) : null;
-  const releasePart = parsed && !Number.isNaN(parsed.getTime())
-    ? ` Expected around **${parsed.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" })}**.`
-    : "";
-  await notifyUser(userId, {
-    color: COLORS.pending,
-    title: `⏰ Awaiting Release — ${escMd(title)}`,
-    description: `Your **${label}** request is approved and queued — it will be downloaded automatically once it's available on home media.${releasePart}`,
-    timestamp: new Date().toISOString(),
+  await notifyUser(userId, (t, locale) => {
+    const expected = parsed && !Number.isNaN(parsed.getTime())
+      ? ` ${t("notify.discord.awaiting.expected", {
+          date: parsed.toLocaleDateString(dateLocaleOf(locale), { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" }),
+        })}`
+      : "";
+    return {
+      color: COLORS.pending,
+      title: t("notify.discord.awaiting.title", { title: escMd(title) }),
+      description: t("notify.discord.awaiting.description", { media: mediaLabelT(t, mediaType), expected }),
+      timestamp: new Date().toISOString(),
+    };
   }, "notifyOnApproved");
 }
 
 export async function notifyUserRequestDeclined(userId: string, title: string, mediaType: string, adminNote?: string | null): Promise<void> {
-  const safeNote = adminNote ? escMd(adminNote) : null;
-  const description = safeNote
-    ? `Your **${mediaLabel(mediaType)}** request was not approved.\n\n**Note:** ${safeNote}`
-    : `Your **${mediaLabel(mediaType)}** request was not approved.`;
-  await notifyUser(userId, {
-    color: COLORS.declined,
-    title: `❌ Request Declined — ${escMd(title)}`,
-    description,
-    timestamp: new Date().toISOString(),
-  }, "notifyOnDeclined");
+  await notifyUser(userId, (t) => declinedEmbed(t, title, mediaType, adminNote), "notifyOnDeclined");
 }
 
 export async function notifyUserIssueMessage(userId: string, title: string, adminName: string, body: string): Promise<void> {
-  await notifyUser(userId, {
+  await notifyUser(userId, (t) => ({
     color: 0x5865F2,
-    title: `💬 Admin Reply — ${escMd(title)}`,
-    description: `**${escMd(adminName)}** replied to your issue:\n\n> ${escMd(body)}`,
+    title: t("notify.discord.userIssueMessage.title", { title: escMd(title) }),
+    description: `${t("notify.discord.userIssueMessage.description", { user: escMd(adminName) })}\n\n> ${escMd(body)}`,
     timestamp: new Date().toISOString(),
-  }, "notifyOnIssue");
+  }), "notifyOnIssue");
 }
 
 export async function notifyAdminsIssueMessage(title: string, userName: string, body: string, opts: { excludeUserId?: string; fromAdmin?: boolean; restrictToUserId?: string } = {}): Promise<void> {
@@ -524,12 +556,18 @@ export async function notifyAdminsIssueMessage(title: string, userName: string, 
     });
     if (!admins.length) return;
 
-    const heading = opts.fromAdmin ? "💬 Admin Reply on Issue" : "💬 User Reply on Issue";
-    const verb = opts.fromAdmin ? "replied" : "added a message";
+    // Posted to the shared channel → the instance default language.
+    const t = channelTranslator();
     const embed: Embed = {
       color: 0xFEE75C,
-      title: `${heading} — ${escMd(title)}`,
-      description: `**${escMd(userName)}** ${verb}:\n\n> ${escMd(body)}`,
+      title: opts.fromAdmin
+        ? t("notify.discord.adminIssueMessage.titleFromAdmin", { title: escMd(title) })
+        : t("notify.discord.adminIssueMessage.title", { title: escMd(title) }),
+      description: `${
+        opts.fromAdmin
+          ? t("notify.discord.adminIssueMessage.descriptionFromAdmin", { user: escMd(userName) })
+          : t("notify.discord.adminIssueMessage.description", { user: escMd(userName) })
+      }\n\n> ${escMd(body)}`,
       timestamp: new Date().toISOString(),
     };
 
@@ -546,13 +584,16 @@ export async function notifyAdminsIssueMessage(title: string, userName: string, 
 }
 
 export async function notifyUserIssueResolved(userId: string, title: string, mediaType: string, resolution?: string | null): Promise<void> {
-  const label = mediaLabel(mediaType);
-  const resolutionPart = resolution ? `\n\n**Resolution:** ${escMd(resolution)}` : "";
-  await notifyUser(userId, {
-    color: COLORS.available,
-    title: `✅ Issue Resolved — ${escMd(title)}`,
-    description: `The issue you reported with **${label}** has been resolved.${resolutionPart}`,
-    timestamp: new Date().toISOString(),
+  await notifyUser(userId, (t) => {
+    const resolutionPart = resolution
+      ? `\n\n${t("notify.discord.issueResolved.resolution", { resolution: escMd(resolution) })}`
+      : "";
+    return {
+      color: COLORS.available,
+      title: t("notify.discord.issueResolved.title", { title: escMd(title) }),
+      description: `${t("notify.discord.issueResolved.description", { media: mediaLabelT(t, mediaType) })}${resolutionPart}`,
+      timestamp: new Date().toISOString(),
+    };
   }, "notifyOnIssue");
 }
 
@@ -570,19 +611,16 @@ export async function notifyUsersRequestsApproved(
       // (guardrail 33), so a removed user keeps a live Discord link and would
       // otherwise still get pinged by a later batch approve/decline.
       where: { id: { in: userIds }, discordId: { not: null }, notifyOnApproved: true, deactivatedAt: null },
-      select: { id: true, discordId: true },
+      select: { id: true, discordId: true, locale: true },
     });
     const idMap = new Map(users.map((u) => [u.id, u.discordId!]));
+    const userById = new Map(users.map((u) => [u.id, u]));
 
     const tasks = requests.map((r) => () => {
       const discordId = idMap.get(r.requestedBy);
       if (!discordId) return Promise.resolve();
-      const embed: Embed = {
-        color: COLORS.approved,
-        title: `✅ Request Approved — ${escMd(r.title)}`,
-        description: `Your **${mediaLabel(r.mediaType)}** request has been approved and is being downloaded. We'll let you know when it's ready!`,
-        timestamp: new Date().toISOString(),
-      };
+      const t = translatorFor(recipientLocale(!!cfg.channelId, userById.get(r.requestedBy)));
+      const embed = approvedEmbed(t, r.title, r.mediaType);
       const send = cfg.channelId
         ? postToChannel(cfg.botToken, cfg.channelId, discordId, embed)
         : enqueueDm(() => sendDm(cfg.botToken, discordId, embed));
@@ -609,19 +647,16 @@ export async function notifyUsersRequestsAvailable(
     const userIds = [...new Set(requests.map((r) => r.requestedBy))];
     const users = await prisma.user.findMany({
       where: { id: { in: userIds }, discordId: { not: null }, notifyOnAvailable: true },
-      select: { id: true, discordId: true },
+      select: { id: true, discordId: true, locale: true },
     });
     const idMap = new Map(users.map((u) => [u.id, u.discordId!]));
+    const userById = new Map(users.map((u) => [u.id, u]));
 
     const tasks = requests.map((r) => () => {
       const discordId = idMap.get(r.requestedBy);
       if (!discordId) return Promise.resolve();
-      const embed: Embed = {
-        color: COLORS.available,
-        title: `🎉 Now Available — ${escMd(r.title)}`,
-        description: `Your **${mediaLabel(r.mediaType)}** request has finished downloading and should be available to watch shortly!`,
-        timestamp: new Date().toISOString(),
-      };
+      const t = translatorFor(recipientLocale(!!cfg.channelId, userById.get(r.requestedBy)));
+      const embed = availableEmbed(t, r.title, r.mediaType);
       const send = cfg.channelId
         ? postToChannel(cfg.botToken, cfg.channelId, discordId, embed)
         : enqueueDm(() => sendDm(cfg.botToken, discordId, embed));
@@ -650,22 +685,16 @@ export async function notifyUsersRequestsDeclined(
     const users = await prisma.user.findMany({
       // deactivatedAt: null — see notifyUsersRequestsApproved.
       where: { id: { in: userIds }, discordId: { not: null }, notifyOnDeclined: true, deactivatedAt: null },
-      select: { id: true, discordId: true },
+      select: { id: true, discordId: true, locale: true },
     });
     const idMap = new Map(users.map((u) => [u.id, u.discordId!]));
+    const userById = new Map(users.map((u) => [u.id, u]));
 
     const tasks = requests.map((r) => () => {
       const discordId = idMap.get(r.requestedBy);
       if (!discordId) return Promise.resolve();
-      const description = adminNote
-        ? `Your **${mediaLabel(r.mediaType)}** request was not approved.\n\n**Note:** ${escMd(adminNote)}`
-        : `Your **${mediaLabel(r.mediaType)}** request was not approved.`;
-      const embed: Embed = {
-        color: COLORS.declined,
-        title: `❌ Request Declined — ${escMd(r.title)}`,
-        description,
-        timestamp: new Date().toISOString(),
-      };
+      const t = translatorFor(recipientLocale(!!cfg.channelId, userById.get(r.requestedBy)));
+      const embed = declinedEmbed(t, r.title, r.mediaType, adminNote);
       const send = cfg.channelId
         ? postToChannel(cfg.botToken, cfg.channelId, discordId, embed)
         : enqueueDm(() => sendDm(cfg.botToken, discordId, embed));

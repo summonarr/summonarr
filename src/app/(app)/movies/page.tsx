@@ -7,13 +7,14 @@ import { tmdbAuth } from "@/lib/tmdb-auth";
 import { LiveRefresh } from "@/components/live-refresh";
 import { BrowseGrid } from "@/components/media/browse-grid";
 import { PageHeader } from "@/components/ui/design";
+import { getTranslator } from "@/lib/i18n/server";
 
 export default async function MoviesPage({
   searchParams,
 }: {
   searchParams: Promise<Record<string, string>>;
 }) {
-  const [sp, session] = await Promise.all([searchParams, requireAppSession()]);
+  const [sp, session, t] = await Promise.all([searchParams, requireAppSession(), getTranslator()]);
   const genreId        = sp.genreId        || undefined;
   const keywordId      = sp.keywordId      || undefined;
   const minRating      = sp.minRating      || undefined;
@@ -55,17 +56,17 @@ export default async function MoviesPage({
   // there is more than one page; a count only when this page is everything.
   // A failed fetch states no number — the grid's retry banner says what happened.
   const subtitle = !hasFilters
-    ? "Popular right now"
+    ? t("browse.popularNow")
     : failed
-      ? "Filtered results"
+      ? t("browse.filteredResults")
       : totalPages > 1
-        ? `Page ${Math.min(page, totalPages)} of ${totalPages}`
-        : `${items.length} result${items.length === 1 ? "" : "s"}`;
+        ? t("browse.pageOf", { page: Math.min(page, totalPages), total: totalPages })
+        : t("browse.results", { count: items.length });
 
   return (
     <div className="ds-page-enter">
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
-      <PageHeader title="Movies" subtitle={subtitle} />
+      <PageHeader title={t("nav.movies")} subtitle={subtitle} />
       <BrowseGrid
         initialItems={items}
         initialTotalPages={totalPages}

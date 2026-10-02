@@ -3,6 +3,8 @@ import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Cache "sources" map to TmdbCache key prefixes — plus, below, the derived
 // tables that hold denormalized copies of the same upstream data (TmdbMediaCore,
@@ -44,19 +46,20 @@ function isSource(v: string): v is Source {
 }
 
 export const DELETE = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   // Per-admin rate limit on this destructive TmdbCache wipe. Clearing forces every
   // page load to re-fetch from upstream (TMDB / MDBList / OMDB), so looping it is a
   // self-inflicted refetch storm that burns their rate limits. 5 per 5-min window
   // stops a compromised session (or a double-click) from looping the wipe.
   if (!checkRateLimit(`admin-clear-cache:${session.user.id}`, 5, 5 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many cache clears — try again shortly." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.cache.tooManyClears") }, { status: 429 });
   }
   const url = new URL(req.url);
   const sourceParam = url.searchParams.get("source") ?? "all";
 
   if (!isSource(sourceParam)) {
     return NextResponse.json(
-      { error: `Unknown source "${sourceParam}". Expected one of: tmdb, mdblist, omdb, all` },
+      { error: t("apiAdmin.cache.unknownSource", { source: String(sourceParam) }) },
       { status: 400 },
     );
   }
@@ -102,13 +105,16 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
     //     (guardrail 40) — full coverage, so the run is conclusive and it
     //     REPLACES every shelf with a fallback one.
     // The second is much worse than doing nothing, which is why the unstamp and
-    // the delete share a transaction and the unstamp goes first.
+    // the delete share a transaction and the unstamp goes first. Both statements
+    // are unbounded over graph-sized tables (up to ~800k edge rows), so the tx
+    // takes BATCH_TX_TIMEOUT (guardrail 4) — under Prisma's 5s default a large
+    // graph rolled back with P2028 and 500'd a half-applied clear.
     await prisma.$transaction(async (tx) => {
       await tx.recommendationTitle.updateMany({
         data: { suggestionsRefreshedAt: null, suggestionCount: 0 },
       });
       edgesCleared = (await tx.titleSuggestion.deleteMany({})).count;
-    });
+    }, { timeout: BATCH_TX_TIMEOUT });
   }
 
   if (resetRatings) {

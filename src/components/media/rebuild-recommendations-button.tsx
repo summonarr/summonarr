@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // Admin-only shortcut on /for-you to the same job the cron loop runs every
 // WARM_RECOMMENDATIONS_INTERVAL (12h). The shelf is PRECOMPUTED, so without
@@ -19,11 +20,28 @@ import { withBasePath } from "@/lib/base-path";
 //
 // Consequence, stated on the button itself: this rebuilds EVERY active user's
 // shelf, not just the viewer's. That is the honest label for what it does.
+//
+// It renders INLINE — the page places it in the header subtitle, right after
+// "updated N ago", which is the fact it changes. As a header action it wrapped
+// onto its own row on phones, a row the shared loading skeleton can't reserve
+// (it doesn't know the role), so admins saw the page jump on every load. So:
+// every element here is phrasing content (the host is a <p>), and the hit area
+// comes from padding cancelled by a negative margin so the line box doesn't grow.
 export function RebuildRecommendationsButton() {
   const router = useRouter();
+  const t = useT();
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
   const [cooldown, setCooldown] = useState(0);
+
+  // The outcome is a one-off report, not state: clear it once it has been
+  // read rather than leaving "Rebuilt 3 of 3 shelves" beside the button for
+  // the rest of the visit.
+  useEffect(() => {
+    if (!message) return;
+    const timer = setTimeout(() => setMessage(null), message.type === "error" ? 15000 : 8000);
+    return () => clearTimeout(timer);
+  }, [message]);
 
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -52,7 +70,7 @@ export function RebuildRecommendationsButton() {
       // a success. Checked BEFORE the error branch because a skip is not a
       // failure — the job is already running, which is what the operator wanted.
       if (res.ok && data.skipped) {
-        setMessage({ text: data.reason ?? "Already running", type: "success" });
+        setMessage({ text: data.reason ?? t("browse.forYou.rebuild.alreadyRunning"), type: "success" });
         setCooldown(30);
         return;
       }
@@ -64,8 +82,8 @@ export function RebuildRecommendationsButton() {
           text:
             data.error ??
             (gatewayTimeout
-              ? "Lost contact with the server; the rebuild may still be running"
-              : `Rebuild failed (HTTP ${res.status})`),
+              ? t("browse.forYou.rebuild.lostContact")
+              : t("browse.forYou.rebuild.failed", { status: res.status })),
           type: "error",
         });
         setCooldown(30);
@@ -75,7 +93,7 @@ export function RebuildRecommendationsButton() {
       const updated = data.usersUpdated ?? 0;
       const eligible = data.usersEligible ?? 0;
       setMessage({
-        text: `Rebuilt ${updated} of ${eligible} ${eligible === 1 ? "shelf" : "shelves"}`,
+        text: t("browse.forYou.rebuild.done", { updated, count: eligible }),
         type: "success",
       });
       setCooldown(60);
@@ -88,7 +106,7 @@ export function RebuildRecommendationsButton() {
       // (~60-100s) while still completing server-side, so a transport failure
       // must not claim the job failed — say what is actually known.
       setMessage({
-        text: "Lost contact with the server; the rebuild may still be running",
+        text: t("browse.forYou.rebuild.lostContact"),
         type: "error",
       });
       setCooldown(60);
@@ -100,50 +118,48 @@ export function RebuildRecommendationsButton() {
   const busy = loading || cooldown > 0;
 
   return (
-    <div className="flex items-center gap-2">
+    <span className="inline-flex items-center gap-2 flex-wrap align-middle">
       <button
         type="button"
         onClick={handleRebuild}
         disabled={busy}
-        aria-label={cooldown > 0 ? `Rebuild picks — wait ${cooldown}s` : "Rebuild picks"}
+        aria-label={cooldown > 0 ? t("browse.forYou.rebuild.labelWait", { seconds: cooldown }) : t("browse.forYou.rebuild.label")}
         title={
           cooldown > 0
-            ? `Wait ${cooldown}s`
-            : "Re-run the recommendation build now. Rebuilds every active user’s shelf, not just yours, and can take a few minutes on a cold graph."
+            ? t("browse.forYou.rebuild.wait", { seconds: cooldown })
+            : t("browse.forYou.rebuild.title")
         }
         // No hover tint while disabled — a dimmed control that still lights up
         // under the cursor reads as clickable.
-        className={`ds-tap inline-flex items-center gap-1.5 font-medium${busy ? "" : " ds-hover-tint"}`}
+        className={`ds-tap inline-flex items-center gap-1 font-medium${busy ? "" : " ds-hover-tint"}`}
         style={{
-          padding: "5px 12px",
-          minHeight: 32,
+          // 28px tall hit box; the -6px margins keep the subtitle's 18px line.
+          padding: "6px 8px",
+          margin: "-6px -2px",
           borderRadius: 6,
           fontSize: 12,
-          background: "var(--ds-bg-2)",
-          color: "var(--ds-fg-muted)",
-          border: "1px solid var(--ds-border)",
+          lineHeight: "16px",
+          background: "transparent",
+          color: "var(--ds-accent-text)",
+          border: 0,
           opacity: busy ? 0.5 : 1,
           whiteSpace: "nowrap",
         }}
       >
         <RefreshCw
-          style={{ width: 13, height: 13 }}
+          style={{ width: 12, height: 12 }}
           className={loading ? "animate-spin" : undefined}
           aria-hidden="true"
         />
-        {loading ? "Rebuilding…" : "Rebuild picks"}
+        {loading ? t("browse.forYou.rebuild.running") : t("browse.forYou.rebuild.button")}
       </button>
-      {message && (
-        <span
-          className="ds-mono"
-          style={{
-            fontSize: 11,
-            color: message.type === "success" ? "var(--ds-success)" : "var(--ds-danger)",
-          }}
-        >
-          {message.text}
-        </span>
-      )}
-    </div>
+      <span role="status" className="ds-mono" style={{ fontSize: 11 }}>
+        {message && (
+          <span style={{ color: message.type === "success" ? "var(--ds-success)" : "var(--ds-danger)" }}>
+            {message.text}
+          </span>
+        )}
+      </span>
+    </span>
   );
 }

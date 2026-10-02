@@ -135,6 +135,7 @@ shadowPrismaModel(prisma, "tmdbMediaCore", {
     coreUpserts.push(args.where.tmdbId_mediaType);
     return args;
   },
+  updateMany: async () => ({ count: 0 }),
 });
 shadowPrismaClientMethod(prisma, "$transaction", async (ops: unknown): Promise<unknown> =>
   Array.isArray(ops) ? Promise.all(ops) : (ops as (tx: unknown) => unknown)(prisma),
@@ -808,6 +809,34 @@ test("discover TV: first_air_date param family, allowlisted sort passes through,
   assert.equal(sp.get("vote_average.gte"), "10"); // 15 clamped into 0..10
   assert.equal(result.totalPages, 3); // under the cap → untouched
   assert.equal(cacheUpserts[0]?.key, "discover:tv:first_air_date.desc:16::10::1999:2001:::page:2");
+});
+
+test("discover TV: movie-only sorts are translated to the TV field (Newest/Oldest → first_air_date) in BOTH the wire param and cache key", async () => {
+  const cases: [string, string][] = [
+    ["release_date.desc", "first_air_date.desc"],
+    ["primary_release_date.asc", "first_air_date.asc"],
+    ["original_title.asc", "original_name.asc"],
+    ["revenue.desc", "popularity.desc"],
+    ["vote_average.desc", "vote_average.desc"],
+  ];
+  for (const [input, expected] of cases) {
+    fetchCalls.length = 0;
+    cacheUpserts.length = 0;
+    respond = () => jsonResponse(pageOf([rawTV(43, "Sorted Show")], 1));
+    await discoverTVPage({ sortBy: input }, 1);
+    assert.equal(fetchCalls[0].url.searchParams.get("sort_by"), expected, input);
+    assert.ok(cacheUpserts[0]?.key.startsWith(`discover:tv:${expected}:`), `${input} cache key`);
+  }
+});
+
+test("discover movies: first_air_date.* maps to primary_release_date.*; release_date.* passes through", async () => {
+  respond = () => jsonResponse(pageOf([rawMovie(44, "Sorted Movie")], 1));
+  await discoverMoviesPage({ sortBy: "first_air_date.desc" }, 1);
+  assert.equal(fetchCalls[0].url.searchParams.get("sort_by"), "primary_release_date.desc");
+  fetchCalls.length = 0;
+  respond = () => jsonResponse(pageOf([rawMovie(45, "Sorted Movie 2")], 1));
+  await discoverMoviesPage({ sortBy: "release_date.asc" }, 1);
+  assert.equal(fetchCalls[0].url.searchParams.get("sort_by"), "release_date.asc");
 });
 
 test("discover movies: an out-of-range page number is clamped to 500 in BOTH the wire param and the cache key", async () => {

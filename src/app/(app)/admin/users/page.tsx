@@ -7,6 +7,7 @@ import { ServerUserTable } from "@/components/admin/server-user-table";
 import { SyncRolesButton } from "@/components/admin/request-actions";
 import { CreateUserButton } from "@/components/admin/create-user-button";
 import { PageHeader } from "@/components/ui/design";
+import { getTranslator } from "@/lib/i18n/server";
 import { isArrConfigured } from "@/lib/arr";
 import { getArrInstances } from "@/lib/arr-instance-registry";
 import { getMediaInstances } from "@/lib/media-instance-registry";
@@ -21,7 +22,7 @@ export default async function UsersPage() {
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_USERS)) redirect("/");
 
-  const [users, localAuthRows, oidcAccountRows, serverUsers, autoDisableRow, radarr4kConfigured, sonarr4kConfigured] = await Promise.all([
+  const [users, localAuthRows, oidcAccountRows, serverUsers, autoDisableRow, radarr4kConfigured, sonarr4kConfigured, totpRows, passkeyRows] = await Promise.all([
     prisma.user.findMany({
       select: {
         id: true,
@@ -101,7 +102,12 @@ export default async function UsersPage() {
     prisma.setting.findUnique({ where: { key: "downloadAutoDisableNew" } }),
     isArrConfigured("radarr", "4k"),
     isArrConfigured("sonarr", "4k"),
+    // Which accounts have an active second factor — drives the Reset two-factor
+    // action. Selects only userId: the TOTP secret never leaves the extension.
+    prisma.userTotp.findMany({ where: { enabledAt: { not: null } }, select: { userId: true } }),
+    prisma.webAuthnCredential.findMany({ distinct: ["userId"], select: { userId: true } }),
   ]);
+  const mfaUserIds = new Set([...totpRows, ...passkeyRows].map((r) => r.userId));
   const localAuthIds = new Set(localAuthRows.map((r) => r.id));
   const oidcAuthIds = new Set(oidcAccountRows.map((r) => r.userId));
   // Request watch grades for every listed account (null when the feature or play
@@ -147,11 +153,13 @@ export default async function UsersPage() {
     }
   }
 
+  const t = await getTranslator();
+
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Users"
-        subtitle={`${users.length} registered user${users.length !== 1 ? "s" : ""}`}
+        title={t("adminManage.users.title")}
+        subtitle={t("adminManage.users.registered", { count: users.length })}
         right={
           <div className="flex items-center gap-2">
             <CreateUserButton />
@@ -170,6 +178,7 @@ export default async function UsersPage() {
             createdAt: u.createdAt.toISOString(),
             disabled: u.deactivatedAt != null,
             purged: isPurgedRow(u),
+            mfaEnabled: mfaUserIds.has(u.id),
             discordId: u.discordId,
             permissions: u.permissions.toString(),
             movieQuotaLimit: u.movieQuotaLimit,
@@ -210,9 +219,9 @@ export default async function UsersPage() {
       {(hasPlex || hasJellyfin || serverUsers.length === 0) && (
         <div className="mt-10">
           <div className="mb-4">
-            <h2 className="text-base font-semibold text-zinc-100">Media Server Users</h2>
+            <h2 className="text-base font-semibold text-zinc-100">{t("adminManage.serverUsers.title")}</h2>
             <p className="text-xs text-zinc-500 mt-0.5">
-              All Plex and Jellyfin accounts. Jellyfin download permissions are synced and enforced each run; Plex permissions must be managed in Plex.
+              {t("adminManage.serverUsers.subtitle")}
             </p>
           </div>
           <ServerUserTable

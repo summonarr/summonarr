@@ -711,6 +711,11 @@ class PlexEventStreamManager {
     // debounce — stop polling, keep the pending resync.
     const capped = this.resyncSkipStreak >= MAX_RESYNC_SKIP_RETRIES;
     const notBefore = this.lastResyncFiredAt + TIMELINE_RESYNC_COOLDOWN_MS;
+    // Past the cap an already-armed timer IS the pending resync — keep it. The
+    // capped fireAt below is not clamped by resyncDeadline, so clearing and
+    // re-arming it on every timeline frame pushed it a full cooldown out per
+    // event, and a continuous scan starved it until the stream went quiet.
+    if (capped && this.resyncTimer) return;
     if (this.resyncTimer) {
       clearTimeout(this.resyncTimer);
     } else {

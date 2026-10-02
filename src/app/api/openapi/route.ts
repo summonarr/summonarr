@@ -1,6 +1,31 @@
 import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
+import { LOCALES } from "@/lib/i18n/locales";
 import { Permission } from "@/lib/permissions";
+
+// Body of every two-factor ENROLLMENT change (guardrail 6d): the current
+// password, plus — once the account has an active factor — a fresh second factor.
+const MFA_SECOND_FACTOR_SCHEMA = {
+  type: "object",
+  description:
+    "Required once the account has an active second factor (omit for the first factor). { method: \"totp\" | \"recovery\", code } or { method: \"webauthn\", credential, challengeToken } with the challenge from POST /profile/mfa/challenge. A recovery code used here is spent.",
+  required: ["method"],
+  properties: {
+    method: { type: "string", enum: ["totp", "recovery", "webauthn"] },
+    code: { type: "string" },
+    credential: { type: "object", description: "PublicKeyCredential JSON (assertion response, base64url)" },
+    challengeToken: { type: "string" },
+  },
+};
+const MFA_STEP_UP_400 =
+  "Missing or wrong password, or a missing/invalid second factor ({ error, secondFactorRequired: true, methods? })";
+function mfaStepUpBody(extra: Record<string, unknown> = {}, extraRequired: string[] = []) {
+  return {
+    type: "object",
+    required: ["password", ...extraRequired],
+    properties: { password: { type: "string" }, secondFactor: MFA_SECOND_FACTOR_SCHEMA, ...extra },
+  };
+}
 
 const spec = {
   openapi: "3.0.3",
@@ -51,6 +76,21 @@ const spec = {
           D: { type: "integer" },
           F: { type: "integer" },
           notGraded: { type: "integer" },
+        },
+      },
+      CleanupSettings: {
+        type: "object",
+        description: "Library cleanup rules. Day-based exclusions take 0 to mean off.",
+        properties: {
+          unwatchedEnabled: { type: "boolean" },
+          unwatchedDays: { type: "integer", minimum: 1, maximum: 3650 },
+          neverWatchedEnabled: { type: "boolean" },
+          neverWatchedDays: { type: "integer", minimum: 1, maximum: 3650 },
+          votesEnabled: { type: "boolean" },
+          votesMin: { type: "integer", minimum: 1, maximum: 1000 },
+          minAgeDays: { type: "integer", minimum: 0, maximum: 3650 },
+          recentRequestDays: { type: "integer", minimum: 0, maximum: 3650 },
+          excludeAiring: { type: "boolean" },
         },
       },
       IssueType: {
@@ -151,6 +191,7 @@ const spec = {
     { name: "Admin – Backup", description: "Database export / import" },
     { name: "Admin – Debug", description: "Pipeline inspection" },
     { name: "Admin – Fix Match", description: "Manual metadata correction" },
+    { name: "Admin – Cleanup", description: "Library cleanup: rule-based candidates and admin-confirmed deletion (ADMIN only)" },
     { name: "Discord", description: "Discord OAuth / role sync" },
     { name: "Settings", description: "Application settings (ADMIN only)" },
     { name: "Webhooks", description: "Inbound webhooks from media servers / ARR" },
@@ -1106,6 +1147,173 @@ const spec = {
         },
       },
     },
+    // ── Two-factor authentication (local-credentials accounts only) ──────────
+    // Every enrollment CHANGE takes the current password in the body (step-up);
+    // once the account has an active factor it ALSO takes `secondFactor` (a
+    // current TOTP code, an unused recovery code — spent — or a passkey assertion
+    // over a /profile/mfa/challenge challenge). The first factor is
+    // password-only. 403 = not a local-credentials account; 429 = too many
+    // step-up attempts or the persistent code lockout. The sign-in half
+    // (POST /auth/sign-in/mfa) is a handshake documented in SECURITY.md.
+    "/profile/mfa": {
+      get: {
+        tags: ["Profile"],
+        summary: "Read the caller's two-factor status",
+        responses: {
+          "200": {
+            description:
+              "{ available, enabled, totpEnabled, passkeys: [{ id, name, transports, backedUp, createdAt, lastUsedAt }], recoveryCodesRemaining, webauthnAvailable } — never a secret",
+          },
+        },
+      },
+      delete: {
+        tags: ["Profile"],
+        summary: "Turn two-factor off (removes every factor and recovery code)",
+        requestBody: { required: true, content: { "application/json": { schema: mfaStepUpBody() } } },
+        responses: {
+          "200": { description: "Turned off; every OTHER session is signed out" },
+          "400": { description: MFA_STEP_UP_400 },
+          "403": { description: "Not a local-credentials account" },
+          "429": { description: "Too many step-up attempts, or code entry is locked" },
+        },
+      },
+    },
+    "/profile/mfa/challenge": {
+      post: {
+        tags: ["Profile"],
+        summary: "A fresh WebAuthn challenge for confirming an enrollment change with a passkey",
+        responses: {
+          "200": { description: "{ challengeToken, publicKey } — publicKey is PublicKeyCredentialRequestOptions (base64url); send the assertion back as secondFactor { method: \"webauthn\", credential, challengeToken }. Single-use, 5-minute, bound to this user and session" },
+          "400": { description: "The account has no passkeys" },
+          "403": { description: "Not a local-credentials account" },
+          "429": { description: "Too many challenges" },
+          "503": { description: "AUTH_URL is not configured, so no WebAuthn RP ID exists" },
+        },
+      },
+    },
+    "/profile/mfa/totp/setup": {
+      post: {
+        tags: ["Profile"],
+        summary: "Issue a pending authenticator-app (TOTP) secret",
+        requestBody: { required: true, content: { "application/json": { schema: mfaStepUpBody() } } },
+        responses: {
+          "200": { description: "{ secret, otpauthUri } — shown once; nothing changes until /totp/enable confirms a code" },
+          "400": { description: MFA_STEP_UP_400 },
+          "409": { description: "An authenticator app is already enabled" },
+          "429": { description: "Too many step-up attempts, or code entry is locked" },
+        },
+      },
+    },
+    "/profile/mfa/totp/enable": {
+      post: {
+        tags: ["Profile"],
+        summary: "Confirm the pending TOTP secret with a current code",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["code"], properties: { code: { type: "string", example: "123456" } } } } },
+        },
+        responses: {
+          "200": { description: "{ ok, recoveryCodes? } — recoveryCodes (shown once) when this is the first factor, which also signs out every other session" },
+          "400": { description: "No pending setup, or the code didn't match" },
+          "409": { description: "Already enabled" },
+        },
+      },
+    },
+    "/profile/mfa/totp": {
+      delete: {
+        tags: ["Profile"],
+        summary: "Remove the authenticator app",
+        requestBody: { required: true, content: { "application/json": { schema: mfaStepUpBody() } } },
+        responses: {
+          "200": { description: "Removed (recovery codes too, and every OTHER session signed out, when no passkey remains)" },
+          "400": { description: MFA_STEP_UP_400 },
+          "404": { description: "No authenticator app set up" },
+          "429": { description: "Too many step-up attempts, or code entry is locked" },
+        },
+      },
+    },
+    "/profile/mfa/recovery-codes": {
+      post: {
+        tags: ["Profile"],
+        summary: "Replace every recovery code with ten new ones",
+        requestBody: { required: true, content: { "application/json": { schema: mfaStepUpBody() } } },
+        responses: {
+          "200": { description: "{ recoveryCodes } — shown once; only hashes are stored" },
+          "400": { description: `${MFA_STEP_UP_400}, or two-factor is off` },
+          "429": { description: "Too many step-up attempts, or code entry is locked" },
+        },
+      },
+    },
+    "/profile/mfa/passkeys/options": {
+      post: {
+        tags: ["Profile"],
+        summary: "Begin adding a passkey — WebAuthn creation options",
+        requestBody: { required: true, content: { "application/json": { schema: mfaStepUpBody() } } },
+        responses: {
+          "200": { description: "{ registrationToken, publicKey } — publicKey is PublicKeyCredentialCreationOptions with base64url binary fields; the token is single-use, 5-minute, bound to this user and session" },
+          "400": { description: `${MFA_STEP_UP_400}, or the passkey limit is reached` },
+          "429": { description: "Too many step-up attempts, or code entry is locked" },
+          "503": { description: "AUTH_URL is not configured, so no WebAuthn RP ID exists" },
+        },
+      },
+    },
+    "/profile/mfa/passkeys": {
+      post: {
+        tags: ["Profile"],
+        summary: "Finish adding a passkey",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["registrationToken", "credential"],
+                properties: {
+                  registrationToken: { type: "string" },
+                  name: { type: "string", maxLength: 64 },
+                  credential: { type: "object", description: "PublicKeyCredential JSON (attestation response, base64url)" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "{ ok, recoveryCodes? } — recoveryCodes when this is the first factor, which also signs out every other session" },
+          "400": { description: "Expired/foreign registration token, a token issued on the password alone to an account that has since gained a factor, or the response failed verification" },
+          "409": { description: "That credential is already registered" },
+        },
+      },
+    },
+    "/profile/mfa/passkeys/{id}": {
+      patch: {
+        tags: ["Profile"],
+        summary: "Rename one of the caller's passkeys",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: mfaStepUpBody({ name: { type: "string", maxLength: 64 } }, ["name"]) } },
+        },
+        responses: { "200": { description: "Renamed" }, "400": { description: `${MFA_STEP_UP_400}, or an empty name` }, "404": { description: "Not the caller's passkey" }, "429": { description: "Too many step-up attempts, or code entry is locked" } },
+      },
+      delete: {
+        tags: ["Profile"],
+        summary: "Remove one of the caller's passkeys",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: mfaStepUpBody() } } },
+        responses: { "200": { description: "Removed (recovery codes too, and every OTHER session signed out, when it was the last factor)" }, "400": { description: MFA_STEP_UP_400 }, "404": { description: "Not the caller's passkey" }, "429": { description: "Too many step-up attempts, or code entry is locked" } },
+      },
+    },
+    "/profile/locale": {
+      patch: {
+        tags: ["Profile"],
+        summary: "Store the caller's UI language (used for emails, push and Discord DMs)",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["locale"], properties: { locale: { type: "string", enum: [...LOCALES] } } } } },
+        },
+        responses: { "200": { description: "Stored" }, "400": { description: "Unsupported locale" } },
+      },
+    },
     "/profile/notifications": {
       get: {
         tags: ["Profile"],
@@ -1174,6 +1382,45 @@ const spec = {
           "200": { description: "Preferences updated" },
           "403": { description: "notificationEmail was sent by a non-Jellyfin account" },
         },
+      },
+    },
+
+    "/profile/auto-request": {
+      get: {
+        tags: ["Profile"],
+        summary: "Read the caller's watchlist auto-request state",
+        responses: {
+          "200": {
+            description: "Feature, permission and toggle state",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    enabled: { type: "boolean", description: "feature.behavior.watchlistAutoRequest is on" },
+                    permitted: {
+                      type: "object",
+                      description: "Whether the caller holds an AUTO_REQUEST* bit for each media type",
+                      properties: { movie: { type: "boolean" }, tv: { type: "boolean" } },
+                    },
+                    plexWatchlist: { type: "boolean", description: "The caller's \"Auto-request from my Plex watchlist\" toggle" },
+                    plexConnected: { type: "boolean", description: "A Plex token is stored (captured at Plex sign-in while the feature is on)" },
+                  },
+                },
+              },
+            },
+          },
+          "404": { description: "User row not found" },
+        },
+      },
+      patch: {
+        tags: ["Profile"],
+        summary: "Turn the caller's Plex watchlist auto-request on or off",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", required: ["plexWatchlist"], properties: { plexWatchlist: { type: "boolean" } } } } },
+        },
+        responses: { "200": { description: "Saved" }, "400": { description: "plexWatchlist is not a boolean" } },
       },
     },
 
@@ -1407,6 +1654,85 @@ const spec = {
       },
     },
 
+    "/profile/calendar": {
+      get: {
+        tags: ["Profile"],
+        summary: "Calendar feed status",
+        description:
+          "Whether the caller has an active iCal feed token. The feed URL itself is never returned here: only a SHA-256 hash of the token is stored, so the URL is shown once, by POST. 404 when feature.integration.calendar is off.",
+        responses: {
+          "200": {
+            description: "Feed status",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    enabled: { type: "boolean" },
+                    createdAt: { type: "string", format: "date-time", nullable: true },
+                    canSubscribeAll: { type: "boolean", description: "Caller holds MANAGE_REQUESTS and may use ?scope=all" },
+                  },
+                },
+              },
+            },
+          },
+          "404": { description: "feature.integration.calendar is disabled" },
+        },
+      },
+      post: {
+        tags: ["Profile"],
+        summary: "Generate (or regenerate) the calendar feed URL",
+        description:
+          "Mints a new secret token and returns the subscription URL ONCE. Any previous URL stops working immediately. Rate-limited per user.",
+        responses: {
+          "201": {
+            description: "New feed URL (shown once)",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    token: { type: "string" },
+                    url: { type: "string" },
+                    webcalUrl: { type: "string" },
+                    allUrl: { type: "string", nullable: true, description: "All-requests feed, for MANAGE_REQUESTS holders" },
+                    createdAt: { type: "string", format: "date-time" },
+                  },
+                },
+              },
+            },
+          },
+          "404": { description: "feature.integration.calendar is disabled, or the account is disabled" },
+          "429": { description: "Too many regenerations" },
+        },
+      },
+      delete: {
+        tags: ["Profile"],
+        summary: "Revoke the calendar feed URL",
+        responses: {
+          "200": { description: "Revoked ({ ok: true })" },
+          "404": { description: "feature.integration.calendar is disabled" },
+        },
+      },
+    },
+    "/calendar/feed/{token}": {
+      get: {
+        tags: ["Profile"],
+        summary: "iCal subscription feed (public, token-authed)",
+        description:
+          "RFC 5545 calendar of upcoming release dates (movie theatrical/digital/physical, TV episode air dates) for the token owner's non-declined requests and watchlist, ~30 days back to ~1 year ahead. The path segment is `<token>.ics`. `?scope=all` returns every non-declined request instead and requires MANAGE_REQUESTS (re-checked on every poll). Cache-read only. Every failure — unknown/revoked token, disabled or purged owner, missing permission, feature off — is a bare 404.",
+        security: [],
+        parameters: [
+          { name: "token", in: "path", required: true, schema: { type: "string" }, description: "`<token>.ics`" },
+          { name: "scope", in: "query", required: false, schema: { type: "string", enum: ["all"] } },
+        ],
+        responses: {
+          "200": { description: "The calendar", content: { "text/calendar": { schema: { type: "string" } } } },
+          "404": { description: "Not found" },
+          "429": { description: "Rate limited (per address and per token)" },
+        },
+      },
+    },
     "/profile": {
       delete: {
         tags: ["Profile"],
@@ -1526,6 +1852,21 @@ const spec = {
           "200": { description: "Personal data purged (idempotent)" },
           "400": { description: "Account must be disabled before it can be purged" },
           "403": { description: "Forbidden" },
+        },
+      },
+    },
+    "/admin/users/{id}/mfa": {
+      delete: {
+        tags: ["Admin – Users"],
+        summary: "Reset a user's two-factor authentication — lost device (MANAGE_USERS)",
+        description:
+          "Removes the user's authenticator app, every passkey and every recovery code, and signs the account out everywhere; their next sign-in is password-only. An ADMIN target needs the ADMIN bit. Refuses the caller's own account (use DELETE /profile/mfa with the password step-up).",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": { description: "Reset" },
+          "400": { description: "Own account" },
+          "403": { description: "Forbidden" },
+          "404": { description: "Not found" },
         },
       },
     },
@@ -1747,6 +2088,177 @@ const spec = {
           },
           "403": { description: "Caller holds neither MANAGE_USERS nor MANAGE_REQUESTS" },
           "404": { description: "No such user" },
+        },
+      },
+    },
+
+    "/admin/cleanup": {
+      get: {
+        tags: ["Admin – Cleanup"],
+        summary: "Library cleanup report (ADMIN)",
+        description:
+          "Judges every library title (the union of every Plex and Jellyfin server) against the configured rules and " +
+          "returns each title any enabled rule matched: candidates first, then the ones an exclusion holds back, with " +
+          "every matched rule and exclusion named. Sizes and Radarr/Sonarr instances come from one live listing per " +
+          "configured instance. Nothing is written. 404 while `feature.admin.cleanup` is off.",
+        responses: {
+          "200": {
+            description: "The report",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    settings: { $ref: "#/components/schemas/CleanupSettings" },
+                    playHistoryTracked: { type: "boolean" },
+                    historyStart: { type: "string", format: "date-time", nullable: true },
+                    libraryTitles: { type: "integer" },
+                    rows: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          tmdbId: { type: "integer" },
+                          mediaType: { type: "string", enum: ["MOVIE", "TV"] },
+                          title: { type: "string" },
+                          posterPath: { type: "string", nullable: true },
+                          year: { type: "string", nullable: true },
+                          servers: { type: "array", items: { type: "string" } },
+                          addedAt: { type: "string", format: "date-time", nullable: true },
+                          lastPlayedAt: { type: "string", format: "date-time", nullable: true },
+                          playCount: { type: "integer" },
+                          votes: { type: "integer" },
+                          idleDays: { type: "integer", nullable: true },
+                          arr: { type: "array", items: { type: "object", properties: { service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" }, sizeOnDisk: { type: "number" } } } },
+                          sizeOnDisk: { type: "number", nullable: true },
+                          matched: { type: "array", items: { type: "string", enum: ["unwatched", "neverWatched", "votes"] } },
+                          excludedBy: { type: "array", items: { type: "string", enum: ["recentlyAdded", "activeRequest", "recentlyFulfilled", "watchlisted", "playingNow", "airing", "protected"] } },
+                          candidate: { type: "boolean" },
+                        },
+                      },
+                    },
+                    arrErrors: { type: "array", items: { type: "object", properties: { service: { type: "string" }, instance: { type: "string" }, error: { type: "string" } } } },
+                    protected: { type: "array", items: { type: "object", properties: { tmdbId: { type: "integer" }, mediaType: { type: "string" }, title: { type: "string", nullable: true }, reason: { type: "string", nullable: true }, createdAt: { type: "string", format: "date-time" } } } },
+                    totals: { type: "object", properties: { candidates: { type: "integer" }, held: { type: "integer" }, reclaimableBytes: { type: "number" } } },
+                  },
+                },
+              },
+            },
+          },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Library cleanup is disabled" },
+        },
+      },
+    },
+
+    "/admin/cleanup/settings": {
+      get: {
+        tags: ["Admin – Cleanup"],
+        summary: "Library cleanup rules in force (ADMIN)",
+        responses: {
+          "200": { description: "The rules", content: { "application/json": { schema: { type: "object", properties: { settings: { $ref: "#/components/schemas/CleanupSettings" } } } } } },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Library cleanup is disabled" },
+        },
+      },
+      patch: {
+        tags: ["Admin – Cleanup"],
+        summary: "Change library cleanup rules (ADMIN)",
+        description: "A partial object keyed by field name. Any unknown field or out-of-range value refuses the whole patch.",
+        requestBody: { required: true, content: { "application/json": { schema: { $ref: "#/components/schemas/CleanupSettings" } } } },
+        responses: {
+          "200": { description: "The rules now in force", content: { "application/json": { schema: { type: "object", properties: { settings: { $ref: "#/components/schemas/CleanupSettings" } } } } } },
+          "400": { description: "Invalid field or value" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Library cleanup is disabled" },
+        },
+      },
+    },
+
+    "/admin/cleanup/protect": {
+      post: {
+        tags: ["Admin – Cleanup"],
+        summary: "Protect a title from cleanup (ADMIN)",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["tmdbId", "mediaType"],
+                properties: {
+                  tmdbId: { type: "integer" },
+                  mediaType: { type: "string", enum: ["MOVIE", "TV"] },
+                  title: { type: "string", maxLength: 500 },
+                  reason: { type: "string", maxLength: 500 },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "201": { description: "Protected (an upsert)" },
+          "400": { description: "Invalid body" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Library cleanup is disabled" },
+        },
+      },
+      delete: {
+        tags: ["Admin – Cleanup"],
+        summary: "Remove a title's cleanup protection (ADMIN)",
+        parameters: [
+          { name: "tmdbId", in: "query", required: true, schema: { type: "integer" } },
+          { name: "mediaType", in: "query", required: true, schema: { type: "string", enum: ["MOVIE", "TV"] } },
+        ],
+        responses: {
+          "200": { description: "{ ok: true, removed: <count> }" },
+          "400": { description: "Missing or invalid query" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Library cleanup is disabled" },
+        },
+      },
+    },
+
+    "/admin/cleanup/delete": {
+      post: {
+        tags: ["Admin – Cleanup"],
+        summary: "Delete cleanup candidates from Radarr/Sonarr — dry run, then confirmed execute (ADMIN)",
+        description:
+          "Default is a DRY RUN: re-judges exactly the given titles against the live rules and returns every " +
+          "Radarr/Sonarr entry each occupies (every instance) and `targetCount`. `?execute=true` with the same body " +
+          "plus `confirmTargets` equal to the live count deletes each target with `deleteFiles=true` and the " +
+          "import-list exclusion flag; any other count answers 409 with the fresh plan. A title that is no longer a " +
+          "candidate is skipped, never deleted. Before deleting, every AVAILABLE request for the title is stamped so " +
+          "the sync never re-pushes it; `blacklist` (default true) also blacklists a fully removed title. Results are " +
+          "per title (deleted / partial / failed) — a partial failure is not an error status.",
+        parameters: [{ name: "execute", in: "query", schema: { type: "string", enum: ["true"] } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["items"],
+                properties: {
+                  items: {
+                    type: "array",
+                    minItems: 1,
+                    maxItems: 500,
+                    items: { type: "object", required: ["tmdbId", "mediaType"], properties: { tmdbId: { type: "integer" }, mediaType: { type: "string", enum: ["MOVIE", "TV"] } } },
+                  },
+                  blacklist: { type: "boolean", default: true },
+                  confirmTargets: { type: "integer", description: "Required with ?execute=true: the dry run's targetCount" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Dry run: { dryRun: true, targetCount, reclaimableBytes, items, skipped }. Execute: { dryRun: false, deletedCount, partialCount, failedCount, results, skipped }" },
+          "400": { description: "Invalid body" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Library cleanup is disabled" },
+          "409": { description: "confirmTargets missing or not equal to the live count (the fresh plan is returned)" },
         },
       },
     },
@@ -2527,8 +3039,43 @@ const spec = {
       post: {
         tags: ["Lists"],
         summary: "Add a title to the caller's watchlist",
+        description:
+          "When watchlist auto-request applies (feature.behavior.watchlistAutoRequest on and the caller holds an AUTO_REQUEST* bit for the media type), the add also files a request through the same path as POST /requests. A refusal never fails the add: the 201 body then carries an additive `autoRequest` object. The field is absent whenever auto-request does not apply.",
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["tmdbId", "mediaType"], properties: { tmdbId: { type: "integer" }, mediaType: { $ref: "#/components/schemas/MediaType" } } } } } },
-        responses: { "201": { description: "Added" }, "409": { description: "Already on watchlist" }, "422": { description: "Could not verify media with TMDB" } },
+        responses: {
+          "201": {
+            description: "Added",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    tmdbId: { type: "integer" },
+                    mediaType: { $ref: "#/components/schemas/MediaType" },
+                    title: { type: "string" },
+                    posterPath: { type: "string", nullable: true },
+                    createdAt: { type: "string", format: "date-time" },
+                    autoRequest: {
+                      type: "object",
+                      description: "Present only when auto-request applied to this add",
+                      properties: {
+                        outcome: {
+                          type: "string",
+                          description: "requested | already-available | already-requested | quota | blacklisted | permanently-declined | rating-cap | forbidden | instance-unavailable | tmdb-unverified | arr-unreachable | discord-link-required | rate-limited | maintenance | error",
+                        },
+                        requested: { type: "boolean" },
+                        status: { type: "string", nullable: true, description: "The filed request's status when one was filed" },
+                        message: { type: "string", description: "Short user-facing explanation" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "409": { description: "Already on watchlist" },
+          "422": { description: "Could not verify media with TMDB" },
+        },
       },
       delete: {
         tags: ["Lists"],

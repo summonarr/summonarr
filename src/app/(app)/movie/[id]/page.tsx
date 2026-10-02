@@ -31,6 +31,8 @@ import { canRequest, hasPermission, Permission } from "@/lib/permissions";
 import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
 import { isBlacklisted } from "@/lib/blacklist";
 import { DetailTitle } from "@/components/layout/detail-title";
+import { getLocale, getTranslator } from "@/lib/i18n/server";
+import { translateTmdbStatus } from "@/components/media/detail-status";
 
 export default async function MovieDetailPage({
   params,
@@ -43,6 +45,7 @@ export default async function MovieDetailPage({
   // running the fetch alongside it let a signed-out caller use up TMDB/OMDB/
   // MDBList quota and write cache rows before the redirect happened.
   const session = await requireAppSession();
+  const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
   // A malformed id or a real TMDB 404 shows the not-found page. ANY other
   // failure (TMDB outage, timeout, missing credentials, a ratings error) is
   // rethrown to (app)/error.tsx, which offers a retry — so a brief TMDB outage
@@ -208,7 +211,7 @@ export default async function MovieDetailPage({
 
           <div className="flex flex-col justify-end" style={{ gap: 10 }}>
             <div className="flex items-center flex-wrap" style={{ gap: 8 }}>
-              <Chip tone="accent">MOVIE</Chip>
+              <Chip tone="accent">{t("detail.kindMovie")}</Chip>
               <AvailabilityBadges
                 plexAvailable={plexAvailable}
                 jellyfinAvailable={jellyfinAvailable}
@@ -242,11 +245,11 @@ export default async function MovieDetailPage({
               {[
                 media.releaseYear,
                 media.certification,
-                media.runtime ? `${media.runtime}m` : null,
-                formatDigitalRelease(media.releasedDigital),
+                media.runtime ? t("detail.runtime.minutes", { minutes: media.runtime }) : null,
+                formatDigitalRelease(media.releasedDigital, locale, (date) => t("detail.digitalRelease", { date })),
                 media.productionCountries?.[0],
                 languageName(media.originalLanguage),
-                media.status && media.status !== "Released" ? media.status : null,
+                media.status && media.status !== "Released" ? translateTmdbStatus(media.status, t) : null,
               ]
                 .filter(Boolean)
                 .map((part, i) => (
@@ -262,7 +265,7 @@ export default async function MovieDetailPage({
                 {media.genres.slice(0, 5).map((g) => {
                   const gid = genreNameToId.get(g);
                   return gid !== undefined ? (
-                    <Link key={g} href={`/movies?genreId=${gid}`} aria-label={`Browse ${g} movies`}>
+                    <Link key={g} href={`/movies?genreId=${gid}`} aria-label={t("detail.browseGenreMovies", { genre: g })}>
                       <Chip className="ds-chip-link">{g}</Chip>
                     </Link>
                   ) : (
@@ -274,7 +277,7 @@ export default async function MovieDetailPage({
 
             {media.originalTitle && (
               <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
-                Original title: {media.originalTitle}
+                {t("detail.originalTitle", { title: media.originalTitle })}
               </div>
             )}
 

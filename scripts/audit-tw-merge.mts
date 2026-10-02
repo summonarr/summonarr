@@ -55,6 +55,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
+import ts from "typescript";
 import { matchGroup } from "../src/lib/tw-merge.ts";
 
 const COLORS = {
@@ -222,22 +223,52 @@ function tokensUsedInSrc(): Set<string> {
     }
   })(SRC);
 
-  const LITERAL = /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|`((?:[^`\\]|\\.)*)`/gs;
-  const VARIANT = /^(?:[a-z0-9-]+(?:\/[a-zA-Z0-9_-]+)?|\[[^\]]+\]|data-\[[^\]]+\]|aria-\[[^\]]+\]|group-[a-z0-9-]+(?:\/[a-zA-Z0-9_-]+)?|peer-[a-z0-9-]+(?:\/[a-zA-Z0-9_-]+)?|has-\[[^\]]+\]|supports-\[[^\]]+\]|max-[a-z0-9-]+|min-[a-z0-9-]+):/;
-
   const used = new Set<string>();
   for (const file of files) {
-    for (const m of readFileSync(file, "utf8").matchAll(LITERAL)) {
-      const raw = m[1] ?? m[2] ?? m[3] ?? "";
-      // Only the static chunks of a template literal are mergeable text.
-      const chunks = m[3] !== undefined ? raw.split(/\$\{[^}]*\}/s) : [raw];
-      for (const chunk of chunks) {
-        for (let token of chunk.split(/\s+/)) {
-          let variant;
-          while ((variant = token.match(VARIANT))) token = token.slice(variant[0].length);
-          if (token) used.add(token.replace(/!$/, ""));
-        }
-      }
+    for (const token of classTokensInSource(readFileSync(file, "utf8"), file)) used.add(token);
+  }
+  return used;
+}
+
+const VARIANT = /^(?:[a-z0-9-]+(?:\/[a-zA-Z0-9_-]+)?|\[[^\]]+\]|data-\[[^\]]+\]|aria-\[[^\]]+\]|group-[a-z0-9-]+(?:\/[a-zA-Z0-9_-]+)?|peer-[a-z0-9-]+(?:\/[a-zA-Z0-9_-]+)?|has-\[[^\]]+\]|supports-\[[^\]]+\]|max-[a-z0-9-]+|min-[a-z0-9-]+):/;
+
+/**
+ * The static text of every string literal in one source file — plain strings,
+ * JSX attribute strings, and each static chunk of a template literal.
+ *
+ * Tokenized with the TypeScript parser, NOT a quote-pairing regex. A regex over
+ * the raw file treats the apostrophe in a comment or JSX text ("can't") as an
+ * opening quote, which re-pairs every quote after it: real className literals
+ * later in the file were silently mis-split and never reached checks 3/4.
+ */
+export function stringLiteralChunks(source: string, fileName = "file.tsx"): string[] {
+  const kind = fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const sf = ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, false, kind);
+  const chunks: string[] = [];
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isStringLiteral(node) ||
+      ts.isNoSubstitutionTemplateLiteral(node) ||
+      ts.isTemplateHead(node) ||
+      ts.isTemplateMiddle(node) ||
+      ts.isTemplateTail(node)
+    ) {
+      chunks.push(node.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return chunks;
+}
+
+/** Every variant-stripped, whitespace-separated token in one file's string literals. */
+export function classTokensInSource(source: string, fileName = "file.tsx"): Set<string> {
+  const used = new Set<string>();
+  for (const chunk of stringLiteralChunks(source, fileName)) {
+    for (let token of chunk.split(/\s+/)) {
+      let variant;
+      while ((variant = token.match(VARIANT))) token = token.slice(variant[0].length);
+      if (token) used.add(token.replace(/!$/, ""));
     }
   }
   return used;

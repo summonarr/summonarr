@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { MessageSquare } from "@/components/icons";
 import { IssueThread } from "@/components/issues/issue-thread";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface IssueCardShellProps {
   issueId: string;
@@ -14,6 +15,7 @@ interface IssueCardShellProps {
 }
 
 export function IssueCardShell({ issueId, messageCount, initialOpen = false, children }: IssueCardShellProps) {
+  const t = useT();
   const [threadOpen, setThreadOpen] = useState(initialOpen);
   // Selection changes via the URL without remounting the card, so open the
   // thread when this card BECOMES selected (adjust-state-during-render).
@@ -34,7 +36,7 @@ export function IssueCardShell({ issueId, messageCount, initialOpen = false, chi
         <button
           type="button"
           onClick={() => setThreadOpen((v) => !v)}
-          aria-label={`Discussion thread${messageCount > 0 ? ` (${messageCount} ${messageCount === 1 ? "message" : "messages"})` : ""}`}
+          aria-label={messageCount > 0 ? t("adminQueue.issues.threadCount", { count: messageCount }) : t("adminQueue.issues.thread")}
           aria-expanded={threadOpen}
           className={`xl:hidden shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors border ${
             threadOpen
@@ -52,7 +54,7 @@ export function IssueCardShell({ issueId, messageCount, initialOpen = false, chi
       {/* Mobile-only expandable thread panel */}
       {threadOpen && (
         <div className="xl:hidden">
-          <IssueThread issueId={issueId} />
+          <IssueThread key={issueId} issueId={issueId} />
         </div>
       )}
     </div>

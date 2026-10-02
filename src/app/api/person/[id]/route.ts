@@ -2,17 +2,19 @@ import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { getEnrichedPerson } from "@/lib/person";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // The enrichment lives in getEnrichedPerson (shared with the /person/[id] server
 // page) so the two can't drift. This handler is just auth + rate-limit + the
 // 404-vs-502 mapping.
 export const GET = withAuth(async (
-  _req,
+  req,
   { params }: { params: Promise<{ id: string }> },
   session,
 ) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`person:${session.user.id}`, 30, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequests") }, { status: 429 });
   }
 
   const { id } = await params;
@@ -20,7 +22,7 @@ export const GET = withAuth(async (
   // TMDB person ids are whole numbers, so "1.5" or "1e3" is rejected up front
   // instead of being sent to TMDB.
   if (!Number.isInteger(personId) || personId <= 0) {
-    return NextResponse.json({ error: "Invalid id" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.person.invalidId") }, { status: 400 });
   }
 
   try {
@@ -34,8 +36,8 @@ export const GET = withAuth(async (
     // from a genuinely missing person.
     const message = err instanceof Error ? err.message : String(err);
     if (/failed: 404\b/.test(message)) {
-      return NextResponse.json({ error: "Not found" }, { status: 404 });
+      return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
     }
-    return NextResponse.json({ error: "Upstream error" }, { status: 502 });
+    return NextResponse.json({ error: t("apiUser.person.upstreamError") }, { status: 502 });
   }
 });

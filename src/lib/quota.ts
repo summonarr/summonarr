@@ -79,3 +79,19 @@ export function parseQuotaLimit(value: string | null | undefined): number {
   const n = Number.parseInt(value ?? "0", 10);
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
+
+// The quota window label (`windowLabel` above) for a user-facing message, in the
+// translator's language. The label is built in English for the log/audit side;
+// this maps each shape it can take onto a catalog entry — "day"/"week"/"month",
+// the per-user "<N> days", and the "period" fallback the callers use — and
+// returns anything else unchanged.
+export function translateQuotaWindow(
+  t: (key: string, vars?: Readonly<Record<string, string | number>>) => string,
+  label: string | undefined,
+): string {
+  const l = label ?? "period";
+  if (l === "day" || l === "week" || l === "month" || l === "period") return t(`apiUser.quota.window.${l}`);
+  const days = /^(\d+) days$/.exec(l);
+  if (days) return t("apiUser.quota.window.days", { count: Number(days[1]) });
+  return l;
+}

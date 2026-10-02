@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -8,13 +8,22 @@ import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export function SiteUrlForm({ initialUrl }: { initialUrl: string }) {
+  const t = useT();
   const [url, setUrl] = useState(initialUrl);
   const [status, setStatus] = useState<SaveStatus>("idle");
+  // An earlier save's idle timer must not fire into a later save (it would
+  // re-enable Save mid-flight or hide the new result early).
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+  }, []);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    if (idleTimer.current) clearTimeout(idleTimer.current);
     setStatus("saving");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
@@ -27,13 +36,13 @@ export function SiteUrlForm({ initialUrl }: { initialUrl: string }) {
     } catch {
       setStatus("error");
     }
-    setTimeout(() => setStatus("idle"), 3000);
+    idleTimer.current = setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
   }
 
   return (
     <form onSubmit={handleSave} className="space-y-4">
       <div className="space-y-1.5">
-        <Label htmlFor="site-url">Public URL</Label>
+        <Label htmlFor="site-url">{t("settings.form.siteUrl.label")}</Label>
         <Input
           id="site-url"
           type="url"
@@ -43,12 +52,12 @@ export function SiteUrlForm({ initialUrl }: { initialUrl: string }) {
           className="bg-zinc-800 border-zinc-700 text-sm"
         />
         <p className="text-xs text-zinc-500">
-          The public address users reach this site at. Used in Plex sign-in redirects — set this to avoid exposing your server IP.
+          {t("settings.form.siteUrl.help")}
         </p>
       </div>
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
-          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
+          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
         </Button>
         <SaveStatusMessage status={status} />
       </div>

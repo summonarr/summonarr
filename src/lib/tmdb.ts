@@ -206,7 +206,12 @@ interface RawTV {
   episode_run_time?: number[];
   number_of_seasons?: number | null;
   number_of_episodes?: number | null;
-  next_episode_to_air?: { air_date?: string | null } | null;
+  next_episode_to_air?: {
+    air_date?: string | null;
+    season_number?: number | null;
+    episode_number?: number | null;
+    name?: string | null;
+  } | null;
   content_ratings?: {
     results: { iso_3166_1: string; rating: string }[];
   };
@@ -909,6 +914,55 @@ export async function getTVSeasonEpisodes(
   return episodes;
 }
 
+// Calendar-feed TV data (src/lib/calendar-events.ts): a plain /tv/<id> read,
+// cached under its OWN key. Deliberately not getTVDetails — that path also runs
+// the MDBList/OMDB ratings chain, whose OMDB getter detaches a stale refresh, so
+// a bounded warm over it would not bound the upstream work (guardrail 31a). This
+// one awaits everything it starts. A short TTL because next_episode_to_air moves
+// weekly for an airing show.
+export interface TvCalendarInfo {
+  status: string | null;
+  lastAirDate: string | null;
+  seasons: { seasonNumber: number; airDate: string | null; episodeCount: number }[];
+  nextEpisode: {
+    airDate: string;
+    seasonNumber: number | null;
+    episodeNumber: number | null;
+    name: string | null;
+  } | null;
+}
+export const TV_CALENDAR_TTL = 2 * 24 * 60 * 60;
+export function tvCalendarKey(tmdbId: number): string {
+  return `tv:${tmdbId}:calendar:v1`;
+}
+
+export async function getTVCalendarInfo(tmdbId: number): Promise<TvCalendarInfo> {
+  const key = tvCalendarKey(tmdbId);
+  return coalesce(key, async () => {
+    const cached = await getCache<TvCalendarInfo>(key);
+    if (cached) return cached;
+    const r = await tmdbFetch<RawTV>(`/tv/${tmdbId}`);
+    const next = r.next_episode_to_air;
+    const info: TvCalendarInfo = {
+      status: r.status ?? null,
+      lastAirDate: r.last_air_date ?? null,
+      seasons: (r.seasons ?? [])
+        .filter((s) => s.season_number > 0)
+        .map((s) => ({ seasonNumber: s.season_number, airDate: s.air_date ?? null, episodeCount: s.episode_count })),
+      nextEpisode: next?.air_date
+        ? {
+            airDate: next.air_date,
+            seasonNumber: next.season_number ?? null,
+            episodeNumber: next.episode_number ?? null,
+            name: next.name ?? null,
+          }
+        : null,
+    };
+    await setCache(key, info, TV_CALENDAR_TTL);
+    return info;
+  });
+}
+
 export async function getPersonDetails(id: number): Promise<PersonDetails> {
   // v2: shape grew (biography/birth/death/placeOfBirth + a larger credit cap) —
   // bump the key so pre-existing cached rows don't serve the old shape.
@@ -1241,6 +1295,26 @@ function allowedDiscoverSort(sortBy: string | undefined): string {
   return sortBy && ALLOWED_DISCOVER_SORT.has(sortBy) ? sortBy : "popularity.desc";
 }
 
+// ALLOWED_DISCOVER_SORT is shared by movies and TV, but /discover/tv only sorts by
+// first_air_date, name/original_name, popularity and vote_*. The web filter-bar's
+// Newest/Oldest send release_date.* (iOS primary_release_date.*) for BOTH media
+// types, so translate to the media type's own field — before the cache key too, so
+// equivalent sorts share one row. A sort TV can't express (revenue) falls back to
+// popularity.desc. The movie side maps first_air_date.* to primary_release_date.*.
+function discoverSortFor(mediaType: "movie" | "tv", sortBy: string): string {
+  const dot = sortBy.lastIndexOf(".");
+  const field = sortBy.slice(0, dot);
+  const dir = sortBy.slice(dot + 1);
+  if (mediaType === "tv") {
+    if (field === "release_date" || field === "primary_release_date") return `first_air_date.${dir}`;
+    if (field === "original_title") return `original_name.${dir}`;
+    if (field === "revenue") return "popularity.desc";
+    return sortBy;
+  }
+  if (field === "first_air_date") return `primary_release_date.${dir}`;
+  return sortBy;
+}
+
 // Normalize the remaining free-text discover filters up front so junk values reach
 // neither TMDB nor the cache key (an unvalidated string baked into discoverKey() lets
 // an authenticated user manufacture arbitrary distinct TmdbCache rows). genreId is a
@@ -1288,6 +1362,7 @@ export async function discoverMoviesPage(filters: DiscoverFilters, page: number)
   const p = Math.min(Math.max(1, page), 500);
   // Normalize free-text filters up front so junk values reach neither TMDB nor the cache key.
   filters = sanitizeDiscoverFilters(filters);
+  filters = { ...filters, sortBy: discoverSortFor("movie", filters.sortBy ?? "popularity.desc") };
   const key = `${discoverKey("movie", filters)}:page:${p}`;
   const cached = await getCache<PagedResult>(key);
   if (cached) return cached;
@@ -1323,6 +1398,7 @@ export async function discoverTVPage(filters: DiscoverFilters, page: number): Pr
   const p = Math.min(Math.max(1, page), 500);
   // Normalize free-text filters up front so junk values reach neither TMDB nor the cache key.
   filters = sanitizeDiscoverFilters(filters);
+  filters = { ...filters, sortBy: discoverSortFor("tv", filters.sortBy ?? "popularity.desc") };
   const key = `${discoverKey("tv", filters)}:page:${p}`;
   const cached = await getCache<PagedResult>(key);
   if (cached) return cached;

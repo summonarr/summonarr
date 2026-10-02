@@ -6,6 +6,7 @@ import { logAuditOrFail, auditContext } from "@/lib/audit";
 import { sanitizeText } from "@/lib/sanitize";
 import { prisma } from "@/lib/prisma";
 import { maintenanceGuard } from "@/lib/maintenance";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // POST /api/report — a signed-in user flags user-generated content (an issue
 // message, a vote reason) for the instance admin to review. The report lands in
@@ -19,13 +20,14 @@ type ContentType = (typeof CONTENT_TYPES)[number];
 const MAX_REASON = 500;
 
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   // 10 reports/hour/user — a spam guard, not a security boundary.
   if (!checkRateLimit(`report:${session.user.id}`, 10, 60 * 60 * 1000)) {
     return NextResponse.json(
-      { error: "Too many reports — please wait a while before reporting again." },
+      { error: t("apiUser.report.rateLimited") },
       { status: 429 },
     );
   }
@@ -37,12 +39,12 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const { contentType, contentId } = body;
   if (!contentType || !CONTENT_TYPES.includes(contentType as ContentType)) {
     return NextResponse.json(
-      { error: `contentType must be one of: ${CONTENT_TYPES.join(", ")}` },
+      { error: t("apiUser.report.contentTypeOneOf", { values: CONTENT_TYPES.join(", ") }) },
       { status: 400 },
     );
   }
   if (!contentId || typeof contentId !== "string" || contentId.length > 200) {
-    return NextResponse.json({ error: "contentId is required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.report.contentIdRequired") }, { status: 400 });
   }
 
   // Confirm the reported content actually exists before writing the audit row —
@@ -54,7 +56,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
         ? (await prisma.issue.count({ where: { id: contentId } })) > 0
         : (await prisma.deletionVote.count({ where: { id: contentId } })) > 0;
   if (!exists) {
-    return NextResponse.json({ error: "Reported content not found" }, { status: 404 });
+    return NextResponse.json({ error: t("apiUser.report.notFound") }, { status: 404 });
   }
 
   const context = typeof body.context === "string" ? sanitizeText(body.context).slice(0, 200) : undefined;

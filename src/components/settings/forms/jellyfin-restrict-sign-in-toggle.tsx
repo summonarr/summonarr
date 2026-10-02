@@ -5,8 +5,10 @@ import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
 import { Switch } from "@/components/ui/switch";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export function JellyfinRestrictSignInToggle({ initialRestrict }: { initialRestrict: boolean }) {
+  const t = useT();
   const [restrict, setRestrict] = useState(initialRestrict);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const titleId = useId();
@@ -44,9 +46,9 @@ export function JellyfinRestrictSignInToggle({ initialRestrict }: { initialRestr
   return (
     <div className="flex items-center justify-between gap-4 mt-4">
       <div>
-        <p id={titleId} className="text-sm font-medium text-zinc-200">Restrict Jellyfin sign-in to known members</p>
+        <p id={titleId} className="text-sm font-medium text-zinc-200">{t("settings.form.jellyfinRestrict.title")}</p>
         <p id={descId} className="text-xs text-zinc-500 mt-0.5">
-          Only Jellyfin accounts that already exist on this instance — synced library users or anyone who has signed in before — may sign in. New, unknown Jellyfin accounts are refused until a library sync adds them. Disabling this lets any valid Jellyfin credential create an account (not recommended).
+          {t("settings.form.jellyfinRestrict.help")}
         </p>
       </div>
       <div className="flex items-center gap-2 shrink-0">

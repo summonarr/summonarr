@@ -77,6 +77,13 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
     category: "pages",
     defaultEnabled: false,
   },
+  {
+    key: "feature.page.recentlyAdded",
+    label: "Recently Added row",
+    description: "Show the \"Recently Added\" row on the home page: the newest titles on the Plex/Jellyfin servers each user can see.",
+    category: "pages",
+    defaultEnabled: true,
+  },
 
   // ── Behaviors ─────────────────────────────────────────────────────────
   {
@@ -113,6 +120,13 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
     description: "Grade each user A–F on whether they watch what they request, shown to admins on the Users page and the request queue. Display only — never blocks a request. Needs play history tracking; tune it in Media → Watch Grades.",
     category: "behaviors",
     defaultEnabled: true,
+  },
+  {
+    key: "feature.behavior.watchlistAutoRequest",
+    label: "Watchlist auto-request",
+    description: "File a request automatically when a user adds a title to their watchlist — in Summonarr, and on their Plex watchlist (polled by the sync-plex-watchlists cron). Only for users granted an Auto-request permission; each request still goes through quota, blacklist and approval. Plex users must sign in with Plex once after this is enabled so their watchlist can be read.",
+    category: "behaviors",
+    defaultEnabled: false,
   },
 
   // ── Integrations ──────────────────────────────────────────────────────
@@ -167,6 +181,13 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
     category: "integrations",
     defaultEnabled: true,
   },
+  {
+    key: "feature.integration.calendar",
+    label: "Calendar feed",
+    description: "Let users subscribe to an iCal (.ics) feed of upcoming release dates for their requests and watchlist from Google, Apple or Outlook calendar.",
+    category: "integrations",
+    defaultEnabled: true,
+  },
 
   // ── Admin pages ───────────────────────────────────────────────────────
   {
@@ -203,6 +224,13 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
     description: "Show the /admin/api-docs OpenAPI reference and nav link.",
     category: "admin",
     defaultEnabled: true,
+  },
+  {
+    key: "feature.admin.cleanup",
+    label: "Library Cleanup page",
+    description: "Show the /admin/cleanup page: titles nobody watches, ranked by configurable rules, which an admin can delete from Radarr/Sonarr after a dry run. Nothing is ever deleted automatically. Off by default.",
+    category: "admin",
+    defaultEnabled: false,
   },
   {
     key: "trashGuidesEnabled",

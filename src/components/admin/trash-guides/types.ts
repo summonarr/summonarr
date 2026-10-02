@@ -1,5 +1,3 @@
-import { formatRelativeTime } from "@/lib/relative-time";
-
 export type TrashService = "RADARR" | "SONARR";
 
 export type TrashSpecKind =
@@ -71,15 +69,11 @@ export interface StarterPackItem {
   application: { enabled: boolean; appliedAt: string | null; lastError: string | null } | null;
 }
 
-export const KIND_LABEL: Record<TrashSpecKind, string> = {
-  CUSTOM_FORMAT: "Custom Format",
-  CUSTOM_FORMAT_GROUP: "CF Group",
-  QUALITY_PROFILE: "Quality Profile",
-  NAMING: "Naming",
-  QUALITY_SIZE: "Quality Size",
+// Catalog keys, translated at render time.
+export const KIND_LABEL_KEY: Record<TrashSpecKind, string> = {
+  CUSTOM_FORMAT: "trash.kind.customFormat",
+  CUSTOM_FORMAT_GROUP: "trash.kind.customFormatGroup",
+  QUALITY_PROFILE: "trash.kind.qualityProfile",
+  NAMING: "trash.kind.naming",
+  QUALITY_SIZE: "trash.kind.qualitySize",
 };
-
-export function formatRelative(iso: string | null): string {
-  if (!iso) return "never";
-  return formatRelativeTime(iso);
-}

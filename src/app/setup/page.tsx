@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
+import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 import { SetupShell } from "./setup-shell";
@@ -16,6 +17,7 @@ export default async function SetupPage() {
 
   const backupPassword = process.env.BACKUP_DB_PASSWORD ?? "";
   const importAvailable = backupPassword.length >= MIN_BACKUP_PASSWORD_LEN;
+  const t = await getTranslator();
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-zinc-950 px-4">
@@ -28,10 +30,10 @@ export default async function SetupPage() {
           </div>
           {/* 22px/600 — the same scale as PageHeader inside the app. */}
           <h1 className="m-0 font-semibold text-center" style={{ fontSize: 22, color: "var(--ds-fg)" }}>
-            Welcome to {siteTitle}
+            {t("auth.setup.welcome", { siteTitle })}
           </h1>
           <p className="text-zinc-400 text-sm mt-1 text-center">
-            Create your admin account to get started.
+            {t("auth.setup.subtitle")}
           </p>
         </div>
 

@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
+import { getTranslator } from "@/lib/i18n/server";
 import { PageHeader } from "@/components/ui/design";
 import { TrashGuidesNav } from "@/components/admin/trash-guides/trash-guides-nav";
 import { TruncationBanner } from "@/components/admin/trash-guides/banners";
@@ -36,14 +37,16 @@ export default async function TrashGuidesLayout({ children }: { children: React.
     }
   }
 
+  const t = await getTranslator();
+  const [introBefore, introAfter] = t("trash.header.subtitle", { link: "\u0000" }).split("\u0000");
+
   return (
     <div className="ds-page-enter">
       <PageHeader
         title="TRaSH Guides"
         subtitle={
           <>
-            Sync recommended custom formats, quality profiles, naming schemes,
-            and quality sizes from{" "}
+            {introBefore}
             <a
               href="https://trash-guides.info"
               target="_blank"
@@ -53,7 +56,7 @@ export default async function TrashGuidesLayout({ children }: { children: React.
             >
               trash-guides.info
             </a>
-            .
+            {introAfter}
           </>
         }
       />

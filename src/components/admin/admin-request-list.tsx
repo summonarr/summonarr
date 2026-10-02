@@ -14,6 +14,8 @@ import { withBasePath } from "@/lib/base-path";
 import { REQUEST_STATUS_TONE } from "@/lib/status-labels";
 import type { WatchGradeSummary } from "@/lib/watch-grade";
 import { WatchGradeChip } from "./watch-grade";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 
 export interface Requester {
   requestId: string;
@@ -75,7 +77,7 @@ interface AdminRequestListProps {
   instanceNames?: Record<string, string>;
 }
 
-function formatUserLabel(r: Requester) {
+function formatUserLabel(r: Requester, t: Translator) {
   if (r.userEmail.endsWith("@discord.local")) {
     return (
       <>
@@ -93,7 +95,7 @@ function formatUserLabel(r: Requester) {
             color: "color-mix(in oklab, var(--ds-accent-text) 60%, transparent)",
           }}
         >
-          (Discord linked)
+          {t("adminQueue.list.discordLinked")}
         </span>
       </>
     );
@@ -106,6 +108,8 @@ function formatUserLabel(r: Requester) {
 export function AdminRequestList({ requests, page, total, pageSize, statusFilter, typeFilter, sort, instanceNames }: AdminRequestListProps) {
   const router = useRouter();
   const mounted = useHasMounted();
+  const t = useT();
+  const locale = useLocale();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const instanceLabel = (slug: string) =>
     instanceNames?.[slug] ?? (slug === "4k" ? "4K" : slug);
@@ -130,6 +134,23 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
   const [showBatchNote, setShowBatchNote] = useState<"APPROVED" | "DECLINED" | null>(null);
   const [batchError, setBatchError] = useState<string | null>(null);
   const [confirmingApprove, setConfirmingApprove] = useState(false);
+
+  // The batch bar hides (but keeps its state) when the selection empties by
+  // unchecking boxes or Clear. Reset the armed approve-confirm, the decline
+  // note and any error then, so the NEXT selection opens in the neutral state
+  // rather than one click away from a batch approve. Adjusted during render
+  // (React's "store the previous value" pattern) instead of in an effect.
+  const selectionEmpty = selected.size === 0;
+  const [prevSelectionEmpty, setPrevSelectionEmpty] = useState(selectionEmpty);
+  if (selectionEmpty !== prevSelectionEmpty) {
+    setPrevSelectionEmpty(selectionEmpty);
+    if (selectionEmpty) {
+      setConfirmingApprove(false);
+      setShowBatchNote(null);
+      setBatchNote("");
+      setBatchError(null);
+    }
+  }
 
   const allPendingIds = requests.flatMap((g) =>
     g.requesters.filter((r) => r.status === "PENDING").map((r) => r.requestId),
@@ -194,7 +215,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
-        setBatchError(data?.error ?? `Request failed (${res.status})`);
+        setBatchError(data?.error ?? t("adminQueue.common.requestFailed", { status: res.status }));
         return;
       }
       // A 200 can still carry rows whose Radarr/Sonarr push failed and were rolled
@@ -219,7 +240,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
       }
       router.refresh();
     } catch {
-      setBatchError("Network error — please try again");
+      setBatchError(t("shared.thread.networkError"));
     } finally {
       setBatchLoading(false);
     }
@@ -268,7 +289,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
             className="font-medium"
             style={{ fontSize: 13, color: "var(--ds-accent-text)" }}
           >
-            {selected.size} selected
+            {t("adminQueue.list.selected", { count: selected.size })}
           </span>
 
           {showBatchNote === "DECLINED" ? (
@@ -277,7 +298,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 type="text"
                 value={batchNote}
                 onChange={(e) => setBatchNote(e.target.value)}
-                placeholder="Decline reason (optional)"
+                placeholder={t("adminQueue.common.declineReason")}
                 className="flex-1 min-w-40 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 style={{
                   padding: "5px 10px",
@@ -302,7 +323,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                   borderColor: "var(--ds-border)",
                 }}
               >
-                Cancel
+                {t("shared.common.cancel")}
               </button>
               <button className="ds-hover-tint"
                 type="button"
@@ -322,13 +343,13 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 ) : (
                   <X style={{ width: 12, height: 12 }} />
                 )}
-                Decline {selected.size}
+                {t("adminQueue.list.declineN", { count: selected.size })}
               </button>
             </>
           ) : confirmingApprove ? (
             <>
               <span style={{ fontSize: 12, color: "var(--ds-fg-muted)" }}>
-                Approve {selected.size} request{selected.size === 1 ? "" : "s"}?
+                {t("adminQueue.list.approveConfirm", { count: selected.size })}
               </span>
               <button className="ds-hover-tint"
                 type="button"
@@ -341,7 +362,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                   borderColor: "var(--ds-border)",
                 }}
               >
-                Cancel
+                {t("shared.common.cancel")}
               </button>
               <button className="ds-hover-tint"
                 type="button"
@@ -361,7 +382,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 ) : (
                   <Check style={{ width: 12, height: 12 }} />
                 )}
-                Confirm approve
+                {t("adminQueue.list.confirmApprove")}
               </button>
             </>
           ) : (
@@ -384,7 +405,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 ) : (
                   <Check style={{ width: 12, height: 12 }} />
                 )}
-                Approve {selected.size}
+                {t("adminQueue.list.approveN", { count: selected.size })}
               </button>
               <button className="ds-hover-tint"
                 type="button"
@@ -399,7 +420,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 }}
               >
                 <X style={{ width: 12, height: 12 }} />
-                Decline {selected.size}
+                {t("adminQueue.list.declineN", { count: selected.size })}
               </button>
               <button className="ds-hover-tint"
                 type="button"
@@ -413,7 +434,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                   borderColor: "var(--ds-border)",
                 }}
               >
-                Clear
+                {t("adminQueue.list.clear")}
               </button>
             </>
           )}
@@ -452,7 +473,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
               className="ds-mono"
               style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
             >
-              Select all pending ({allPendingIds.length})
+              {t("adminQueue.list.selectAllPending", { count: allPendingIds.length })}
             </span>
           </label>
         </div>
@@ -505,7 +526,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                       type="checkbox"
                       checked={groupAllPendingSelected}
                       onChange={() => toggleGroup(group)}
-                      aria-label={`Select ${group.title}`}
+                      aria-label={t("adminQueue.list.selectTitle", { title: group.title })}
                       className="w-4 h-4"
                       style={{ accentColor: "var(--ds-accent)" }}
                     />
@@ -572,7 +593,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                     marginTop: 2,
                   }}
                 >
-                  {group.mediaType === "MOVIE" ? "MOVIE" : "TV"}
+                  {group.mediaType === "MOVIE" ? t("requests.mediaType.movie") : t("requests.mediaType.tv")}
                   {group.releaseYear ? ` · ${group.releaseYear}` : ""}
                   {group.ratings?.certification && (
                     <>
@@ -588,7 +609,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                           color: "var(--ds-fg-muted)",
                           border: "1px solid var(--ds-border)",
                         }}
-                        title="Content rating"
+                        title={t("adminQueue.list.contentRating")}
                       >
                         {group.ratings.certification}
                       </span>
@@ -598,7 +619,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                     <>
                       {" · "}
                       <span style={{ color: "var(--ds-fg-muted)" }}>
-                        {group.requesters.length} requesters
+                        {t("adminQueue.list.requesters", { count: group.requesters.length })}
                       </span>
                     </>
                   )}
@@ -639,7 +660,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                         color: "var(--ds-fg-muted)",
                       }}
                     >
-                      <span>{formatUserLabel(r)}</span>
+                      <span>{formatUserLabel(r, t)}</span>
                       <WatchGradeChip
                         userId={r.userId}
                         userLabel={r.userName ?? r.userEmail}
@@ -661,7 +682,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                         </span>
                       )}
                       <span style={{ color: "var(--ds-fg-subtle)" }}>
-                        {mounted ? `· ${new Date(r.createdAt).toLocaleDateString()}` : ""}
+                        {mounted ? `· ${new Date(r.createdAt).toLocaleDateString(locale)}` : ""}
                       </span>
                       {mixedInstances && r.arrInstance !== "" && (
                         <span
@@ -692,7 +713,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                             color: "var(--ds-fg-subtle)",
                           }}
                         >
-                          {r.status}
+                          {t(`requests.status.${r.status.toLowerCase()}`)}
                         </span>
                       )}
                       {r.note && (
@@ -718,16 +739,16 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                     style={{ gap: 4, marginTop: 6 }}
                   >
                     {group.onPlex && (
-                      <span className="ds-chip ds-chip-plex">On Plex</span>
+                      <span className="ds-chip ds-chip-plex">{t("adminQueue.list.onPlex")}</span>
                     )}
                     {group.onJellyfin && (
-                      <span className="ds-chip ds-chip-jellyfin">On Jellyfin</span>
+                      <span className="ds-chip ds-chip-jellyfin">{t("adminQueue.list.onJellyfin")}</span>
                     )}
                     {groupInstances.map((slug) => (
                       <span
                         key={slug}
                         className="ds-chip"
-                        title="Radarr/Sonarr instance this title was requested on"
+                        title={t("adminQueue.list.instanceTitle")}
                         style={{
                           background: "color-mix(in oklab, var(--ds-accent) 14%, transparent)",
                           color: "var(--ds-accent-text)",
@@ -755,7 +776,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
 
               <div className="hidden sm:inline-flex shrink-0">
                 <Chip tone={REQUEST_STATUS_TONE[group.aggregateStatus]}>
-                  {group.aggregateStatus.charAt(0) + group.aggregateStatus.slice(1).toLowerCase()}
+                  {t(`requests.status.${group.aggregateStatus.toLowerCase()}`)}
                 </Chip>
               </div>
 
@@ -785,7 +806,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
             className="ds-mono"
             style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}
           >
-            {total} total · page {page} of {totalPages}
+            {t("adminQueue.list.pageOf", { total, page, pages: totalPages })}
           </p>
           <div className="flex items-center gap-2">
             <button className="ds-hover-tint"
@@ -801,7 +822,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 cursor: page <= 1 ? "not-allowed" : "pointer",
               }}
             >
-              Previous
+              {t("adminQueue.list.previous")}
             </button>
             <button className="ds-hover-tint"
               type="button"
@@ -819,7 +840,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 cursor: page >= totalPages ? "not-allowed" : "pointer",
               }}
             >
-              Next
+              {t("adminQueue.list.next")}
             </button>
           </div>
         </div>

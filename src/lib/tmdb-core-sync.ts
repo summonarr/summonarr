@@ -15,7 +15,8 @@ export async function syncTmdbMediaCore(items: TmdbMedia[]): Promise<void> {
     (a, b) => a.id - b.id || a.mediaType.localeCompare(b.mediaType)
   );
   await prisma.$transaction(
-    sorted.map((m) =>
+    [
+    ...sorted.map((m) =>
       prisma.tmdbMediaCore.upsert({
         where: {
           tmdbId_mediaType: {
@@ -44,11 +45,28 @@ export async function syncTmdbMediaCore(items: TmdbMedia[]): Promise<void> {
           // on every list warm (~4x/day via warm-list-cache), blanking the
           // grid badges that read TmdbMediaCore.certification.
           certification: m.certification ?? undefined,
-          expiresAt,
+          // expiresAt deliberately NOT written here: an existing row may carry
+          // the longer age-aware TTL from upsertTmdbMediaCore/the prewarm
+          // (3–30 days), and overwriting it with the 12h list TTL let the daily
+          // purge delete a library title's row ~12h after it left the lists.
+          // The updateMany below only ever EXTENDS expiry (GREATEST semantics).
           lastSyncedAt:  new Date(),
         },
       })
     ),
+    // Runs after the upserts, so every row it touches is already locked by
+    // this transaction in sorted order — it acquires no new locks.
+    prisma.tmdbMediaCore.updateMany({
+      where: {
+        expiresAt: { lt: expiresAt },
+        OR: sorted.map((m) => ({
+          tmdbId:    m.id,
+          mediaType: m.mediaType === "movie" ? ("MOVIE" as const) : ("TV" as const),
+        })),
+      },
+      data: { expiresAt },
+    }),
+    ],
     { timeout: BATCH_TX_TIMEOUT }
   ).catch((err) => {
     console.error("[tmdb-core-sync] batch upsert failed for", items.length, "items:", err);

@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CheckCircle, XCircle, Loader2, Trash2, RefreshCw, Copy, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // 24 random bytes as a hex string — same as generateSecret() in
 // forms/webhook-secret-form.tsx (the HD/4K webhook-secret field). Browser-only
@@ -56,9 +57,9 @@ interface ArrOptions {
 
 // Radarr's fixed list of choices for when a movie counts as "available" to search for.
 const MINIMUM_AVAILABILITY_OPTIONS = [
-  { value: "announced", label: "Announced" },
-  { value: "inCinemas", label: "In Cinemas" },
-  { value: "released", label: "Released" },
+  { value: "announced", i18nKey: "settings.arr.minAvail.announced" },
+  { value: "inCinemas", i18nKey: "settings.arr.minAvail.inCinemas" },
+  { value: "released", i18nKey: "settings.arr.minAvail.released" },
 ] as const;
 
 interface Draft {
@@ -106,6 +107,7 @@ function toDraft(v: InstanceView): Draft {
 const isNamed = (slug: string) => slug !== "" && slug !== "4k";
 
 function ServiceInstances({ service }: { service: ArrService }) {
+  const t = useT();
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [loaded, setLoaded] = useState(false);
   // If loading fails, `drafts` stays empty, which looks exactly like "no
@@ -217,7 +219,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
     for (const d of drafts) {
       if (!SLUG_RE.test(d.slug) || d.slug === "hd") {
         setStatus("error");
-        setMessage(`Invalid slug "${d.slug}" — use lowercase letters/digits, starting with a letter (not "hd").`);
+        setMessage(t("settings.arr.invalidSlug", { slug: d.slug }));
         return;
       }
     }
@@ -225,7 +227,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
     for (const d of drafts) {
       if (seen.has(d.slug)) {
         setStatus("error");
-        setMessage(`Duplicate slug "${d.slug}".`);
+        setMessage(t("settings.instances.duplicateSlug", { slug: d.slug }));
         return;
       }
       seen.add(d.slug);
@@ -271,35 +273,33 @@ function ServiceInstances({ service }: { service: ArrService }) {
         named.forEach((i) => { if (i.hasApiKey && i.url) fetchOptions(i.slug); });
         setConfirmRemove(null);
         setStatus("ok");
-        setMessage("Saved");
+        setMessage(t("settings.common.saved"));
       } else {
         setStatus("error");
-        setMessage(data.error ?? "Failed to save");
+        setMessage(data.error ?? t("settings.common.failedToSave"));
       }
     } catch {
       setStatus("error");
-      setMessage("Failed to save");
+      setMessage(t("settings.common.failedToSave"));
     }
   }
 
   const label = service === "radarr" ? "Radarr" : "Sonarr";
-  const mediaWord = service === "radarr" ? "movies" : "TV";
 
   if (!loaded) {
-    return <p className="text-sm text-zinc-500 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />Loading instances…</p>;
+    return <p className="text-sm text-zinc-500 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />{t("settings.instances.loading")}</p>;
   }
 
   return (
     <div className="space-y-4">
       <div>
-        <h3 className="font-semibold" style={{ fontSize: 14, color: "var(--ds-fg)", margin: 0 }}>{label} — additional instances</h3>
+        <h3 className="font-semibold" style={{ fontSize: 14, color: "var(--ds-fg)", margin: 0 }}>{t("settings.arr.heading", { label })}</h3>
         <p className="text-xs text-zinc-500 mt-1">
-          Extra {label} instances (e.g. a dedicated <strong>anime</strong>{" "}instance). Requests auto-route here when an instance&apos;s
-          rule matches; a request can also target one explicitly. Restricted instances need a per-user grant (Users → Instance access).
+          {t("settings.arr.intro", { label })}
         </p>
       </div>
 
-      {drafts.length === 0 && <p className="text-sm text-zinc-500">No additional {label} instances configured.</p>}
+      {drafts.length === 0 && <p className="text-sm text-zinc-500">{t("settings.arr.none", { label })}</p>}
 
       {drafts.map((d, idx) => {
         const test = tests[d.slug];
@@ -307,15 +307,15 @@ function ServiceInstances({ service }: { service: ArrService }) {
         const optsReady = opts != null && opts !== "loading" && opts !== "error";
         // Why the dropdowns aren't showing yet, for the note under each field.
         const optsNote = opts === "loading"
-          ? "Loading options…"
+          ? t("settings.arr.optsLoading")
           : opts === "error"
-            ? "Couldn't load — check the connection above."
-            : "Save the connection to load options.";
+            ? t("settings.arr.optsError")
+            : t("settings.arr.optsSaveFirst");
         return (
           <div key={idx} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
             <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
               <div className="space-y-1.5">
-                <Label htmlFor={`${service}-${idx}-slug`}>Slug</Label>
+                <Label htmlFor={`${service}-${idx}-slug`}>{t("settings.instances.slug")}</Label>
                 <Input
                   id={`${service}-${idx}-slug`}
                   value={d.slug}
@@ -324,10 +324,10 @@ function ServiceInstances({ service }: { service: ArrService }) {
                   placeholder="anime"
                   className="bg-zinc-800 border-zinc-700 font-mono text-sm disabled:opacity-60"
                 />
-                {!d.isNew && <p className="text-xs text-zinc-500">Slug is fixed once created.</p>}
+                {!d.isNew && <p className="text-xs text-zinc-500">{t("settings.instances.slugFixed")}</p>}
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor={`${service}-${idx}-name`}>Display name</Label>
+                <Label htmlFor={`${service}-${idx}-name`}>{t("settings.instances.displayName")}</Label>
                 <Input
                   id={`${service}-${idx}-name`}
                   value={d.name}
@@ -340,7 +340,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
 
             <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
               <div className="space-y-1.5">
-                <Label htmlFor={`${service}-${idx}-url`}>{label} URL</Label>
+                <Label htmlFor={`${service}-${idx}-url`}>{t("settings.arr.url", { label })}</Label>
                 <Input
                   id={`${service}-${idx}-url`}
                   type="url"
@@ -351,13 +351,13 @@ function ServiceInstances({ service }: { service: ArrService }) {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor={`${service}-${idx}-key`}>API Key</Label>
+                <Label htmlFor={`${service}-${idx}-key`}>{t("settings.arr.apiKey")}</Label>
                 <Input
                   id={`${service}-${idx}-key`}
                   type="password"
                   value={d.apiKey}
                   onChange={(e) => update(idx, { apiKey: e.target.value })}
-                  placeholder={d.hasApiKey ? MASKED_VALUE : "API key"}
+                  placeholder={d.hasApiKey ? MASKED_VALUE : t("settings.arr.apiKeyPlaceholder")}
                   className="bg-zinc-800 border-zinc-700 font-mono text-sm"
                 />
               </div>
@@ -366,10 +366,10 @@ function ServiceInstances({ service }: { service: ArrService }) {
             <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
-                  <Label htmlFor={`${service}-${idx}-folder`}>Root Folder <span className="text-zinc-500">(optional)</span></Label>
+                  <Label htmlFor={`${service}-${idx}-folder`}>{t("settings.arr.rootFolder")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
                   {optsReady && (
                     <button type="button" onClick={() => fetchOptions(d.slug)} className="flex items-center gap-1 min-h-8 px-2 -my-2 -mr-2 text-xs text-zinc-500 hover:text-zinc-100">
-                      <RefreshCw className="w-3 h-3" />Refresh
+                      <RefreshCw className="w-3 h-3" />{t("settings.common.refresh")}
                     </button>
                   )}
                 </div>
@@ -380,13 +380,13 @@ function ServiceInstances({ service }: { service: ArrService }) {
                     onChange={(e) => update(idx, { rootFolder: e.target.value })}
                     className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
-                    <option value="">— {label}&apos;s default —</option>
+                    <option value="">{t("settings.arr.serviceDefault", { label })}</option>
                     {/* If the saved folder is no longer on the server, the select
                         would silently show the first option ("default") while
                         still holding the old value — so list it, marked
                         "not found", instead of hiding it. */}
                     {d.rootFolder && !(opts as ArrOptions).rootFolders.some((f) => f.path === d.rootFolder) && (
-                      <option value={d.rootFolder}>{d.rootFolder} (not found on server)</option>
+                      <option value={d.rootFolder}>{t("settings.arr.notFoundOnServer", { value: d.rootFolder })}</option>
                     )}
                     {(opts as ArrOptions).rootFolders.map((f) => (
                       <option key={f.path} value={f.path}>{f.path}</option>
@@ -397,7 +397,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                 )}
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor={`${service}-${idx}-profile`}>Quality Profile <span className="text-zinc-500">(optional)</span></Label>
+                <Label htmlFor={`${service}-${idx}-profile`}>{t("settings.arr.qualityProfile")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
                 {optsReady ? (
                   <select
                     id={`${service}-${idx}-profile`}
@@ -405,9 +405,9 @@ function ServiceInstances({ service }: { service: ArrService }) {
                     onChange={(e) => update(idx, { qualityProfileId: e.target.value })}
                     className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
-                    <option value="">— {label}&apos;s default —</option>
+                    <option value="">{t("settings.arr.serviceDefault", { label })}</option>
                     {d.qualityProfileId && !(opts as ArrOptions).qualityProfiles.some((p) => String(p.id) === d.qualityProfileId) && (
-                      <option value={d.qualityProfileId}>Profile #{d.qualityProfileId} (not found on server)</option>
+                      <option value={d.qualityProfileId}>{t("settings.arr.notFoundOnServer", { value: t("settings.arr.profileNumber", { id: d.qualityProfileId }) })}</option>
                     )}
                     {(opts as ArrOptions).qualityProfiles.map((p) => (
                       <option key={p.id} value={String(p.id)}>{p.name}</option>
@@ -425,19 +425,19 @@ function ServiceInstances({ service }: { service: ArrService }) {
             {service === "radarr" && (
               <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
                 <div className="space-y-1.5">
-                  <Label htmlFor={`${service}-${idx}-min-availability`}>Minimum Availability <span className="text-zinc-500">(optional)</span></Label>
+                  <Label htmlFor={`${service}-${idx}-min-availability`}>{t("settings.arr.minAvailability")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
                   <select
                     id={`${service}-${idx}-min-availability`}
                     value={d.minimumAvailability}
                     onChange={(e) => update(idx, { minimumAvailability: e.target.value })}
                     className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
-                    <option value="">— {label}&apos;s default —</option>
+                    <option value="">{t("settings.arr.serviceDefault", { label })}</option>
                     {MINIMUM_AVAILABILITY_OPTIONS.map((o) => (
-                      <option key={o.value} value={o.value}>{o.label}</option>
+                      <option key={o.value} value={o.value}>{t(o.i18nKey)}</option>
                     ))}
                   </select>
-                  <p className="text-xs text-zinc-500">When added movies count as available to search.</p>
+                  <p className="text-xs text-zinc-500">{t("settings.arr.minAvailabilityHelp")}</p>
                 </div>
               </div>
             )}
@@ -445,35 +445,35 @@ function ServiceInstances({ service }: { service: ArrService }) {
             {service === "sonarr" && optsReady && ((opts as ArrOptions).languageProfiles?.length ?? 0) > 0 && (
               <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
                 <div className="space-y-1.5">
-                  <Label htmlFor={`${service}-${idx}-language-profile`}>Language Profile <span className="text-zinc-500">(optional)</span></Label>
+                  <Label htmlFor={`${service}-${idx}-language-profile`}>{t("settings.arr.languageProfile")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
                   <select
                     id={`${service}-${idx}-language-profile`}
                     value={d.languageProfileId}
                     onChange={(e) => update(idx, { languageProfileId: e.target.value })}
                     className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
-                    <option value="">— {label}&apos;s default —</option>
+                    <option value="">{t("settings.arr.serviceDefault", { label })}</option>
                     {d.languageProfileId && !(opts as ArrOptions).languageProfiles!.some((p) => String(p.id) === d.languageProfileId) && (
-                      <option value={d.languageProfileId}>Profile #{d.languageProfileId} (not found on server)</option>
+                      <option value={d.languageProfileId}>{t("settings.arr.notFoundOnServer", { value: t("settings.arr.profileNumber", { id: d.languageProfileId }) })}</option>
                     )}
                     {(opts as ArrOptions).languageProfiles!.map((p) => (
                       <option key={p.id} value={String(p.id)}>{p.name}</option>
                     ))}
                   </select>
-                  <p className="text-xs text-zinc-500">Sonarr v3 only — v4 handles language via custom formats.</p>
+                  <p className="text-xs text-zinc-500">{t("settings.arr.languageProfileHelp")}</p>
                 </div>
               </div>
             )}
 
             <div className="space-y-1.5">
-              <Label htmlFor={`${service}-${idx}-hook`}>Webhook Secret <span className="text-zinc-500">(auto-generated — paste the URL below into {label})</span></Label>
+              <Label htmlFor={`${service}-${idx}-hook`}>{t("settings.arr.webhookSecret")} <span className="text-zinc-500">{t("settings.arr.webhookSecretHint", { label })}</span></Label>
               <div className="flex gap-2">
                 <Input
                   id={`${service}-${idx}-hook`}
                   type="text"
                   value={d.webhookSecret}
                   onChange={(e) => update(idx, { webhookSecret: e.target.value })}
-                  placeholder={d.hasWebhookSecret ? MASKED_VALUE : "auto-generated when you add an instance"}
+                  placeholder={d.hasWebhookSecret ? MASKED_VALUE : t("settings.arr.webhookSecretPlaceholder")}
                   className="bg-zinc-800 border-zinc-700 font-mono text-sm"
                 />
                 <Button
@@ -482,46 +482,46 @@ function ServiceInstances({ service }: { service: ArrService }) {
                   className="shrink-0 border-zinc-700 text-zinc-300 hover:text-zinc-100"
                   onClick={() => update(idx, { webhookSecret: generateSecret() })}
                 >
-                  Generate
+                  {t("settings.arr.generate")}
                 </Button>
               </div>
               {d.webhookSecret && (
                 <div className="space-y-1">
                   <div className="flex items-center gap-2 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2">
                     <span className="flex-1 font-mono text-xs text-zinc-300 truncate">{webhookUrl(d.webhookSecret)}</span>
-                    <button type="button" onClick={() => copyHook(idx, d.webhookSecret)} className="shrink-0 p-2 -m-2 text-zinc-500 hover:text-zinc-100 transition-colors" aria-label="Copy webhook URL">
+                    <button type="button" onClick={() => copyHook(idx, d.webhookSecret)} className="shrink-0 p-2 -m-2 text-zinc-500 hover:text-zinc-100 transition-colors" aria-label={t("settings.arr.copyWebhook")}>
                       {copiedHook === idx ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
                     </button>
                   </div>
-                  <p className="text-xs text-zinc-500">Add this as a webhook (Connect → Webhook, method POST) in {label}, then Save &amp; Test here.</p>
+                  <p className="text-xs text-zinc-500">{t("settings.arr.webhookHelp", { label })}</p>
                 </div>
               )}
               {d.hasWebhookSecret && !d.webhookSecret && (
-                <p className="text-xs text-zinc-500">A webhook secret is saved. Click <strong>Generate</strong> to replace it — the current value can&apos;t be shown again.</p>
+                <p className="text-xs text-zinc-500">{t("settings.arr.webhookSaved")}</p>
               )}
             </div>
 
             <div className="flex flex-wrap gap-x-6 gap-y-2 pt-1">
               <label className="flex items-center gap-2 text-sm text-zinc-300">
                 <input type="checkbox" checked={d.animeOnly} onChange={(e) => update(idx, { animeOnly: e.target.checked })} />
-                Auto-route anime here
+                {t("settings.arr.autoRouteAnime")}
               </label>
               <label className="flex items-center gap-2 text-sm text-zinc-300">
                 <input type="checkbox" checked={d.restricted} onChange={(e) => update(idx, { restricted: e.target.checked })} />
-                Restricted (needs a grant)
+                {t("settings.instances.restricted")}
               </label>
               <label className="flex items-center gap-2 text-sm text-zinc-300">
                 <input type="checkbox" checked={d.serverAll} onChange={(e) => update(idx, { serverAll: e.target.checked })} />
-                Open to all requesters
+                {t("settings.arr.openToAll")}
               </label>
               <label className="flex items-center gap-2 text-sm text-zinc-300">
                 <input type="checkbox" checked={d.skipLibraryCheck} onChange={(e) => update(idx, { skipLibraryCheck: e.target.checked })} />
-                Separate library (skip &quot;already available&quot; check)
+                {t("settings.arr.separateLibrary")}
               </label>
             </div>
 
             <div className="flex items-center justify-between pt-1">
-              {test?.version && <span className="text-xs text-green-400 flex items-center gap-1"><CheckCircle className="w-3.5 h-3.5" />Connected · v{test.version}</span>}
+              {test?.version && <span className="text-xs text-green-400 flex items-center gap-1"><CheckCircle className="w-3.5 h-3.5" />{t("settings.arr.connectedVersion", { version: test.version })}</span>}
               {test?.error && <span className="text-xs text-red-400 flex items-center gap-1"><XCircle className="w-3.5 h-3.5" />{test.error}</span>}
               {!test && <span />}
               {confirmRemove !== idx && (
@@ -532,7 +532,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                   onClick={() => (d.isNew ? removeInstance(idx) : setConfirmRemove(idx))}
                   className="flex items-center gap-1 min-h-8 px-2 -my-2 -mr-2 text-xs text-red-400 hover:text-[var(--ds-danger-hover)]"
                 >
-                  <Trash2 className="w-3.5 h-3.5" />Remove
+                  <Trash2 className="w-3.5 h-3.5" />{t("settings.common.remove")}
                 </button>
               )}
             </div>
@@ -544,10 +544,8 @@ function ServiceInstances({ service }: { service: ArrService }) {
             {confirmRemove === idx && (
               <div className="rounded-md border border-red-500/40 bg-red-500/10 p-3 space-y-2">
                 <p className="text-xs text-red-400">
-                  Remove <strong>{d.name.trim() || d.slug || "this instance"}</strong>? On <strong>Save &amp; Test</strong> this
-                  deletes its stored URL, API key and webhook secret (encrypted — not recoverable, so you would need to
-                  re-copy the key from {label} and re-add the webhook), and clears its cached wanted/available
-                  rows. <strong>Existing requests are preserved.</strong>
+                  {t("settings.arr.confirmRemove", { name: d.name.trim() || d.slug || t("settings.arr.thisInstance"), label })}{" "}
+                  <strong>{t("settings.arr.confirmRemoveKept")}</strong>
                 </p>
                 <div className="flex items-center gap-2">
                   <button
@@ -556,14 +554,14 @@ function ServiceInstances({ service }: { service: ArrService }) {
                     autoFocus
                     className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />Remove instance
+                    <Trash2 className="w-3.5 h-3.5" />{t("settings.arr.removeInstance")}
                   </button>
                   <button
                     type="button"
                     onClick={() => setConfirmRemove(null)}
                     className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
                   >
-                    Cancel
+                    {t("settings.common.cancel")}
                   </button>
                 </div>
               </div>
@@ -574,12 +572,12 @@ function ServiceInstances({ service }: { service: ArrService }) {
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <Button type="button" variant="outline" onClick={addInstance} className="border-zinc-600 text-zinc-300 hover:text-zinc-100 h-8 px-3 text-xs">
-          + Add {label} instance
+          {t("settings.arr.add", { label })}
         </Button>
         <Button type="button" onClick={save} disabled={status === "saving" || loadFailed} className="h-8 px-3 text-xs">
-          {status === "saving" ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Saving…</> : "Save & Test"}
+          {status === "saving" ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />{t("settings.common.saving")}</> : t("settings.instances.saveAndTest")}
         </Button>
-        <button type="button" onClick={load} className="flex items-center gap-1 min-h-8 px-2 text-xs text-zinc-500 hover:text-zinc-100"><RefreshCw className="w-3 h-3" />Refresh</button>
+        <button type="button" onClick={load} className="flex items-center gap-1 min-h-8 px-2 text-xs text-zinc-500 hover:text-zinc-100"><RefreshCw className="w-3 h-3" />{t("settings.common.refresh")}</button>
       </div>
       {/* On its own line so a long save error wraps instead of running off
           the card beside the buttons at phone width. */}
@@ -588,10 +586,10 @@ function ServiceInstances({ service }: { service: ArrService }) {
       {loadFailed && (
         <p className="text-sm text-red-400 flex items-center gap-1.5">
           <XCircle className="w-4 h-4 shrink-0" />
-          Couldn&apos;t load the current instances — saving is disabled so an empty list can&apos;t wipe them. Hit Refresh.
+          {t("settings.arr.loadFailed")}
         </p>
       )}
-      <p className="text-xs text-zinc-500">Extra {mediaWord} instances share the same webhook endpoints — each authenticates with its own webhook secret.</p>
+      <p className="text-xs text-zinc-500">{service === "radarr" ? t("settings.arr.sharedEndpointsMovies") : t("settings.arr.sharedEndpointsTv")}</p>
     </div>
   );
 }

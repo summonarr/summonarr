@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Download, Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
 import { withBasePath } from "@/lib/base-path";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 // Magic bytes at the start of every encrypted backup file; used to reject plain-SQL uploads
 const ENCRYPTED_MAGIC = "RBKBKP01";
@@ -78,6 +79,7 @@ function SecondaryButton({
 }
 
 function DbExportSection() {
+  const t = useT();
   const [lastFilename, setLastFilename] = useState<string | null>(null);
   // Default-filename preview includes today's date; gate to avoid SSR/CSR
   // drift across midnight UTC. See CLAUDE.md guardrail 16.
@@ -116,7 +118,7 @@ function DbExportSection() {
             letterSpacing: "0.06em",
           }}
         >
-          Filename
+          {t("adminManage.backup.filename")}
         </span>
         <span
           className="ds-mono break-all"
@@ -127,18 +129,21 @@ function DbExportSection() {
       </div>
 
       <PrimaryButton onClick={handleExport}>
-        <Download className="w-4 h-4" /> Download encrypted dump
+        <Download className="w-4 h-4" /> {t("adminManage.backup.download")}
       </PrimaryButton>
     </div>
   );
 }
 
 function DbImportSection() {
+  const t = useT();
+  const locale = useLocale();
   const [file, setFile] = useState<File | null>(null);
   const [encrypted, setEncrypted] = useState<boolean | null>(null);
   const [size, setSize] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [progress, setProgress] = useState<ChunkedUploadProgress | null>(null);
   const [result, setResult] = useState<
     | {
@@ -165,14 +170,14 @@ function DbImportSection() {
       const mb = (f.size / (1024 * 1024)).toFixed(1);
       setSize(f.size > 1024 * 1024 ? `${mb} MB` : `${kb} KB`);
     } catch {
-      setResult({ ok: false, error: "Could not read file" });
+      setResult({ ok: false, error: t("adminManage.backup.error.read") });
     }
   }
 
   async function handleImport() {
     if (!file) return;
     if (!encrypted) {
-      setResult({ ok: false, error: "Backup file is not an encrypted Summonarr dump." });
+      setResult({ ok: false, error: t("adminManage.backup.error.notEncrypted") });
       return;
     }
     setConfirming(false);
@@ -193,7 +198,7 @@ function DbImportSection() {
       });
     } catch (err) {
       setImporting(false);
-      setResult({ ok: false, error: err instanceof Error ? err.message : "Upload failed" });
+      setResult({ ok: false, error: err instanceof Error ? err.message : t("adminManage.backup.error.upload") });
       return;
     }
 
@@ -213,6 +218,9 @@ function DbImportSection() {
   }
 
   function clearFile() {
+    // Reset the uncontrolled input too, or re-picking the same file fires no
+    // change event and the drop zone stays empty.
+    if (fileInputRef.current) fileInputRef.current.value = "";
     setFile(null);
     setEncrypted(null);
     setSize(null);
@@ -284,7 +292,7 @@ function DbImportSection() {
                 style={{ gap: 4, fontSize: 10, letterSpacing: "0.04em" }}
               >
                 <CheckCircle style={{ width: 10, height: 10 }} />
-                VALID HEADER · RBKBKP01
+                {t("adminManage.backup.validHeader")}
               </span>
             )}
             {encrypted === false && (
@@ -292,7 +300,7 @@ function DbImportSection() {
                 className="ds-chip ds-chip-declined"
                 style={{ fontSize: 10, letterSpacing: "0.04em" }}
               >
-                NOT ENCRYPTED · REJECTED
+                {t("adminManage.backup.notEncrypted")}
               </span>
             )}
           </>
@@ -309,7 +317,7 @@ function DbImportSection() {
                 letterSpacing: "0.06em",
               }}
             >
-              Drop .sql.enc file or choose below
+              {t("adminManage.backup.drop")}
             </span>
           </>
         )}
@@ -327,18 +335,25 @@ function DbImportSection() {
             border: "1px solid var(--ds-border)",
           }}
         >
-          Choose file
+          {t("adminManage.backup.chooseFile")}
           <input
+            ref={fileInputRef}
             type="file"
             accept=".enc"
-            onChange={(e) => handleFileChange(e.target.files?.[0] ?? null)}
+            onChange={(e) => {
+              const picked = e.target.files?.[0] ?? null;
+              // Empty the input once read: a later drop or Clear replaces the
+              // file in state, and re-picking the same file must still fire.
+              e.target.value = "";
+              void handleFileChange(picked);
+            }}
             // sr-only, not hidden: display:none drops the input from the tab
             // order and a <label> can't take focus, so keyboard users could
             // never open the chooser.
             className="sr-only"
           />
         </label>
-        {file && <SecondaryButton onClick={clearFile}>Clear</SecondaryButton>}
+        {file && <SecondaryButton onClick={clearFile}>{t("adminManage.backup.clear")}</SecondaryButton>}
       </div>
 
       {!result?.summary && !confirming && (
@@ -350,14 +365,14 @@ function DbImportSection() {
             <>
               <Loader2 className="w-4 h-4 animate-spin" />
               {progress?.phase === "import"
-                ? "Importing…"
+                ? t("adminManage.backup.importing")
                 : progress
-                  ? `Uploading… ${Math.round((progress.uploaded / progress.total) * 100)}%`
-                  : "Starting…"}
+                  ? t("adminManage.backup.uploadingPct", { pct: Math.round((progress.uploaded / progress.total) * 100) })
+                  : t("adminManage.backup.starting")}
             </>
           ) : (
             <>
-              <Upload className="w-4 h-4" /> Restore from file
+              <Upload className="w-4 h-4" /> {t("adminManage.backup.restoreFromFile")}
             </>
           )}
         </PrimaryButton>
@@ -376,15 +391,14 @@ function DbImportSection() {
           }}
         >
           <span style={{ fontSize: 12.5, color: "var(--ds-fg)" }}>
-            This replaces the current database with the contents of this backup.
-            Existing data will be overwritten and cannot be recovered. Continue?
+            {t("adminManage.backup.confirm")}
           </span>
           <div className="flex items-center gap-2 flex-wrap">
             <SecondaryButton onClick={() => setConfirming(false)}>
-              Cancel
+              {t("adminManage.common.cancel")}
             </SecondaryButton>
             <PrimaryButton onClick={handleImport} disabled={importing}>
-              <Upload className="w-4 h-4" /> Yes, restore and overwrite
+              <Upload className="w-4 h-4" /> {t("adminManage.backup.confirmYes")}
             </PrimaryButton>
           </div>
         </div>
@@ -423,7 +437,7 @@ function DbImportSection() {
               {(progress.total / (1024 * 1024)).toFixed(1)} MB
             </span>
             <span>
-              {progress.phase === "import" ? "Decrypting + restoring on server…" : "Uploading"}
+              {progress.phase === "import" ? t("adminManage.backup.restoringOnServer") : t("adminManage.backup.uploading")}
             </span>
           </div>
         </div>
@@ -447,18 +461,18 @@ function DbImportSection() {
               marginBottom: 10,
             }}
           >
-            Result · {result.ok ? "import complete" : "import completed with errors"}
+            {result.ok ? t("adminManage.backup.resultOk") : t("adminManage.backup.resultErrors")}
           </div>
           <div
             className="grid grid-cols-2 sm:grid-cols-4"
             style={{ gap: 10 }}
           >
             {[
-              { label: "Total", value: result.summary.total, color: "var(--ds-fg)" },
-              { label: "Executed", value: result.summary.executed, color: "var(--ds-success)" },
-              { label: "Skipped", value: result.summary.skipped, color: "var(--ds-warning)" },
+              { label: t("adminManage.backup.kpi.total"), value: result.summary.total, color: "var(--ds-fg)" },
+              { label: t("adminManage.backup.kpi.executed"), value: result.summary.executed, color: "var(--ds-success)" },
+              { label: t("adminManage.backup.kpi.skipped"), value: result.summary.skipped, color: "var(--ds-warning)" },
               {
-                label: "Errors",
+                label: t("adminManage.backup.kpi.errors"),
                 value: result.summary.errors,
                 color: result.summary.errors > 0 ? "var(--ds-danger)" : "var(--ds-fg-subtle)",
               },
@@ -483,7 +497,7 @@ function DbImportSection() {
                     fontVariantNumeric: "tabular-nums",
                   }}
                 >
-                  {kpi.value.toLocaleString("en-US")}
+                  {kpi.value.toLocaleString(locale)}
                 </div>
               </div>
             ))}
@@ -515,7 +529,7 @@ function DbImportSection() {
                   marginBottom: 6,
                 }}
               >
-                Errors ({result.errors.length})
+                {t("adminManage.backup.errorsCount", { count: result.errors.length })}
               </div>
               <ul
                 className="ds-mono"
@@ -534,7 +548,7 @@ function DbImportSection() {
                 ))}
                 {result.errors.length > 10 && (
                   <li style={{ color: "var(--ds-fg-subtle)" }}>
-                    …and {result.errors.length - 10} more
+                    {t("adminManage.backup.andMore", { count: result.errors.length - 10 })}
                   </li>
                 )}
               </ul>

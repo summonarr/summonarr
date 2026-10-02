@@ -23,9 +23,10 @@ import { withBasePath } from "@/lib/base-path";
 import { NotificationsModal } from "./user-modals/notifications-modal";
 import { PermissionsModal } from "./user-modals/permissions-modal";
 import { SessionsModal } from "./user-modals/sessions-modal";
-import { roleLabel, type NamedInstance, type RestrictedMediaInstance, type User } from "./user-modals/shared";
+import { roleLabelKey, type NamedInstance, type RestrictedMediaInstance, type User } from "./user-modals/shared";
 import { WatchGradeChip } from "./watch-grade";
 import { hasWatchGradeSignal } from "@/lib/watch-grade";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 export type { NamedInstance, RestrictedMediaInstance } from "./user-modals/shared";
 
@@ -81,12 +82,14 @@ interface ActionsMenuProps {
   onDisable: () => void;
   onReactivate: () => void;
   onPurge: () => void;
+  onResetMfa: () => void;
   has4k?: boolean;
   namedInstances?: NamedInstance[];
   mediaInstances?: RestrictedMediaInstance[];
 }
 
-function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, namedInstances, mediaInstances }: ActionsMenuProps) {
+function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, onResetMfa, has4k, namedInstances, mediaInstances }: ActionsMenuProps) {
+  const t = useT();
   const [open, setOpen]             = useState(false);
   const [notifOpen, setNotifOpen]   = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
@@ -150,7 +153,7 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, name
       <button
         ref={triggerRef}
         onClick={() => setOpen((v) => !v)}
-        aria-label="User actions"
+        aria-label={t("adminManage.users.actions")}
         aria-haspopup="true"
         aria-expanded={open}
         className="h-8 w-8 flex items-center justify-center rounded-md border border-zinc-700 text-zinc-400 hover:text-zinc-100 hover:border-zinc-500 transition-colors"
@@ -161,22 +164,22 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, name
       {open && (
         <div ref={menuRef} className="absolute right-0 top-9 z-50 w-44 rounded-lg bg-zinc-900 border border-zinc-800 shadow-xl p-1">
           <p className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-            Set role
+            {t("adminManage.users.setRole")}
           </p>
           {u.role !== "ADMIN" && item(
             () => onPatch("ADMIN", { role: "ADMIN" }),
             <ShieldCheck className="w-3.5 h-3.5 text-indigo-400 shrink-0" />,
-            "Admin",
+            t(roleLabelKey.ADMIN),
           )}
           {u.role !== "ISSUE_ADMIN" && item(
             () => onPatch("ISSUE_ADMIN", { role: "ISSUE_ADMIN" }),
             <ShieldAlert className="w-3.5 h-3.5 text-amber-400 shrink-0" />,
-            "Issue Admin",
+            t(roleLabelKey.ISSUE_ADMIN),
           )}
           {u.role !== "USER" && item(
             () => onPatch("USER", { role: "USER" }),
             <ShieldOff className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
-            "User",
+            t(roleLabelKey.USER),
           )}
 
           <div className="my-1 border-t border-zinc-800" />
@@ -184,7 +187,7 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, name
           {item(
             () => setPermOpen(true),
             <Zap className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
-            "Permissions & Quota",
+            t("adminManage.users.menu.permissions"),
           )}
 
           {adminAssignsServer(u.source) && (
@@ -194,17 +197,17 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, name
               {u.mediaServer === null && (
                 <>
                   <p className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-                    Server access
+                    {t("adminManage.users.menu.serverAccess")}
                   </p>
                   {item(
                     () => onPatch("mediaServer", { mediaServer: "plex" }),
                     <Server className="w-3.5 h-3.5 text-yellow-400 shrink-0" />,
-                    "Assign Plex",
+                    t("adminManage.users.menu.assignPlex"),
                   )}
                   {item(
                     () => onPatch("mediaServer", { mediaServer: "jellyfin" }),
                     <Server className="w-3.5 h-3.5 text-purple-400 shrink-0" />,
-                    "Assign Jellyfin",
+                    t("adminManage.users.menu.assignJellyfin"),
                   )}
                 </>
               )}
@@ -212,7 +215,7 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, name
               {u.mediaServer !== null && item(
                 () => onPatch("mediaServer", { mediaServer: null }),
                 <Server className="w-3.5 h-3.5 text-zinc-500 shrink-0" />,
-                "Remove server access",
+                t("adminManage.users.menu.removeServer"),
               )}
             </>
           )}
@@ -222,12 +225,19 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, name
           {item(
             () => setNotifOpen(true),
             <Bell className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
-            "Notifications",
+            t("adminManage.users.menu.notifications"),
           )}
           {item(
             () => setSessionsOpen(true),
             <KeyRound className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
-            "Sessions",
+            t("adminManage.users.menu.sessions"),
+          )}
+          {/* Lost phone / lost security key: removes every second factor and
+              recovery code and signs the account out everywhere. */}
+          {u.mfaEnabled && !u.purged && item(
+            onResetMfa,
+            <ShieldOff className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
+            t("adminManage.users.menu.resetMfa"),
           )}
 
           <div className="my-1 border-t border-zinc-800" />
@@ -236,13 +246,13 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, has4k, name
               scrubbed, and the user's watch history keeps being attributed) and
               then purge (irreversible PII scrub). A purged row can't be
               re-enabled, so it gets neither action. */}
-          {!u.disabled && item(onDisable, <UserX className="w-3.5 h-3.5 shrink-0" />, "Disable account", true)}
+          {!u.disabled && item(onDisable, <UserX className="w-3.5 h-3.5 shrink-0" />, t("adminManage.users.menu.disable"), true)}
           {u.disabled && !u.purged && item(
             onReactivate,
             <UserCheck className="w-3.5 h-3.5 text-green-400 shrink-0" />,
-            "Re-enable account",
+            t("adminManage.users.menu.reenable"),
           )}
-          {u.disabled && !u.purged && item(onPurge, <Trash2 className="w-3.5 h-3.5 shrink-0" />, "Purge personal data", true)}
+          {u.disabled && !u.purged && item(onPurge, <Trash2 className="w-3.5 h-3.5 shrink-0" />, t("adminManage.users.menu.purge"), true)}
         </div>
       )}
 
@@ -262,8 +272,10 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
   const [error, setError] = useState<{ id: string; message: string } | null>(null);
   // Inline confirm state, keyed by user id. "disable" is reversible; "purge"
   // is not, so they confirm separately and never share a button.
-  const [confirming, setConfirming] = useState<{ id: string; kind: "disable" | "purge" } | null>(null);
+  const [confirming, setConfirming] = useState<{ id: string; kind: "disable" | "purge" | "resetMfa" } | null>(null);
   const mounted = useHasMounted();
+  const t = useT();
+  const locale = useLocale();
 
   async function patch(id: string, key: string, body: object) {
     setBusy(id + key);
@@ -276,12 +288,12 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
       });
       const data = (await res.json().catch(() => null)) as { error?: string } | null;
       if (!res.ok || data?.error) {
-        setError({ id, message: data?.error ?? `Request failed (${res.status})` });
+        setError({ id, message: data?.error ?? t("adminManage.users.error.requestFailed", { status: res.status }) });
         return;
       }
       router.refresh();
     } catch {
-      setError({ id, message: "Network error — please try again" });
+      setError({ id, message: t("adminManage.users.error.network") });
     } finally {
       setBusy(null);
     }
@@ -290,26 +302,30 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
   // The three account-lifecycle actions. DELETE disables (reversible, nothing
   // scrubbed); /reactivate turns it back on; /purge is the irreversible scrub and
   // is only offered for an already-disabled account.
-  async function lifecycle(id: string, action: "disable" | "reactivate" | "purge") {
+  // resetMfa (DELETE …/mfa) rides the same plumbing: it is destructive for the
+  // target's sign-in setup, so it gets the same inline confirm.
+  async function lifecycle(id: string, action: "disable" | "reactivate" | "purge" | "resetMfa") {
     setConfirming(null);
     setBusy(id + action);
     setError(null);
     const path =
       action === "disable"
         ? `/api/admin/users/${id}`
-        : `/api/admin/users/${id}/${action}`;
+        : action === "resetMfa"
+          ? `/api/admin/users/${id}/mfa`
+          : `/api/admin/users/${id}/${action}`;
     try {
       const res = await fetch(withBasePath(path), {
-        method: action === "disable" ? "DELETE" : "POST",
+        method: action === "disable" || action === "resetMfa" ? "DELETE" : "POST",
       });
       const data = (await res.json().catch(() => null)) as { error?: string } | null;
       if (!res.ok || data?.error) {
-        setError({ id, message: data?.error ?? `Request failed (${res.status})` });
+        setError({ id, message: data?.error ?? t("adminManage.users.error.requestFailed", { status: res.status }) });
         return;
       }
       router.refresh();
     } catch {
-      setError({ id, message: "Network error — please try again" });
+      setError({ id, message: t("adminManage.users.error.network") });
     } finally {
       setBusy(null);
     }
@@ -380,7 +396,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                     className="font-medium"
                     style={{ fontSize: 10, color: "var(--ds-accent-text)" }}
                   >
-                    (you)
+                    {t("adminManage.users.you")}
                   </span>
                 )}
               </div>
@@ -394,12 +410,11 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                 }}
               >
                 <span>
-                  Joined {mounted ? new Date(u.createdAt).toLocaleDateString() : ""}
+                  {t("adminManage.users.joined", { date: mounted ? new Date(u.createdAt).toLocaleDateString(locale) : "" })}
                 </span>
                 <span>·</span>
                 <span>
-                  {u._count.requests} request
-                  {u._count.requests !== 1 ? "s" : ""}
+                  {t("adminManage.users.requests", { count: u._count.requests })}
                 </span>
                 {hasWatchGradeSignal(u.watchGrade) && (
                   <>
@@ -411,7 +426,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                   <>
                     <span>·</span>
                     <span style={{ color: "var(--ds-accent-text)" }}>
-                      Discord linked
+                      {t("adminManage.users.discordLinked")}
                     </span>
                   </>
                 )}
@@ -419,27 +434,27 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                   <>
                     <span>·</span>
                     <span style={{ color: "var(--ds-success)" }}>
-                      Auto-approve
+                      {t("adminManage.users.autoApprove")}
                     </span>
                   </>
                 )}
                 {showNoQuota && (
                   <>
                     <span>·</span>
-                    <span style={{ color: "var(--ds-info)" }}>No quota</span>
+                    <span style={{ color: "var(--ds-info)" }}>{t("adminManage.users.noQuota")}</span>
                   </>
                 )}
                 {u.mediaServer === "plex" && adminAssignsServer(u.source) && (
                   <>
                     <span>·</span>
-                    <span style={{ color: "var(--ds-plex-text)" }}>Plex access</span>
+                    <span style={{ color: "var(--ds-plex-text)" }}>{t("adminManage.users.plexAccess")}</span>
                   </>
                 )}
                 {u.mediaServer === "jellyfin" && adminAssignsServer(u.source) && (
                   <>
                     <span>·</span>
                     <span style={{ color: "var(--ds-jellyfin-text)" }}>
-                      Jellyfin access
+                      {t("adminManage.users.jellyfinAccess")}
                     </span>
                   </>
                 )}
@@ -453,23 +468,23 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
               <Badge
                 className={`border text-[10px] px-1.5 h-5 ${sourceStyles[u.source]}`}
               >
-                {u.source}
+                {t(`adminManage.users.source.${u.source}`)}
               </Badge>
               <Badge
                 className={`border text-[10px] px-1.5 h-5 ${roleStyles[u.role]}`}
               >
-                {roleLabel[u.role]}
+                {t(roleLabelKey[u.role])}
               </Badge>
               {u.disabled && (
                 <Badge
                   className="border text-[10px] px-1.5 h-5 border-red-500/30 bg-red-500/10 text-red-400"
                   title={
                     u.purged
-                      ? "Personal data was purged — this account can't be re-enabled"
-                      : "Sign-in is blocked. Data is intact and an admin can re-enable it."
+                      ? t("adminManage.users.purgedTitle")
+                      : t("adminManage.users.disabledTitle")
                   }
                 >
-                  {u.purged ? "purged" : "disabled"}
+                  {u.purged ? t("adminManage.users.purged") : t("adminManage.users.disabled")}
                 </Badge>
               )}
             </div>
@@ -492,26 +507,30 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                   type="button"
                   aria-label={
                     confirming.kind === "disable"
-                      ? `Confirm disabling ${displayName}`
-                      : `Confirm permanently purging ${displayName}'s personal data`
+                      ? t("adminManage.users.confirm.disableAria", { name: displayName })
+                      : confirming.kind === "resetMfa"
+                        ? t("adminManage.users.confirm.resetMfaAria", { name: displayName })
+                        : t("adminManage.users.confirm.purgeAria", { name: displayName })
                   }
                   onClick={() => lifecycle(u.id, confirming.kind)}
                   autoFocus
                   className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
                 >
                   {confirming.kind === "disable" ? (
-                    <><UserX className="w-3.5 h-3.5" />Disable</>
+                    <><UserX className="w-3.5 h-3.5" />{t("adminManage.users.confirm.disable")}</>
+                  ) : confirming.kind === "resetMfa" ? (
+                    <><ShieldOff className="w-3.5 h-3.5" />{t("adminManage.users.confirm.resetMfa")}</>
                   ) : (
-                    <><Trash2 className="w-3.5 h-3.5" />Purge data</>
+                    <><Trash2 className="w-3.5 h-3.5" />{t("adminManage.users.confirm.purge")}</>
                   )}
                 </button>
                 <button
                   type="button"
-                  aria-label="Cancel"
+                  aria-label={t("adminManage.common.cancel")}
                   onClick={() => setConfirming(null)}
                   className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
                 >
-                  Cancel
+                  {t("adminManage.common.cancel")}
                 </button>
               </div>
             ) : (
@@ -521,6 +540,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                 onDisable={() => setConfirming({ id: u.id, kind: "disable" })}
                 onReactivate={() => lifecycle(u.id, "reactivate")}
                 onPurge={() => setConfirming({ id: u.id, kind: "purge" })}
+                onResetMfa={() => setConfirming({ id: u.id, kind: "resetMfa" })}
                 has4k={has4k}
                 namedInstances={namedInstances}
                 mediaInstances={mediaInstances}

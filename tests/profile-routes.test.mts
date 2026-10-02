@@ -215,7 +215,7 @@ shadowPrismaModel(prisma, "setting", {
 
 // logAudit is void-fired (guardrail 26) — a no-op create keeps its floated
 // promise from touching a real DB.
-shadowPrismaModel(prisma, "auditLog", { create: async () => ({}) });
+shadowPrismaModel(prisma, "auditLog", { create: async (a: unknown) => { rec("auditLog.create", a); return {}; } });
 
 // notification-email verification-token writes.
 const verificationTokenModel = {
@@ -259,8 +259,12 @@ const txObj = {
   $executeRawUnsafe: async () => 0,
   $executeRaw: async () => 1,
 };
+// Runs at the top of a CALLBACK-form tx, before its first read — lets a test land
+// a concurrent write "inside" the verifyPassword window.
+let beforeTxCallback: (() => void) | null = null;
 shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
   txCalls++;
+  if (!Array.isArray(arg) && beforeTxCallback) beforeTxCallback();
   if (Array.isArray(arg)) return Promise.all(arg);
   return (arg as (tx: typeof txObj) => Promise<unknown>)(txObj);
 });
@@ -364,6 +368,7 @@ function bodyOr(value: unknown, raw?: string): string | undefined {
 // Routes under test (imported AFTER every stub is in place).
 const { PATCH: passwordPATCH } = await import("../src/app/api/profile/password/route.ts");
 const { GET: notificationsGET, PATCH: notificationsPATCH } = await import("../src/app/api/profile/notifications/route.ts");
+const { PATCH: localePATCH } = await import("../src/app/api/profile/locale/route.ts");
 const { POST: notifEmailPOST } = await import("../src/app/api/profile/notification-email/route.ts");
 const { DELETE: profileDELETE } = await import("../src/app/api/profile/route.ts");
 
@@ -452,6 +457,8 @@ test("password change with the CORRECT current password re-hashes, stamps the in
   assert.ok(changedAt instanceof Date && revokedAt instanceof Date, "both invalidation cutoffs must be stamped");
   assert.ok(changedAt.getTime() >= before && changedAt.getTime() <= Date.now(), "passwordChangedAt must be ~now");
   assert.equal(changedAt.getTime(), revokedAt.getTime(), "both cutoffs are stamped from the same instant");
+  assert.equal(data.calendarTokenHash, null, "a password change revokes the calendar feed URL");
+  assert.equal(data.calendarTokenCreatedAt, null);
 
   // Every device session removed, and the caller marked force-revalidate so the
   // dbCheckedAt fast-path window closes immediately on the issuing replica.
@@ -743,6 +750,36 @@ test("self-delete SKIPS the password step-up for an SSO account (session is the 
   assert.deepEqual(Object.keys(passwordUpdateData()).sort(), ["deactivatedAt", "sessionsRevokedAt"]);
 });
 
+test("self-delete racing an admin removal writes NO self-delete audit row when the in-tx re-read finds the row already disabled", async () => {
+  const { userId, token } = await mintSession({ provider: "jellyfin", passwordHash: null });
+  // The admin's deactivate commits after the handler's first read but before its tx.
+  beforeTxCallback = () => { usersById.get(userId)!.deactivatedAt = new Date(); };
+  try {
+    const res = await deleteProfile(token);
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true });
+  } finally {
+    beforeTxCallback = null;
+  }
+  await new Promise((r) => setImmediate(r)); // let a void-fired logAudit land, if any
+  assert.equal(opsOf("user.update").length, 0, "the already-disabled row must not be re-deactivated");
+  assert.equal(
+    opsOf("auditLog.create").filter((o) => JSON.stringify(o.args).includes("self-delete")).length,
+    0,
+    "a self-delete that changed nothing must not be audited as one",
+  );
+});
+
+test("a self-delete that DID disable the row still writes its USER_DEACTIVATE audit", async () => {
+  const { token } = await mintSession({ provider: "jellyfin", passwordHash: null });
+  assert.equal((await deleteProfile(token)).status, 200);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(
+    opsOf("auditLog.create").filter((o) => JSON.stringify(o.args).includes("self-delete")).length,
+    1,
+  );
+});
+
 // ═══ shared: every profile route requires an authenticated session ══════════
 
 test("all four profile routes reject an unauthenticated request with 401 (withAuth), handler body never runs", async () => {
@@ -766,4 +803,38 @@ test("all four profile routes reject an unauthenticated request with 401 (withAu
   assert.equal(ops.length, 0);
   assert.equal(txCalls, 0);
   assert.equal(fetchCalls.length, 0);
+});
+
+
+// ── PATCH /api/profile/locale ───────────────────────────────────────────────
+// The stored language is what emails / push / Discord DMs are written in, so
+// it must only ever hold a supported locale, and only for the caller.
+
+async function patchLocale(token: string | null, body: unknown): Promise<Response> {
+  const req = makeReq("/api/profile/locale", { method: "PATCH", token, body: bodyOr(body) });
+  return inScope(() => localePATCH(req, undefined));
+}
+
+test("locale PATCH stores a supported locale on the caller's own row", async () => {
+  const { userId, token } = await mintSession();
+  const res = await patchLocale(token, { locale: "es" });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { locale: "es" });
+  const [up] = opsOf("user.update").map((o) => o.args as { where: { id: string }; data: Record<string, unknown> });
+  assert.deepEqual(up, { where: { id: userId }, data: { locale: "es" } });
+});
+
+test("locale PATCH refuses an unsupported or malformed locale and writes nothing", async () => {
+  const { token } = await mintSession();
+  for (const body of [{ locale: "fr" }, { locale: "ES" }, { locale: 1 }, {}]) {
+    const res = await patchLocale(token, body);
+    assert.equal(res.status, 400, JSON.stringify(body));
+  }
+  assert.equal(opsOf("user.update").length, 0);
+});
+
+test("locale PATCH needs a session", async () => {
+  const res = await patchLocale(null, { locale: "es" });
+  assert.equal(res.status, 401);
+  assert.equal(opsOf("user.update").length, 0);
 });

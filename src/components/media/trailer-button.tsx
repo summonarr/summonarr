@@ -2,6 +2,7 @@
 
 import { Play } from "@/components/icons";
 import { safeExternalHref } from "@/lib/safe-url";
+import { useT } from "@/components/i18n/i18n-provider";
 import { DETAIL_ACTION_CLASS, detailActionStyle } from "./detail-action-button";
 
 interface TrailerButtonProps {
@@ -12,6 +13,7 @@ interface TrailerButtonProps {
 // "Watch Trailer" link — prefers a YouTube key, else falls back to a
 // sanitized external URL; renders nothing when neither is present.
 export function TrailerButton({ trailerKey, trailerUrl }: TrailerButtonProps) {
+  const t = useT();
   const href = trailerKey
     ? `https://www.youtube.com/watch?v=${trailerKey}`
     : safeExternalHref(trailerUrl);
@@ -25,7 +27,7 @@ export function TrailerButton({ trailerKey, trailerUrl }: TrailerButtonProps) {
       style={detailActionStyle("secondary")}
     >
       <Play style={{ width: 14, height: 14 }} />
-      Watch Trailer
+      {t("detail.watchTrailer")}
     </a>
   );
 }

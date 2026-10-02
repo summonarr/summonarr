@@ -5,19 +5,21 @@ import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const GET = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   if (!checkRateLimit(`search:${session.user.id}`, 30, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many searches — try again in a minute" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.search.rateLimited") }, { status: 429 });
   }
 
   const query = req.nextUrl.searchParams.get("q") ?? "";
   const type = req.nextUrl.searchParams.get("type");
   if (!query.trim()) return NextResponse.json([]);
-  if (query.length > 200) return NextResponse.json({ error: "Query too long" }, { status: 400 });
+  if (query.length > 200) return NextResponse.json({ error: t("apiUser.search.queryTooLong") }, { status: 400 });
 
   try {
     const allResults = await searchMulti(query);
@@ -35,6 +37,6 @@ export const GET = withAuth(async (req, _ctx, session) => {
     return NextResponse.json(enriched);
   } catch (err) {
     console.error("[search] TMDB search error:", err);
-    return NextResponse.json({ error: "Search failed" }, { status: 500 });
+    return NextResponse.json({ error: t("apiUser.search.failed") }, { status: 500 });
   }
 });

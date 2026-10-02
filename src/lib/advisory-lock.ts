@@ -7,6 +7,9 @@ export const WARM_MDBLIST_LOCK_ID = 2005;
 export const TRASH_SYNC_LOCK_ID = 2010;
 export const WARM_RECOMMENDATIONS_LOCK_ID = 2011;
 export const WARM_LIBRARY_LOCK_ID = 2012;
+// Deliberately not the next free id (2013): ids are claimed by parallel branches,
+// and a clash makes two unrelated crons serialize against each other.
+export const PLEX_WATCHLIST_LOCK_ID = 2021;
 
 // 30 minutes — generous enough for legitimate full-library syncs but bounds the worst-case lock hold.
 const DEFAULT_WORK_TIMEOUT_MS = 30 * 60 * 1000;

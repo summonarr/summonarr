@@ -19,6 +19,7 @@ import {
   Sparkline,
   sourceDotColor,
 } from "@/components/admin/activity-ui";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 /* ── KPI strip ────────────────────────────────────────────────── */
 
@@ -191,6 +192,7 @@ export function AnalyticsRow({
   playsByDayLabels: string[];
   heatmapInsight: string;
 }) {
+  const t = useT();
   return (
     <section style={{ marginBottom: 22 }}>
       <div
@@ -203,14 +205,14 @@ export function AnalyticsRow({
       >
         <ActivityCard>
           <SectionHeader
-            label={`Plays per day · last ${days}d`}
+            label={t("adminActivity.overview.playsPerDay", { days })}
             sub={peakSub}
           />
           <AreaChart
             data={playsByDay}
             h={160}
             labels={playsByDayLabels}
-            valueSuffix=" plays"
+            valueSuffix={t("adminActivity.common.playsSuffix")}
           />
           <div
             className="ds-mono"
@@ -228,7 +230,7 @@ export function AnalyticsRow({
           </div>
         </ActivityCard>
         <ActivityCard>
-          <SectionHeader label="Day × hour" sub="when watching happens" />
+          <SectionHeader label={t("adminActivity.overview.dayHour")} sub={t("adminActivity.overview.dayHourSub")} />
           <HourHeatmap matrix={heatmapMatrix} detailBase={heatmapDetailBase} />
           <div
             className="ds-mono"
@@ -242,7 +244,7 @@ export function AnalyticsRow({
           </div>
         </ActivityCard>
         <ActivityCard>
-          <SectionHeader label="Stream mix" sub={`last ${days}d`} />
+          <SectionHeader label={t("adminActivity.overview.streamMix")} sub={t("adminActivity.common.lastDays", { days })} />
           <DistributionList rows={streamMix} />
           <hr
             style={{
@@ -251,7 +253,7 @@ export function AnalyticsRow({
               margin: "12px 0",
             }}
           />
-          <SectionHeader label="Media mix" />
+          <SectionHeader label={t("adminActivity.overview.mediaMix")} />
           <DistributionList rows={mediaMix} />
         </ActivityCard>
       </div>
@@ -300,6 +302,7 @@ export function Leaderboards({
   showPosters?: boolean;
   days: number;
 }) {
+  const t = useT();
   const maxHours = Math.max(...users.map((u) => u.hours), 1);
   const maxPlays = Math.max(...rewatched.map((m) => m.plays), 1);
   return (
@@ -310,8 +313,8 @@ export function Leaderboards({
       >
         <ActivityCard>
           <SectionHeader
-            label="Top viewers · watch time"
-            sub={`${users.length} users · ${days}d`}
+            label={t("adminActivity.overview.topViewers")}
+            sub={t("adminActivity.overview.usersDays", { count: users.length, days })}
           />
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {users.map((u, i) => (
@@ -392,7 +395,7 @@ export function Leaderboards({
                     >
                       {u.hours.toFixed(1)}h{" "}
                       <span style={{ color: "var(--ds-fg-subtle)" }}>
-                        · {u.plays} plays
+                        · {t("adminActivity.common.plays", { count: u.plays })}
                       </span>
                     </span>
                   </div>
@@ -420,8 +423,8 @@ export function Leaderboards({
         </ActivityCard>
         <ActivityCard>
           <SectionHeader
-            label="Most rewatched"
-            sub={`library champions · ${days}d`}
+            label={t("adminActivity.overview.mostRewatched")}
+            sub={t("adminActivity.overview.libraryChampions", { days })}
           />
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {rewatched.map((m, i) => (
@@ -514,7 +517,7 @@ export function Leaderboards({
                     >
                       {m.plays}{" "}
                       <span style={{ color: "var(--ds-fg-subtle)" }}>
-                        · {m.viewers} viewers
+                        · {t("adminActivity.common.viewers", { count: m.viewers })}
                       </span>
                     </span>
                   </div>
@@ -556,18 +559,20 @@ export function CalendarSection({
   totalPlays: number;
   children: ReactNode;
 }) {
+  const t = useT();
+  const locale = useLocale();
   return (
     <section style={{ marginBottom: 22 }}>
       <ActivityCard>
         <SectionHeader
-          label="365-day activity"
-          sub={`${activeDays.toLocaleString("en-US")} active days · always the last 365 days, independent of the period filter`}
+          label={t("adminActivity.calendar.title")}
+          sub={t("adminActivity.calendar.sub", { count: activeDays, n: activeDays.toLocaleString(locale) })}
           right={
             <span
               className="ds-mono"
               style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
             >
-              Total {totalPlays.toLocaleString("en-US")} plays
+              {t("adminActivity.calendar.total", { count: totalPlays, n: totalPlays.toLocaleString(locale) })}
             </span>
           }
         />

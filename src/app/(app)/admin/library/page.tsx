@@ -7,8 +7,10 @@ import { WarmCacheButton } from "@/components/admin/warm-cache-button";
 import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
 import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button";
 import { TTL, getCache, setCache } from "@/lib/tmdb-cache";
+import { inferGroupMounts } from "@/lib/bad-matches";
 import { LibraryDiffClient, type DiffItem, type ClientBadMatch } from "@/components/admin/library-diff-client";
 import { EmptyState, PageHeader } from "@/components/ui/design";
+import { getLocale, getTranslator } from "@/lib/i18n/server";
 import { Library } from "@/components/icons";
 import {
   DEFAULT_MEDIA_INSTANCE,
@@ -183,26 +185,6 @@ async function fetchOverviews(
   return map;
 }
 
-function commonPathPrefix(paths: (string | null)[]): string {
-  const valid = paths.filter((p): p is string => p !== null && p.length > 0);
-  if (valid.length === 0) return "";
-
-  const segmented = valid.map((p) => p.replace(/\\/g, "/").split("/").filter(Boolean));
-  const first = segmented[0];
-  let commonLen = first.length - 1;
-
-  for (const segs of segmented.slice(1)) {
-    let i = 0;
-    while (i < commonLen && i < segs.length - 1 && first[i] === segs[i]) i++;
-    commonLen = i;
-    if (commonLen === 0) return "";
-  }
-
-  if (commonLen === 0) return "";
-  const sep = valid[0].startsWith("/") ? "/" : "";
-  return sep + first.slice(0, commonLen).join("/") + "/";
-}
-
 function stripMountPoint(filePath: string | null, mountPoint: string): string | null {
   if (!filePath) return null;
   const normalised = filePath.replace(/\\/g, "/");
@@ -239,18 +221,19 @@ function mountKey(row: { serverInstance: string; mediaType: "MOVIE" | "TV" }): s
   return `${row.serverInstance} ${row.mediaType}`;
 }
 
+// One-path groups must NOT fall back to commonPathPrefix (it returns that
+// file's own parent dir, shrinking the key to a bare filename) — the shared
+// inferGroupMounts handles them exactly as the native bad-match list does.
 function mountsByInstance(rows: { serverInstance: string; mediaType: "MOVIE" | "TV"; filePath: string | null }[]): Map<string, string> {
-  const paths = new Map<string, (string | null)[]>();
+  const groups = new Map<string, { filePath: string | null; mediaType: "MOVIE" | "TV" }[]>();
   for (const r of rows) {
     if (!r.filePath) continue;
     const k = mountKey(r);
-    const g = paths.get(k);
-    if (g) g.push(r.filePath);
-    else paths.set(k, [r.filePath]);
+    const g = groups.get(k);
+    if (g) g.push(r);
+    else groups.set(k, [r]);
   }
-  const out = new Map<string, string>();
-  for (const [key, group] of paths) out.set(key, commonPathPrefix(group));
-  return out;
+  return inferGroupMounts(groups);
 }
 
 // The Movie/Tv strip-prefix Setting keys for every NAMED instance present in a
@@ -381,6 +364,7 @@ export default async function LibraryDiffPage({
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const { type, server: highlightServer, tmdbId: highlightTmdbIdStr, mediaType: highlightMediaType } = await searchParams;
+  const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
   const activeType = type === "movie" ? "MOVIE" : type === "tv" ? "TV" : null;
   const highlightTmdbId = highlightTmdbIdStr ? parseInt(highlightTmdbIdStr, 10) : null;
   const highlightKey = highlightTmdbId && highlightMediaType
@@ -393,7 +377,7 @@ export default async function LibraryDiffPage({
   // overview is omitted here on purpose: it is the heaviest column and is only
   // rendered for the difference sets, so pulling it for up to 50k rows per render
   // is wasted. fetchOverviews backfills it for just the displayed rows below.
-  const [plexItems, jellyfinItems, prefixRows, freshMovieCount, freshTvCount] = await Promise.all([
+  const [plexItems, jellyfinItems, prefixRows] = await Promise.all([
     prisma.plexLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, plexRatingKey: true, title: true, year: true, serverInstance: true }, take: LIBRARY_ITEM_CAP }),
     prisma.jellyfinLibraryItem.findMany({ select: { tmdbId: true, mediaType: true, filePath: true, jellyfinItemId: true, title: true, year: true, serverInstance: true }, take: LIBRARY_ITEM_CAP }),
     // The four connection keys ride along on the existing query so the Re-sync
@@ -405,12 +389,6 @@ export default async function LibraryDiffPage({
       "plexMoviePathStripPrefix", "plexTvPathStripPrefix", "jellyfinMoviePathStripPrefix", "jellyfinTvPathStripPrefix",
       "plexServerUrl", "plexAdminToken", "jellyfinUrl", "jellyfinApiKey",
     ] } } }),
-    prisma.tmdbCache.count({
-      where: { key: { startsWith: "movie:", endsWith: ":details" }, expiresAt: { gt: threshold } },
-    }),
-    prisma.tmdbCache.count({
-      where: { key: { startsWith: "tv:", endsWith: ":details" }, expiresAt: { gt: threshold } },
-    }),
   ]);
   const libraryCapped = plexItems.length >= LIBRARY_ITEM_CAP || jellyfinItems.length >= LIBRARY_ITEM_CAP;
 
@@ -472,13 +450,31 @@ export default async function LibraryDiffPage({
   const plexStripFor     = stripResolver(prefixCfg, plexSettingKey);
   const jellyfinStripFor = stripResolver(prefixCfg, jellyfinSettingKey);
 
-  const uniqueLibraryCount = (() => {
+  // The distinct library titles as their TMDB details cache keys. Freshness is
+  // counted over exactly these keys: an unscoped `movie:*:details` count also
+  // takes in every title anyone browsed, requested or was recommended, which
+  // routinely exceeds the library and clamped uncachedCount to 0 — the Warm
+  // Cache button then read "Cache warm" over thousands of uncached titles.
+  const libraryDetailKeys = (() => {
     const seen = new Set<string>();
-    for (const i of [...plexItems, ...jellyfinItems]) seen.add(`${i.tmdbId}:${i.mediaType}`);
-    return seen.size;
+    for (const i of [...plexItems, ...jellyfinItems]) {
+      seen.add(i.mediaType === "MOVIE" ? `movie:${i.tmdbId}:details` : `tv:${i.tmdbId}:details`);
+    }
+    return [...seen];
   })();
+  const uniqueLibraryCount = libraryDetailKeys.length;
 
-  const uncachedCount = Math.max(0, uniqueLibraryCount - (freshMovieCount + freshTvCount));
+  // Chunked so a capped library (up to 50k keys) stays well under Postgres's
+  // bind-parameter limit; sequential to stay off the small connection pool.
+  const FRESH_COUNT_CHUNK = 10_000;
+  let freshLibraryCount = 0;
+  for (let i = 0; i < libraryDetailKeys.length; i += FRESH_COUNT_CHUNK) {
+    freshLibraryCount += await prisma.tmdbCache.count({
+      where: { key: { in: libraryDetailKeys.slice(i, i + FRESH_COUNT_CHUNK) }, expiresAt: { gt: threshold } },
+    });
+  }
+
+  const uncachedCount = Math.max(0, uniqueLibraryCount - freshLibraryCount);
 
   const jellyfinSet = new Set(jellyfinItems.map((i) => `${i.tmdbId}:${i.mediaType}`));
   const plexSet     = new Set(plexItems.map((i)     => `${i.tmdbId}:${i.mediaType}`));
@@ -711,18 +707,18 @@ export default async function LibraryDiffPage({
   // makes one row exactly one title. (The type tabs below stay row-based on
   // purpose — they label the cards actually rendered, one per server.)
   const stats = [
-    { label: "Plex Library",     value: plexSet.size,     color: "var(--ds-plex-text)" },
-    { label: "Jellyfin Library", value: jellyfinSet.size, color: "var(--ds-jellyfin-text)" },
-    { label: "In Sync",          value: inSyncCount,      color: "var(--ds-success)"  },
-    { label: "Differences",      value: (plexSet.size - inSyncCount) + (jellyfinSet.size - inSyncCount), color: "var(--ds-danger)" },
-    { label: "Bad Matches",      value: allRawBadMatches.length, color: "var(--ds-warning)" },
+    { label: t("adminManage.library.stat.plex"),     value: plexSet.size,     color: "var(--ds-plex-text)" },
+    { label: t("adminManage.library.stat.jellyfin"), value: jellyfinSet.size, color: "var(--ds-jellyfin-text)" },
+    { label: t("adminManage.library.stat.inSync"),          value: inSyncCount,      color: "var(--ds-success)"  },
+    { label: t("adminManage.library.stat.differences"),      value: (plexSet.size - inSyncCount) + (jellyfinSet.size - inSyncCount), color: "var(--ds-danger)" },
+    { label: t("adminManage.library.stat.badMatches"),      value: allRawBadMatches.length, color: "var(--ds-warning)" },
   ];
 
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Library Diff"
-        subtitle="Media present on one server but missing from the other."
+        title={t("adminManage.library.title")}
+        subtitle={t("adminManage.library.subtitle")}
         right={
           <div className="flex items-center gap-2 flex-wrap">
             <ResyncLibraryButton plexConfigured={plexSyncConfigured} jellyfinConfigured={jellyfinSyncConfigured} />
@@ -786,8 +782,7 @@ export default async function LibraryDiffPage({
             fontSize: 12.5,
           }}
         >
-          Library exceeds {LIBRARY_ITEM_CAP.toLocaleString()} items — results are
-          truncated and the diff may be incomplete.
+          {t("adminManage.library.capped", { cap: LIBRARY_ITEM_CAP.toLocaleString(locale) })}
         </div>
       )}
 
@@ -796,11 +791,11 @@ export default async function LibraryDiffPage({
           icon={Library}
           title={
             !plexConfigured && !jellyfinConfigured
-              ? "Neither Plex nor Jellyfin has been synced yet"
-              : `Only ${plexConfigured ? "Plex" : "Jellyfin"} has been synced`
+              ? t("adminManage.library.oneSided.neither")
+              : t("adminManage.library.oneSided.only", { server: plexConfigured ? "Plex" : "Jellyfin" })
           }
-          description="A library diff needs both servers. Run a sync first."
-          cta={{ href: "/admin", label: "Run a sync" }}
+          description={t("adminManage.library.oneSided.description")}
+          cta={{ href: "/admin", label: t("adminManage.library.oneSided.cta") }}
         />
       ) : (
         <>
@@ -816,17 +811,17 @@ export default async function LibraryDiffPage({
             }}
           >
             <TypeTab
-              label={`All (${rawOnlyPlex.length + rawOnlyJellyfin.length})`}
+              label={t("adminManage.library.tab.all", { count: rawOnlyPlex.length + rawOnlyJellyfin.length })}
               href="/admin/library"
               active={!activeType}
             />
             <TypeTab
-              label={`Movies (${rawOnlyPlex.filter((i) => i.mediaType === "MOVIE").length + rawOnlyJellyfin.filter((i) => i.mediaType === "MOVIE").length})`}
+              label={t("adminManage.library.tab.movies", { count: rawOnlyPlex.filter((i) => i.mediaType === "MOVIE").length + rawOnlyJellyfin.filter((i) => i.mediaType === "MOVIE").length })}
               href="/admin/library?type=movie"
               active={activeType === "MOVIE"}
             />
             <TypeTab
-              label={`TV Shows (${rawOnlyPlex.filter((i) => i.mediaType === "TV").length + rawOnlyJellyfin.filter((i) => i.mediaType === "TV").length})`}
+              label={t("adminManage.library.tab.tv", { count: rawOnlyPlex.filter((i) => i.mediaType === "TV").length + rawOnlyJellyfin.filter((i) => i.mediaType === "TV").length })}
               href="/admin/library?type=tv"
               active={activeType === "TV"}
             />

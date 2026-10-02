@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { ChevronLeft, ChevronRight } from "@/components/icons";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface PaginationBarProps {
   currentPage: number;
@@ -11,6 +12,7 @@ interface PaginationBarProps {
 
 export function PaginationBar({ currentPage, totalPages }: PaginationBarProps) {
   const searchParams = useSearchParams();
+  const t = useT();
 
   function buildHref(page: number) {
     const params = new URLSearchParams(searchParams.toString());
@@ -43,7 +45,7 @@ export function PaginationBar({ currentPage, totalPages }: PaginationBarProps) {
       className="flex flex-wrap items-center justify-center mt-8"
       style={{ gap: 4 }}
     >
-      <PagerButton href={hasPrev ? buildHref(currentPage - 1) : undefined} ariaLabel="Previous page">
+      <PagerButton href={hasPrev ? buildHref(currentPage - 1) : undefined} ariaLabel={t("media.pager.previous")}>
         <ChevronLeft style={{ width: 14, height: 14 }} />
       </PagerButton>
 
@@ -99,7 +101,7 @@ export function PaginationBar({ currentPage, totalPages }: PaginationBarProps) {
         </>
       )}
 
-      <PagerButton href={hasNext ? buildHref(currentPage + 1) : undefined} ariaLabel="Next page">
+      <PagerButton href={hasNext ? buildHref(currentPage + 1) : undefined} ariaLabel={t("media.pager.next")}>
         <ChevronRight style={{ width: 14, height: 14 }} />
       </PagerButton>
     </div>

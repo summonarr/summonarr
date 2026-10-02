@@ -590,7 +590,7 @@ export async function processBackupImport(
   const currentTekFingerprint = tokenEncryptionKeyFingerprint();
   if (receivedTekFingerprint && currentTekFingerprint && receivedTekFingerprint !== currentTekFingerprint) {
     warnings.push(
-      `This backup's encrypted secrets (API keys, tokens, SMTP password) were encrypted with a different TOKEN_ENCRYPTION_KEY than this server uses — they will restore but won't be decryptable. Re-enter them in Settings after the restore.`,
+      `This backup's encrypted secrets (API keys, tokens, SMTP password, two-factor authenticator secrets) were encrypted with a different TOKEN_ENCRYPTION_KEY than this server uses — they will restore but won't be decryptable. Re-enter them in Settings after the restore.`,
     );
   }
 

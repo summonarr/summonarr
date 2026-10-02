@@ -76,9 +76,14 @@ function signBody(timestamp: string, body: string): string {
 
 // ── scripted upstreams ───────────────────────────────────────────────────────
 const fetchCalls: URL[] = [];
-globalThis.fetch = (async (input: RequestInfo | URL) => {
+// Bodies of the Discord webhook edits (editOriginal), for the reply-language tests.
+const discordEdits: Array<{ content?: string }> = [];
+globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   fetchCalls.push(url);
+  if (url.hostname === "discord.com" && url.pathname.includes("/webhooks/") && typeof init?.body === "string") {
+    discordEdits.push(JSON.parse(init.body) as { content?: string });
+  }
   const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { "content-type": "application/json" } });
   if ((url.hostname === "themoviedb.org" || url.hostname.endsWith(".themoviedb.org"))) {
     return json({ page: 1, total_pages: 1, results: [], id: 603, title: "The Matrix" });
@@ -268,6 +273,7 @@ beforeEach(async () => {
   linkTokens = [];
   appUsers = [];
   fetchCalls.length = 0;
+  discordEdits.length = 0;
   warns.length = 0;
   errors.length = 0;
   settings.clear();
@@ -448,6 +454,35 @@ test("a real interaction while DISABLED gets an ephemeral explanation, not an er
   assert.equal(body.type, 4, "type 4 = immediate reply");
   assert.equal(body.data.flags, 64, "flags 64 = ephemeral");
   assert.match(body.data.content, /disabled/i);
+});
+
+// ── reply language ───────────────────────────────────────────────────────────
+
+test("replies follow the invoker's Discord locale (es-ES → Spanish); no locale and no linked choice → English", async () => {
+  settings.set("feature.integration.discord", "false");
+  invalidateFeatureFlagCache();
+  const disabled = await (await post({ ...command("status"), locale: "es-ES" })).json();
+  assert.equal(disabled.data.content, "La integración con Discord está desactivada.");
+  assert.equal(disabled.type, 4, "machine fields are never translated");
+
+  settings.delete("feature.integration.discord");
+  invalidateFeatureFlagCache();
+  await post({ ...command("status"), locale: "es-419" });
+  await waitFor(() => discordEdits.length > 0);
+  assert.equal(discordEdits[0].content, "Todavía no tienes solicitudes.");
+
+  discordEdits.length = 0;
+  await post(command("status")); // no interaction.locale, no linked account
+  await waitFor(() => discordEdits.length > 0);
+  assert.equal(discordEdits[0].content, "You have no requests yet.");
+});
+
+test("with no usable Discord locale, the linked account's stored language is used", async () => {
+  appUsers = [{ id: "u-es", email: "es@example.com", discordId: "123456789012345678", locale: "es" }];
+  await post({ ...command("status"), locale: "fr" }); // unsupported → fall back to the linked user
+  await waitFor(() => discordEdits.length > 0);
+  // The linked user has no requests in this harness.
+  assert.equal(discordEdits[0].content, "Todavía no tienes solicitudes.");
 });
 
 test("a disabled integration runs NO command work", async () => {

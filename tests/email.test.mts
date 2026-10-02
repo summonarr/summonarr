@@ -124,7 +124,7 @@ shadowPrismaModel(prisma, "setting", {
       .map((k) => ({ key: k, value: settings.get(k) as string })),
 });
 
-type UserRow = { email: string; notificationEmail: string | null; role: string; permissions: bigint };
+type UserRow = { email: string; notificationEmail: string | null; role: string; permissions: bigint; locale?: string | null };
 let userRows: UserRow[] = [];
 const userFindManyCalls: Array<{ where?: unknown; select?: unknown }> = [];
 shadowPrismaModel(prisma, "user", {
@@ -262,6 +262,7 @@ test("notifyAdminsNewRequest: MANAGE_REQUESTS bitmask selects recipients; exclus
     notificationEmail: true,
     role: true,
     permissions: true,
+    locale: true, // each admin's mail is written in their own language
   });
 
   // One send per eligible recipient, through the resend wire.
@@ -408,7 +409,7 @@ test("notifyUserRequestAvailableEmail: single send, tmdb deep link, CRLF scrubbe
   const sent = sentEmails()[0];
   assert.equal(sent.to, "user@example.com");
   assert.equal(sent.subject, "Now Available: Dune");
-  assert.ok(sent.html.includes("https://summonarr.example.com/movie/550"), "CTA deep-links to the media page");
+  assert.ok(sent.html.includes('href="https://summonarr.example.com/movie/550"'), "CTA deep-links to the media page");
   assert.equal(userFindManyCalls.length, 0); // user notifiers never query recipients
 
   // Header-injection scrubbing happens caller-side (safeHeader/safeSubject),
@@ -424,6 +425,40 @@ test("notifyUserRequestAvailableEmail: single send, tmdb deep link, CRLF scrubbe
   assert.equal(/[\r\n]/.test(scrubbed.subject), false);
   assert.equal(scrubbed.to, "victim@example.com Bcc: hidden@evil.example");
   assert.equal(scrubbed.subject, "Now Available: Dune X-Injected: 1");
+});
+
+// ── recipient language ──────────────────────────────────────────────────────
+
+test("a recipient with locale 'es' gets a Spanish email; a null locale stays English", async () => {
+  configureResend();
+  await notifyUserRequestAvailableEmail({ toEmail: "es@example.com", title: "Dune", mediaType: "MOVIE", tmdbId: 550, locale: "es" });
+  await notifyUserRequestAvailableEmail({ toEmail: "en@example.com", title: "Dune", mediaType: "MOVIE", tmdbId: 550, locale: null });
+  const [es, en] = sentEmails();
+  assert.equal(es.subject, "Ya disponible: Dune");
+  assert.ok(es.html.includes('<html lang="es">'));
+  assert.ok(es.html.includes("Empezar a ver"), "CTA label translated");
+  assert.ok(es.html.includes("Enviado por"), "footer translated");
+  assert.ok(es.html.includes('href="https://summonarr.example.com/movie/550"'), "links are never translated");
+  assert.equal(en.subject, "Now Available: Dune");
+  assert.ok(en.html.includes('<html lang="en">'));
+  assert.ok(en.html.includes("Start Watching") && en.html.includes("Sent by"));
+});
+
+test("admin fan-out: each admin is mailed in their own language, from the same single recipient query", async () => {
+  configureResend();
+  userRows = [
+    { ...adminUser("es-admin@example.com"), locale: "es" },
+    { ...adminUser("en-admin@example.com"), locale: null },
+    { ...adminUser("bad-admin@example.com"), locale: "xx" }, // unknown → instance default
+  ];
+  await notifyAdminsNewRequest({ title: "Dune", mediaType: "TV", requestedBy: "Paul", note: null });
+  assert.equal(userFindManyCalls.length, 1);
+  const byTo = new Map(sentEmails().map((e) => [e.to, e]));
+  assert.equal(byTo.get("es-admin@example.com")?.subject, "Nueva solicitud (Serie): Dune");
+  assert.ok(byTo.get("es-admin@example.com")?.html.includes("Solicitado por"));
+  assert.equal(byTo.get("en-admin@example.com")?.subject, "New TV Show Request: Dune");
+  assert.equal(byTo.get("bad-admin@example.com")?.subject, "New TV Show Request: Dune");
+  assert.deepEqual(errors, []);
 });
 
 // ── sendTestEmail ───────────────────────────────────────────────────────────

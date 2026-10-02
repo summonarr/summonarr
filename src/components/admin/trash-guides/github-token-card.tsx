@@ -6,8 +6,18 @@ import { Button } from "@/components/ui/button";
 import { CheckCircle, Loader2, XCircle } from "@/components/icons";
 import type { ActionState } from "./types";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
+
+// Splits a translated template on {name} placeholders and drops in nodes.
+function rich(template: string, nodes: Record<string, React.ReactNode>): React.ReactNode[] {
+  return template.split(/(\{\w+\})/).map((part, i) => {
+    const m = /^\{(\w+)\}$/.exec(part);
+    return m && m[1] in nodes ? <span key={i}>{nodes[m[1]]}</span> : part;
+  });
+}
 
 export function GithubTokenCard() {
+  const t = useT();
   const [masked, setMasked] = useState<string>("");
   const [value, setValue] = useState("");
   const [state, setState] = useState<ActionState>("idle");
@@ -47,21 +57,25 @@ export function GithubTokenCard() {
   return (
     <Card className="bg-zinc-900 border-zinc-800 p-6">
       <div className="mb-3">
-        <h2 className="font-semibold text-zinc-100 text-lg">GitHub Token <span className="text-xs font-normal text-zinc-500">(optional)</span></h2>
+        <h2 className="font-semibold text-zinc-100 text-lg">{t("trash.token.title")} <span className="text-xs font-normal text-zinc-500">{t("trash.token.optional")}</span></h2>
         <p className="text-sm text-zinc-500 mt-0.5">
-          GitHub limits unauthenticated API calls to 60/hour — enough for a few refreshes. Paste any{" "}
-          <a href="https://github.com/settings/tokens?type=beta" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline">fine-grained personal access token</a>{" "}
-          (no scopes needed, public-repo read is the default) to raise it to 5 000/hour. Stored encrypted at rest when{" "}
-          <code className="text-zinc-300">TOKEN_ENCRYPTION_KEY</code> is set.
+          {rich(t("trash.token.description"), {
+            link: (
+              <a href="https://github.com/settings/tokens?type=beta" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline">
+                {t("trash.token.linkText")}
+              </a>
+            ),
+            envVar: <code className="text-zinc-300">TOKEN_ENCRYPTION_KEY</code>,
+          })}
         </p>
       </div>
       <div className="flex items-center gap-2">
         <input
           type="password"
-          aria-label="GitHub personal access token"
+          aria-label={t("trash.token.inputAria")}
           value={value}
           onChange={(e) => setValue(e.target.value)}
-          placeholder={masked ? "Replace stored token…" : "ghp_… or github_pat_…"}
+          placeholder={masked ? t("trash.token.replacePlaceholder") : t("trash.token.placeholder")}
           className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-indigo-500 font-mono"
           autoComplete="off"
         />
@@ -71,16 +85,16 @@ export function GithubTokenCard() {
           disabled={!value || state === "running"}
           className="bg-indigo-600 hover:bg-indigo-500 text-[var(--ds-accent-fg)]"
         >
-          {state === "running" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save"}
+          {state === "running" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("trash.common.save")}
         </Button>
         {masked && !value && (
           <span className="text-xs text-zinc-500 inline-flex items-center gap-1.5">
             <CheckCircle className="w-3.5 h-3.5 text-green-400" />
-            Configured
+            {t("trash.token.configured")}
           </span>
         )}
-        {state === "ok"    && <span className="text-xs text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />Saved</span>}
-        {state === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />Save failed</span>}
+        {state === "ok"    && <span className="text-xs text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />{t("trash.common.saved")}</span>}
+        {state === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />{t("trash.common.saveFailed")}</span>}
       </div>
     </Card>
   );

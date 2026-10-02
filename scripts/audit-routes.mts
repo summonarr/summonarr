@@ -74,6 +74,10 @@ const ROUTE_EXCEPTIONS: Array<{ route: string; reason: string }> = [
     route: "/api/profile/notification-email/confirm",
     reason: "public email-verification landing (clicked from email, possibly logged-out); the one-time hashed token in the query IS the credential — pre-auth via isPublicPath in proxy.ts",
   },
+  {
+    route: "/api/calendar/feed/[token]",
+    reason: "public iCal subscription feed — calendar apps send no cookie/header, so the per-user secret in the path IS the credential (SHA-256-hashed at rest, timing-safe compare, IP + token rate limits, 404 for disabled/purged owners) — pre-auth via isPublicPath in proxy.ts",
+  },
 ];
 
 /**
@@ -91,6 +95,7 @@ const PERMISSION_GUARDED_ADMIN_ROUTES: Array<{ route: string; reason: string }> 
   { route: "/api/admin/users/[id]", reason: "user management delegated via withPermission(Permission.MANAGE_USERS)" },
   { route: "/api/admin/users/[id]/reactivate", reason: "user management delegated via withPermission(Permission.MANAGE_USERS); re-enabling an ADMIN target additionally requires Permission.ADMIN in-handler" },
   { route: "/api/admin/users/[id]/purge", reason: "user management delegated via withPermission(Permission.MANAGE_USERS); purging an ADMIN target additionally requires Permission.ADMIN in-handler, and the target must already be disabled" },
+  { route: "/api/admin/users/[id]/mfa", reason: "two-factor reset (lost device) delegated via withPermission(Permission.MANAGE_USERS); resetting an ADMIN target additionally requires Permission.ADMIN in-handler, and the caller's own account is refused (that path must go through the profile step-up)" },
   { route: "/api/admin/users/[id]/watch-grade", reason: "read-only watch grade delegated via withPermission([MANAGE_USERS, MANAGE_REQUESTS]) — the Users page and the request queue both show it" },
 ];
 

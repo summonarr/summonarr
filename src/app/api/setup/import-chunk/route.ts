@@ -14,6 +14,8 @@ import {
   clearSession,
   hasActiveUploadSession,
 } from "@/lib/import-session";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -22,7 +24,7 @@ const MIN_BACKUP_PASSWORD_LEN = 12;
 // Client uploader defaults to 16 MiB chunks; cap at 32 MiB to leave headroom while still bounding memory.
 const MAX_CHUNK_BYTES = 32 * 1024 * 1024;
 
-async function gate(): Promise<NextResponse | { password: string } | { closed: true }> {
+async function gate(t: Translator): Promise<NextResponse | { password: string } | { closed: true }> {
   // Mirror processBackupImport's internet-facing opt-in HERE, at chunk 0 — the
   // authoritative check only runs on the FINAL chunk, which would let an
   // unauthenticated caller stream the full ciphertext (up to the session cap)
@@ -31,9 +33,7 @@ async function gate(): Promise<NextResponse | { password: string } | { closed: t
   if (process.env.TRUST_PROXY === "true" && process.env.SUMMONARR_ALLOW_SETUP_RESTORE !== "true") {
     return NextResponse.json(
       {
-        error:
-          "Pre-authentication restore is disabled on this internet-facing instance. " +
-          "Set SUMMONARR_ALLOW_SETUP_RESTORE=true to enable a first-run restore, then unset it once the admin account exists.",
+        error: t("apiAuth.setup.restoreDisabled"),
       },
       { status: 403 },
     );
@@ -58,13 +58,13 @@ async function gate(): Promise<NextResponse | { password: string } | { closed: t
   const password = process.env.BACKUP_DB_PASSWORD ?? "";
   if (password.length === 0) {
     return NextResponse.json(
-      { error: "Backup is not configured. Set the BACKUP_DB_PASSWORD environment variable on the server." },
+      { error: t("apiAuth.setup.backupNotConfigured") },
       { status: 503 },
     );
   }
   if (password.length < MIN_BACKUP_PASSWORD_LEN) {
     return NextResponse.json(
-      { error: `BACKUP_DB_PASSWORD is too short (minimum ${MIN_BACKUP_PASSWORD_LEN} characters).` },
+      { error: t("apiAuth.setup.passwordTooShort", { min: MIN_BACKUP_PASSWORD_LEN }) },
       { status: 503 },
     );
   }
@@ -80,20 +80,21 @@ async function gate(): Promise<NextResponse | { password: string } | { closed: t
 //   X-File-Size     total file size in bytes
 // Body: raw chunk bytes (application/octet-stream)
 export async function POST(req: NextRequest) {
+  const t = translatorForRequest(req);
   const uploadId = req.headers.get("x-upload-id") ?? "";
   const chunkIndex = Number(req.headers.get("x-chunk-index") ?? "");
   const chunkTotal = Number(req.headers.get("x-chunk-total") ?? "");
   const fileSize = Number(req.headers.get("x-file-size") ?? "");
 
   if (!uploadId || !Number.isFinite(chunkIndex) || !Number.isFinite(chunkTotal) || !Number.isFinite(fileSize)) {
-    return NextResponse.json({ error: "Missing or invalid upload headers." }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.setup.badHeaders") }, { status: 400 });
   }
 
   // Rate-limit the upload *attempt*, not each chunk: consume one slot when the client
   // opens the session (chunk 0). A real backup is split into many 16 MiB chunks, so a
   // per-chunk limiter would burn the whole bucket and 429 the restore partway through.
   if (chunkIndex === 0 && !checkRateLimit(`setup-import:${getClientIpKey(req.headers)}`, 5, 5 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many setup-import attempts. Try again later." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.setup.tooManyAttempts") }, { status: 429 });
   }
 
   // A non-zero chunk with no matching active session is bogus (no rate-limited
@@ -102,13 +103,13 @@ export async function POST(req: NextRequest) {
   // requests skips the chunk-0 limiter yet amplifies into advisory-lock contention
   // (shared with /api/auth/register) and DB load. Legit chunk-N always has a session.
   if (chunkIndex !== 0 && !hasActiveUploadSession(uploadId)) {
-    return NextResponse.json({ error: "No active upload session — start at chunk 0." }, { status: 409 });
+    return NextResponse.json({ error: t("apiAuth.setup.noSession") }, { status: 409 });
   }
 
   const sizeCheck = checkBodySize(req, MAX_CHUNK_BYTES);
   if (sizeCheck) return sizeCheck;
 
-  const g = await gate();
+  const g = await gate(t);
   if (g instanceof NextResponse) return g;
   if ("closed" in g) {
     // Setup completed (or a user appeared) mid-upload. Free the single global
@@ -116,7 +117,7 @@ export async function POST(req: NextRequest) {
     // by a stale in-flight session until its TTL.
     await clearSession(uploadId);
     return NextResponse.json(
-      { error: "Setup import is only available on a fresh server with no users." },
+      { error: t("apiAuth.setup.notFresh") },
       { status: 409 },
     );
   }
@@ -124,7 +125,7 @@ export async function POST(req: NextRequest) {
 
   if (fileSize > MAX_CIPHERTEXT_BYTES) {
     return NextResponse.json(
-      { error: `File exceeds the ${Math.round(MAX_CIPHERTEXT_BYTES / (1024 * 1024))} MB limit.` },
+      { error: t("apiAuth.setup.fileTooLarge", { mb: Math.round(MAX_CIPHERTEXT_BYTES / (1024 * 1024)) }) },
       { status: 413 },
     );
   }
@@ -135,22 +136,22 @@ export async function POST(req: NextRequest) {
       const e = start.error;
       if (e.kind === "in-progress") {
         return NextResponse.json(
-          { error: "Another upload is already in progress. Wait for it to finish or cancel it." },
+          { error: t("apiAuth.setup.inProgress") },
           { status: 409 },
         );
       }
       if (e.kind === "size-too-large") {
         return NextResponse.json(
-          { error: `File exceeds the ${Math.round(e.max / (1024 * 1024))} MB limit.` },
+          { error: t("apiAuth.setup.fileTooLarge", { mb: Math.round(e.max / (1024 * 1024)) }) },
           { status: 413 },
         );
       }
-      return NextResponse.json({ error: "Invalid upload parameters." }, { status: 400 });
+      return NextResponse.json({ error: t("apiAuth.setup.badParams") }, { status: 400 });
     }
   }
 
   if (!req.body) {
-    return NextResponse.json({ error: "Empty chunk body." }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.setup.emptyChunk") }, { status: 400 });
   }
 
   const chunkBytes = new Uint8Array(await req.arrayBuffer());
@@ -161,7 +162,7 @@ export async function POST(req: NextRequest) {
     // (not just chunk 0) so it isn't stranded until the session TTL.
     await clearSession(uploadId);
     return NextResponse.json(
-      { error: `Chunk exceeds ${Math.round(MAX_CHUNK_BYTES / (1024 * 1024))} MB cap.` },
+      { error: t("apiAuth.setup.chunkTooLarge", { mb: Math.round(MAX_CHUNK_BYTES / (1024 * 1024)) }) },
       { status: 413 },
     );
   }
@@ -169,24 +170,24 @@ export async function POST(req: NextRequest) {
   if (!append.ok) {
     const e = append.error;
     if (e.kind === "no-session") {
-      return NextResponse.json({ error: "No active upload session — start at chunk 0." }, { status: 409 });
+      return NextResponse.json({ error: t("apiAuth.setup.noSession") }, { status: 409 });
     }
     if (e.kind === "session-mismatch") {
-      return NextResponse.json({ error: "Upload-id does not match the active session." }, { status: 409 });
+      return NextResponse.json({ error: t("apiAuth.setup.sessionMismatch") }, { status: 409 });
     }
     if (e.kind === "expired") {
-      return NextResponse.json({ error: "Upload session expired — restart from chunk 0." }, { status: 410 });
+      return NextResponse.json({ error: t("apiAuth.setup.sessionExpired") }, { status: 410 });
     }
     if (e.kind === "out-of-order") {
-      return NextResponse.json({ error: `Out-of-order chunk. Next expected index: ${e.expected}.` }, { status: 409 });
+      return NextResponse.json({ error: t("apiAuth.setup.outOfOrder", { expected: e.expected }) }, { status: 409 });
     }
     if (e.kind === "size-mismatch") {
       return NextResponse.json(
-        { error: `Upload incomplete: received ${e.received} of ${e.expected} declared bytes. Restart from chunk 0.` },
+        { error: t("apiAuth.setup.incomplete", { received: e.received, expected: e.expected }) },
         { status: 400 },
       );
     }
-    return NextResponse.json({ error: "Chunk exceeds declared file size." }, { status: 413 });
+    return NextResponse.json({ error: t("apiAuth.setup.chunkExceedsSize") }, { status: 413 });
   }
 
   if (!append.complete) {
@@ -202,7 +203,7 @@ export async function POST(req: NextRequest) {
   const stream = getSessionStream(uploadId);
   if (!stream) {
     await clearSession(uploadId);
-    return NextResponse.json({ error: "Upload state lost between final chunk and import." }, { status: 500 });
+    return NextResponse.json({ error: t("apiAuth.setup.stateLost") }, { status: 500 });
   }
 
   let result;
@@ -260,9 +261,10 @@ export async function POST(req: NextRequest) {
 
 // DELETE: cancel the in-flight upload and remove the temp file.
 export async function DELETE(req: NextRequest) {
+  const t = translatorForRequest(req);
   const uploadId = req.headers.get("x-upload-id") ?? "";
   if (!uploadId) {
-    return NextResponse.json({ error: "Missing X-Upload-Id." }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.setup.missingUploadId") }, { status: 400 });
   }
   // Cancel only releases the in-memory upload slot + temp file for this
   // uploadId (no DB mutation), and clearSession is a no-op unless this uploadId

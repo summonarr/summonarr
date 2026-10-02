@@ -17,52 +17,60 @@ import { ResyncLibraryButton } from "@/components/admin/resync-library-button";
 import { SyncTVEpisodesButton } from "@/components/admin/sync-tv-episodes-button";
 import { MasterDbFillButton } from "@/components/admin/master-db-fill-button";
 import { SettingsTabNav, type TabId } from "@/components/settings/settings-tab-nav";
-import { SettingsNav, type NavItem as SettingsNavItem } from "@/components/settings/settings-nav";
+import { SettingsNav } from "@/components/settings/settings-nav";
 import { CronJobTable, type CronJobInfo } from "@/components/settings/cron-job-table";
 import { FeaturesForm } from "@/components/settings/features-form";
 import { getFeatureFlags, groupFeaturesByCategory } from "@/lib/features";
 import { parseHiddenRatingSources } from "@/lib/ratings-visibility";
+import { mfaEnforcementDisabledByEnv } from "@/lib/mfa/policy";
+import { RequireAdminMfaToggle } from "@/components/settings/forms/require-admin-mfa-toggle";
+import { getLocale, getTranslator } from "@/lib/i18n/server";
+import type { Translator } from "@/lib/i18n/translate";
 
-const TAB_SECTIONS: Record<TabId, SettingsNavItem[]> = {
+// Labels and groups are catalog keys, translated at render (never at module
+// load — the locale is per request).
+type TabSection = { id: string; i18nKey: string; group: string };
+
+const TAB_SECTIONS: Record<TabId, TabSection[]> = {
   site: [
-    { id: "general",          label: "General",            group: "Site" },
-    { id: "rate-limiting",    label: "Rate Limiting",      group: "Site" },
-    { id: "quotas",           label: "Quotas",             group: "Site" },
-    { id: "deletion-votes",   label: "Deletion Votes",     group: "Site" },
-    { id: "authentication",   label: "Authentication",     group: "Site" },
-    { id: "sessions",         label: "Sessions",           group: "Site" },
-    { id: "maintenance",      label: "Maintenance",        group: "Site" },
-    { id: "motd",             label: "Message of the Day", group: "Site" },
-    { id: "donations",        label: "Donations",          group: "Site" },
+    { id: "general", i18nKey: "settings.nav.general", group: "settings.group.site" },
+    { id: "rate-limiting", i18nKey: "settings.nav.rateLimiting", group: "settings.group.site" },
+    { id: "quotas", i18nKey: "settings.nav.quotas", group: "settings.group.site" },
+    { id: "deletion-votes", i18nKey: "settings.nav.deletionVotes", group: "settings.group.site" },
+    { id: "authentication", i18nKey: "settings.nav.authentication", group: "settings.group.site" },
+    { id: "sessions", i18nKey: "settings.nav.sessions", group: "settings.group.site" },
+    { id: "maintenance", i18nKey: "settings.nav.maintenance", group: "settings.group.site" },
+    { id: "motd", i18nKey: "settings.nav.motd", group: "settings.group.site" },
+    { id: "donations", i18nKey: "settings.nav.donations", group: "settings.group.site" },
   ],
   media: [
-    { id: "plex",             label: "Plex",               group: "Media Servers" },
-    { id: "jellyfin",         label: "Jellyfin",           group: "Media Servers" },
-    { id: "media-instances",  label: "Extra Servers",      group: "Media Servers" },
-    { id: "play-history",     label: "Play History",       group: "Media Servers" },
-    { id: "watch-grades",     label: "Watch Grades",       group: "Media Servers" },
-    { id: "library-matching", label: "Library Matching",   group: "Media Servers" },
-    { id: "radarr",           label: "Radarr",             group: "Automation" },
-    { id: "radarr4k",         label: "Radarr 4K",          group: "Automation" },
-    { id: "sonarr",           label: "Sonarr",             group: "Automation" },
-    { id: "sonarr4k",         label: "Sonarr 4K",          group: "Automation" },
-    { id: "arr-instances",    label: "Extra Instances",    group: "Automation" },
+    { id: "plex", i18nKey: "settings.nav.plex", group: "settings.group.mediaServers" },
+    { id: "jellyfin", i18nKey: "settings.nav.jellyfin", group: "settings.group.mediaServers" },
+    { id: "media-instances", i18nKey: "settings.nav.mediaInstances", group: "settings.group.mediaServers" },
+    { id: "play-history", i18nKey: "settings.nav.playHistory", group: "settings.group.mediaServers" },
+    { id: "watch-grades", i18nKey: "settings.nav.watchGrades", group: "settings.group.mediaServers" },
+    { id: "library-matching", i18nKey: "settings.nav.libraryMatching", group: "settings.group.mediaServers" },
+    { id: "radarr", i18nKey: "settings.nav.radarr", group: "settings.group.automation" },
+    { id: "radarr4k", i18nKey: "settings.nav.radarr4k", group: "settings.group.automation" },
+    { id: "sonarr", i18nKey: "settings.nav.sonarr", group: "settings.group.automation" },
+    { id: "sonarr4k", i18nKey: "settings.nav.sonarr4k", group: "settings.group.automation" },
+    { id: "arr-instances", i18nKey: "settings.nav.arrInstances", group: "settings.group.automation" },
   ],
   notifications: [
-    { id: "email",            label: "Email",              group: "Notifications" },
-    { id: "discord-bot",      label: "Discord Bot",        group: "Notifications" },
-    { id: "ios-push-relay",   label: "iOS Push Relay",     group: "Notifications" },
+    { id: "email", i18nKey: "settings.nav.email", group: "settings.group.notifications" },
+    { id: "discord-bot", i18nKey: "settings.nav.discordBot", group: "settings.group.notifications" },
+    { id: "ios-push-relay", i18nKey: "settings.nav.iosPushRelay", group: "settings.group.notifications" },
   ],
   integrations: [
-    { id: "external-ratings", label: "External Ratings",   group: "Integrations" },
-    { id: "ip-geolocation",   label: "IP Geolocation",     group: "Integrations" },
-    { id: "webhooks",         label: "Webhooks",           group: "Integrations" },
+    { id: "external-ratings", i18nKey: "settings.nav.externalRatings", group: "settings.group.integrations" },
+    { id: "ip-geolocation", i18nKey: "settings.nav.ipGeolocation", group: "settings.group.integrations" },
+    { id: "webhooks", i18nKey: "settings.nav.webhooks", group: "settings.group.integrations" },
   ],
   features: [],
   system: [
-    { id: "scheduled-jobs",   label: "Scheduled Jobs",     group: "System" },
-    { id: "audit-log-settings", label: "Audit Log",        group: "System" },
-    { id: "db-metrics",       label: "DB Metrics",         group: "System" },
+    { id: "scheduled-jobs", i18nKey: "settings.nav.scheduledJobs", group: "settings.group.system" },
+    { id: "audit-log-settings", i18nKey: "settings.nav.auditLogSettings", group: "settings.group.system" },
+    { id: "db-metrics", i18nKey: "settings.nav.dbMetrics", group: "settings.group.system" },
   ],
 };
 
@@ -73,20 +81,20 @@ export const dynamic = "force-dynamic";
 // "86400s" was the one value nobody could read at a glance. Unparseable or
 // non-positive values are shown verbatim rather than silently normalised — an
 // operator who typo'd the env var needs to see what they actually set.
-function formatInterval(seconds: string | undefined, fallback: string): string {
+function formatInterval(t: Translator, seconds: string | undefined, fallback: string): string {
   const raw = seconds ?? fallback;
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) return raw;
-  if (n === 3_600) return "hourly";
-  if (n === 86_400) return "daily";
-  if (n === 604_800) return "weekly";
+  if (n === 3_600) return t("settings.cron.interval.hourly");
+  if (n === 86_400) return t("settings.cron.interval.daily");
+  if (n === 604_800) return t("settings.cron.interval.weekly");
   if (n % 86_400 === 0) return `${n / 86_400}d`;
   if (n % 3_600 === 0) return `${n / 3_600}h`;
   if (n % 60 === 0) return `${n / 60}m`;
   return `${n}s`;
 }
 
-function StatusBadge({ connected, label = "Connected" }: { connected: boolean; label?: string }) {
+function StatusBadge({ connected, t }: { connected: boolean; t: Translator }) {
   if (connected) {
     return (
       <span className="ds-chip ds-chip-approved">
@@ -98,12 +106,12 @@ function StatusBadge({ connected, label = "Connected" }: { connected: boolean; l
             background: "var(--ds-success)",
           }}
         />
-        {label}
+        {t("settings.common.connected")}
       </span>
     );
   }
   return (
-    <span className="ds-chip">Not configured</span>
+    <span className="ds-chip">{t("settings.common.notConfigured")}</span>
   );
 }
 
@@ -133,6 +141,7 @@ const ALL_KEYS = [
   "discordLinkedRoleId", "discordPlexRoleId", "discordJellyfinRoleId", "discordAdminRoleId", "discordIssueAdminRoleId",
   "deletionVoteThreshold",
   "disableLocalLogin",
+  "requireMfaForAdmins",
   "jellyfinRestrictSignIn",
   "enableMachineSession", "machineSessionAllowedIps",
   "playHistoryEnabled", "playHistoryPlexEnabled", "playHistoryJellyfinEnabled",
@@ -156,6 +165,7 @@ export default async function SettingsPage({
   const [sp, session] = await Promise.all([searchParams, authActive()]);
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
+  const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
   const rawTab = sp.tab as TabId | undefined;
   const tab: TabId = rawTab && VALID_TABS.includes(rawTab) ? rawTab : "site";
 
@@ -292,7 +302,7 @@ export default async function SettingsPage({
     const cronTargets = [
       "sync:full", "upcoming-cache", "ratings-sync", "list-cache",
       "activity", "mdblist", "omdb", "recommendations", "library", "audit-log:pii-scrub", "auth-sessions:purge-expired",
-      "trash-sync", "download-policies",
+      "trash-sync", "download-policies", "plex-watchlist",
     ];
     // Primary source: `Setting` rows written by `recordCronRun` on every run
     // (admin- or cron-triggered). Several warm jobs deliberately skip the
@@ -407,31 +417,32 @@ export default async function SettingsPage({
     }
 
     return [
-      { name: "Library Sync", description: "Plex + Jellyfin library, Radarr/Sonarr state", endpoint: "/api/sync", interval: formatInterval(process.env.SYNC_INTERVAL, "3600"), ...lastRunInfo("sync:full") },
-      { name: "Upcoming Sync", description: "Upcoming movies and TV from TMDB", endpoint: "/api/sync/upcoming", interval: formatInterval(process.env.UPCOMING_SYNC_INTERVAL, "86400"), ...lastRunInfo("upcoming-cache") },
-      { name: "Ratings Sync", description: "Pre-warm MDBList/OMDB ratings for trending/popular", endpoint: "/api/sync/ratings", interval: formatInterval(process.env.RATINGS_SYNC_INTERVAL, "86400"), ...lastRunInfo("ratings-sync") },
-      { name: "Warm List Cache", description: "TMDB, Trakt, MDBList lists + genres + providers", endpoint: "/api/cron/warm-list-cache", interval: formatInterval(process.env.LIST_CACHE_SYNC_INTERVAL, "21600"), ...lastRunInfo("list-cache") },
-      { name: "Warm Activity", description: "Play history stats for admin dashboard", endpoint: "/api/cron/warm-activity", interval: formatInterval(process.env.WARM_ACTIVITY_INTERVAL, "1800"), ...lastRunInfo("activity") },
-      { name: "Warm MDBList", description: "MDBList ratings for entire library", endpoint: "/api/cron/warm-mdblist", interval: formatInterval(process.env.WARM_MDBLIST_INTERVAL, "86400"), ...lastRunInfo("mdblist") },
-      { name: "Warm OMDB", description: "OMDB ratings fallback for entire library", endpoint: "/api/cron/warm-omdb", interval: formatInterval(process.env.WARM_OMDB_INTERVAL, "86400"), ...lastRunInfo("omdb") },
-      { name: "Warm Recommendations", description: "Rebuild every active user's \"For You\" shelf", endpoint: "/api/cron/warm-recommendations", interval: formatInterval(process.env.WARM_RECOMMENDATIONS_INTERVAL, "43200"), ...lastRunInfo("recommendations") },
+      { name: t("settings.cron.job.librarySync.name"), description: t("settings.cron.job.librarySync.description"), endpoint: "/api/sync", interval: formatInterval(t, process.env.SYNC_INTERVAL, "3600"), ...lastRunInfo("sync:full") },
+      { name: t("settings.cron.job.upcomingSync.name"), description: t("settings.cron.job.upcomingSync.description"), endpoint: "/api/sync/upcoming", interval: formatInterval(t, process.env.UPCOMING_SYNC_INTERVAL, "86400"), ...lastRunInfo("upcoming-cache") },
+      { name: t("settings.cron.job.ratingsSync.name"), description: t("settings.cron.job.ratingsSync.description"), endpoint: "/api/sync/ratings", interval: formatInterval(t, process.env.RATINGS_SYNC_INTERVAL, "86400"), ...lastRunInfo("ratings-sync") },
+      { name: t("settings.cron.job.warmListCache.name"), description: t("settings.cron.job.warmListCache.description"), endpoint: "/api/cron/warm-list-cache", interval: formatInterval(t, process.env.LIST_CACHE_SYNC_INTERVAL, "21600"), ...lastRunInfo("list-cache") },
+      { name: t("settings.cron.job.warmActivity.name"), description: t("settings.cron.job.warmActivity.description"), endpoint: "/api/cron/warm-activity", interval: formatInterval(t, process.env.WARM_ACTIVITY_INTERVAL, "1800"), ...lastRunInfo("activity") },
+      { name: t("settings.cron.job.warmMdblist.name"), description: t("settings.cron.job.warmMdblist.description"), endpoint: "/api/cron/warm-mdblist", interval: formatInterval(t, process.env.WARM_MDBLIST_INTERVAL, "86400"), ...lastRunInfo("mdblist") },
+      { name: t("settings.cron.job.warmOmdb.name"), description: t("settings.cron.job.warmOmdb.description"), endpoint: "/api/cron/warm-omdb", interval: formatInterval(t, process.env.WARM_OMDB_INTERVAL, "86400"), ...lastRunInfo("omdb") },
+      { name: t("settings.cron.job.warmRecommendations.name"), description: t("settings.cron.job.warmRecommendations.description"), endpoint: "/api/cron/warm-recommendations", interval: formatInterval(t, process.env.WARM_RECOMMENDATIONS_INTERVAL, "43200"), ...lastRunInfo("recommendations") },
       // Distinct from Admin -> Library's "Warm library cache" button, which
       // POSTs /api/admin/library-warm: that one runs the metadata walk ALONE,
       // records no cron run, and so never appears in this table. This row is
       // the only browser trigger that also builds the suggestion graph.
-      { name: "Warm Library", description: "TMDB metadata for entire library + the \"For You\" suggestion graph", endpoint: "/api/cron/warm-library", interval: formatInterval(process.env.WARM_LIBRARY_INTERVAL, "86400"), ...lastRunInfo("library") },
-      { name: "Purge Sessions", description: "Delete expired auth sessions", endpoint: "/api/cron/purge-auth-sessions", interval: formatInterval(process.env.PURGE_SESSIONS_INTERVAL, "86400"), ...lastRunInfo("auth-sessions:purge-expired") },
-      { name: "Scrub Audit PII", description: "Remove IP/UA from audit entries past the retention window (default 90 days)", endpoint: "/api/cron/scrub-audit-pii", interval: formatInterval(process.env.SCRUB_AUDIT_PII_INTERVAL, "86400"), ...lastRunInfo("audit-log:pii-scrub") },
-      { name: "TRaSH Sync", description: "Refresh TRaSH-Guides catalog (capped at hourly) and re-apply managed specs each tick", endpoint: "/api/cron/trash-sync", interval: formatInterval(process.env.TRASH_SYNC_INTERVAL, "86400"), ...lastRunInfo("trash-sync") },
-      { name: "Download Policy Sync", description: "Sync Plex & Jellyfin user download permissions, enforce any restrictions set in Summonarr", endpoint: "/api/cron/sync-download-policies", interval: formatInterval(process.env.SYNC_INTERVAL, "3600"), ...lastRunInfo("download-policies") },
+      { name: t("settings.cron.job.warmLibrary.name"), description: t("settings.cron.job.warmLibrary.description"), endpoint: "/api/cron/warm-library", interval: formatInterval(t, process.env.WARM_LIBRARY_INTERVAL, "86400"), ...lastRunInfo("library") },
+      { name: t("settings.cron.job.purgeSessions.name"), description: t("settings.cron.job.purgeSessions.description"), endpoint: "/api/cron/purge-auth-sessions", interval: formatInterval(t, process.env.PURGE_SESSIONS_INTERVAL, "86400"), ...lastRunInfo("auth-sessions:purge-expired") },
+      { name: t("settings.cron.job.scrubAuditPii.name"), description: t("settings.cron.job.scrubAuditPii.description"), endpoint: "/api/cron/scrub-audit-pii", interval: formatInterval(t, process.env.SCRUB_AUDIT_PII_INTERVAL, "86400"), ...lastRunInfo("audit-log:pii-scrub") },
+      { name: t("settings.cron.job.trashSync.name"), description: t("settings.cron.job.trashSync.description"), endpoint: "/api/cron/trash-sync", interval: formatInterval(t, process.env.TRASH_SYNC_INTERVAL, "86400"), ...lastRunInfo("trash-sync") },
+      { name: t("settings.cron.job.plexWatchlist.name"), description: t("settings.cron.job.plexWatchlist.description"), endpoint: "/api/cron/sync-plex-watchlists", interval: formatInterval(t, process.env.PLEX_WATCHLIST_SYNC_INTERVAL, "1800"), ...lastRunInfo("plex-watchlist") },
+      { name: t("settings.cron.job.downloadPolicy.name"), description: t("settings.cron.job.downloadPolicy.description"), endpoint: "/api/cron/sync-download-policies", interval: formatInterval(t, process.env.SYNC_INTERVAL, "3600"), ...lastRunInfo("download-policies") },
     ];
   }
 
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Settings"
-        subtitle="Configure integrations and preferences"
+        title={t("nav.settings")}
+        subtitle={t("settings.subtitle")}
       />
 
       {decryptFailures.length > 0 && (
@@ -469,15 +480,12 @@ export default async function SettingsPage({
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
               <h3 style={{ fontSize: 14, fontWeight: 600, color: "var(--ds-danger)", margin: 0 }}>
-                {decryptFailures.length === 1
-                  ? "1 saved setting could not be decrypted"
-                  : `${decryptFailures.length} saved settings could not be decrypted`}
+                {t("settings.decrypt.title", { count: decryptFailures.length })}
               </h3>
               <p style={{ fontSize: 12, color: "var(--ds-fg-muted)", margin: "4px 0 8px", lineHeight: 1.5 }}>
-                {decryptFailures.length === 1 ? "It is" : "They are"} being treated as empty. Re-save{" "}
-                {decryptFailures.length === 1 ? "it" : "them"} below to restore functionality. This usually happens
-                when <code style={{ fontFamily: "var(--font-mono, ui-monospace)" }}>TOKEN_ENCRYPTION_KEY</code> has
-                changed since the value was written.
+                {t("settings.decrypt.bodyBefore", { count: decryptFailures.length })}{" "}
+                <code style={{ fontFamily: "var(--font-mono, ui-monospace)" }}>TOKEN_ENCRYPTION_KEY</code>{" "}
+                {t("settings.decrypt.bodyAfter")}
               </p>
               <ul style={{ fontSize: 12, color: "var(--ds-fg)", margin: 0, paddingLeft: 18, lineHeight: 1.7 }}>
                 {decryptFailures.map((k) => (
@@ -497,7 +505,9 @@ export default async function SettingsPage({
         {TAB_SECTIONS[tab].length > 1 && (
           <aside className="hidden lg:block w-48 shrink-0">
             <div className="sticky top-4">
-              <SettingsNav items={TAB_SECTIONS[tab]} />
+              <SettingsNav
+                items={TAB_SECTIONS[tab].map((sec) => ({ id: sec.id, label: t(sec.i18nKey), group: t(sec.group) }))}
+              />
             </div>
           </aside>
         )}
@@ -510,8 +520,8 @@ export default async function SettingsPage({
           <>
             <div id="general" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>General</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>Basic branding for your instance.</p>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.general.title")}</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.general.description")}</p>
               </div>
               <div className="space-y-6">
                 <SiteTitleForm initialTitle={cfg.siteTitle ?? ""} />
@@ -521,10 +531,8 @@ export default async function SettingsPage({
 
             <div id="rate-limiting" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Rate Limiting</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  Maximum actions allowed per user within the time window.
-                </p>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.rateLimiting.title")}</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.rateLimiting.description")}</p>
               </div>
               <RateLimitForm
                 initialRegister={cfg.rateLimitRegister ?? ""}
@@ -536,10 +544,8 @@ export default async function SettingsPage({
 
             <div id="quotas" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Quotas</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  Limit how many requests each user can submit in a rolling time period. Admins and quota-exempt users are never restricted.
-                </p>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.quotas.title")}</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.quotas.description")}</p>
               </div>
               <QuotaForm
                 initialLimit={cfg.quotaLimit ?? ""}
@@ -549,22 +555,22 @@ export default async function SettingsPage({
 
             <div id="deletion-votes" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Deletion Votes</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  Users can vote to remove items from the library. When an item reaches the threshold, admins are notified.
-                </p>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.deletionVotes.title")}</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.deletionVotes.description")}</p>
               </div>
               <DeletionVoteThresholdForm initialThreshold={cfg.deletionVoteThreshold ?? ""} />
             </div>
 
             <div id="authentication" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Authentication</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  Control which sign-in methods are available. External providers (Plex, Jellyfin, OIDC) are configured via environment variables.
-                </p>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.authentication.title")}</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.authentication.description")}</p>
               </div>
               <DisableLocalLoginToggle initialDisabled={cfg.disableLocalLogin === "true"} />
+              <RequireAdminMfaToggle
+                initialRequired={cfg.requireMfaForAdmins === "true"}
+                envOverride={mfaEnforcementDisabledByEnv()}
+              />
               <JellyfinRestrictSignInToggle initialRestrict={cfg.jellyfinRestrictSignIn !== "false"} />
               <EnableMachineSessionToggle
                 initialEnabled={cfg.enableMachineSession === "true"}
@@ -574,10 +580,8 @@ export default async function SettingsPage({
 
             <div id="sessions" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Sessions</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  Control how long users stay logged in. The &quot;Remember me&quot; duration applies when users check that option at login.
-                </p>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.sessions.title")}</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.sessions.description")}</p>
               </div>
               <SessionForm
                 initialDefaultDuration={cfg.sessionDefaultDuration ?? ""}
@@ -588,10 +592,8 @@ export default async function SettingsPage({
 
             <div id="maintenance" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Maintenance Mode</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  When enabled, non-admin users will see a maintenance page instead of the app.
-                </p>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.maintenance.title")}</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.maintenance.description")}</p>
               </div>
               <MaintenanceForm
                 initialEnabled={cfg.maintenanceEnabled === "true"}
@@ -601,10 +603,8 @@ export default async function SettingsPage({
 
             <div id="motd" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Message of the Day</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  Optional popup shown to users once per session after login. Leave blank to disable.
-                </p>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.motd.title")}</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.motd.description")}</p>
               </div>
               <MotdForm
                 initialEnabled={cfg.motdEnabled === "true"}
@@ -615,10 +615,8 @@ export default async function SettingsPage({
 
             <div id="donations" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Donations</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  Configure donation links shown to users on the Donate page.
-                </p>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.donations.title")}</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.donations.description")}</p>
               </div>
               <DonationForm
                 initialPaypal={cfg.donationPaypal ?? ""}
@@ -638,11 +636,9 @@ export default async function SettingsPage({
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
                   <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Plex</h2>
-                  <StatusBadge connected={!!cfg.plexAdminEmail} />
+                  <StatusBadge t={t} connected={!!cfg.plexAdminEmail} />
                 </div>
-                <p className="text-sm text-zinc-500">
-                  Allow users shared with your Plex account to sign in with Plex.
-                </p>
+                <p className="text-sm text-zinc-500">{t("settings.section.plex.description")}</p>
               </div>
               <PlexConnectForm
                 initialEmail={cfg.plexAdminEmail ?? ""}
@@ -656,11 +652,9 @@ export default async function SettingsPage({
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
                   <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Jellyfin</h2>
-                  <StatusBadge connected={!!(cfg.jellyfinUrl && cfg.jellyfinApiKey)} />
+                  <StatusBadge t={t} connected={!!(cfg.jellyfinUrl && cfg.jellyfinApiKey)} />
                 </div>
-                <p className="text-sm text-zinc-500">
-                  Sync your Jellyfin library to show availability badges on media.
-                </p>
+                <p className="text-sm text-zinc-500">{t("settings.section.jellyfin.description")}</p>
               </div>
               <JellyfinSyncForm
                 initialUrl={cfg.jellyfinUrl ?? ""}
@@ -671,8 +665,8 @@ export default async function SettingsPage({
 
             <div id="media-instances" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Additional media servers</h2>
-                <p className="text-sm text-zinc-500 mt-1">Connect extra Plex/Jellyfin servers (e.g. a friend&apos;s separate server). Availability and activity are combined across every configured server of a type.</p>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.mediaInstances.title")}</h2>
+                <p className="text-sm text-zinc-500 mt-1">{t("settings.section.mediaInstances.description")}</p>
               </div>
               <div className="space-y-8">
                 <MediaInstancesManager service="plex" />
@@ -682,10 +676,8 @@ export default async function SettingsPage({
 
             <div id="play-history" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Play History</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  Track playback sessions from Plex and Jellyfin. Plex is followed live through its event stream and Jellyfin through a frequent poller — no media-server webhooks are needed.
-                </p>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.playHistory.title")}</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.playHistory.description")}</p>
               </div>
               <PlayHistorySettingsForm
                 initialEnabled={cfg.playHistoryEnabled ?? ""}
@@ -701,10 +693,8 @@ export default async function SettingsPage({
 
             <div id="watch-grades" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Watch Grades</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  Grade users on whether they watch what they request, from play history. Shown to admins on the Users page and the request queue; turn it off in Features.
-                </p>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.watchGrades.title")}</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.watchGrades.description")}</p>
               </div>
               <WatchGradeSettingsForm
                 initial={{
@@ -723,10 +713,8 @@ export default async function SettingsPage({
 
             <div id="library-matching" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Library Matching</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  Configure how file paths are normalised when comparing Plex and Jellyfin libraries for bad-match detection.
-                </p>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.libraryMatching.title")}</h2>
+                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.libraryMatching.description")}</p>
               </div>
               <LibraryMatchForm
                 initialPlexMoviePrefix={cfg.plexMoviePathStripPrefix ?? ""}
@@ -740,11 +728,9 @@ export default async function SettingsPage({
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
                   <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Radarr</h2>
-                  <StatusBadge connected={!!(cfg.radarrUrl && cfg.radarrApiKey)} />
+                  <StatusBadge t={t} connected={!!(cfg.radarrUrl && cfg.radarrApiKey)} />
                 </div>
-                <p className="text-sm text-zinc-500">
-                  Automatically send approved movie requests to Radarr.
-                </p>
+                <p className="text-sm text-zinc-500">{t("settings.section.radarr.description")}</p>
               </div>
               <ArrForm
                 service="radarr"
@@ -759,12 +745,10 @@ export default async function SettingsPage({
             <div id="radarr4k" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Radarr 4K <span style={{fontSize:12,color:"var(--ds-fg-subtle)",fontWeight:400}}>(optional)</span></h2>
-                  <StatusBadge connected={!!(cfg.radarr4kUrl && cfg.radarr4kApiKey)} />
+                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Radarr 4K <span style={{fontSize:12,color:"var(--ds-fg-subtle)",fontWeight:400}}>{t("settings.common.optional")}</span></h2>
+                  <StatusBadge t={t} connected={!!(cfg.radarr4kUrl && cfg.radarr4kApiKey)} />
                 </div>
-                <p className="text-sm text-zinc-500">
-                  A separate Radarr instance for 4K movies. Users with the “Request 4K” permission get a 4K request option.
-                </p>
+                <p className="text-sm text-zinc-500">{t("settings.section.radarr4k.description")}</p>
               </div>
               <ArrForm
                 service="radarr"
@@ -781,11 +765,9 @@ export default async function SettingsPage({
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
                   <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Sonarr</h2>
-                  <StatusBadge connected={!!(cfg.sonarrUrl && cfg.sonarrApiKey)} />
+                  <StatusBadge t={t} connected={!!(cfg.sonarrUrl && cfg.sonarrApiKey)} />
                 </div>
-                <p className="text-sm text-zinc-500">
-                  Automatically send approved TV show requests to Sonarr.
-                </p>
+                <p className="text-sm text-zinc-500">{t("settings.section.sonarr.description")}</p>
               </div>
               <ArrForm
                 service="sonarr"
@@ -800,12 +782,10 @@ export default async function SettingsPage({
             <div id="sonarr4k" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Sonarr 4K <span style={{fontSize:12,color:"var(--ds-fg-subtle)",fontWeight:400}}>(optional)</span></h2>
-                  <StatusBadge connected={!!(cfg.sonarr4kUrl && cfg.sonarr4kApiKey)} />
+                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Sonarr 4K <span style={{fontSize:12,color:"var(--ds-fg-subtle)",fontWeight:400}}>{t("settings.common.optional")}</span></h2>
+                  <StatusBadge t={t} connected={!!(cfg.sonarr4kUrl && cfg.sonarr4kApiKey)} />
                 </div>
-                <p className="text-sm text-zinc-500">
-                  A separate Sonarr instance for 4K TV. Users with the “Request 4K” permission get a 4K request option.
-                </p>
+                <p className="text-sm text-zinc-500">{t("settings.section.sonarr4k.description")}</p>
               </div>
               <ArrForm
                 service="sonarr"
@@ -824,8 +804,8 @@ export default async function SettingsPage({
 
             <div id="arr-instances" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Additional instances</h2>
-                <p className="text-sm text-zinc-500 mt-1">Configure extra Radarr/Sonarr instances (e.g. a dedicated anime instance) beyond the default and 4K instances above.</p>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.arrInstances.title")}</h2>
+                <p className="text-sm text-zinc-500 mt-1">{t("settings.section.arrInstances.description")}</p>
               </div>
               <ArrInstancesManager />
             </div>
@@ -837,12 +817,10 @@ export default async function SettingsPage({
             <div id="email" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Email</h2>
-                  <StatusBadge connected={cfg.emailBackend === "resend" ? !!cfg.resendApiKey : !!cfg.smtpHost} />
+                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.email.title")}</h2>
+                  <StatusBadge t={t} connected={cfg.emailBackend === "resend" ? !!cfg.resendApiKey : !!cfg.smtpHost} />
                 </div>
-                <p className="text-sm text-zinc-500">
-                  Send admins an email when a new request or issue is submitted. Saving will send a test email to your account.
-                </p>
+                <p className="text-sm text-zinc-500">{t("settings.section.email.description")}</p>
               </div>
               <EmailForm
                 initialBackend={cfg.emailBackend === "resend" ? "resend" : "smtp"}
@@ -860,12 +838,10 @@ export default async function SettingsPage({
             <div id="discord-bot" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Discord Bot</h2>
-                  <StatusBadge connected={!!cfg.discordBotToken} />
+                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.discordBot.title")}</h2>
+                  <StatusBadge t={t} connected={!!cfg.discordBotToken} />
                 </div>
-                <p className="text-sm text-zinc-500">
-                  Allow Discord users to request media via slash commands using Discord&apos;s HTTP Interactions endpoint. No extra process or environment variables needed.
-                </p>
+                <p className="text-sm text-zinc-500">{t("settings.section.discordBot.description")}</p>
               </div>
               <DiscordBotForm
                 initialBotToken={cfg.discordBotToken ? "••••••••" : ""}
@@ -889,10 +865,9 @@ export default async function SettingsPage({
 
             <div id="ios-push-relay" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>iOS Push Relay</h2>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.iosPushRelay.title")}</h2>
                 <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  iOS push notifications are delivered through an APNs relay. Point at a self-hosted relay,
-                  add its bearer key if it requires auth, and optionally recommend a minimum app build.
+                  {t("settings.section.iosPushRelay.description")}
                 </p>
               </div>
               <div className="space-y-6">
@@ -914,12 +889,11 @@ export default async function SettingsPage({
             <div id="external-ratings" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>External Ratings</h2>
-                  <StatusBadge connected={!!(cfg.mdblistApiKey || cfg.omdbApiKey || cfg.traktClientId)} />
+                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.externalRatings.title")}</h2>
+                  <StatusBadge t={t} connected={!!(cfg.mdblistApiKey || cfg.omdbApiKey || cfg.traktClientId)} />
                 </div>
                 <p className="text-sm text-zinc-500">
-                  Adds IMDb, Rotten Tomatoes, RT Audience, Metacritic, and Trakt ratings to media pages.
-                  MDBList is recommended — it covers TV shows and adds Audience scores.
+                  {t("settings.section.externalRatings.description")}
                 </p>
               </div>
               <div className="space-y-6">
@@ -942,22 +916,19 @@ export default async function SettingsPage({
             <div id="ip-geolocation" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>IP Geolocation</h2>
-                  <StatusBadge connected={!!cfg.ipinfoToken} />
+                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.ipGeolocation.title")}</h2>
+                  <StatusBadge t={t} connected={!!cfg.ipinfoToken} />
                 </div>
-                <p className="text-sm text-zinc-500">
-                  Resolves stream IPs to city, ISP, and approximate location on the activity pages, similar to Tautulli&apos;s IP info popup.
-                </p>
+                <p className="text-sm text-zinc-500">{t("settings.section.ipGeolocation.description")}</p>
               </div>
               <IpinfoForm initialApiKey={cfg.ipinfoToken ? "••••••••" : ""} />
             </div>
 
             <div id="webhooks" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Webhooks</h2>
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.webhooks.title")}</h2>
                 <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  Add these URLs in Radarr/Sonarr → Settings → Connect → Webhook so requests
-                  are marked Available the moment a download completes.
+                  {t("settings.section.webhooks.description")}
                 </p>
               </div>
               <div className="space-y-6">
@@ -991,10 +962,10 @@ export default async function SettingsPage({
             groups={(() => {
               const g = groupFeaturesByCategory();
               return [
-                { category: "pages" as const,        title: "User pages",         description: "Hide or show user-facing nav sections and their pages.", features: g.pages },
-                { category: "behaviors" as const,    title: "Behaviors",          description: "Turn on or off specific features of the app.", features: g.behaviors },
-                { category: "integrations" as const, title: "Integrations",       description: "Toggle external integrations on or off without clearing their config.", features: g.integrations },
-                { category: "admin" as const,        title: "Admin pages",        description: "Hide or show admin-only pages and their nav entries.", features: g.admin },
+                { category: "pages" as const,        title: t("settings.features.group.pages.title"), description: t("settings.features.group.pages.description"), features: g.pages },
+                { category: "behaviors" as const,    title: t("settings.features.group.behaviors.title"), description: t("settings.features.group.behaviors.description"), features: g.behaviors },
+                { category: "integrations" as const, title: t("settings.features.group.integrations.title"), description: t("settings.features.group.integrations.description"), features: g.integrations },
+                { category: "admin" as const,        title: t("settings.features.group.admin.title"), description: t("settings.features.group.admin.description"), features: g.admin },
               ];
             })()}
           />
@@ -1004,18 +975,17 @@ export default async function SettingsPage({
           <>
           <div id="scheduled-jobs" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
             <div className="mb-5">
-              <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Scheduled Jobs</h2>
-              <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>Background cron jobs and their current status. Click Run to trigger on demand.</p>
+              <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.scheduledJobs.title")}</h2>
+              <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.scheduledJobs.description")}</p>
             </div>
             <CronJobTable jobs={metrics.cronJobs} />
           </div>
 
           <div id="audit-log-settings" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
             <div className="mb-5">
-              <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Audit Log</h2>
+              <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.auditLog.title")}</h2>
               <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                How long audit rows keep IP addresses, devices, and user names before the daily scrub redacts them.
-                A manual &ldquo;Scrub PII&rdquo; button lives on the Audit Log page.
+                {t("settings.section.auditLog.description")}
               </p>
             </div>
             <AuditRetentionForm initialDays={cfg.auditPiiRetentionDays ?? ""} />
@@ -1023,60 +993,60 @@ export default async function SettingsPage({
 
           <div id="db-metrics" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
             <div className="mb-5">
-              <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>DB Metrics</h2>
-              <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>Read-only snapshot of database row counts.</p>
+              <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.dbMetrics.title")}</h2>
+              <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.dbMetrics.description")}</p>
             </div>
             <div className="space-y-6">
 
               <div>
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3">Requests</h3>
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3">{t("settings.metrics.requests.heading")}</h3>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   {[
-                    { label: "Total",     value: metrics.totalRequests },
-                    { label: "Pending",   value: metrics.pendingRequests },
-                    { label: "Approved",  value: metrics.approvedRequests },
-                    { label: "Available", value: metrics.availableRequests },
-                    { label: "Declined",  value: metrics.declinedRequests },
-                    { label: "Movies",    value: metrics.movieRequests },
-                    { label: "TV Shows",  value: metrics.tvRequests },
+                    { label: t("settings.metrics.total"),     value: metrics.totalRequests },
+                    { label: t("settings.metrics.pending"),   value: metrics.pendingRequests },
+                    { label: t("settings.metrics.approved"),  value: metrics.approvedRequests },
+                    { label: t("settings.metrics.available"), value: metrics.availableRequests },
+                    { label: t("settings.metrics.declined"),  value: metrics.declinedRequests },
+                    { label: t("settings.metrics.movies"),    value: metrics.movieRequests },
+                    { label: t("settings.metrics.tvShows"),  value: metrics.tvRequests },
                   ].map(({ label, value }) => (
                     <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString()}</p>
+                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString(locale)}</p>
                     </div>
                   ))}
                 </div>
               </div>
 
               <div className="border-t border-zinc-800 pt-5">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3">Users</h3>
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3">{t("settings.metrics.users.heading")}</h3>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   {[
-                    { label: "Total",          value: metrics.totalUsers },
-                    { label: "Admins",         value: metrics.adminUsers },
-                    { label: "Issue Admins",   value: metrics.issueAdminUsers },
-                    { label: "Discord Linked", value: metrics.discordLinkedUsers },
+                    { label: t("settings.metrics.total"),          value: metrics.totalUsers },
+                    { label: t("settings.metrics.admins"),         value: metrics.adminUsers },
+                    { label: t("settings.metrics.issueAdmins"),   value: metrics.issueAdminUsers },
+                    { label: t("settings.metrics.discordLinked"), value: metrics.discordLinkedUsers },
                   ].map(({ label, value }) => (
                     <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString()}</p>
+                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString(locale)}</p>
                     </div>
                   ))}
                 </div>
               </div>
 
               <div className="border-t border-zinc-800 pt-5">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3">Issues</h3>
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3">{t("settings.metrics.issues.heading")}</h3>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   {[
-                    { label: "Total",       value: metrics.totalIssues },
-                    { label: "Open",        value: metrics.openIssues },
-                    { label: "In Progress", value: metrics.inProgressIssues },
-                    { label: "Resolved",    value: metrics.resolvedIssues },
+                    { label: t("settings.metrics.total"),       value: metrics.totalIssues },
+                    { label: t("settings.metrics.open"),        value: metrics.openIssues },
+                    { label: t("settings.metrics.inProgress"), value: metrics.inProgressIssues },
+                    { label: t("settings.metrics.resolved"),    value: metrics.resolvedIssues },
                   ].map(({ label, value }) => (
                     <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
-                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString()}</p>
+                      <p className="text-xl font-semibold text-zinc-100 tabular-nums">{value.toLocaleString(locale)}</p>
                     </div>
                   ))}
                 </div>
@@ -1084,7 +1054,7 @@ export default async function SettingsPage({
 
               <div className="border-t border-zinc-800 pt-5">
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Library Cache</h3>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">{t("settings.metrics.libraryCache.heading")}</h3>
                   <div className="flex items-center gap-2 flex-wrap">
                     <ResyncLibraryButton plexConfigured={plexConfigured} jellyfinConfigured={jellyfinConfigured} />
                     <SyncTVEpisodesButton />
@@ -1094,19 +1064,19 @@ export default async function SettingsPage({
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   {[
-                    { label: "Plex Items",           value: metrics.plexItems.toLocaleString() },
-                    { label: "Jellyfin Items",        value: metrics.jellyfinItems.toLocaleString() },
-                    { label: "TV Episodes",           value: metrics.episodeCacheEntries.toLocaleString() },
-                    { label: "Plex TV Coverage",      value: `${metrics.plexShowsWithEps.toLocaleString()} / ${metrics.plexTvShows.toLocaleString()} shows` },
-                    { label: "Jellyfin TV Coverage",  value: `${metrics.jellyfinShowsWithEps.toLocaleString()} / ${metrics.jellyfinTvShows.toLocaleString()} shows` },
-                    { label: "TMDB Cache",            value: metrics.tmdbCacheEntries.toLocaleString() },
-                    { label: "OMDB Cache",            value: metrics.omdbCacheEntries.toLocaleString() },
-                    { label: "Upcoming",              value: metrics.upcomingItems.toLocaleString() },
-                    { label: "Radarr Wanted",         value: metrics.radarrWanted.toLocaleString() },
-                    { label: "Radarr Available",      value: metrics.radarrAvailable.toLocaleString() },
-                    { label: "Sonarr Wanted",         value: metrics.sonarrWanted.toLocaleString() },
-                    { label: "Sonarr Available",      value: metrics.sonarrAvailable.toLocaleString() },
-                    { label: "Deletion Votes",        value: metrics.deletionVotes.toLocaleString() },
+                    { label: t("settings.metrics.plexItems"),           value: metrics.plexItems.toLocaleString(locale) },
+                    { label: t("settings.metrics.jellyfinItems"),        value: metrics.jellyfinItems.toLocaleString(locale) },
+                    { label: t("settings.metrics.tvEpisodes"),           value: metrics.episodeCacheEntries.toLocaleString(locale) },
+                    { label: t("settings.metrics.plexTvCoverage"),      value: t("settings.metrics.coverageShows", { covered: metrics.plexShowsWithEps.toLocaleString(locale), total: metrics.plexTvShows.toLocaleString(locale) }) },
+                    { label: t("settings.metrics.jellyfinTvCoverage"),  value: t("settings.metrics.coverageShows", { covered: metrics.jellyfinShowsWithEps.toLocaleString(locale), total: metrics.jellyfinTvShows.toLocaleString(locale) }) },
+                    { label: t("settings.metrics.tmdbCache"),            value: metrics.tmdbCacheEntries.toLocaleString(locale) },
+                    { label: t("settings.metrics.omdbCache"),            value: metrics.omdbCacheEntries.toLocaleString(locale) },
+                    { label: t("settings.metrics.upcoming"),              value: metrics.upcomingItems.toLocaleString(locale) },
+                    { label: t("settings.metrics.radarrWanted"),         value: metrics.radarrWanted.toLocaleString(locale) },
+                    { label: t("settings.metrics.radarrAvailable"),      value: metrics.radarrAvailable.toLocaleString(locale) },
+                    { label: t("settings.metrics.sonarrWanted"),         value: metrics.sonarrWanted.toLocaleString(locale) },
+                    { label: t("settings.metrics.sonarrAvailable"),      value: metrics.sonarrAvailable.toLocaleString(locale) },
+                    { label: t("settings.metrics.deletionVotes"),        value: metrics.deletionVotes.toLocaleString(locale) },
                   ].map(({ label, value }) => (
                     <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>
@@ -1117,10 +1087,9 @@ export default async function SettingsPage({
               </div>
 
               <div className="border-t border-zinc-800 pt-5">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3">TmdbMediaCore</h3>
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3">{t("settings.metrics.tmdbCore.heading")}</h3>
                 <p className="text-xs text-zinc-500 mb-3">
-                  Normalised metadata table (title, poster, year, rating) used by all grid pages to avoid live TMDB calls.
-                  Populated automatically as pages are browsed; use Initial DB Fill to seed it immediately.
+                  {t("settings.metrics.tmdbCore.description")}
                 </p>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
                   {(() => {
@@ -1129,10 +1098,10 @@ export default async function SettingsPage({
                     const libTotal = metrics.uniqueLibraryItems;
                     const coveragePct = libTotal > 0 ? Math.min(100, Math.round((total / libTotal) * 100)) : 0;
                     return [
-                      { label: "Total Entries",   value: total.toLocaleString() },
-                      { label: "Movies",           value: metrics.tmdbCoreMovies.toLocaleString() },
-                      { label: "TV Shows",         value: metrics.tmdbCoreTv.toLocaleString() },
-                      { label: "Library Coverage", value: libTotal > 0 ? `~${coveragePct}%` : "—", dim: total === 0 },
+                      { label: t("settings.metrics.totalEntries"),   value: total.toLocaleString(locale) },
+                      { label: t("settings.metrics.movies"),           value: metrics.tmdbCoreMovies.toLocaleString(locale) },
+                      { label: t("settings.metrics.tvShows"),         value: metrics.tmdbCoreTv.toLocaleString(locale) },
+                      { label: t("settings.metrics.libraryCoverage"), value: libTotal > 0 ? `~${coveragePct}%` : "—", dim: total === 0 },
                     ].map(({ label, value, dim }) => (
                       <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
                         <p className="text-xs text-zinc-500 mb-1">{label}</p>
@@ -1145,13 +1114,13 @@ export default async function SettingsPage({
               </div>
 
               <div className="border-t border-zinc-800 pt-5">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3">Play History</h3>
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-3">{t("settings.metrics.playHistory.heading")}</h3>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   {[
-                    { label: "Recorded Sessions",  value: metrics.playHistoryEntries.toLocaleString() },
-                    { label: "Media Server Users", value: metrics.mediaServerUsers.toLocaleString() },
-                    { label: "Current Shares",     value: metrics.currentShares !== null ? metrics.currentShares.toLocaleString() : "—" },
-                    { label: "Discord Search Cache", value: metrics.discordCacheEntries.toLocaleString() },
+                    { label: t("settings.metrics.recordedSessions"),  value: metrics.playHistoryEntries.toLocaleString(locale) },
+                    { label: t("settings.metrics.mediaServerUsers"), value: metrics.mediaServerUsers.toLocaleString(locale) },
+                    { label: t("settings.metrics.currentShares"),     value: metrics.currentShares !== null ? metrics.currentShares.toLocaleString(locale) : "—" },
+                    { label: t("settings.metrics.discordSearchCache"), value: metrics.discordCacheEntries.toLocaleString(locale) },
                   ].map(({ label, value }) => (
                     <div key={label} className="bg-zinc-800 border border-zinc-800 rounded-lg px-4 py-3">
                       <p className="text-xs text-zinc-500 mb-1">{label}</p>

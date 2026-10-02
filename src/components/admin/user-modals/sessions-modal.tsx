@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { useHasMounted } from "@/hooks/use-has-mounted";
-import { formatRelativeTime } from "@/lib/relative-time";
+import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { isIndefiniteDeadline } from "@/lib/session-lifetime";
 import {
   Trash2,
@@ -18,6 +18,8 @@ import {
 import { withBasePath } from "@/lib/base-path";
 import { useModalA11y } from "@/hooks/use-modal-a11y";
 import type { User } from "./shared";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 
 interface AdminAuthSession {
   id: string;
@@ -36,17 +38,23 @@ function DeviceIcon({ deviceType }: { deviceType: string }) {
   return                              <Monitor     className="w-3.5 h-3.5 shrink-0 text-zinc-400" />;
 }
 
-function deviceName(s: AdminAuthSession): string {
-  return s.deviceLabel ?? `${s.deviceType.charAt(0).toUpperCase() + s.deviceType.slice(1)} device`;
+function deviceName(s: AdminAuthSession, t: Translator): string {
+  if (s.deviceLabel) return s.deviceLabel;
+  if (s.deviceType === "mobile") return t("profile.sessions.device.mobile");
+  if (s.deviceType === "tablet") return t("profile.sessions.device.tablet");
+  if (s.deviceType === "desktop") return t("profile.sessions.device.desktop");
+  return t("profile.sessions.device.other", { type: s.deviceType.charAt(0).toUpperCase() + s.deviceType.slice(1) });
 }
 
 // Names the device (and IP when known) so each row's icon-only revoke control
 // is distinguishable to a screen reader.
-function sessionLabel(s: AdminAuthSession): string {
-  return s.ipAddress ? `${deviceName(s)} (${s.ipAddress})` : deviceName(s);
+function sessionLabel(s: AdminAuthSession, t: Translator): string {
+  return s.ipAddress ? `${deviceName(s, t)} (${s.ipAddress})` : deviceName(s, t);
 }
 
 export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) {
+  const t = useT();
+  const locale = useLocale();
   const [sessions, setSessions]       = useState<AdminAuthSession[]>([]);
   const [loading, setLoading]         = useState(true);
   const [revoking, setRevoking]       = useState<string | null>(null);
@@ -71,10 +79,10 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
       .catch(() => {
         // Say so: an empty list here would read as "no active sessions".
         setSessions([]);
-        setError("Could not load sessions.");
+        setError(t("adminManage.sessions.loadError"));
       })
       .finally(() => setLoading(false));
-  }, [u.id]);
+  }, [u.id, t]);
 
   async function revoke(sessionId: string) {
     setConfirmingRevoke(null);
@@ -90,12 +98,12 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
         // Show why it failed, so the admin knows the device may still be
         // signed in rather than guessing from a row that didn't disappear.
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
-        setError(data?.error ?? `Could not revoke session (${res.status})`);
+        setError(data?.error ?? t("adminManage.sessions.revokeError", { status: res.status }));
         return;
       }
       setSessions((s) => s.filter((r) => r.sessionId !== sessionId));
     } catch {
-      setError("Network error — the session may still be active.");
+      setError(t("adminManage.sessions.revokeNetwork"));
     } finally {
       setRevoking(null);
     }
@@ -113,12 +121,12 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
-        setError(data?.error ?? `Could not revoke sessions (${res.status})`);
+        setError(data?.error ?? t("adminManage.sessions.revokeAllError", { status: res.status }));
         return;
       }
       setSessions([]);
     } catch {
-      setError("Network error — the sessions may still be active.");
+      setError(t("adminManage.sessions.revokeAllNetwork"));
     } finally {
       setRevokingAll(false);
     }
@@ -147,12 +155,12 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
             className="text-sm font-semibold text-zinc-100 flex items-center gap-2"
           >
             <KeyRound className="w-4 h-4 text-zinc-400" />
-            Active Sessions
+            {t("profile.sessions.title")}
           </h3>
           <button
             ref={closeBtnRef}
             type="button"
-            aria-label="Close"
+            aria-label={t("adminManage.common.close")}
             onClick={onClose}
             className="-m-2 inline-flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-100 transition-colors"
           >
@@ -170,12 +178,12 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
           {loading && (
             <div className="flex items-center gap-2 py-4 justify-center">
               <Loader2 className="w-4 h-4 animate-spin text-zinc-500" />
-              <span className="text-xs text-zinc-500">Loading…</span>
+              <span className="text-xs text-zinc-500">{t("adminManage.common.loading")}</span>
             </div>
           )}
 
           {!loading && sessions.length === 0 && !error && (
-            <p className="text-xs text-zinc-500 py-4 text-center">No active sessions.</p>
+            <p className="text-xs text-zinc-500 py-4 text-center">{t("profile.sessions.empty")}</p>
           )}
 
           {!loading && sessions.map((s) => (
@@ -187,7 +195,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                 <DeviceIcon deviceType={s.deviceType} />
                 <div className="min-w-0 space-y-0.5">
                   <p className="text-xs text-zinc-200 truncate">
-                    {deviceName(s)}
+                    {deviceName(s, t)}
                   </p>
                   <div className="flex items-center gap-3 flex-wrap">
                     {s.ipAddress && (
@@ -196,15 +204,15 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                       </span>
                     )}
                     <span className="flex items-center gap-1 text-[10px] text-zinc-500">
-                      <Clock className="w-2.5 h-2.5" />Active {mounted ? formatRelativeTime(s.lastSeenAt) : ""}
+                      <Clock className="w-2.5 h-2.5" />{t("profile.sessions.active", { time: mounted ? formatRelativeTimeLocalized(s.lastSeenAt, locale) : "" })}
                     </span>
                   </div>
                   <p className="text-[10px] text-zinc-500">
                     {/* A native-app (iOS) session carries the never-reached sentinel
                         deadline (session-lifetime.ts) — it ends only when revoked. */}
                     {isIndefiniteDeadline(s.expiresAt)
-                      ? "Never expires — until revoked"
-                      : <>Expires {mounted ? new Date(s.expiresAt).toLocaleDateString() : ""}</>}
+                      ? t("profile.sessions.neverExpires")
+                      : t("profile.sessions.expires", { date: mounted ? new Date(s.expiresAt).toLocaleDateString(locale) : "" })}
                   </p>
                 </div>
               </div>
@@ -213,7 +221,7 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                 <div className="flex items-center gap-1.5 shrink-0 mt-0.5">
                   <button
                     type="button"
-                    aria-label={`Confirm revoke session: ${sessionLabel(s)}`}
+                    aria-label={t("adminManage.sessions.confirmRevokeAria", { name: sessionLabel(s, t) })}
                     disabled={revoking === s.sessionId || revokingAll}
                     onClick={() => revoke(s.sessionId)}
                     autoFocus
@@ -221,16 +229,16 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                   >
                     {revoking === s.sessionId
                       ? <Loader2 className="w-3 h-3 animate-spin" />
-                      : "Revoke"}
+                      : t("profile.sessions.revokeButton")}
                   </button>
                   <button
                     type="button"
-                    aria-label={`Cancel revoke session: ${sessionLabel(s)}`}
+                    aria-label={t("adminManage.sessions.cancelRevokeAria", { name: sessionLabel(s, t) })}
                     disabled={revoking === s.sessionId || revokingAll}
                     onClick={() => setConfirmingRevoke(null)}
                     className="rounded-md px-2 py-1 text-[10px] text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors disabled:opacity-40"
                   >
-                    Cancel
+                    {t("adminManage.common.cancel")}
                   </button>
                 </div>
               ) : (
@@ -238,9 +246,9 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                   type="button"
                   disabled={revoking === s.sessionId || revokingAll}
                   onClick={() => setConfirmingRevoke(s.sessionId)}
-                  aria-label={`Revoke session: ${sessionLabel(s)}`}
+                  aria-label={t("adminManage.sessions.revokeAria", { name: sessionLabel(s, t) })}
                   className="shrink-0 -m-1.5 inline-flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-40"
-                  title={`Revoke session: ${sessionLabel(s)}`}
+                  title={t("adminManage.sessions.revokeAria", { name: sessionLabel(s, t) })}
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
@@ -259,31 +267,31 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
                 className="w-full flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40"
               >
                 {revokingAll
-                  ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Revoking…</>
-                  : <><Trash2  className="w-3.5 h-3.5" />Revoke all sessions</>}
+                  ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />{t("adminManage.sessions.revoking")}</>
+                  : <><Trash2  className="w-3.5 h-3.5" />{t("adminManage.sessions.revokeAll")}</>}
               </button>
             ) : (
               <div className="flex items-center gap-1.5">
                 <button
                   type="button"
-                  aria-label={`Confirm revoke all sessions for ${u.name ?? u.email}`}
+                  aria-label={t("adminManage.sessions.confirmRevokeAllAria", { name: u.name ?? u.email })}
                   disabled={revokingAll}
                   onClick={revokeAll}
                   autoFocus
                   className="flex-1 flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-40"
                 >
                   {revokingAll
-                    ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Revoking…</>
-                    : <><Trash2  className="w-3.5 h-3.5" />Revoke all — they will be signed out</>}
+                    ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />{t("adminManage.sessions.revoking")}</>
+                    : <><Trash2  className="w-3.5 h-3.5" />{t("adminManage.sessions.revokeAllConfirm")}</>}
                 </button>
                 <button
                   type="button"
-                  aria-label="Cancel revoke all"
+                  aria-label={t("adminManage.sessions.cancelRevokeAll")}
                   disabled={revokingAll}
                   onClick={() => setConfirmingRevokeAll(false)}
                   className="rounded-md px-3 py-2 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors disabled:opacity-40"
                 >
-                  Cancel
+                  {t("adminManage.common.cancel")}
                 </button>
               </div>
             )}

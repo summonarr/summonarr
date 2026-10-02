@@ -4,8 +4,10 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { CheckCircle, Loader2, RefreshCw } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export function RatingsWarmButton() {
+  const t = useT();
   const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [results, setResults] = useState<{ omdb?: string; mdblist?: string } | null>(null);
 
@@ -27,32 +29,34 @@ export function RatingsWarmButton() {
       // A reply that isn't JSON (e.g. a reverse proxy's timeout page on a long
       // warm) becomes an error line for that source instead of throwing.
       const omdbData: { fetched?: number; skipped?: number; total?: number; failed?: number; error?: string } =
-        await omdbRes.json().catch(() => ({ error: `Request failed (HTTP ${omdbRes.status})` }));
+        await omdbRes.json().catch(() => ({ error: t("settings.form.common.requestFailedHttp", { status: omdbRes.status }) }));
       const mdblistData: MdblistWarmData =
-        await mdblistRes.json().catch(() => ({ error: `Request failed (HTTP ${mdblistRes.status})` }));
+        await mdblistRes.json().catch(() => ({ error: t("settings.form.common.requestFailedHttp", { status: mdblistRes.status }) }));
 
       const omdbErr    = omdbData.error;
       const mdblistErr = mdblistData.error;
 
       const mdblistSummary = mdblistErr
-        ?? `Fetched ${mdblistData.fetched ?? 0}, skipped ${mdblistData.skipped ?? 0}${(mdblistData.purged ?? 0) > 0 ? `, purged ${mdblistData.purged}` : ""}`;
+        ?? ((mdblistData.purged ?? 0) > 0
+          ? t("settings.form.ratingsWarm.summaryPurged", { fetched: mdblistData.fetched ?? 0, skipped: mdblistData.skipped ?? 0, purged: mdblistData.purged ?? 0 })
+          : t("settings.form.ratingsWarm.summary", { fetched: mdblistData.fetched ?? 0, skipped: mdblistData.skipped ?? 0 }));
 
       if (omdbErr || mdblistErr) {
         setStatus("error");
         setResults({
-          omdb: omdbErr ?? `Fetched ${omdbData.fetched ?? 0}, skipped ${omdbData.skipped ?? 0}`,
+          omdb: omdbErr ?? t("settings.form.ratingsWarm.summary", { fetched: omdbData.fetched ?? 0, skipped: omdbData.skipped ?? 0 }),
           mdblist: mdblistSummary,
         });
       } else {
         setStatus("done");
         setResults({
-          omdb: `Fetched ${omdbData.fetched ?? 0}, skipped ${omdbData.skipped ?? 0}`,
+          omdb: t("settings.form.ratingsWarm.summary", { fetched: omdbData.fetched ?? 0, skipped: omdbData.skipped ?? 0 }),
           mdblist: mdblistSummary,
         });
       }
     } catch {
       setStatus("error");
-      setResults({ omdb: "Request failed" });
+      setResults({ omdb: t("settings.form.common.requestFailed") });
     }
     setTimeout(() => setStatus("idle"), 10000);
   }
@@ -68,8 +72,8 @@ export function RatingsWarmButton() {
         className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
       >
         {status === "loading"
-          ? <><Loader2 className="w-4 h-4 animate-spin" />Warming…</>
-          : <><RefreshCw className="w-4 h-4" />Warm Ratings</>
+          ? <><Loader2 className="w-4 h-4 animate-spin" />{t("settings.form.activityWarm.warming")}</>
+          : <><RefreshCw className="w-4 h-4" />{t("settings.form.ratingsWarm.button")}</>
         }
       </Button>
       <Button
@@ -79,9 +83,9 @@ export function RatingsWarmButton() {
         onClick={() => runWarm(true)}
         disabled={status === "loading"}
         className="border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-2"
-        title="Purge all MDBList sentinels and re-fetch the entire library"
+        title={t("settings.form.ratingsWarm.fullSyncTitle")}
       >
-        <RefreshCw className="w-4 h-4" />Full Sync
+        <RefreshCw className="w-4 h-4" />{t("settings.form.ratingsWarm.fullSync")}
       </Button>
       {results && (
         <div role={status === "error" ? "alert" : "status"} aria-live={status === "error" ? "assertive" : "polite"} className={`text-xs ${status === "error" ? "text-red-400" : "text-zinc-400"}`}>

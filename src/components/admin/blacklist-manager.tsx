@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { Ban, X, Loader2 } from "@/components/icons";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface BlacklistRow {
   tmdbId: number;
@@ -22,6 +23,7 @@ interface SearchResult {
 const rowKey = (tmdbId: number, mt: string) => `${tmdbId}:${mt}`;
 
 export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
+  const t = useT();
   const [items, setItems] = useState<BlacklistRow[]>(initial);
   const [query, setQuery] = useState("");
   const [reason, setReason] = useState("");
@@ -52,7 +54,7 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
       // this the error body falls through Array.isArray to setResults([]) and the
       // empty list reads as "TMDB has no such title".
       if (!res.ok) {
-        setError((data as { error?: string } | null)?.error ?? "Search failed — try again");
+        setError((data as { error?: string } | null)?.error ?? t("adminQueue.blacklist.searchFailed"));
         return;
       }
       setSearched(true);
@@ -67,7 +69,7 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
         setResults([]);
       }
     } catch {
-      setError("Search failed — try again");
+      setError(t("adminQueue.blacklist.searchFailed"));
     } finally {
       setSearching(false);
     }
@@ -93,7 +95,7 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        setError(d.error ?? "Failed to block");
+        setError(d.error ?? t("adminQueue.blacklist.blockFailed"));
         return;
       }
       // The route is an "upsert" (insert, or update if it already exists) and
@@ -115,7 +117,7 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
         ...prev.filter((i) => !(i.tmdbId === r.id && i.mediaType === mediaType)),
       ]);
     } catch {
-      setError("Network error — please try again");
+      setError(t("shared.thread.networkError"));
     } finally {
       setBusy(null);
     }
@@ -132,12 +134,12 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
       );
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        setError(d.error ?? "Failed to remove");
+        setError(d.error ?? t("adminQueue.blacklist.removeFailed"));
         return;
       }
       setItems((prev) => prev.filter((i) => !(i.tmdbId === row.tmdbId && i.mediaType === row.mediaType)));
     } catch {
-      setError("Network error — please try again");
+      setError(t("shared.thread.networkError"));
     } finally {
       setBusy(null);
     }
@@ -150,13 +152,13 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
         className="flex flex-col gap-3"
         style={{ padding: 16, borderRadius: 10, border: "1px solid var(--ds-border)", background: "var(--ds-bg-1)" }}
       >
-        <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--ds-fg)", margin: 0 }}>Block a title</h2>
+        <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--ds-fg)", margin: 0 }}>{t("adminQueue.blacklist.blockHeading")}</h2>
         <form onSubmit={runSearch} className="flex items-center gap-2">
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value.slice(0, 200))}
-            placeholder="Search TMDB for a movie or show…"
-            aria-label="Search for a title to block"
+            placeholder={t("adminQueue.blacklist.searchPlaceholder")}
+            aria-label={t("adminQueue.blacklist.searchAria")}
             className="flex-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             style={{
               padding: "8px 12px",
@@ -183,15 +185,15 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
             }}
           >
             {searching ? <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} /> : null}
-            Search
+            {t("adminQueue.actions.search")}
           </button>
         </form>
 
         <input
           value={reason}
           onChange={(e) => setReason(e.target.value.slice(0, 500))}
-          placeholder="Reason (optional) — saved with the next title you block"
-          aria-label="Reason for blocking"
+          placeholder={t("adminQueue.blacklist.reasonPlaceholder")}
+          aria-label={t("adminQueue.blacklist.reasonAria")}
           className="focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           style={{
             padding: "8px 12px",
@@ -205,7 +207,7 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
 
         {searched && !searching && results.length === 0 && (
           <p role="status" style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>
-            No matching titles
+            {t("adminQueue.blacklist.noMatches")}
           </p>
         )}
 
@@ -224,7 +226,7 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
                   <span style={{ fontSize: 13, color: "var(--ds-fg)" }}>
                     {r.title}
                     {r.releaseYear ? <span style={{ color: "var(--ds-fg-subtle)" }}> ({r.releaseYear})</span> : null}
-                    <span style={{ color: "var(--ds-fg-subtle)", marginLeft: 8 }}>{r.mediaType === "movie" ? "Movie" : "TV"}</span>
+                    <span style={{ color: "var(--ds-fg-subtle)", marginLeft: 8 }}>{r.mediaType === "movie" ? t("adminQueue.blacklist.movie") : t("adminQueue.blacklist.tv")}</span>
                   </span>
                   <button
                     type="button"
@@ -247,7 +249,7 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
                     ) : (
                       <Ban style={{ width: 12, height: 12 }} />
                     )}
-                    {isBlocked ? "Blocked" : "Block"}
+                    {isBlocked ? t("adminQueue.blacklist.blocked") : t("adminQueue.blacklist.block")}
                   </button>
                 </div>
               );
@@ -265,11 +267,11 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
       {/* Blocked titles */}
       <div className="flex flex-col gap-2">
         <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--ds-fg)", margin: 0 }}>
-          Blocked titles ({items.length})
+          {t("adminQueue.blacklist.blockedHeading", { count: items.length })}
         </h2>
         {items.length === 0 ? (
           <p style={{ fontSize: 13, color: "var(--ds-fg-muted)", margin: 0 }}>
-            Nothing is blocked. Search above to block a title.
+            {t("adminQueue.blacklist.empty")}
           </p>
         ) : (
           <div className="flex flex-col" style={{ gap: 4 }}>
@@ -283,15 +285,15 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
                 >
                   <span style={{ fontSize: 13, color: "var(--ds-fg)" }}>
                     {row.title ?? `TMDB #${row.tmdbId}`}
-                    <span style={{ color: "var(--ds-fg-subtle)", marginLeft: 8 }}>{row.mediaType === "MOVIE" ? "Movie" : "TV"}</span>
+                    <span style={{ color: "var(--ds-fg-subtle)", marginLeft: 8 }}>{row.mediaType === "MOVIE" ? t("adminQueue.blacklist.movie") : t("adminQueue.blacklist.tv")}</span>
                     {row.reason ? <span style={{ color: "var(--ds-fg-subtle)", marginLeft: 8 }}>· {row.reason}</span> : null}
                   </span>
                   <button
                     type="button"
                     onClick={() => remove(row)}
                     disabled={busy === k}
-                    title="Remove from blacklist"
-                    aria-label={`Unblock ${row.title ?? row.tmdbId}`}
+                    title={t("adminQueue.blacklist.removeTitle")}
+                    aria-label={t("adminQueue.blacklist.unblockAria", { title: row.title ?? row.tmdbId })}
                     className="inline-flex items-center gap-1"
                     style={{
                       padding: "4px 10px",
@@ -307,7 +309,7 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
                     ) : (
                       <X style={{ width: 12, height: 12 }} />
                     )}
-                    Unblock
+                    {t("adminQueue.blacklist.unblock")}
                   </button>
                 </div>
               );

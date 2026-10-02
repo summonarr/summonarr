@@ -95,6 +95,10 @@ const baseTx = {
   hiddenItem: { deleteMany: record("hiddenItem", "deleteMany") },
   notification: { deleteMany: record("notification", "deleteMany") },
   userRecommendation: { deleteMany: record("userRecommendation", "deleteMany") },
+  verificationToken: { deleteMany: record("verificationToken", "deleteMany") },
+  userTotp: { deleteMany: record("userTotp", "deleteMany") },
+  webAuthnCredential: { deleteMany: record("webAuthnCredential", "deleteMany") },
+  mfaRecoveryCode: { deleteMany: record("mfaRecoveryCode", "deleteMany") },
   user: {
     findUnique: async (args: unknown) => {
       ops.push({ op: "user.findUnique", args });
@@ -121,6 +125,11 @@ const deactivateTx = {
     ),
     deleteMany: trap("guardrail 28 violated: MediaServerUser must never be hard-deleted"),
   },
+  // Deactivation is REVERSIBLE (guardrail 33): a re-enabled account must come
+  // back with its two-factor intact, so the disable path never touches it.
+  userTotp: { deleteMany: trap("deactivation must NOT remove two-factor — it is reversible") },
+  webAuthnCredential: { deleteMany: trap("deactivation must NOT remove passkeys — it is reversible") },
+  mfaRecoveryCode: { deleteMany: trap("deactivation must NOT remove recovery codes — it is reversible") },
 } as unknown as AnyTx;
 
 const purgeTx = {
@@ -140,6 +149,10 @@ const PURGE_OPS = [
   "user.findUnique",
   "account.deleteMany",
   "authSession.deleteMany",
+  // Two-factor credentials (guardrail 6d) — deleteAllMfaInTx's write set.
+  "userTotp.deleteMany",
+  "webAuthnCredential.deleteMany",
+  "mfaRecoveryCode.deleteMany",
   "pushSubscription.deleteMany",
   "discordLinkToken.deleteMany",
   "discordMergeCode.deleteMany",
@@ -148,6 +161,7 @@ const PURGE_OPS = [
   "hiddenItem.deleteMany",
   "notification.deleteMany",
   "userRecommendation.deleteMany",
+  "verificationToken.deleteMany",
   "user.updateMany",
 ];
 
@@ -284,7 +298,7 @@ test("purge is idempotent — an already-purged row is a no-op, not a second scr
 test("purge of a disabled account issues the full scrub set, in order", async () => {
   await purgeUserDataInTx(purgeTx, ID, NOW);
   assert.deepEqual(opNames(), PURGE_OPS);
-  for (const op of PURGE_OPS.slice(1, 6)) {
+  for (const op of PURGE_OPS.slice(1, 9)) {
     assert.deepEqual(opArgs(op), { where: { userId: ID } }, op);
   }
 });
@@ -350,6 +364,15 @@ test("the tombstone email is unique per user id and sits on the unroutable .inva
   for (const email of [first, second]) {
     assert.match(email, /^deleted-user-(one|two)@deleted\.invalid$/);
   }
+});
+
+test("purge drops the user's pending notification-email verification tokens (their identifier carries the address)", async () => {
+  // Left behind, a confirm link clicked inside its TTL would write the personal
+  // address back onto the scrubbed row.
+  await purgeUserDataInTx(purgeTx, ID, NOW);
+  assert.deepEqual(opArgs("verificationToken.deleteMany"), {
+    where: { identifier: { startsWith: `notif-email:${ID}:` } },
+  });
 });
 
 // ── purged-row detection (the pre-`purgedAt` migration gap) ─────────────────

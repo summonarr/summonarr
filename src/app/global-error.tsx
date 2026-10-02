@@ -1,8 +1,31 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import "./globals.css";
 import { withBasePath } from "@/lib/base-path";
+import { LOCALE_COOKIE, isLocale, negotiateLocale, type Locale } from "@/lib/i18n/locales";
+import { createTranslator } from "@/lib/i18n/translate";
+// Only the shared area, not the full CATALOGS: this boundary renders without
+// the root layout (so without I18nProvider), and bundling every catalog into
+// the crash page would cost far more than these few strings.
+import enShared from "@/lib/i18n/messages/en/shared.json";
+import esShared from "@/lib/i18n/messages/es/shared.json";
+
+const SHARED_MESSAGES: Record<Locale, Record<string, string>> = { en: enShared, es: esShared };
+
+// The picker's cookie, else the browser language — the same precedence the
+// server applies (resolveLocale), read client-side because there is no
+// request scope here.
+function readClientLocale(): Locale {
+  try {
+    const match = document.cookie.split("; ").find((c) => c.startsWith(`${LOCALE_COOKIE}=`));
+    const value = match?.slice(LOCALE_COOKIE.length + 1);
+    if (isLocale(value)) return value;
+  } catch {
+    // cookies unavailable — fall through to the browser language
+  }
+  return negotiateLocale(navigator.languages?.join(",") || navigator.language);
+}
 
 // Replaces the entire document on unrecoverable errors; must render its own <html>/<body> shell.
 // globals.css is imported here directly because global-error.tsx bypasses the root layout,
@@ -43,9 +66,18 @@ export default function GlobalError({
   error: Error & { digest?: string };
   retry: () => void;
 }) {
+  // English on the first render (matches any server render), then the
+  // viewer's language from an effect, like the theme below (guardrail 16).
+  const [locale, setLocale] = useState<Locale>("en");
+  const t = createTranslator(locale, SHARED_MESSAGES[locale], SHARED_MESSAGES.en);
+
   useEffect(() => {
     console.error("[global/error]", error);
   }, [error]);
+
+  useEffect(() => {
+    setLocale(readClientLocale());
+  }, []);
 
   // Same storage keys + validation as the root layout's THEME_INIT_SCRIPT and
   // theme-provider.tsx. Post-hydration, so it never disagrees with SSR (guardrail 16).
@@ -65,7 +97,7 @@ export default function GlobalError({
   }, []);
 
   return (
-    <html lang="en" className="dark" data-theme="dark" data-accent="indigo">
+    <html lang={locale} className="dark" data-theme="dark" data-accent="indigo">
       <body
         style={{
           margin: 0,
@@ -108,7 +140,7 @@ export default function GlobalError({
               textAlign: "center",
             }}
           >
-            Something went wrong
+            {t("shared.error.title")}
           </h1>
           <p
             style={{
@@ -120,8 +152,7 @@ export default function GlobalError({
               textAlign: "center",
             }}
           >
-            A critical error occurred and the page could not be drawn. Try again, or reload from
-            the home page.
+            {t("shared.error.criticalDescription")}
           </p>
           <div
             style={{
@@ -145,7 +176,7 @@ export default function GlobalError({
                 border: 0,
               }}
             >
-              Try again
+              {t("shared.error.tryAgain")}
             </button>
             <a
               href={withBasePath("/")}
@@ -157,7 +188,7 @@ export default function GlobalError({
                 border: "1px solid var(--ds-border)",
               }}
             >
-              Go home
+              {t("shared.error.goHome")}
             </a>
           </div>
         </div>

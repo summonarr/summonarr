@@ -6,10 +6,12 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { List, Activity, Download, X, ChevronDown, ChevronRight, Monitor, Globe, Shield, Bot } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
-import { formatRelativeTime } from "@/lib/relative-time";
+import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { ACTION_LABELS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
 import type { AuditAction } from "@/generated/prisma";
 import { withBasePath } from "@/lib/base-path";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 
 interface AuditRow {
   id: string;
@@ -28,12 +30,18 @@ interface AuditRow {
 // to the schema forces a label and group to be added too.
 const ALL_ACTIONS = Object.keys(ACTION_LABELS);
 
-const GROUP_OPTIONS: { value: AuditGroup | ""; label: string }[] = [
-  { value: "", label: "All" },
-  { value: "auth", label: "Auth" },
-  { value: "admin", label: "Admin" },
-  { value: "system", label: "System" },
+const GROUP_OPTIONS: { value: AuditGroup | ""; labelKey: string }[] = [
+  { value: "", labelKey: "adminManage.audit.group.all" },
+  { value: "auth", labelKey: "adminManage.audit.group.auth" },
+  { value: "admin", labelKey: "adminManage.audit.group.admin" },
+  { value: "system", labelKey: "adminManage.audit.group.system" },
 ];
+
+// Human label for an action badge. The enum code itself is never translated;
+// an unknown code (a newer server) falls back to the code.
+function actionLabel(action: string, t: Translator): string {
+  return action in ACTION_LABELS ? t(`adminManage.audit.action.${action}`) : action;
+}
 
 const DOT_COLORS: Record<string, string> = {
   REQUEST_APPROVE:    "bg-green-500",
@@ -74,21 +82,21 @@ function useAuditNav() {
 
 // Falls back to an absolute date past 7 days — audit rows are read long after
 // the fact, where "43d ago" is less useful than the date itself.
-function relativeTime(iso: string): string {
+function relativeTime(iso: string, locale: string): string {
   const diff = Date.now() - new Date(iso).getTime();
-  if (diff >= 7 * 86_400_000) return new Date(iso).toLocaleDateString();
-  return formatRelativeTime(iso);
+  if (diff >= 7 * 86_400_000) return new Date(iso).toLocaleDateString(locale);
+  return formatRelativeTimeLocalized(iso, locale);
 }
 
-function formatDateGroup(iso: string): string {
+function formatDateGroup(iso: string, t: Translator, locale: string): string {
   const date = new Date(iso);
   const today = new Date();
   const yesterday = new Date();
   yesterday.setDate(yesterday.getDate() - 1);
 
-  if (date.toDateString() === today.toDateString()) return "Today";
-  if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
-  return date.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+  if (date.toDateString() === today.toDateString()) return t("adminManage.audit.today");
+  if (date.toDateString() === yesterday.toDateString()) return t("adminManage.audit.yesterday");
+  return date.toLocaleDateString(locale, { weekday: "long", month: "long", day: "numeric", year: "numeric" });
 }
 
 function parseDetails(details: string | null): Record<string, unknown> | null {
@@ -100,8 +108,8 @@ function parseDetails(details: string | null): Record<string, unknown> | null {
   }
 }
 
-function parseUserAgent(ua: string | null): string {
-  if (!ua) return "Unknown";
+function parseUserAgent(ua: string | null, t: Translator): string {
+  if (!ua) return t("adminManage.audit.unknown");
   if (ua.includes("Firefox")) return "Firefox";
   if (ua.includes("Edg/")) return "Edge";
   if (ua.includes("Chrome")) return "Chrome";
@@ -131,6 +139,7 @@ function AuditLogFilters({
   viewMode: "table" | "timeline";
   onViewModeChange: (mode: "table" | "timeline") => void;
 }) {
+  const t = useT();
   const navigate = useAuditNav();
   const [userInput, setUserInput] = useState(currentUser);
   const [targetInput, setTargetInput] = useState(currentTarget);
@@ -218,7 +227,7 @@ function AuditLogFilters({
                 fontWeight: active ? 600 : 500,
               }}
             >
-              {g.label}
+              {t(g.labelKey)}
             </button>
           );
         })}
@@ -232,7 +241,7 @@ function AuditLogFilters({
               !currentAction ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
             }`}
           >
-            All
+            {t("adminManage.audit.group.all")}
           </button>
           {visibleActions.map((a) => (
             <button
@@ -242,7 +251,7 @@ function AuditLogFilters({
                 currentAction === a ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
               }`}
             >
-              {ACTION_LABELS[a as AuditAction].label}
+              {actionLabel(a, t)}
             </button>
           ))}
         </div>
@@ -255,23 +264,25 @@ function AuditLogFilters({
                 ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
                 : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
             }`}
-            title={currentHideCron ? "Showing only real users — click to include cron jobs" : "Hide system cron job entries"}
+            title={currentHideCron ? t("adminManage.audit.cronHiddenTitle") : t("adminManage.audit.hideCronTitle")}
           >
-            <Bot size={14} /> {currentHideCron ? "Cron hidden" : "Hide cron"}
+            <Bot size={14} /> {currentHideCron ? t("adminManage.audit.cronHidden") : t("adminManage.audit.hideCron")}
           </button>
 
           <div className="flex rounded-md border border-zinc-700 overflow-hidden">
             <button
               onClick={() => onViewModeChange("table")}
               className={`p-1.5 transition-colors ${viewMode === "table" ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"}`}
-              title="Table view"
+              title={t("adminManage.audit.tableView")}
+              aria-label={t("adminManage.audit.tableView")}
             >
               <List size={16} />
             </button>
             <button
               onClick={() => onViewModeChange("timeline")}
               className={`p-1.5 transition-colors ${viewMode === "timeline" ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"}`}
-              title="Timeline view"
+              title={t("adminManage.audit.timelineView")}
+              aria-label={t("adminManage.audit.timelineView")}
             >
               <Activity size={16} />
             </button>
@@ -293,7 +304,7 @@ function AuditLogFilters({
 
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex items-center gap-1.5">
-          <label htmlFor="audit-date-from" className="text-xs text-zinc-500">From</label>
+          <label htmlFor="audit-date-from" className="text-xs text-zinc-500">{t("adminManage.audit.from")}</label>
           <input
             id="audit-date-from"
             type="date"
@@ -303,7 +314,7 @@ function AuditLogFilters({
           />
         </div>
         <div className="flex items-center gap-1.5">
-          <label htmlFor="audit-date-to" className="text-xs text-zinc-500">To</label>
+          <label htmlFor="audit-date-to" className="text-xs text-zinc-500">{t("adminManage.audit.to")}</label>
           <input
             id="audit-date-to"
             type="date"
@@ -313,15 +324,15 @@ function AuditLogFilters({
           />
         </div>
         <Input
-          placeholder="Search by user..."
-          aria-label="Search by user"
+          placeholder={t("adminManage.audit.searchUserPlaceholder")}
+          aria-label={t("adminManage.audit.searchUser")}
           value={userInput}
           onChange={(e) => setUserInput(e.target.value)}
           className="w-40 !h-[30px] !text-xs bg-zinc-800 border-zinc-700"
         />
         <Input
-          placeholder="Search by target..."
-          aria-label="Search by target"
+          placeholder={t("adminManage.audit.searchTargetPlaceholder")}
+          aria-label={t("adminManage.audit.searchTarget")}
           value={targetInput}
           onChange={(e) => setTargetInput(e.target.value)}
           className="w-40 !h-[30px] !text-xs bg-zinc-800 border-zinc-700"
@@ -335,7 +346,7 @@ function AuditLogFilters({
             }}
             className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs text-zinc-400 hover:text-zinc-100 bg-zinc-800 hover:bg-zinc-700 transition-colors"
           >
-            <X size={12} /> Clear
+            <X size={12} /> {t("adminManage.audit.clear")}
           </button>
         )}
       </div>
@@ -360,6 +371,7 @@ function ExportButton({
   currentTarget: string;
   currentHideCron: boolean;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
 
   function exportAs(format: "csv" | "json") {
@@ -382,17 +394,17 @@ function ExportButton({
         onClick={() => setOpen(!open)}
         className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-800 text-zinc-400 hover:text-zinc-100 transition-colors"
       >
-        <Download size={14} /> Export
+        <Download size={14} /> {t("adminManage.audit.export")}
       </button>
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
           <div className="absolute right-0 top-full mt-1 z-20 bg-zinc-800 border border-zinc-700 rounded-md shadow-lg overflow-hidden">
             <button onClick={() => exportAs("csv")} className="block w-full text-left px-4 py-2 text-xs text-zinc-300 hover:bg-zinc-700">
-              Export as CSV
+              {t("adminManage.audit.exportCsv")}
             </button>
             <button onClick={() => exportAs("json")} className="block w-full text-left px-4 py-2 text-xs text-zinc-300 hover:bg-zinc-700">
-              Export as JSON
+              {t("adminManage.audit.exportJson")}
             </button>
           </div>
         </>
@@ -406,6 +418,7 @@ function ExportButton({
 // older than the configured retention window. Same handler the cron mirrors, so
 // running it early is always safe — it can only do what the cron would do later.
 function ScrubPiiButton() {
+  const t = useT();
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
@@ -422,13 +435,13 @@ function ScrubPiiButton() {
       if (res.ok) {
         setResult({
           kind: "ok",
-          text: `Scrubbed ${data.scrubbed ?? 0} row(s) older than ${data.retentionDays ?? 90} days`,
+          text: t("adminManage.audit.scrubDone", { count: data.scrubbed ?? 0, days: data.retentionDays ?? 90 }),
         });
       } else {
-        setResult({ kind: "err", text: data.error ?? "Scrub failed" });
+        setResult({ kind: "err", text: data.error ?? t("adminManage.audit.scrubFailed") });
       }
     } catch {
-      setResult({ kind: "err", text: "Scrub failed" });
+      setResult({ kind: "err", text: t("adminManage.audit.scrubFailed") });
     }
     setBusy(false);
     setTimeout(() => setResult(null), 8000);
@@ -437,18 +450,18 @@ function ScrubPiiButton() {
   if (confirming) {
     return (
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-xs text-zinc-300">Redact IP, device & names on old rows?</span>
+        <span className="text-xs text-zinc-300">{t("adminManage.audit.scrubConfirm")}</span>
         <button
           onClick={runScrub}
           className="px-2.5 py-1.5 rounded-md text-xs font-medium bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
         >
-          Scrub
+          {t("adminManage.audit.scrub")}
         </button>
         <button
           onClick={() => setConfirming(false)}
           className="px-2 py-1.5 rounded-md text-xs text-zinc-400 hover:text-zinc-100 bg-zinc-800 transition-colors"
         >
-          Cancel
+          {t("adminManage.common.cancel")}
         </button>
       </div>
     );
@@ -460,9 +473,9 @@ function ScrubPiiButton() {
         onClick={() => setConfirming(true)}
         disabled={busy}
         className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-800 text-zinc-400 hover:text-zinc-100 transition-colors disabled:opacity-50"
-        title="Immediately redact IP addresses, devices, and user names from rows past the retention window (normally done by the daily cron)"
+        title={t("adminManage.audit.scrubTitle")}
       >
-        <Shield size={14} /> {busy ? "Scrubbing…" : "Scrub PII"}
+        <Shield size={14} /> {busy ? t("adminManage.audit.scrubbing") : t("adminManage.audit.scrubPii")}
       </button>
       {result && (
         <span
@@ -477,7 +490,16 @@ function ScrubPiiButton() {
   );
 }
 
-function formatSummary(action: string, d: Record<string, unknown>): string | null {
+function formatSummary(action: string, d: Record<string, unknown>, t: Translator): string | null {
+  // Plural lookups need a real number; a malformed payload counts as 0.
+  const num = (v: unknown): number => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const note = () => d.adminNote && t("adminManage.audit.summary.note", { note: String(d.adminNote).slice(0, 80) });
+  const media = () => d.mediaType && `(${String(d.mediaType).toLowerCase()})`;
+  const reason = () => d.reason && `— ${String(d.reason).slice(0, 80)}`;
+  const via = () => d.provider && t("adminManage.audit.summary.via", { provider: String(d.provider) });
   switch (action) {
     case "REQUEST_APPROVE":
     case "REQUEST_DECLINE":
@@ -487,74 +509,80 @@ function formatSummary(action: string, d: Record<string, unknown>): string | nul
       // single title. (A permanent bulk decline has its own case below.)
       if (d.batch) {
         return [
-          `Batch: ${d.count ?? "?"} request(s)`,
-          d.permanent && "permanent",
-          d.adminNote && `note: ${String(d.adminNote).slice(0, 80)}`,
+          t("adminManage.audit.summary.batch", { count: num(d.count) }),
+          d.permanent && t("adminManage.audit.summary.permanent"),
+          note(),
         ].filter(Boolean).join(" · ") || null;
       }
       return [
         d.title && `"${d.title}"`,
-        d.mediaType && `(${String(d.mediaType).toLowerCase()})`,
+        media(),
         d.year && `[${d.year}]`,
-        d.requestedBy && `requested by ${d.requestedBy}`,
+        d.requestedBy && t("adminManage.audit.summary.requestedBy", { user: String(d.requestedBy) }),
       ].filter(Boolean).join(" ") || null;
     case "BATCH_REQUEST_DECLINE":
       return [
-        `Batch: ${d.count ?? "?"} request(s) declined`,
-        d.permanent && "permanent",
-        d.adminNote && `note: ${String(d.adminNote).slice(0, 80)}`,
+        t("adminManage.audit.summary.batchDeclined", { count: num(d.count) }),
+        d.permanent && t("adminManage.audit.summary.permanent"),
+        note(),
       ].filter(Boolean).join(" · ") || null;
     case "REQUEST_ON_BEHALF":
       return [
-        d.created != null && `${d.created} request(s) created`,
-        d.targetUser && `for ${d.targetUser}`,
+        d.created != null && t("adminManage.audit.summary.requestsCreated", { count: num(d.created) }),
+        d.targetUser && t("adminManage.audit.summary.forUser", { user: String(d.targetUser) }),
       ].filter(Boolean).join(" ") || null;
     case "USER_ROLE_CHANGE":
     case "USER_PERMISSIONS_CHANGE":
       return [
-        d.targetUser && `User: ${d.targetUser}`,
+        d.targetUser && t("adminManage.audit.summary.user", { user: String(d.targetUser) }),
         d.targetEmail && `(${d.targetEmail})`,
       ].filter(Boolean).join(" ") || null;
     case "USER_CREATE":
       return [
-        d.targetUser && `Created ${d.targetUser}`,
+        d.targetUser && t("adminManage.audit.summary.created", { user: String(d.targetUser) }),
         d.targetEmail && `(${d.targetEmail})`,
         d.role && `· ${d.role}`,
       ].filter(Boolean).join(" ") || null;
     case "USER_DELETE":
       return [
-        d.targetUser && `Deleted user: ${d.targetUser}`,
+        d.targetUser && t("adminManage.audit.summary.deletedUser", { user: String(d.targetUser) }),
         d.targetEmail && `(${d.targetEmail})`,
       ].filter(Boolean).join(" ") || null;
     case "USER_DEACTIVATE":
       return [
-        d.targetUser ? `Disabled ${d.targetUser}` : null,
+        d.targetUser ? t("adminManage.audit.summary.disabled", { user: String(d.targetUser) }) : null,
         d.targetEmail && `(${d.targetEmail})`,
-        d.kind === "self-delete" && "closed by the user",
+        d.kind === "self-delete" && t("adminManage.audit.summary.closedByUser"),
       ].filter(Boolean).join(" ") || null;
     case "USER_REACTIVATE":
       return [
-        d.targetUser && `Re-enabled ${d.targetUser}`,
+        d.targetUser && t("adminManage.audit.summary.reenabled", { user: String(d.targetUser) }),
         d.targetEmail && `(${d.targetEmail})`,
       ].filter(Boolean).join(" ") || null;
     case "USER_PURGE": {
       const kept = d.historyPreserved as Record<string, unknown> | undefined;
       return [
-        d.targetUser && `Purged ${d.targetUser}`,
-        kept && `kept ${kept.mediaRequests ?? 0} requests, ${kept.issues ?? 0} issues, ${kept.deletionVotes ?? 0} votes`,
+        d.targetUser && t("adminManage.audit.summary.purged", { user: String(d.targetUser) }),
+        kept && t("adminManage.audit.summary.kept", {
+          requests: num(kept.mediaRequests),
+          issues: num(kept.issues),
+          votes: num(kept.deletionVotes),
+        }),
       ].filter(Boolean).join(" · ") || null;
     }
     case "SETTINGS_CHANGE":
     case "MAINTENANCE_TOGGLE": {
       const keys = d.keys as string[] | undefined;
-      if (keys?.length) return `Changed: ${keys.join(", ")}`;
+      if (keys?.length) return t("adminManage.audit.summary.changed", { keys: keys.join(", ") });
       // Instance-manager saves ({service, instances[]}) and the PII scrub
       // ({scrubbed}) log under SETTINGS_CHANGE with their own shapes.
       if (d.service && Array.isArray(d.instances)) {
-        const removed = Array.isArray(d.removed) && d.removed.length > 0 ? ` · removed: ${(d.removed as unknown[]).join(", ")}` : "";
-        return `${d.service}: ${(d.instances as unknown[]).length} instance(s)${removed}`;
+        const removed = Array.isArray(d.removed) && d.removed.length > 0
+          ? ` · ${t("adminManage.audit.summary.removed", { list: (d.removed as unknown[]).join(", ") })}`
+          : "";
+        return `${d.service}: ${t("adminManage.audit.summary.instances", { count: (d.instances as unknown[]).length })}${removed}`;
       }
-      if (d.scrubbed != null) return `Scrubbed PII from ${d.scrubbed} row(s)`;
+      if (d.scrubbed != null) return t("adminManage.audit.summary.scrubbedRows", { count: num(d.scrubbed) });
       // TRaSH sync also logs under SETTINGS_CHANGE, with its own shape
       // ({refreshed[], applied{count,failures}, errors[], durationMs}). Summarize
       // it in one line instead of dumping the whole `refreshed` array as JSON.
@@ -564,11 +592,11 @@ function formatSummary(action: string, d: Record<string, unknown>): string | nul
         const recreated = applied?.recreated ?? 0;
         const errors = Array.isArray(d.errors) ? d.errors.length : 0;
         return [
-          Array.isArray(d.refreshed) && `Refreshed ${d.refreshed.length} service(s)`,
-          applied?.count != null && `applied ${applied.count} spec(s)`,
-          recreated > 0 && `${recreated} recreated`,
-          failures > 0 && `${failures} failed`,
-          errors > 0 && `${errors} error(s)`,
+          Array.isArray(d.refreshed) && t("adminManage.audit.summary.refreshedServices", { count: d.refreshed.length }),
+          applied?.count != null && t("adminManage.audit.summary.appliedSpecs", { count: num(applied.count) }),
+          recreated > 0 && t("adminManage.audit.summary.recreated", { count: recreated }),
+          failures > 0 && t("adminManage.audit.summary.failed", { count: failures }),
+          errors > 0 && t("adminManage.audit.summary.errors", { count: errors }),
         ].filter(Boolean).join(" · ") || null;
       }
       return null;
@@ -580,34 +608,41 @@ function formatSummary(action: string, d: Record<string, unknown>): string | nul
     case "ISSUE_DELETE":
       return [
         d.title && `"${d.title}"`,
-        d.mediaType && `(${String(d.mediaType).toLowerCase()})`,
+        media(),
       ].filter(Boolean).join(" ") || null;
     case "CONTENT_REPORT":
       return [
         d.contentType && d.contentId && `${d.contentType} #${d.contentId}`,
-        d.reason && `— ${String(d.reason).slice(0, 80)}`,
+        reason(),
       ].filter(Boolean).join(" ") || null;
     case "VOTE_DISMISS_ALL":
       return [
-        d.dismissedCount != null && `Dismissed ${d.dismissedCount} vote(s)`,
+        d.dismissedCount != null && t("adminManage.audit.summary.dismissedVotes", { count: num(d.dismissedCount) }),
         d.tmdbId && `tmdb:${d.tmdbId}`,
-        d.mediaType && `(${String(d.mediaType).toLowerCase()})`,
+        media(),
       ].filter(Boolean).join(" ") || null;
     case "FIX_MATCH":
       return [
         d.source && `${d.source}:`,
         d.fromTmdbId && d.toTmdbId && `tmdb ${d.fromTmdbId} → ${d.toTmdbId}`,
-        d.mediaType && `(${String(d.mediaType).toLowerCase()})`,
-        d.serverInstance && `on ${d.serverInstance}`,
+        media(),
+        d.serverInstance && t("adminManage.audit.summary.onInstance", { instance: String(d.serverInstance) }),
       ].filter(Boolean).join(" ") || null;
     case "SERVER_USERS_BULK":
       return [
-        d.downloadsEnabled != null && `Downloads ${d.downloadsEnabled ? "enabled" : "disabled"}`,
-        d.targetCount != null && `for ${d.targetCount} user(s)`,
-        d.pushed != null && `(${d.pushed} pushed)`,
+        d.downloadsEnabled != null &&
+          (d.downloadsEnabled
+            ? t("adminManage.audit.summary.downloadsEnabled")
+            : t("adminManage.audit.summary.downloadsDisabled")),
+        d.targetCount != null && t("adminManage.audit.summary.forUsers", { count: num(d.targetCount) }),
+        d.pushed != null && t("adminManage.audit.summary.pushed", { count: num(d.pushed) }),
       ].filter(Boolean).join(" ") || null;
     case "SERVER_USER_LINK": {
-      const mode = d.mode === "auto" ? "back to automatic" : d.mode === "manual-unlink" ? "manually unlinked" : "manually linked";
+      const mode = d.mode === "auto"
+        ? t("adminManage.audit.summary.linkAuto")
+        : d.mode === "manual-unlink"
+          ? t("adminManage.audit.summary.linkManualUnlink")
+          : t("adminManage.audit.summary.linkManual");
       return [
         d.serverUser && `${d.serverUser}`,
         d.source && `(${d.source})`,
@@ -619,32 +654,32 @@ function formatSummary(action: string, d: Record<string, unknown>): string | nul
       return [
         (d.mediaTitle ?? d.title) && `"${d.mediaTitle ?? d.title}"`,
         (d.accountName ?? d.userName) && `· ${d.accountName ?? d.userName}`,
-        d.reason && `— ${String(d.reason).slice(0, 80)}`,
+        reason(),
       ].filter(Boolean).join(" ") || null;
     case "LIBRARY_SYNC":
       return [
-        d.movies != null && `${d.movies} movies`,
-        d.tv != null && `${d.tv} TV`,
-        d.marked != null && `${d.marked} marked available`,
-        d.full === true && "full resync",
-        d.durationMs != null && `in ${Math.round(Number(d.durationMs) / 1000)}s`,
+        d.movies != null && t("adminManage.audit.summary.movies", { count: num(d.movies) }),
+        d.tv != null && t("adminManage.audit.summary.tv", { count: num(d.tv) }),
+        d.marked != null && t("adminManage.audit.summary.markedAvailable", { count: num(d.marked) }),
+        d.full === true && t("adminManage.audit.summary.fullResync"),
+        d.durationMs != null && t("adminManage.audit.summary.inSeconds", { seconds: Math.round(Number(d.durationMs) / 1000) }),
       ].filter(Boolean).join(" · ") || null;
     case "CACHE_WARM":
       return [
-        d.warmed != null && `${d.warmed} warmed`,
-        d.fetched != null && `${d.fetched} fetched`,
-        d.skipped != null && `${d.skipped} skipped`,
+        d.warmed != null && t("adminManage.audit.summary.warmed", { count: num(d.warmed) }),
+        d.fetched != null && t("adminManage.audit.summary.fetched", { count: num(d.fetched) }),
+        d.skipped != null && t("adminManage.audit.summary.skipped", { count: num(d.skipped) }),
         d.trigger && `(${d.trigger})`,
       ].filter(Boolean).join(" · ") || null;
     case "RATINGS_CACHE_CLEAR":
       return [
-        d.cleared != null && `Cleared ${d.cleared} entries`,
+        d.cleared != null && t("adminManage.audit.summary.clearedEntries", { count: num(d.cleared) }),
         d.source && `(${d.source})`,
       ].filter(Boolean).join(" ") || null;
     case "PLAY_HISTORY_BACKFILL":
       return [
-        d.updated != null && `Clamped ${d.updated} row(s)`,
-        d.watchedFlippedToFalse != null && `${d.watchedFlippedToFalse} watched-flag(s) flipped`,
+        d.updated != null && t("adminManage.audit.summary.clampedRows", { count: num(d.updated) }),
+        d.watchedFlippedToFalse != null && t("adminManage.audit.summary.watchedFlipped", { count: num(d.watchedFlippedToFalse) }),
       ].filter(Boolean).join(" · ") || null;
     case "PLAY_HISTORY_DELETE":
       return [
@@ -654,66 +689,111 @@ function formatSummary(action: string, d: Record<string, unknown>): string | nul
     case "PLAY_HISTORY_EXPORT":
     case "AUDIT_LOG_EXPORT":
       return [
-        d.format && `Format: ${String(d.format).toUpperCase()}`,
-        d.rowCount != null && Number(d.rowCount) > 0 && `${d.rowCount} rows`,
-        d.truncated === true && "truncated",
+        d.format && t("adminManage.audit.summary.format", { format: String(d.format).toUpperCase() }),
+        d.rowCount != null && Number(d.rowCount) > 0 && t("adminManage.audit.summary.rows", { count: num(d.rowCount) }),
+        d.truncated === true && t("adminManage.audit.summary.truncated"),
         d.status && `(${d.status})`,
       ].filter(Boolean).join(" · ") || null;
     case "BLACKLIST_CHANGE":
       return [
-        d.op === "remove" ? "Unblocked" : "Blocked",
+        d.op === "remove" ? t("adminManage.audit.summary.unblocked") : t("adminManage.audit.summary.blocked"),
         d.title && `"${d.title}"`,
-        d.reason && `— ${String(d.reason).slice(0, 80)}`,
+        reason(),
+      ].filter(Boolean).join(" ") || null;
+    case "LIBRARY_CLEANUP_DELETE":
+      return [
+        d.title && `"${d.title}"`,
+        Array.isArray(d.deleted) && d.deleted.length > 0 && t("adminManage.audit.summary.removedFrom", { list: d.deleted.join(", ") }),
+        Array.isArray(d.failed) && d.failed.length > 0 && t("adminManage.audit.summary.failedOn", { list: d.failed.join(", ") }),
+        d.blacklisted === true && `· ${t("adminManage.audit.summary.blacklisted")}`,
+      ].filter(Boolean).join(" ") || null;
+    case "LIBRARY_CLEANUP_PROTECT":
+      return [
+        d.op === "remove" ? t("adminManage.audit.summary.unprotected") : t("adminManage.audit.summary.protected"),
+        d.title && `"${d.title}"`,
+        reason(),
       ].filter(Boolean).join(" ") || null;
     case "BACKUP_EXPORT":
       return [
-        d.format && `Format: ${String(d.format).toUpperCase()}`,
-        d.totalRows != null && `${d.totalRows} rows`,
-        d.userCount != null && `${d.userCount} users, ${d.requestCount ?? 0} requests`,
-        d.includeSensitive && "incl. sensitive",
+        d.format && t("adminManage.audit.summary.format", { format: String(d.format).toUpperCase() }),
+        d.totalRows != null && t("adminManage.audit.summary.rows", { count: num(d.totalRows) }),
+        d.userCount != null && t("adminManage.audit.summary.usersAndRequests", { users: num(d.userCount), requests: num(d.requestCount) }),
+        d.includeSensitive && t("adminManage.audit.summary.inclSensitive"),
       ].filter(Boolean).join(" · ") || null;
     case "BACKUP_IMPORT":
       return [
-        d.format && `Format: ${String(d.format).toUpperCase()}`,
+        d.format && t("adminManage.audit.summary.format", { format: String(d.format).toUpperCase() }),
       ].filter(Boolean).join(" · ") || null;
     case "AUTH_LOGIN":
       return [
         d.email && `${d.email}`,
         d.role && `(${d.role})`,
-        d.provider && `via ${d.provider}`,
+        via(),
       ].filter(Boolean).join(" ") || null;
     case "AUTH_LOGIN_FAILED":
       return [
-        d.reason && `Reason: ${String(d.reason).replace(/_/g, " ")}`,
-        d.provider && `via ${d.provider}`,
+        d.reason && t("adminManage.audit.summary.reason", { reason: String(d.reason).replace(/_/g, " ") }),
+        via(),
       ].filter(Boolean).join(" · ") || null;
     case "AUTH_LOGOUT":
       return [
         d.email && `${d.email}`,
-        d.provider && `via ${d.provider}`,
+        via(),
       ].filter(Boolean).join(" ") || null;
     case "SESSION_REVOKE":
       return [
-        d.targetUser ? `User: ${String(d.targetUser)}` : d.deviceLabel && `Device: ${String(d.deviceLabel)}`,
-        d.revokedAll && "All sessions",
-        d.adminAction && "by admin",
-        d.revokedByOwner && "by owner",
+        d.targetUser
+          ? t("adminManage.audit.summary.user", { user: String(d.targetUser) })
+          : d.deviceLabel && t("adminManage.audit.summary.device", { device: String(d.deviceLabel) }),
+        d.revokedAll && t("adminManage.audit.summary.allSessions"),
+        d.adminAction && t("adminManage.audit.summary.byAdmin"),
+        d.revokedByOwner && t("adminManage.audit.summary.byOwner"),
       ].filter(Boolean).join(" · ") || null;
+    case "MFA_CHANGE":
+      return [
+        d.kind && String(d.kind).replace(/-/g, " "),
+        d.name && `"${String(d.name)}"`,
+        typeof d.otherSessionsRevoked === "number" && d.otherSessionsRevoked > 0 &&
+          t("adminManage.audit.summary.otherSessionsSignedOut", { count: d.otherSessionsRevoked }),
+      ].filter(Boolean).join(" · ") || null;
+    case "MFA_RESET":
+      return d.targetUser ? t("adminManage.audit.summary.user", { user: String(d.targetUser) }) : null;
     default:
       return null;
   }
 }
 
+// Render one side of a before/after diff. Writers log either an object of
+// changed fields or a bare scalar (a permissions bitfield string, a
+// mediaServer enum, a numeric quota, a boolean flag, or null for "cleared"),
+// so only a plain object is spread into `key: value` pairs; anything else is
+// shown whole, labelled with the entry's `field` when it has one.
+function formatDiffValue(v: unknown, t: Translator): string {
+  if (v === null || v === undefined) return t("adminManage.audit.none");
+  return typeof v === "object" ? JSON.stringify(v) : String(v);
+}
+
+function formatDiffSide(value: unknown, field: unknown, t: Translator): string | null {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length === 0) return null;
+    return entries.map(([k, v]) => `${k}: ${formatDiffValue(v, t)}`).join(", ");
+  }
+  const text = formatDiffValue(value, t);
+  return typeof field === "string" && field ? `${field}: ${text}` : text;
+}
+
 function DetailSection({ details, action, expanded }: { details: string | null; action: string; expanded?: boolean }) {
+  const t = useT();
   const [isExpanded, setIsExpanded] = useState(expanded ?? false);
   const parsed = parseDetails(details);
   if (!parsed) return <span className="text-zinc-500 text-xs">—</span>;
 
-  const before = parsed.before as Record<string, unknown> | undefined;
-  const after = parsed.after as Record<string, unknown> | undefined;
-  const hasDiff = before || after;
+  const beforeText = "before" in parsed ? formatDiffSide(parsed.before, parsed.field, t) : null;
+  const afterText = "after" in parsed ? formatDiffSide(parsed.after, parsed.field, t) : null;
+  const hasDiff = beforeText !== null || afterText !== null;
 
-  const summary = formatSummary(action, parsed);
+  const summary = formatSummary(action, parsed, t);
 
   // Actions with no summary case (cron shapes, anything added later) keep their
   // raw payload behind the same expand toggle the diff rows use, so long JSON
@@ -734,8 +814,8 @@ function DetailSection({ details, action, expanded }: { details: string | null; 
           <span>
             {summary ||
               (hasDiff
-                ? "View changes"
-                : `${rawEntries.length} field${rawEntries.length === 1 ? "" : "s"}: ${rawEntries.map(([k]) => k).join(", ")}`)}
+                ? t("adminManage.audit.viewChanges")
+                : t("adminManage.audit.fields", { count: rawEntries.length, list: rawEntries.map(([k]) => k).join(", ") }))}
           </span>
         </button>
       ) : (
@@ -750,16 +830,16 @@ function DetailSection({ details, action, expanded }: { details: string | null; 
 
       {isExpanded && hasDiff && (
         <div className="mt-2 pl-4 space-y-1.5 border-l-2 border-zinc-700/60">
-          {before && Object.keys(before).length > 0 && (
+          {beforeText !== null && (
             <div className="flex items-start gap-2">
-              <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-500/15 text-red-400">BEFORE</span>
-              <span className="text-red-400">{Object.entries(before).map(([k, v]) => `${k}: ${v}`).join(", ")}</span>
+              <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-red-500/15 text-red-400">{t("adminManage.audit.before")}</span>
+              <span className="text-red-400">{beforeText}</span>
             </div>
           )}
-          {after && Object.keys(after).length > 0 && (
+          {afterText !== null && (
             <div className="flex items-start gap-2">
-              <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-500/15 text-green-400">AFTER</span>
-              <span className="text-green-400">{Object.entries(after).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join(", ")}</span>
+              <span className="shrink-0 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-green-500/15 text-green-400">{t("adminManage.audit.after")}</span>
+              <span className="text-green-400">{afterText}</span>
             </div>
           )}
         </div>
@@ -769,6 +849,8 @@ function DetailSection({ details, action, expanded }: { details: string | null; 
 }
 
 function AuditLogTable({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }) {
+  const t = useT();
+  const locale = useLocale();
   return (
     <Card className="bg-zinc-900 border-zinc-800 overflow-hidden">
       <div className="overflow-x-auto">
@@ -779,26 +861,27 @@ function AuditLogTable({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }
                   lowest-information columns for a mobile glance (Source is
                   usually inferable from the Action verb; Details truncates
                   anyway). The wrapping overflow-x-auto div remains a safety net. */}
-              <th scope="col" className="text-left px-4 py-3 font-medium">Time</th>
-              <th scope="col" className="text-left px-4 py-3 font-medium">User</th>
-              <th scope="col" className="text-left px-4 py-3 font-medium">Action</th>
-              <th scope="col" className="text-left px-4 py-3 font-medium">Target</th>
-              <th scope="col" className="hidden sm:table-cell text-left px-4 py-3 font-medium">Details</th>
-              <th scope="col" className="hidden sm:table-cell text-left px-4 py-3 font-medium">Source</th>
+              <th scope="col" className="text-left px-4 py-3 font-medium">{t("adminManage.audit.col.time")}</th>
+              <th scope="col" className="text-left px-4 py-3 font-medium">{t("adminManage.audit.col.user")}</th>
+              <th scope="col" className="text-left px-4 py-3 font-medium">{t("adminManage.audit.col.action")}</th>
+              <th scope="col" className="text-left px-4 py-3 font-medium">{t("adminManage.audit.col.target")}</th>
+              <th scope="col" className="hidden sm:table-cell text-left px-4 py-3 font-medium">{t("adminManage.audit.col.details")}</th>
+              <th scope="col" className="hidden sm:table-cell text-left px-4 py-3 font-medium">{t("adminManage.audit.col.source")}</th>
             </tr>
           </thead>
           <tbody>
             {logs.map((log) => {
               const actionInfo = ACTION_LABELS[log.action as AuditAction] ?? { label: log.action, color: "bg-zinc-800 text-zinc-400" };
+              const label = actionLabel(log.action, t);
               return (
                 <tr key={log.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-                  <td className="px-4 py-3 text-zinc-400 whitespace-nowrap text-xs" title={mounted ? new Date(log.createdAt).toLocaleString("en-US") : undefined}>
-                    {mounted ? relativeTime(log.createdAt) : ""}
+                  <td className="px-4 py-3 text-zinc-400 whitespace-nowrap text-xs" title={mounted ? new Date(log.createdAt).toLocaleString(locale) : undefined}>
+                    {mounted ? relativeTime(log.createdAt, locale) : ""}
                   </td>
                   <td className="px-4 py-3 text-zinc-100 text-sm">{log.userName}</td>
                   <td className="px-4 py-3">
                     <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${actionInfo.color}`}>
-                      {actionInfo.label}
+                      {label}
                     </span>
                   </td>
                   <td className="px-4 py-3 text-zinc-300 max-w-[200px] truncate text-xs font-mono">{log.target}</td>
@@ -808,18 +891,18 @@ function AuditLogTable({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }
                   <td className="hidden sm:table-cell px-4 py-3">
                     <div className="flex items-center gap-2 text-xs text-zinc-500">
                       {log.ipAddress && (
-                        <span className="flex items-center gap-1" title={`IP: ${log.ipAddress}`}>
+                        <span className="flex items-center gap-1" title={t("adminManage.audit.ipTitle", { ip: log.ipAddress })}>
                           <Globe size={11} /> {log.ipAddress}
                         </span>
                       )}
                       {log.provider && (
-                        <span className="flex items-center gap-1" title={`Provider: ${log.provider}`}>
+                        <span className="flex items-center gap-1" title={t("adminManage.audit.providerTitle", { provider: log.provider })}>
                           <Shield size={11} /> {log.provider}
                         </span>
                       )}
                       {log.userAgent && (
                         <span className="flex items-center gap-1" title={log.userAgent}>
-                          <Monitor size={11} /> {parseUserAgent(log.userAgent)}
+                          <Monitor size={11} /> {parseUserAgent(log.userAgent, t)}
                         </span>
                       )}
                     </div>
@@ -835,14 +918,20 @@ function AuditLogTable({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }
 }
 
 function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }) {
+  const t = useT();
+  const locale = useLocale();
   const groups: { date: string; logs: AuditRow[] }[] = [];
   let currentDate = "";
 
   for (const log of logs) {
-    // Group rows by their UTC date. The server and the browser can be in different
-    // time zones, so grouping by local date could split rows near midnight
-    // differently on each side and cause a React #418 hydration mismatch.
-    const dateStr = log.createdAt.slice(0, 10);
+    // Before mount, group rows by their UTC date: the server and the browser can
+    // be in different time zones, so grouping by local date during SSR/hydration
+    // could split rows near midnight differently on each side and cause a React
+    // #418 hydration mismatch. The headings only render after mount, so once
+    // mounted regroup by the viewer's LOCAL date — the same day formatDateGroup
+    // labels — or one heading could span two local days and two neighbouring
+    // groups could share a heading.
+    const dateStr = mounted ? new Date(log.createdAt).toDateString() : log.createdAt.slice(0, 10);
     if (dateStr !== currentDate) {
       currentDate = dateStr;
       groups.push({ date: log.createdAt, logs: [] });
@@ -855,7 +944,7 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
       {groups.map((group) => (
         <div key={group.date}>
           <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">
-            {mounted ? formatDateGroup(group.date) : ""}
+            {mounted ? formatDateGroup(group.date, t, locale) : ""}
           </h3>
           <div className="relative pl-6">
             <div className="absolute left-[7px] top-2 bottom-2 w-px bg-zinc-800" />
@@ -864,6 +953,7 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
               {group.logs.map((log) => {
                 const actionInfo = ACTION_LABELS[log.action as AuditAction] ?? { label: log.action, color: "bg-zinc-800 text-zinc-400" };
                 const dotColor = DOT_COLORS[log.action] ?? "bg-zinc-500";
+                const label = actionLabel(log.action, t);
 
                 return (
                   <div key={log.id} className="relative">
@@ -874,12 +964,12 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="text-sm font-medium text-zinc-100">{log.userName}</span>
                           <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${actionInfo.color}`}>
-                            {actionInfo.label}
+                            {label}
                           </span>
                           <span className="text-xs text-zinc-500 font-mono break-all">{log.target}</span>
                         </div>
-                        <span className="text-xs text-zinc-500" title={mounted ? new Date(log.createdAt).toLocaleString("en-US") : undefined}>
-                          {mounted ? relativeTime(log.createdAt) : ""}
+                        <span className="text-xs text-zinc-500" title={mounted ? new Date(log.createdAt).toLocaleString(locale) : undefined}>
+                          {mounted ? relativeTime(log.createdAt, locale) : ""}
                         </span>
                       </div>
 
@@ -901,7 +991,7 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
                           )}
                           {log.userAgent && (
                             <span className="flex items-center gap-1">
-                              <Monitor size={10} /> {parseUserAgent(log.userAgent)}
+                              <Monitor size={10} /> {parseUserAgent(log.userAgent, t)}
                             </span>
                           )}
                         </div>
@@ -950,6 +1040,7 @@ export function AuditLogView({
   const [loadError, setLoadError] = useState(false);
   const [viewMode, setViewMode] = useState<"table" | "timeline">("table");
   const mounted = useHasMounted();
+  const t = useT();
 
   useEffect(() => {
     // Storage access throws (SecurityError) with site data blocked or in some
@@ -1031,7 +1122,7 @@ export function AuditLogView({
       {logs.length === 0 ? (
         <Card className="bg-zinc-900 border-zinc-800">
           <div className="p-8 text-center text-zinc-500 text-sm">
-            No audit log entries found.
+            {t("adminManage.audit.empty")}
           </div>
         </Card>
       ) : viewMode === "table" ? (
@@ -1047,16 +1138,16 @@ export function AuditLogView({
             disabled={loading}
             className="px-4 py-2 rounded-md bg-zinc-800 text-zinc-300 hover:bg-zinc-700 text-sm disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
-            {loading ? "Loading..." : loadError ? "Retry" : "Load More"}
+            {loading ? t("adminManage.common.loading") : loadError ? t("adminManage.common.retry") : t("adminManage.common.loadMore")}
           </button>
           {loadError && (
-            <span className="text-xs text-red-400">Could not load more entries</span>
+            <span className="text-xs text-red-400">{t("adminManage.audit.loadMoreError")}</span>
           )}
         </div>
       )}
 
       {!hasMore && logs.length > 0 && (
-        <p className="text-center text-xs text-zinc-500">{logs.length} entries loaded</p>
+        <p className="text-center text-xs text-zinc-500">{t("adminManage.audit.entriesLoaded", { count: logs.length })}</p>
       )}
     </div>
   );

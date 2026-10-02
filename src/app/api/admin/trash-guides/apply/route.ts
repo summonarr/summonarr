@@ -8,32 +8,35 @@ import type { ArrVariant } from "@/lib/arr";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { isFeatureEnabled } from "@/lib/features";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
-function busyResponse() {
+function busyResponse(t: Translator) {
   return NextResponse.json(
-    { ok: false, error: "Trash sync already running", retryAfter: 30 },
+    { ok: false, error: t("apiAdmin.trash.alreadyRunning"), retryAfter: 30 },
     { status: 409, headers: { "Retry-After": "30" } },
   );
 }
 
 export const POST = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   // Kill-switch parity with the nightly cron: a disabled TRaSH integration must not
   // still rewrite Radarr/Sonarr custom formats and quality profiles.
   if (!(await isFeatureEnabled("trashGuidesEnabled"))) {
-    return NextResponse.json({ error: "TRaSH Guides integration is disabled" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.trash.disabled") }, { status: 403 });
   }
   // Per-admin rate limit. Applying specs bursts writes (custom formats + quality
   // profiles) at Radarr/Sonarr; 10 per 5-minute window caps a compromised session
   // while leaving headroom for an operator iterating on their profiles.
   if (!checkRateLimit(`admin-trash-apply:${session.user.id}`, 10, 5 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many apply requests — try again shortly." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.trash.tooManyApply") }, { status: 429 });
   }
   const parsed = await readJsonCapped<{ specIds?: unknown; variant?: unknown }>(req, 32768);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
   if (!Array.isArray(body.specIds) || body.specIds.some((v) => typeof v !== "string")) {
-    return NextResponse.json({ error: "specIds must be string[]" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.trash.specIdsArray") }, { status: 400 });
   }
   const ids = body.specIds as string[];
   // body.variant is an instance slug ("" default, "4k", named); "hd" is the
@@ -42,13 +45,13 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const rawVariant = typeof body.variant === "string" ? body.variant.trim() : "";
   const variant: ArrVariant = rawVariant === "hd" ? "" : rawVariant;
   if (!isValidInstanceSlug(variant)) {
-    return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.invalidInstance") }, { status: 400 });
   }
   if (ids.length === 0) {
     return NextResponse.json({ ok: true, results: [] });
   }
   if (ids.length > 500) {
-    return NextResponse.json({ error: "Too many specs — apply in batches of 500" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.trash.tooManySpecs") }, { status: 400 });
   }
 
   return withAdvisoryLock(
@@ -81,6 +84,6 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         durationMs,
       });
     },
-    busyResponse,
+    () => busyResponse(t),
   );
 });

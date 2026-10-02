@@ -14,6 +14,11 @@ model User {
   name          String?
   email         String    @unique
   image         String?
+  // UI language for text sent WITHOUT a browser — emails, push, Discord DMs
+  // (src/lib/i18n/server-locale.ts). Written by PATCH /api/profile/locale when
+  // the user picks a language (or, once, from the language they first browse
+  // in). null ⇒ the instance default (SUMMONARR_DEFAULT_LOCALE).
+  locale        String?   @db.VarChar(16)
   passwordHash  String?
   // Set when the credentials password is changed. verifyAndRefreshSession()
   // (src/lib/session-refresh.ts) rejects any session JWT issued (iat) at or before
@@ -132,6 +137,35 @@ model User {
   pushOnAvailable Boolean @default(true)
   pushOnDeclined  Boolean @default(true)
 
+  // Watchlist auto-request: file a request for each new title on this user's
+  // Plex watchlist (src/lib/auto-request.ts). Only takes effect while the user
+  // holds an AUTO_REQUEST* permission bit and feature.behavior.watchlistAutoRequest
+  // is on; the user can opt out on their profile. Default on so granting the
+  // permission is enough.
+  plexWatchlistAutoRequest Boolean @default(true)
+  // Personal iCal (.ics) subscription feed — /api/calendar/feed/<token>.ics.
+  // Calendar apps cannot send cookies or headers, so the URL itself carries a
+  // per-user secret. Only its SHA-256 HASH is stored (src/lib/calendar-token.ts):
+  // the plaintext is shown once at generation and never again, so a leaked
+  // backup or DB read cannot be replayed as a feed URL. Regenerating overwrites
+  // the hash, which revokes the old URL. null ⇒ no feed. Unique so the public
+  // route resolves a token with one indexed lookup.
+  calendarTokenHash      String?   @unique
+  calendarTokenCreatedAt DateTime?
+
+  // Two-factor GUESSING bound (src/lib/mfa/lockout.ts, guardrail 6d). Persistent
+  // on purpose: an in-memory limiter forgets on every restart, and a correct
+  // password refunds the password-step limiter, so only a DB counter bounds how
+  // many codes an attacker holding the password can try. Counts CONSECUTIVE
+  // failed codes (TOTP + recovery; passkeys are not guessable and never count),
+  // reset on a successful code. At MFA_LOCKOUT_THRESHOLD failures the counter
+  // resets and mfaLockedUntil is set (15 min, doubling per lockout, capped at 24h)
+  // — while it is in the future every CODE is refused, even a correct one.
+  // This is NOT a "has 2FA" flag: the factor rows stay the only source of truth.
+  mfaFailedAttempts Int       @default(0)
+  mfaLockoutCount   Int       @default(0)
+  mfaLockedUntil    DateTime?
+
   accounts          Account[]
   requests          MediaRequest[]
   issues            Issue[]            @relation(name: "IssueReporter")
@@ -148,6 +182,13 @@ model User {
   hidden            HiddenItem[]
   notifications     Notification[]
   recommendations   UserRecommendation[]
+  autoRequests      AutoRequestLedger[]
+  // Two-factor authentication for LOCAL-CREDENTIALS sign-in (src/lib/mfa/).
+  // The factor rows ARE the source of truth for "has 2FA" — there is no
+  // denormalized flag on this row that could drift and silently fail open.
+  totp              UserTotp?
+  mfaRecoveryCodes  MfaRecoveryCode[]
+  webAuthnCredentials WebAuthnCredential[]
 }
 
 model PushSubscription {
@@ -193,6 +234,72 @@ model VerificationToken {
   expires    DateTime
 
   @@unique([identifier, token])
+}
+
+// ─── Two-factor authentication (local credentials only) ─────────────────────
+// Second factors for the password sign-in path. Plex/Jellyfin/OIDC sign-ins are
+// out of scope (the IdP owns MFA there). See src/lib/mfa/ and CLAUDE.md
+// guardrail 6d. Account purge (purgeUserDataInTx) deletes all three tables'
+// rows for the user; an admin reset (DELETE /api/admin/users/[id]/mfa) does too.
+
+// One authenticator-app (RFC 6238) secret per user.
+model UserTotp {
+  userId       String    @id
+  // enc:v1 ciphertext at rest. The prisma.ts extension encrypts on every write
+  // and decrypts on every read (guardrail 7a) — callers pass/receive base32
+  // plaintext and NEVER call encryptToken themselves.
+  secret       String
+  // null while the enrollment is pending (secret issued by /totp/setup, not yet
+  // confirmed with a code). Only an enabled row is a second factor.
+  enabledAt    DateTime?
+  // Highest 30-second TOTP time step ever accepted. A code is accepted only for
+  // a step strictly greater than this (compare-and-swap) — replay protection.
+  lastUsedStep Int?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// One-time recovery codes. Only a SHA-256 of the normalized code is stored;
+// the plaintext is shown to the user exactly once.
+model MfaRecoveryCode {
+  id        String    @id @default(cuid(2))
+  userId    String
+  codeHash  String    @db.VarChar(64)
+  // Set (compare-and-swap from null) when the code is redeemed — single use.
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Also serves every by-user lookup (userId is the leading column).
+  @@unique([userId, codeHash])
+}
+
+// A WebAuthn (passkey / security key) credential used as a second factor.
+model WebAuthnCredential {
+  id             String    @id @default(cuid(2))
+  userId         String
+  // base64url credential id (raw id from the authenticator). Globally unique.
+  credentialId   String    @unique
+  // base64url COSE_Key bytes from the attested credential data. Public — not
+  // a secret, so it is stored as-is (like an SSH public key).
+  publicKey      String
+  // Authenticator signature counter (uint32). A non-increasing value from an
+  // authenticator that counts is rejected as a possible cloned credential.
+  signCount      BigInt    @default(0)
+  transports     String[]  @default([])
+  name           String    @db.VarChar(64)
+  aaguid         String?   @db.VarChar(36)
+  backupEligible Boolean   @default(false)
+  backedUp       Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  lastUsedAt     DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 // One record per active JWT auth session. Created at sign-in, deleted on sign-out or revocation.
@@ -290,6 +397,14 @@ model MediaRequest {
   availableAt       DateTime? // set once when status transitions to AVAILABLE; used for fulfillment-time stats
   pendingNotifyAt   DateTime? // set to approvedAt+90s; cleared once the pending/awaiting notification fires
   notifiedAvailable Boolean   @default(false) // set when the "ready to watch" notification is sent; never reset on status revert
+  // Set when an admin deleted this title from Radarr/Sonarr through Library
+  // cleanup (/admin/cleanup). The title then leaves every cache and library, and
+  // the sync's AVAILABLE→APPROVED revert would read that absence as "the file was
+  // lost" and push the title straight back to Radarr/Sonarr — re-downloading what
+  // the admin just deleted. The revert skips a row carrying this stamp, so the
+  // request stays AVAILABLE (it WAS fulfilled) and nothing is re-pushed. Only the
+  // cleanup delete route writes it; status and approvedAt are left alone.
+  cleanedUpAt       DateTime?
 
   requestedBy String
   user        User   @relation(fields: [requestedBy], references: [id], onDelete: Cascade)
@@ -737,6 +852,23 @@ model BlacklistItem {
   @@index([createdAt])
 }
 
+// ─── Library Cleanup Protection ────────────────────────────────────────────────
+// Titles an admin has pinned as "never a cleanup candidate" on /admin/cleanup.
+// Keyed like BlacklistItem by the app's canonical (tmdbId, mediaType) identity,
+// so a protection covers every server and every Radarr/Sonarr instance at once.
+// No FK on addedBy, for the same reason as BlacklistItem.
+
+model CleanupProtection {
+  tmdbId    Int
+  mediaType MediaType
+  title     String?  @db.VarChar(500)
+  reason    String?  @db.VarChar(500)
+  addedBy   String?
+  createdAt DateTime @default(now())
+
+  @@id([tmdbId, mediaType])
+}
+
 enum AuditAction {
   REQUEST_APPROVE
   REQUEST_DECLINE
@@ -777,6 +909,13 @@ enum AuditAction {
   PLEX_SESSION_TERMINATE
   JELLYFIN_SESSION_TERMINATE
   BLACKLIST_CHANGE
+  REQUEST_AUTO
+  LIBRARY_CLEANUP_DELETE
+  LIBRARY_CLEANUP_PROTECT
+  // A user changed their own two-factor enrollment (TOTP, passkey, recovery codes).
+  MFA_CHANGE
+  // An admin reset another user's two-factor enrollment (lost device).
+  MFA_RESET
 }
 
 // ─── Play History ────────────────────────────────────────────────────────────
@@ -1141,6 +1280,33 @@ model WatchlistItem {
   @@index([userId, createdAt])
 }
 
+// Watchlist auto-request ledger (src/lib/auto-request.ts). One row per
+// (user, title): the outcome of the last time a watchlist add was turned into a
+// request. It is what stops the Plex watchlist cron from re-requesting a title
+// every poll — a request that was filed and later declined or deleted, or a title
+// that is blacklisted, is never retried; a quota hit or a transient failure is
+// retried after a backoff (isRetryableOutcome / shouldAttemptAutoRequest).
+// `requestId` has no FK on purpose: deleting the request must NOT delete the
+// ledger row, or the cron would file it again on the next poll.
+model AutoRequestLedger {
+  id        String    @id @default(cuid(2))
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tmdbId    Int
+  mediaType MediaType
+  // "watchlist" (Summonarr watchlist add) | "plex-watchlist" (the cron)
+  source    String    @db.VarChar(32)
+  // An AutoRequestOutcome — see src/lib/auto-request.ts
+  outcome   String    @db.VarChar(32)
+  requestId String?   @db.VarChar(64)
+  attempts  Int       @default(1)
+
+  @@unique([userId, tmdbId, mediaType])
+  @@index([userId, updatedAt])
+}
+
 // Per-user "not interested" / hide list. Distinct from the admin-global
 // BlacklistItem: HiddenItem is per-user and REMOVES a title from that user's
 // discovery (attachAllAvailability filters it out), whereas the admin blacklist
@@ -1336,6 +1502,13 @@ model Notification {
   mediaType  MediaType?
   posterPath String?    @db.VarChar(500)
   readAt     DateTime?
+  // The values `title`/`body` were built from (issue title, reply author and
+  // text, resolution …), so the inbox can re-render the row in the READER's
+  // language at read time (src/lib/notification-render.ts). `title`/`body`
+  // stay the English copy: the fallback for rows written before this column
+  // existed, and what an unknown type renders as. Nullable + additive, so
+  // `prisma db push` adds it without touching existing rows.
+  data       Json?
 
   @@index([userId, createdAt])
   // Serves the unread-count query (userId, readAt: null) without scanning all

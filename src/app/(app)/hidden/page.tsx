@@ -2,6 +2,7 @@ import { requireAppSession } from "@/lib/require-app-session";
 import { prisma } from "@/lib/prisma";
 import { PageHeader } from "@/components/ui/design";
 import { HiddenGrid } from "@/components/hidden/hidden-grid";
+import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +12,7 @@ export const dynamic = "force-dynamic";
 // src/lib/require-app-session.ts). The returned session also supplies the caller's own id.
 export default async function HiddenPage() {
   const session = await requireAppSession();
+  const t = await getTranslator();
   const items = session
     ? await prisma.hiddenItem.findMany({
         where: { userId: session.user.id },
@@ -23,8 +25,8 @@ export default async function HiddenPage() {
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Hidden"
-        subtitle="Titles you've marked “Not interested” — these stay out of your discovery"
+        title={t("personal.hidden.title")}
+        subtitle={t("personal.hidden.subtitle")}
       />
       <HiddenGrid initialItems={items} />
     </div>

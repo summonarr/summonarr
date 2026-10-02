@@ -381,6 +381,8 @@ test("no Json column may hold a top-level array — db-export discriminates arra
     "User.instanceGrants",
     "User.mediaServerGrants",
     "TrashSpec.payload",
+    // Always a NotificationData object ({ v: 1, … } — notification-render.ts).
+    "Notification.data",
   ]);
   for (const field of jsonFields) {
     assert.ok(

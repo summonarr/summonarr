@@ -8,6 +8,7 @@ import { CheckCircle, XCircle, Loader2, RefreshCw, Download } from "@/components
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus, LoadStatus } from "./shared";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface ArrFormProps {
   service: "radarr" | "sonarr";
@@ -33,9 +34,9 @@ interface ArrOptions {
 
 // Radarr's closed enum for when a movie counts as "available" to search.
 const MINIMUM_AVAILABILITY_OPTIONS = [
-  { value: "announced", label: "Announced" },
-  { value: "inCinemas", label: "In Cinemas" },
-  { value: "released", label: "Released" },
+  { value: "announced", labelKey: "settings.form.arr.minAvail.announced" },
+  { value: "inCinemas", labelKey: "settings.form.arr.minAvail.inCinemas" },
+  { value: "released", labelKey: "settings.form.arr.minAvail.released" },
 ] as const;
 
 export function ArrForm({
@@ -48,6 +49,7 @@ export function ArrForm({
   initialLanguageProfileId = "",
   variant = "hd",
 }: ArrFormProps) {
+  const t = useT();
   const v          = variant === "4k" ? "4k" : "";
   const label      = `${service === "radarr" ? "Radarr" : "Sonarr"}${variant === "4k" ? " 4K" : ""}`;
   const idPrefix   = `${service}${v}`;
@@ -111,15 +113,15 @@ export function ArrForm({
 
       if (res.ok && data.ok) {
         const version = data[versionKey];
-        setMessage(version ? `Connected · v${version}` : "Saved");
+        setMessage(version ? t("settings.form.arr.connectedVersion", { version }) : t("settings.form.common.saved"));
         setStatus("ok");
         fetchOptions();
       } else {
-        setMessage(data[errorKey] ?? data.error ?? "Failed to save");
+        setMessage(data[errorKey] ?? data.error ?? t("settings.form.common.saveFailed"));
         setStatus("error");
       }
     } catch {
-      setMessage("Failed to save");
+      setMessage(t("settings.form.common.saveFailed"));
       setStatus("error");
     }
   }
@@ -153,7 +155,7 @@ export function ArrForm({
       <form onSubmit={handleSave} className="space-y-4">
         <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-4 lg:space-y-0">
           <div className="space-y-1.5">
-            <Label htmlFor={`${idPrefix}-url`}>{label} URL</Label>
+            <Label htmlFor={`${idPrefix}-url`}>{t("settings.form.arr.url", { service: label })}</Label>
             <Input
               id={`${idPrefix}-url`}
               type="url"
@@ -164,7 +166,7 @@ export function ArrForm({
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor={`${idPrefix}-key`}>API Key</Label>
+            <Label htmlFor={`${idPrefix}-key`}>{t("settings.form.common.apiKey")}</Label>
             <Input
               id={`${idPrefix}-key`}
               type="password"
@@ -173,12 +175,12 @@ export function ArrForm({
               placeholder="••••••••••••••••••••••••••••••••"
               className="bg-zinc-800 border-zinc-700 font-mono text-sm"
             />
-            <p className="text-xs text-zinc-500">Found in {label} → Settings → General → Security</p>
+            <p className="text-xs text-zinc-500">{t("settings.form.arr.apiKeyHelp", { service: label })}</p>
           </div>
         </div>
         <div className="flex items-center gap-3">
           <Button type="submit" disabled={status === "saving" || !url || !apiKey} className="bg-indigo-600 hover:bg-indigo-500">
-            {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save & Test"}
+            {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.saveAndTest")}
           </Button>
           <SaveStatusMessage status={status} okLabel={message} errorLabel={message} />
         </div>
@@ -187,7 +189,7 @@ export function ArrForm({
       {optionsStatus !== "idle" && (
         <div className="border-t border-zinc-800 pt-5 space-y-4">
           <div className="flex items-center justify-between">
-            <p className="text-sm font-medium text-zinc-300">Default Library Settings</p>
+            <p className="text-sm font-medium text-zinc-300">{t("settings.form.arr.defaults")}</p>
             <button
               type="button"
               onClick={fetchOptions}
@@ -195,32 +197,32 @@ export function ArrForm({
               className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-100 transition-colors disabled:opacity-50"
             >
               <RefreshCw className={`w-3 h-3 ${optionsStatus === "loading" ? "animate-spin" : ""}`} />
-              Refresh
+              {t("settings.form.arr.refresh")}
             </button>
           </div>
 
           {optionsStatus === "error" && (
-            <p className="text-sm text-red-400">Could not load options — check your connection above.</p>
+            <p className="text-sm text-red-400">{t("settings.form.arr.optionsFailed")}</p>
           )}
 
           {optionsStatus === "loaded" && options && (
             <form onSubmit={handleSaveOptions} className="space-y-4">
               <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-4 lg:space-y-0">
                 <div className="space-y-1.5">
-                  <Label htmlFor={`${idPrefix}-folder`}>Root Folder</Label>
+                  <Label htmlFor={`${idPrefix}-folder`}>{t("settings.form.arr.rootFolder")}</Label>
                   <select
                     id={`${idPrefix}-folder`}
                     value={rootFolder}
                     onChange={(e) => setRootFolder(e.target.value)}
                     className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
-                    <option value="">— select a root folder —</option>
+                    <option value="">{t("settings.form.arr.selectRootFolder")}</option>
                     {/* If the saved folder no longer exists on the server, the
                         dropdown would show the placeholder while still holding the
                         old value (and Save Defaults stays enabled). Show it as its
                         own option so the admin can see it. Same as arr-instances-manager. */}
                     {rootFolder && !options.rootFolders.some((f) => f.path === rootFolder) && (
-                      <option value={rootFolder}>{rootFolder} (not found on server)</option>
+                      <option value={rootFolder}>{t("settings.form.arr.folderNotFound", { folder: rootFolder })}</option>
                     )}
                     {options.rootFolders.map((f) => (
                       <option key={f.path} value={f.path}>{f.path}</option>
@@ -228,16 +230,16 @@ export function ArrForm({
                   </select>
                 </div>
                 <div className="space-y-1.5">
-                  <Label htmlFor={`${idPrefix}-profile`}>Quality Profile</Label>
+                  <Label htmlFor={`${idPrefix}-profile`}>{t("settings.form.arr.qualityProfile")}</Label>
                   <select
                     id={`${idPrefix}-profile`}
                     value={qualityProfileId}
                     onChange={(e) => setQualityProfileId(e.target.value)}
                     className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
-                    <option value="">— select a quality profile —</option>
+                    <option value="">{t("settings.form.arr.selectQualityProfile")}</option>
                     {qualityProfileId && !options.qualityProfiles.some((p) => String(p.id) === qualityProfileId) && (
-                      <option value={qualityProfileId}>Profile #{qualityProfileId} (not found on server)</option>
+                      <option value={qualityProfileId}>{t("settings.form.arr.profileNotFound", { id: qualityProfileId })}</option>
                     )}
                     {options.qualityProfiles.map((p) => (
                       <option key={p.id} value={String(p.id)}>{p.name}</option>
@@ -247,21 +249,20 @@ export function ArrForm({
 
                 {service === "radarr" && (
                   <div className="space-y-1.5">
-                    <Label htmlFor={`${idPrefix}-min-availability`}>Minimum Availability</Label>
+                    <Label htmlFor={`${idPrefix}-min-availability`}>{t("settings.form.arr.minimumAvailability")}</Label>
                     <select
                       id={`${idPrefix}-min-availability`}
                       value={minimumAvailability}
                       onChange={(e) => setMinimumAvailability(e.target.value)}
                       className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     >
-                      <option value="">— {label}&apos;s default —</option>
+                      <option value="">{t("settings.form.arr.serviceDefault", { service: label })}</option>
                       {MINIMUM_AVAILABILITY_OPTIONS.map((o) => (
-                        <option key={o.value} value={o.value}>{o.label}</option>
+                        <option key={o.value} value={o.value}>{t(o.labelKey)}</option>
                       ))}
                     </select>
                     <p className="text-xs text-zinc-500">
-                      When added movies count as available to search — e.g. &ldquo;Released&rdquo; waits for a
-                      digital/physical release instead of grabbing early rips.
+                      {t("settings.form.arr.minimumAvailabilityHelp")}
                     </p>
                   </div>
                 )}
@@ -270,24 +271,23 @@ export function ArrForm({
                     endpoint returns no list and this dropdown never shows. */}
                 {service === "sonarr" && (options.languageProfiles?.length ?? 0) > 0 && (
                   <div className="space-y-1.5">
-                    <Label htmlFor={`${idPrefix}-language-profile`}>Language Profile</Label>
+                    <Label htmlFor={`${idPrefix}-language-profile`}>{t("settings.form.arr.languageProfile")}</Label>
                     <select
                       id={`${idPrefix}-language-profile`}
                       value={languageProfileId}
                       onChange={(e) => setLanguageProfileId(e.target.value)}
                       className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     >
-                      <option value="">— {label}&apos;s default —</option>
+                      <option value="">{t("settings.form.arr.serviceDefault", { service: label })}</option>
                       {languageProfileId && !options.languageProfiles!.some((p) => String(p.id) === languageProfileId) && (
-                        <option value={languageProfileId}>Profile #{languageProfileId} (not found on server)</option>
+                        <option value={languageProfileId}>{t("settings.form.arr.profileNotFound", { id: languageProfileId })}</option>
                       )}
                       {options.languageProfiles!.map((p) => (
                         <option key={p.id} value={String(p.id)}>{p.name}</option>
                       ))}
                     </select>
                     <p className="text-xs text-zinc-500">
-                      Applied to series added by approved requests (Sonarr v3 — v4 handles language via
-                      custom formats instead).
+                      {t("settings.form.arr.languageProfileHelp")}
                     </p>
                   </div>
                 )}
@@ -298,7 +298,7 @@ export function ArrForm({
                   disabled={optionsSaveStatus === "saving" || !rootFolder || !qualityProfileId}
                   className="bg-indigo-600 hover:bg-indigo-500"
                 >
-                  {optionsSaveStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save Defaults"}
+                  {optionsSaveStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.arr.saveDefaults")}
                 </Button>
                 <SaveStatusMessage status={optionsSaveStatus} />
               </div>
@@ -315,6 +315,7 @@ export function ArrForm({
 }
 
 function ArrImportSection({ service }: { service: "radarr" | "sonarr" }) {
+  const t = useT();
   const label = service === "radarr" ? "Radarr" : "Sonarr";
   const [importStatus, setImportStatus] = useState<"idle" | "importing" | "ok" | "error">("idle");
   const [importCount, setImportCount] = useState<number | null>(null);
@@ -326,22 +327,22 @@ function ArrImportSection({ service }: { service: "radarr" | "sonarr" }) {
     try {
       const res = await fetch(withBasePath(`/api/sync/${service}`), { method: "POST" });
       const data = (await res.json().catch(() => ({}))) as { wanted?: number; error?: string };
-      if (!res.ok) throw new Error(data.error ?? "Import failed");
+      if (!res.ok) throw new Error(data.error ?? t("settings.form.arr.importFailed"));
       setImportCount(data.wanted ?? 0);
       setImportStatus("ok");
     } catch (err) {
-      setImportError(err instanceof Error ? err.message : "Import failed");
+      setImportError(err instanceof Error ? err.message : t("settings.form.arr.importFailed"));
       setImportStatus("error");
     }
   }
 
   return (
     <div className="border-t border-zinc-800 pt-5 space-y-2">
-      <p className="text-sm font-medium text-zinc-300">Library Import</p>
+      <p className="text-sm font-medium text-zinc-300">{t("settings.form.arr.importTitle")}</p>
       <p className="text-xs text-zinc-500">
-        Scans your {label} library and caches which{" "}
-        {service === "radarr" ? "movies are" : "TV shows are"} monitored but not yet downloaded.
-        Run this once after connecting, then keep it up-to-date via the webhook or a scheduled sync.
+        {service === "radarr"
+          ? t("settings.form.arr.importHelpMovies", { service: label })
+          : t("settings.form.arr.importHelpTv", { service: label })}
       </p>
       <div className="flex items-center gap-3 pt-1">
         <Button
@@ -352,13 +353,15 @@ function ArrImportSection({ service }: { service: "radarr" | "sonarr" }) {
           className="border-zinc-700 text-zinc-300 hover:text-zinc-100 hover:border-zinc-500"
         >
           {importStatus === "importing"
-            ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Importing…</>
-            : <><Download className="w-4 h-4 mr-2" />Import from {label}</>}
+            ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.arr.importing")}</>
+            : <><Download className="w-4 h-4 mr-2" />{t("settings.form.arr.importFrom", { service: label })}</>}
         </Button>
         {importStatus === "ok" && (
           <span role="status" aria-live="polite" className="flex items-center gap-1.5 text-sm text-green-400">
             <CheckCircle className="w-4 h-4" />
-            {importCount} {service === "radarr" ? "movie(s)" : "show(s)"} pending
+            {service === "radarr"
+              ? t("settings.form.arr.pendingMovies", { count: importCount ?? 0 })
+              : t("settings.form.arr.pendingShows", { count: importCount ?? 0 })}
           </span>
         )}
         {importStatus === "error" && (

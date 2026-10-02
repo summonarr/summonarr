@@ -3,18 +3,20 @@
 import Link from "next/link";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import type { TrashService } from "./types";
+import { useT } from "@/components/i18n/i18n-provider";
 
-const SUB_PAGES = [
-  { label: "Overview", href: "/admin/trash-guides", exact: true },
-  { label: "Custom Formats", href: "/admin/trash-guides/custom-formats" },
-  { label: "Quality Profiles", href: "/admin/trash-guides/quality-profiles" },
-  { label: "Naming & Sizes", href: "/admin/trash-guides/naming-sizes" },
-  { label: "Settings", href: "/admin/trash-guides/settings" },
+// `labelKey` / `suffixKey` are catalog keys, translated at render.
+const SUB_PAGES: { labelKey: string; href: string; exact?: boolean }[] = [
+  { labelKey: "trash.nav.overview", href: "/admin/trash-guides", exact: true },
+  { labelKey: "trash.section.customFormats.title", href: "/admin/trash-guides/custom-formats" },
+  { labelKey: "trash.section.qualityProfiles.title", href: "/admin/trash-guides/quality-profiles" },
+  { labelKey: "trash.nav.namingSizes", href: "/admin/trash-guides/naming-sizes" },
+  { labelKey: "trash.nav.settings", href: "/admin/trash-guides/settings" },
 ];
 
-const SERVICES: { label: string; value: TrashService; suffix: string }[] = [
-  { label: "Radarr", value: "RADARR", suffix: "Movies" },
-  { label: "Sonarr", value: "SONARR", suffix: "TV" },
+const SERVICES: { label: string; value: TrashService; suffixKey: string }[] = [
+  { label: "Radarr", value: "RADARR", suffixKey: "trash.nav.movies" },
+  { label: "Sonarr", value: "SONARR", suffixKey: "trash.nav.tv" },
 ];
 
 export interface NavInstanceOption {
@@ -40,6 +42,7 @@ export function TrashGuidesNav({
   radarrInstances,
   sonarrInstances,
 }: TrashGuidesNavProps) {
+  const t = useT();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -54,7 +57,7 @@ export function TrashGuidesNav({
   // the default connection isn't configured (the page shows its banner there).
   const instanceOptions: NavInstanceOption[] = configuredInstances.some((i) => i.slug === "")
     ? configuredInstances
-    : [{ slug: "", name: "Default" }, ...configuredInstances];
+    : [{ slug: "", name: t("trash.nav.defaultInstance") }, ...configuredInstances];
 
   const rawVariant = searchParams.get("variant");
   // Drop an unknown/unconfigured ?variant= slug — keeps the view coherent.
@@ -121,7 +124,7 @@ export function TrashGuidesNav({
           const active = isPageActive(page);
           return (
             <Link
-              key={page.label}
+              key={page.href}
               href={`${page.href}${queryWithParams}`}
               className={`px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors ${
                 active
@@ -129,7 +132,7 @@ export function TrashGuidesNav({
                   : "text-zinc-500 hover:text-zinc-300"
               }`}
             >
-              {page.label}
+              {t(page.labelKey)}
             </Link>
           );
         })}
@@ -138,7 +141,7 @@ export function TrashGuidesNav({
       {showServiceToggle && (
         <div className="flex items-center gap-4 flex-wrap">
           <div className="flex items-center gap-1">
-            <span className="text-xs text-zinc-500 mr-1">Service</span>
+            <span className="text-xs text-zinc-500 mr-1">{t("trash.nav.service")}</span>
             <div className="flex rounded-lg border border-zinc-700 overflow-hidden">
               {SERVICES.map((s) => {
                 const cfg = s.value === "RADARR" ? radarrConfigured : sonarrConfigured;
@@ -155,10 +158,10 @@ export function TrashGuidesNav({
                   >
                     <span>
                       {s.label}
-                      <span className={active ? "text-[var(--ds-accent-fg)] ml-1" : "text-zinc-500 ml-1"}>· {s.suffix}</span>
+                      <span className={active ? "text-[var(--ds-accent-fg)] ml-1" : "text-zinc-500 ml-1"}>· {t(s.suffixKey)}</span>
                     </span>
                     {!cfg && (
-                      <span className={`text-[10px] ${active ? "text-[var(--ds-accent-fg)]" : "text-amber-400"}`}>(not configured)</span>
+                      <span className={`text-[10px] ${active ? "text-[var(--ds-accent-fg)]" : "text-amber-400"}`}>{t("trash.nav.notConfigured")}</span>
                     )}
                   </button>
                 );
@@ -168,7 +171,7 @@ export function TrashGuidesNav({
 
           {showVariantToggle && (
             <div className="flex items-center gap-1">
-              <span className="text-xs text-zinc-500 mr-1">Instance</span>
+              <span className="text-xs text-zinc-500 mr-1">{t("trash.nav.instance")}</span>
               <div className="flex rounded-lg border border-zinc-700 overflow-hidden">
                 {instanceOptions.map((v) => {
                   const active = currentVariant === v.slug;

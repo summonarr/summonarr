@@ -23,6 +23,19 @@ import {
   HeatmapCellPopover,
   type HeatmapCellAnchor,
 } from "@/components/admin/heatmap-cell-popover";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
+
+// Mon-first weekday catalog keys, shared by the heatmaps. Translated at render.
+export const WEEKDAY_KEYS = [
+  "adminActivity.weekday.mon",
+  "adminActivity.weekday.tue",
+  "adminActivity.weekday.wed",
+  "adminActivity.weekday.thu",
+  "adminActivity.weekday.fri",
+  "adminActivity.weekday.sat",
+  "adminActivity.weekday.sun",
+] as const;
 
 /* ── Source helpers ───────────────────────────────────────────── */
 
@@ -62,19 +75,20 @@ export function SourceTag({ source, instance }: { source: string; instance?: str
 export type MethodClass = "ok" | "info" | "warn" | "err" | "muted";
 
 export function methodLabel(
+  t: Translator,
   playMethod: string | null,
   videoDecision?: string | null,
   audioDecision?: string | null,
 ): { label: string; cls: MethodClass } {
-  if (playMethod === "DirectPlay") return { label: "Direct Play", cls: "ok" };
-  if (playMethod === "DirectStream") return { label: "Remux", cls: "info" };
+  if (playMethod === "DirectPlay") return { label: t("adminActivity.method.directPlay"), cls: "ok" };
+  if (playMethod === "DirectStream") return { label: t("adminActivity.method.remux"), cls: "info" };
   if (playMethod === "Transcode") {
     const v = videoDecision === "transcode";
     const a = audioDecision === "transcode";
-    if (v && a) return { label: "Transcode A/V", cls: "warn" };
-    if (v) return { label: "Transcode video", cls: "warn" };
-    if (a) return { label: "Transcode audio", cls: "warn" };
-    return { label: "Transcode", cls: "warn" };
+    if (v && a) return { label: t("adminActivity.method.transcodeAV"), cls: "warn" };
+    if (v) return { label: t("adminActivity.method.transcodeVideo"), cls: "warn" };
+    if (a) return { label: t("adminActivity.method.transcodeAudio"), cls: "warn" };
+    return { label: t("adminActivity.method.transcode"), cls: "warn" };
   }
   if (playMethod) return { label: playMethod, cls: "muted" };
   return { label: "—", cls: "muted" };
@@ -243,13 +257,15 @@ function ChartTooltipDetail({
   data: number[];
   i: number;
 }) {
+  const t = useT();
+  const locale = useLocale();
   const total = data.reduce((a, b) => a + b, 0);
   const value = data[i] ?? 0;
   const avg = data.length > 0 ? total / data.length : 0;
   const prev = i > 0 ? data[i - 1] : null;
   // Round floats (watch-hours series) to one decimal; integers stay integer.
   const round1 = (n: number) => Math.round(n * 10) / 10;
-  const fmt = (n: number) => round1(n).toLocaleString("en-US");
+  const fmt = (n: number) => round1(n).toLocaleString(locale);
   const share = total > 0 ? round1((value / total) * 100) : 0;
   const avgPct = avg > 0 ? Math.round(((value - avg) / avg) * 100) : null;
   const delta = prev !== null ? round1(value - prev) : null;
@@ -257,11 +273,11 @@ function ChartTooltipDetail({
     prev !== null && prev !== 0 ? Math.round(((value - prev) / prev) * 100) : null;
 
   const rows: { label: string; value: string; color: string }[] = [
-    { label: "Share", value: `${share}%`, color: "var(--ds-fg-muted)" },
+    { label: t("adminActivity.chart.share"), value: `${share}%`, color: "var(--ds-fg-muted)" },
   ];
   if (avgPct !== null) {
     rows.push({
-      label: "vs avg",
+      label: t("adminActivity.chart.vsAvg"),
       value: `${avgPct > 0 ? "+" : ""}${avgPct}%`,
       color:
         avgPct > 0
@@ -274,7 +290,7 @@ function ChartTooltipDetail({
   if (delta !== null) {
     const arrow = delta > 0 ? "↑" : delta < 0 ? "↓" : "→";
     rows.push({
-      label: "vs prev",
+      label: t("adminActivity.chart.vsPrev"),
       value: `${arrow} ${delta > 0 ? "+" : ""}${fmt(delta)}${
         deltaPct !== null ? ` (${deltaPct > 0 ? "+" : ""}${deltaPct}%)` : ""
       }`,
@@ -341,6 +357,7 @@ export function Sparkline({
   interactive?: boolean;
 }) {
   const gradId = useId().replace(/[:]/g, "");
+  const locale = useLocale();
   const wrapRef = useRef<HTMLDivElement>(null);
   // `x` is the SVG-local crosshair coord; `px`/`py` are the hovered point's
   // viewport coords for the portalled tooltip. All captured in the mousemove
@@ -512,7 +529,7 @@ export function Sparkline({
                 display: "inline-block",
               }}
             />
-            {data[hover.i].toLocaleString("en-US")}
+            {data[hover.i].toLocaleString(locale)}
             {valueSuffix}
           </div>
           <ChartTooltipDetail data={data} i={hover.i} />
@@ -538,6 +555,7 @@ export function AreaChart({
   valueSuffix?: string;
 }) {
   const gradId = useId().replace(/[:]/g, "");
+  const locale = useLocale();
   const wrapRef = useRef<HTMLDivElement>(null);
   // `x`/`y` are SVG-local coords for the in-chart crosshair; `px`/`py` are the
   // hovered point's viewport coords, used to position the portalled tooltip.
@@ -726,7 +744,7 @@ export function AreaChart({
                 display: "inline-block",
               }}
             />
-            {data[hover.i].toLocaleString("en-US")}
+            {data[hover.i].toLocaleString(locale)}
             {valueSuffix}
           </div>
           <ChartTooltipDetail data={data} i={hover.i} />
@@ -748,7 +766,8 @@ export function HourHeatmap({
   // (all-history) — matches getHeatmapCellDetail's scoping. Omit for static.
   detailBase?: { userId?: string; source?: string; mediaType?: string; days?: number };
 }) {
-  const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const t = useT();
+  const DAYS = WEEKDAY_KEYS.map((k) => t(k));
   const cell = 12;
   const gap = 2;
   const max = Math.max(1, ...matrix.flat());
@@ -799,7 +818,7 @@ export function HourHeatmap({
     >
       <div
         className="ds-mono"
-        title="Hours are bucketed in UTC"
+        title={t("adminActivity.heatmap.utcTitle")}
         style={{ fontSize: 7.5, color: "var(--ds-fg-subtle)", alignSelf: "end", lineHeight: 1 }}
       >
         UTC
@@ -837,8 +856,8 @@ export function HourHeatmap({
             return (
               <div
                 key={c}
-                title={`${DAYS[r]} ${c}:00 — ${v} plays`}
-                aria-label={clickable ? `${DAYS[r]} ${c}:00 UTC, ${v} plays` : undefined}
+                title={t("adminActivity.heatmap.cellTitle", { day: DAYS[r], hour: `${c}:00`, count: v })}
+                aria-label={clickable ? t("adminActivity.heatmap.cellAria", { day: DAYS[r], hour: `${c}:00`, count: v }) : undefined}
                 role={clickable ? "button" : undefined}
                 tabIndex={clickable ? 0 : undefined}
                 onClick={clickable ? (e) => openCell(e.currentTarget, r, c, v) : undefined}
@@ -1233,13 +1252,13 @@ export function fmtBitrate(raw: number | null, source: string | null): string {
   return `${Math.round(kbps)} kbps`;
 }
 
-// Renders a localized timestamp. Locale + TZ depend on the client, so the
+// Renders a timestamp in the UI language and the viewer's timezone. TZ depends on the client, so the
 // caller must pass `mounted` (from useHasMounted) — pre-hydration we return
 // "" so SSR and the first client paint agree (guardrail 16).
-export function fmtTimestamp(iso: string | null, mounted: boolean): string {
+export function fmtTimestamp(iso: string | null, mounted: boolean, locale: string): string {
   if (!mounted) return "";
   if (!iso) return "—";
-  return new Date(iso).toLocaleString(undefined, {
+  return new Date(iso).toLocaleString(locale, {
     month: "short",
     day: "numeric",
     hour: "numeric",
@@ -1258,6 +1277,8 @@ export function HorizontalBars({
   color?: string;
   labelWidth?: number;
 }) {
+  const t = useT();
+  const locale = useLocale();
   const max = Math.max(...items.map((i) => i.count), 1);
   if (items.length === 0)
     return (
@@ -1269,7 +1290,7 @@ export function HorizontalBars({
           textAlign: "center",
         }}
       >
-        No data yet
+        {t("adminActivity.common.noDataYet")}
       </div>
     );
   return (
@@ -1322,7 +1343,7 @@ export function HorizontalBars({
               flexShrink: 0,
             }}
           >
-            {it.count.toLocaleString("en-US")}
+            {it.count.toLocaleString(locale)}
           </span>
         </div>
       ))}
@@ -1335,6 +1356,7 @@ export function StreamTypeBars({
 }: {
   data: { label: string; count: number; color: string }[];
 }) {
+  const locale = useLocale();
   const total = data.reduce((s, r) => s + r.count, 0);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -1406,7 +1428,7 @@ export function StreamTypeBars({
                   whiteSpace: "nowrap",
                 }}
               >
-                {r.count.toLocaleString("en-US")}{" "}
+                {r.count.toLocaleString(locale)}{" "}
                 <span style={{ color: "var(--ds-fg-subtle)" }}>· {pct}%</span>
               </span>
             </div>

@@ -30,6 +30,8 @@ import { canRequest, hasPermission, Permission } from "@/lib/permissions";
 import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
 import { isBlacklisted } from "@/lib/blacklist";
 import { DetailTitle } from "@/components/layout/detail-title";
+import { getLocale, getTranslator } from "@/lib/i18n/server";
+import { translateTmdbStatus } from "@/components/media/detail-status";
 import { isFeatureEnabled } from "@/lib/features";
 
 export default async function TVDetailPage({
@@ -44,6 +46,7 @@ export default async function TVDetailPage({
   // check — overlapping it with getTVDetails let an unauthenticated caller
   // burn TMDB/OMDB/MDBList quota and write cache rows before the redirect fired.
   const session = await requireAppSession();
+  const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
   // A malformed id or a genuine TMDB 404 is a not-found; ANY other failure
   // (TMDB outage/timeout/5xx, missing credentials, a ratings-chain throw)
   // propagates to (app)/error.tsx, which offers a retry. The old bare
@@ -239,7 +242,7 @@ export default async function TVDetailPage({
 
           <div className="flex flex-col justify-end" style={{ gap: 10 }}>
             <div className="flex items-center flex-wrap" style={{ gap: 8 }}>
-              <Chip tone="accent">TV SHOW</Chip>
+              <Chip tone="accent">{t("detail.kindTv")}</Chip>
               <AvailabilityBadges
                 plexAvailable={plexAvailable}
                 jellyfinAvailable={jellyfinAvailable}
@@ -273,14 +276,14 @@ export default async function TVDetailPage({
               {[
                 media.releaseYear,
                 media.certification,
-                media.runtime ? `${media.runtime}m/ep` : null,
+                media.runtime ? t("detail.runtimePerEpisode", { minutes: media.runtime }) : null,
                 media.numberOfSeasons
-                  ? `${media.numberOfSeasons} season${media.numberOfSeasons === 1 ? "" : "s"}`
+                  ? t("detail.seasonCount", { count: media.numberOfSeasons })
                   : null,
-                formatDigitalRelease(media.releasedDigital),
+                formatDigitalRelease(media.releasedDigital, locale, (date) => t("detail.digitalRelease", { date })),
                 media.productionCountries?.[0],
                 languageName(media.originalLanguage),
-                media.status,
+                media.status ? translateTmdbStatus(media.status, t) : null,
               ]
                 .filter(Boolean)
                 .map((part, i) => (
@@ -296,7 +299,7 @@ export default async function TVDetailPage({
                 {media.genres.slice(0, 5).map((g) => {
                   const gid = genreNameToId.get(g);
                   return gid !== undefined ? (
-                    <Link key={g} href={`/tv?genreId=${gid}`} aria-label={`Browse ${g} TV shows`}>
+                    <Link key={g} href={`/tv?genreId=${gid}`} aria-label={t("detail.browseGenreTv", { genre: g })}>
                       <Chip className="ds-chip-link">{g}</Chip>
                     </Link>
                   ) : (
@@ -308,17 +311,17 @@ export default async function TVDetailPage({
 
             {media.originalTitle && (
               <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
-                Original title: {media.originalTitle}
+                {t("detail.originalTitle", { title: media.originalTitle })}
               </div>
             )}
 
             {media.nextEpisodeAirDate && (
               <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
-                Next episode:{" "}
+                {t("detail.nextEpisode")}{" "}
                 {/* TMDB air dates are date-only ("YYYY-MM-DD"), which Date parses
                     as UTC midnight — format in UTC too, or a server running west
                     of UTC renders the day before (same fix as formatDigitalRelease). */}
-                {new Date(media.nextEpisodeAirDate).toLocaleDateString("en-US", {
+                {new Date(media.nextEpisodeAirDate).toLocaleDateString(locale, {
                   month: "short",
                   day: "numeric",
                   year: "numeric",

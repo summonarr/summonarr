@@ -5,6 +5,7 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { RefreshCw, XCircle } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 export function ResyncLibraryButton({
   plexConfigured,
@@ -13,6 +14,8 @@ export function ResyncLibraryButton({
   plexConfigured: boolean;
   jellyfinConfigured: boolean;
 }) {
+  const t = useT();
+  const locale = useLocale();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -51,7 +54,7 @@ export function ResyncLibraryButton({
         // Not an error — nothing is misconfigured, there is simply nothing to
         // re-scan. Neutral styling says that; red would not.
         setStatus("done");
-        setResult("No media servers configured");
+        setResult(t("adminManage.library.btn.noServers"));
         scheduleReset();
         return;
       }
@@ -68,12 +71,12 @@ export function ResyncLibraryButton({
               | { scanned?: { movies: number; tv: number }; error?: string }
               | null;
             if (!res.ok || data?.error) {
-              return { name, ok: false, text: `${name} ${data?.error ?? `failed (${res.status})`}` };
+              return { name, ok: false, text: `${name} ${data?.error ?? t("adminManage.library.btn.failedStatus", { status: res.status })}` };
             }
             const count = (data?.scanned?.movies ?? 0) + (data?.scanned?.tv ?? 0);
-            return { name, ok: true, text: `${name} ${count.toLocaleString("en-US")} items` };
+            return { name, ok: true, text: `${name} ${t("adminManage.library.btn.items", { count, formatted: count.toLocaleString(locale) })}` };
           } catch {
-            return { name, ok: false, text: `${name} network error` };
+            return { name, ok: false, text: `${name} ${t("adminManage.library.btn.networkError")}` };
           }
         }),
       );
@@ -91,7 +94,7 @@ export function ResyncLibraryButton({
       }
     } catch {
       setStatus("error");
-      setResult("Sync failed");
+      setResult(t("adminManage.library.btn.syncFailed"));
     }
     scheduleReset();
   }
@@ -100,13 +103,13 @@ export function ResyncLibraryButton({
     return (
       <div className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/60 px-3 py-2 w-fit">
         <XCircle className="w-4 h-4 text-amber-400 shrink-0" />
-        <p className="text-sm text-zinc-200">Re-scan all libraries?</p>
+        <p className="text-sm text-zinc-200">{t("adminManage.library.btn.rescanConfirm")}</p>
         <Button
           size="sm"
           onClick={handleResync}
           className="bg-amber-600 text-black hover:bg-amber-600/90 h-7 px-3 text-xs"
         >
-          Re-sync
+          {t("adminManage.library.btn.resync")}
         </Button>
         <Button
           size="sm"
@@ -114,7 +117,7 @@ export function ResyncLibraryButton({
           onClick={() => setStatus("idle")}
           className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-7 px-3 text-xs"
         >
-          Cancel
+          {t("adminManage.common.cancel")}
         </Button>
       </div>
     );
@@ -130,7 +133,7 @@ export function ResyncLibraryButton({
         className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
       >
         <RefreshCw className={`w-4 h-4 ${status === "loading" ? "animate-spin" : ""}`} />
-        {status === "loading" ? "Syncing…" : "Re-sync Libraries"}
+        {status === "loading" ? t("adminManage.library.btn.syncing") : t("adminManage.library.btn.resyncLibraries")}
       </Button>
       {result && (
         <span

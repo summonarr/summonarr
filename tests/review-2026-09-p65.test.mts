@@ -21,6 +21,10 @@ const src = readFileSync(
   path.join(here, "..", "src", "components", "media", "browse-grid.tsx"),
   "utf8",
 );
+// The copy lives in the i18n catalog; the component references it by key.
+const enBrowse: Record<string, string> = JSON.parse(
+  readFileSync(path.join(here, "..", "src", "lib", "i18n", "messages", "en", "browse.json"), "utf8"),
+);
 
 test("f91: the empty-state branch is exclusive of the failure banner", () => {
   // The banner is gated on `failed && !isPending`; the empty state must carry
@@ -33,12 +37,14 @@ test("f91: the empty-state branch is exclusive of the failure banner", () => {
   );
   // And the wrong-cause empty state is still the fallback for a genuine
   // no-token empty result (not deleted by mistake).
-  assert.match(src, /title="TMDB token not configured"/);
+  assert.match(src, /title=\{t\("browse\.grid\.tokenMissing\.title"\)\}/);
+  assert.equal(enBrowse["browse.grid.tokenMissing.title"], "TMDB token not configured");
 });
 
 test("f91: the banner does not claim a previous view is shown", () => {
   // The component no longer keeps a client-fetched previous view (the server
   // owns the render), so the banner must not promise one.
-  assert.doesNotMatch(src, /Showing the previous view/);
-  assert.match(src, /Couldn&apos;t load results from TMDB/);
+  assert.match(src, /\{t\("browse\.grid\.loadFailed"\)\}/);
+  assert.doesNotMatch(enBrowse["browse.grid.loadFailed"], /Showing the previous view/);
+  assert.match(enBrowse["browse.grid.loadFailed"], /Couldn’t load results from TMDB/);
 });

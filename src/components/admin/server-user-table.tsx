@@ -8,6 +8,7 @@ import { Download, Ban, ShieldCheck, Link, Loader2, RefreshCw } from "@/componen
 import { withBasePath } from "@/lib/base-path";
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { Switch } from "@/components/ui/switch";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface ServerUser {
   id: string;
@@ -79,6 +80,7 @@ function LinkPicker({
   row: ServerUser;
   accounts: LinkableAccount[];
 }) {
+  const t = useT();
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -98,12 +100,12 @@ function LinkPicker({
       });
       const data = (await res.json().catch(() => null)) as { error?: string } | null;
       if (!res.ok || data?.error) {
-        setError(data?.error ?? `Failed (${res.status})`);
+        setError(data?.error ?? t("adminManage.notif.failed", { status: res.status }));
         return;
       }
       router.refresh();
     } catch {
-      setError("Network error");
+      setError(t("adminManage.serverUsers.networkError"));
     } finally {
       setLoading(false);
     }
@@ -120,14 +122,16 @@ function LinkPicker({
         <select
           value={value}
           disabled={loading}
-          aria-label={`Summonarr account attributed for ${row.username}`}
+          aria-label={t("adminManage.serverUsers.linkAria", { name: row.username })}
           onChange={(e) => change(e.target.value)}
           className="max-w-[170px] truncate rounded-md border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 text-xs text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:opacity-50"
         >
           <option value={AUTO}>
-            Automatic{row.user ? ` — ${row.user.name ?? row.user.email}` : " — unmatched"}
+            {row.user
+              ? t("adminManage.serverUsers.automaticMatched", { name: row.user.name ?? row.user.email })
+              : t("adminManage.serverUsers.automaticUnmatched")}
           </option>
-          <option value={NONE}>Not linked</option>
+          <option value={NONE}>{t("adminManage.serverUsers.notLinked")}</option>
           {accounts.map((a) => (
             <option key={a.id} value={a.id}>
               {a.name ?? a.email}
@@ -136,7 +140,7 @@ function LinkPicker({
         </select>
       </div>
       {row.manualUserLink && !error && (
-        <span className="text-[10px] text-amber-400">pinned by admin</span>
+        <span className="text-[10px] text-amber-400">{t("adminManage.serverUsers.pinned")}</span>
       )}
       {error && <span className="text-[10px] text-red-400">{error}</span>}
     </div>
@@ -152,6 +156,7 @@ function DownloadToggle({
   enabled: boolean | null;
   disabled: boolean;
 }) {
+  const t = useT();
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [optimistic, setOptimistic] = useState(enabled);
@@ -191,7 +196,7 @@ function DownloadToggle({
   if (isDisabled) {
     return (
       <Badge className="border-zinc-700 bg-zinc-800 text-zinc-500 text-[10px]">
-        Admin
+        {t("adminManage.serverUsers.admin")}
       </Badge>
     );
   }
@@ -199,7 +204,7 @@ function DownloadToggle({
   // null = not yet synced from server — show as indeterminate, not enabled
   if (optimistic === null) {
     return (
-      <span className="text-[11px] text-zinc-500 italic">not synced</span>
+      <span className="text-[11px] text-zinc-500 italic">{t("adminManage.serverUsers.notSynced")}</span>
     );
   }
 
@@ -209,16 +214,17 @@ function DownloadToggle({
     <Switch
       variant="success"
       checked={on}
-      aria-label="Toggle downloads for this user"
+      aria-label={t("adminManage.serverUsers.toggleDownloads")}
       disabled={loading}
       loading={loading}
       onCheckedChange={toggle}
-      title={on ? "Downloads enabled — click to disable" : "Downloads disabled — click to enable"}
+      title={on ? t("adminManage.serverUsers.downloadsOnTitle") : t("adminManage.serverUsers.downloadsOffTitle")}
     />
   );
 }
 
 function SyncUsersButton() {
+  const t = useT();
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
@@ -248,9 +254,9 @@ function SyncUsersButton() {
         className="flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border border-zinc-700 bg-zinc-800/60 text-zinc-300 hover:bg-zinc-700/60 hover:text-zinc-100 transition-colors disabled:opacity-50"
       >
         {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-        {loading ? "Syncing…" : "Sync users from server"}
+        {loading ? t("adminManage.serverUsers.syncing") : t("adminManage.serverUsers.sync")}
       </button>
-      {error && <span className="text-xs text-red-400">Sync failed</span>}
+      {error && <span className="text-xs text-red-400">{t("adminManage.serverUsers.syncFailed")}</span>}
     </div>
   );
 }
@@ -262,6 +268,7 @@ function BulkBar({
   source: "jellyfin";
   label: string;
 }) {
+  const t = useT();
   const router = useRouter();
   const [loading, setLoading] = useState<"disable" | "enable" | null>(null);
   const [error, setError] = useState(false);
@@ -297,7 +304,7 @@ function BulkBar({
     return (
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs text-zinc-300">
-          {enable ? "Enable" : "Disable"} downloads for every {label} user?
+          {enable ? t("adminManage.serverUsers.bulk.confirmEnable", { label }) : t("adminManage.serverUsers.bulk.confirmDisable", { label })}
         </span>
         <button
           onClick={() => bulk(enable)}
@@ -307,13 +314,13 @@ function BulkBar({
               : "border-red-800/40 bg-red-500/10 text-red-400 hover:bg-red-500/20"
           }`}
         >
-          {enable ? "Enable all" : "Disable all"}
+          {enable ? t("adminManage.serverUsers.bulk.enableAll") : t("adminManage.serverUsers.bulk.disableAll")}
         </button>
         <button
           onClick={() => setConfirming(null)}
           className="px-2 py-0.5 text-xs rounded border border-zinc-700 text-zinc-400 hover:text-zinc-100 transition-colors"
         >
-          Cancel
+          {t("adminManage.common.cancel")}
         </button>
       </div>
     );
@@ -328,7 +335,7 @@ function BulkBar({
         className="flex items-center gap-1 px-2 py-0.5 text-xs rounded border border-red-800/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
       >
         {loading === "disable" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Ban className="w-3 h-3" />}
-        Disable all
+        {t("adminManage.serverUsers.bulk.disableAll")}
       </button>
       <button
         onClick={() => setConfirming("enable")}
@@ -336,14 +343,15 @@ function BulkBar({
         className="flex items-center gap-1 px-2 py-0.5 text-xs rounded border border-green-800/40 bg-green-500/10 text-green-400 hover:bg-green-500/20 transition-colors disabled:opacity-50"
       >
         {loading === "enable" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
-        Enable all
+        {t("adminManage.serverUsers.bulk.enableAll")}
       </button>
-      {error && <span className="text-xs text-red-400">Failed</span>}
+      {error && <span className="text-xs text-red-400">{t("adminManage.serverUsers.failed")}</span>}
     </div>
   );
 }
 
 function AutoDisableToggle({ initial }: { initial: boolean }) {
+  const t = useT();
   const router = useRouter();
   const [on, setOn] = useState(initial);
   const [loading, setLoading] = useState(false);
@@ -371,14 +379,14 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
   return (
     <div className="flex items-center gap-2.5 py-2 px-3 rounded-lg border border-zinc-800 bg-zinc-900/60">
       <div className="flex-1 min-w-0">
-        <p className="text-xs font-medium text-zinc-200">Auto-disable downloads for new Jellyfin users</p>
+        <p className="text-xs font-medium text-zinc-200">{t("adminManage.serverUsers.autoDisable")}</p>
         <p className="text-[11px] text-zinc-500 mt-0.5">
-          New Jellyfin accounts discovered on sync have downloads disabled. Manually re-enabled users are left alone.
+          {t("adminManage.serverUsers.autoDisableHint")}
         </p>
       </div>
       <Switch
         checked={on}
-        aria-label="Auto-disable downloads for new Jellyfin users"
+        aria-label={t("adminManage.serverUsers.autoDisable")}
         disabled={loading}
         loading={loading}
         onCheckedChange={toggle}
@@ -388,6 +396,7 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
 }
 
 export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }: ServerUserTableProps) {
+  const t = useT();
   const [search, setSearch] = useState("");
 
   const query = search.trim().toLowerCase();
@@ -431,14 +440,14 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
                 <div className="flex items-center gap-1.5">
                   <span className="text-sm font-medium text-zinc-100 truncate">{u.username}</span>
                   {u.isServerAdmin && (
-                    <ShieldCheck className="w-3 h-3 text-indigo-400 shrink-0" aria-label="Server admin" />
+                    <ShieldCheck className="w-3 h-3 text-indigo-400 shrink-0" aria-label={t("adminManage.serverUsers.serverAdmin")} />
                   )}
                   {!u.active && (
                     <Badge
                       className="border-zinc-700 bg-zinc-800 text-zinc-400 text-[10px] shrink-0"
-                      title="No longer on the media server. Listed because their watch history is still here and can be attributed."
+                      title={t("adminManage.serverUsers.departedTitle")}
                     >
-                      departed
+                      {t("adminManage.serverUsers.departed")}
                     </Badge>
                   )}
                 </div>
@@ -494,7 +503,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
     return (
       <div className="flex flex-col items-start gap-3 py-2">
         {hasJellyfin && <AutoDisableToggle initial={autoDisableNew} />}
-        <p className="text-sm text-zinc-500">No media server users synced yet.</p>
+        <p className="text-sm text-zinc-500">{t("adminManage.serverUsers.empty")}</p>
         <SyncUsersButton />
       </div>
     );
@@ -515,8 +524,8 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
       {/* Search */}
       <input
         type="search"
-        placeholder="Filter by username or email…"
-        aria-label="Filter server users"
+        placeholder={t("adminManage.serverUsers.filterPlaceholder")}
+        aria-label={t("adminManage.serverUsers.filter")}
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         className="w-full sm:w-72 rounded-lg border border-zinc-700 bg-zinc-800/60 px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
@@ -526,10 +535,10 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-zinc-800 bg-zinc-900/60">
-              <th scope="col" className="py-2 pl-4 pr-3 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500">User</th>
-              <th scope="col" className="py-2 px-3 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hidden sm:table-cell">Source</th>
-              <th scope="col" className="py-2 px-3 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hidden md:table-cell">Linked account</th>
-              <th scope="col" className="py-2 pl-3 pr-4 text-right text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Downloads</th>
+              <th scope="col" className="py-2 pl-4 pr-3 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500">{t("adminManage.serverUsers.col.user")}</th>
+              <th scope="col" className="py-2 px-3 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hidden sm:table-cell">{t("adminManage.serverUsers.col.source")}</th>
+              <th scope="col" className="py-2 px-3 text-left text-[11px] font-semibold uppercase tracking-wider text-zinc-500 hidden md:table-cell">{t("adminManage.serverUsers.col.linked")}</th>
+              <th scope="col" className="py-2 pl-3 pr-4 text-right text-[11px] font-semibold uppercase tracking-wider text-zinc-500">{t("adminManage.serverUsers.col.downloads")}</th>
             </tr>
           </thead>
           <tbody className="bg-zinc-900/30">
@@ -538,7 +547,7 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
             {filtered.length === 0 && (
               <tr>
                 <td colSpan={4} className="py-6 px-4 text-center text-sm text-zinc-500">
-                  No users match &ldquo;{search.trim()}&rdquo;.
+                  {t("adminManage.serverUsers.noMatch", { query: search.trim() })}
                 </td>
               </tr>
             )}
@@ -548,12 +557,13 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
 
       {/* Both counts use the same search-filtered set, so they always agree. */}
       <p className="text-[11px] text-zinc-500">
-        {filtered.length} server {filtered.length === 1 ? "user" : "users"}
-        {search.trim() && ` of ${users.length}`}
+        {search.trim()
+          ? t("adminManage.serverUsers.countOf", { count: filtered.length, total: users.length })
+          : t("adminManage.serverUsers.count", { count: filtered.length })}
         {hasJellyfin && (
           <>
             {" · "}
-            {disabledJellyfinCount} Jellyfin user{disabledJellyfinCount === 1 ? "" : "s"} with downloads disabled
+            {t("adminManage.serverUsers.disabledCount", { count: disabledJellyfinCount })}
           </>
         )}
       </p>

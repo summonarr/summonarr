@@ -12,11 +12,13 @@ import { requireAppSession } from "@/lib/require-app-session";
 import { getBadgeVisibility } from "@/lib/badge-visibility";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { LiveRefresh } from "@/components/live-refresh";
-import { requireFeature } from "@/lib/features";
+import { isFeatureEnabled, requireFeature } from "@/lib/features";
 import Link from "next/link";
 import { Suspense } from "react";
 import { PageHeader, EmptyState, SectionHeader } from "@/components/ui/design";
 import { TrendingUp, Film } from "@/components/icons";
+import { getTranslator } from "@/lib/i18n/server";
+import type { Translator } from "@/lib/i18n/translate";
 
 type EnrichedMedia = TmdbMedia & {
   // 1-based position in the SERVER-WIDE ranking (page offset included), taken
@@ -32,16 +34,18 @@ type EnrichedMedia = TmdbMedia & {
   totalHours: number;
 };
 
-const SORT_OPTIONS: { value: PopularSort; label: string; description: string }[] = [
-  { value: "trending", label: "Trending", description: "Most played in the last 30 days" },
-  { value: "viewers", label: "Most Viewers", description: "Ranked by number of unique viewers" },
-  { value: "plays", label: "Most Played", description: "Ranked by total play count across all users" },
+// Labels are catalog keys, translated at render time (module scope has no
+// request locale).
+const SORT_OPTIONS: { value: PopularSort; labelKey: string; descriptionKey: string }[] = [
+  { value: "trending", labelKey: "browse.popular.sort.trending", descriptionKey: "browse.popular.sort.trendingDescription" },
+  { value: "viewers", labelKey: "browse.popular.sort.viewers", descriptionKey: "browse.popular.sort.viewersDescription" },
+  { value: "plays", labelKey: "browse.popular.sort.plays", descriptionKey: "browse.popular.sort.playsDescription" },
 ];
 
 const TYPE_OPTIONS = [
-  { label: "All", value: undefined },
-  { label: "Movies", value: "movies" },
-  { label: "TV Shows", value: "tv" },
+  { labelKey: "browse.type.all", value: undefined },
+  { labelKey: "nav.movies", value: "movies" },
+  { labelKey: "nav.tvShows", value: "tv" },
 ] as const;
 
 export default async function PopularOnServerPage({
@@ -50,9 +54,19 @@ export default async function PopularOnServerPage({
   searchParams: Promise<Record<string, string>>;
 }) {
   await requireFeature("feature.page.popular");
-  const [sp, session] = await Promise.all([searchParams, requireAppSession()]);
+  const [sp, session, plexEnabled, jellyfinEnabled, t] = await Promise.all([
+    searchParams,
+    requireAppSession(),
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+    getTranslator(),
+  ]);
   if (!session) return null;
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
+  // Integration flags passed explicitly — they default to TRUE when omitted.
+  const { showPlex, showJellyfin } = getBadgeVisibility(session, {
+    plex: plexEnabled,
+    jellyfin: jellyfinEnabled,
+  });
   const [show4k, playHistoryEnabled] = await Promise.all([
     getShow4kVisibility(session),
     isPlayHistoryEnabled(),
@@ -64,11 +78,11 @@ export default async function PopularOnServerPage({
   if (!playHistoryEnabled) {
     return (
       <div className="ds-page-enter">
-        <PageHeader title="Popular on Server" subtitle="Most played on your servers" />
+        <PageHeader title={t("nav.popularOnServer")} subtitle={t("browse.popular.subtitle")} />
         <EmptyState
           icon={TrendingUp}
-          title="Play history tracking is off"
-          description="Enable play history in Admin → Features to populate this page."
+          title={t("browse.popular.trackingOff.title")}
+          description={t("browse.popular.trackingOff.description")}
         />
       </div>
     );
@@ -177,7 +191,7 @@ export default async function PopularOnServerPage({
   // "first–last of N" from the surviving ranks, not from the survivor count:
   // a filtered title in the middle of the page leaves the ends where they are.
   const rankRange = (items: EnrichedMedia[], total: number) =>
-    `${items[0]!.rank}–${items[items.length - 1]!.rank} of ${total} titles`;
+    t("browse.popular.rankRange", { from: items[0]!.rank, to: items[items.length - 1]!.rank, total });
 
   function buildHref(overrides: Record<string, string | undefined>) {
     const merged: Record<string, string> = {};
@@ -195,7 +209,7 @@ export default async function PopularOnServerPage({
   return (
     <div className="ds-page-enter">
       <LiveRefresh on={["request:new", "request:updated", "request:deleted"]} />
-      <PageHeader title="Popular on Server" subtitle={activeSort.description} />
+      <PageHeader title={t("nav.popularOnServer")} subtitle={t(activeSort.descriptionKey)} />
 
       <div className="flex flex-col sm:flex-row gap-3 mb-6 flex-wrap">
         <div
@@ -208,7 +222,7 @@ export default async function PopularOnServerPage({
             gap: 0,
           }}
         >
-          {SORT_OPTIONS.map(({ value, label }) => {
+          {SORT_OPTIONS.map(({ value, labelKey }) => {
             const isActive = sort === value;
             return (
               <Link
@@ -227,7 +241,7 @@ export default async function PopularOnServerPage({
                   color: isActive ? "var(--ds-fg)" : "var(--ds-fg-muted)",
                 }}
               >
-                {label}
+                {t(labelKey)}
               </Link>
             );
           })}
@@ -247,11 +261,11 @@ export default async function PopularOnServerPage({
             borderRadius: 8,
           }}
         >
-          {TYPE_OPTIONS.map(({ label, value }) => {
+          {TYPE_OPTIONS.map(({ labelKey, value }) => {
             const isActive = mediaTypeFilter === value;
             return (
               <Link
-                key={label}
+                key={value ?? "all"}
                 href={buildHref({ mediaType: value })}
                 aria-current={isActive ? "page" : undefined}
                 className="ds-hover-tint inline-flex items-center whitespace-nowrap font-medium"
@@ -266,7 +280,7 @@ export default async function PopularOnServerPage({
                   color: isActive ? "var(--ds-fg)" : "var(--ds-fg-muted)",
                 }}
               >
-                {label}
+                {t(labelKey)}
               </Link>
             );
           })}
@@ -279,22 +293,22 @@ export default async function PopularOnServerPage({
         page > 1 ? (
           <EmptyState
             icon={Film}
-            title="No more results on this page"
-            description="Try going back to the first page."
-            cta={{ href: buildHref({}), label: "Back to page 1" }}
+            title={t("browse.empty.noMoreResults.title")}
+            description={t("browse.empty.noMoreResults.description")}
+            cta={{ href: buildHref({}), label: t("browse.empty.backToPage1") }}
           />
         ) : sort === "trending" ? (
           <EmptyState
             icon={TrendingUp}
-            title="No plays in the last 30 days"
-            description="Nothing was played in this window."
-            cta={{ href: buildHref({ sort: "plays" }), label: "Switch to Most Played" }}
+            title={t("browse.popular.noRecentPlays.title")}
+            description={t("browse.popular.noRecentPlays.description")}
+            cta={{ href: buildHref({ sort: "plays" }), label: t("browse.popular.noRecentPlays.cta") }}
           />
         ) : (
           <EmptyState
             icon={Film}
-            title="No play history yet"
-            description="Data will appear once media is played on your servers."
+            title={t("browse.popular.noHistory.title")}
+            description={t("browse.popular.noHistory.description")}
           />
         )
       ) : (
@@ -302,7 +316,7 @@ export default async function PopularOnServerPage({
           {showMovies && movies.length > 0 && (
             <section>
               <SectionHeader
-                title="Movies"
+                title={t("nav.movies")}
                 right={<RangeLabel>{rankRange(movies, totalMovies)}</RangeLabel>}
               />
               <MediaGrid
@@ -310,6 +324,7 @@ export default async function PopularOnServerPage({
                 showPlex={showPlex}
                 showJellyfin={showJellyfin}
                 sort={sort}
+                t={t}
               />
             </section>
           )}
@@ -317,7 +332,7 @@ export default async function PopularOnServerPage({
           {showTV && tv.length > 0 && (
             <section>
               <SectionHeader
-                title="TV Shows"
+                title={t("nav.tvShows")}
                 right={<RangeLabel>{rankRange(tv, totalTv)}</RangeLabel>}
               />
               <MediaGrid
@@ -325,6 +340,7 @@ export default async function PopularOnServerPage({
                 showPlex={showPlex}
                 showJellyfin={showJellyfin}
                 sort={sort}
+                t={t}
               />
             </section>
           )}
@@ -355,16 +371,21 @@ function MediaGrid({
   showPlex,
   showJellyfin,
   sort,
+  t,
 }: {
   items: EnrichedMedia[];
   showPlex: boolean;
   showJellyfin: boolean;
   sort: PopularSort;
+  t: Translator;
 }) {
   return (
     <div className="ds-media-grid">
       {items.map((media) => (
-        <div key={`${media.mediaType}-${media.id}`} className="ds-ranked-card relative">
+        // flex-col + the card's grow: the grid stretches this wrapper, not the
+        // card, so without them each card stopped at its own content height and
+        // a row's cards (and their stats lines) ended at different heights.
+        <div key={`${media.mediaType}-${media.id}`} className="ds-ranked-card relative flex flex-col">
           <div
             className="ds-mono absolute z-10 flex items-center justify-center font-bold"
             style={{
@@ -386,6 +407,7 @@ function MediaGrid({
             showPlex={showPlex}
             showJellyfin={showJellyfin}
             size="md"
+            className="grow"
           />
           <div
             className="ds-mono flex flex-wrap items-center"
@@ -407,12 +429,13 @@ function MediaGrid({
                 fontWeight: sort === "plays" || sort === "trending" ? 500 : 400,
               }}
             >
-              {media.plays} {media.plays === 1 ? "play" : "plays"}
-              {sort === "trending" ? " (30d)" : ""}
+              {sort === "trending"
+                ? t("browse.popular.stat.plays30d", { count: media.plays })
+                : t("browse.popular.stat.plays", { count: media.plays })}
             </span>
             {sort === "trending" && (
               <span style={{ whiteSpace: "nowrap" }}>
-                · {media.allTimePlays} all-time
+                · {t("browse.popular.stat.allTime", { count: media.allTimePlays })}
               </span>
             )}
             <span
@@ -423,15 +446,15 @@ function MediaGrid({
                 fontWeight: sort === "viewers" ? 500 : 400,
               }}
             >
-              · {media.viewers} {media.viewers === 1 ? "viewer" : "viewers"}
+              · {t("browse.popular.stat.viewers", { count: media.viewers })}
             </span>
             {media.mediaType === "tv" && media.episodes > 0 && (
               <span style={{ whiteSpace: "nowrap" }}>
-                · {media.episodes} {media.episodes === 1 ? "ep" : "eps"}
+                · {t("browse.popular.stat.episodes", { count: media.episodes })}
               </span>
             )}
             {media.totalHours > 0 && (
-              <span style={{ whiteSpace: "nowrap" }}>· {media.totalHours}h</span>
+              <span style={{ whiteSpace: "nowrap" }}>· {t("browse.popular.stat.hours", { hours: media.totalHours })}</span>
             )}
           </div>
         </div>

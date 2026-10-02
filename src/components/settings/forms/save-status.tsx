@@ -1,4 +1,5 @@
 import { CheckCircle, XCircle } from "@/components/icons";
+import { useT } from "@/components/i18n/i18n-provider";
 import type { SaveStatus } from "./shared";
 
 // The "Saved" / "Failed to save" line shared by the settings forms. It sits in
@@ -8,18 +9,19 @@ import type { SaveStatus } from "./shared";
 // because the Save button already shows its own "Saving…" spinner.
 export function SaveStatusMessage({
   status,
-  okLabel = "Saved",
-  errorLabel = "Failed to save",
+  okLabel,
+  errorLabel,
 }: {
   status: SaveStatus;
   okLabel?: string;
   errorLabel?: string;
 }) {
+  const t = useT();
   if (status === "ok") {
     return (
       <span role="status" aria-live="polite" className="flex items-center gap-1.5 text-sm text-green-400">
         <CheckCircle className="w-4 h-4" />
-        {okLabel}
+        {okLabel ?? t("settings.form.common.saved")}
       </span>
     );
   }
@@ -27,7 +29,7 @@ export function SaveStatusMessage({
     return (
       <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400">
         <XCircle className="w-4 h-4" />
-        {errorLabel}
+        {errorLabel ?? t("settings.form.common.saveFailed")}
       </span>
     );
   }

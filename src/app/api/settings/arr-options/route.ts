@@ -3,11 +3,13 @@ import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { arrFetch } from "@/lib/arr";
 import { arrSettingKey, isValidInstanceSlug } from "@/lib/arr-instances";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const GET = withAdmin(async (req, _ctx, _session) => {
+  const t = translatorForRequest(req);
   const service = req.nextUrl.searchParams.get("service");
   if (service !== "radarr" && service !== "sonarr") {
-    return NextResponse.json({ error: "service must be radarr or sonarr" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.serviceRadarrOrSonarr") }, { status: 400 });
   }
   // ?instance=<slug> selects a named instance's namespaced settings keys; the
   // legacy ?variant=4k spelling is still honored. "" = the default instance.
@@ -16,7 +18,7 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     ? rawInstance
     : req.nextUrl.searchParams.get("variant") === "4k" ? "4k" : "";
   if (!isValidInstanceSlug(instance)) {
-    return NextResponse.json({ error: "invalid instance" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.invalidInstanceLower") }, { status: 400 });
   }
 
   const urlKey = arrSettingKey(service, instance, "Url");
@@ -25,7 +27,7 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
 
   if (!map[urlKey] || !map[keyKey]) {
-    return NextResponse.json({ error: `${service} is not configured` }, { status: 422 });
+    return NextResponse.json({ error: t("apiAdmin.settings.arrNotConfigured", { service }) }, { status: 422 });
   }
 
   const cfg = { url: map[urlKey].replace(/\/$/, ""), apiKey: map[keyKey] };
@@ -56,6 +58,6 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     return NextResponse.json({ rootFolders, qualityProfiles, ...(languageProfiles ? { languageProfiles } : {}) });
   } catch (err) {
     console.error(`[settings/arr-options] Failed to fetch ${service} options:`, err);
-    return NextResponse.json({ error: `Could not connect to ${service}` }, { status: 502 });
+    return NextResponse.json({ error: t("apiAdmin.settings.arrConnectFailed", { service }) }, { status: 502 });
   }
 });

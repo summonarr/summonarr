@@ -1,0 +1,14 @@
+{
+  "appearance.theme": "Theme",
+  "appearance.dark": "Dark",
+  "appearance.light": "Light",
+  "appearance.accent": "Accent",
+  "appearance.accentColor": "Accent color",
+  "appearance.accent.indigo": "Indigo",
+  "appearance.accent.amber": "Amber",
+  "appearance.accent.emerald": "Emerald",
+  "appearance.accent.cyan": "Cyan",
+  "appearance.accent.rose": "Rose",
+  "appearance.accent.mono": "Mono",
+  "appearance.language": "Language"
+}

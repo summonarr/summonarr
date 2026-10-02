@@ -61,6 +61,7 @@ const EXCEPTIONS: Array<{ route: string; reason: string }> = [
   { route: "/auth/sign-in/jellyfin-quickconnect", reason: "Jellyfin QuickConnect redemption" },
   { route: "/auth/sign-in/plex", reason: "Plex sign-in handshake" },
   { route: "/auth/sign-in/oidc", reason: "native OIDC code exchange handshake" },
+  { route: "/auth/sign-in/mfa", reason: "second-factor completion of the credentials sign-in handshake (wire contract in SECURITY.md / src/lib/mfa/signin-challenge.ts)" },
   { route: "/auth/plex/pin", reason: "Plex OAuth PIN poll" },
   { route: "/auth/plex/start", reason: "Plex OAuth start" },
   { route: "/auth/oidc/start", reason: "OIDC redirect start" },
@@ -105,6 +106,7 @@ const EXCEPTIONS: Array<{ route: string; reason: string }> = [
   { route: "/cron/trash-sync", reason: "cron job (CRON_SECRET)" },
   { route: "/cron/trash-diagnostic", reason: "cron diagnostic (CRON_SECRET)" },
   { route: "/cron/warm-list-cache", reason: "cron job (CRON_SECRET)" },
+  { route: "/cron/sync-plex-watchlists", reason: "cron job (CRON_SECRET)" },
 ];
 
 /**

@@ -8,12 +8,14 @@ import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // How many days audit-log rows keep personal data (PII, e.g. IP addresses)
 // before it is scrubbed. getAuditPiiRetentionDays() reads this one setting for
 // BOTH the daily scrub-audit-pii cron and the manual "Scrub PII" button on the
 // Audit Log page, so the two always agree.
 export function AuditRetentionForm({ initialDays }: { initialDays: string }) {
+  const t = useT();
   const [days, setDays] = useState(initialDays);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState("");
@@ -32,11 +34,11 @@ export function AuditRetentionForm({ initialDays }: { initialDays: string }) {
       if (res.ok && data.ok !== false) {
         setStatus("ok");
       } else {
-        setError(data.error ?? "Failed to save");
+        setError(data.error ?? t("settings.form.common.saveFailed"));
         setStatus("error");
       }
     } catch {
-      setError("Failed to save");
+      setError(t("settings.form.common.saveFailed"));
       setStatus("error");
     }
     setTimeout(() => setStatus("idle"), 4000);
@@ -45,7 +47,7 @@ export function AuditRetentionForm({ initialDays }: { initialDays: string }) {
   return (
     <form onSubmit={handleSave} className="space-y-4">
       <div className="space-y-1.5">
-        <Label htmlFor="audit-pii-retention-days">PII retention (days)</Label>
+        <Label htmlFor="audit-pii-retention-days">{t("settings.form.auditRetention.label")}</Label>
         <Input
           id="audit-pii-retention-days"
           type="number"
@@ -57,14 +59,12 @@ export function AuditRetentionForm({ initialDays }: { initialDays: string }) {
           className="bg-zinc-800 border-zinc-700 text-sm max-w-48"
         />
         <p className="text-xs text-zinc-500">
-          Audit rows older than this have their IP address, device, and user name redacted
-          (and login-event details cleared) by the daily scrub job. The rows themselves are
-          kept. Leave blank for the default of 90 days; minimum 7.
+          {t("settings.form.auditRetention.help")}
         </p>
       </div>
       <div className="flex items-center gap-3">
         <Button type="submit" size="sm" disabled={status === "saving"}>
-          {status === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save"}
+          {status === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("settings.form.common.save")}
         </Button>
         <SaveStatusMessage status={status} errorLabel={error} />
       </div>

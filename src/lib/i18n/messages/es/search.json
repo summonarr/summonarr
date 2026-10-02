@@ -1,0 +1,9 @@
+{
+  "search.filter.all": "Todo",
+  "search.filter.movies": "Películas",
+  "search.filter.tv": "Series",
+  "search.placeholder": "Buscar películas, series, solicitudes…",
+  "search.results": "Resultados de búsqueda",
+  "search.unavailable": "La búsqueda no está disponible. Inténtalo de nuevo.",
+  "search.noMatches": "Sin resultados"
+}

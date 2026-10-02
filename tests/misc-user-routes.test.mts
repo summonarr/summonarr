@@ -757,6 +757,15 @@ test("POST consumes the token FIRST so a double-submit can't re-trigger the bind
   assert.equal(opsOf("user.updateMany").length, 1, "the replay must not re-run the bind");
 });
 
+test("POST binds only onto a still-active, never-purged row — a link clicked after disable/purge can't restore the address", async () => {
+  const raw = "abcdef0123456789";
+  verifyTokens = [{ token: hashVerifyToken(raw), identifier: buildVerifyIdentifier("u1", "new@example.com"), expires: new Date(Date.now() + 60_000) }];
+  await confirmPost(`?token=${raw}`);
+  const where = opsOf("user.updateMany")[0]?.args as Record<string, unknown> | undefined;
+  assert.ok(where, "the bind must have been attempted");
+  assert.deepEqual(where, { id: "u1", deactivatedAt: null, purgedAt: null });
+});
+
 test("the confirm pages are HTML, not JSON", async () => {
   const res = await confirmGet("");
   assert.match(res.headers.get("content-type") ?? "", /text\/html/);

@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { enforceUserDownloadPolicy } from "@/lib/download-policy";
 import { isPurgedRow } from "@/lib/account-lifecycle";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // PATCH /api/admin/server-users/[id] — two independent admin actions on one
 // media-server identity:
@@ -25,6 +26,7 @@ export const PATCH = withAdmin(async (
   { params }: { params: Promise<{ id: string }> },
   session,
 ) => {
+  const t = translatorForRequest(req);
   const { id } = await params;
 
   const parsed = await readJsonCapped<{
@@ -41,13 +43,13 @@ export const PATCH = withAdmin(async (
 
   if (!wantsLink && !wantsAutoLink && !wantsPolicy) {
     return NextResponse.json(
-      { error: "Provide downloadsEnabled, userId, or autoLink" },
+      { error: t("apiAdmin.serverUsers.provideField") },
       { status: 400 },
     );
   }
   if (wantsLink && wantsAutoLink) {
     return NextResponse.json(
-      { error: "Provide either userId or autoLink, not both" },
+      { error: t("apiAdmin.serverUsers.userIdOrAutoLink") },
       { status: 400 },
     );
   }
@@ -63,7 +65,7 @@ export const PATCH = withAdmin(async (
       manualUserLink: true,
     },
   });
-  if (!record) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!record) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
 
   // ── Account linking ───────────────────────────────────────────────────────
   // Deliberately NOT gated on isServerAdmin, source, or `active`: those are
@@ -78,13 +80,13 @@ export const PATCH = withAdmin(async (
 
     if (wantsLink && body.userId !== null) {
       if (typeof body.userId !== "string" || body.userId.length === 0) {
-        return NextResponse.json({ error: "userId must be a user id or null" }, { status: 400 });
+        return NextResponse.json({ error: t("apiAdmin.serverUsers.userIdInvalid") }, { status: 400 });
       }
       const target = await prisma.user.findUnique({
         where: { id: body.userId },
         select: { id: true, name: true, email: true, purgedAt: true },
       });
-      if (!target) return NextResponse.json({ error: "User not found" }, { status: 404 });
+      if (!target) return NextResponse.json({ error: t("apiAdmin.serverUsers.userNotFound") }, { status: 404 });
       // A purged account has had its identity scrubbed — attributing watch
       // history to it would re-attach data to a row that exists only as a
       // de-identified tombstone. A merely DISABLED account is fine and is the
@@ -92,7 +94,7 @@ export const PATCH = withAdmin(async (
       // Shape-aware (see isPurgedRow) so a pre-`purgedAt` scrubbed row is caught too.
       if (isPurgedRow(target)) {
         return NextResponse.json(
-          { error: "That account's data was purged and it can no longer be linked." },
+          { error: t("apiAdmin.serverUsers.purgedCannotLink") },
           { status: 400 },
         );
       }
@@ -131,19 +133,19 @@ export const PATCH = withAdmin(async (
 
   // ── Download policy (Jellyfin only) ───────────────────────────────────────
   if (typeof body.downloadsEnabled !== "boolean") {
-    return NextResponse.json({ error: "downloadsEnabled must be a boolean" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.common.downloadsEnabledBoolean") }, { status: 400 });
   }
   // Soft-deleted (active: false) rows are departed users hidden from the active
   // management surfaces; treat them as absent so policy can't be pushed to an
   // account that no longer exists on the server.
-  if (!record.active) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!record.active) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
   if (record.isServerAdmin) {
-    return NextResponse.json({ error: "Cannot change download policy for server admins" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.serverUsers.cannotChangeAdminPolicy") }, { status: 400 });
   }
   // Plex's sharing API does not expose a working remote toggle for allowSync,
   // so download policy is Jellyfin-only. The UI hides the toggle for Plex rows.
   if (record.source === "plex") {
-    return NextResponse.json({ error: "Plex download policy is not managed by Summonarr" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.serverUsers.plexPolicyUnmanaged") }, { status: 400 });
   }
 
   await prisma.mediaServerUser.update({
@@ -167,6 +169,6 @@ export const PATCH = withAdmin(async (
   return NextResponse.json(
     pushed
       ? { ok: true, pushed: true }
-      : { ok: true, pushed: false, warning: "Saved, but the media server could not be reached to apply the change — it will retry on the next hourly sync only if you disabled downloads." },
+      : { ok: true, pushed: false, warning: t("apiAdmin.serverUsers.savedNotPushed") },
   );
 });

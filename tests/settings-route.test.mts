@@ -776,3 +776,42 @@ test("PATCH: a CHANGED discordGuildId launches command re-registration exactly o
   assert.equal(discordRegistrationReads().length, 1, "a changed guild id must still trigger the re-registration task, once");
   assert.equal(fetchCalls.length, 0, "with no bot token stored the task stops before any Discord call");
 });
+
+// ── clearing the Discord app ids and the public site URL ────────────────────
+
+test("PATCH: an empty discordGuildId / discordClientId / discordPublicKey / siteUrl is WRITTEN, not skipped", async () => {
+  // Each has a real meaning when blank — a blank guild id is the documented
+  // switch to GLOBAL command registration, a blank client id / public key turns
+  // the bot off, and a blank siteUrl falls back to the request origin / AUTH_URL.
+  // They used to be dropped by the empty-value filter while the route still
+  // answered ok, so the form said "Saved", the old value stayed live, and the
+  // form's own saved-state then made the change impossible to retry.
+  // discordGuildId was submitted by the re-registration test above; step the
+  // clock past the route's 10s per-key cooldown instead of depending on order.
+  settings.set("discordGuildId", "222222222222222222");
+  settings.set("discordClientId", "111111111111111111");
+  settings.set("discordPublicKey", "abcdef0123456789");
+  settings.set("siteUrl", "https://old.example.com");
+  const admin = await mintSession("ADMIN");
+  const realNow = Date.now;
+  const offset = 60_000;
+  Date.now = () => realNow() + offset;
+  let res: Response;
+  try {
+    res = await PATCH(
+      patchReq(
+        JSON.stringify({ discordGuildId: "", discordClientId: "", discordPublicKey: "", siteUrl: "" }),
+        admin.header,
+      ),
+      undefined,
+    );
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(res.status, 200);
+  for (const key of ["discordGuildId", "discordClientId", "discordPublicKey", "siteUrl"]) {
+    const write = upsertFor(key)[0];
+    assert.ok(write, `clearing ${key} must reach the database`);
+    assert.equal(write.create.value, "", `${key} must be stored empty, not left at its previous value`);
+  }
+});

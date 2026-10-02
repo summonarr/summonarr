@@ -6,6 +6,8 @@ import type { Genre, WatchProvider } from "@/lib/tmdb-types";
 import { X } from "@/components/icons";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { FilterBar as SortSegments } from "@/components/ui/design";
+import { useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 
 interface FilterBarProps {
   genres: Genre[];
@@ -30,15 +32,18 @@ interface FilterBarProps {
   navigate: (cb: () => void) => void;
 }
 
+// Labels are catalog keys, translated at render (module scope has no locale).
 const SORT_OPTIONS = [
-  { value: "popularity.desc",     label: "Most Popular" },
-  { value: "vote_average.desc",   label: "Top Rated" },
-  { value: "release_date.desc",   label: "Newest" },
-  { value: "release_date.asc",    label: "Oldest" },
+  { value: "popularity.desc",     labelKey: "media.filter.sort.popular" },
+  { value: "vote_average.desc",   labelKey: "media.filter.sort.topRated" },
+  { value: "release_date.desc",   labelKey: "media.filter.sort.newest" },
+  { value: "release_date.asc",    labelKey: "media.filter.sort.oldest" },
 ];
 
-const RATING_OPTIONS = [
-  { value: "",          label: "Any Rating" },
+// A `label` is a literal (brand + number, same in every language); `labelKey`
+// + `pct` is translated at render.
+const RATING_OPTIONS: { value: string; label?: string; labelKey?: string; pct?: number }[] = [
+  { value: "",          labelKey: "media.filter.anyRating" },
   { value: "imdb:6",    label: "IMDb 6+" },
   { value: "imdb:6.5",  label: "IMDb 6.5+" },
   { value: "imdb:7",    label: "IMDb 7+" },
@@ -51,10 +56,10 @@ const RATING_OPTIONS = [
   { value: "rt:70",     label: "🍅 RT 70%+" },
   { value: "rt:80",     label: "🍅 RT 80%+" },
   { value: "rt:90",     label: "🍅 RT 90%+" },
-  { value: "rta:60",   label: "🍿 Audience 60%+" },
-  { value: "rta:70",   label: "🍿 Audience 70%+" },
-  { value: "rta:80",   label: "🍿 Audience 80%+" },
-  { value: "rta:90",   label: "🍿 Audience 90%+" },
+  { value: "rta:60",   labelKey: "media.filter.audience", pct: 60 },
+  { value: "rta:70",   labelKey: "media.filter.audience", pct: 70 },
+  { value: "rta:80",   labelKey: "media.filter.audience", pct: 80 },
+  { value: "rta:90",   labelKey: "media.filter.audience", pct: 90 },
   { value: "tmdb:6",    label: "TMDB 6+" },
   { value: "tmdb:7",    label: "TMDB 7+" },
   { value: "tmdb:7.5",  label: "TMDB 7.5+" },
@@ -63,15 +68,20 @@ const RATING_OPTIONS = [
   { value: "tmdb:9",    label: "TMDB 9+" },
 ];
 
-const VOTE_COUNT_OPTIONS = [
-  { value: "",      label: "Any Votes" },
-  { value: "100",   label: "100+ votes" },
-  { value: "250",   label: "250+ votes" },
-  { value: "500",   label: "500+ votes" },
-  { value: "1000",  label: "1,000+ votes" },
-  { value: "5000",  label: "5,000+ votes" },
-  { value: "10000", label: "10,000+ votes" },
-];
+const VOTE_COUNT_OPTIONS = ["", "100", "250", "500", "1000", "5000", "10000"];
+
+function ratingOptionLabel(t: Translator, o: (typeof RATING_OPTIONS)[number]): string {
+  return o.labelKey ? t(o.labelKey, o.pct !== undefined ? { pct: o.pct } : undefined) : (o.label ?? o.value);
+}
+
+// "1,000+ votes". Grouped by hand with the catalog's separator rather than
+// Intl.NumberFormat: the <option> text is server-rendered, and the server's and
+// browser's ICU data can disagree on grouping (guardrail 16's locale cousin).
+export function voteCountLabel(t: Translator, value: string): string {
+  if (!value) return t("media.filter.anyVotes");
+  const n = value.replace(/\B(?=(\d{3})+(?!\d))/g, t("media.filter.thousandsSeparator"));
+  return t("media.filter.votesMin", { n });
+}
 
 // `maxYear` is a prop, not a module-level constant. DO NOT introduce a
 // module-level `const x = new Date()...` here — that's the canonical React
@@ -83,14 +93,14 @@ function buildYears(maxYear: number): string[] {
   return Array.from({ length: maxYear - 1899 }, (_, i) => String(maxYear - i));
 }
 
-function ratingChipLabel(minRating?: string, ratingFilter?: string): string | null {
+function ratingChipLabel(t: Translator, minRating?: string, ratingFilter?: string): string | null {
   if (ratingFilter) {
     const opt = RATING_OPTIONS.find((o) => o.value === ratingFilter);
-    return opt?.label ?? ratingFilter;
+    return opt ? ratingOptionLabel(t, opt) : ratingFilter;
   }
   if (minRating) {
     const opt = RATING_OPTIONS.find((o) => o.value === `tmdb:${minRating}`);
-    return opt?.label ?? `TMDB ${minRating}+`;
+    return opt ? ratingOptionLabel(t, opt) : `TMDB ${minRating}+`;
   }
   return null;
 }
@@ -126,6 +136,7 @@ export function FilterBar({
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const t = useT();
   const years = useMemo(() => buildYears(maxYear), [maxYear]);
 
   // Filter changes we have pushed but that the URL has not caught up with yet.
@@ -200,7 +211,7 @@ export function FilterBar({
   }
 
   const hasFilters = !!(activeGenreId || activeKeywordId || activeMinRating || activeRatingFilter || activeMinVoteCount || activeFromYear || activeToYear || activeSortBy || activeWatchProvider || activeHideAvailable);
-  const chipLabel = ratingChipLabel(activeMinRating, activeRatingFilter);
+  const chipLabel = ratingChipLabel(t, activeMinRating, activeRatingFilter);
 
   const sortedProviders = (watchProviders ?? []).slice().sort((a, b) => {
     const aTop = TOP_PROVIDER_IDS.has(a.provider_id);
@@ -221,7 +232,7 @@ export function FilterBar({
   return (
     <div className="flex flex-col gap-3 mb-6">
       <SortSegments
-        segments={SORT_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+        segments={SORT_OPTIONS.map((o) => ({ value: o.value, label: t(o.labelKey) }))}
         active={activeSortBy ?? "popularity.desc"}
         onChange={(v) =>
           push({ sortBy: v === "popularity.desc" ? undefined : v })
@@ -231,11 +242,11 @@ export function FilterBar({
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2 items-center">
         <StyledSelect
-          aria-label="Filter by genre"
+          aria-label={t("media.filter.genreLabel")}
           value={activeGenreId ?? ""}
           onChange={(e) => push({ genreId: e.target.value || undefined })}
         >
-          <option value="">All Genres</option>
+          <option value="">{t("media.filter.allGenres")}</option>
           {genres.map((g) => (
             <option key={g.id} value={String(g.id)}>{g.name}</option>
           ))}
@@ -243,11 +254,11 @@ export function FilterBar({
 
         {sortedProviders.length > 0 && (
           <StyledSelect
-            aria-label="Filter by streaming service"
+            aria-label={t("media.filter.serviceLabel")}
             value={activeWatchProvider ?? ""}
             onChange={(e) => push({ watchProvider: e.target.value || undefined })}
           >
-            <option value="">All Services</option>
+            <option value="">{t("media.filter.allServices")}</option>
             {sortedProviders.map((p) => (
               <option key={p.provider_id} value={String(p.provider_id)}>{p.provider_name}</option>
             ))}
@@ -255,42 +266,42 @@ export function FilterBar({
         )}
 
         <StyledSelect
-          aria-label="Minimum rating"
+          aria-label={t("media.filter.minRatingLabel")}
           value={activeRatingValue}
           onChange={(e) => handleRatingChange(e.target.value)}
         >
           {RATING_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>{o.label}</option>
+            <option key={o.value} value={o.value}>{ratingOptionLabel(t, o)}</option>
           ))}
         </StyledSelect>
 
         <StyledSelect
-          aria-label="Minimum vote count"
+          aria-label={t("media.filter.minVotesLabel")}
           value={activeMinVoteCount ?? ""}
           onChange={(e) => push({ minVoteCount: e.target.value || undefined })}
         >
-          {VOTE_COUNT_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>{o.label}</option>
+          {VOTE_COUNT_OPTIONS.map((v) => (
+            <option key={v} value={v}>{voteCountLabel(t, v)}</option>
           ))}
         </StyledSelect>
 
         <StyledSelect
-          aria-label="From year"
+          aria-label={t("media.filter.fromYearLabel")}
           value={activeFromYear ?? ""}
           onChange={(e) => push({ fromYear: e.target.value || undefined })}
         >
-          <option value="">From Year</option>
+          <option value="">{t("media.filter.fromYear")}</option>
           {years.map((y) => (
             <option key={y} value={y}>{y}</option>
           ))}
         </StyledSelect>
 
         <StyledSelect
-          aria-label="To year"
+          aria-label={t("media.filter.toYearLabel")}
           value={activeToYear ?? ""}
           onChange={(e) => push({ toYear: e.target.value || undefined })}
         >
-          <option value="">To Year</option>
+          <option value="">{t("media.filter.toYear")}</option>
           {years.map((y) => (
             <option key={y} value={y}>{y}</option>
           ))}
@@ -315,7 +326,7 @@ export function FilterBar({
             border: `1px solid ${activeHideAvailable ? "var(--ds-accent-ring)" : "var(--ds-border)"}`,
           }}
         >
-          Hide Available
+          {t("media.hideAvailable")}
         </button>
 
         {hasFilters && (
@@ -334,7 +345,7 @@ export function FilterBar({
             }}
           >
             <X style={{ width: 12, height: 12 }} />
-            Clear filters
+            {t("browse.clearFilters")}
           </button>
         )}
       </div>
@@ -345,31 +356,31 @@ export function FilterBar({
             <Chip label={genres.find((g) => String(g.id) === activeGenreId)?.name ?? activeGenreId} onRemove={() => push({ genreId: undefined })} />
           )}
           {activeKeywordId && (
-            <Chip label={activeKeywordName ?? "Keyword"} onRemove={() => push({ keywordId: undefined, keywordName: undefined })} />
+            <Chip label={activeKeywordName ?? t("media.filter.keyword")} onRemove={() => push({ keywordId: undefined, keywordName: undefined })} />
           )}
           {chipLabel && (
             <Chip label={chipLabel} onRemove={() => push({ minRating: undefined, ratingFilter: undefined })} />
           )}
           {activeMinVoteCount && (
             <Chip
-              label={VOTE_COUNT_OPTIONS.find((o) => o.value === activeMinVoteCount)?.label ?? `${activeMinVoteCount}+ votes`}
+              label={voteCountLabel(t, activeMinVoteCount)}
               onRemove={() => push({ minVoteCount: undefined })}
             />
           )}
           {activeFromYear && (
-            <Chip label={`From ${activeFromYear}`} onRemove={() => push({ fromYear: undefined })} />
+            <Chip label={t("media.filter.fromChip", { year: activeFromYear })} onRemove={() => push({ fromYear: undefined })} />
           )}
           {activeToYear && (
-            <Chip label={`To ${activeToYear}`} onRemove={() => push({ toYear: undefined })} />
+            <Chip label={t("media.filter.toChip", { year: activeToYear })} onRemove={() => push({ toYear: undefined })} />
           )}
           {activeProviderName && (
             <Chip label={activeProviderName} onRemove={() => push({ watchProvider: undefined })} />
           )}
           {activeSortBy && activeSortBy !== "popularity.desc" && (
-            <Chip label={SORT_OPTIONS.find((o) => o.value === activeSortBy)?.label ?? activeSortBy} onRemove={() => push({ sortBy: undefined })} />
+            <Chip label={(() => { const o = SORT_OPTIONS.find((x) => x.value === activeSortBy); return o ? t(o.labelKey) : activeSortBy; })()} onRemove={() => push({ sortBy: undefined })} />
           )}
           {activeHideAvailable && (
-            <Chip label="Hiding Available" onRemove={() => push({ hideAvailable: undefined })} />
+            <Chip label={t("media.filter.hidingAvailable")} onRemove={() => push({ hideAvailable: undefined })} />
           )}
         </div>
       )}
@@ -378,14 +389,15 @@ export function FilterBar({
 }
 
 function Chip({ label, onRemove }: { label: string; onRemove: () => void }) {
+  const t = useT();
   return (
     <span className="ds-chip ds-chip-accent">
       {label}
       <button
         type="button"
         onClick={onRemove}
-        aria-label={`Remove filter: ${label}`}
-        title={`Remove filter: ${label}`}
+        aria-label={t("media.filter.remove", { label })}
+        title={t("media.filter.remove", { label })}
         className="ds-hover-tint inline-flex items-center justify-center shrink-0"
         style={{
           // 24px hit box. The negative margins pull it back to the 12px

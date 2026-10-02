@@ -10,6 +10,8 @@ import { Loader2 } from "@/components/icons";
 import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
 import { withBasePath } from "@/lib/base-path";
 import { safeInternalPath } from "@/lib/safe-url";
+import { getPasskeyAssertion, isWebAuthnCancel, isWebAuthnSupported, type RequestOptionsJSON } from "@/lib/client/webauthn";
+import { useT } from "@/components/i18n/i18n-provider";
 
 type Provider = "credentials" | "plex" | "jellyfin" | "oidc";
 type JellyfinMode = "password" | "quickconnect";
@@ -29,10 +31,28 @@ interface Props {
   siteUrl: string;
 }
 
+// The password step's answer for an account with two-factor enabled (see
+// src/lib/mfa/signin-challenge.ts for the wire contract).
+type MfaMethod = "totp" | "webauthn" | "recovery";
+interface MfaChallenge {
+  mfaToken: string;
+  methods: MfaMethod[];
+  webauthn?: RequestOptionsJSON;
+}
+
+function parseMfaChallenge(body: unknown): MfaChallenge | null {
+  if (!body || typeof body !== "object") return null;
+  const b = body as Record<string, unknown>;
+  if (b.mfaRequired !== true || typeof b.mfaToken !== "string" || !Array.isArray(b.methods)) return null;
+  const methods = b.methods.filter((m): m is MfaMethod => m === "totp" || m === "webauthn" || m === "recovery");
+  const webauthn = b.webauthn && typeof b.webauthn === "object" ? (b.webauthn as RequestOptionsJSON) : undefined;
+  return { mfaToken: b.mfaToken, methods, webauthn };
+}
+
 async function signInWithFetch(
   provider: "credentials" | "plex" | "jellyfin" | "jellyfin-quickconnect",
   payload: Record<string, unknown>,
-): Promise<{ ok: boolean; error?: string; offline?: boolean }> {
+): Promise<{ ok: boolean; error?: string; offline?: boolean; disabled?: boolean; mfa?: MfaChallenge }> {
   let res: Response;
   try {
     res = await fetch(withBasePath(`/api/auth/sign-in/${provider}`), {
@@ -49,17 +69,25 @@ async function signInWithFetch(
     return { ok: false, offline: true };
   }
   if (!res.ok) {
-    let error = "Sign-in failed";
+    // No default text here: callers substitute their own (translated) message.
+    let error: string | undefined;
     try {
       const body = await res.json();
+      // Correct password, second factor still owed — not a failure to report.
+      const mfa = parseMfaChallenge(body);
+      if (mfa) return { ok: false, mfa };
       if (typeof body?.error === "string") error = body.error;
     } catch {}
-    return { ok: false, error };
+    // 403 is the disabled-account answer (disabledAccountResponse) — the one
+    // failure where "check your password" is the wrong advice, so callers show
+    // the server's message instead of their generic one.
+    return { ok: false, error, disabled: res.status === 403 };
   }
   return { ok: true };
 }
 
 export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oidcEnabled, oidcName, localLoginDisabled, siteUrl }: Props) {
+  const t = useT();
   const router = useRouter();
   const searchParams = useSearchParams();
   // Sidebar/header read role from this context; refresh after sign-in so
@@ -91,6 +119,8 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
   // below (which only renders for length > 1) never has to move it.
   const [jellyfinInstance, setJellyfinInstance] = useState(jellyfinInstances[0]?.slug ?? "");
   const [qcCode, setQcCode] = useState<string | null>(null);
+  // Set when the password was right but the account has two-factor enabled.
+  const [mfaChallenge, setMfaChallenge] = useState<MfaChallenge | null>(null);
   // Cancels an in-flight QuickConnect poll loop (provider switch, "Use password
   // instead", unmount) so an abandoned code can't later complete a sign-in.
   //
@@ -224,7 +254,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
       pinId = data.pinId;
       pinCode = data.code;
     } catch {
-      setError("Could not start Plex sign-in. Please try again.");
+      setError(t("auth.login.error.plexStart"));
       setLoading(false);
       return;
     }
@@ -252,7 +282,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
         flow: "login", pinId, clientId, rememberMe, callbackUrl, siteUrl, state, deviceMeta,
       }));
     } catch {
-      setError("Could not store sign-in state. Disable private browsing and try again.");
+      setError(t("auth.login.error.storeState"));
       setLoading(false);
       return;
     }
@@ -273,13 +303,22 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
     const fetchProvider = provider as "credentials" | "jellyfin";
     const res = await signInWithFetch(fetchProvider, payload);
 
+    if (res.mfa) {
+      setMfaChallenge(res.mfa);
+      setFields((f) => ({ ...f, password: "" }));
+      setLoading(false);
+      return;
+    }
+
     if (!res.ok) {
       setError(
         res.offline
-          ? "Network error — please try again."
-          : provider === "credentials"
-            ? "Invalid email or password."
-            : "Invalid credentials or Jellyfin server unreachable."
+          ? t("auth.login.error.network")
+          : res.disabled
+            ? (res.error ?? t("auth.login.error.signInFailed"))
+            : provider === "credentials"
+              ? t("auth.login.error.invalidCredentials")
+              : t("auth.login.error.jellyfinInvalid")
       );
       setLoading(false);
     } else {
@@ -291,6 +330,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
 
   function switchProvider(next: Provider) {
     cancelQuickConnect();
+    setMfaChallenge(null);
     setProvider(next);
     setError("");
     setFields({ email: "", password: "", username: "" });
@@ -319,7 +359,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
       secret = data.secret;
       code = data.code;
     } catch {
-      setError("Could not start QuickConnect. Is Jellyfin reachable?");
+      setError(t("auth.login.error.quickConnectStart"));
       setLoading(false);
       return;
     }
@@ -353,7 +393,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
     if (qcRunRef.current !== myRun) return;
 
     if (!authenticated) {
-      setError("QuickConnect timed out. Please try again.");
+      setError(t("auth.login.error.quickConnectTimeout"));
       setLoading(false);
       setQcCode(null);
       return;
@@ -372,8 +412,10 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
     if (!result.ok) {
       setError(
         result.offline
-          ? "Network error — please try again."
-          : "QuickConnect approved but sign-in failed. Contact the server owner."
+          ? t("auth.login.error.network")
+          : result.disabled
+            ? (result.error ?? t("auth.login.error.signInFailed"))
+            : t("auth.login.error.quickConnectFailed")
       );
       setLoading(false);
       setQcCode(null);
@@ -384,12 +426,29 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
     }
   }
 
+  if (mfaChallenge) {
+    return (
+      <MfaStep
+        challenge={mfaChallenge}
+        onSuccess={async () => {
+          await refreshSession();
+          router.refresh();
+          router.push(callbackUrl);
+        }}
+        onRestart={(message) => {
+          setMfaChallenge(null);
+          setError(message ?? "");
+        }}
+      />
+    );
+  }
+
   return (
     <div className="space-y-5">
       {hasExternalProviders && (
         <div
           role="group"
-          aria-label="Sign-in method"
+          aria-label={t("auth.login.method")}
           className="flex gap-1"
           style={{
             padding: 2,
@@ -400,7 +459,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
         >
           {!localLoginDisabled && (
             <ProviderTab active={provider === "credentials"} onClick={() => switchProvider("credentials")}>
-              Password
+              {t("auth.login.tab.password")}
             </ProviderTab>
           )}
           {plexEnabled && (
@@ -437,9 +496,9 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
             className="w-full min-h-11"
           >
             {loading ? (
-              <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Redirecting…</>
+              <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("auth.login.redirecting")}</>
             ) : (
-              `Sign in with ${oidcName}`
+              t("auth.login.signInWith", { provider: oidcName })
             )}
           </Button>
           {error && <p role="alert" aria-live="assertive" className="text-sm text-red-400">{error}</p>}
@@ -458,9 +517,9 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
             className="w-full min-h-11 bg-[var(--ds-plex)] hover:bg-[var(--ds-plex)] hover:brightness-110 text-black font-semibold"
           >
             {loading ? (
-              <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Waiting for Plex…</>
+              <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("auth.login.waitingForPlex")}</>
             ) : (
-              "Sign in with Plex"
+              t("auth.login.signInWith", { provider: "Plex" })
             )}
           </Button>
           {error && <p role="alert" aria-live="assertive" className="text-sm text-red-400">{error}</p>}
@@ -468,7 +527,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
       )}
 
       {provider === "jellyfin" && jellyfinInstances.length > 1 && (
-        <Field label="Server" htmlFor="jf-instance">
+        <Field label={t("auth.login.server")} htmlFor="jf-instance">
           <StyledSelect
             id="jf-instance"
             value={jellyfinInstance}
@@ -495,7 +554,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
                 padding: 20,
               }}
             >
-              <p className="text-sm m-0" style={{ color: "var(--ds-fg-muted)" }}>Enter this code in your Jellyfin app or server:</p>
+              <p className="text-sm m-0" style={{ color: "var(--ds-fg-muted)" }}>{t("auth.login.quickConnect.enterCode")}</p>
               <p
                 className="ds-mono m-0 font-bold tracking-widest"
                 style={{ fontSize: 32, color: "var(--ds-fg)" }}
@@ -504,7 +563,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
               </p>
               <div className="flex items-center justify-center gap-2 text-sm" style={{ color: "var(--ds-fg-muted)" }}>
                 <Loader2 className="w-4 h-4 animate-spin" />
-                Waiting for approval…
+                {t("auth.login.quickConnect.waiting")}
               </div>
             </div>
           ) : (
@@ -513,7 +572,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
               disabled={loading}
               className="w-full min-h-11"
             >
-              {loading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Starting…</> : "Generate QuickConnect Code"}
+              {loading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("auth.login.quickConnect.starting")}</> : t("auth.login.quickConnect.generate")}
             </Button>
           )}
           {error && <p role="alert" aria-live="assertive" className="text-sm text-red-400">{error}</p>}
@@ -522,7 +581,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
             onClick={() => { cancelQuickConnect(); setJellyfinMode("password"); setError(""); setQcCode(null); setLoading(false); }}
             className="ds-hover-tint w-full min-h-9 rounded-md text-sm text-zinc-400 hover:text-zinc-200 transition-colors"
           >
-            Use password instead
+            {t("auth.login.quickConnect.usePassword")}
           </button>
         </div>
       )}
@@ -531,18 +590,18 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
         <form onSubmit={handleSubmit} className="space-y-4">
           {provider === "credentials" && !localLoginDisabled && (
             <>
-              <Field label="Email" htmlFor="email">
+              <Field label={t("auth.field.email")} htmlFor="email">
                 <Input
                   id="email"
                   type="email"
                   value={fields.email}
                   onChange={(e) => setField("email", e.target.value)}
-                  placeholder="you@example.com"
+                  placeholder={t("auth.field.emailPlaceholder")}
                   autoComplete="email"
                   required
                 />
               </Field>
-              <Field label="Password" htmlFor="password">
+              <Field label={t("auth.field.password")} htmlFor="password">
                 <Input
                   id="password"
                   type="password"
@@ -558,18 +617,18 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
 
           {provider === "jellyfin" && jellyfinMode === "password" && (
             <>
-              <Field label="Jellyfin username" htmlFor="jf-username">
+              <Field label={t("auth.login.jellyfinUsername")} htmlFor="jf-username">
                 <Input
                   id="jf-username"
                   type="text"
                   value={fields.username}
                   onChange={(e) => setField("username", e.target.value)}
-                  placeholder="username"
+                  placeholder={t("auth.login.usernamePlaceholder")}
                   autoComplete="username"
                   required
                 />
               </Field>
-              <Field label="Jellyfin password" htmlFor="jf-password">
+              <Field label={t("auth.login.jellyfinPassword")} htmlFor="jf-password">
                 <Input
                   id="jf-password"
                   type="password"
@@ -592,7 +651,7 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
             className="w-full min-h-11"
             disabled={loading}
           >
-            {loading ? "Signing in…" : "Sign in"}
+            {loading ? t("auth.login.signingIn") : t("auth.login.signIn")}
           </Button>
 
           {provider === "jellyfin" && (
@@ -601,11 +660,154 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
               onClick={() => { setJellyfinMode("quickconnect"); setError(""); }}
               className="ds-hover-tint w-full min-h-9 rounded-md text-sm text-zinc-400 hover:text-zinc-200 transition-colors"
             >
-              Use QuickConnect instead
+              {t("auth.login.quickConnect.useInstead")}
             </button>
           )}
         </form>
       )}
+    </div>
+  );
+}
+
+// Second step of a password sign-in for an account with two-factor enabled.
+// Everything decisive happens server-side at POST /api/auth/sign-in/mfa.
+function MfaStep({
+  challenge,
+  onSuccess,
+  onRestart,
+}: {
+  challenge: MfaChallenge;
+  onSuccess: () => Promise<void>;
+  onRestart: (message?: string) => void;
+}) {
+  const t = useT();
+  const initial: MfaMethod = challenge.methods.includes("totp")
+    ? "totp"
+    : challenge.methods.includes("webauthn")
+      ? "webauthn"
+      : "recovery";
+  const [method, setMethod] = useState<MfaMethod>(initial);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(body: Record<string, unknown>) {
+    setBusy(true);
+    setError("");
+    let res: Response;
+    try {
+      res = await fetch(withBasePath("/api/auth/sign-in/mfa"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ mfaToken: challenge.mfaToken, ...body }),
+      });
+    } catch {
+      setError(t("auth.login.error.network"));
+      setBusy(false);
+      return;
+    }
+    if (res.ok) {
+      await onSuccess();
+      return;
+    }
+    const data = (await res.json().catch(() => ({}))) as { error?: string; mfaExpired?: boolean };
+    if (data.mfaExpired) {
+      onRestart(data.error ?? t("auth.mfa.error.expired"));
+      return;
+    }
+    setError(data.error ?? t("auth.mfa.error.failed"));
+    setCode("");
+    setBusy(false);
+  }
+
+  async function usePasskey() {
+    if (!challenge.webauthn) return;
+    if (!isWebAuthnSupported()) {
+      setError(t("auth.mfa.error.passkeyUnsupported"));
+      return;
+    }
+    let credential: Record<string, unknown>;
+    try {
+      credential = await getPasskeyAssertion(challenge.webauthn);
+    } catch (err) {
+      if (!isWebAuthnCancel(err)) setError(t("auth.mfa.error.passkeyFailed"));
+      return;
+    }
+    await submit({ method: "webauthn", credential });
+  }
+
+  const noMethods = challenge.methods.length === 0;
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-1">
+        <p className="text-sm font-medium m-0" style={{ color: "var(--ds-fg)" }}>{t("auth.mfa.title")}</p>
+        <p className="text-sm m-0" style={{ color: "var(--ds-fg-muted)" }}>
+          {noMethods
+            ? t("auth.mfa.noMethods")
+            : method === "totp"
+              ? t("auth.mfa.totpHint")
+              : method === "webauthn"
+                ? t("auth.mfa.passkeyHint")
+                : t("auth.mfa.recoveryHint")}
+        </p>
+      </div>
+
+      {method === "webauthn" && challenge.methods.includes("webauthn") && (
+        <Button type="button" onClick={usePasskey} disabled={busy} className="w-full min-h-11">
+          {busy ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("auth.mfa.verifying")}</> : t("auth.mfa.usePasskeyButton")}
+        </Button>
+      )}
+
+      {(method === "totp" || method === "recovery") && challenge.methods.includes(method) && (
+        <form
+          className="space-y-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submit({ method, code });
+          }}
+        >
+          <Field label={method === "totp" ? t("auth.mfa.verificationCode") : t("auth.mfa.recoveryCode")} htmlFor="mfa-code">
+            <Input
+              id="mfa-code"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              autoComplete="one-time-code"
+              inputMode={method === "totp" ? "numeric" : "text"}
+              placeholder={method === "totp" ? "123456" : "XXXX-XXXX-XXXX-XXXX"}
+              maxLength={method === "totp" ? 7 : 24}
+              autoFocus
+              required
+            />
+          </Field>
+          <Button type="submit" disabled={busy || code.trim().length === 0} className="w-full min-h-11">
+            {busy ? t("auth.mfa.verifying") : t("auth.mfa.verify")}
+          </Button>
+        </form>
+      )}
+
+      {error && <p role="alert" aria-live="assertive" className="text-sm text-red-400">{error}</p>}
+
+      <div className="flex flex-col gap-1">
+        {challenge.methods.filter((m) => m !== method).map((m) => (
+          <button
+            key={m}
+            type="button"
+            onClick={() => { setMethod(m); setError(""); setCode(""); }}
+            className="ds-hover-tint w-full min-h-9 rounded-md text-sm text-zinc-400 hover:text-zinc-200 transition-colors"
+          >
+            {m === "totp" ? t("auth.mfa.switch.totp") : m === "webauthn" ? t("auth.mfa.switch.passkey") : t("auth.mfa.switch.recovery")}
+          </button>
+        ))}
+        <button
+          type="button"
+          onClick={() => onRestart()}
+          className="ds-hover-tint w-full min-h-9 rounded-md text-sm text-zinc-400 hover:text-zinc-200 transition-colors"
+        >
+          {t("auth.mfa.backToSignIn")}
+        </button>
+      </div>
     </div>
   );
 }
@@ -617,6 +819,7 @@ function RememberMeCheckbox({
   checked: boolean;
   onChange: (v: boolean) => void;
 }) {
+  const t = useT();
   return (
     <label className="flex items-center gap-2 cursor-pointer select-none">
       <input
@@ -626,7 +829,7 @@ function RememberMeCheckbox({
         className="w-4 h-4 rounded"
         style={{ accentColor: "var(--ds-accent)" }}
       />
-      <span className="text-sm" style={{ color: "var(--ds-fg-muted)" }}>Remember me</span>
+      <span className="text-sm" style={{ color: "var(--ds-fg-muted)" }}>{t("auth.login.rememberMe")}</span>
     </label>
   );
 }

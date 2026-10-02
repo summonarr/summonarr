@@ -2,6 +2,7 @@
 
 import type { CSSProperties } from "react";
 import { useHiddenRatingSources } from "./ratings-visibility";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // IMDb's brand yellow (#F5C518) is unreadable on the light theme; blending it
 // toward the foreground keeps the hue and lands legible on both.
@@ -111,6 +112,7 @@ export function RatingsBar({
 }: RatingsBarProps) {
   // Admin-hidden sources (ratingsHiddenSources Setting via the layout provider).
   const hidden = useHiddenRatingSources();
+  const t = useT();
 
   const showImdb = !!imdbRating && !hidden.includes("imdb");
   const showRt = !!rottenTomatoes && !hidden.includes("rottenTomatoes");
@@ -148,7 +150,7 @@ export function RatingsBar({
           target="_blank"
           rel="noopener noreferrer"
           className="flex items-center gap-0.5 group"
-          title="IMDb rating"
+          title={t("media.ratings.imdb")}
           // MediaCard is a role="button" div that navigates on click; without
           // this, opening IMDb in a new tab also pushed the card's detail page.
           onClick={(e) => e.stopPropagation()}
@@ -161,7 +163,7 @@ export function RatingsBar({
           )}
         </a>
       ) : showImdb ? (
-        <div className="flex items-center gap-0.5" title="IMDb rating">
+        <div className="flex items-center gap-0.5" title={t("media.ratings.imdb")}>
           <span className={`font-bold ${textSm}`} style={IMDB_LABEL_STYLE}>IMDb</span>
           <span className={`font-semibold text-zinc-100 ${textSm}`}>{imdbRating}</span>
           {!compact && <span className={`text-zinc-500 ${textXs}`}>/10</span>}
@@ -179,8 +181,8 @@ export function RatingsBar({
       )}
 
       {showRtAudience && rtAudienceScore && (
-        <div className="flex items-center gap-0.5" title="Rotten Tomatoes Audience">
-          <span className={iconSz} role="img" aria-label="Rotten Tomatoes Audience">🍿</span>
+        <div className="flex items-center gap-0.5" title={t("media.ratings.rtAudience")}>
+          <span className={iconSz} role="img" aria-label={t("media.ratings.rtAudience")}>🍿</span>
           <span className={`font-semibold ${rtAudienceColor(rtAudienceScore)} ${textSm}`}>{rtAudienceScore}</span>
         </div>
       )}
@@ -195,7 +197,7 @@ export function RatingsBar({
       )}
 
       {showTrakt && traktRating && (
-        <div className="flex items-center gap-0.5" title="Trakt rating">
+        <div className="flex items-center gap-0.5" title={t("media.ratings.trakt")}>
           <span className={`font-bold rounded px-1 py-0.5 ${textXs} ${traktBadge(traktRating)}`}>
             {traktRating}
           </span>
@@ -204,14 +206,14 @@ export function RatingsBar({
       )}
 
       {showLetterboxd && letterboxdRating && (
-        <div className="flex items-center gap-0.5" title="Letterboxd average">
+        <div className="flex items-center gap-0.5" title={t("media.ratings.letterboxd")}>
           <span className={`font-semibold ${textXs} text-zinc-400`}>LB</span>
           <span className={`font-semibold ${letterboxdColor(letterboxdRating)} ${textSm}`}>{letterboxdRating}</span>
         </div>
       )}
 
       {showMdblist && mdblistScore && (
-        <div className="flex items-center gap-0.5" title="MDBList score">
+        <div className="flex items-center gap-0.5" title={t("media.ratings.mdblist")}>
           {!compact && <span className={`text-zinc-500 ${textXs}`}>MDB</span>}
           <span className={`font-semibold ${mdblistColor(mdblistScore)} ${textSm}`}>{mdblistScore}</span>
         </div>
@@ -233,7 +235,7 @@ export function RatingsBar({
       )}
 
       {showJellyfin && jellyfinRating && (
-        <div className="flex items-center gap-0.5" title="Jellyfin community rating">
+        <div className="flex items-center gap-0.5" title={t("media.ratings.jellyfin")}>
           <span className={`font-semibold ${textXs}`} style={{ color: "var(--ds-jellyfin-text)" }}>JF</span>
           <span className={`font-semibold text-zinc-100 ${textSm}`}>{jellyfinRating}</span>
           {!compact && <span className={`text-zinc-500 ${textXs}`}>/10</span>}
@@ -241,7 +243,7 @@ export function RatingsBar({
       )}
 
       {showTmdb && voteAverage ? (
-        <div className="flex items-center gap-0.5" title="TMDB score">
+        <div className="flex items-center gap-0.5" title={t("media.ratings.tmdb")}>
           {!compact && <span className={`text-zinc-500 ${textXs}`}>TMDB</span>}
           <span className={`font-semibold text-yellow-400 ${textSm}`}>{voteAverage.toFixed(1)}</span>
         </div>

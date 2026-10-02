@@ -15,6 +15,7 @@ import { Prisma } from "@/generated/prisma";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { Chip, EmptyState, PageHeader } from "@/components/ui/design";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
+import { getTranslator } from "@/lib/i18n/server";
 
 const PAGE_SIZE = 40;
 const VALID_SORTS = ["votes", "recent"] as const;
@@ -30,7 +31,7 @@ export default async function VotesPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   await requireFeature("feature.page.votes");
-  const [sp, session] = await Promise.all([searchParams, requireAppSession()]);
+  const [sp, session, t] = await Promise.all([searchParams, requireAppSession(), getTranslator()]);
   const page = Math.max(1, parseInt(first(sp.page) ?? "1", 10) || 1);
 
   const mine = first(sp.mine) === "1";
@@ -150,7 +151,7 @@ export default async function VotesPage({
       // filtered: under "My votes only" it is always 1. Mirrors /api/votes.
       voteCount: votes.length || g._count.id,
       userVoted: votes.some((v) => v.userId === session.user.id),
-      reasons: reasons.map((v) => ({ reason: v.reason!, userName: v.user.name ?? "Anonymous" })),
+      reasons: reasons.map((v) => ({ reason: v.reason!, userName: v.user.name ?? t("personal.votes.anonymous") })),
     };
   });
 
@@ -160,8 +161,8 @@ export default async function VotesPage({
   return (
     <div className="ds-page-enter">
       <PageHeader
-        title="Vote to Delete"
-        subtitle="Nominate library titles for removal — browse Movies or TV and vote on anything already in your library"
+        title={t("personal.votes.title")}
+        subtitle={t("personal.votes.subtitle")}
       />
 
       <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:items-center sm:justify-between">
@@ -169,8 +170,8 @@ export default async function VotesPage({
           param="mine"
           active={mine ? "1" : ""}
           options={[
-            { value: "", label: "All votes" },
-            { value: "1", label: "My votes only" },
+            { value: "", label: t("personal.votes.filter.all") },
+            { value: "1", label: t("personal.votes.filter.mine") },
           ]}
           preserve={["sort", "q"]}
         />
@@ -179,15 +180,15 @@ export default async function VotesPage({
             param="sort"
             active={sort === "votes" ? "" : sort}
             options={[
-              { value: "", label: "Most votes" },
-              { value: "recent", label: "Most recent" },
+              { value: "", label: t("personal.votes.sort.most") },
+              { value: "recent", label: t("personal.votes.sort.recent") },
             ]}
             preserve={["mine", "q"]}
           />
           <SearchBox
             param="q"
             initial={q}
-            placeholder="Search titles…"
+            placeholder={t("personal.common.searchTitles")}
             preserve={["mine", "sort"]}
           />
         </div>
@@ -199,20 +200,20 @@ export default async function VotesPage({
         // dead end.
         <EmptyState
           icon={Trash2}
-          title="Nothing on this page"
-          description="No more votes on this page."
-          cta={{ href: "/votes", label: "Back to page 1" }}
+          title={t("personal.common.nothingOnPage")}
+          description={t("personal.votes.emptyPageDescription")}
+          cta={{ href: "/votes", label: t("personal.common.backToFirst") }}
         />
       ) : items.length === 0 ? (
         <EmptyState
           icon={Trash2}
-          title={hasFilters ? "No matching votes" : "No deletion votes yet"}
+          title={hasFilters ? t("personal.votes.emptyFilteredTitle") : t("personal.votes.emptyTitle")}
           description={
             hasFilters
-              ? "No votes match these filters."
-              : "Browse your library and vote on items you think should be removed."
+              ? t("personal.votes.emptyFilteredDescription")
+              : t("personal.votes.emptyDescription")
           }
-          cta={hasFilters ? undefined : { href: "/movies", label: "Browse movies" }}
+          cta={hasFilters ? undefined : { href: "/movies", label: t("personal.common.browseMovies") }}
         />
       ) : (
         <div className="flex flex-col" style={{ gap: 8 }}>
@@ -256,7 +257,7 @@ export default async function VotesPage({
                         className="w-full h-full flex items-center justify-center ds-mono"
                         style={{ color: "var(--ds-fg-subtle)", fontSize: 10 }}
                       >
-                        No poster
+                        {t("personal.votes.noPoster")}
                       </div>
                     )}
                   </div>
@@ -272,7 +273,7 @@ export default async function VotesPage({
                       >
                         {item.title}
                       </h3>
-                      <Chip>{item.mediaType === "MOVIE" ? "MOVIE" : "TV"}</Chip>
+                      <Chip>{item.mediaType === "MOVIE" ? t("personal.common.movie") : t("personal.common.tv")}</Chip>
                     </div>
 
                     <div
@@ -284,7 +285,7 @@ export default async function VotesPage({
                         fontWeight: 600,
                       }}
                     >
-                      {item.voteCount} vote{item.voteCount !== 1 ? "s" : ""}
+                      {t("personal.votes.count", { count: item.voteCount })}
                     </div>
 
                     {item.reasons.length > 0 && (

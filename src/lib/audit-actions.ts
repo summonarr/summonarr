@@ -18,6 +18,8 @@ export const ACTION_GROUP: Record<AuditAction, AuditGroup> = {
   AUTH_LOGIN_FAILED: "auth",
   AUTH_LOGOUT: "auth",
   SESSION_REVOKE: "auth",
+  MFA_CHANGE: "auth",
+  MFA_RESET: "admin",
   REQUEST_APPROVE: "admin",
   REQUEST_DECLINE: "admin",
   REQUEST_DELETE: "admin",
@@ -47,6 +49,11 @@ export const ACTION_GROUP: Record<AuditAction, AuditGroup> = {
   PLEX_SESSION_TERMINATE: "admin",
   JELLYFIN_SESSION_TERMINATE: "admin",
   BLACKLIST_CHANGE: "admin",
+  // A request filed by the watchlist auto-request (in-app add or the Plex
+  // watchlist cron) — grouped with the other request events.
+  REQUEST_AUTO: "admin",
+  LIBRARY_CLEANUP_DELETE: "admin",
+  LIBRARY_CLEANUP_PROTECT: "admin",
   LIBRARY_SYNC: "system",
   CACHE_WARM: "system",
   RATINGS_CACHE_CLEAR: "system",
@@ -92,6 +99,8 @@ export const ACTION_LABELS: Record<AuditAction, ActionLabel> = {
   AUTH_LOGIN_FAILED:     { label: "Login Failed",              color: "bg-red-500/15 text-red-400",            icon: "login_failed" },
   AUTH_LOGOUT:           { label: "Logout",                    color: "bg-zinc-700/50 text-zinc-400",          icon: "logout" },
   SESSION_REVOKE:        { label: "Session Revoked",           color: "bg-orange-500/15 text-orange-400",      icon: "revoke" },
+  MFA_CHANGE:            { label: "Two-Factor Changed",        color: "bg-sky-500/15 text-sky-400",            icon: "role" },
+  MFA_RESET:             { label: "Two-Factor Reset",          color: "bg-orange-500/15 text-orange-400",      icon: "revoke" },
   CACHE_WARM:            { label: "Cache Warmed",              color: "bg-purple-500/15 text-purple-400",      icon: "sync" },
   RATINGS_CACHE_CLEAR:   { label: "Ratings Cache Cleared",     color: "bg-purple-500/15 text-purple-400",      icon: "sync" },
   PLAY_HISTORY_BACKFILL: { label: "Play History Backfilled",   color: "bg-purple-500/15 text-purple-400",      icon: "sync" },
@@ -104,4 +113,7 @@ export const ACTION_LABELS: Record<AuditAction, ActionLabel> = {
   PLEX_SESSION_TERMINATE: { label: "Plex Session Terminated",  color: "bg-red-500/15 text-red-400",            icon: "delete" },
   JELLYFIN_SESSION_TERMINATE: { label: "Jellyfin Session Terminated", color: "bg-red-500/15 text-red-400",      icon: "delete" },
   BLACKLIST_CHANGE:      { label: "Blacklist Changed",         color: "bg-red-500/15 text-red-400",             icon: "delete" },
+  REQUEST_AUTO:          { label: "Auto-Requested",            color: "bg-sky-500/15 text-sky-400",           icon: "approve" },
+  LIBRARY_CLEANUP_DELETE: { label: "Library Cleanup Delete",   color: "bg-red-500/15 text-red-400",             icon: "delete" },
+  LIBRARY_CLEANUP_PROTECT: { label: "Cleanup Protection Changed", color: "bg-sky-500/15 text-sky-400",         icon: "role" },
 };

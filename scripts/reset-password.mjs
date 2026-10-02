@@ -21,6 +21,12 @@
 //   docker compose exec -w /app summonarr \
 //     node scripts/reset-password.mjs user@example.com 'new-password' --admin
 //
+//   # Also remove the account's two-factor authentication — the break-glass for
+//   # a lost authenticator AND lost recovery codes with no other admin to do an
+//   # in-app reset. A plain password reset deliberately leaves 2FA in place:
+//   docker compose exec -w /app summonarr \
+//     node scripts/reset-password.mjs user@example.com 'new-password' --reset-mfa
+//
 //   # Read the password from stdin instead of argv (avoids shell history):
 //   echo -n 'new-password' | docker compose exec -T -w /app summonarr \
 //     node scripts/reset-password.mjs user@example.com --stdin
@@ -52,19 +58,20 @@ async function hashPassword(password) {
 
 function usage(code = 0) {
   console.log(
-    "Usage: node scripts/reset-password.mjs <email> <new-password> [--admin]\n" +
-      "       node scripts/reset-password.mjs <email> --stdin [--admin]",
+    "Usage: node scripts/reset-password.mjs <email> <new-password> [--admin] [--reset-mfa]\n" +
+      "       node scripts/reset-password.mjs <email> --stdin [--admin] [--reset-mfa]",
   );
   process.exit(code);
 }
 
 function parseArgs(argv) {
-  const opts = { email: null, password: null, fromStdin: false, promote: false };
+  const opts = { email: null, password: null, fromStdin: false, promote: false, resetMfa: false };
   const positional = [];
   for (const arg of argv) {
     if (arg === "--help" || arg === "-h") usage(0);
     else if (arg === "--stdin") opts.fromStdin = true;
     else if (arg === "--admin") opts.promote = true;
+    else if (arg === "--reset-mfa") opts.resetMfa = true;
     else positional.push(arg);
   }
   if (positional.length === 0) usage(1);
@@ -143,6 +150,7 @@ async function main() {
   const client = new Client(connectionParams());
   await client.connect();
   try {
+    await client.query("BEGIN");
     const sql = opts.promote
       ? `UPDATE "User"
             SET "passwordHash" = $1,
@@ -157,13 +165,37 @@ async function main() {
         RETURNING id, email, role`;
     const { rows } = await client.query(sql, [hash, opts.email]);
     if (rows.length === 0) {
+      await client.query("ROLLBACK");
       console.error(`No user found with email ${opts.email}.`);
       process.exit(2);
     }
     const u = rows[0];
+    if (opts.resetMfa) {
+      // Same write set as the in-app admin reset (deleteAllMfaInTx in
+      // src/lib/mfa/mfa-store.ts): authenticator secret, passkeys, recovery codes.
+      for (const table of ["UserTotp", "WebAuthnCredential", "MfaRecoveryCode"]) {
+        await client.query(`DELETE FROM "${table}" WHERE "userId" = $1`, [u.id]);
+      }
+      // ...and the persistent code lockout (clearMfaLockoutInTx). Probed first so
+      // the break-glass still works on a database whose schema predates it.
+      const { rows: lockCols } = await client.query(
+        `SELECT 1 FROM information_schema.columns WHERE table_name = 'User' AND column_name = 'mfaLockedUntil'`,
+      );
+      if (lockCols.length > 0) {
+        await client.query(
+          `UPDATE "User" SET "mfaFailedAttempts" = 0, "mfaLockoutCount" = 0, "mfaLockedUntil" = NULL WHERE id = $1`,
+          [u.id],
+        );
+      }
+    }
+    await client.query("COMMIT");
     console.log(
-      `Password reset for ${u.email} (${u.role}) [id: ${u.id}]. All existing sessions invalidated.`,
+      `Password reset for ${u.email} (${u.role}) [id: ${u.id}]. All existing sessions invalidated.` +
+        (opts.resetMfa ? " Two-factor authentication removed." : ""),
     );
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
   } finally {
     await client.end();
   }

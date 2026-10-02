@@ -6,10 +6,12 @@ import { resolveStarterPack, STARTER_PACK } from "@/lib/trash-recommendations";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { isFeatureEnabled } from "@/lib/features";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
-function busyResponse() {
+function busyResponse(t: Translator) {
   return NextResponse.json(
-    { ok: false, error: "Trash sync already running", retryAfter: 30 },
+    { ok: false, error: t("apiAdmin.trash.alreadyRunning"), retryAfter: 30 },
     { status: 409, headers: { "Retry-After": "30" } },
   );
 }
@@ -31,17 +33,18 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
   }
 });
 
-export const POST = withAdmin(async (_req, _ctx, session) => {
+export const POST = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   // Kill-switch parity: applies curated specs to Radarr/Sonarr, so a disabled TRaSH
   // integration must block it. (GET is a read-only preview and stays open.)
   if (!(await isFeatureEnabled("trashGuidesEnabled"))) {
-    return NextResponse.json({ error: "TRaSH Guides integration is disabled" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.trash.disabled") }, { status: 403 });
   }
   // Per-admin rate limit, matching apply/refresh — this route applies the same
   // kind of Radarr/Sonarr writes as /api/admin/trash-guides/apply and shouldn't
   // be a lighter-gated way to trigger the same burst.
   if (!checkRateLimit(`admin-trash-starter-pack:${session.user.id}`, 10, 5 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many requests — try again shortly." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.common.tooManyRequestsShortly") }, { status: 429 });
   }
   return withAdvisoryLock(
     TRASH_SYNC_LOCK_ID,
@@ -90,6 +93,6 @@ export const POST = withAdmin(async (_req, _ctx, session) => {
         );
       }
     },
-    busyResponse,
+    () => busyResponse(t),
   );
 });

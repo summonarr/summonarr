@@ -18,8 +18,10 @@ import {
   userNavItems,
   getVisibleAdminItems,
   filterNavByFeatures,
+  navItemLabel,
   type NavItem,
 } from "@/lib/nav-items";
+import { useT } from "@/components/i18n/i18n-provider";
 import type { FeatureFlags } from "@/lib/features";
 import { PushNotifications } from "@/components/layout/push-notifications";
 import { AppearanceMenu } from "@/components/theme/appearance-menu";
@@ -44,6 +46,7 @@ export function MobileNavDrawer({
   onOpenChange,
   featureFlags,
 }: MobileNavDrawerProps) {
+  const t = useT();
   const pathname = usePathname();
   const { session } = useSummonarrSession();
   const role = session?.user?.role;
@@ -86,9 +89,9 @@ export function MobileNavDrawer({
             borderTop: "1px solid var(--ds-border)",
           }}
         >
-          <DrawerTitle>Navigation menu</DrawerTitle>
+          <DrawerTitle>{t("nav.menu")}</DrawerTitle>
           <DrawerContent>
-            <SectionHeader>Browse</SectionHeader>
+            <SectionHeader>{t("nav.section.browse")}</SectionHeader>
             {browseItems.map((item) => (
               <NavLink
                 key={item.href}
@@ -100,7 +103,7 @@ export function MobileNavDrawer({
 
             {personalItems.length > 0 && (
               <>
-                <SectionHeader>You</SectionHeader>
+                <SectionHeader>{t("nav.section.you")}</SectionHeader>
                 {personalItems.map((item) => (
                   <NavLink
                     key={item.href}
@@ -114,7 +117,7 @@ export function MobileNavDrawer({
 
             {adminItems.length > 0 && (
               <>
-                <SectionHeader>Admin</SectionHeader>
+                <SectionHeader>{t("nav.section.admin")}</SectionHeader>
                 {adminItems.map((item) => (
                   <NavLink
                     key={item.href}
@@ -154,7 +157,7 @@ export function MobileNavDrawer({
                   className="font-medium flex-1"
                   style={{ fontSize: 13, color: "var(--ds-fg)" }}
                 >
-                  Push notifications
+                  {t("nav.pushNotifications")}
                 </span>
                 <PushNotifications />
               </div>
@@ -175,7 +178,7 @@ export function MobileNavDrawer({
                 }}
               >
                 <LogOut style={{ width: 16, height: 16 }} />
-                Sign out
+                {t("nav.signOut")}
               </button>
             </div>
 
@@ -194,7 +197,7 @@ export function MobileNavDrawer({
                 href="https://github.com/Summonarr/Summonarr"
                 target="_blank"
                 rel="noopener noreferrer"
-                title="Summonarr is free software (AGPL-3.0). View the source and fork it on GitHub."
+                title={t("nav.footer.sourceTitle")}
                 className="flex items-center gap-2 text-[var(--ds-fg-subtle)] hover:text-[var(--ds-fg-muted)] transition-colors"
               >
                 <GitFork className="h-3 w-3 shrink-0" />
@@ -202,14 +205,14 @@ export function MobileNavDrawer({
                   className="ds-mono"
                   style={{ fontSize: 10 }}
                 >
-                  Fork me on GitHub
+                  {t("nav.footer.fork")}
                 </span>
               </a>
               <a
                 href="https://www.themoviedb.org"
                 target="_blank"
                 rel="noopener noreferrer"
-                title="This product uses the TMDB API but is not endorsed or certified by TMDB."
+                title={t("nav.footer.tmdbTitle")}
                 className="flex items-center gap-2 text-[var(--ds-fg-subtle)] hover:text-[var(--ds-fg-muted)] transition-colors"
               >
                 {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -218,7 +221,7 @@ export function MobileNavDrawer({
                   className="ds-mono"
                   style={{ fontSize: 10 }}
                 >
-                  Data via TMDB
+                  {t("nav.footer.tmdb")}
                 </span>
               </a>
             </div>
@@ -259,6 +262,7 @@ function NavLink({
   onClick: () => void;
 }) {
   const Icon = item.icon as IconComponent;
+  const t = useT();
   return (
     <Link
       href={item.href}
@@ -296,7 +300,7 @@ function NavLink({
           color: active ? "var(--ds-accent-text)" : "var(--ds-fg-muted)",
         }}
       />
-      {item.label}
+      {navItemLabel(item, t)}
     </Link>
   );
 }

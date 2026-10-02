@@ -7,6 +7,7 @@ import { CheckCircle, Clock, Loader2, Play, RefreshCw, XCircle } from "@/compone
 import type { ActionState, ApplyResult, TrashSettings } from "./types";
 import { withBasePath } from "@/lib/base-path";
 import { RefreshErrorBanner } from "./banners";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface SyncSettingsCardProps {
   initialSettings: TrashSettings;
@@ -15,6 +16,7 @@ interface SyncSettingsCardProps {
 }
 
 export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSettingsCardProps) {
+  const t = useT();
   const [settings, setSettings] = useState<TrashSettings>(initialSettings);
   const [saveState, setSaveState] = useState<ActionState>("idle");
   const [refreshState, setRefreshState] = useState<ActionState>("idle");
@@ -68,6 +70,7 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
       }
       const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
+        error?: string;
         errors?: string[];
         schemaDiagnostic?: string;
       };
@@ -75,7 +78,7 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
       setRefreshState(hasErrors ? "error" : "ok");
       if (hasErrors) {
         setRefreshError({
-          errors: data.errors && data.errors.length > 0 ? data.errors : [`HTTP ${res.status}`],
+          errors: data.errors && data.errors.length > 0 ? data.errors : [data.error ?? `HTTP ${res.status}`],
           schemaDiagnostic: data.schemaDiagnostic,
         });
       }
@@ -113,54 +116,54 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
   return (
     <Card className="bg-zinc-900 border-zinc-800 p-6">
       <div className="mb-5">
-        <h2 className="font-semibold text-zinc-100 text-lg">Sync Settings</h2>
+        <h2 className="font-semibold text-zinc-100 text-lg">{t("trash.sync.title")}</h2>
         <p className="text-sm text-zinc-500 mt-0.5">
-          Enable the master toggle, then pick which kinds of specs the cron job re-applies each run.
+          {t("trash.sync.subtitle")}
         </p>
       </div>
 
       <div className="space-y-3">
         <ToggleRow
-          label="TRaSH Sync Enabled"
-          description="Master switch. When off, the trash-sync cron job exits immediately."
+          label={t("trash.sync.toggle.enabled.label")}
+          description={t("trash.sync.toggle.enabled.description")}
           checked={settings.enabled}
           onChange={(v) => patchSettings({ enabled: v })}
         />
         <ToggleRow
-          label="Sync Custom Formats"
-          description="Re-apply managed CFs on every sync. Overwrites manual edits in Radarr/Sonarr."
+          label={t("trash.sync.toggle.customFormats.label")}
+          description={t("trash.sync.toggle.customFormats.description")}
           checked={settings.syncCustomFormats}
           onChange={(v) => patchSettings({ syncCustomFormats: v })}
           indent
           disabled={!settings.enabled}
         />
         <ToggleRow
-          label="Sync Custom Format Groups"
-          description="Re-apply managed TRaSH CF-Groups (HDR Formats, Release Groups HQ, etc.). Each group cascades to its member CFs."
+          label={t("trash.sync.toggle.customFormatGroups.label")}
+          description={t("trash.sync.toggle.customFormatGroups.description")}
           checked={settings.syncCustomFormatGroups}
           onChange={(v) => patchSettings({ syncCustomFormatGroups: v })}
           indent
           disabled={!settings.enabled}
         />
         <ToggleRow
-          label="Sync Quality Profiles"
-          description="Re-apply managed quality profiles."
+          label={t("trash.sync.toggle.qualityProfiles.label")}
+          description={t("trash.sync.toggle.qualityProfiles.description")}
           checked={settings.syncQualityProfiles}
           onChange={(v) => patchSettings({ syncQualityProfiles: v })}
           indent
           disabled={!settings.enabled}
         />
         <ToggleRow
-          label="Sync Naming"
-          description="Re-apply managed naming schemes."
+          label={t("trash.sync.toggle.naming.label")}
+          description={t("trash.sync.toggle.naming.description")}
           checked={settings.syncNaming}
           onChange={(v) => patchSettings({ syncNaming: v })}
           indent
           disabled={!settings.enabled}
         />
         <ToggleRow
-          label="Sync Quality Sizes"
-          description="Re-apply managed quality-size templates (Radarr/Sonarr quality definition sliders)."
+          label={t("trash.sync.toggle.qualitySizes.label")}
+          description={t("trash.sync.toggle.qualitySizes.description")}
           checked={settings.syncQualitySizes}
           onChange={(v) => patchSettings({ syncQualitySizes: v })}
           indent
@@ -176,8 +179,8 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
           className="bg-zinc-800 hover:bg-zinc-700 text-zinc-100"
         >
           {refreshState === "running"
-            ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Refreshing…</>
-            : <><RefreshCw className="w-4 h-4 mr-2" />Refresh Catalog</>}
+            ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("trash.sync.refreshing")}</>
+            : <><RefreshCw className="w-4 h-4 mr-2" />{t("trash.sync.refreshCatalog")}</>}
         </Button>
         <Button
           type="button"
@@ -186,18 +189,18 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
           className="bg-indigo-600 hover:bg-indigo-500 text-[var(--ds-accent-fg)]"
         >
           {syncState === "running"
-            ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Syncing…</>
-            : <><Play className="w-4 h-4 mr-2" />Sync Now</>}
+            ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("trash.sync.syncing")}</>
+            : <><Play className="w-4 h-4 mr-2" />{t("trash.sync.syncNow")}</>}
         </Button>
 
-        {saveState === "ok"    && <span className="text-xs text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />Saved</span>}
-        {saveState === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />Save failed</span>}
-        {refreshState === "ok"    && <span className="text-xs text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />Catalog refreshed</span>}
-        {refreshState === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />Refresh failed</span>}
-        {syncState === "ok"    && <span className="text-xs text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />Sync complete</span>}
-        {syncState === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />Sync failed</span>}
-        {refreshSkipped && <span className="text-xs text-amber-400 flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" />Refresh already running — try again shortly</span>}
-        {syncSkipped && <span className="text-xs text-amber-400 flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" />Already running — try again shortly</span>}
+        {saveState === "ok"    && <span className="text-xs text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />{t("trash.common.saved")}</span>}
+        {saveState === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />{t("trash.common.saveFailed")}</span>}
+        {refreshState === "ok"    && <span className="text-xs text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />{t("trash.sync.catalogRefreshed")}</span>}
+        {refreshState === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />{t("trash.sync.refreshFailed")}</span>}
+        {syncState === "ok"    && <span className="text-xs text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />{t("trash.sync.syncComplete")}</span>}
+        {syncState === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />{t("trash.sync.syncFailed")}</span>}
+        {refreshSkipped && <span className="text-xs text-amber-400 flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" />{t("trash.sync.refreshAlreadyRunning")}</span>}
+        {syncSkipped && <span className="text-xs text-amber-400 flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" />{t("trash.sync.alreadyRunning")}</span>}
       </div>
 
       {refreshError && (

@@ -16,6 +16,8 @@ import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { getUserRecommendations } from "@/lib/recommendations";
 import { getFeatureFlags } from "@/lib/features";
+import { getRecentlyAddedForViewer, RECENTLY_ADDED_SIZE } from "@/lib/recently-added";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // The home feed for native clients, mirroring the web home page
 // (src/app/(app)/page.tsx): the trending "featured" titles plus the same rails
@@ -66,16 +68,21 @@ function settled<T>(r: PromiseSettledResult<T[]>): T[] {
 }
 
 export const GET = withAuth(async (request, _ctx, session) => {
+  const t = translatorForRequest(request);
   if (!checkRateLimit(`home:${session.user.id}`, 30, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiUser.common.tooManyRequests") }, { status: 429 });
   }
 
   const hideAvailable = request.nextUrl.searchParams.get("hideAvailable") === "1";
-  // Which servers (Plex / Jellyfin) this user is shown, for the hideAvailable filter.
-  const { showPlex, showJellyfin } = getBadgeVisibility(session);
-
   try {
     const flags = await getFeatureFlags();
+    // Which servers (Plex / Jellyfin) this user is shown, for the hideAvailable
+    // filter — with the integration flags, which default to TRUE when omitted.
+    const { showPlex, showJellyfin } = getBadgeVisibility(session, {
+      plex: flags["feature.integration.plex"],
+      jellyfin: flags["feature.integration.jellyfin"],
+    });
+    const recentEnabled = flags["feature.page.recentlyAdded"] && !hideAvailable;
 
     const [
       trendingRes,
@@ -86,6 +93,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
       topMoviesRes,
       topTVRes,
       forYouRes,
+      recentRes,
     ] = await Promise.allSettled([
       getTrending(),
       getPopularMovies(),
@@ -101,6 +109,15 @@ export const GET = withAuth(async (request, _ctx, session) => {
       flags["feature.page.forYou"]
         ? getUserRecommendations(session.user.id)
         : Promise.resolve([] as TmdbMedia[]),
+      // Library reads scoped to the servers this viewer may see (guardrail 35),
+      // cached per visible-server set. Every title on it is on the viewer's own
+      // server, so hideAvailable would always empty it — skip the read then.
+      recentEnabled
+        ? getRecentlyAddedForViewer(session, {
+            plex: flags["feature.integration.plex"],
+            jellyfin: flags["feature.integration.jellyfin"],
+          })
+        : Promise.resolve([] as TmdbMedia[]),
     ]);
 
     // A rail whose source rejected degrades to an omitted rail (better than
@@ -109,8 +126,9 @@ export const GET = withAuth(async (request, _ctx, session) => {
     const sourceNames = [
       "trending", "popular-movies", "popular-tv",
       "upcoming-movies", "on-the-air-tv", "top-rated-movies", "top-rated-tv", "for-you",
+      "recently-added",
     ];
-    [trendingRes, popMoviesRes, popTVRes, upMoviesRes, upTVRes, topMoviesRes, topTVRes, forYouRes]
+    [trendingRes, popMoviesRes, popTVRes, upMoviesRes, upTVRes, topMoviesRes, topTVRes, forYouRes, recentRes]
       .forEach((r, i) => {
         if (r.status === "rejected") {
           console.error(`[home] source ${sourceNames[i]} failed:`, r.reason instanceof Error ? r.reason.message : r.reason);
@@ -125,6 +143,7 @@ export const GET = withAuth(async (request, _ctx, session) => {
     const topMovies = settled(topMoviesRes).slice(0, RAIL_OVERFETCH);
     const topTV = settled(topTVRes).slice(0, RAIL_OVERFETCH);
     const forYou = settled(forYouRes).slice(0, RAIL_OVERFETCH);
+    const recent = settled(recentRes);
 
     // Enrich the full RAIL_OVERFETCH window (not just RAIL_SIZE): project() drops
     // available/hidden items then backfills toward RAIL_SIZE from the tail, so the
@@ -138,6 +157,8 @@ export const GET = withAuth(async (request, _ctx, session) => {
       topMovies.slice(0, RAIL_OVERFETCH),
       topTV.slice(0, RAIL_OVERFETCH),
       forYou.slice(0, RAIL_OVERFETCH),
+      // Last, so a title also on a TMDB rail keeps that richer record.
+      recent,
     ];
     const displaySet = dedupeUnion(candidateLists);
     const show4k = await getShow4kVisibility(session);
@@ -158,6 +179,10 @@ export const GET = withAuth(async (request, _ctx, session) => {
 
     const carousels = [
       { id: "trending", title: "Trending this week", items: trendingRest },
+      // Additive: a carousel id older clients don't know renders generically.
+      ...(recentEnabled
+        ? [{ id: "recently-added", title: "Recently Added", items: project(recent, emap, hideAvailable, showPlex, showJellyfin, RECENTLY_ADDED_SIZE) }]
+        : []),
       ...(flags["feature.page.forYou"]
         ? [{ id: "for-you", title: "For You", items: project(forYou, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) }]
         : []),
@@ -174,6 +199,6 @@ export const GET = withAuth(async (request, _ctx, session) => {
     return NextResponse.json({ featured, carousels });
   } catch (err) {
     console.error("[home] Failed:", err);
-    return NextResponse.json({ error: "Failed to fetch" }, { status: 500 });
+    return NextResponse.json({ error: t("apiUser.common.fetchFailed") }, { status: 500 });
   }
 });

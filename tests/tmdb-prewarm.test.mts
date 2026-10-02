@@ -21,9 +21,10 @@
 //     backfill path counts failed the same way;
 //   - the CONCURRENCY=5 bound: the sixth stale item's fetch is not issued
 //     until the first batch of five has settled;
-//   - PINS CURRENT BEHAVIOR: fetch-level misses (404 / non-2xx / unparseable
-//     body) resolve, so they count as `fetched` even though no details blob
-//     was written (a 404 writes only a "not found" tombstone row);
+//   - fetch-level misses: a 404 is a definitive answer (tombstoned, counted
+//     `fetched`); a SafeFetchError, any other non-2xx (429/401/5xx) or an
+//     unparseable body counts `failed` — a TMDB outage must not report as a
+//     successful warm — without throwing out of the page loop;
 //   - cross-source dedup on tmdbId:mediaType and the LIBRARY_PAGE_SIZE page
 //     buffer (a >500-item walk is processed in two flushes).
 //
@@ -505,7 +506,7 @@ test("stale fetches are bounded at CONCURRENCY=5 — the sixth is issued only af
   assert.equal(fetchCalls.length, 6);
 });
 
-test("fetch-level misses: a 404 writes a :missing tombstone and skips on the NEXT run; non-2xx/unparseable write nothing and retry", async () => {
+test("fetch-level misses: a 404 writes a :missing tombstone and skips on the NEXT run; non-2xx/unparseable write nothing, count failed, and retry", async () => {
   tables.plex = [
     { tmdbId: 40, mediaType: "MOVIE" },
     { tmdbId: 41, mediaType: "MOVIE" },
@@ -518,11 +519,11 @@ test("fetch-level misses: a 404 writes a :missing tombstone and skips on the NEX
     return new Response("<html>not json</html>", { status: 200 });
   };
 
-  // fetchAndStore swallows HTTP-level misses (warn + return), so the settled
-  // promise is FULFILLED: `fetched` counts attempts, not successes — a run
-  // that hit only errors still reports fetched=3. Flip these pins if
-  // failed-counting is ever wanted for HTTP-level misses.
-  assert.deepEqual(await prewarmLibraryCache(), { total: 3, fetched: 3, backfilled: 0, skipped: 0, failed: 0 });
+  // The 404 is a definitive answer (counted fetched); the 500 and the
+  // unparseable body are TMDB failures and must reach `failed` — counting them
+  // fetched reported an outage as a successful warm.
+  assert.deepEqual(await prewarmLibraryCache(), { total: 3, fetched: 1, backfilled: 0, skipped: 0, failed: 2 });
+  assert.ok(!warns.some((w) => w.includes("[prewarm] item failed:")), "a counted miss is not double-logged");
   // The 404 (a dead library match) writes the negative tombstone — without it
   // every run re-fetched the same dead ids forever. 500/unparseable still
   // write nothing (transient — they must retry next run).
@@ -535,11 +536,33 @@ test("fetch-level misses: a 404 writes a :missing tombstone and skips on the NEX
 
   // Second run: the tombstoned id skips without a fetch; the transient pair retries.
   fetchCalls.length = 0;
-  assert.deepEqual(await prewarmLibraryCache(), { total: 3, fetched: 2, backfilled: 0, skipped: 1, failed: 0 });
+  assert.deepEqual(await prewarmLibraryCache(), { total: 3, fetched: 0, backfilled: 0, skipped: 1, failed: 2 });
   assert.ok(
     !fetchCalls.some((c) => c.url.pathname.endsWith("/movie/40")),
     "a live tombstone must spare the dead id its fetch",
   );
+});
+
+test("a TMDB outage (429 / 401 / network SafeFetchError) counts failed, writes nothing, and never aborts the walk", async () => {
+  tables.plex = [
+    { tmdbId: 50, mediaType: "MOVIE" },
+    { tmdbId: 51, mediaType: "MOVIE" },
+    { tmdbId: 52, mediaType: "MOVIE" },
+    { tmdbId: 53, mediaType: "MOVIE" },
+  ];
+  respond = (url) => {
+    const id = Number(url.pathname.split("/").pop());
+    if (id === 50) return new Response("slow down", { status: 429 });
+    if (id === 51) return new Response("nope", { status: 401 });
+    if (id === 52) throw new TypeError("fetch failed"); // → SafeFetchError("network")
+    return jsonResponse({ id, title: `M${id}`, release_date: "2010-01-01" });
+  };
+
+  assert.deepEqual(await prewarmLibraryCache(), { total: 4, fetched: 1, backfilled: 0, skipped: 0, failed: 3 });
+  assert.deepEqual(cacheUpserts.map((u) => u.key), ["movie:53:details"]);
+  assert.ok(warns.some((w) => w.includes("[prewarm] TMDB movie:50 → HTTP 429")));
+  assert.ok(warns.some((w) => w.includes("[prewarm] TMDB movie:51 → HTTP 401")));
+  assert.ok(warns.some((w) => w.includes("[prewarm] TMDB movie:52 → network")));
 });
 
 // ── dedup + page buffering ──────────────────────────────────────────────────

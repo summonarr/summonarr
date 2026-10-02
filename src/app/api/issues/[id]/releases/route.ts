@@ -15,6 +15,8 @@ import { isValidInstanceSlug } from "@/lib/arr-instances";
 import { logAudit, auditContext } from "@/lib/audit";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { emitSSE } from "@/lib/sse-emitter";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -24,24 +26,26 @@ type RouteContext = { params: Promise<{ id: string }> };
 async function resolveInstanceOr(
   raw: string | null | undefined,
   service: "radarr" | "sonarr",
+  t: Translator,
 ): Promise<string | NextResponse> {
   const instance = typeof raw === "string" ? raw.trim() : "";
   if (!isValidInstanceSlug(instance)) {
-    return NextResponse.json({ error: "Invalid instance" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.common.invalidInstance") }, { status: 400 });
   }
   if (instance !== "" && !(await isArrConfigured(service, instance))) {
-    return NextResponse.json({ error: `${service} (${instance}) is not configured` }, { status: 422 });
+    return NextResponse.json({ error: t("apiUser.issues.instanceNotConfigured", { service, instance }) }, { status: 422 });
   }
   return instance;
 }
 
 export const GET = withIssueAdmin(async (req, { params }: RouteContext, _session) => {
+  const t = translatorForRequest(req);
   const { id } = await params;
   const issue = await prisma.issue.findUnique({ where: { id } });
-  if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!issue) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
   const service = issue.mediaType === "MOVIE" ? ("radarr" as const) : ("sonarr" as const);
-  const instanceOr = await resolveInstanceOr(req.nextUrl.searchParams.get("instance"), service);
+  const instanceOr = await resolveInstanceOr(req.nextUrl.searchParams.get("instance"), service, t);
   if (instanceOr instanceof NextResponse) return instanceOr;
   const instance = instanceOr;
 
@@ -54,13 +58,13 @@ export const GET = withIssueAdmin(async (req, { params }: RouteContext, _session
       if (!tvdbId) {
         tvdbId = await resolveTvdbIdFromTmdbId(issue.tmdbId, instance);
         if (!tvdbId) {
-          return NextResponse.json({ error: "Could not resolve TVDB ID for this series — check Sonarr" }, { status: 422 });
+          return NextResponse.json({ error: t("apiUser.issues.tvdbUnresolved") }, { status: 422 });
         }
       }
       const VALID_SCOPES = ["FULL", "SEASON", "EPISODE"] as const;
       type IssueScope = typeof VALID_SCOPES[number];
       if (!(VALID_SCOPES as readonly string[]).includes(issue.scope)) {
-        return NextResponse.json({ error: "Invalid issue scope" }, { status: 422 });
+        return NextResponse.json({ error: t("apiUser.issues.invalidScope") }, { status: 422 });
       }
       releases = await getReleasesForSeries(
         tvdbId,
@@ -78,17 +82,18 @@ export const GET = withIssueAdmin(async (req, { params }: RouteContext, _session
 });
 
 export const POST = withIssueAdmin(async (req, { params }: RouteContext, session) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
   const { id } = await params;
   const issue = await prisma.issue.findUnique({ where: { id } });
-  if (!issue) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!issue) return NextResponse.json({ error: t("apiUser.common.notFound") }, { status: 404 });
 
   // A RESOLVED issue is closed, so don't start a download for it. (The status
   // update further down re-checks this in case the issue is resolved meanwhile.)
   if (issue.status === "RESOLVED") {
-    return NextResponse.json({ error: "Issue is resolved — reopen it before grabbing a release" }, { status: 409 });
+    return NextResponse.json({ error: t("apiUser.issues.resolvedBeforeGrab") }, { status: 409 });
   }
 
   const parsed = await readJsonCapped<{ guid?: string; indexerId?: number; instance?: string }>(req, 65536);
@@ -96,13 +101,13 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
   const body = parsed;
 
   const service = issue.mediaType === "MOVIE" ? ("radarr" as const) : ("sonarr" as const);
-  const instanceOr = await resolveInstanceOr(body.instance, service);
+  const instanceOr = await resolveInstanceOr(body.instance, service, t);
   if (instanceOr instanceof NextResponse) return instanceOr;
   const instance = instanceOr;
 
   const { guid, indexerId } = body;
   if (!guid || typeof guid !== "string") {
-    return NextResponse.json({ error: "guid is required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.issues.guidRequired") }, { status: 400 });
   }
 
   // Only allow characters a real release guid uses. Radarr/Sonarr guids are
@@ -110,10 +115,10 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
   // brackets, backslashes or control characters. Listing what IS allowed is
   // safer than listing what is not, because nothing unexpected slips through.
   if (guid.length === 0 || guid.length > 500 || !/^[A-Za-z0-9._:/+\-=?&%#@~,!*$]+$/.test(guid)) {
-    return NextResponse.json({ error: "Invalid guid format" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.issues.guidInvalid") }, { status: 400 });
   }
   if (!Number.isInteger(indexerId) || (indexerId as number) <= 0) {
-    return NextResponse.json({ error: "indexerId must be a positive integer" }, { status: 400 });
+    return NextResponse.json({ error: t("apiUser.issues.indexerIdInvalid") }, { status: 400 });
   }
 
   // Move the issue to IN_PROGRESS BEFORE the grab, with a compare-and-swap
@@ -127,7 +132,7 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
     data: { status: "IN_PROGRESS" },
   });
   if (claim.count === 0) {
-    return NextResponse.json({ error: "Issue is resolved — reopen it before grabbing a release" }, { status: 409 });
+    return NextResponse.json({ error: t("apiUser.issues.resolvedBeforeGrab") }, { status: 409 });
   }
   const statusChanged = issue.status !== "IN_PROGRESS";
   // Announce the status change now: the row already says IN_PROGRESS, and the
@@ -145,7 +150,7 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
     } else {
       if (!resolvedTvdbId) {
         resolvedTvdbId = await resolveTvdbIdFromTmdbId(issue.tmdbId, instance);
-        if (!resolvedTvdbId) return NextResponse.json({ error: "Could not resolve TVDB ID for this series — check Sonarr" }, { status: 422 });
+        if (!resolvedTvdbId) return NextResponse.json({ error: t("apiUser.issues.tvdbUnresolved") }, { status: 422 });
       }
       // Both SEASON and EPISODE issues pass their seasonNumber, so the grab
       // targets the right season. Only EPISODE issues pass an episodeNumber.

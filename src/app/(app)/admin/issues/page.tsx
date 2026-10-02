@@ -16,13 +16,36 @@ import { requireFeature } from "@/lib/features";
 import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { Chip, EmptyState, PageHeader } from "@/components/ui/design";
 import { LocalDateText } from "@/components/local-date";
-import { ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL, ISSUE_TYPE_LABELS } from "@/lib/status-labels";
+import { ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL_KEY, ISSUE_TYPE_LABEL_KEY } from "@/lib/status-labels";
+import { getTranslator } from "@/lib/i18n/server";
+import type { Translator } from "@/lib/i18n/translate";
 
-const SCOPE_LABELS: Record<string, string> = {
-  FULL: "Full",
-  SEASON: "Season",
-  EPISODE: "Episode",
-};
+// The TV scope chip ("Season 2", "Episode S02E05"). Only called for a non-FULL
+// scope; the number tails are omitted when the column is null, as before.
+function scopeLabel(
+  t: Translator,
+  issue: { scope: string; seasonNumber: number | null; episodeNumber: number | null },
+): string {
+  if (issue.scope === "SEASON") {
+    return issue.seasonNumber != null
+      ? t("adminQueue.issues.scope.seasonN", { number: issue.seasonNumber })
+      : t("adminQueue.issues.scope.season");
+  }
+  if (issue.scope === "EPISODE") {
+    return issue.seasonNumber != null && issue.episodeNumber != null
+      ? t("adminQueue.issues.scope.episodeCode", {
+          code: `S${String(issue.seasonNumber).padStart(2, "0")}E${String(issue.episodeNumber).padStart(2, "0")}`,
+        })
+      : t("adminQueue.issues.scope.episode");
+  }
+  return t("adminQueue.issues.scope.full");
+}
+
+// Issue type label: translated when the type is known, the raw enum otherwise.
+function issueTypeLabel(t: Translator, issueType: string): string {
+  const key = ISSUE_TYPE_LABEL_KEY[issueType];
+  return key ? t(key) : issueType;
+}
 
 const VALID_FILTERS = ["ALL", "OPEN", "IN_PROGRESS", "RESOLVED"] as const;
 
@@ -47,7 +70,7 @@ function groupIssues<T extends {
   episodeNumber: number | null;
   createdAt: Date;
   _count: { messages: number };
-}>(issues: T[]): { representative: T; count: number; reporterNames: string[] }[] {
+}>(issues: T[], unknownName: string): { representative: T; count: number; reporterNames: string[] }[] {
   const map = new Map<string, T[]>();
   for (const issue of issues) {
     const key = `${issue.tmdbId}::${issue.mediaType}::${issue.issueType}::${issue.scope}::${issue.seasonNumber ?? ""}::${issue.episodeNumber ?? ""}`;
@@ -58,7 +81,7 @@ function groupIssues<T extends {
   return Array.from(map.values())
     .map((group) => {
       group.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-      const names = group.map((i) => (i as unknown as { user: { name: string | null; email: string } }).user?.name ?? (i as unknown as { user: { name: string | null; email: string } }).user?.email ?? "Unknown");
+      const names = group.map((i) => (i as unknown as { user: { name: string | null; email: string } }).user?.name ?? (i as unknown as { user: { name: string | null; email: string } }).user?.email ?? unknownName);
       return { representative: group[0], count: group.length, reporterNames: names };
     })
     .sort((a, b) => {
@@ -76,6 +99,7 @@ export default async function AdminIssuesPage({
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_ISSUES)) redirect("/");
   const currentUserId = session.user.id;
+  const t = await getTranslator();
 
   const { filter: rawFilter, selected: selectedId } = await searchParams;
   const filter: FilterValue = VALID_FILTERS.includes(rawFilter as FilterValue)
@@ -111,7 +135,7 @@ export default async function AdminIssuesPage({
     statusCounts.find((s) => s.status === status)?._count.status ?? 0;
 
   const filtered = allIssues;
-  const groups = groupIssues(filtered);
+  const groups = groupIssues(filtered, t("shared.thread.unknownAuthor"));
 
   let selectedIssue = selectedId ? allIssues.find((i) => i.id === selectedId) ?? null : null;
   if (selectedId && !selectedIssue) {
@@ -152,12 +176,12 @@ export default async function AdminIssuesPage({
   const jellyfinSet = new Set(jellyfinItems.map((i) => `${i.tmdbId}:${i.mediaType}`));
 
   const tabs: { label: string; value: FilterValue; count: number }[] = [
-    { label: "Open", value: "OPEN", count: countFor("OPEN") },
-    { label: "In Progress", value: "IN_PROGRESS", count: countFor("IN_PROGRESS") },
-    { label: "Resolved", value: "RESOLVED", count: countFor("RESOLVED") },
+    { label: t(ISSUE_STATUS_LABEL_KEY.OPEN), value: "OPEN", count: countFor("OPEN") },
+    { label: t(ISSUE_STATUS_LABEL_KEY.IN_PROGRESS), value: "IN_PROGRESS", count: countFor("IN_PROGRESS") },
+    { label: t(ISSUE_STATUS_LABEL_KEY.RESOLVED), value: "RESOLVED", count: countFor("RESOLVED") },
     // Sum of the uncapped groupBy, not allIssues.length — the list is capped
     // at ISSUE_LIST_CAP, so its length would undercount a large table.
-    { label: "All", value: "ALL", count: statusCounts.reduce((n, c) => n + c._count.status, 0) },
+    { label: t("requests.filter.all"), value: "ALL", count: statusCounts.reduce((n, c) => n + c._count.status, 0) },
   ];
 
   function issueHref(id: string): string {
@@ -193,11 +217,11 @@ export default async function AdminIssuesPage({
               <p className="font-semibold" style={{ fontSize: 14, color: "var(--ds-fg)", margin: 0 }}>
                 {sel.title}
               </p>
-              <Chip tone={ISSUE_STATUS_TONE[sel.status]}>{ISSUE_STATUS_LABEL[sel.status]}</Chip>
-              <Chip>{ISSUE_TYPE_LABELS[sel.issueType] ?? sel.issueType}</Chip>
+              <Chip tone={ISSUE_STATUS_TONE[sel.status]}>{t(ISSUE_STATUS_LABEL_KEY[sel.status] ?? sel.status)}</Chip>
+              <Chip>{issueTypeLabel(t, sel.issueType)}</Chip>
             </div>
             <p className="ds-mono" style={{ marginTop: 4, fontSize: 10.5, color: "var(--ds-fg-subtle)" }}>
-              Reported by {sel.user.name ?? sel.user.email} ·{" "}
+              {t("adminQueue.issues.reportedBy", { name: sel.user.name ?? sel.user.email })} ·{" "}
               <LocalDateText iso={sel.createdAt.toISOString()} />
             </p>
             {sel.note && (
@@ -224,7 +248,7 @@ export default async function AdminIssuesPage({
                   color: "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))",
                 }}
               >
-                Resolution: {sel.resolution}
+                {t("adminQueue.issues.resolution", { resolution: sel.resolution })}
               </p>
             )}
           </>
@@ -234,12 +258,13 @@ export default async function AdminIssuesPage({
             className="ds-mono"
             style={{ marginTop: standalone ? 4 : 0, marginBottom: 8, fontSize: 10.5, color: "var(--ds-accent-text)" }}
           >
-            Claimed by {sel.claimedUser?.name ?? sel.claimedUser?.email ?? "unknown"}
+            {t("adminQueue.issues.claimedBy", { name: sel.claimedUser?.name ?? sel.claimedUser?.email ?? t("adminQueue.issues.unknown") })}
           </p>
         )}
         <div className="flex items-center flex-wrap" style={{ gap: 8, marginTop: standalone ? 10 : 0 }}>
           {standalone && sel.issueType === "WRONG_MATCH" && (
             <IssueFixMatchButton
+              key={sel.id}
               issueId={sel.id}
               tmdbId={sel.tmdbId}
               mediaType={sel.mediaType}
@@ -250,6 +275,7 @@ export default async function AdminIssuesPage({
             />
           )}
           <IssueClaimButton
+            key={sel.id}
             issueId={sel.id}
             claimedBy={sel.claimedBy}
             claimerName={sel.claimedUser?.name ?? sel.claimedUser?.email ?? null}
@@ -257,6 +283,7 @@ export default async function AdminIssuesPage({
           />
           {standalone && (
             <IssueActions
+              key={sel.id}
               issueId={sel.id}
               currentStatus={sel.status}
               mediaType={sel.mediaType}
@@ -271,7 +298,7 @@ export default async function AdminIssuesPage({
         </div>
         {standalone && (
           <div style={{ marginTop: 12 }}>
-            <IssueThread issueId={sel.id} />
+            <IssueThread key={sel.id} issueId={sel.id} />
           </div>
         )}
       </div>
@@ -289,8 +316,8 @@ export default async function AdminIssuesPage({
         ]}
       />
       <PageHeader
-        title="Issues"
-        subtitle="User-reported media quality problems"
+        title={t("nav.tab.issues")}
+        subtitle={t("adminQueue.issues.subtitle")}
       />
 
       <div
@@ -345,7 +372,7 @@ export default async function AdminIssuesPage({
           className="ds-mono"
           style={{ fontSize: 11, color: "var(--ds-fg-subtle)", marginBottom: 10 }}
         >
-          Showing the {ISSUE_LIST_CAP} most recent — older issues in this tab are not listed.
+          {t("adminQueue.issues.capped", { count: ISSUE_LIST_CAP })}
         </p>
       )}
 
@@ -353,12 +380,12 @@ export default async function AdminIssuesPage({
           resolves through the findUnique fallback even when the default tab is
           empty — keep the grid so its side panel still renders. */}
       {groups.length === 0 && !selectedIssue ? (
-        <EmptyIssues />
+        <EmptyIssues title={t("adminQueue.issues.empty")} />
       ) : (
         <div className="xl:grid xl:grid-cols-[1fr_480px] xl:gap-6 xl:items-start">
           <div className="min-w-0">
             {selectedIssue && !selectedInList && renderMobileDetail(true)}
-            {groups.length === 0 && <EmptyIssues />}
+            {groups.length === 0 && <EmptyIssues title={t("adminQueue.issues.empty")} />}
             <div className="flex flex-col gap-3">
               {groups.map(({ representative: issue, count, reporterNames }) => {
                 const poster = posterUrl(issue.posterPath, "w342");
@@ -400,23 +427,13 @@ export default async function AdminIssuesPage({
                             {issue.title}
                           </p>
                           <Chip>
-                            {ISSUE_TYPE_LABELS[issue.issueType] ??
-                              issue.issueType}
+                            {issueTypeLabel(t, issue.issueType)}
                           </Chip>
                           {issue.mediaType === "TV" && issue.scope !== "FULL" && (
-                            <Chip>
-                              {SCOPE_LABELS[issue.scope]}
-                              {issue.scope === "SEASON" &&
-                                issue.seasonNumber != null &&
-                                ` ${issue.seasonNumber}`}
-                              {issue.scope === "EPISODE" &&
-                                issue.seasonNumber != null &&
-                                issue.episodeNumber != null &&
-                                ` S${String(issue.seasonNumber).padStart(2, "0")}E${String(issue.episodeNumber).padStart(2, "0")}`}
-                            </Chip>
+                            <Chip>{scopeLabel(t, issue)}</Chip>
                           )}
                           {count > 1 && (
-                            <Chip tone="pending">{count} reports</Chip>
+                            <Chip tone="pending">{t("adminQueue.issues.reports", { count })}</Chip>
                           )}
                         </div>
                         <p
@@ -427,12 +444,12 @@ export default async function AdminIssuesPage({
                             marginTop: 4,
                           }}
                         >
-                          {issue.mediaType === "MOVIE" ? "MOVIE" : "TV"}
+                          {issue.mediaType === "MOVIE" ? t("requests.mediaType.movie") : t("requests.mediaType.tv")}
                           {" · "}
                           <span style={{ color: "var(--ds-fg-muted)" }}>
                             {count > 1
-                              ? `${reporterNames.slice(0, 2).join(", ")}${count > 2 ? ` +${count - 2} more` : ""}`
-                              : `by ${issue.user.name ?? issue.user.email}`}
+                              ? `${reporterNames.slice(0, 2).join(", ")}${count > 2 ? t("adminQueue.issues.more", { count: count - 2 }) : ""}`
+                              : t("adminQueue.issues.by", { name: issue.user.name ?? issue.user.email })}
                           </span>
                           {" · "}
                           <LocalDateText iso={issue.createdAt.toISOString()} />
@@ -462,17 +479,14 @@ export default async function AdminIssuesPage({
                                 "color-mix(in oklab, var(--ds-success) 80%, var(--ds-fg))",
                             }}
                           >
-                            Resolution: {issue.resolution}
+                            {t("adminQueue.issues.resolution", { resolution: issue.resolution })}
                           </p>
                         )}
                       </Link>
 
                       <div className="hidden sm:inline-flex shrink-0">
                         <Chip tone={ISSUE_STATUS_TONE[issue.status]}>
-                          {issue.status === "IN_PROGRESS"
-                            ? "In Progress"
-                            : issue.status.charAt(0) +
-                              issue.status.slice(1).toLowerCase()}
+                          {t(ISSUE_STATUS_LABEL_KEY[issue.status] ?? issue.status)}
                         </Chip>
                       </div>
 
@@ -577,24 +591,14 @@ export default async function AdminIssuesPage({
                         style={{ gap: 6, marginTop: 4 }}
                       >
                         <Chip tone={ISSUE_STATUS_TONE[selectedIssue.status]}>
-                          {ISSUE_STATUS_LABEL[selectedIssue.status]}
+                          {t(ISSUE_STATUS_LABEL_KEY[selectedIssue.status] ?? selectedIssue.status)}
                         </Chip>
                         <Chip>
-                          {ISSUE_TYPE_LABELS[selectedIssue.issueType] ??
-                            selectedIssue.issueType}
+                          {issueTypeLabel(t, selectedIssue.issueType)}
                         </Chip>
                         {selectedIssue.mediaType === "TV" &&
                           selectedIssue.scope !== "FULL" && (
-                            <Chip>
-                              {SCOPE_LABELS[selectedIssue.scope]}
-                              {selectedIssue.scope === "SEASON" &&
-                                selectedIssue.seasonNumber != null &&
-                                ` ${selectedIssue.seasonNumber}`}
-                              {selectedIssue.scope === "EPISODE" &&
-                                selectedIssue.seasonNumber != null &&
-                                selectedIssue.episodeNumber != null &&
-                                ` S${String(selectedIssue.seasonNumber).padStart(2, "0")}E${String(selectedIssue.episodeNumber).padStart(2, "0")}`}
-                            </Chip>
+                            <Chip>{scopeLabel(t, selectedIssue)}</Chip>
                           )}
                       </div>
                       <p
@@ -605,8 +609,7 @@ export default async function AdminIssuesPage({
                           color: "var(--ds-fg-subtle)",
                         }}
                       >
-                        Reported by{" "}
-                        {selectedIssue.user.name ?? selectedIssue.user.email} ·{" "}
+                        {t("adminQueue.issues.reportedBy", { name: selectedIssue.user.name ?? selectedIssue.user.email })} ·{" "}
                         <LocalDateText iso={selectedIssue.createdAt.toISOString()} />
                       </p>
                       {selectedIssue.claimedBy && (
@@ -618,10 +621,12 @@ export default async function AdminIssuesPage({
                             color: "var(--ds-accent-text)",
                           }}
                         >
-                          Claimed by{" "}
-                          {selectedIssue.claimedUser?.name ??
-                            selectedIssue.claimedUser?.email ??
-                            "unknown"}
+                          {t("adminQueue.issues.claimedBy", {
+                            name:
+                              selectedIssue.claimedUser?.name ??
+                              selectedIssue.claimedUser?.email ??
+                              t("adminQueue.issues.unknown"),
+                          })}
                         </p>
                       )}
                     </div>
@@ -653,7 +658,7 @@ export default async function AdminIssuesPage({
                           "color-mix(in oklab, var(--ds-success) 85%, var(--ds-fg))",
                       }}
                     >
-                      Resolution: {selectedIssue.resolution}
+                      {t("adminQueue.issues.resolution", { resolution: selectedIssue.resolution })}
                     </p>
                   )}
 
@@ -665,6 +670,7 @@ export default async function AdminIssuesPage({
                       const key = `${selectedIssue.tmdbId}:${selectedIssue.mediaType}`;
                       return (
                         <IssueFixMatchButton
+                          key={selectedIssue.id}
                           issueId={selectedIssue.id}
                           tmdbId={selectedIssue.tmdbId}
                           mediaType={selectedIssue.mediaType}
@@ -676,12 +682,14 @@ export default async function AdminIssuesPage({
                       );
                     })()}
                     <IssueClaimButton
+                      key={selectedIssue.id}
                       issueId={selectedIssue.id}
                       claimedBy={selectedIssue.claimedBy}
                       claimerName={selectedIssue.claimedUser?.name ?? selectedIssue.claimedUser?.email ?? null}
                       currentUserId={session.user.id}
                     />
                     <IssueActions
+                      key={selectedIssue.id}
                       issueId={selectedIssue.id}
                       currentStatus={selectedIssue.status}
                       mediaType={selectedIssue.mediaType}
@@ -694,7 +702,7 @@ export default async function AdminIssuesPage({
                     />
                   </div>
                 </div>
-                <IssueThread issueId={selectedIssue.id} variant="panel" />
+                <IssueThread key={selectedIssue.id} issueId={selectedIssue.id} variant="panel" />
               </div>
             ) : (
               <div
@@ -718,7 +726,7 @@ export default async function AdminIssuesPage({
                   className="ds-mono"
                   style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}
                 >
-                  Select an issue to view its thread
+                  {t("adminQueue.issues.selectPrompt")}
                 </p>
               </div>
             )}
@@ -729,6 +737,6 @@ export default async function AdminIssuesPage({
   );
 }
 
-function EmptyIssues() {
-  return <EmptyState icon={MessageSquare} title="No issues in this category." />;
+function EmptyIssues({ title }: { title: string }) {
+  return <EmptyState icon={MessageSquare} title={title} />;
 }

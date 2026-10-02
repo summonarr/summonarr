@@ -5,6 +5,7 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Tv2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 interface SyncResult {
   plex?: number;
@@ -13,6 +14,8 @@ interface SyncResult {
 }
 
 export function SyncTVEpisodesButton() {
+  const t = useT();
+  const locale = useLocale();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -37,7 +40,7 @@ export function SyncTVEpisodesButton() {
 
       if (!res.ok || data?.error) {
         setStatus("error");
-        setResult(data?.error ?? `Request failed (${res.status})`);
+        setResult(data?.error ?? t("adminManage.users.error.requestFailed", { status: res.status }));
       } else if (data?.errors && data.errors.length > 0) {
         setStatus("error");
         setResult(data.errors.join("; "));
@@ -47,13 +50,15 @@ export function SyncTVEpisodesButton() {
         if ((data?.plex ?? 0) > 0) parts.push(`Plex ${data?.plex}`);
         if ((data?.jellyfin ?? 0) > 0) parts.push(`Jellyfin ${data?.jellyfin}`);
         setStatus("done");
-        setResult(parts.length > 0 ? `${total.toLocaleString("en-US")} episodes (${parts.join(", ")})` : "0 episodes");
+        setResult(parts.length > 0
+          ? t("adminManage.library.btn.episodesWithParts", { count: total, formatted: total.toLocaleString(locale), parts: parts.join(", ") })
+          : t("adminManage.library.btn.episodes", { count: 0, formatted: "0" }));
         const search = searchParams.toString();
         router.push(pathname + (search ? `?${search}` : ""));
       }
     } catch {
       setStatus("error");
-      setResult("Sync failed");
+      setResult(t("adminManage.library.btn.syncFailed"));
     }
     clearTimeout(resetTimer.current);
     resetTimer.current = setTimeout(() => { setStatus("idle"); setResult(null); }, 10_000);
@@ -69,7 +74,7 @@ export function SyncTVEpisodesButton() {
         className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
       >
         <Tv2 className={`w-4 h-4 ${status === "loading" ? "animate-pulse" : ""}`} />
-        {status === "loading" ? "Syncing Episodes…" : "Sync TV Episodes"}
+        {status === "loading" ? t("adminManage.library.btn.syncingEpisodes") : t("adminManage.library.btn.syncEpisodes")}
       </Button>
       {result && (
         <span

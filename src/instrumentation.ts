@@ -226,8 +226,19 @@ export async function register() {
       .then(({ backfillRequestApprovals }) => backfillRequestApprovals())
       .catch((err) => console.error("[request-approval] startup error:", err));
 
-    import("@/lib/tmdb-prewarm")
-      .then(({ prewarmLibraryCache }) => prewarmLibraryCache())
+    // Under the warm-library cron's advisory lock (and observing its abort
+    // signal, guardrail 41): on a large, cold library this walk can still be
+    // running when the entrypoint's first warm-library cron fires, and without
+    // the lock that cron would start a second full walk beside it. If the cron
+    // (or an admin warm) already holds the lock, the boot walk simply skips.
+    Promise.all([import("@/lib/tmdb-prewarm"), import("@/lib/advisory-lock")])
+      .then(([{ prewarmLibraryCache }, { withAdvisoryLock, WARM_LIBRARY_LOCK_ID }]) =>
+        withAdvisoryLock(
+          WARM_LIBRARY_LOCK_ID,
+          (signal) => prewarmLibraryCache({ signal }),
+          () => undefined,
+        ),
+      )
       .catch((err) => console.error("[prewarm] Library cache pre-warm error:", err));
 
     // Stamp `purgedAt` on accounts scrubbed before that column existed, and

@@ -11,6 +11,15 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import type { HistoryRow } from "./types";
+import { useT } from "@/components/i18n/i18n-provider";
+
+// Splits a translated template on {name} placeholders and drops in nodes.
+function rich(template: string, nodes: Record<string, React.ReactNode>): React.ReactNode[] {
+  return template.split(/(\{\w+\})/).map((part, i) => {
+    const m = /^\{(\w+)\}$/.exec(part);
+    return m && m[1] in nodes ? <span key={i}>{nodes[m[1]]}</span> : part;
+  });
+}
 
 export function DeleteConfirm({
   row,
@@ -25,6 +34,7 @@ export function DeleteConfirm({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  const t = useT();
   return (
     <Dialog
       open
@@ -59,7 +69,7 @@ export function DeleteConfirm({
             letterSpacing: "-0.01em",
           }}
         >
-          Delete this play?
+          {t("adminActivity.deleteConfirm.title")}
         </DialogTitle>
         <div
           style={{
@@ -69,12 +79,14 @@ export function DeleteConfirm({
             lineHeight: 1.5,
           }}
         >
-          The play record for{" "}
-          <span style={{ color: "var(--ds-fg)" }}>{row.title}</span> by{" "}
-          <span style={{ color: "var(--ds-fg)" }}>
-            {row.mediaServerUser.username}
-          </span>{" "}
-          will be permanently removed from history.
+          {rich(t("adminActivity.deleteConfirm.body"), {
+            title: <span style={{ color: "var(--ds-fg)" }}>{row.title}</span>,
+            user: (
+              <span style={{ color: "var(--ds-fg)" }}>
+                {row.mediaServerUser.username}
+              </span>
+            ),
+          })}
           {/* Say how many rows will go. A grouped row is one VIEWING that was
               paused and resumed, so it can stand for several database rows.
               Deleted play history cannot be rebuilt (guardrail 19: the live
@@ -82,11 +94,13 @@ export function DeleteConfirm({
           {(row.segmentCount ?? 1) > 1 && (
             <>
               {" "}
-              This viewing was watched across{" "}
-              <span style={{ color: "var(--ds-fg)" }}>
-                {row.segmentCount} sittings
-              </span>
-              ; all of them will be deleted.
+              {rich(t("adminActivity.deleteConfirm.sittings"), {
+                sittings: (
+                  <span style={{ color: "var(--ds-fg)" }}>
+                    {t("adminActivity.deleteConfirm.sittingsCount", { count: row.segmentCount ?? 1 })}
+                  </span>
+                ),
+              })}
             </>
           )}
         </div>
@@ -119,7 +133,7 @@ export function DeleteConfirm({
               cursor: "pointer",
             }}
           >
-            Cancel
+            {t("adminActivity.common.cancel")}
           </button>
           <button
             type="button"
@@ -138,7 +152,7 @@ export function DeleteConfirm({
               opacity: deleting ? 0.7 : 1,
             }}
           >
-            {deleting ? "Deleting…" : "Delete"}
+            {deleting ? t("adminActivity.common.deleting") : t("adminActivity.common.delete")}
           </button>
         </div>
         </DialogPopup>

@@ -9,6 +9,7 @@ import { normalizeEmail } from "@/lib/email-normalize";
 import { sanitizeOptional } from "@/lib/sanitize";
 import { Permission, hasPermission, defaultPermissionsForRole } from "@/lib/permissions";
 import { logAudit, auditContext } from "@/lib/audit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const dynamic = "force-dynamic";
 
@@ -107,8 +108,9 @@ export const GET = withPermission(Permission.MANAGE_USERS)(async (_req, _ctx, _s
 // new username/password account — e.g. an App Review demo account. Role seeds the
 // permission bitmask (defaultPermissionsForRole); tune later via PATCH.
 export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`admin-user-create:${session.user.id}`, 10, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many attempts — please wait a minute." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.common.tooManyAttempts") }, { status: 429 });
   }
   const parsed = await readJsonCapped<{ email?: string; password?: string; name?: string | null; role?: string }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
@@ -116,39 +118,39 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
 
   const role = body.role ?? "USER";
   if (role !== "USER" && role !== "ISSUE_ADMIN" && role !== "ADMIN") {
-    return NextResponse.json({ error: "role must be USER, ISSUE_ADMIN, or ADMIN" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.users.roleInvalidCreate") }, { status: 400 });
   }
   // MANAGE_USERS delegates creation of NON-admin users only. Creating an ADMIN
   // account requires the caller to be a full admin — otherwise a MANAGE_USERS
   // holder could mint a fresh ADMIN with a password they control and self-escalate.
   // session.user.permissions is the effective mask (api-auth resolves it).
   if (role === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
-    return NextResponse.json({ error: "Only an admin can create an admin account" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.users.onlyAdminCreate") }, { status: 403 });
   }
 
   const email = body.email;
   if (!email || typeof email !== "string" || email.length > 254 || /\s/.test(email)) {
-    return NextResponse.json({ error: "Invalid email address" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.users.invalidEmail") }, { status: 400 });
   }
   const parts = email.split("@");
   const domainDot = parts[1]?.lastIndexOf(".") ?? -1;
   if (parts.length !== 2 || !parts[0] || !parts[1] || domainDot < 1 || domainDot === parts[1].length - 1) {
-    return NextResponse.json({ error: "Invalid email address" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.users.invalidEmail") }, { status: 400 });
   }
 
   const password = body.password;
   if (!password || typeof password !== "string") {
-    return NextResponse.json({ error: "Password is required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.users.passwordRequired") }, { status: 400 });
   }
   if (password.length < 8) {
-    return NextResponse.json({ error: "Password must be at least 8 characters" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.users.passwordTooShort") }, { status: 400 });
   }
   if (password.length > MAX_PASSWORD_LENGTH) {
-    return NextResponse.json({ error: `Password must be at most ${MAX_PASSWORD_LENGTH} characters` }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.users.passwordTooLong", { max: MAX_PASSWORD_LENGTH }) }, { status: 400 });
   }
 
   if (body.name !== undefined && body.name !== null && (typeof body.name !== "string" || body.name.trim().length > 100)) {
-    return NextResponse.json({ error: "Name must be under 100 characters" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAdmin.users.nameTooLong") }, { status: 400 });
   }
 
   const normalized = normalizeEmail(email);
@@ -169,7 +171,7 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
     });
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-      return NextResponse.json({ error: "A user with that email already exists" }, { status: 409 });
+      return NextResponse.json({ error: t("apiAdmin.users.emailExists") }, { status: 409 });
     }
     throw err;
   }

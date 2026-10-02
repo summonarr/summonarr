@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission } from "@/lib/permissions";
 import { reactivateUser, isPurgedRow } from "@/lib/account-lifecycle";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // POST /api/admin/users/[id]/reactivate — re-enable a disabled account.
 //
@@ -20,22 +21,23 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
   { params }: { params: Promise<{ id: string }> },
   session,
 ) => {
+  const t = translatorForRequest(req);
   const { id } = await params;
   if (!checkRateLimit(`admin-user-reactivate:${session.user.id}`, 10, 60 * 1000)) {
-    return NextResponse.json({ error: "Too many attempts — please wait a minute." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAdmin.common.tooManyAttempts") }, { status: 429 });
   }
 
   const target = await prisma.user.findUnique({
     where: { id },
     select: { id: true, role: true, name: true, email: true, deactivatedAt: true, purgedAt: true },
   });
-  if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
 
   // Same authority gate as the disable path: a non-admin MANAGE_USERS holder must
   // not be able to switch an admin account back on (restoring an admin is at
   // least as privileged as disabling one).
   if (target.role === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
-    return NextResponse.json({ error: "Only an admin can re-enable an admin account" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAdmin.users.onlyAdminReenable") }, { status: 403 });
   }
 
   // isPurgedRow, not a bare `purgedAt` test: accounts scrubbed before that column
@@ -44,7 +46,7 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
   // OAuth rows, an unroutable email) that still counts as an active user.
   if (isPurgedRow(target)) {
     return NextResponse.json(
-      { error: "This account's data was purged and it can no longer be re-enabled." },
+      { error: t("apiAdmin.users.purgedCannotReenable") },
       { status: 400 },
     );
   }
@@ -54,7 +56,7 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
   if (!restored) {
     // Lost a race with a concurrent purge/reactivate — the row no longer matches
     // the (disabled AND not purged) precondition.
-    return NextResponse.json({ error: "Account state changed — reload and try again." }, { status: 409 });
+    return NextResponse.json({ error: t("apiAdmin.users.stateChanged") }, { status: 409 });
   }
 
   invalidateUserSession(id);

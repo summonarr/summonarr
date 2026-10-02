@@ -58,7 +58,9 @@ process.env.DATABASE_URL ??= "postgresql://unit:unit@127.0.0.1:9/never_connects"
 
 // ── DNS stub (tests/push.test.mts rationale) — the subscribe SSRF resolve and
 // the APNs relay safe-fetch both resolve a hostname; no real lookup may escape.
-const fakeLookup = async () => [{ address: "93.184.216.34", family: 4 }];
+// `dnsDown` simulates a resolver outage (no records) for the unsubscribe pin.
+let dnsDown = false;
+const fakeLookup = async () => (dnsDown ? [] : [{ address: "93.184.216.34", family: 4 }]);
 (dns as { lookup: unknown }).lookup = fakeLookup;
 if ((dns as { lookup: unknown }).lookup !== fakeLookup) {
   throw new Error("could not stub dns.lookup — aborting before a real DNS query can leave the process");
@@ -257,7 +259,7 @@ shadowPrismaClientMethod(prisma, "$transaction", async (arg: unknown) => {
 });
 
 // Route handlers (imported AFTER every stub is in place).
-const { POST: subscribePost } = await import("../src/app/api/push/subscribe/route.ts");
+const { POST: subscribePost, DELETE: subscribeDelete } = await import("../src/app/api/push/subscribe/route.ts");
 const { POST: apnsPost } = await import("../src/app/api/push/apns/route.ts");
 const { POST: testPost } = await import("../src/app/api/push/test/route.ts");
 const { GET: vapidGet } = await import("../src/app/api/push/vapid-key/route.ts");
@@ -465,6 +467,38 @@ test("POST /api/push/subscribe re-subscribing the same endpoint upserts in place
   assert.ok(stored.p256dh!.startsWith("enc:v1:"));
   assert.equal(decryptToken(stored.p256dh!, "p"), "second-p256", "the rotated key must be re-encrypted, single-pass");
   assert.equal(decryptToken(stored.auth!, "a"), "second-auth");
+});
+
+test("DELETE /api/push/subscribe by endpoint removes the caller's row even when the push service's DNS is down (no resolve needed)", async () => {
+  const { userId, token } = await mintSession();
+  const other = await mintSession();
+  // A hostname never resolved elsewhere in this file, so no cached success can mask the outage.
+  const endpoint = "https://updates.push.services.mozilla.com/wpush/v2/dns-outage";
+  const mine = seedWebSub(userId, "unused");
+  mine.endpoint = endpoint;
+  const theirs = seedWebSub(other.userId, "unused-2");
+  theirs.endpoint = "https://updates.push.services.mozilla.com/wpush/v2/other";
+
+  dnsDown = true;
+  try {
+    const res = await callRoute(subscribeDelete, pushReq("subscribe", { method: "DELETE", token, body: { endpoint } }));
+    assert.equal(res.status, 200, "a DNS failure must not turn an opt-out into a 400");
+    assert.deepEqual(await res.json(), { ok: true });
+  } finally {
+    dnsDown = false;
+  }
+  assert.equal(subRows.some((r) => r.id === mine.id), false, "the caller's subscription row must be deleted");
+  assert.equal(subRows.some((r) => r.id === theirs.id), true, "another user's row is untouched");
+
+  // Canonicalization still matches the stored key: a bare-origin endpoint loses only its trailing slash.
+  const bare = seedWebSub(userId, "bare");
+  bare.endpoint = "https://fcm.googleapis.com";
+  const res2 = await callRoute(subscribeDelete, pushReq("subscribe", { method: "DELETE", token, body: { endpoint: "https://FCM.googleapis.com/" } }));
+  assert.equal(res2.status, 200);
+  assert.equal(subRows.some((r) => r.id === bare.id), false, "bare-origin endpoint canonicalizes to the stored key");
+
+  const bad = await callRoute(subscribeDelete, pushReq("subscribe", { method: "DELETE", token, body: { endpoint: "not a url" } }));
+  assert.equal(bad.status, 400);
 });
 
 test("POST /api/push/subscribe rejects malformed and unsafe subscriptions with 400, writing nothing", async () => {

@@ -14,45 +14,57 @@ import { CONTENT_RATING_CAPS } from "@/lib/content-rating";
 import { useModalA11y } from "@/hooks/use-modal-a11y";
 import {
   AdminToggleRow,
-  roleLabel,
+  roleLabelKey,
   type InstanceGrantMap,
   type MediaServerGrants,
   type NamedInstance,
   type RestrictedMediaInstance,
   type User,
 } from "./shared";
+import { useT } from "@/components/i18n/i18n-provider";
 
-const PERMISSION_GROUPS: { title: string; bits: { key: keyof typeof Permission; label: string }[] }[] = [
+const PERMISSION_GROUPS: { titleKey: string; bits: { key: keyof typeof Permission }[] }[] = [
   {
-    title: "Request",
+    titleKey: "adminManage.perm.group.request",
     bits: [
-      { key: "REQUEST", label: "Request (all media)" },
-      { key: "REQUEST_MOVIE", label: "Request movies" },
-      { key: "REQUEST_TV", label: "Request TV" },
+      { key: "REQUEST" },
+      { key: "REQUEST_MOVIE" },
+      { key: "REQUEST_TV" },
     ],
   },
   {
-    title: "Auto-approve",
+    titleKey: "adminManage.perm.group.autoApprove",
     bits: [
-      { key: "AUTO_APPROVE", label: "Auto-approve (all)" },
-      { key: "AUTO_APPROVE_MOVIE", label: "Auto-approve movies" },
-      { key: "AUTO_APPROVE_TV", label: "Auto-approve TV" },
+      { key: "AUTO_APPROVE" },
+      { key: "AUTO_APPROVE_MOVIE" },
+      { key: "AUTO_APPROVE_TV" },
     ],
   },
   {
-    title: "Manage",
+    // File a request when the user adds a title to their watchlist (Summonarr or
+    // Plex). The request still needs the Request bits above and goes through quota,
+    // blacklist and approval like any other — this only automates the click.
+    titleKey: "adminManage.perm.group.autoRequest",
     bits: [
-      { key: "MANAGE_REQUESTS", label: "Manage requests" },
-      { key: "MANAGE_USERS", label: "Manage users" },
-      { key: "MANAGE_ISSUES", label: "Manage issues" },
+      { key: "AUTO_REQUEST" },
+      { key: "AUTO_REQUEST_MOVIE" },
+      { key: "AUTO_REQUEST_TV" },
     ],
   },
   {
-    title: "Other",
+    titleKey: "adminManage.perm.group.manage",
     bits: [
-      { key: "REQUEST_ON_BEHALF", label: "Request on behalf of others" },
-      { key: "QUOTA_UNLIMITED", label: "Exempt from request quotas" },
-      { key: "REQUEST_ADVANCED", label: "Choose quality profile at request" },
+      { key: "MANAGE_REQUESTS" },
+      { key: "MANAGE_USERS" },
+      { key: "MANAGE_ISSUES" },
+    ],
+  },
+  {
+    titleKey: "adminManage.perm.group.other",
+    bits: [
+      { key: "REQUEST_ON_BEHALF" },
+      { key: "QUOTA_UNLIMITED" },
+      { key: "REQUEST_ADVANCED" },
     ],
   },
 ];
@@ -61,15 +73,15 @@ const PERMISSION_GROUPS: { title: string; bits: { key: keyof typeof Permission; 
 // show4k). Exposes every 4K bit defined in the permission model, including the
 // per-type auto-approve bits so an admin can grant "auto-approve 4K movies" (or
 // TV) without the blanket AUTO_APPROVE_4K.
-const PERMISSION_GROUP_4K: { title: string; bits: { key: keyof typeof Permission; label: string }[] } = {
-  title: "4K",
+const PERMISSION_GROUP_4K: { titleKey: string; bits: { key: keyof typeof Permission }[] } = {
+  titleKey: "adminManage.perm.group.fourK",
   bits: [
-    { key: "REQUEST_4K", label: "Request 4K (all)" },
-    { key: "REQUEST_4K_MOVIE", label: "Request 4K movies" },
-    { key: "REQUEST_4K_TV", label: "Request 4K TV" },
-    { key: "AUTO_APPROVE_4K", label: "Auto-approve 4K (all)" },
-    { key: "AUTO_APPROVE_4K_MOVIE", label: "Auto-approve 4K movies" },
-    { key: "AUTO_APPROVE_4K_TV", label: "Auto-approve 4K TV" },
+    { key: "REQUEST_4K" },
+    { key: "REQUEST_4K_MOVIE" },
+    { key: "REQUEST_4K_TV" },
+    { key: "AUTO_APPROVE_4K" },
+    { key: "AUTO_APPROVE_4K_MOVIE" },
+    { key: "AUTO_APPROVE_4K_TV" },
   ],
 };
 
@@ -93,6 +105,7 @@ function QuotaRow({
   // "Movie" / "TV" — names the inputs, which otherwise only carry placeholders.
   noun: string;
 }) {
+  const t = useT();
   // Enter commits the field the same way leaving it does. The inputs are never
   // disabled while another field saves: that knocked keyboard focus out of the
   // field the admin had just tabbed into.
@@ -109,28 +122,28 @@ function QuotaRow({
         type="number"
         min={0}
         inputMode="numeric"
-        placeholder="limit"
-        aria-label={`${noun} request limit`}
+        placeholder={t("adminManage.perm.quota.limitPlaceholder")}
+        aria-label={t("adminManage.perm.quota.limitAria", { noun })}
         value={limit}
         onChange={(e) => onLimit(e.target.value)}
         onBlur={onBlurLimit}
         onKeyDown={commitOnEnter(onBlurLimit)}
         className="w-16 rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-200 disabled:opacity-50"
       />
-      <span className="text-[10px] text-zinc-500">per</span>
+      <span className="text-[10px] text-zinc-500">{t("adminManage.perm.quota.per")}</span>
       <input
         type="number"
         min={1}
         inputMode="numeric"
-        placeholder="days"
-        aria-label={`${noun} quota window in days`}
+        placeholder={t("adminManage.perm.quota.daysPlaceholder")}
+        aria-label={t("adminManage.perm.quota.daysAria", { noun })}
         value={days}
         onChange={(e) => onDays(e.target.value)}
         onBlur={onBlurDays}
         onKeyDown={commitOnEnter(onBlurDays)}
         className="w-16 rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-200 disabled:opacity-50"
       />
-      <span className="text-[10px] text-zinc-500">days</span>
+      <span className="text-[10px] text-zinc-500">{t("adminManage.perm.quota.days")}</span>
     </div>
   );
 }
@@ -154,6 +167,7 @@ export function PermissionsModal({
   // then renders nothing at all rather than an empty heading.
   mediaInstances?: RestrictedMediaInstance[];
 }) {
+  const t = useT();
   const router = useRouter();
   const [perms, setPerms] = useState<bigint>(() => parsePermissions(u.permissions));
   const [grants, setGrants] = useState<InstanceGrantMap>(u.instanceGrants);
@@ -223,7 +237,7 @@ export function PermissionsModal({
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
         rollback();
-        setError(data?.error ?? `Failed (${res.status})`);
+        setError(data?.error ?? t("adminManage.notif.failed", { status: res.status }));
         return;
       }
       router.refresh();
@@ -232,7 +246,7 @@ export function PermissionsModal({
       // !res.ok branch above never runs. Roll back here too, and swallow the
       // error: callers don't await this promise, so a throw would go unhandled.
       rollback();
-      setError("Network error — please try again.");
+      setError(t("adminManage.users.error.network"));
     } finally {
       setSaving(false);
     }
@@ -320,12 +334,12 @@ export function PermissionsModal({
         <div className="flex items-center justify-between mb-1">
           <h3 id={titleId} className="text-sm font-semibold text-zinc-100 flex items-center gap-2">
             <ShieldCheck className="w-4 h-4 text-zinc-400" />
-            Permissions &amp; Quota
+            {t("adminManage.users.menu.permissions")}
           </h3>
           <button
             ref={closeBtnRef}
             type="button"
-            aria-label="Close"
+            aria-label={t("adminManage.common.close")}
             onClick={handleClose}
             className="-m-2 inline-flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-100 transition-colors"
           >
@@ -336,8 +350,7 @@ export function PermissionsModal({
 
         {isSuperAdmin ? (
           <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 p-3 text-xs text-indigo-300">
-            This user is an <strong>Administrator</strong> with full access. Capabilities are
-            governed by the Admin role — change the role to adjust access.
+            {t("adminManage.perm.superAdmin.before")} <strong>{t("adminManage.perm.superAdmin.role")}</strong> {t("adminManage.perm.superAdmin.after")}
           </div>
         ) : (
           <>
@@ -346,7 +359,7 @@ export function PermissionsModal({
             <div className="flex items-center justify-end gap-1.5 mb-2">
               {confirmReset ? (
                 <>
-                  <span className="text-[11px] text-zinc-400">Replace all permissions?</span>
+                  <span className="text-[11px] text-zinc-400">{t("adminManage.perm.reset.confirm")}</span>
                   <button
                     type="button"
                     onClick={applyPreset}
@@ -354,14 +367,14 @@ export function PermissionsModal({
                     autoFocus
                     className="rounded-md px-2 py-1 text-[11px] font-medium bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-50"
                   >
-                    Reset
+                    {t("adminManage.perm.reset.button")}
                   </button>
                   <button
                     type="button"
                     onClick={() => setConfirmReset(false)}
                     className="rounded-md px-2 py-1 text-[11px] text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
                   >
-                    Cancel
+                    {t("adminManage.common.cancel")}
                   </button>
                 </>
               ) : (
@@ -371,17 +384,17 @@ export function PermissionsModal({
                   disabled={saving}
                   className="rounded-md px-2 py-1 text-[11px] text-indigo-400 hover:text-indigo-300 disabled:opacity-50"
                 >
-                  Reset to {roleLabel[u.role]} preset
+                  {t("adminManage.perm.reset.toPreset", { role: t(roleLabelKey[u.role]) })}
                 </button>
               )}
             </div>
             {groups.map((g) => (
-              <div key={g.title} className="mb-3">
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">{g.title}</p>
+              <div key={g.titleKey} className="mb-3">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">{t(g.titleKey)}</p>
                 {g.bits.map((b) => (
                   <AdminToggleRow
                     key={b.key}
-                    label={b.label}
+                    label={t(`adminManage.perm.bit.${b.key}`)}
                     checked={(perms & Permission[b.key]) !== 0n}
                     onChange={() => toggle(Permission[b.key])}
                     disabled={saving}
@@ -392,9 +405,9 @@ export function PermissionsModal({
 
             {namedInstances.length > 0 && (
               <div className="mb-3">
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">Instance access</p>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">{t("adminManage.perm.instance.title")}</p>
                 <p className="text-[10px] text-zinc-500 mb-2">
-                  Per-user access to named Radarr/Sonarr instances. The default instance is open to every requester; 4K uses the permission toggles above.
+                  {t("adminManage.perm.instance.description")}
                 </p>
                 {namedInstances.map((inst) => {
                   const open = !inst.restricted || inst.serverAll;
@@ -403,19 +416,19 @@ export function PermissionsModal({
                       <p className="text-[11px] text-zinc-400 mb-0.5">
                         {inst.name}
                         {open && (
-                          <span className="text-zinc-500"> — open to all requesters</span>
+                          <span className="text-zinc-500"> — {t("adminManage.perm.instance.open")}</span>
                         )}
                       </p>
                       {!open && (
                         <AdminToggleRow
-                          label={`Request on ${inst.name}`}
+                          label={t("adminManage.perm.instance.request", { name: inst.name })}
                           checked={grants[inst.slug]?.request === true}
                           onChange={() => toggleGrant(inst.slug, "request")}
                           disabled={saving}
                         />
                       )}
                       <AdminToggleRow
-                        label={`Auto-approve on ${inst.name}`}
+                        label={t("adminManage.perm.instance.autoApprove", { name: inst.name })}
                         checked={grants[inst.slug]?.autoApprove === true}
                         onChange={() => toggleGrant(inst.slug, "autoApprove")}
                         disabled={saving}
@@ -433,10 +446,9 @@ export function PermissionsModal({
                 canViewMediaInstance short-circuits on the ADMIN bit. */}
             {mediaInstances.length > 0 && (
               <div className="mb-3">
-                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">Media server access</p>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">{t("adminManage.perm.media.title")}</p>
                 <p className="text-[10px] text-zinc-500 mb-2">
-                  Restricted servers only. Without a grant this user never sees that server&apos;s library as available.
-                  Every other server is visible to everyone; admins see all of them.
+                  {t("adminManage.perm.media.description")}
                 </p>
                 {mediaInstances.map((inst) => (
                   <AdminToggleRow
@@ -453,43 +465,43 @@ export function PermissionsModal({
             )}
 
             <div className="mt-3">
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">Quota overrides</p>
-              <p className="text-[10px] text-zinc-500 mb-2">Blank = use the global quota. Limit = max requests in a rolling window of N days.</p>
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">{t("adminManage.perm.quota.title")}</p>
+              <p className="text-[10px] text-zinc-500 mb-2">{t("adminManage.perm.quota.description")}</p>
               <QuotaRow
-                label="Movies"
+                label={t("nav.movies")}
                 limit={quota.movieQuotaLimit}
                 days={quota.movieQuotaDays}
                 onLimit={(v) => setQuota((q) => ({ ...q, movieQuotaLimit: v }))}
                 onDays={(v) => setQuota((q) => ({ ...q, movieQuotaDays: v }))}
                 onBlurLimit={() => saveQuota("movieQuotaLimit", quota.movieQuotaLimit)}
                 onBlurDays={() => saveQuota("movieQuotaDays", quota.movieQuotaDays)}
-                noun="Movie"
+                noun={t("adminManage.perm.quota.movieNoun")}
               />
               <QuotaRow
-                label="TV"
+                label={t("adminManage.perm.quota.tv")}
                 limit={quota.tvQuotaLimit}
                 days={quota.tvQuotaDays}
                 onLimit={(v) => setQuota((q) => ({ ...q, tvQuotaLimit: v }))}
                 onDays={(v) => setQuota((q) => ({ ...q, tvQuotaDays: v }))}
                 onBlurLimit={() => saveQuota("tvQuotaLimit", quota.tvQuotaLimit)}
                 onBlurDays={() => saveQuota("tvQuotaDays", quota.tvQuotaDays)}
-                noun="TV"
+                noun={t("adminManage.perm.quota.tv")}
               />
             </div>
 
             <div className="mt-3">
-              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">Parental control</p>
-              <p className="text-[10px] text-zinc-500 mb-2">Maximum content rating this user can request. Applies to movies and TV; admins are exempt.</p>
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">{t("adminManage.perm.parental.title")}</p>
+              <p className="text-[10px] text-zinc-500 mb-2">{t("adminManage.perm.parental.description")}</p>
               <select
                 value={maxRating}
                 onChange={(e) => saveMaxRating(e.target.value)}
                 disabled={saving}
-                aria-label="Maximum content rating"
+                aria-label={t("adminManage.perm.parental.aria")}
                 className="text-xs rounded-md bg-zinc-800 border border-zinc-700 text-zinc-200 px-2 py-1.5"
               >
-                <option value="">No limit</option>
+                <option value="">{t("adminManage.perm.parental.noLimit")}</option>
                 {CONTENT_RATING_CAPS.map((r) => (
-                  <option key={r} value={r}>{r} and under</option>
+                  <option key={r} value={r}>{t("adminManage.perm.parental.andUnder", { rating: r })}</option>
                 ))}
               </select>
             </div>
@@ -498,7 +510,7 @@ export function PermissionsModal({
 
         {saving && (
           <p className="text-xs text-zinc-500 flex items-center gap-1 mt-3">
-            <Loader2 className="w-3 h-3 animate-spin" /> Saving…
+            <Loader2 className="w-3 h-3 animate-spin" /> {t("adminManage.common.saving")}
           </p>
         )}
 

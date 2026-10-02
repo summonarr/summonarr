@@ -7,6 +7,7 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { X, Film, Tv2, Bookmark } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { EmptyState } from "@/components/ui/design";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export interface WatchlistGridItem {
   tmdbId: number;
@@ -20,6 +21,7 @@ export interface WatchlistGridItem {
 export function WatchlistGrid({ initialItems }: { initialItems: WatchlistGridItem[] }) {
   const [items, setItems] = useState(initialItems);
   const [removing, setRemoving] = useState<string | null>(null);
+  const t = useT();
 
   async function remove(it: WatchlistGridItem) {
     const key = `${it.tmdbId}:${it.mediaType}`;
@@ -46,9 +48,9 @@ export function WatchlistGrid({ initialItems }: { initialItems: WatchlistGridIte
     return (
       <EmptyState
         icon={Bookmark}
-        title="Your watchlist is empty"
-        description="Browse Movies or TV and tap Watchlist to save titles for later."
-        cta={{ href: "/movies", label: "Browse movies" }}
+        title={t("personal.watchlist.emptyTitle")}
+        description={t("personal.watchlist.emptyDescription")}
+        cta={{ href: "/movies", label: t("personal.common.browseMovies") }}
       />
     );
   }
@@ -85,8 +87,8 @@ export function WatchlistGrid({ initialItems }: { initialItems: WatchlistGridIte
               type="button"
               onClick={() => remove(it)}
               disabled={removing === key}
-              aria-label={`Remove ${it.title} from watchlist`}
-              title="Remove from watchlist"
+              aria-label={t("personal.watchlist.removeAria", { title: it.title })}
+              title={t("personal.watchlist.remove")}
               className="ds-hover-tint absolute"
               style={{
                 top: 6,

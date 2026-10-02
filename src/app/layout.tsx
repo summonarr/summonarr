@@ -6,6 +6,11 @@ import { readSummonarrSession } from "@/lib/session-server";
 import { SummonarrSessionProvider } from "@/components/auth/summonarr-session-provider";
 import { ThemeProvider } from "@/components/theme/theme-provider";
 import { ToastProvider } from "@/components/ui/toast";
+import { I18nProvider } from "@/components/i18n/i18n-provider";
+import { getLocale } from "@/lib/i18n/server";
+import { CATALOGS } from "@/lib/i18n/catalogs";
+
+const EMPTY_MESSAGES = {};
 
 // Runs before first paint: applies the user's persisted theme/accent so there
 // is no flash. Mirrors the storage keys + validation in theme-provider.tsx.
@@ -80,9 +85,10 @@ export default async function RootLayout({
   // the matching `nonce` attribute on its emitted inline scripts so they pass CSP.
   // We reuse it for the anti-FOUC theme script below (strict-dynamic requires it).
   const nonce = (await headers()).get("x-nonce") ?? undefined;
+  const locale = await getLocale();
   return (
     <html
-      lang="en"
+      lang={locale}
       className={`${geist.variable} ${geistMono.variable} ${playfair.variable} h-full antialiased dark`}
       data-theme="dark"
       data-accent="indigo"
@@ -126,11 +132,20 @@ export default async function RootLayout({
         className="min-h-full"
         style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}
       >
-        <SummonarrSessionProvider initialSession={summonarrInitialSession}>
-          <ThemeProvider>
-            <ToastProvider>{children}</ToastProvider>
-          </ThemeProvider>
-        </SummonarrSessionProvider>
+        <I18nProvider
+          locale={locale}
+          messages={CATALOGS[locale]}
+          // No client-side fallback: tests/i18n.test.mts pins every locale to
+          // exactly English's key set, so the active catalog is always complete
+          // and shipping English beside it would only double the payload.
+          fallback={EMPTY_MESSAGES}
+        >
+          <SummonarrSessionProvider initialSession={summonarrInitialSession}>
+            <ThemeProvider>
+              <ToastProvider>{children}</ToastProvider>
+            </ThemeProvider>
+          </SummonarrSessionProvider>
+        </I18nProvider>
       </body>
     </html>
   );

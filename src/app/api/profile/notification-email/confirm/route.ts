@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { hashVerifyToken, parseVerifyIdentifier } from "@/lib/notification-email-verify";
+import { localeForRequest, translatorFor } from "@/lib/i18n/server-locale";
+import type { Locale } from "@/lib/i18n/locales";
 
 // PUBLIC (listed in isPublicPath in proxy.ts + ROUTE_EXCEPTIONS in
 // audit-routes.mts): the one-time token in the query IS the credential. The link
@@ -24,12 +26,12 @@ function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
-const PAGE_HEAD = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">`;
+const pageHead = (locale: Locale) => `<!doctype html><html lang="${locale}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">`;
 const BODY_OPEN = `<body style="font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;background:#09090b;color:#e4e4e7;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center">
 <div style="max-width:420px;margin:16px;padding:28px;text-align:center;border:1px solid #27272a;border-radius:12px;background:#18181b">`;
 
-function resultPage(title: string, message: string, ok: boolean): NextResponse {
-  const html = `${PAGE_HEAD}<title>${escapeHtml(title)}</title></head>
+function resultPage(locale: Locale, title: string, message: string, ok: boolean): NextResponse {
+  const html = `${pageHead(locale)}<title>${escapeHtml(title)}</title></head>
 ${BODY_OPEN}
 <div style="font-size:34px;line-height:1;margin-bottom:12px">${ok ? "✓" : "⚠"}</div>
 <h1 style="font-size:18px;font-weight:600;margin:0 0 8px">${escapeHtml(title)}</h1>
@@ -45,23 +47,25 @@ ${BODY_OPEN}
 // token so it can show the pending address. The form re-POSTs the token in its
 // action URL — a deliberate human click is what performs the bind.
 export async function GET(req: Request) {
+  const locale = localeForRequest(req);
+  const t = translatorFor(locale);
   const token = new URL(req.url).searchParams.get("token");
   if (!token) {
-    return resultPage("Invalid link", "This verification link is missing its token.", false);
+    return resultPage(locale, t("apiAuth.emailConfirm.invalidLinkTitle"), t("apiAuth.emailConfirm.missingToken"), false);
   }
 
   const row = await prisma.verificationToken.findUnique({ where: { token: hashVerifyToken(token) } });
   if (!row) {
-    return resultPage("Link expired or already used", "Request a fresh verification email from your Summonarr profile.", false);
+    return resultPage(locale, t("apiAuth.emailConfirm.usedTitle"), t("apiAuth.emailConfirm.usedBody"), false);
   }
 
   if (row.expires.getTime() < Date.now()) {
-    return resultPage("Link expired", "This verification link has expired. Request a new one from your profile.", false);
+    return resultPage(locale, t("apiAuth.emailConfirm.expiredTitle"), t("apiAuth.emailConfirm.expiredBody"), false);
   }
 
   const parsed = parseVerifyIdentifier(row.identifier);
   if (!parsed) {
-    return resultPage("Invalid link", "This verification link is malformed.", false);
+    return resultPage(locale, t("apiAuth.emailConfirm.invalidLinkTitle"), t("apiAuth.emailConfirm.malformed"), false);
   }
 
   // The token is opaque hex, but escape into the action URL defensively; the
@@ -73,13 +77,21 @@ export async function GET(req: Request) {
   // No-op when BASE_PATH is unset (the default).
   const basePath = process.env.BASE_PATH ?? "";
   const action = `${basePath}/api/profile/notification-email/confirm?token=${encodeURIComponent(token)}`;
-  const html = `${PAGE_HEAD}<title>Confirm notification email</title></head>
+  // The address is spliced in AFTER escaping the translated sentence, so the
+  // <strong> markup survives while the surrounding text stays escaped.
+  const EMAIL_SLOT = "%%EMAIL%%";
+  const bindLine = escapeHtml(t("apiAuth.emailConfirm.body", { email: EMAIL_SLOT })).replace(
+    EMAIL_SLOT,
+    // A function replacer: a string one would expand $-patterns in the address.
+    () => `<strong style="color:#e4e4e7">${escapeHtml(parsed.email)}</strong>`,
+  );
+  const html = `${pageHead(locale)}<title>${escapeHtml(t("apiAuth.emailConfirm.pageTitle"))}</title></head>
 ${BODY_OPEN}
 <div style="font-size:34px;line-height:1;margin-bottom:12px">✉</div>
-<h1 style="font-size:18px;font-weight:600;margin:0 0 8px">Confirm your notification email</h1>
-<p style="font-size:13px;color:#a1a1aa;line-height:1.55;margin:0 0 20px">Bind <strong style="color:#e4e4e7">${escapeHtml(parsed.email)}</strong> to your Summonarr account so request updates are sent there.</p>
+<h1 style="font-size:18px;font-weight:600;margin:0 0 8px">${escapeHtml(t("apiAuth.emailConfirm.heading"))}</h1>
+<p style="font-size:13px;color:#a1a1aa;line-height:1.55;margin:0 0 20px">${bindLine}</p>
 <form method="post" action="${escapeHtml(action)}">
-<button type="submit" style="display:inline-block;width:100%;padding:11px 16px;font-size:14px;font-weight:600;color:#09090b;background:#e4e4e7;border:none;border-radius:8px;cursor:pointer">Confirm this email</button>
+<button type="submit" style="display:inline-block;width:100%;padding:11px 16px;font-size:14px;font-weight:600;color:#09090b;background:#e4e4e7;border:none;border-radius:8px;cursor:pointer">${escapeHtml(t("apiAuth.emailConfirm.button"))}</button>
 </form>
 </div></body></html>`;
   return new NextResponse(html, {
@@ -90,40 +102,44 @@ ${BODY_OPEN}
 
 // POST: the actual bind. Only a human form submission reaches here.
 export async function POST(req: Request) {
+  const locale = localeForRequest(req);
+  const t = translatorFor(locale);
   const token = new URL(req.url).searchParams.get("token");
   if (!token) {
-    return resultPage("Invalid link", "This verification link is missing its token.", false);
+    return resultPage(locale, t("apiAuth.emailConfirm.invalidLinkTitle"), t("apiAuth.emailConfirm.missingToken"), false);
   }
 
   const row = await prisma.verificationToken.findUnique({ where: { token: hashVerifyToken(token) } });
   if (!row) {
-    return resultPage("Link expired or already used", "Request a fresh verification email from your Summonarr profile.", false);
+    return resultPage(locale, t("apiAuth.emailConfirm.usedTitle"), t("apiAuth.emailConfirm.usedBody"), false);
   }
 
   // Single-use: consume the token FIRST so a double-submit can't re-trigger the bind.
   await prisma.verificationToken.delete({ where: { token: row.token } }).catch(() => {});
 
   if (row.expires.getTime() < Date.now()) {
-    return resultPage("Link expired", "This verification link has expired. Request a new one from your profile.", false);
+    return resultPage(locale, t("apiAuth.emailConfirm.expiredTitle"), t("apiAuth.emailConfirm.expiredBody"), false);
   }
 
   const parsed = parseVerifyIdentifier(row.identifier);
   if (!parsed) {
-    return resultPage("Invalid link", "This verification link is malformed.", false);
+    return resultPage(locale, t("apiAuth.emailConfirm.invalidLinkTitle"), t("apiAuth.emailConfirm.malformed"), false);
   }
 
   try {
     // updateMany (not update): a since-deleted account no-ops instead of throwing;
     // the email value is never reflected into the HTML (avoids any injection).
-    await prisma.user.updateMany({ where: { id: parsed.userId }, data: { notificationEmail: parsed.email } });
+    // Scoped to a still-active, never-purged row: a link clicked after the account
+    // was disabled or purged must not write a personal address back onto it
+    // (guardrail 33 — a purge's scrub would otherwise be partly undone).
+    await prisma.user.updateMany({
+      where: { id: parsed.userId, deactivatedAt: null, purgedAt: null },
+      data: { notificationEmail: parsed.email },
+    });
   } catch (err) {
     console.error("[notif-email] confirm update failed:", err instanceof Error ? err.message : err);
-    return resultPage("Something went wrong", "We couldn't save your verified email. Try again from your profile.", false);
+    return resultPage(locale, t("apiAuth.emailConfirm.errorTitle"), t("apiAuth.emailConfirm.errorBody"), false);
   }
 
-  return resultPage(
-    "Email verified",
-    "Your notification email is confirmed. Summonarr will now send your request updates there. You can close this tab.",
-    true,
-  );
+  return resultPage(locale, t("apiAuth.emailConfirm.successTitle"), t("apiAuth.emailConfirm.successBody"), true);
 }

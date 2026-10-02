@@ -533,13 +533,15 @@ test("plex.tv returns no accounts (bad token): warn + skip — no binds, and NO 
   assert.deepEqual(errors, []);
 });
 
-test("a unique-violation race on the update is swallowed: not bound, not unmatched, run still completes", async () => {
-  // A concurrent live sign-in can bind the same plexUserId first; the loser's
-  // update throws P2002 and that user needs neither warning — they're fine.
+test("PIN: a unique violation on the update is WARNED (another user owns the plex id), not bound, run still completes", async () => {
+  // Candidates have a null plexUserId and Plex sign-in never binds an
+  // email-matched row, so a P2002 always means a DIFFERENT User row already
+  // holds this plex id. It used to be swallowed as a "benign race" — no warn,
+  // marker stamped — leaving the account unbound with no operator signal.
   //
   // Throws a REAL PrismaClientKnownRequestError: the catch discriminates on the
   // error code, so a plain Error whose message merely contains "P2002" would
-  // exercise the unexpected-error branch instead and pin nothing about races.
+  // exercise the unexpected-error branch instead and pin nothing here.
   candidateRows = [{ id: "u-race", email: "owner@example.com" }];
   configurePlex();
   respond = plexResponder({ owner: { id: 100, email: "owner@example.com" }, friends: [] });
@@ -552,10 +554,13 @@ test("a unique-violation race on the update is swallowed: not bound, not unmatch
 
   await runPlexUserBackfillIfNeeded();
 
-  assert.equal(userUpdates.length, 1); // the attempt was made…
-  assert.deepEqual(warns, []); // …but no bound-count warn and no REFUSED warn
-  assert.deepEqual(errors, []); // and the race is not an error
-  assert.equal(settingUpserts.length, 1); // the run completed → marker stamped
+  assert.equal(userUpdates.length, 1);
+  assert.equal(warns.length, 1, warns.join("\n"));
+  assert.ok(warns[0].includes("owner@example.com (u-race)"), warns[0]);
+  assert.ok(warns[0].includes("another user already holds that plexUserId"), warns[0]);
+  assert.ok(!warns.some((w) => w.includes("REFUSED")), "a conflict is not an email mismatch");
+  assert.deepEqual(errors, []);
+  assert.equal(settingUpserts.length, 1); // a retry cannot fix a conflict → marker stamped
 });
 
 test("PIN: a NON-race update failure is surfaced, not silently swallowed", async () => {

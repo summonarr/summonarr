@@ -10,6 +10,7 @@ import {
 import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 import { safeInternalPath } from "@/lib/safe-url";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 function getRedirectUri(base: string): string {
   return `${base.replace(/\/$/, "")}/api/auth/oidc/callback`;
@@ -23,17 +24,18 @@ function isSecureCookieContext(): boolean {
 }
 
 export async function GET(req: NextRequest) {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`oidc-start:${getClientIpKey(req.headers)}`, 20, 5 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many requests — try again later." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.common.tooManyRequestsTryLaterDot") }, { status: 429 });
   }
 
   if (!isOidcConfigured()) {
-    return NextResponse.json({ error: "OIDC sign-in is not configured" }, { status: 503 });
+    return NextResponse.json({ error: t("apiAuth.oidc.notConfigured") }, { status: 503 });
   }
 
   const authUrl = process.env.AUTH_URL;
   if (!authUrl) {
-    return NextResponse.json({ error: "Server misconfigured: AUTH_URL is not set" }, { status: 500 });
+    return NextResponse.json({ error: t("apiAuth.common.authUrlMissing") }, { status: 500 });
   }
 
   const redirectUri = getRedirectUri(authUrl);
@@ -53,7 +55,7 @@ export async function GET(req: NextRequest) {
     auth = await buildOidcAuthorization(redirectUri, returnTo, { native: isNative });
   } catch (err) {
     console.error("[oidc/start] discovery or URL build failed:", err);
-    return NextResponse.json({ error: "OIDC sign-in is unavailable" }, { status: 503 });
+    return NextResponse.json({ error: t("apiAuth.oidc.unavailable") }, { status: 503 });
   }
 
   const cookieValue = await signOidcStateCookie(auth.state);

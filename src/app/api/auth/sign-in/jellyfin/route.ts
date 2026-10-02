@@ -4,18 +4,20 @@ import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-in
 import { getConfiguredJellyfinUrl } from "@/lib/jellyfin-config";
 import { buildSignInResponse, disabledAccountResponse } from "@/lib/sign-in-response";
 import { readJsonCapped } from "@/lib/body-size";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Jellyfin sign-in body carries username/password/rememberMe/instance — 16 KB
 // cap protects this unauthenticated surface against memory-exhaustion DoS.
 const MAX_SIGNIN_BODY_BYTES = 16 * 1024;
 
 export async function POST(req: NextRequest) {
+  const t = translatorForRequest(req);
   const parsed = await readJsonCapped<Record<string, unknown>>(req, MAX_SIGNIN_BODY_BYTES);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
   if (typeof body.username !== "string" || typeof body.password !== "string") {
-    return NextResponse.json({ error: "Username and password required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.jellyfin.credentialsRequired") }, { status: 400 });
   }
 
   // `instance` is optional so older single-server clients that never send it
@@ -31,10 +33,10 @@ export async function POST(req: NextRequest) {
   // lookup later searches `serverInstance: "Remote"` and finds no row — wrongly
   // refusing a real user of that server.
   if (!isValidMediaInstanceSlug(instance)) {
-    return NextResponse.json({ error: "Invalid server" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.common.invalidServer") }, { status: 400 });
   }
   if (!(await getConfiguredJellyfinUrl(instance))) {
-    return NextResponse.json({ error: "Jellyfin sign-in is not configured for this server" }, { status: 503 });
+    return NextResponse.json({ error: t("apiAuth.jellyfin.signInNotConfigured") }, { status: 503 });
   }
 
   const user = await authorizeWithJellyfin(
@@ -47,14 +49,14 @@ export async function POST(req: NextRequest) {
     instance,
   );
   if (!user) {
-    return NextResponse.json({ error: "Invalid Jellyfin credentials" }, { status: 401 });
+    return NextResponse.json({ error: t("apiAuth.jellyfin.invalidCredentials") }, { status: 401 });
   }
 
   let result;
   try {
     result = await signInAndMintSession({ user, providerId: "jellyfin" });
   } catch (err) {
-    if (err instanceof AccountDeactivatedError) return disabledAccountResponse();
+    if (err instanceof AccountDeactivatedError) return disabledAccountResponse(t);
     throw err;
   }
   return buildSignInResponse(req, result);

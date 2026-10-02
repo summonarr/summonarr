@@ -1,0 +1,9 @@
+{
+  "search.filter.all": "All",
+  "search.filter.movies": "Movies",
+  "search.filter.tv": "TV",
+  "search.placeholder": "Search movies, TV, requests…",
+  "search.results": "Search results",
+  "search.unavailable": "Search is unavailable. Try again.",
+  "search.noMatches": "No matches"
+}

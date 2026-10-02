@@ -13,6 +13,10 @@
 //      has no exports entries for them (the bundler resolves them); the real
 //      files are the .js siblings, so the specifiers are rewritten. Tests get
 //      the REAL NextRequest/NextResponse.
+//   5. Bare `import x from "./file.json"` — the bundler treats it as a JSON
+//      module, Node requires `with { type: "json" }`. The i18n catalogs
+//      (src/lib/i18n/catalogs.ts) are imported this way, and every route that
+//      translates its responses loads them, so the attribute is supplied here.
 //
 // This file must stay dependency-free and side-effect-free beyond hook
 // registration: every test child process loads it.
@@ -55,30 +59,41 @@ function resolveTsPath(base) {
   return null;
 }
 
+function withJsonAttribute(result) {
+  if (result?.url?.endsWith(".json") && result.importAttributes?.type !== "json") {
+    return { ...result, importAttributes: { ...result.importAttributes, type: "json" } };
+  }
+  return result;
+}
+
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (specifier === "server-only" || specifier === "client-only") {
-      return { url: STUB, shortCircuit: true };
-    }
-    const rewrite = NEXT_REWRITES.get(specifier);
-    if (rewrite) {
-      return nextResolve(rewrite, context);
-    }
-    if (specifier.startsWith("@/")) {
-      const url = resolveTsPath(resolve(SRC, specifier.slice(2)));
-      if (url) return { url, shortCircuit: true };
-    }
-    if ((specifier.startsWith("./") || specifier.startsWith("../")) && context.parentURL?.startsWith("file:")) {
-      try {
-        return nextResolve(specifier, context);
-      } catch (err) {
-        if (err?.code !== "ERR_MODULE_NOT_FOUND") throw err;
-        const base = resolve(dirname(fileURLToPath(context.parentURL)), specifier);
-        const url = resolveTsPath(base);
-        if (url) return { url, shortCircuit: true };
-        throw err;
-      }
-    }
-    return nextResolve(specifier, context);
+    return withJsonAttribute(resolveSpecifier(specifier, context, nextResolve));
   },
 });
+
+function resolveSpecifier(specifier, context, nextResolve) {
+  if (specifier === "server-only" || specifier === "client-only") {
+    return { url: STUB, shortCircuit: true };
+  }
+  const rewrite = NEXT_REWRITES.get(specifier);
+  if (rewrite) {
+    return nextResolve(rewrite, context);
+  }
+  if (specifier.startsWith("@/")) {
+    const url = resolveTsPath(resolve(SRC, specifier.slice(2)));
+    if (url) return { url, shortCircuit: true };
+  }
+  if ((specifier.startsWith("./") || specifier.startsWith("../")) && context.parentURL?.startsWith("file:")) {
+    try {
+      return nextResolve(specifier, context);
+    } catch (err) {
+      if (err?.code !== "ERR_MODULE_NOT_FOUND") throw err;
+      const base = resolve(dirname(fileURLToPath(context.parentURL)), specifier);
+      const url = resolveTsPath(base);
+      if (url) return { url, shortCircuit: true };
+      throw err;
+    }
+  }
+  return nextResolve(specifier, context);
+}

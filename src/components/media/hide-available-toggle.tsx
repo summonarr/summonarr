@@ -1,6 +1,7 @@
 "use client";
 
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
+import { useT } from "@/components/i18n/i18n-provider";
 
 interface HideAvailableToggleProps {
   active: boolean;
@@ -10,6 +11,7 @@ export function HideAvailableToggle({ active }: HideAvailableToggleProps) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const t = useT();
 
   function toggle() {
     const params = new URLSearchParams(searchParams.toString());
@@ -43,7 +45,7 @@ export function HideAvailableToggle({ active }: HideAvailableToggleProps) {
         whiteSpace: "nowrap",
       }}
     >
-      Hide Available
+      {t("media.hideAvailable")}
     </button>
   );
 }

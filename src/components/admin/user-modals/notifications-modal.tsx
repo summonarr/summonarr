@@ -14,10 +14,12 @@ import {
 import { withBasePath } from "@/lib/base-path";
 import { useModalA11y } from "@/hooks/use-modal-a11y";
 import { AdminToggleRow, type User } from "./shared";
+import { useT } from "@/components/i18n/i18n-provider";
 
 type NotifKey = "notifyOnApproved" | "notifyOnAvailable" | "notifyOnDeclined" | "emailOnApproved" | "emailOnAvailable" | "emailOnDeclined" | "pushOnApproved" | "pushOnAvailable" | "pushOnDeclined" | "notifyOnIssue";
 
 export function NotificationsModal({ u, onClose }: { u: User; onClose: () => void }) {
+  const t = useT();
   const router = useRouter();
   const [prefs, setPrefs] = useState<Record<NotifKey, boolean>>({
     notifyOnApproved: u.notifyOnApproved,
@@ -55,7 +57,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as { error?: string } | null;
         setPrefs(prevPrefs);
-        setError(data?.error ?? `Failed (${res.status})`);
+        setError(data?.error ?? t("adminManage.notif.failed", { status: res.status }));
         return;
       }
       router.refresh();
@@ -64,7 +66,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
       // rollback above never runs. Undo the optimistic flip here too, or the
       // switch would show a preference the server never stored.
       setPrefs(prevPrefs);
-      setError("Network error — please try again.");
+      setError(t("adminManage.users.error.network"));
     } finally {
       setSaving(false);
     }
@@ -93,12 +95,12 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
             className="text-sm font-semibold text-zinc-100 flex items-center gap-2"
           >
             <Bell className="w-4 h-4 text-zinc-400" />
-            Notification Settings
+            {t("adminManage.notif.title")}
           </h3>
           <button
             ref={closeBtnRef}
             type="button"
-            aria-label="Close"
+            aria-label={t("adminManage.common.close")}
             onClick={onClose}
             className="-m-2 inline-flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-100 transition-colors"
           >
@@ -112,42 +114,42 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
             <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-1.5">
               <MessageCircle className="w-3 h-3" /> Discord
             </p>
-            <AdminToggleRow label="Request Approved" checked={prefs.notifyOnApproved} onChange={() => toggle("notifyOnApproved")} disabled={saving} />
-            <AdminToggleRow label="Now Available" checked={prefs.notifyOnAvailable} onChange={() => toggle("notifyOnAvailable")} disabled={saving} />
-            <AdminToggleRow label="Request Declined" checked={prefs.notifyOnDeclined} onChange={() => toggle("notifyOnDeclined")} disabled={saving} />
+            <AdminToggleRow label={t("adminManage.notif.approved")} checked={prefs.notifyOnApproved} onChange={() => toggle("notifyOnApproved")} disabled={saving} />
+            <AdminToggleRow label={t("adminManage.notif.available")} checked={prefs.notifyOnAvailable} onChange={() => toggle("notifyOnAvailable")} disabled={saving} />
+            <AdminToggleRow label={t("adminManage.notif.declined")} checked={prefs.notifyOnDeclined} onChange={() => toggle("notifyOnDeclined")} disabled={saving} />
           </div>
         ) : (
-          <p className="text-xs text-zinc-500 mb-3 italic">Discord not linked — no Discord notifications</p>
+          <p className="text-xs text-zinc-500 mb-3 italic">{t("adminManage.notif.discordNotLinked")}</p>
         )}
 
         <div className="mt-3">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-1.5">
-            <Mail className="w-3 h-3" /> Email
+            <Mail className="w-3 h-3" /> {t("adminManage.notif.email")}
           </p>
-          <AdminToggleRow label="Request Approved" checked={prefs.emailOnApproved} onChange={() => toggle("emailOnApproved")} disabled={saving} />
-          <AdminToggleRow label="Now Available" checked={prefs.emailOnAvailable} onChange={() => toggle("emailOnAvailable")} disabled={saving} />
-          <AdminToggleRow label="Request Declined" checked={prefs.emailOnDeclined} onChange={() => toggle("emailOnDeclined")} disabled={saving} />
+          <AdminToggleRow label={t("adminManage.notif.approved")} checked={prefs.emailOnApproved} onChange={() => toggle("emailOnApproved")} disabled={saving} />
+          <AdminToggleRow label={t("adminManage.notif.available")} checked={prefs.emailOnAvailable} onChange={() => toggle("emailOnAvailable")} disabled={saving} />
+          <AdminToggleRow label={t("adminManage.notif.declined")} checked={prefs.emailOnDeclined} onChange={() => toggle("emailOnDeclined")} disabled={saving} />
         </div>
 
         <div className="mt-3">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-1.5">
-            <Smartphone className="w-3 h-3" /> Push
+            <Smartphone className="w-3 h-3" /> {t("adminManage.notif.push")}
           </p>
-          <AdminToggleRow label="Request Approved" checked={prefs.pushOnApproved} onChange={() => toggle("pushOnApproved")} disabled={saving} />
-          <AdminToggleRow label="Now Available" checked={prefs.pushOnAvailable} onChange={() => toggle("pushOnAvailable")} disabled={saving} />
-          <AdminToggleRow label="Request Declined" checked={prefs.pushOnDeclined} onChange={() => toggle("pushOnDeclined")} disabled={saving} />
+          <AdminToggleRow label={t("adminManage.notif.approved")} checked={prefs.pushOnApproved} onChange={() => toggle("pushOnApproved")} disabled={saving} />
+          <AdminToggleRow label={t("adminManage.notif.available")} checked={prefs.pushOnAvailable} onChange={() => toggle("pushOnAvailable")} disabled={saving} />
+          <AdminToggleRow label={t("adminManage.notif.declined")} checked={prefs.pushOnDeclined} onChange={() => toggle("pushOnDeclined")} disabled={saving} />
         </div>
 
         <div className="mt-3">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-1.5">
-            <AlertTriangle className="w-3 h-3" /> Issues
+            <AlertTriangle className="w-3 h-3" /> {t("adminManage.notif.issues")}
           </p>
-          <AdminToggleRow label="New Issues & Replies" checked={prefs.notifyOnIssue} onChange={() => toggle("notifyOnIssue")} disabled={saving} />
+          <AdminToggleRow label={t("adminManage.notif.issueReplies")} checked={prefs.notifyOnIssue} onChange={() => toggle("notifyOnIssue")} disabled={saving} />
         </div>
 
         {saving && (
           <p className="text-xs text-zinc-500 flex items-center gap-1 mt-3">
-            <Loader2 className="w-3 h-3 animate-spin" /> Saving…
+            <Loader2 className="w-3 h-3 animate-spin" /> {t("adminManage.common.saving")}
           </p>
         )}
 

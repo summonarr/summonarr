@@ -1,6 +1,6 @@
 {
   "name": "summonarr",
-  "version": "0.27.1",
+  "version": "0.28.0",
   "private": true,
   "license": "AGPL-3.0-only",
   "engines": {
@@ -20,7 +20,7 @@
     "audit:openapi": "node scripts/audit-openapi.mts",
     "audit:tw-merge": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/audit-tw-merge.mts",
     "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tests/_loader.mjs --test tests/*.test.mts",
-    "smoke:security": "tsx scripts/smoke-test-security.ts",
+    "smoke:security": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./tests/_loader.mjs scripts/smoke-test-security.ts",
     "licenses:generate": "node scripts/generate-licenses.mts",
     "licenses:check": "node scripts/generate-licenses.mts --check",
     "postinstall": "node scripts/patch-eslint-plugin-react.mjs"
@@ -30,7 +30,7 @@
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "jose": "^6.2.12",
-    "next": "16.3.5",
+    "next": "16.3.6",
     "openid-client": "^6.8.8",
     "pg": "^8.23.0",
     "prisma": "^7.10.0",
@@ -39,18 +39,12 @@
   },
   "overrides": {
     "@babel/core": "^7.29.6",
-    "defu": ">=6.1.5",
-    "find-my-way": "^9.7.0",
-    "@hono/node-server": "^2.0.5",
-    "brace-expansion@5": "^5.0.9",
+    "brace-expansion@5": "^5.0.12",
     "minimatch": {
-      "brace-expansion": "^5.0.9"
+      "brace-expansion": "^5.0.12"
     },
-    "fast-uri": "^3.1.6",
-    "hono": "^4.12.27",
+    "fast-uri": "^3.1.8",
     "postcss": "^8.5.18",
-    "sharp": "^0.35.4",
-    "valibot": "^1.4.2",
     "nanoid": "^3.3.18",
     "deepmerge-ts": "^8.0.1",
     "mysql2": "^3.23.1",
@@ -59,17 +53,16 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.3",
     "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "eslint": "^10.10.0",
-    "eslint-config-next": "16.3.5",
+    "eslint": "^10.11.0",
+    "eslint-config-next": "16.3.6",
     "eslint-plugin-react-hooks": "^7.1.1",
     "playwright": "^1.63.0",
     "tailwindcss": "^4.3.1",
     "tsgo": "npm:typescript@^7.0.2",
-    "tsx": "^4.23.15",
     "typescript": "^6"
   }
 }

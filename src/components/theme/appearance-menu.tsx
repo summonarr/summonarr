@@ -2,6 +2,8 @@
 
 import { Moon, Sun } from "@/components/icons";
 import { ACCENTS, useTheme, type Accent, type Theme } from "./theme-provider";
+import { useLocale, useSetLocale, useT } from "@/components/i18n/i18n-provider";
+import { LOCALES, LOCALE_LABELS, isLocale, type Locale } from "@/lib/i18n/locales";
 import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
@@ -26,14 +28,6 @@ const ACCENT_SWATCH: Record<Accent, string> = {
   mono: "linear-gradient(135deg, oklch(0.97 0 0) 50%, oklch(0.18 0 0) 50%)",
 };
 
-const ACCENT_LABEL: Record<Accent, string> = {
-  indigo: "Indigo",
-  amber: "Amber",
-  emerald: "Emerald",
-  cyan: "Cyan",
-  rose: "Rose",
-  mono: "Mono",
-};
 
 const sectionHeaderStyle: React.CSSProperties = {
   padding: "6px 8px 2px",
@@ -56,7 +50,7 @@ function StandaloneRadioGroup<T extends string>({
 }: {
   label: string;
   value: T;
-  options: { value: T; label: string; swatch?: string; icon?: React.ReactNode }[];
+  options: { value: T; label: string; swatch?: string; icon?: React.ReactNode; lang?: string }[];
   onChange: (v: T) => void;
 }) {
   return (
@@ -73,6 +67,7 @@ function StandaloneRadioGroup<T extends string>({
             type="button"
             role="radio"
             aria-checked={selected}
+            lang={o.lang}
             onClick={() => onChange(o.value)}
             className="ds-tap flex items-center gap-2 font-medium transition-colors"
             style={{
@@ -116,34 +111,47 @@ function StandaloneRadioGroup<T extends string>({
  */
 export function AppearanceMenu({ standalone = false }: { standalone?: boolean } = {}) {
   const { theme, setTheme, accent, setAccent } = useTheme();
+  const t = useT();
+  const locale = useLocale();
+  const setLocale = useSetLocale();
+  const accentLabel = (a: Accent) => t(`appearance.accent.${a}`);
 
   if (standalone) {
     return (
       <>
         <div style={sectionHeaderStyle} aria-hidden="true">
-          Theme
+          {t("appearance.theme")}
         </div>
         <StandaloneRadioGroup<Theme>
-          label="Theme"
+          label={t("appearance.theme")}
           value={theme}
           onChange={setTheme}
           options={[
-            { value: "dark", label: "Dark", icon: <Moon className="size-4" /> },
-            { value: "light", label: "Light", icon: <Sun className="size-4" /> },
+            { value: "dark", label: t("appearance.dark"), icon: <Moon className="size-4" /> },
+            { value: "light", label: t("appearance.light"), icon: <Sun className="size-4" /> },
           ]}
         />
         <div style={sectionHeaderStyle} aria-hidden="true">
-          Accent
+          {t("appearance.accent")}
         </div>
         <StandaloneRadioGroup<Accent>
-          label="Accent color"
+          label={t("appearance.accentColor")}
           value={accent}
           onChange={setAccent}
           options={ACCENTS.map((a) => ({
             value: a,
-            label: ACCENT_LABEL[a],
+            label: accentLabel(a),
             swatch: ACCENT_SWATCH[a],
           }))}
+        />
+        <div style={sectionHeaderStyle} aria-hidden="true">
+          {t("appearance.language")}
+        </div>
+        <StandaloneRadioGroup<Locale>
+          label={t("appearance.language")}
+          value={locale}
+          onChange={setLocale}
+          options={LOCALES.map((l) => ({ value: l, label: LOCALE_LABELS[l], lang: l }))}
         />
       </>
     );
@@ -152,26 +160,26 @@ export function AppearanceMenu({ standalone = false }: { standalone?: boolean } 
   return (
     <>
       <div style={sectionHeaderStyle} aria-hidden="true">
-        Theme
+        {t("appearance.theme")}
       </div>
       <DropdownMenuRadioGroup
-        aria-label="Theme"
+        aria-label={t("appearance.theme")}
         value={theme}
         onValueChange={(v) => setTheme(v as Theme)}
       >
         <DropdownMenuRadioItem value="dark">
-          <Moon className="size-4" /> Dark
+          <Moon className="size-4" /> {t("appearance.dark")}
         </DropdownMenuRadioItem>
         <DropdownMenuRadioItem value="light">
-          <Sun className="size-4" /> Light
+          <Sun className="size-4" /> {t("appearance.light")}
         </DropdownMenuRadioItem>
       </DropdownMenuRadioGroup>
 
       <div style={sectionHeaderStyle} aria-hidden="true">
-        Accent
+        {t("appearance.accent")}
       </div>
       <DropdownMenuRadioGroup
-        aria-label="Accent color"
+        aria-label={t("appearance.accentColor")}
         value={accent}
         onValueChange={(v) => setAccent(v as Accent)}
       >
@@ -189,7 +197,24 @@ export function AppearanceMenu({ standalone = false }: { standalone?: boolean } 
                 flexShrink: 0,
               }}
             />
-            {ACCENT_LABEL[a]}
+            {accentLabel(a)}
+          </DropdownMenuRadioItem>
+        ))}
+      </DropdownMenuRadioGroup>
+
+      <div style={sectionHeaderStyle} aria-hidden="true">
+        {t("appearance.language")}
+      </div>
+      <DropdownMenuRadioGroup
+        aria-label={t("appearance.language")}
+        value={locale}
+        onValueChange={(v) => {
+          if (isLocale(v)) setLocale(v);
+        }}
+      >
+        {LOCALES.map((l) => (
+          <DropdownMenuRadioItem key={l} value={l} lang={l}>
+            {LOCALE_LABELS[l]}
           </DropdownMenuRadioItem>
         ))}
       </DropdownMenuRadioGroup>

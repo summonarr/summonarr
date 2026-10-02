@@ -8,6 +8,7 @@ import type { PlexCandidate, CandidateMatch, CandidatesResponse } from "@/app/ap
 import { withBasePath } from "@/lib/base-path";
 import { runFixMatch, type FixMatchProgressView } from "@/lib/client/fix-match";
 import { DEFAULT_MEDIA_INSTANCE, mediaInstanceLabel } from "@/lib/media-instances";
+import { useT } from "@/components/i18n/i18n-provider";
 
 type Phase = "idle" | "fetching" | "selecting" | "applying" | "success" | "conflated" | "error";
 
@@ -27,13 +28,13 @@ interface Props {
   serverInstance?: string;
 }
 
-const LEVEL_STYLES: Record<CandidateMatch, { border: string; bg: string; badge: string; label: string }> = {
-  exact:   { border: "border-l-2 border-green-500",       bg: "bg-green-500/5 hover:bg-green-500/10",    badge: "bg-green-500/20 text-green-400 border-green-500/40",    label: "Exact" },
-  strong:  { border: "border-l-2 border-emerald-500/70",  bg: "bg-emerald-500/5 hover:bg-emerald-500/10", badge: "bg-emerald-500/20 text-emerald-400 border-emerald-500/40", label: "Strong" },
-  likely:  { border: "border-l-2 border-yellow-500/70",   bg: "bg-yellow-500/5 hover:bg-yellow-500/10",  badge: "bg-yellow-500/20 text-yellow-400 border-yellow-500/40",  label: "Likely" },
-  possible:{ border: "border-l-2 border-zinc-500/50",     bg: "hover:bg-zinc-800",                       badge: "bg-zinc-700 text-zinc-400 border-zinc-600",              label: "Possible" },
-  wrong:   { border: "border-l-2 border-red-500/70",      bg: "bg-red-500/5 hover:bg-red-500/10",        badge: "bg-red-500/20 text-red-400 border-red-500/40",           label: "Wrong" },
-  unknown: { border: "border-l-2 border-transparent",     bg: "hover:bg-zinc-800",                       badge: "bg-zinc-800 text-zinc-500 border-zinc-700",              label: "Unknown" },
+const LEVEL_STYLES: Record<CandidateMatch, { border: string; bg: string; badge: string }> = {
+  exact:   { border: "border-l-2 border-green-500",       bg: "bg-green-500/5 hover:bg-green-500/10",    badge: "bg-green-500/20 text-green-400 border-green-500/40" },
+  strong:  { border: "border-l-2 border-emerald-500/70",  bg: "bg-emerald-500/5 hover:bg-emerald-500/10", badge: "bg-emerald-500/20 text-emerald-400 border-emerald-500/40" },
+  likely:  { border: "border-l-2 border-yellow-500/70",   bg: "bg-yellow-500/5 hover:bg-yellow-500/10",  badge: "bg-yellow-500/20 text-yellow-400 border-yellow-500/40" },
+  possible:{ border: "border-l-2 border-zinc-500/50",     bg: "hover:bg-zinc-800",                       badge: "bg-zinc-700 text-zinc-400 border-zinc-600" },
+  wrong:   { border: "border-l-2 border-red-500/70",      bg: "bg-red-500/5 hover:bg-red-500/10",        badge: "bg-red-500/20 text-red-400 border-red-500/40" },
+  unknown: { border: "border-l-2 border-transparent",     bg: "hover:bg-zinc-800",                       badge: "bg-zinc-800 text-zinc-500 border-zinc-700" },
 };
 
 // m:ss from a duration the poll already measured — no clock read in render
@@ -70,6 +71,7 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
     targetOverview, targetReleaseDate, targetVoteAverage, targetRuntime, targetGenres,
     arrConfirmedTmdbId, arrConfirmedTitle, plexFilePath, jellyfinFilePath,
   } = data;
+  const t = useT();
   const tmdbPoster = posterUrl(targetPosterPath, "w342");
 
   const resolvedArrTmdbId = arrTmdbId ?? arrConfirmedTmdbId;
@@ -83,27 +85,29 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
         <DialogBackdrop />
         <DialogPopup className="max-w-3xl">
           <DialogTitle className="sr-only">
-            {server === "jellyfin" ? "Confirm the new match for" : "Select the correct match for"} {targetTitle || `TMDB #${correctTmdbId}`}
+            {server === "jellyfin"
+              ? t("adminQueue.fixMatch.srConfirm", { title: targetTitle || `TMDB #${correctTmdbId}` })
+              : t("adminQueue.fixMatch.srSelect", { title: targetTitle || `TMDB #${correctTmdbId}` })}
           </DialogTitle>
 
         <div className="px-6 pt-5 pb-4 border-b border-zinc-700 flex-shrink-0 flex gap-4 items-start">
           {tmdbPoster && (
             <div className="flex-shrink-0 w-16 h-[96px] rounded overflow-hidden">
               {/* eslint-disable-next-line @next/next/no-img-element -- tiny 64×96 modal thumbnail; next/image optimizer round-trip isn't worth it for a one-shot picker */}
-              <img src={tmdbPoster} alt={targetTitle || "poster"} className="w-full h-full object-cover" />
+              <img src={tmdbPoster} alt={targetTitle || t("adminQueue.fixMatch.poster")} className="w-full h-full object-cover" />
             </div>
           )}
           <div className="flex-1 min-w-0">
             <p className="text-xs font-medium text-zinc-500 uppercase tracking-wide mb-1">
-              Target — TMDB #{correctTmdbId}
+              {t("adminQueue.fixMatch.target", { id: correctTmdbId })}
               {instanceLabel && (
-                <span className="ml-2 text-orange-400 normal-case">· on {instanceLabel}</span>
+                <span className="ml-2 text-orange-400 normal-case">· {t("adminQueue.fixMatch.onInstance", { instance: instanceLabel })}</span>
               )}
               {resolvedArrTmdbId === correctTmdbId && (
-                <span className="ml-2 text-emerald-400">· Radarr/Sonarr confirmed ✓</span>
+                <span className="ml-2 text-emerald-400">· {t("adminQueue.fixMatch.arrConfirmedShort")}</span>
               )}
               {resolvedArrTmdbId !== null && resolvedArrTmdbId !== correctTmdbId && (
-                <span className="ml-2 text-yellow-400">· Arr says TMDB #{resolvedArrTmdbId}</span>
+                <span className="ml-2 text-yellow-400">· {t("adminQueue.fixMatch.arrSays", { id: resolvedArrTmdbId })}</span>
               )}
             </p>
             <p className="text-base font-semibold text-zinc-100 leading-tight">{targetTitle || `TMDB #${correctTmdbId}`}</p>
@@ -112,7 +116,7 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
                 <span className="text-sm text-zinc-400">{targetReleaseDate?.slice(0, 10) ?? targetYear}</span>
               )}
               {targetRuntime && (
-                <span className="text-sm text-zinc-500">{targetRuntime} min</span>
+                <span className="text-sm text-zinc-500">{t("adminQueue.fixMatch.minutes", { minutes: targetRuntime })}</span>
               )}
               {targetVoteAverage != null && targetVoteAverage > 0 && (
                 <span className="text-sm text-zinc-500">★ {targetVoteAverage.toFixed(1)}</span>
@@ -155,7 +159,7 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
           <div className="mx-6 mt-3 flex-shrink-0 px-4 py-3 rounded border bg-yellow-500/8 border-yellow-500/25 text-yellow-400 space-y-2">
             <div className="flex items-center gap-2 text-xs">
               <span>⚠</span>
-              <span className="font-semibold">Radarr/Sonarr recommends a different match:</span>
+              <span className="font-semibold">{t("adminQueue.fixMatch.arrRecommends")}</span>
             </div>
             <div className="flex items-center justify-between gap-2">
               <div>
@@ -170,37 +174,34 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
         {resolvedArrTmdbId !== null && resolvedArrTmdbId === correctTmdbId && (
           <div className="mx-6 mt-3 flex-shrink-0 px-4 py-3 rounded border bg-emerald-500/8 border-emerald-500/25 text-xs text-emerald-400 flex items-center gap-2">
             <span>✓</span>
-            <span><span className="font-semibold">Radarr/Sonarr</span> confirms TMDB #{resolvedArrTmdbId} — matching candidates highlighted below.</span>
+            <span>{t("adminQueue.fixMatch.arrConfirmsHighlighted", { id: resolvedArrTmdbId })}</span>
           </div>
         )}
 
         {server === "jellyfin" ? (
           <div className="px-6 py-4 flex-1 overflow-y-auto">
             <p className="text-sm text-zinc-300 leading-snug">
-              Re-identify this Jellyfin item from{" "}
-              <span className="font-mono text-zinc-500">TMDB #{currentTmdbId}</span> to{" "}
-              <span className="font-mono text-zinc-100">TMDB #{correctTmdbId}</span>
-              {instanceLabel && <span className="text-orange-400"> on {instanceLabel}</span>}.
+              {t("adminQueue.fixMatch.reidentify", { from: currentTmdbId, to: correctTmdbId })}
+              {instanceLabel && <span className="text-orange-400"> {t("adminQueue.fixMatch.onInstance", { instance: instanceLabel })}</span>}.
             </p>
             <p className="text-xs text-zinc-500 mt-2 leading-snug">
-              Jellyfin applies this exact TMDB id and runs a full metadata refresh — there are no
-              alternative candidates to choose from. Large items can take a few minutes to confirm.
+              {t("adminQueue.fixMatch.jellyfinNote")}
             </p>
           </div>
         ) : (<>
         <div className="px-6 py-3 flex-shrink-0 flex items-center justify-between">
           <p className="text-xs font-medium text-zinc-500 uppercase tracking-wide">
-            Plex candidates — select the correct match
+            {t("adminQueue.fixMatch.plexCandidatesHeading")}
             {instanceLabel && (
-              <span className="ml-1.5 text-orange-400 normal-case">on {instanceLabel}</span>
+              <span className="ml-1.5 text-orange-400 normal-case">{t("adminQueue.fixMatch.onInstance", { instance: instanceLabel })}</span>
             )}
           </p>
-          <p className="text-xs text-zinc-500">{candidates.length} found</p>
+          <p className="text-xs text-zinc-500">{t("adminQueue.fixMatch.found", { count: candidates.length })}</p>
         </div>
 
         <div className="overflow-y-auto flex-1 divide-y divide-zinc-800/60">
           {candidates.length === 0 ? (
-            <p className="px-6 py-8 text-sm text-zinc-500 text-center">No candidates found in Plex.</p>
+            <p className="px-6 py-8 text-sm text-zinc-500 text-center">{t("adminQueue.fixMatch.noCandidates")}</p>
           ) : (
             candidates.map((c) => (
               <CandidateRow key={c.guid} candidate={c} onSelect={onSelect} disabled={applying}
@@ -215,16 +216,15 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
           <div className="mx-6 mb-3 flex-shrink-0 px-4 py-3 rounded border bg-zinc-800/60 border-zinc-700 text-xs text-zinc-300 space-y-1">
             <p>
               {progress?.remoteApplied
-                ? `✓ ${server === "jellyfin" ? "Jellyfin" : "Plex"} accepted the new match — waiting for its library refresh to finish`
-                : `Applying the match on ${server === "jellyfin" ? "Jellyfin" : "Plex"}…`}
+                ? t("adminQueue.fixMatch.accepted", { server: server === "jellyfin" ? "Jellyfin" : "Plex" })
+                : t("adminQueue.fixMatch.applyingOn", { server: server === "jellyfin" ? "Jellyfin" : "Plex" })}
               <span className="ml-2 font-mono text-zinc-500">{formatElapsed(progress?.elapsedMs ?? 0)}</span>
             </p>
             <p className="text-zinc-500">
-              Large shows can take several minutes — the server answers slowly while it refreshes. You can hide this;
-              Summonarr keeps tracking it and records the match the moment the server confirms it.
+              {t("adminQueue.fixMatch.slowNote")}
             </p>
             {(progress?.readFailures ?? 0) > 0 && (
-              <p className="text-yellow-400">The server isn&apos;t answering status reads right now (busy refreshing) — still waiting.</p>
+              <p className="text-yellow-400">{t("adminQueue.fixMatch.notAnswering")}</p>
             )}
           </div>
         )}
@@ -234,7 +234,7 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
             className="text-sm px-4 py-2 rounded border border-zinc-600 text-zinc-400
               hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
           >
-            {applying ? "Hide" : "Cancel"}
+            {applying ? t("adminQueue.fixMatch.hide") : t("shared.common.cancel")}
           </DialogClose>
           {server === "jellyfin" && (
             <button
@@ -245,7 +245,7 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
                 hover:bg-orange-500/20 hover:border-orange-500/50
                 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {applying ? "Applying…" : "Apply match"}
+              {applying ? t("adminQueue.fixMatch.applying") : t("adminQueue.fixMatch.applyMatch")}
             </button>
           )}
         </div>
@@ -267,6 +267,7 @@ function CandidateRow({
   arrTmdbId:      number | null;
   serverInstance: string;
 }) {
+  const t = useT();
   const hash     = candidate.guid.split("/").pop() ?? candidate.guid;
   // A relative Plex thumb path is server-local like the ratingKey, so the proxy
   // needs the same instance the candidates came from. Omitted when default.
@@ -293,7 +294,7 @@ function CandidateRow({
       <div className="flex-shrink-0 w-14 h-[84px] rounded overflow-hidden bg-zinc-800 flex items-center justify-center mt-0.5">
         {thumbSrc ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={thumbSrc} alt={candidate.name || "thumb"} className="w-full h-full object-cover" />
+          <img src={thumbSrc} alt={candidate.name || t("adminQueue.fixMatch.thumb")} className="w-full h-full object-cover" />
         ) : (
           <span className="text-zinc-500 text-xs">?</span>
         )}
@@ -302,7 +303,7 @@ function CandidateRow({
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-base font-medium text-zinc-200 leading-tight">
-            {(candidate.tmdbTitle ?? candidate.name) || "(untitled)"}
+            {(candidate.tmdbTitle ?? candidate.name) || t("adminQueue.fixMatch.untitled")}
           </span>
           {candidate.year && (
             <span className="text-sm text-zinc-500">({candidate.year})</span>
@@ -313,12 +314,12 @@ function CandidateRow({
             </span>
           ) : (
             <span className={`text-xs px-1.5 py-0.5 rounded border font-medium ${style.badge}`}>
-              {candidate.radarrConfirmed ? "Arr ✓" : style.label}
+              {candidate.radarrConfirmed ? "Arr ✓" : t(`adminQueue.fixMatch.level.${effectiveLevel}`)}
             </span>
           )}
           {isSuggested && !arrMatch && (
             <span className="text-xs px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30 font-medium">
-              Suggested
+              {t("adminQueue.fixMatch.suggested")}
             </span>
           )}
           {candidate.confidence > 0 && candidate.matchLevel !== "exact" && (
@@ -329,7 +330,7 @@ function CandidateRow({
         <div className="flex items-center gap-3 mt-1 flex-wrap">
           {candidate.tmdbRuntime && (
             <span className={`text-xs ${targetRuntime && Math.abs(candidate.tmdbRuntime - targetRuntime) <= 5 ? "text-green-500" : "text-zinc-500"}`}>
-              {candidate.tmdbRuntime} min
+              {t("adminQueue.fixMatch.minutes", { minutes: candidate.tmdbRuntime })}
               {targetRuntime && ` (${candidate.tmdbRuntime > targetRuntime ? "+" : ""}${candidate.tmdbRuntime - targetRuntime})`}
             </span>
           )}
@@ -371,7 +372,7 @@ function CandidateRow({
         )}
       </div>
 
-      <div className="flex-shrink-0 text-xs text-zinc-500 mt-1">Apply →</div>
+      <div className="flex-shrink-0 text-xs text-zinc-500 mt-1">{t("adminQueue.fixMatch.apply")}</div>
     </button>
   );
 }
@@ -385,6 +386,7 @@ export function FixMatchButton({
   serverInstance = DEFAULT_MEDIA_INSTANCE,
 }: Props) {
   const router = useRouter();
+  const t = useT();
   const [phase, setPhase]       = useState<Phase>("idle");
   const [errorMsg, setErrorMsg] = useState("");
   const [candidates, setCandidates] = useState<CandidatesResponse | null>(null);
@@ -429,7 +431,7 @@ export function FixMatchButton({
       setCandidates(json);
       setPhase("selecting");
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Unknown error");
+      setErrorMsg(err instanceof Error ? err.message : t("adminQueue.fixMatch.unknownError"));
       setPhase("error");
     }
   }
@@ -461,13 +463,13 @@ export function FixMatchButton({
       router.refresh();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return; // unmounted; job runs on
-      setErrorMsg(err instanceof Error ? err.message : "Unknown error");
+      setErrorMsg(err instanceof Error ? err.message : t("adminQueue.fixMatch.unknownError"));
       setPhase("error");
     }
   }
 
   if (phase === "success") {
-    return <span className="text-[10px] text-green-400 font-medium">Fixed — re-sync to confirm</span>;
+    return <span className="text-[10px] text-green-400 font-medium">{t("adminQueue.fixMatch.fixedResync")}</span>;
   }
 
   if (phase === "conflated") {
@@ -477,7 +479,7 @@ export function FixMatchButton({
             re-match, or an identical job was already running) — the Plex
             metadata-merge headline would misdescribe it. */}
         <span className="text-[10px] text-yellow-400 font-medium">
-          {server === "plex" ? "DB updated — Plex display unchanged" : "DB updated — see note"}
+          {server === "plex" ? t("adminQueue.fixMatch.dbUpdatedPlex") : t("adminQueue.fixMatch.dbUpdatedNote")}
         </span>
         <span className="text-[9px] text-zinc-500 leading-tight max-w-[200px]">{errorMsg}</span>
       </div>
@@ -513,15 +515,17 @@ export function FixMatchButton({
             disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {phase === "fetching"
-            ? "Loading…"
+            ? t("adminQueue.fixMatch.loading")
             : phase === "applying"
-              ? (progress?.remoteApplied ? `Confirming… ${formatElapsed(progress.elapsedMs)}` : "Applying…")
+              ? (progress?.remoteApplied
+                ? t("adminQueue.fixMatch.confirming", { elapsed: formatElapsed(progress.elapsedMs) })
+                : t("adminQueue.fixMatch.applying"))
               : instanceLabel ? `${label} · ${instanceLabel}` : label}
         </button>
         {phase === "error" && (
           <>
             <span className="text-[11px] text-red-400 leading-tight">{errorMsg}</span>
-            <button onClick={reset} className="text-[11px] text-zinc-500 hover:text-zinc-300 text-left">Dismiss</button>
+            <button onClick={reset} className="text-[11px] text-zinc-500 hover:text-zinc-300 text-left">{t("shared.common.dismiss")}</button>
           </>
         )}
       </div>

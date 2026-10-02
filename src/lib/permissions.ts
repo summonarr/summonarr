@@ -58,6 +58,17 @@ export const Permission = {
   // without it a request silently uses the target instance's configured default.
   // ADMIN always passes via the superbit.
   REQUEST_ADVANCED: 1n << 18n,
+
+  // ─── Watchlist auto-request ───────────────────────────────────────────────
+  // File a request automatically when the user adds a title to their Summonarr
+  // watchlist or their Plex watchlist (src/lib/auto-request.ts). Umbrella-or-
+  // specific like REQUEST. These grant only the AUTOMATION — the request itself
+  // still goes through the full request chokepoint (base REQUEST bits, instance
+  // access, quota, blacklist, content cap), so they never widen what a user can
+  // request. No preset carries them; an admin grants them per user.
+  AUTO_REQUEST: 1n << 19n,
+  AUTO_REQUEST_MOVIE: 1n << 20n,
+  AUTO_REQUEST_TV: 1n << 21n,
 } as const;
 
 export type PermissionValue = (typeof Permission)[keyof typeof Permission];
@@ -161,6 +172,20 @@ export function canAutoApprove(
     ? hasPermission(userPerms, [Permission.AUTO_APPROVE, Permission.AUTO_APPROVE_MOVIE])
     : hasPermission(userPerms, [Permission.AUTO_APPROVE, Permission.AUTO_APPROVE_TV]);
 }
+
+// May this permission set have its watchlist adds filed as requests for the
+// given media type? Umbrella-or-specific, ADMIN via the superbit (hasPermission).
+// Says nothing about whether the REQUEST itself is allowed — that is decided by
+// the request chokepoint, which every auto-request goes through.
+export function canAutoRequest(userPerms: bigint, mediaType: "MOVIE" | "TV"): boolean {
+  return mediaType === "MOVIE"
+    ? hasPermission(userPerms, [Permission.AUTO_REQUEST, Permission.AUTO_REQUEST_MOVIE])
+    : hasPermission(userPerms, [Permission.AUTO_REQUEST, Permission.AUTO_REQUEST_TV]);
+}
+
+// Any auto-request bit at all — the Plex watchlist cron's per-user prefilter.
+export const AUTO_REQUEST_MASK: bigint =
+  Permission.AUTO_REQUEST | Permission.AUTO_REQUEST_MOVIE | Permission.AUTO_REQUEST_TV;
 
 // ─── Per-instance grants (multi-instance Radarr/Sonarr) ─────────────────────
 // The default ("") instance is open to any requester; the legacy "4k" instance

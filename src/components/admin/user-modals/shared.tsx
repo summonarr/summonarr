@@ -48,6 +48,8 @@ export interface User {
   // (guardrail 16), and only the on/off state drives the UI.
   disabled: boolean;
   purged: boolean;
+  // Has an active second factor (TOTP or a passkey) — offers Reset two-factor.
+  mfaEnabled: boolean;
   // How the account authenticates, derived by the page via deriveUserSource
   // (src/lib/user-source.ts): "local" = passwordHash, "oidc" = an oidc Account
   // row, "jellyfin"/"plex" = the provider-pinned rest, "discord" = a shadow
@@ -81,10 +83,11 @@ export interface User {
   watchGrade: WatchGradeSummary | null;
 }
 
-export const roleLabel: Record<User["role"], string> = {
-  ADMIN:       "Admin",
-  ISSUE_ADMIN: "Issue Admin",
-  USER:        "User",
+// Catalog keys for the role names — translated at render (useT), never here.
+export const roleLabelKey: Record<User["role"], string> = {
+  ADMIN:       "adminManage.users.role.ADMIN",
+  ISSUE_ADMIN: "adminManage.users.role.ISSUE_ADMIN",
+  USER:        "adminManage.users.role.USER",
 };
 
 export function AdminToggleRow({ label, checked, onChange, disabled }: { label: string; checked: boolean; onChange: () => void; disabled: boolean }) {

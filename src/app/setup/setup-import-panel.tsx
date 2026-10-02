@@ -5,6 +5,7 @@ import { Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText } fro
 import { Button } from "@/components/ui/button";
 import { uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
 import { withBasePath } from "@/lib/base-path";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 const ENCRYPTED_MAGIC = "RBKBKP01";
 
@@ -31,6 +32,8 @@ type ImportResult =
 
 // First-run restore panel: validates + chunk-uploads an encrypted backup, then redirects to /login.
 export function SetupImportPanel() {
+  const t = useT();
+  const locale = useLocale();
   const [file, setFile] = useState<File | null>(null);
   const [encrypted, setEncrypted] = useState<boolean | null>(null);
   const [size, setSize] = useState<string | null>(null);
@@ -60,14 +63,14 @@ export function SetupImportPanel() {
       setSize(f.size > 1024 * 1024 ? `${mb} MB` : `${kb} KB`);
     } catch {
       if (pickedFileRef.current !== f) return;
-      setResult({ ok: false, error: "Could not read file" });
+      setResult({ ok: false, error: t("auth.restore.error.readFile") });
     }
   }
 
   async function handleImport() {
     if (!file) return;
     if (!encrypted) {
-      setResult({ ok: false, error: "Backup file is not an encrypted Summonarr dump." });
+      setResult({ ok: false, error: t("auth.restore.error.notEncrypted") });
       return;
     }
     setImporting(true);
@@ -117,12 +120,13 @@ export function SetupImportPanel() {
   return (
     <div className="space-y-4">
       <div className="space-y-2">
-        <p className="text-sm text-zinc-300">Restore from a previous Summonarr backup</p>
+        <p className="text-sm text-zinc-300">{t("auth.restore.title")}</p>
         <p className="text-xs text-zinc-500 leading-relaxed">
-          Upload a <code className="text-zinc-300">.sql.enc</code> file exported from another Summonarr instance.
-          The server decrypts it with the configured <code className="text-zinc-300">BACKUP_DB_PASSWORD</code> and
-          replaces the empty database — settings, accounts, library caches, and the original admin user are all
-          restored. Sign in afterwards with the credentials from the source server.
+          {t("auth.restore.description").split(/(\{\w+\})/).map((part, i) =>
+            part === "{ext}" ? <code key={i} className="text-zinc-300">.sql.enc</code>
+            : part === "{envVar}" ? <code key={i} className="text-zinc-300">BACKUP_DB_PASSWORD</code>
+            : part,
+          )}
         </p>
       </div>
 
@@ -154,12 +158,12 @@ export function SetupImportPanel() {
             </div>
             {encrypted === true && (
               <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-green-400">
-                <CheckCircle className="w-3 h-3" /> Valid header · RBKBKP01
+                <CheckCircle className="w-3 h-3" /> {t("auth.restore.validHeader", { magic: ENCRYPTED_MAGIC })}
               </span>
             )}
             {encrypted === false && (
               <span className="text-[10px] uppercase tracking-wider text-red-400">
-                Not encrypted · rejected
+                {t("auth.restore.notEncrypted")}
               </span>
             )}
           </>
@@ -167,7 +171,7 @@ export function SetupImportPanel() {
           <>
             <Upload className="w-5 h-5 text-zinc-500" />
             <span className="text-[11px] uppercase tracking-wider text-zinc-500">
-              Drop .sql.enc file or choose below
+              {t("auth.restore.drop")}
             </span>
           </>
         )}
@@ -180,7 +184,7 @@ export function SetupImportPanel() {
           ref={fileInputRef}
           type="file"
           accept=".enc"
-          aria-label="Backup file"
+          aria-label={t("auth.restore.fileLabel")}
           onChange={(e) => handleFileChange(e.target.files?.[0] ?? null)}
           className="sr-only"
           tabIndex={-1}
@@ -192,11 +196,11 @@ export function SetupImportPanel() {
           disabled={importing}
           onClick={() => fileInputRef.current?.click()}
         >
-          Choose file
+          {t("auth.restore.choose")}
         </Button>
         {file && (
           <Button type="button" variant="outline" className="min-h-11" disabled={importing} onClick={clearFile}>
-            Clear
+            {t("auth.restore.clear")}
           </Button>
         )}
       </div>
@@ -212,14 +216,14 @@ export function SetupImportPanel() {
             <>
               <Loader2 className="w-4 h-4 animate-spin mr-2" />
               {progress?.phase === "import"
-                ? "Importing…"
+                ? t("auth.restore.importing")
                 : progress
-                  ? `Uploading… ${Math.round((progress.uploaded / progress.total) * 100)}%`
-                  : "Starting…"}
+                  ? t("auth.restore.uploadingPercent", { percent: Math.round((progress.uploaded / progress.total) * 100) })
+                  : t("auth.restore.starting")}
             </>
           ) : (
             <>
-              <Upload className="w-4 h-4 mr-2" /> Restore from file
+              <Upload className="w-4 h-4 mr-2" /> {t("auth.restore.submit")}
             </>
           )}
         </Button>
@@ -239,7 +243,7 @@ export function SetupImportPanel() {
               {(progress.total / (1024 * 1024)).toFixed(1)} MB
             </span>
             <span>
-              {progress.phase === "import" ? "Decrypting + restoring on server…" : "Uploading"}
+              {progress.phase === "import" ? t("auth.restore.restoringOnServer") : t("auth.restore.uploading")}
             </span>
           </div>
         </div>
@@ -248,15 +252,15 @@ export function SetupImportPanel() {
       {result?.summary && (
         <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3 space-y-3">
           <div className="text-[10px] uppercase tracking-wider text-zinc-500 font-mono">
-            Result · {result.ok ? "import complete · redirecting…" : "import completed with errors"}
+            {result.ok ? t("auth.restore.resultOk") : t("auth.restore.resultErrors")}
           </div>
           <div className="grid grid-cols-4 gap-2">
             {[
-              { label: "Total", value: result.summary.total, color: "text-zinc-200" },
-              { label: "Executed", value: result.summary.executed, color: "text-green-400" },
-              { label: "Skipped", value: result.summary.skipped, color: "text-amber-400" },
+              { label: t("auth.restore.kpi.total"), value: result.summary.total, color: "text-zinc-200" },
+              { label: t("auth.restore.kpi.executed"), value: result.summary.executed, color: "text-green-400" },
+              { label: t("auth.restore.kpi.skipped"), value: result.summary.skipped, color: "text-amber-400" },
               {
-                label: "Errors",
+                label: t("auth.restore.kpi.errors"),
                 value: result.summary.errors,
                 color: result.summary.errors > 0 ? "text-red-400" : "text-zinc-500",
               },
@@ -266,7 +270,7 @@ export function SetupImportPanel() {
                   {kpi.label}
                 </div>
                 <div className={`text-base font-semibold tabular-nums ${kpi.color}`}>
-                  {kpi.value.toLocaleString()}
+                  {kpi.value.toLocaleString(locale)}
                 </div>
               </div>
             ))}
@@ -284,7 +288,7 @@ export function SetupImportPanel() {
                 </li>
               ))}
               {result.errors.length > 10 && (
-                <li className="text-zinc-500">…and {result.errors.length - 10} more</li>
+                <li className="text-zinc-500">{t("auth.restore.moreErrors", { count: result.errors.length - 10 })}</li>
               )}
             </ul>
           )}

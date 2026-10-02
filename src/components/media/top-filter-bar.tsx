@@ -5,6 +5,8 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import { X } from "@/components/icons";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { FilterBar as Segments } from "@/components/ui/design";
+import { useT } from "@/components/i18n/i18n-provider";
+import { voteCountLabel } from "./filter-bar";
 
 interface TopFilterBarProps {
   activeMediaType?: string;
@@ -20,12 +22,14 @@ interface TopFilterBarProps {
   maxYear: number;
 }
 
-const SORT_OPTIONS = [
-  { value: "",           label: "Sort: IMDb" },
-  { value: "letterboxd", label: "Sort: Letterboxd" },
-  { value: "rt",         label: "Sort: Rotten Tomatoes" },
-  { value: "trakt",      label: "Sort: Trakt" },
-  { value: "mdblist",    label: "Sort: MDBList Score" },
+// Chip labels for the active sort ("Sort: …"). Brand names stay literal; the
+// MDBList one carries a translatable word, so it is a catalog key.
+const SORT_OPTIONS: { value: string; label?: string; labelKey?: string }[] = [
+  { value: "",           label: "IMDb" },
+  { value: "letterboxd", label: "Letterboxd" },
+  { value: "rt",         label: "Rotten Tomatoes" },
+  { value: "trakt",      label: "Trakt" },
+  { value: "mdblist",    labelKey: "media.filter.mdblistScore" },
 ];
 
 // Concise labels for the segmented sort control (SORT_OPTIONS keeps the
@@ -38,8 +42,8 @@ const SORT_SEGMENTS = [
   { value: "mdblist", label: "MDBList" },
 ];
 
-const IMDB_OPTIONS = [
-  { value: "",    label: "Any IMDb" },
+const IMDB_OPTIONS: { value: string; label?: string }[] = [
+  { value: "" },
   { value: "6",   label: "IMDb 6+" },
   { value: "6.5", label: "IMDb 6.5+" },
   { value: "7",   label: "IMDb 7+" },
@@ -49,14 +53,7 @@ const IMDB_OPTIONS = [
   { value: "9",   label: "IMDb 9+" },
 ];
 
-const VOTE_OPTIONS = [
-  { value: "",      label: "Any Votes" },
-  { value: "500",   label: "500+ votes" },
-  { value: "1000",  label: "1,000+ votes" },
-  { value: "5000",  label: "5,000+ votes" },
-  { value: "10000", label: "10,000+ votes" },
-  { value: "50000", label: "50,000+ votes" },
-];
+const VOTE_OPTIONS = ["", "500", "1000", "5000", "10000", "50000"];
 
 function buildYears(maxYear: number): string[] {
   return Array.from({ length: maxYear - 1899 }, (_, i) => String(maxYear - i));
@@ -75,6 +72,7 @@ export function TopFilterBar({
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const t = useT();
   const years = useMemo(() => buildYears(maxYear), [maxYear]);
 
   // Filter changes we've pushed but the URL hasn't caught up with yet.
@@ -125,9 +123,9 @@ export function TopFilterBar({
     <div className="flex flex-col gap-3 mb-6">
       <Segments
         segments={[
-          { value: "both", label: "All" },
-          { value: "movies", label: "Movies" },
-          { value: "tv", label: "TV Shows" },
+          { value: "both", label: t("browse.type.all") },
+          { value: "movies", label: t("nav.movies") },
+          { value: "tv", label: t("nav.tvShows") },
         ]}
         active={activeMediaType ?? "both"}
         onChange={(v) =>
@@ -145,42 +143,42 @@ export function TopFilterBar({
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2 items-center">
         <StyledSelect
-          aria-label="Minimum IMDb rating"
+          aria-label={t("media.filter.minImdbLabel")}
           value={activeMinImdb ?? ""}
           onChange={(e) => push({ minImdb: e.target.value || undefined })}
         >
           {IMDB_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>{o.label}</option>
+            <option key={o.value} value={o.value}>{o.label ?? t("media.filter.anyImdb")}</option>
           ))}
         </StyledSelect>
 
         <StyledSelect
-          aria-label="Minimum vote count"
+          aria-label={t("media.filter.minVotesLabel")}
           value={activeMinVotes ?? ""}
           onChange={(e) => push({ minVotes: e.target.value || undefined })}
         >
-          {VOTE_OPTIONS.map((o) => (
-            <option key={o.value} value={o.value}>{o.label}</option>
+          {VOTE_OPTIONS.map((v) => (
+            <option key={v} value={v}>{voteCountLabel(t, v)}</option>
           ))}
         </StyledSelect>
 
         <StyledSelect
-          aria-label="From year"
+          aria-label={t("media.filter.fromYearLabel")}
           value={activeFromYear ?? ""}
           onChange={(e) => push({ fromYear: e.target.value || undefined })}
         >
-          <option value="">From Year</option>
+          <option value="">{t("media.filter.fromYear")}</option>
           {years.map((y) => (
             <option key={y} value={y}>{y}</option>
           ))}
         </StyledSelect>
 
         <StyledSelect
-          aria-label="To year"
+          aria-label={t("media.filter.toYearLabel")}
           value={activeToYear ?? ""}
           onChange={(e) => push({ toYear: e.target.value || undefined })}
         >
-          <option value="">To Year</option>
+          <option value="">{t("media.filter.toYear")}</option>
           {years.map((y) => (
             <option key={y} value={y}>{y}</option>
           ))}
@@ -205,7 +203,7 @@ export function TopFilterBar({
             border: `1px solid ${activeHideAvailable ? "var(--ds-accent-ring)" : "var(--ds-border)"}`,
           }}
         >
-          Hide Available
+          {t("media.hideAvailable")}
         </button>
 
         {hasFilters && (
@@ -224,7 +222,7 @@ export function TopFilterBar({
             }}
           >
             <X style={{ width: 12, height: 12 }} />
-            Clear filters
+            {t("browse.clearFilters")}
           </button>
         )}
       </div>
@@ -232,11 +230,15 @@ export function TopFilterBar({
       {hasFilters && (
         <div className="flex flex-wrap gap-1.5">
           {activeMediaType && (
-            <Chip label={activeMediaType === "movies" ? "Movies only" : "TV only"} onRemove={() => push({ mediaType: undefined })} />
+            <Chip label={activeMediaType === "movies" ? t("media.filter.moviesOnly") : t("media.filter.tvOnly")} onRemove={() => push({ mediaType: undefined })} />
           )}
           {activeSortBy && (
             <Chip
-              label={SORT_OPTIONS.find((o) => o.value === activeSortBy)?.label ?? `Sort: ${activeSortBy}`}
+              label={(() => {
+                const o = SORT_OPTIONS.find((x) => x.value === activeSortBy);
+                const name = o ? (o.labelKey ? t(o.labelKey) : (o.label ?? activeSortBy)) : activeSortBy;
+                return t("media.filter.sortChip", { label: name });
+              })()}
               onRemove={() => push({ sortBy: undefined })}
             />
           )}
@@ -248,18 +250,18 @@ export function TopFilterBar({
           )}
           {activeMinVotes && (
             <Chip
-              label={VOTE_OPTIONS.find((o) => o.value === activeMinVotes)?.label ?? `${activeMinVotes}+ votes`}
+              label={voteCountLabel(t, activeMinVotes)}
               onRemove={() => push({ minVotes: undefined })}
             />
           )}
           {activeFromYear && (
-            <Chip label={`From ${activeFromYear}`} onRemove={() => push({ fromYear: undefined })} />
+            <Chip label={t("media.filter.fromChip", { year: activeFromYear })} onRemove={() => push({ fromYear: undefined })} />
           )}
           {activeToYear && (
-            <Chip label={`To ${activeToYear}`} onRemove={() => push({ toYear: undefined })} />
+            <Chip label={t("media.filter.toChip", { year: activeToYear })} onRemove={() => push({ toYear: undefined })} />
           )}
           {activeHideAvailable && (
-            <Chip label="Hiding Available" onRemove={() => push({ hideAvailable: undefined })} />
+            <Chip label={t("media.filter.hidingAvailable")} onRemove={() => push({ hideAvailable: undefined })} />
           )}
         </div>
       )}
@@ -268,14 +270,15 @@ export function TopFilterBar({
 }
 
 function Chip({ label, onRemove }: { label: string; onRemove: () => void }) {
+  const t = useT();
   return (
     <span className="ds-chip ds-chip-accent">
       {label}
       <button
         type="button"
         onClick={onRemove}
-        aria-label={`Remove filter: ${label}`}
-        title={`Remove filter: ${label}`}
+        aria-label={t("media.filter.remove", { label })}
+        title={t("media.filter.remove", { label })}
         className="ds-hover-tint inline-flex items-center justify-center shrink-0"
         style={{
           // A 24px box is easy to tap. The negative margins shrink the space it

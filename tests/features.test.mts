@@ -56,7 +56,12 @@ const LEGACY_KEYS = ["motdEnabled", "playHistoryEnabled", "trashGuidesEnabled"] 
 // no data to show on a fresh install. This is a short, named exception to the
 // rule "every feature.* flag defaults ON" — unrelated to LEGACY_KEYS above,
 // which are older than the Features tab.
-const NEW_FEATURE_DEFAULT_OFF_KEYS = ["feature.page.forYou"] as const;
+// feature.behavior.watchlistAutoRequest is the other kind of exception: it files
+// requests on users' behalf (and needs Plex tokens stored at sign-in), so an
+// operator opts in rather than having it start on upgrade.
+// feature.admin.cleanup defaults OFF because its page deletes media: an
+// operator opts in deliberately rather than finding it switched on by an upgrade.
+const NEW_FEATURE_DEFAULT_OFF_KEYS = ["feature.page.forYou", "feature.behavior.watchlistAutoRequest", "feature.admin.cleanup"] as const;
 
 // ── Registry invariants ──────────────────────────────────────────────────
 
@@ -126,6 +131,8 @@ test("spot checks: security/UX-salient definitions are exact", () => {
   assert.equal(byKey.get("playHistoryEnabled")?.category, "behaviors");
   assert.equal(byKey.get("trashGuidesEnabled")?.category, "admin");
   assert.equal(byKey.get("feature.integration.push")?.category, "integrations");
+  assert.equal(byKey.get("feature.integration.calendar")?.category, "integrations");
+  assert.equal(byKey.get("feature.integration.calendar")?.defaultEnabled, true);
 });
 
 // ── groupFeaturesByCategory partition ────────────────────────────────────
@@ -179,10 +186,10 @@ test("every registered flag is writable through /api/settings — an unlisted ke
 
 test("group sizes are exact (pins accidental category reassignment)", () => {
   const groups = groupFeaturesByCategory();
-  assert.equal(groups.pages.length, 7);
-  assert.equal(groups.behaviors.length, 5);
-  assert.equal(groups.integrations.length, 7);
-  assert.equal(groups.admin.length, 6);
+  assert.equal(groups.pages.length, 8);
+  assert.equal(groups.behaviors.length, 6);
+  assert.equal(groups.integrations.length, 8);
+  assert.equal(groups.admin.length, 7);
 });
 
 // ── getFeatureFlags(cfg) — the pure computeFlags path ────────────────────

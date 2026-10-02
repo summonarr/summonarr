@@ -109,7 +109,7 @@ const authSessionsById = new Map<string, { userId: string; deviceLabel: string |
 const settings = new Map<string, string>();
 const settingReads: string[] = [];
 
-type LibRow = { tmdbId: number; mediaType: string; serverInstance: string; filePath: string | null; plexRatingKey?: string; jellyfinItemId?: string };
+type LibRow = { tmdbId: number; mediaType: string; serverInstance: string; filePath: string | null; plexRatingKey?: string; jellyfinItemId?: string; jellyfinItemIds?: string[] };
 const plexRows: LibRow[] = [];
 const jellyfinRows: LibRow[] = [];
 
@@ -656,6 +656,50 @@ test("POST with NO serverInstance targets the default server (jellyfin)", async 
   assert.deepEqual(origins(), [new URL(JF_DEFAULT).origin]);
   for (const c of fetchCalls) assert.equal(c.headers["x-mediabrowser-token"], KEY_DEFAULT);
   assert.ok(!settingReads.some((k) => k.startsWith("jellyfinRemote")));
+});
+
+// Multi-copy (guardrail 37): a title in two Jellyfin libraries is remapped copy
+// by copy. When the SECOND copy's confirmation read fails, the path/tmdb
+// fallback search used the canonical row's filePath — i.e. the FIRST copy's —
+// and found that first copy, already remapped to the correct id. The second
+// copy was then reported confirmed without ever being read, deduped out of
+// jellyfinItemIds, and no partial warning was raised.
+test("POST (jellyfin, two copies): a failed read of copy B is never confirmed by the already-remapped copy A", async () => {
+  const a = await admin();
+  configureServers();
+  jellyfinRows.push({
+    tmdbId: 111, mediaType: "MOVIE", serverInstance: "", filePath: "/d/Title (2000)/a.mkv",
+    jellyfinItemId: "aaaaaaaa", jellyfinItemIds: ["aaaaaaaa", "bbbbbbbb"],
+  });
+
+  const searches: string[] = [];
+  respond = (url) => {
+    const p = url.pathname;
+    if (p.startsWith("/Items/RemoteSearch/Apply/")) return new Response("", { status: 200 });
+    if (p.startsWith("/Items/RemoteSearch/")) return okJson([{ ProviderIds: { Tmdb: "222" }, Name: "Correct Title" }]);
+    if (p.endsWith("/Refresh")) return new Response("", { status: 200 });
+    if (p === "/Items/aaaaaaaa") return okJson({ ProviderIds: { Tmdb: "222" } });
+    if (p === "/Items/bbbbbbbb") return new Response("", { status: 500 }); // B never reads back
+    if (p === "/Items") {
+      searches.push(url.search);
+      // Copy A, already remapped — the only hit a path or tmdb search can find.
+      return okJson({ Items: [{ Id: "aaaaaaaa", Path: "/d/Title (2000)/a.mkv", ProviderIds: { Tmdb: "222" } }] });
+    }
+    throw new Error(`unexpected Jellyfin path ${p}`);
+  };
+
+  const res = await fixMatch(postBody(
+    { server: "jellyfin", tmdbId: 111, mediaType: "MOVIE", correctTmdbId: 222 },
+    a.header,
+  ), undefined);
+
+  assert.equal(res.status, 200);
+  const body = await res.json() as { ok: boolean; warning?: string };
+  assert.ok(body.warning?.includes("1 of 2 copies"), `copy B must be reported unconfirmed, got: ${JSON.stringify(body)}`);
+  assert.ok(errors.some((e) => e.includes("jellyfin copy bbbbbbbb failed")), "copy B's failure must be logged");
+  const upsert = opsOf("jellyfinLibraryItem.upsert")[0]?.args as { create: { jellyfinItemId: string; jellyfinItemIds: string[] } };
+  assert.equal(upsert.create.jellyfinItemId, "aaaaaaaa");
+  assert.deepEqual(upsert.create.jellyfinItemIds, ["aaaaaaaa"]);
 });
 
 // ════════════════════════════════════════════════════════════════════════════

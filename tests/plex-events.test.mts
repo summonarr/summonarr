@@ -1092,6 +1092,41 @@ test("timeline: the lock-race retry is COUNT-bounded — it stops polling and fa
   }
 });
 
+test("timeline: past the skip cap, a CONTINUOUS event stream cannot push the deferred resync back forever", async (t) => {
+  // The capped re-arm is not clamped by the burst deadline, so clearing and
+  // re-arming it on every timeline frame moved it a full cooldown out per event:
+  // a scan emitting a frame every few seconds starved it until the scan went
+  // quiet. An already-armed capped timer must be left in place.
+  enableTimelineClock(t);
+  const syncBefore = syncFetches().length;
+  syncResponseBody = { skipped: true, reason: "sync already running" };
+  try {
+    pushFrame(timelineFrame({ itemID: 300, metadataState: "created" }));
+    await drain(20);
+    for (let i = 0; i < MAX_RESYNC_SKIP_RETRIES; i++) {
+      t.mock.timers.tick(30_000);
+      await waitFor(() => syncFetches().length === syncBefore + i + 1, `probe ${i + 1}`);
+      await drain(30);
+    }
+    const afterCap = syncFetches().length;
+    syncResponseBody = { ok: true };
+
+    // A frame every 20s for the whole cooldown and beyond — never a quiet gap.
+    let elapsed = 0;
+    let n = 0;
+    while (elapsed < TIMELINE_RESYNC_COOLDOWN_MS + 60_000 && syncFetches().length === afterCap) {
+      pushFrame(timelineFrame({ itemID: 400 + n++, metadataState: "updated" }));
+      await drain(20);
+      t.mock.timers.tick(20_000);
+      elapsed += 20_000;
+      await drain(10);
+    }
+    await waitFor(() => syncFetches().length === afterCap + 1, "the deferred resync despite a continuous stream");
+  } finally {
+    syncResponseBody = { ok: true };
+  }
+});
+
 test("timeline: a long scan coalesces into at most ONE run per TIMELINE_RESYNC_COOLDOWN_MS — a trailing run at expiry, then nothing while quiet", async (t) => {
   // Policy bounds first: the mechanism pins here and below are parameterized
   // on the constants, so a value drifting to "never" (or "always") would still

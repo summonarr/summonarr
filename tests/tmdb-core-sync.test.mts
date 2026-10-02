@@ -52,7 +52,7 @@ type UpsertBranch = {
   releaseYear: string | null;
   voteAverage: number;
   certification?: string | null;
-  expiresAt: Date;
+  expiresAt?: Date;
   lastSyncedAt?: Date;
   tmdbId?: number;
   mediaType?: "MOVIE" | "TV";
@@ -65,7 +65,16 @@ type UpsertArgs = {
 
 const upsertCalls: UpsertArgs[] = [];
 let upsertRejection: Error | null = null;
+type UpdateManyArgs = {
+  where: { expiresAt: { lt: Date }; OR: { tmdbId: number; mediaType: "MOVIE" | "TV" }[] };
+  data: { expiresAt: Date };
+};
+const updateManyCalls: UpdateManyArgs[] = [];
 shadowPrismaModel(prisma, "tmdbMediaCore", {
+  updateMany: (args: UpdateManyArgs): Promise<{ count: number }> => {
+    updateManyCalls.push(args);
+    return Promise.resolve({ count: 0 });
+  },
   upsert: (args: UpsertArgs): Promise<UpsertArgs> => {
     upsertCalls.push(args);
     return upsertRejection ? Promise.reject(upsertRejection) : Promise.resolve(args);
@@ -85,6 +94,7 @@ shadowPrismaClientMethod(
 
 beforeEach(() => {
   upsertCalls.length = 0;
+  updateManyCalls.length = 0;
   txCalls.length = 0;
   errors.length = 0;
   upsertRejection = null;
@@ -186,18 +196,34 @@ test("batch: one shared 12h expiresAt for the whole batch; update stamps lastSyn
 
   const [a, b] = upsertCalls;
   // Same instant for every item — the batch is one list snapshot, one expiry.
-  assert.equal(a.create.expiresAt.getTime(), b.create.expiresAt.getTime());
-  assert.equal(a.update.expiresAt.getTime(), a.create.expiresAt.getTime());
-  assertExpiry(a.create.expiresAt, before, after, LIST_TTL_MS);
+  assert.equal(a.create.expiresAt!.getTime(), b.create.expiresAt!.getTime());
+  assertExpiry(a.create.expiresAt!, before, after, LIST_TTL_MS);
 
   assert.ok(a.update.lastSyncedAt instanceof Date);
   assert.ok(!("lastSyncedAt" in a.create), "create must leave lastSyncedAt to the column default");
 });
 
+test("batch: the list TTL never SHORTENS an existing expiry — update skips expiresAt, a GREATEST-style updateMany only extends", async () => {
+  // A library title upserted with a 30-day age-aware TTL then showing up in a
+  // trending list must keep its 30 days — overwriting with now+12h let the
+  // daily purge delete the row ~12h after it left the lists.
+  await syncTmdbMediaCore([media({ id: 5, mediaType: "tv" }), media({ id: 3 })]);
+  for (const c of upsertCalls) {
+    assert.ok(!("expiresAt" in c.update), "update branch must not write expiresAt");
+  }
+  assert.equal(updateManyCalls.length, 1);
+  const um = updateManyCalls[0];
+  const listExpiry = upsertCalls[0].create.expiresAt!.getTime();
+  assert.equal(um.data.expiresAt.getTime(), listExpiry);
+  // Only rows whose expiry is EARLIER than the list TTL are touched.
+  assert.equal(um.where.expiresAt.lt.getTime(), listExpiry);
+  assert.deepEqual(um.where.OR, [{ tmdbId: 3, mediaType: "MOVIE" }, { tmdbId: 5, mediaType: "TV" }]);
+});
+
 test("batch: runs as ONE transaction over all items with { timeout: BATCH_TX_TIMEOUT }", async () => {
   await syncTmdbMediaCore([media({ id: 1 }), media({ id: 2 }), media({ id: 3 })]);
   assert.equal(txCalls.length, 1);
-  assert.equal(txCalls[0].size, 3); // one upsert op per item, all in the same tx
+  assert.equal(txCalls[0].size, 4); // one upsert op per item + the expiry-extend, all in the same tx
   // Guardrail 4: library-sized writes always carry the 30s batch timeout.
   assert.deepEqual(txCalls[0].opts, { timeout: BATCH_TX_TIMEOUT });
 });
@@ -218,15 +244,15 @@ test("single: expiry is age-aware — a this-year release gets ~3 days, not the 
   const before = Date.now();
   await upsertTmdbMediaCore(media({ id: 5, releaseDate: `${thisYear}-06-15` }));
   const after = Date.now();
-  assertExpiry(upsertCalls[0].create.expiresAt, before, after, 3 * DAY_MS);
-  assert.equal(upsertCalls[0].update.expiresAt.getTime(), upsertCalls[0].create.expiresAt.getTime());
+  assertExpiry(upsertCalls[0].create.expiresAt!, before, after, 3 * DAY_MS);
+  assert.equal(upsertCalls[0].update.expiresAt!.getTime(), upsertCalls[0].create.expiresAt!.getTime());
 });
 
 test("single: unknown release date falls into the longest bucket (~30 days)", async () => {
   const before = Date.now();
   await upsertTmdbMediaCore(media({ id: 6, releaseDate: null }));
   const after = Date.now();
-  assertExpiry(upsertCalls[0].create.expiresAt, before, after, 30 * DAY_MS);
+  assertExpiry(upsertCalls[0].create.expiresAt!, before, after, 30 * DAY_MS);
 });
 
 test("single: absent certification SKIPS the column on update (never erases a stored cert); create defaults null", async () => {

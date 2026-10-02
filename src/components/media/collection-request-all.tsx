@@ -6,6 +6,7 @@ import { Plus, Check, Loader2 } from "@/components/icons";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
 import { DetailActionButton } from "./detail-action-button";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // Must match MAX_ITEMS in src/app/api/requests/bulk/route.ts. The route rejects
 // a larger batch outright (400 "Too many items"), so we send the list in
@@ -25,6 +26,7 @@ export function CollectionRequestAllButton({
   canRequest?: boolean;
 }) {
   const router = useRouter();
+  const t = useT();
   const [state, setState] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [msg, setMsg] = useState("");
 
@@ -50,7 +52,7 @@ export function CollectionRequestAllButton({
     // A partial failure (chunk k of n rejected) still refreshes: the rows the
     // earlier chunks created are what the click was for.
     const fail = (reason: string) => {
-      setMsg(sent > 0 ? `Requested ${created} of ${missing.length} — ${reason}` : reason);
+      setMsg(sent > 0 ? t("request.collection.partial", { created, total: missing.length, reason }) : reason);
       setState("error");
       if (sent > 0) router.refresh();
     };
@@ -64,17 +66,17 @@ export function CollectionRequestAllButton({
         });
         const data: { created?: number; error?: string } = await res.json().catch(() => ({}));
         if (!res.ok) {
-          fail(data.error ?? "Something went wrong");
+          fail(data.error ?? t("request.somethingWrong"));
           return;
         }
         created += data.created ?? 0;
         sent += chunk.length;
       }
-      setMsg(`Requested ${created} of ${missing.length}`);
+      setMsg(t("request.collection.done", { created, total: missing.length }));
       setState("done");
       router.refresh();
     } catch {
-      fail(sent > 0 ? "network error, please try again" : "Network error — please try again");
+      fail(sent > 0 ? t("request.collection.networkErrorLower") : t("request.networkError"));
     }
   }
 
@@ -95,7 +97,7 @@ export function CollectionRequestAllButton({
         ) : (
           <Plus style={{ width: 14, height: 14 }} />
         )}
-        {state === "done" ? "Requested" : `Request All (${missing.length})`}
+        {state === "done" ? t("request.collection.requested") : t("request.collection.requestAll", { count: missing.length })}
       </DetailActionButton>
       {(state === "done" || state === "error") && msg && (
         <span

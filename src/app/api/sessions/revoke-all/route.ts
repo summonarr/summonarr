@@ -6,6 +6,7 @@ import { logAudit } from "@/lib/audit";
 import { markUserForceRevalidate } from "@/lib/session-revocation";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { readJsonCappedOr } from "@/lib/body-size";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const STEP_UP_MAX_AGE_MS = 5 * 60 * 1000;
 
@@ -23,9 +24,10 @@ const STEP_UP_MAX_AGE_MS = 5 * 60 * 1000;
 // confirmPassword, SSO users must hold a session younger than 5 minutes.
 
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`sessions-revoke-all:${session.user.id}`, 5, 60 * 60_000)) {
     return NextResponse.json(
-      { error: "rate_limit", message: "Too many revoke-all attempts. Try again later." },
+      { error: "rate_limit", message: t("apiAuth.sessions.revokeAllRateLimit") },
       { status: 429 },
     );
   }
@@ -40,12 +42,12 @@ export const POST = withAuth(async (req, _ctx, session) => {
     where: { id: session.user.id },
     select: { passwordHash: true },
   });
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!user) return NextResponse.json({ error: t("apiAuth.common.unauthorized") }, { status: 401 });
 
   if (user.passwordHash) {
     if (!confirmPassword) {
       return NextResponse.json(
-        { error: "password-required", message: "Confirm your password to sign out other devices." },
+        { error: "password-required", message: t("apiAuth.sessions.confirmPasswordSignOut") },
         { status: 401 },
       );
     }
@@ -55,7 +57,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     const callerSessionId = session.sessionId;
     if (!callerSessionId) {
       return NextResponse.json(
-        { error: "session-too-old", message: "Recent sign-in required to sign out other devices." },
+        { error: "session-too-old", message: t("apiAuth.sessions.recentSignInSignOut") },
         { status: 401 },
       );
     }
@@ -65,7 +67,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     });
     if (!caller || Date.now() - caller.createdAt.getTime() > STEP_UP_MAX_AGE_MS) {
       return NextResponse.json(
-        { error: "session-too-old", message: "Recent sign-in required to sign out other devices." },
+        { error: "session-too-old", message: t("apiAuth.sessions.recentSignInSignOut") },
         { status: 401 },
       );
     }

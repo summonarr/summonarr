@@ -11,7 +11,8 @@
 import type { CSSProperties } from "react";
 import Link from "next/link";
 import { useHasMounted } from "@/hooks/use-has-mounted";
-import { formatRelativeTime } from "@/lib/relative-time";
+import { formatRelativeTimeLocalized } from "@/lib/relative-time";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import {
   ActivityCard,
   AreaChart,
@@ -46,11 +47,11 @@ export interface MyStatsData {
   }[];
 }
 
-function absTime(iso: string): string {
+function absTime(iso: string, locale: string): string {
   // UTC-pinned so SSR (container TZ) and the first client paint produce the same
   // text — prevents a React #418 hydration mismatch on the relative-time labels
   // when they're gated behind useHasMounted (guardrail 16).
-  return new Date(iso).toLocaleDateString("en-US", {
+  return new Date(iso).toLocaleDateString(locale, {
     month: "short",
     day: "numeric",
     timeZone: "UTC",
@@ -65,8 +66,10 @@ const CARD_GRID: CSSProperties = {
 
 export function MyStatsView({ data: s }: { data: MyStatsData }) {
   const mounted = useHasMounted();
+  const t = useT();
+  const locale = useLocale();
   const when = (iso: string | null) =>
-    !iso ? "—" : mounted ? formatRelativeTime(iso) : absTime(iso);
+    !iso ? "—" : mounted ? formatRelativeTimeLocalized(iso, locale) : absTime(iso, locale);
 
   // Postgres numbers weekdays 0=Sun..6=Sat, but the heatmap rows start on
   // Monday (like the admin grid), so a day lands on row (dow + 6) % 7.
@@ -86,8 +89,8 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
     return (
       <EmptyState
         icon={BarChart3}
-        title="No watch activity yet"
-        description="Once you play something on the server, your stats will appear here."
+        title={t("personal.stats.noActivityTitle")}
+        description={t("personal.stats.noActivityDescription")}
       />
     );
   }
@@ -101,17 +104,17 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
           gap: 10,
         }}
       >
-        <MiniKpi label="Total plays" value={s.totalPlays.toLocaleString("en-US")} big />
-        <MiniKpi label="Watch time" value={`${s.totalWatchTimeHours.toLocaleString("en-US")}h`} big />
-        <MiniKpi label="Last active" value={when(s.lastActiveIso)} />
-        <MiniKpi label="Avg session" value={fmtDuration(s.avgSessionDuration)} />
+        <MiniKpi label={t("personal.stats.totalPlays")} value={s.totalPlays.toLocaleString(locale)} big />
+        <MiniKpi label={t("personal.stats.watchTime")} value={`${s.totalWatchTimeHours.toLocaleString(locale)}h`} big />
+        <MiniKpi label={t("personal.stats.lastActive")} value={when(s.lastActiveIso)} />
+        <MiniKpi label={t("personal.stats.avgSession")} value={fmtDuration(s.avgSessionDuration)} />
       </div>
 
       {s.activityCalendar.length > 0 && (
         <ActivityCard>
           <SectionHeader
-            label="365-day activity"
-            sub={`${s.activityCalendar.filter((v) => v.count > 0).length} active days`}
+            label={t("personal.stats.calendar")}
+            sub={t("personal.stats.activeDays", { count: s.activityCalendar.filter((v) => v.count > 0).length })}
           />
           <ActivityCalendar data={s.activityCalendar} today={s.todayIso} />
         </ActivityCard>
@@ -119,29 +122,38 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
 
       <div style={CARD_GRID}>
         <ActivityCard>
-          <SectionHeader label="Plays per day · 90d" sub={`peak ${Math.max(...playsByDay, 0)} plays`} />
+          <SectionHeader
+            label={t("personal.stats.playsPerDay")}
+            sub={t("personal.stats.peakPlays", { count: Math.max(...playsByDay, 0) })}
+          />
           <AreaChart
             data={playsByDay}
             h={130}
-            labels={s.playsByDay.map((d) => absTime(`${d.day}T00:00:00Z`))}
-            valueSuffix=" plays"
+            labels={s.playsByDay.map((d) => absTime(`${d.day}T00:00:00Z`, locale))}
+            valueSuffix={t("personal.stats.playsSuffix")}
           />
         </ActivityCard>
         <ActivityCard>
-          <SectionHeader label="Viewing heatmap" sub="day × hour" />
+          <SectionHeader label={t("personal.stats.heatmap")} sub={t("personal.stats.heatmapSub")} />
           <HourHeatmap matrix={heatmapMatrix} />
         </ActivityCard>
       </div>
 
       <div style={CARD_GRID}>
         <ActivityCard>
-          <SectionHeader label="Platforms" sub={`${s.platformBreakdown.length} unique`} />
+          <SectionHeader
+            label={t("personal.stats.platforms")}
+            sub={t("personal.stats.uniqueCount", { count: s.platformBreakdown.length })}
+          />
           <HorizontalBars
             items={s.platformBreakdown.slice(0, 6).map((p) => ({ label: p.platform, count: p.count }))}
           />
         </ActivityCard>
         <ActivityCard>
-          <SectionHeader label="Devices" sub={`${s.deviceList.length} known`} />
+          <SectionHeader
+            label={t("personal.stats.devices")}
+            sub={t("personal.stats.knownCount", { count: s.deviceList.length })}
+          />
           <HorizontalBars
             items={s.deviceList.slice(0, 6).map((d) => ({ label: d.device, count: d.count }))}
             color="var(--ds-info)"
@@ -152,7 +164,10 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
 
       {s.topMedia.length > 0 && (
         <ActivityCard>
-          <SectionHeader label="Most watched" sub={`${s.topMedia.length} titles`} />
+          <SectionHeader
+            label={t("personal.stats.mostWatched")}
+            sub={t("personal.stats.titleCount", { count: s.topMedia.length })}
+          />
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {s.topMedia.map((m, i) => {
               const href =
@@ -214,7 +229,7 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
                         flexShrink: 0,
                       }}
                     >
-                      {m.count.toLocaleString("en-US")} {m.count === 1 ? "play" : "plays"}
+                      {t("personal.stats.plays", { count: m.count, n: m.count.toLocaleString(locale) })}
                     </span>
                   </div>
                 </div>

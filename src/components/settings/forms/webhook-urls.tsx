@@ -3,6 +3,7 @@
 import { useState, useCallback } from "react";
 import { Copy, Check, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import { useT } from "@/components/i18n/i18n-provider";
 
 function CopyRow({
   label,
@@ -18,6 +19,7 @@ function CopyRow({
   // must be fetched on demand rather than baked into props.
   resolveCopyUrl?: () => Promise<string | null>;
 }) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
   const [revealed, setRevealed] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -63,14 +65,14 @@ function CopyRow({
           disabled={pending}
           aria-busy={pending || undefined}
           className="shrink-0 p-2 -m-2 text-zinc-500 hover:text-zinc-100 transition-colors disabled:opacity-50"
-          aria-label={`Copy ${label}`}
+          aria-label={t("settings.form.webhookUrls.copyLabel", { label })}
         >
           {pending
             ? <Loader2 className="w-4 h-4 animate-spin" />
             : copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
         </button>
       </div>
-      {failed && <p className="text-xs text-amber-500">Couldn’t load the token — try again.</p>}
+      {failed && <p className="text-xs text-amber-500">{t("settings.form.webhookUrls.loadFailed")}</p>}
     </div>
   );
 }
@@ -83,11 +85,12 @@ function CopyRow({
 // does. The 4K rows point at the SAME endpoint with the 4K instance's own secret; the handler
 // works out which instance fired by which secret matched (guardrail 32).
 function SecretNeededRow({ label }: { label: string }) {
+  const t = useT();
   return (
     <div className="space-y-1">
       <p className="text-xs font-medium text-zinc-400">{label}</p>
       <div className="flex items-center gap-2 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2">
-        <span className="flex-1 text-xs text-amber-500">Set the 4K webhook secret above to generate this URL.</span>
+        <span className="flex-1 text-xs text-amber-500">{t("settings.form.webhookUrls.secretNeeded")}</span>
       </div>
     </div>
   );
@@ -118,6 +121,7 @@ export function WebhookUrls({
   sonarr4kConfigured?: boolean;
   legacyHasSecret?: boolean;
 }) {
+  const t = useT();
   const radarrBase = `${baseUrl}/api/webhooks/radarr`;
   const sonarrBase = `${baseUrl}/api/webhooks/sonarr`;
 
@@ -151,25 +155,25 @@ export function WebhookUrls({
 
   return (
     <div className="space-y-4">
-      <CopyRow label="Radarr webhook URL" displayUrl={`${radarrBase}${maskSuffix(radarrTokenSet)}`} resolveCopyUrl={resolver("radarr", radarrBase)} />
-      <CopyRow label="Sonarr webhook URL" displayUrl={`${sonarrBase}${maskSuffix(sonarrTokenSet)}`} resolveCopyUrl={resolver("sonarr", sonarrBase)} />
+      <CopyRow label={t("settings.form.webhookUrls.label", { service: "Radarr" })} displayUrl={`${radarrBase}${maskSuffix(radarrTokenSet)}`} resolveCopyUrl={resolver("radarr", radarrBase)} />
+      <CopyRow label={t("settings.form.webhookUrls.label", { service: "Sonarr" })} displayUrl={`${sonarrBase}${maskSuffix(sonarrTokenSet)}`} resolveCopyUrl={resolver("sonarr", sonarrBase)} />
       {radarr4kConfigured && (
         radarr4kHasSecret
-          ? <CopyRow label="Radarr 4K webhook URL" displayUrl={`${radarrBase}?token=••••••••`} resolveCopyUrl={resolver("radarr4k", radarrBase)} />
-          : <SecretNeededRow label="Radarr 4K webhook URL" />
+          ? <CopyRow label={t("settings.form.webhookUrls.label", { service: "Radarr 4K" })} displayUrl={`${radarrBase}?token=••••••••`} resolveCopyUrl={resolver("radarr4k", radarrBase)} />
+          : <SecretNeededRow label={t("settings.form.webhookUrls.label", { service: "Radarr 4K" })} />
       )}
       {sonarr4kConfigured && (
         sonarr4kHasSecret
-          ? <CopyRow label="Sonarr 4K webhook URL" displayUrl={`${sonarrBase}?token=••••••••`} resolveCopyUrl={resolver("sonarr4k", sonarrBase)} />
-          : <SecretNeededRow label="Sonarr 4K webhook URL" />
+          ? <CopyRow label={t("settings.form.webhookUrls.label", { service: "Sonarr 4K" })} displayUrl={`${sonarrBase}?token=••••••••`} resolveCopyUrl={resolver("sonarr4k", sonarrBase)} />
+          : <SecretNeededRow label={t("settings.form.webhookUrls.label", { service: "Sonarr 4K" })} />
       )}
       {noHdSecret && (
         <p className="text-xs text-amber-500">
-          No secret token set — Radarr/Sonarr webhook calls will be rejected until you set a token above.
+          {t("settings.form.webhookUrls.noSecret")}
         </p>
       )}
       <p className="text-xs text-zinc-500">
-        In Radarr/Sonarr: Settings → Connect → + → Webhook · Method: POST · Events: On Import + On Manual Interaction Required + On Movie Delete / On Series Delete + On Movie File Delete · Use the URLs above (token is included). 4K rows point at the same endpoint with the 4K instance&apos;s own token.
+        {t("settings.form.webhookUrls.help")}
       </p>
     </div>
   );
