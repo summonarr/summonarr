@@ -18,6 +18,7 @@ import {
   verifyOidcStateCookie,
 } from "@/lib/oidc";
 import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Native completion of the OIDC flow — the counterpart to the JSON branch of
 // /api/auth/oidc/start. The browser flow never reaches here: it finishes inside
@@ -38,14 +39,15 @@ import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 const MAX_SIGNIN_BODY_BYTES = 16 * 1024;
 
 export async function POST(req: NextRequest) {
+  const t = translatorForRequest(req);
   // Each hit triggers an outbound IdP token exchange plus a DB user
   // lookup/create, so throttle on the same budget as /start and /callback.
   if (!checkRateLimit(`oidc-signin:${getClientIpKey(req.headers)}`, 20, 5 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many requests — try again later." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.common.tooManyRequestsTryLaterDot") }, { status: 429 });
   }
 
   if (!isOidcConfigured()) {
-    return NextResponse.json({ error: "OIDC sign-in is not configured" }, { status: 503 });
+    return NextResponse.json({ error: t("apiAuth.oidc.notConfigured") }, { status: 503 });
   }
 
   const parsed = await readJsonCapped<Record<string, unknown>>(req, MAX_SIGNIN_BODY_BYTES);
@@ -53,31 +55,31 @@ export async function POST(req: NextRequest) {
   const body = parsed;
 
   if (typeof body.code !== "string" || !body.code) {
-    return NextResponse.json({ error: "code required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.oidc.codeRequired") }, { status: 400 });
   }
   if (typeof body.state !== "string" || !body.state) {
-    return NextResponse.json({ error: "state required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.oidc.stateRequired") }, { status: 400 });
   }
   if (typeof body.flowState !== "string" || !body.flowState) {
-    return NextResponse.json({ error: "OIDC sign-in flow expired" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.oidc.flowExpired") }, { status: 400 });
   }
 
   const flowState = await verifyOidcStateCookie(body.flowState);
   if (!flowState) {
-    return NextResponse.json({ error: "OIDC sign-in flow expired" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.oidc.flowExpired") }, { status: 400 });
   }
   // Bind the submitted state to the signed one. exchangeNativeOidcCode also
   // passes it as expectedState, so this is belt-and-suspenders — but it fails
   // here with a clear 400 instead of surfacing as an opaque exchange error.
   if (flowState.state !== body.state) {
-    return NextResponse.json({ error: "OIDC sign-in flow mismatch" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.oidc.flowMismatch") }, { status: 400 });
   }
   // Refuse a flow state minted for the WEB handshake. Without this a stolen web
   // flow cookie could be replayed through the native path to trade a code for a
   // bearer token; the native marker is stamped at /start only for callers that
   // identified as native.
   if (!isNativeOidcState(flowState.state)) {
-    return NextResponse.json({ error: "OIDC sign-in flow mismatch" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.oidc.flowMismatch") }, { status: 400 });
   }
 
   let claims;
@@ -88,7 +90,7 @@ export async function POST(req: NextRequest) {
       "[auth/sign-in/oidc] code exchange failed:",
       err instanceof Error ? err.message : err,
     );
-    return NextResponse.json({ error: "OIDC sign-in failed" }, { status: 401 });
+    return NextResponse.json({ error: t("apiAuth.oidc.failed") }, { status: 401 });
   }
 
   let dbUser;
@@ -99,7 +101,7 @@ export async function POST(req: NextRequest) {
       "[auth/sign-in/oidc] user lookup failed:",
       err instanceof Error ? err.message : err,
     );
-    return NextResponse.json({ error: "OIDC sign-in failed" }, { status: 401 });
+    return NextResponse.json({ error: t("apiAuth.oidc.failed") }, { status: 401 });
   }
 
   // Same refusals the web callback renders as ?error= codes on /login. Kept as
@@ -107,13 +109,13 @@ export async function POST(req: NextRequest) {
   // showing a generic failure.
   if (dbUser === PROVIDER_REBIND_REQUIRED) {
     return NextResponse.json(
-      { error: "This account is already linked to a different sign-in method." },
+      { error: t("apiAuth.oidc.rebindRequired") },
       { status: 409 },
     );
   }
   if (dbUser === PROVIDER_SETUP_REQUIRED) {
     return NextResponse.json(
-      { error: "This server hasn't finished its first-run setup yet." },
+      { error: t("apiAuth.oidc.setupRequired") },
       { status: 409 },
     );
   }
@@ -140,7 +142,7 @@ export async function POST(req: NextRequest) {
       providerId: "oidc",
     });
   } catch (err) {
-    if (err instanceof AccountDeactivatedError) return disabledAccountResponse();
+    if (err instanceof AccountDeactivatedError) return disabledAccountResponse(t);
     throw err;
   }
 

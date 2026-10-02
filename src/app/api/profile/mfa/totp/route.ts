@@ -8,6 +8,7 @@ import { revokeOtherUserSessions } from "@/lib/auth";
 import { dropRecoveryCodesIfNoFactorInTx } from "@/lib/mfa/mfa-store";
 import { mfaReauthStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // DELETE /api/profile/mfa/totp — removes the authenticator app (enabled or a
 // pending setup). Body: { password, secondFactor? } — the second factor is
@@ -16,11 +17,12 @@ import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 // remains, the recovery codes go too, the account is back to password-only, and
 // every OTHER session is signed out — the same as turning 2FA off outright.
 export const DELETE = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
   const parsed = await readJsonCappedOr<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024, {});
   if (parsed instanceof NextResponse) return parsed;
-  const user = await mfaReauthStepUp(session, parsed.password);
+  const user = await mfaReauthStepUp(session, parsed.password, t);
   if (user instanceof NextResponse) return user;
   const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor);
   if (proof instanceof NextResponse) return proof;
@@ -31,7 +33,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     const noneLeft = await dropRecoveryCodesIfNoFactorInTx(tx, user.id);
     return { removed: res.count, noneLeft };
   });
-  if (outcome.removed === 0) return NextResponse.json({ error: "No authenticator app is set up" }, { status: 404 });
+  if (outcome.removed === 0) return NextResponse.json({ error: t("apiAuth.mfa.noTotp") }, { status: 404 });
 
   // The last factor went: the account is password-only from now on, so any
   // session that existed alongside the 2FA one is signed out (guardrail 6d).

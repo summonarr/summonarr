@@ -9,6 +9,7 @@ import {
   hashQuickConnectSecret,
   signQcFlowCookie,
 } from "@/lib/jellyfin-flow-state";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // `instance` travels as a query param on both the initiate (POST) and poll
 // (GET) requests — client-supplied here is fine for BOTH: this only resolves
@@ -68,19 +69,20 @@ setInterval(() => {
 }, 60_000).unref();
 
 export async function POST(req: NextRequest) {
+  const t = translatorForRequest(req);
   const instance = readInstanceParam(req);
   if (instance === null) {
-    return NextResponse.json({ error: "Invalid server" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.common.invalidServer") }, { status: 400 });
   }
   // Rate-limit BEFORE the Setting read: this is an unauthenticated surface, so
   // the limiter must bound anonymous DB load too, not only the outbound Jellyfin
   // call (matches setup-status / machine-session / jellyfin/servers).
   if (!checkRateLimit(`qc-initiate:${getClientIpKey(req.headers)}`, 10, 60_000)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.common.tooManyRequestsTryLater") }, { status: 429 });
   }
   const jellyfinUrl = await getConfiguredJellyfinUrl(instance);
   if (!jellyfinUrl) {
-    return NextResponse.json({ error: "Jellyfin not configured" }, { status: 503 });
+    return NextResponse.json({ error: t("apiAuth.jellyfin.notConfigured") }, { status: 503 });
   }
   try {
     const result = await initiateJellyfinQuickConnect(jellyfinUrl);
@@ -107,36 +109,37 @@ export async function POST(req: NextRequest) {
     // 401 from /QuickConnect/Initiate is Jellyfin's "the feature is disabled"
     // answer — surface it as such instead of the generic reachability message.
     if ((err as { status?: number }).status === 401) {
-      return NextResponse.json({ error: "QuickConnect is disabled on the Jellyfin server" }, { status: 502 });
+      return NextResponse.json({ error: t("apiAuth.quickConnect.disabled") }, { status: 502 });
     }
-    return NextResponse.json({ error: "Failed to initiate QuickConnect" }, { status: 502 });
+    return NextResponse.json({ error: t("apiAuth.quickConnect.initiateFailed") }, { status: 502 });
   }
 }
 
 export async function GET(req: NextRequest) {
+  const t = translatorForRequest(req);
   const instance = readInstanceParam(req);
   if (instance === null) {
-    return NextResponse.json({ error: "Invalid server" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.common.invalidServer") }, { status: 400 });
   }
   const { searchParams } = new URL(req.url);
   const secret = searchParams.get("secret");
   if (!secret) {
-    return NextResponse.json({ error: "Missing secret" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.quickConnect.missingSecret") }, { status: 400 });
   }
 
   // Both limiters run BEFORE the Setting read (same reason as POST above): an
   // anonymous poller must not get a DB round-trip per request past its budget.
   if (!checkRateLimit(`qc-poll:${getClientIpKey(req.headers)}`, 60, 60_000)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.common.tooManyRequestsTryLater") }, { status: 429 });
   }
 
   if (!checkRateLimit(`qc-poll-secret:${secret.slice(0, 32)}`, 30, 60_000)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.common.tooManyRequestsTryLater") }, { status: 429 });
   }
 
   const jellyfinUrl = await getConfiguredJellyfinUrl(instance);
   if (!jellyfinUrl) {
-    return NextResponse.json({ error: "Jellyfin not configured" }, { status: 503 });
+    return NextResponse.json({ error: t("apiAuth.jellyfin.notConfigured") }, { status: 503 });
   }
   const wait = searchParams.get("wait") === "1";
 
@@ -154,14 +157,14 @@ export async function GET(req: NextRequest) {
     // the very next poll for the same secret start a fresh 60-attempt window.
     // The 60s sweep above reclaims the key once its TTL passes.
     pollCounts.set(countKey, { count: attempts, expiresAt: existing?.expiresAt ?? now + QC_TTL });
-    return NextResponse.json({ error: "QuickConnect session expired" }, { status: 410 });
+    return NextResponse.json({ error: t("apiAuth.quickConnect.sessionExpired") }, { status: 410 });
   }
   if (!existing && pollCounts.size >= MAX_POLL_KEYS) {
     sweepExpiredPollCounts(now);
     if (pollCounts.size >= MAX_POLL_KEYS) {
       // Shed load rather than grow unbounded. 503 (not 410) so a legitimate client
       // retries instead of treating its session as dead.
-      return NextResponse.json({ error: "QuickConnect is busy — try again shortly" }, { status: 503 });
+      return NextResponse.json({ error: t("apiAuth.quickConnect.busy") }, { status: 503 });
     }
   }
   pollCounts.set(countKey, { count: attempts, expiresAt: existing?.expiresAt ?? now + QC_TTL });
@@ -177,11 +180,11 @@ export async function GET(req: NextRequest) {
     // client can fall back to short-polling instead of stalling.
     const ipKey = getClientIpKey(req.headers);
     if (globalInflight >= LONG_POLL_GLOBAL_CAP) {
-      return NextResponse.json({ error: "Server busy — retry shortly" }, { status: 503 });
+      return NextResponse.json({ error: t("apiAuth.quickConnect.serverBusy") }, { status: 503 });
     }
     const ipCount = inflightByIp.get(ipKey) ?? 0;
     if (ipCount >= LONG_POLL_PER_IP_CAP) {
-      return NextResponse.json({ error: "Too many concurrent polls — retry shortly" }, { status: 503 });
+      return NextResponse.json({ error: t("apiAuth.quickConnect.tooManyPolls") }, { status: 503 });
     }
     inflightByIp.set(ipKey, ipCount + 1);
     globalInflight += 1;
@@ -240,11 +243,11 @@ export async function GET(req: NextRequest) {
     const status = (err as { status?: number }).status;
     if (status === 404) {
       pollCounts.delete(countKey);
-      return NextResponse.json({ error: "QuickConnect session expired" }, { status: 410 });
+      return NextResponse.json({ error: t("apiAuth.quickConnect.sessionExpired") }, { status: 410 });
     }
     if (status === 401) {
-      return NextResponse.json({ error: "QuickConnect is disabled on the Jellyfin server" }, { status: 502 });
+      return NextResponse.json({ error: t("apiAuth.quickConnect.disabled") }, { status: 502 });
     }
-    return NextResponse.json({ error: "Failed to poll QuickConnect" }, { status: 502 });
+    return NextResponse.json({ error: t("apiAuth.quickConnect.pollFailed") }, { status: 502 });
   }
 }

@@ -8,12 +8,14 @@ import {
   readQcFlowCookie,
   verifyQcFlowCookie,
 } from "@/lib/jellyfin-flow-state";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // QuickConnect sign-in body carries secret/rememberMe — 16 KB cap protects
 // this unauthenticated surface against memory-exhaustion DoS.
 const MAX_SIGNIN_BODY_BYTES = 16 * 1024;
 
 export async function POST(req: NextRequest) {
+  const t = translatorForRequest(req);
   // No up-front "is Jellyfin configured" gate here — which instance this
   // request is even for isn't known until the flow cookie is verified below,
   // and authorizeWithJellyfinQuickConnect already 401s (via the !user branch)
@@ -23,7 +25,7 @@ export async function POST(req: NextRequest) {
   const body = parsed;
 
   if (typeof body.secret !== "string") {
-    return NextResponse.json({ error: "QuickConnect secret required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.quickConnect.secretRequired") }, { status: 400 });
   }
 
   // Verify the QC secret was issued by THIS server to THIS browser. Without
@@ -35,14 +37,14 @@ export async function POST(req: NextRequest) {
   const cookieToken = readQcFlowCookie(req.headers.get("cookie"))
     ?? (typeof body.flowState === "string" ? body.flowState : null);
   if (!cookieToken) {
-    return NextResponse.json({ error: "QuickConnect flow expired" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.quickConnect.flowExpired") }, { status: 400 });
   }
   const flowState = await verifyQcFlowCookie(cookieToken);
   if (!flowState) {
-    return NextResponse.json({ error: "QuickConnect flow expired" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.quickConnect.flowExpired") }, { status: 400 });
   }
   if (flowState.secretHash !== hashQuickConnectSecret(body.secret)) {
-    return NextResponse.json({ error: "QuickConnect flow mismatch" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.quickConnect.flowMismatch") }, { status: 400 });
   }
 
   // The instance comes ONLY from the verified flow cookie — never from a
@@ -58,7 +60,7 @@ export async function POST(req: NextRequest) {
     flowState.instance,
   );
   if (!user) {
-    const failRes = NextResponse.json({ error: "QuickConnect authentication failed" }, { status: 401 });
+    const failRes = NextResponse.json({ error: t("apiAuth.quickConnect.authFailed") }, { status: 401 });
     failRes.headers.append("Set-Cookie", buildQcFlowClearedSetCookie());
     return failRes;
   }
@@ -68,7 +70,7 @@ export async function POST(req: NextRequest) {
     result = await signInAndMintSession({ user, providerId: "jellyfin-quickconnect" });
   } catch (err) {
     if (err instanceof AccountDeactivatedError) {
-      const disabled = disabledAccountResponse();
+      const disabled = disabledAccountResponse(t);
       disabled.headers.append("Set-Cookie", buildQcFlowClearedSetCookie());
       return disabled;
     }

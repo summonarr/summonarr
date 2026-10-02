@@ -2,7 +2,10 @@ import { NextResponse, type NextRequest } from "next/server";
 import { serializeSessionCookie } from "@/lib/session-cookie";
 import { NATIVE_CLIENT_HEADER, hasNativeClientHeader } from "@/lib/mobile-auth";
 import type { SignInResult } from "@/lib/auth";
+import type { Translator } from "@/lib/i18n/translate";
 
+// English text of apiAuth.signIn.accountDisabled (the catalog is the source;
+// this constant is kept for tests that pin the English wire text).
 // Shown when signInAndMintSession throws AccountDeactivatedError — i.e. the
 // credential was valid but the account is disabled (see account-lifecycle.ts).
 // 403, not 401: retrying with different credentials for the same account will
@@ -10,8 +13,8 @@ import type { SignInResult } from "@/lib/auth";
 export const DISABLED_ACCOUNT_MESSAGE =
   "This account has been disabled. Contact an administrator.";
 
-export function disabledAccountResponse(): NextResponse {
-  return NextResponse.json({ error: DISABLED_ACCOUNT_MESSAGE }, { status: 403 });
+export function disabledAccountResponse(t: Translator): NextResponse {
+  return NextResponse.json({ error: t("apiAuth.signIn.accountDisabled") }, { status: 403 });
 }
 
 // Shared response builder for the provider sign-in routes

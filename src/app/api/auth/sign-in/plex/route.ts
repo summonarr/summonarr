@@ -9,21 +9,23 @@ import {
 } from "@/lib/plex-flow-state";
 import { rememberPlexWatchlistToken } from "@/lib/plex-watchlist";
 import { sanitizeForLog } from "@/lib/sanitize";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Plex sign-in body carries plexToken/plexClientId/pinId/rememberMe — 16 KB
 // cap protects this unauthenticated surface against memory-exhaustion DoS.
 const MAX_SIGNIN_BODY_BYTES = 16 * 1024;
 
 export async function POST(req: NextRequest) {
+  const t = translatorForRequest(req);
   const parsed = await readJsonCapped<Record<string, unknown>>(req, MAX_SIGNIN_BODY_BYTES);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
   if (typeof body.plexToken !== "string") {
-    return NextResponse.json({ error: "Plex token required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.plex.tokenRequired") }, { status: 400 });
   }
   if (typeof body.pinId !== "number" || !Number.isFinite(body.pinId)) {
-    return NextResponse.json({ error: "pinId required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.plex.pinIdRequired") }, { status: 400 });
   }
 
   // Verify the PIN was issued by THIS server for THIS browser. Without this
@@ -36,18 +38,18 @@ export async function POST(req: NextRequest) {
     readPlexFlowCookie(req.headers.get("cookie")) ??
     (typeof body.flowState === "string" ? body.flowState : null);
   if (!cookieToken) {
-    return NextResponse.json({ error: "Plex sign-in flow expired" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.plex.flowExpired") }, { status: 400 });
   }
   const flowState = await verifyPlexFlowCookie(cookieToken);
   if (!flowState) {
-    return NextResponse.json({ error: "Plex sign-in flow expired" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.plex.flowExpired") }, { status: 400 });
   }
   if (flowState.pinId !== body.pinId) {
-    return NextResponse.json({ error: "Plex sign-in flow mismatch" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.plex.flowMismatch") }, { status: 400 });
   }
   // Bind clientId too — caller must submit the same client id used at /start.
   if (typeof body.plexClientId === "string" && body.plexClientId !== flowState.clientId) {
-    return NextResponse.json({ error: "Plex sign-in flow mismatch" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.plex.flowMismatch") }, { status: 400 });
   }
 
   const user = await authorizeWithPlex(
@@ -59,7 +61,7 @@ export async function POST(req: NextRequest) {
     req,
   );
   if (!user) {
-    const failRes = NextResponse.json({ error: "Invalid Plex credentials" }, { status: 401 });
+    const failRes = NextResponse.json({ error: t("apiAuth.plex.invalidCredentials") }, { status: 401 });
     failRes.headers.append("Set-Cookie", buildPlexFlowClearedSetCookie());
     return failRes;
   }
@@ -69,7 +71,7 @@ export async function POST(req: NextRequest) {
     result = await signInAndMintSession({ user, providerId: "plex" });
   } catch (err) {
     if (err instanceof AccountDeactivatedError) {
-      const disabled = disabledAccountResponse();
+      const disabled = disabledAccountResponse(t);
       disabled.headers.append("Set-Cookie", buildPlexFlowClearedSetCookie());
       return disabled;
     }

@@ -28,10 +28,12 @@ import { NextResponse, type NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 import { disabledAccountResponse } from "@/lib/sign-in-response";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { getMfaState, passwordVersion } from "./mfa-store";
 import { MFA_TOKEN_TTL_SECONDS, signMfaSigninToken } from "./mfa-token";
 import { webAuthnConfigFromEnv } from "./webauthn";
 
+// English text of apiAuth.mfa.required.
 export const MFA_REQUIRED_MESSAGE = "Two-factor authentication required";
 export const WEBAUTHN_TIMEOUT_MS = MFA_TOKEN_TTL_SECONDS * 1000;
 
@@ -50,13 +52,17 @@ export async function mfaChallengeFor(
     where: { id: user.id },
     select: { passwordHash: true, deactivatedAt: true },
   });
+  // Only the human-readable `error` text follows the request's language; every
+  // other field of the challenge (mfaRequired, methods, mfaToken, …) is a wire
+  // contract and stays as-is (guardrail 6d).
+  const t = translatorForRequest(req);
   if (!row?.passwordHash) {
-    return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
+    return NextResponse.json({ error: t("apiAuth.common.invalidCredentials") }, { status: 401 });
   }
   // Same answer the non-2FA path gives a disabled account with a valid password
   // (signInAndMintSession's AccountDeactivatedError) — no second factor needed
   // to learn something the password alone already discloses there.
-  if (row.deactivatedAt) return disabledAccountResponse();
+  if (row.deactivatedAt) return disabledAccountResponse(t);
 
   const config = webAuthnConfigFromEnv();
   const webauthn =
@@ -85,7 +91,7 @@ export async function mfaChallengeFor(
 
   return NextResponse.json(
     {
-      error: MFA_REQUIRED_MESSAGE,
+      error: t("apiAuth.mfa.required"),
       mfaRequired: true,
       methods,
       mfaToken: token,

@@ -421,6 +421,55 @@ test("2FA account: the password step returns the challenge and mints NOTHING (no
   assert.equal(sessionWrites, 0);
 });
 
+test("i18n: a Spanish browser gets the challenge's `error` in Spanish — every machine field is unchanged", async () => {
+  const u = await seedUser();
+  seedTotp(u.id as string);
+  seedRecoveryCodes(u.id as string, ["AAAA-BBBB-CCCC-DDDD"]);
+  const en = await challengeFor(u);
+  const es = await challengeFor(u, { "accept-language": "es-ES,es;q=0.9" });
+  assert.equal((en as unknown as { error: string }).error, "Two-factor authentication required");
+  assert.equal((es as unknown as { error: string }).error, "Se requiere autenticación en dos pasos");
+  const shape = (b: Record<string, unknown>) => ({ ...b, error: undefined, mfaToken: typeof b.mfaToken });
+  assert.deepEqual(shape(es as never), shape(en as never), "only `error` differs");
+
+  // A native client ignores Accept-Language (its UI is English): unchanged text.
+  const native = await challengeFor(u, { ...NATIVE, "accept-language": "es" });
+  assert.equal((native as unknown as { error: string }).error, "Two-factor authentication required");
+
+  // The second step and the expiry answer follow the request too; mfaExpired stays a flag.
+  const wrong = await mfa({ mfaToken: es.mfaToken, method: "totp", code: "000000" }, { cookie: "summonarr-locale=es" });
+  assert.equal(wrong.status, 401);
+  assert.deepEqual(await wrong.json(), { error: "Código de verificación incorrecto." });
+  const dead = await mfa({ mfaToken: "not-a-token", method: "totp", code: "000000" }, { cookie: "summonarr-locale=es" });
+  assert.deepEqual(await dead.json(), { error: "Tu inicio de sesión ha caducado. Vuelve a iniciar sesión.", mfaExpired: true });
+});
+
+test("i18n: a wrong password stays the English literal with no hints and is Spanish with the cookie", async () => {
+  const u = await seedUser();
+  const body = { email: u.email, password: "wrong-password-here" };
+  const en = await call(credentialsRoute.POST as never, "/api/auth/sign-in/credentials", { body });
+  assert.deepEqual(await en.json(), { error: "Invalid credentials" });
+  const es = await call(credentialsRoute.POST as never, "/api/auth/sign-in/credentials", { body, headers: { cookie: "summonarr-locale=es" } });
+  assert.equal(es.status, 401);
+  assert.deepEqual(await es.json(), { error: "Credenciales incorrectas" });
+});
+
+test("i18n: enrollment step-up messages follow the request; secondFactorRequired/methods do not change", async () => {
+  const u = await seedUser();
+  seedTotp(u.id as string);
+  const jwt = await sessionFor(u);
+  const es = { ...bearer(jwt), cookie: "summonarr-locale=es" };
+  const noPw = await call(totpSetup.POST as never, "/api/profile/mfa/totp/setup", { body: {}, headers: es });
+  assert.equal(noPw.status, 400);
+  assert.deepEqual(await noPw.json(), { error: "Se requiere tu contraseña actual" });
+  const off = await call(profileMfa.DELETE as never, "/api/profile/mfa", { method: "DELETE", body: { password: PASSWORD }, headers: es });
+  assert.equal(off.status, 400);
+  const body = await off.json();
+  assert.equal(body.secondFactorRequired, true);
+  assert.deepEqual(body.methods, ["totp"]);
+  assert.match(body.error, /^Confirma este cambio/);
+});
+
 test("a wrong password on a 2FA account is the ordinary 401 — no challenge is disclosed", async () => {
   const u = await seedUser();
   seedTotp(u.id as string);

@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { isFeatureEnabled } from "@/lib/features";
 import { canAutoRequest } from "@/lib/permissions";
 import { WATCHLIST_AUTO_REQUEST_FEATURE_KEY } from "@/lib/auto-request";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // The caller's watchlist auto-request state (src/lib/auto-request.ts):
 //   enabled        — the feature flag is on;
@@ -13,13 +14,14 @@ import { WATCHLIST_AUTO_REQUEST_FEATURE_KEY } from "@/lib/auto-request";
 //   plexConnected  — a Plex token is stored (captured at Plex sign-in while the
 //                    feature is on), i.e. the cron can actually read their list.
 // The web profile renders this server-side; native clients need the REST form.
-export const GET = withAuth(async (_req, _ctx, session) => {
+export const GET = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const [enabled, user, plexAccount] = await Promise.all([
     isFeatureEnabled(WATCHLIST_AUTO_REQUEST_FEATURE_KEY),
     prisma.user.findUnique({ where: { id: session.user.id }, select: { plexWatchlistAutoRequest: true } }),
     prisma.account.findFirst({ where: { userId: session.user.id, provider: "plex" }, select: { id: true } }),
   ]);
-  if (!user) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!user) return NextResponse.json({ error: t("apiAuth.common.notFound") }, { status: 404 });
   return NextResponse.json({
     enabled,
     permitted: {
@@ -35,10 +37,11 @@ export const GET = withAuth(async (_req, _ctx, session) => {
 // and the permission: it is a preference, and it should survive an admin
 // turning the feature off and on again.
 export const PATCH = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const parsed = await readJsonCapped<{ plexWatchlist?: unknown }>(req, 4096);
   if (parsed instanceof NextResponse) return parsed;
   if (typeof parsed.plexWatchlist !== "boolean") {
-    return NextResponse.json({ error: "plexWatchlist must be a boolean" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.profile.plexWatchlistBoolean") }, { status: 400 });
   }
   await prisma.user.update({
     where: { id: session.user.id },

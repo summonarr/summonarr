@@ -8,6 +8,7 @@ import { revokeOtherUserSessions } from "@/lib/auth";
 import { dropRecoveryCodesIfNoFactorInTx, sanitizePasskeyName } from "@/lib/mfa/mfa-store";
 import { mfaReauthStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // PATCH /api/profile/mfa/passkeys/[id] — rename one of the caller's passkeys.
 // Body: { password, secondFactor, name } — a passkey exists, so 2FA is on and
@@ -17,15 +18,16 @@ export const PATCH = withAuth(async (
   { params }: { params: Promise<{ id: string }> },
   session,
 ) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
   const { id } = await params;
   const parsed = await readJsonCapped<{ password?: unknown; secondFactor?: unknown; name?: unknown }>(req, 64 * 1024);
   if (parsed instanceof NextResponse) return parsed;
   if (typeof parsed.name !== "string" || parsed.name.trim().length === 0) {
-    return NextResponse.json({ error: "A name is required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.mfa.nameRequired") }, { status: 400 });
   }
-  const user = await mfaReauthStepUp(session, parsed.password);
+  const user = await mfaReauthStepUp(session, parsed.password, t);
   if (user instanceof NextResponse) return user;
   const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor);
   if (proof instanceof NextResponse) return proof;
@@ -33,7 +35,7 @@ export const PATCH = withAuth(async (
   const name = sanitizePasskeyName(parsed.name);
   // Scoped to the caller: another user's credential id is simply "not found".
   const res = await prisma.webAuthnCredential.updateMany({ where: { id, userId: user.id }, data: { name } });
-  if (res.count === 0) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (res.count === 0) return NextResponse.json({ error: t("apiAuth.common.notFound") }, { status: 404 });
 
   void notifyMfaSecurityEvent(user.id, "passkey-renamed");
   void logAudit({
@@ -56,12 +58,13 @@ export const DELETE = withAuth(async (
   { params }: { params: Promise<{ id: string }> },
   session,
 ) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
   const { id } = await params;
   const parsed = await readJsonCappedOr<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024, {});
   if (parsed instanceof NextResponse) return parsed;
-  const user = await mfaReauthStepUp(session, parsed.password);
+  const user = await mfaReauthStepUp(session, parsed.password, t);
   if (user instanceof NextResponse) return user;
   const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor);
   if (proof instanceof NextResponse) return proof;
@@ -71,7 +74,7 @@ export const DELETE = withAuth(async (
     const noneLeft = res.count > 0 ? await dropRecoveryCodesIfNoFactorInTx(tx, user.id) : false;
     return { removed: res.count, noneLeft };
   });
-  if (outcome.removed === 0) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (outcome.removed === 0) return NextResponse.json({ error: t("apiAuth.common.notFound") }, { status: 404 });
 
   const revoked = outcome.noneLeft ? await revokeOtherUserSessions(user.id, session.sessionId) : 0;
   void notifyMfaSecurityEvent(user.id, "passkey-removed");

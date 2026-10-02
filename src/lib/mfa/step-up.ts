@@ -17,11 +17,14 @@ import { prisma } from "@/lib/prisma";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 import type { SummonarrSession } from "@/lib/api-auth";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 import { getMfaState, type MfaState, type SecondFactorInput } from "./mfa-store";
-import { MFA_LOCKED_MESSAGE, verifySecondFactorGuarded } from "./lockout";
+import { verifySecondFactorGuarded } from "./lockout";
 import { commitToken, releaseToken, reserveToken, verifyMfaStepUpToken } from "./mfa-token";
 import { webAuthnConfigFromEnv, type AuthenticationResponseJSON } from "./webauthn";
 
+// English text of apiAuth.mfa.unavailable.
 export const MFA_UNAVAILABLE_MESSAGE =
   "Two-factor authentication is available only for accounts that sign in with a password.";
 
@@ -32,22 +35,26 @@ export interface StepUpUser {
 }
 
 // The non-password half: is this session's account eligible at all?
-export async function mfaEligibleUser(session: SummonarrSession): Promise<StepUpUser | NextResponse> {
+export async function mfaEligibleUser(session: SummonarrSession, t: Translator): Promise<StepUpUser | NextResponse> {
   const user = await prisma.user.findUnique({
     where: { id: session.user.id },
     select: { id: true, name: true, email: true, passwordHash: true },
   });
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!user) return NextResponse.json({ error: t("apiAuth.common.unauthorized") }, { status: 401 });
   if (session.user.provider !== "credentials" || !user.passwordHash) {
-    return NextResponse.json({ error: MFA_UNAVAILABLE_MESSAGE }, { status: 403 });
+    return NextResponse.json({ error: t("apiAuth.mfa.unavailable") }, { status: 403 });
   }
   return { id: user.id, name: user.name, email: user.email };
 }
 
-export async function mfaReauthStepUp(session: SummonarrSession, password: unknown): Promise<StepUpUser | NextResponse> {
+export async function mfaReauthStepUp(
+  session: SummonarrSession,
+  password: unknown,
+  t: Translator,
+): Promise<StepUpUser | NextResponse> {
   if (!checkRateLimit(`mfa-stepup:${session.user.id}`, 10, 15 * 60 * 1000)) {
     return NextResponse.json(
-      { error: "Too many attempts — please wait 15 minutes before trying again." },
+      { error: t("apiAuth.common.tooManyAttemptsWait15") },
       { status: 429 },
     );
   }
@@ -55,18 +62,18 @@ export async function mfaReauthStepUp(session: SummonarrSession, password: unkno
     where: { id: session.user.id },
     select: { id: true, name: true, email: true, passwordHash: true },
   });
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!user) return NextResponse.json({ error: t("apiAuth.common.unauthorized") }, { status: 401 });
   if (session.user.provider !== "credentials" || !user.passwordHash) {
-    return NextResponse.json({ error: MFA_UNAVAILABLE_MESSAGE }, { status: 403 });
+    return NextResponse.json({ error: t("apiAuth.mfa.unavailable") }, { status: 403 });
   }
   if (typeof password !== "string" || password.length === 0) {
-    return NextResponse.json({ error: "Your current password is required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.mfa.currentPasswordRequired") }, { status: 400 });
   }
   if (password.length > MAX_PASSWORD_LENGTH) {
-    return NextResponse.json({ error: "Invalid password" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.common.invalidPassword") }, { status: 400 });
   }
   if (!(await verifyPassword(password, user.passwordHash))) {
-    return NextResponse.json({ error: "Invalid password" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.common.invalidPassword") }, { status: 400 });
   }
   return { id: user.id, name: user.name, email: user.email };
 }
@@ -90,9 +97,9 @@ export async function mfaReauthStepUp(session: SummonarrSession, password: unkno
 //   { method: "totp" | "recovery", code }
 //   { method: "webauthn", credential: <assertion JSON>, challengeToken }
 
+// English text of apiAuth.mfa.secondFactorRequired.
 export const SECOND_FACTOR_REQUIRED_MESSAGE =
   "Confirm this change with a code from your authenticator app, a recovery code or a passkey.";
-const SECOND_FACTOR_INVALID_MESSAGE = "Invalid verification code.";
 
 export interface SecondFactorProof {
   // True when a factor was verified; false when the account had none to prove.
@@ -134,13 +141,14 @@ export async function mfaSecondFactorStepUp(
   raw: unknown,
   state?: MfaState,
 ): Promise<SecondFactorProof | NextResponse> {
+  const t = translatorForRequest(req);
   const current = state ?? (await getMfaState(user.id));
   if (!current.enabled) return { proved: false, state: current };
 
   const parsed = parseStepUpFactor(raw);
   if (!parsed) {
     return NextResponse.json(
-      { error: SECOND_FACTOR_REQUIRED_MESSAGE, secondFactorRequired: true, methods: stepUpMethods(current) },
+      { error: t("apiAuth.mfa.secondFactorRequired"), secondFactorRequired: true, methods: stepUpMethods(current) },
       { status: 400 },
     );
   }
@@ -157,7 +165,7 @@ export async function mfaSecondFactorStepUp(
       !reserveToken(claims.jti)
     ) {
       return NextResponse.json(
-        { error: "This passkey confirmation has expired. Please try again.", secondFactorRequired: true },
+        { error: t("apiAuth.mfa.passkeyConfirmExpired"), secondFactorRequired: true },
         { status: 400 },
       );
     }
@@ -184,8 +192,8 @@ export async function mfaSecondFactorStepUp(
     else releaseToken(reservedJti, { failed: true });
   }
   if (!verdict.ok) {
-    if (verdict.locked) return NextResponse.json({ error: MFA_LOCKED_MESSAGE }, { status: 429 });
-    return NextResponse.json({ error: SECOND_FACTOR_INVALID_MESSAGE, secondFactorRequired: true }, { status: 400 });
+    if (verdict.locked) return NextResponse.json({ error: t("apiAuth.mfa.locked") }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.mfa.invalidCode"), secondFactorRequired: true }, { status: 400 });
   }
   return { proved: true, state: current };
 }

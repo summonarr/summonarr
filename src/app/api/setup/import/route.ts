@@ -7,6 +7,7 @@ import {
   processBackupImport,
   MAX_CIPHERTEXT_BYTES,
 } from "@/lib/backup-import";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const dynamic = "force-dynamic";
 
@@ -16,8 +17,9 @@ const MIN_BACKUP_PASSWORD_LEN = 12;
 // can't post a crafted dump to a live server. The admin route at
 // /api/admin/backup/db-import handles every other case.
 export async function POST(req: NextRequest) {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`setup-import:${getClientIpKey(req.headers)}`, 5, 5 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many setup-import attempts. Try again later." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.setup.tooManyAttempts") }, { status: 429 });
   }
 
   // Advisory lock 43 is shared with /api/auth/register — initial registration and setup-import
@@ -31,7 +33,7 @@ export async function POST(req: NextRequest) {
   });
   if (gate.closed) {
     return NextResponse.json(
-      { error: "Setup import is only available on a fresh server with no users." },
+      { error: t("apiAuth.setup.notFresh") },
       { status: 409 },
     );
   }
@@ -39,13 +41,13 @@ export async function POST(req: NextRequest) {
   const password = process.env.BACKUP_DB_PASSWORD ?? "";
   if (password.length === 0) {
     return NextResponse.json(
-      { error: "Backup is not configured. Set the BACKUP_DB_PASSWORD environment variable on the server." },
+      { error: t("apiAuth.setup.backupNotConfigured") },
       { status: 503 },
     );
   }
   if (password.length < MIN_BACKUP_PASSWORD_LEN) {
     return NextResponse.json(
-      { error: `BACKUP_DB_PASSWORD is too short (minimum ${MIN_BACKUP_PASSWORD_LEN} characters).` },
+      { error: t("apiAuth.setup.passwordTooShort", { min: MIN_BACKUP_PASSWORD_LEN }) },
       { status: 503 },
     );
   }
@@ -54,7 +56,7 @@ export async function POST(req: NextRequest) {
   if (sizeCheck) return sizeCheck;
 
   if (!req.body) {
-    return NextResponse.json({ error: "Empty request body" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.setup.emptyBody") }, { status: 400 });
   }
 
   const result = await processBackupImport(req.body, password, "setup");

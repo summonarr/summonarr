@@ -7,15 +7,17 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { logAudit } from "@/lib/audit";
 import { invalidateUserSession } from "@/lib/auth";
 import { hashPassword, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // PATCH /api/profile/password — the signed-in user changes their own local
 // password; revokes all existing sessions on success.
 export const PATCH = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
   if (!checkRateLimit(`profile-password:${session.user.id}`, 5, 15 * 60 * 1000)) {
     return NextResponse.json(
-      { error: "Too many attempts — please wait 15 minutes before trying again." },
+      { error: t("apiAuth.common.tooManyAttemptsWait15") },
       { status: 429 },
     );
   }
@@ -27,15 +29,15 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
   const { currentPassword, newPassword } = body;
 
   if (!newPassword || typeof newPassword !== "string") {
-    return NextResponse.json({ error: "New password is required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.profile.newPasswordRequired") }, { status: 400 });
   }
 
   if (newPassword.length < 12) {
-    return NextResponse.json({ error: "New password must be at least 12 characters" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.profile.newPasswordTooShort") }, { status: 400 });
   }
 
   if (newPassword.length > MAX_PASSWORD_LENGTH) {
-    return NextResponse.json({ error: `New password must be at most ${MAX_PASSWORD_LENGTH} characters` }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.profile.newPasswordTooLong", { max: MAX_PASSWORD_LENGTH }) }, { status: 400 });
   }
 
   const user = await prisma.user.findUnique({
@@ -43,7 +45,7 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     select: { passwordHash: true, name: true, email: true },
   });
 
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!user) return NextResponse.json({ error: t("apiAuth.common.unauthorized") }, { status: 401 });
 
   // SSO-provisioned accounts (Plex, Jellyfin, OIDC) authenticate against their
   // upstream identity provider and never have a local passwordHash. Allowing a
@@ -54,7 +56,7 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
   // Hard-refuse the operation for any account with no existing passwordHash.
   if (user.passwordHash === null) {
     return NextResponse.json(
-      { error: "Local passwords are not available for SSO accounts. Sign in with your provider." },
+      { error: t("apiAuth.profile.ssoNoPassword") },
       { status: 403 },
     );
   }
@@ -62,11 +64,11 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
   if (currentPassword !== undefined && typeof currentPassword !== "string") {
     // A non-string currentPassword would reach bcrypt and throw an opaque
     // TypeError; reject it explicitly (mirrors the newPassword guard above).
-    return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.profile.invalidRequest") }, { status: 400 });
   }
   const currentOk = await verifyPassword(currentPassword ?? "", user.passwordHash);
   if (!currentOk) {
-    return NextResponse.json({ error: "Invalid password" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.common.invalidPassword") }, { status: 400 });
   }
 
   const newHash = await hashPassword(newPassword);

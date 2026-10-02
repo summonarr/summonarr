@@ -9,6 +9,7 @@ import { revokeOtherUserSessions } from "@/lib/auth";
 import { confirmTotpEnrollmentInTx, ensureRecoveryCodesInTx, getMfaState, type ConfirmTotpResult } from "@/lib/mfa/mfa-store";
 import { mfaEligibleUser } from "@/lib/mfa/step-up";
 import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // POST /api/profile/mfa/totp/enable — confirms the pending secret from
 // /totp/setup with a current code and turns the authenticator app on.
@@ -22,17 +23,18 @@ import { notifyMfaSecurityEvent } from "@/lib/mfa/notify";
 // When this is the account's FIRST second factor the response carries ten
 // one-time recovery codes (shown once) and every OTHER session is signed out.
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
   if (!checkRateLimit(`mfa-totp-enable:${session.user.id}`, 10, 15 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many attempts — please wait 15 minutes." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.common.tooManyAttempts15") }, { status: 429 });
   }
   const parsed = await readJsonCapped<{ code?: unknown }>(req, 4096);
   if (parsed instanceof NextResponse) return parsed;
   if (typeof parsed.code !== "string" || parsed.code.length === 0 || parsed.code.length > 32) {
-    return NextResponse.json({ error: "Enter the 6-digit code from your authenticator app" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.mfa.enterCode") }, { status: 400 });
   }
-  const user = await mfaEligibleUser(session);
+  const user = await mfaEligibleUser(session, t);
   if (user instanceof NextResponse) return user;
 
   const before = await getMfaState(user.id);
@@ -43,13 +45,13 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return { result, recoveryCodes: await ensureRecoveryCodesInTx(tx, user.id) };
   });
   if (outcome.result === "no-pending") {
-    return NextResponse.json({ error: "Start the authenticator setup first" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.mfa.startSetupFirst") }, { status: 400 });
   }
   if (outcome.result === "already-enabled") {
-    return NextResponse.json({ error: "An authenticator app is already set up" }, { status: 409 });
+    return NextResponse.json({ error: t("apiAuth.mfa.totpAlreadySet") }, { status: 409 });
   }
   if (outcome.result === "invalid") {
-    return NextResponse.json({ error: "That code didn't match. Check the time on your device and try again." }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.mfa.codeMismatch") }, { status: 400 });
   }
 
   const revoked = before.enabled ? 0 : await revokeOtherUserSessions(user.id, session.sessionId);

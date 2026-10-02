@@ -6,6 +6,7 @@ import { getMfaState } from "@/lib/mfa/mfa-store";
 import { MFA_TOKEN_TTL_SECONDS, signMfaStepUpToken } from "@/lib/mfa/mfa-token";
 import { mfaEligibleUser } from "@/lib/mfa/step-up";
 import { webAuthnConfigFromEnv } from "@/lib/mfa/webauthn";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // POST /api/profile/mfa/challenge — a fresh WebAuthn challenge so a PASSKEY can
 // confirm a two-factor enrollment change (the `secondFactor` step-up in
@@ -17,20 +18,21 @@ import { webAuthnConfigFromEnv } from "@/lib/mfa/webauthn";
 //
 // Issuing a challenge changes nothing and discloses only the caller's own
 // credential ids, so it needs no password — the change it confirms does.
-export const POST = withAuth(async (_req, _ctx, session) => {
+export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const config = webAuthnConfigFromEnv();
   if (!config) {
-    return NextResponse.json({ error: "Passkeys need AUTH_URL to be set to this server's public URL." }, { status: 503 });
+    return NextResponse.json({ error: t("apiAuth.mfa.passkeysNeedAuthUrl") }, { status: 503 });
   }
-  if (!session.sessionId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!session.sessionId) return NextResponse.json({ error: t("apiAuth.common.unauthorized") }, { status: 401 });
   if (!checkRateLimit(`mfa-stepup-challenge:${session.user.id}`, 30, 15 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many attempts — please wait 15 minutes." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.common.tooManyAttempts15") }, { status: 429 });
   }
-  const user = await mfaEligibleUser(session);
+  const user = await mfaEligibleUser(session, t);
   if (user instanceof NextResponse) return user;
   const state = await getMfaState(user.id);
   if (state.passkeys.length === 0) {
-    return NextResponse.json({ error: "This account has no passkeys." }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.mfa.noPasskeys") }, { status: 400 });
   }
 
   const challenge = randomBytes(32).toString("base64url");

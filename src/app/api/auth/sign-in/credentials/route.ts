@@ -3,6 +3,7 @@ import { AccountDeactivatedError, authorizeWithCredentials, signInAndMintSession
 import { buildSignInResponse, disabledAccountResponse } from "@/lib/sign-in-response";
 import { readJsonCapped } from "@/lib/body-size";
 import { mfaChallengeFor } from "@/lib/mfa/signin-challenge";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Summonarr-native credentials sign-in: authorize(), then mint a Summonarr JWT we own.
 
@@ -11,12 +12,13 @@ import { mfaChallengeFor } from "@/lib/mfa/signin-challenge";
 const MAX_SIGNIN_BODY_BYTES = 16 * 1024;
 
 export async function POST(req: NextRequest) {
+  const t = translatorForRequest(req);
   const parsed = await readJsonCapped<Record<string, unknown>>(req, MAX_SIGNIN_BODY_BYTES);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
 
   if (typeof body.email !== "string" || typeof body.password !== "string") {
-    return NextResponse.json({ error: "Email and password required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.credentials.required") }, { status: 400 });
   }
 
   const user = await authorizeWithCredentials(
@@ -28,7 +30,7 @@ export async function POST(req: NextRequest) {
     req,
   );
   if (!user) {
-    return NextResponse.json({ error: "Invalid credentials" }, { status: 401 });
+    return NextResponse.json({ error: t("apiAuth.common.invalidCredentials") }, { status: 401 });
   }
 
   // Two-factor (guardrail 6d): the password alone NEVER mints a session for an
@@ -45,7 +47,7 @@ export async function POST(req: NextRequest) {
   try {
     result = await signInAndMintSession({ user, providerId: "credentials" });
   } catch (err) {
-    if (err instanceof AccountDeactivatedError) return disabledAccountResponse();
+    if (err instanceof AccountDeactivatedError) return disabledAccountResponse(t);
     throw err;
   }
   return buildSignInResponse(req, result);

@@ -7,6 +7,7 @@ import { getMfaState, MAX_PASSKEYS_PER_USER, webAuthnUserHandle } from "@/lib/mf
 import { MFA_TOKEN_TTL_SECONDS, signPasskeyRegisterToken } from "@/lib/mfa/mfa-token";
 import { mfaReauthStepUp, mfaSecondFactorStepUp } from "@/lib/mfa/step-up";
 import { SUPPORTED_COSE_ALGS, webAuthnConfigFromEnv } from "@/lib/mfa/webauthn";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // POST /api/profile/mfa/passkeys/options — step 1 of adding a passkey.
 // Body: { password, secondFactor? } — the second factor is required when the
@@ -17,21 +18,22 @@ import { SUPPORTED_COSE_ALGS, webAuthnConfigFromEnv } from "@/lib/mfa/webauthn";
 // user AND this session, and records whether a second factor was verified.
 // Step 2 is POST /api/profile/mfa/passkeys.
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
   const config = webAuthnConfigFromEnv();
   if (!config) {
-    return NextResponse.json({ error: "Passkeys need AUTH_URL to be set to this server's public URL." }, { status: 503 });
+    return NextResponse.json({ error: t("apiAuth.mfa.passkeysNeedAuthUrl") }, { status: 503 });
   }
-  if (!session.sessionId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (!session.sessionId) return NextResponse.json({ error: t("apiAuth.common.unauthorized") }, { status: 401 });
   const parsed = await readJsonCapped<{ password?: unknown; secondFactor?: unknown }>(req, 64 * 1024);
   if (parsed instanceof NextResponse) return parsed;
-  const user = await mfaReauthStepUp(session, parsed.password);
+  const user = await mfaReauthStepUp(session, parsed.password, t);
   if (user instanceof NextResponse) return user;
 
   const state = await getMfaState(user.id);
   if (state.passkeys.length >= MAX_PASSKEYS_PER_USER) {
-    return NextResponse.json({ error: `You can register at most ${MAX_PASSKEYS_PER_USER} passkeys.` }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.mfa.maxPasskeys", { max: MAX_PASSKEYS_PER_USER }) }, { status: 400 });
   }
   const proof = await mfaSecondFactorStepUp(req, session, user, parsed.secondFactor, state);
   if (proof instanceof NextResponse) return proof;

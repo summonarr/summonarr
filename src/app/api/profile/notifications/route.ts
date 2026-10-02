@@ -4,6 +4,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { normalizeEmail } from "@/lib/auth";
 import { isNotificationEmailEnabled } from "@/lib/email";
 import { prisma } from "@/lib/prisma";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // RFC-5322-lite: local@domain, at least one dot in the domain, no whitespace.
 // Intentionally loose — SMTP will reject anything the regex lets through.
@@ -14,7 +15,8 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // `emailEnabled` mirrors the web profile's gate (email feature + "Send
 // notification emails" switch + transport configured) so native clients can
 // hide their email-preference section while the channel can never send.
-export const GET = withAuth(async (_req, _ctx, session) => {
+export const GET = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const [prefs, emailEnabled] = await Promise.all([
     prisma.user.findUnique({
       where: { id: session.user.id },
@@ -27,11 +29,12 @@ export const GET = withAuth(async (_req, _ctx, session) => {
     }),
     isNotificationEmailEnabled(),
   ]);
-  if (!prefs) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!prefs) return NextResponse.json({ error: t("apiAuth.common.notFound") }, { status: 404 });
   return NextResponse.json({ ...prefs, emailEnabled });
 });
 
 export const PATCH = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const parsed = await readJsonCapped<{
     notifyOnApproved?: boolean; notifyOnAvailable?: boolean; notifyOnDeclined?: boolean;
     emailOnApproved?: boolean;  emailOnAvailable?: boolean;  emailOnDeclined?: boolean;
@@ -61,7 +64,7 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
     const provider = session.user.provider;
     const isJellyfin = provider === "jellyfin" || provider === "jellyfin-quickconnect";
     if (!isJellyfin) {
-      return NextResponse.json({ error: "notificationEmail is read-only for this sign-in method" }, { status: 403 });
+      return NextResponse.json({ error: t("apiAuth.profile.notificationEmailReadOnly") }, { status: 403 });
     }
 
     const raw = body.notificationEmail;
@@ -69,7 +72,7 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
       data.notificationEmail = null;
     } else if (typeof raw === "string") {
       if (raw.length > 320 || !EMAIL_RE.test(raw.trim())) {
-        return NextResponse.json({ error: "Invalid email address" }, { status: 400 });
+        return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
       }
       // A Jellyfin-authenticated user has no provider-verified email the way Plex
       // and OIDC users do (those addresses are owned and synced by the IdP on every
@@ -105,17 +108,17 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
         // vector, so point the caller at the verification flow — it mails a
         // one-time token and binds only on proven possession.
         return NextResponse.json(
-          { error: "Verify this address first via POST /api/profile/notification-email." },
+          { error: t("apiAuth.profile.verifyAddressFirst") },
           { status: 403 },
         );
       }
     } else {
-      return NextResponse.json({ error: "Invalid notificationEmail" }, { status: 400 });
+      return NextResponse.json({ error: t("apiAuth.profile.invalidNotificationEmail") }, { status: 400 });
     }
   }
 
   if (Object.keys(data).length === 0) {
-    return NextResponse.json({ error: "No valid fields provided" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.profile.noValidFields") }, { status: 400 });
   }
 
   await prisma.user.update({ where: { id: session.user.id }, data });

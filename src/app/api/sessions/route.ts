@@ -7,6 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { logAudit } from "@/lib/audit";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { isIndefiniteDeadline } from "@/lib/session-lifetime";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const GET = withAuth(async (_req, _ctx, session) => {
   const sessions = await prisma.authSession.findMany({
@@ -41,12 +42,13 @@ export const GET = withAuth(async (_req, _ctx, session) => {
 const STEP_UP_MAX_AGE_MS = 5 * 60 * 1000;
 
 export const DELETE = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   // Per-user revoke rate cap (10 per minute). Bounds how fast a hijacked cookie or
   // a CSRF-replay attempt can iterate over a user's sessions, so an attacker can't
   // sweep every device off in a tight loop before the user notices or intervenes.
   if (!checkRateLimit(`sessions-delete:${session.user.id}`, 10, 60_000)) {
     return NextResponse.json(
-      { error: "rate_limit", message: "Too many revoke attempts. Try again in a minute." },
+      { error: "rate_limit", message: t("apiAuth.sessions.revokeRateLimit") },
       { status: 429 },
     );
   }
@@ -57,7 +59,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
 
   const { sessionId, confirmPassword } = body;
   if (!sessionId || typeof sessionId !== "string") {
-    return NextResponse.json({ error: "sessionId required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.sessions.sessionIdRequired") }, { status: 400 });
   }
 
   const record = await prisma.authSession.findUnique({
@@ -66,7 +68,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   });
 
   if (!record || record.userId !== session.user.id) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return NextResponse.json({ error: t("apiAuth.common.notFound") }, { status: 404 });
   }
 
   const isSelf = record.sessionId === session.sessionId;
@@ -85,13 +87,13 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     });
 
     if (!user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json({ error: t("apiAuth.common.unauthorized") }, { status: 401 });
     }
 
     if (user.passwordHash) {
       if (!confirmPassword || typeof confirmPassword !== "string") {
         return NextResponse.json(
-          { error: "password-required", message: "Confirm your password to revoke this device." },
+          { error: "password-required", message: t("apiAuth.sessions.confirmPasswordRevoke") },
           { status: 401 },
         );
       }
@@ -107,7 +109,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
       const callerSessionId = session.sessionId;
       if (!callerSessionId) {
         return NextResponse.json(
-          { error: "session-too-old", message: "Recent sign-in required to revoke other devices." },
+          { error: "session-too-old", message: t("apiAuth.sessions.recentSignInRevoke") },
           { status: 401 },
         );
       }
@@ -117,7 +119,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
       });
       if (!caller || Date.now() - caller.createdAt.getTime() > STEP_UP_MAX_AGE_MS) {
         return NextResponse.json(
-          { error: "session-too-old", message: "Recent sign-in required to revoke other devices." },
+          { error: "session-too-old", message: t("apiAuth.sessions.recentSignInRevoke") },
           { status: 401 },
         );
       }
@@ -134,7 +136,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     // log that falsely records a successful revoke. Failing loudly lets the caller
     // retry instead of trusting a revocation that never happened.
     console.error("[sessions] revoke failed:", err);
-    return NextResponse.json({ error: "Failed to revoke session" }, { status: 500 });
+    return NextResponse.json({ error: t("apiAuth.sessions.revokeFailed") }, { status: 500 });
   }
 
   void logAudit({

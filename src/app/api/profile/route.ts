@@ -8,6 +8,7 @@ import { readJsonCappedOr } from "@/lib/body-size";
 import { verifyPassword } from "@/lib/password-hash";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { deactivateUserInTx, LastAdminError } from "@/lib/account-lifecycle";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // DELETE /api/profile — the signed-in user deletes their OWN account.
 //
@@ -23,6 +24,7 @@ import { deactivateUserInTx, LastAdminError } from "@/lib/account-lifecycle";
 // an in-app deletion to actually remove the account's data, so a user who wants
 // that must have an admin follow up with a purge — see account-lifecycle.ts.
 export const DELETE = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
   const id = session.user.id;
@@ -31,7 +33,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     where: { id },
     select: { role: true, name: true, email: true, deactivatedAt: true, passwordHash: true },
   });
-  if (!target) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  if (!target) return NextResponse.json({ error: t("apiAuth.common.notFound") }, { status: 404 });
   if (target.deactivatedAt) return NextResponse.json({ ok: true }); // idempotent
 
   // Step-up for local-credential accounts: this signs the user out everywhere and
@@ -42,7 +44,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   if (target.passwordHash !== null) {
     if (!checkRateLimit(`profile-delete:${id}`, 5, 15 * 60 * 1000)) {
       return NextResponse.json(
-        { error: "Too many attempts — please wait 15 minutes before trying again." },
+        { error: t("apiAuth.common.tooManyAttemptsWait15") },
         { status: 429 },
       );
     }
@@ -50,11 +52,11 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
     if (parsed instanceof NextResponse) return parsed;
     const password = parsed.password;
     if (typeof password !== "string" || password.length === 0) {
-      return NextResponse.json({ error: "Password is required to delete your account" }, { status: 400 });
+      return NextResponse.json({ error: t("apiAuth.profile.passwordRequiredDelete") }, { status: 400 });
     }
     const ok = await verifyPassword(password, target.passwordHash);
     if (!ok) {
-      return NextResponse.json({ error: "Invalid password" }, { status: 400 });
+      return NextResponse.json({ error: t("apiAuth.common.invalidPassword") }, { status: 400 });
     }
   }
 
@@ -81,7 +83,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   } catch (err) {
     if (err instanceof LastAdminError) {
       return NextResponse.json(
-        { error: "You are the last admin. Promote another user to admin before deleting your account." },
+        { error: t("apiAuth.profile.lastAdmin") },
         { status: 400 },
       );
     }

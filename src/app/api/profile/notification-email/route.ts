@@ -12,6 +12,7 @@ import {
   verifyIdentifierPrefixFor,
   VERIFY_TTL_MS,
 } from "@/lib/notification-email-verify";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // RFC-5322-lite (matches the profile route). SMTP rejects the rest.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -22,27 +23,28 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // which is what stops this from being a "redirect Summonarr's mail at a victim"
 // vector. Jellyfin-only (Plex/OIDC emails are provider-owned + synced on sign-in).
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const provider = session.user.provider;
   const isJellyfin = provider === "jellyfin" || provider === "jellyfin-quickconnect";
   if (!isJellyfin) {
-    return NextResponse.json({ error: "notificationEmail is read-only for this sign-in method" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAuth.profile.notificationEmailReadOnly") }, { status: 403 });
   }
 
   // 3 sends / 15 min per user — an authenticated user can't weaponize this into
   // an email-bombing tool against an arbitrary mailbox.
   if (!checkRateLimit(`notif-email-verify:${session.user.id}`, 3, 15 * 60_000)) {
-    return tooManyRequests(900, "Too many verification emails — try again later.");
+    return tooManyRequests(900, t("apiAuth.profile.tooManyVerificationEmails"));
   }
 
   const parsed = await readJsonCapped<{ email?: string }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const rawEmail = typeof parsed.email === "string" ? parsed.email.trim() : "";
   if (!rawEmail || rawEmail.length > 320 || !EMAIL_RE.test(rawEmail)) {
-    return NextResponse.json({ error: "Invalid email address" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
   }
 
   if (!(await isNotificationEmailEnabled())) {
-    return NextResponse.json({ error: "Email notifications aren't configured on this server." }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.profile.emailNotConfigured") }, { status: 400 });
   }
 
   const email = normalizeEmail(rawEmail);
@@ -64,7 +66,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     await sendNotificationEmailVerification(email, token);
   } catch (err) {
     console.error("[notif-email] verification send failed:", err instanceof Error ? err.message : err);
-    return NextResponse.json({ error: "Couldn't send the verification email — contact the server owner." }, { status: 502 });
+    return NextResponse.json({ error: t("apiAuth.profile.verificationSendFailed") }, { status: 502 });
   }
 
   return NextResponse.json({ ok: true, email });

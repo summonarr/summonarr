@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // The Jellyfin sign-in server picker, for clients that can't render one from a
 // server component.
@@ -38,8 +39,9 @@ import { checkRateLimit, getClientIpKey } from "@/lib/rate-limit";
 // keys, no library/user counts, and not the registry's `restricted` flag (a
 // per-user library-visibility concern that says nothing about sign-in).
 export async function GET(req: NextRequest) {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`jellyfin-servers:${getClientIpKey(req.headers)}`, 30, 60_000)) {
-    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.common.tooManyRequests") }, { status: 429 });
   }
   // Default ("") first when configured — getMediaInstances synthesizes it ahead
   // of the registry entries and the configured-filter preserves that order, so

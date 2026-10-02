@@ -6,6 +6,8 @@ import { isFeatureEnabled } from "@/lib/features";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { generateCalendarToken, hashCalendarToken } from "@/lib/calendar-token";
 import { calendarFeedPath, calendarSiteUrl, CALENDAR_FEATURE_KEY } from "@/lib/calendar-feed";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 // Manage the caller's personal iCal feed token. The token is shown ONCE — in the
 // POST response that mints it — because only its hash is stored (see
@@ -16,12 +18,13 @@ export const dynamic = "force-dynamic";
 const GENERATE_LIMIT = 10;
 const GENERATE_WINDOW_MS = 60 * 60 * 1000;
 
-function disabled(): NextResponse {
-  return NextResponse.json({ error: "Calendar feeds are disabled" }, { status: 404 });
+function disabled(t: Translator): NextResponse {
+  return NextResponse.json({ error: t("apiAuth.profile.calendarDisabled") }, { status: 404 });
 }
 
-export const GET = withAuth(async (_req, _ctx, session) => {
-  if (!(await isFeatureEnabled(CALENDAR_FEATURE_KEY))) return disabled();
+export const GET = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
+  if (!(await isFeatureEnabled(CALENDAR_FEATURE_KEY))) return disabled(t);
   const user = await prisma.user.findUnique({
     where: { id: session.user.id },
     select: { calendarTokenHash: true, calendarTokenCreatedAt: true },
@@ -34,9 +37,10 @@ export const GET = withAuth(async (_req, _ctx, session) => {
 });
 
 export const POST = withAuth(async (req, _ctx, session) => {
-  if (!(await isFeatureEnabled(CALENDAR_FEATURE_KEY))) return disabled();
+  const t = translatorForRequest(req);
+  if (!(await isFeatureEnabled(CALENDAR_FEATURE_KEY))) return disabled(t);
   if (!checkRateLimit(`calendar-token:${session.user.id}`, GENERATE_LIMIT, GENERATE_WINDOW_MS)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.common.tooManyRequestsTryLater") }, { status: 429 });
   }
   const token = generateCalendarToken();
   const createdAt = new Date();
@@ -47,7 +51,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     where: { id: session.user.id, deactivatedAt: null, purgedAt: null },
     data: { calendarTokenHash: hashCalendarToken(token), calendarTokenCreatedAt: createdAt },
   });
-  if (count !== 1) return NextResponse.json({ error: "Account unavailable" }, { status: 404 });
+  if (count !== 1) return NextResponse.json({ error: t("apiAuth.profile.accountUnavailable") }, { status: 404 });
 
   const site = calendarSiteUrl(req.nextUrl.origin);
   const url = `${site ?? ""}${calendarFeedPath(token)}`;
@@ -65,8 +69,9 @@ export const POST = withAuth(async (req, _ctx, session) => {
   );
 });
 
-export const DELETE = withAuth(async (_req, _ctx, session) => {
-  if (!(await isFeatureEnabled(CALENDAR_FEATURE_KEY))) return disabled();
+export const DELETE = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
+  if (!(await isFeatureEnabled(CALENDAR_FEATURE_KEY))) return disabled(t);
   await prisma.user.updateMany({
     where: { id: session.user.id },
     data: { calendarTokenHash: null, calendarTokenCreatedAt: null },

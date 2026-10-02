@@ -20,6 +20,7 @@ import {
   WebAuthnError,
   type RegistrationResponseJSON,
 } from "@/lib/mfa/webauthn";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // POST /api/profile/mfa/passkeys — step 2 of adding a passkey.
 // Body: { registrationToken, name, credential } where `credential` is the
@@ -33,11 +34,12 @@ import {
 // When this is the account's FIRST second factor the response carries ten
 // one-time recovery codes and every OTHER session is signed out.
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
   const config = webAuthnConfigFromEnv();
   if (!config) {
-    return NextResponse.json({ error: "Passkeys need AUTH_URL to be set to this server's public URL." }, { status: 503 });
+    return NextResponse.json({ error: t("apiAuth.mfa.passkeysNeedAuthUrl") }, { status: 503 });
   }
   const parsed = await readJsonCapped<{ registrationToken?: unknown; name?: unknown; credential?: unknown }>(req, 64 * 1024);
   if (parsed instanceof NextResponse) return parsed;
@@ -50,16 +52,16 @@ export const POST = withAuth(async (req, _ctx, session) => {
     claims.sessionId !== session.sessionId ||
     !isTokenUsable(claims.jti)
   ) {
-    return NextResponse.json({ error: "This passkey setup has expired. Please start again." }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.mfa.passkeySetupExpired") }, { status: 400 });
   }
-  const user = await mfaEligibleUser(session);
+  const user = await mfaEligibleUser(session, t);
   if (user instanceof NextResponse) return user;
   if (!parsed.credential || typeof parsed.credential !== "object") {
-    return NextResponse.json({ error: "Missing passkey response" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.mfa.passkeyResponseMissing") }, { status: 400 });
   }
   const before = await getMfaState(user.id);
   if (before.enabled && !claims.factorVerified) {
-    return NextResponse.json({ error: "This passkey setup has expired. Please start again." }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.mfa.passkeySetupExpired") }, { status: 400 });
   }
 
   let verified;
@@ -72,14 +74,14 @@ export const POST = withAuth(async (req, _ctx, session) => {
   } catch (err) {
     recordTokenFailure(claims.jti);
     const code = err instanceof WebAuthnError ? err.code : "verify";
-    return NextResponse.json({ error: "The passkey could not be verified.", code }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.mfa.passkeyNotVerified"), code }, { status: 400 });
   }
   if (!consumeToken(claims.jti)) {
-    return NextResponse.json({ error: "This passkey setup has expired. Please start again." }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.mfa.passkeySetupExpired") }, { status: 400 });
   }
 
   if (before.passkeys.length >= MAX_PASSKEYS_PER_USER) {
-    return NextResponse.json({ error: `You can register at most ${MAX_PASSKEYS_PER_USER} passkeys.` }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.mfa.maxPasskeys", { max: MAX_PASSKEYS_PER_USER }) }, { status: 400 });
   }
   const name = sanitizePasskeyName(parsed.name);
 
@@ -109,7 +111,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
     });
   } catch (err) {
     if ((err as { code?: string })?.code === "P2002") {
-      return NextResponse.json({ error: "That passkey is already registered." }, { status: 409 });
+      return NextResponse.json({ error: t("apiAuth.mfa.passkeyAlreadyRegistered") }, { status: 409 });
     }
     throw err;
   }

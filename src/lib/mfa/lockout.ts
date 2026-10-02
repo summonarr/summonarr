@@ -38,6 +38,7 @@ import type { WebAuthnConfig } from "./webauthn";
 export const MFA_LOCKOUT_THRESHOLD = 10;
 export const MFA_LOCKOUT_BASE_MS = 15 * 60 * 1000;
 export const MFA_LOCKOUT_MAX_MS = 24 * 60 * 60 * 1000;
+// English text of apiAuth.mfa.locked (responses go through the catalog).
 export const MFA_LOCKED_MESSAGE =
   "Too many incorrect verification codes. Code sign-in is temporarily locked for this account — try again later.";
 

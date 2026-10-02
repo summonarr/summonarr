@@ -8,11 +8,13 @@ import { normalizeEmail } from "@/lib/auth";
 import { defaultPermissionsForRole } from "@/lib/permissions";
 import { readJsonCapped } from "@/lib/body-size";
 import { parseBearerToken, hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // In-process flag: the DB advisory lock below is the real guard; this just turns away an obvious double-submit early.
 let registrationInFlight = false;
 
 export async function POST(req: NextRequest) {
+  const t = translatorForRequest(req);
   // CSRF Origin check. A native/bearer client (custom Authorization / X-Summonarr-Client
   // headers a cross-origin page can't forge) carries no ambient-cookie CSRF risk and
   // legitimately sends no browser Origin — exempt it, mirroring the proxy.ts CSRF skip.
@@ -38,24 +40,24 @@ export async function POST(req: NextRequest) {
       try { originOk = allowed.has(new URL(origin).origin); } catch { }
     }
     if (allowed.size === 0 || !originOk) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      return NextResponse.json({ error: t("apiAuth.common.forbidden") }, { status: 403 });
     }
   }
 
   const { enabled } = await getMaintenanceStatus();
   if (enabled) {
-    return NextResponse.json({ error: "Registration is disabled during maintenance" }, { status: 503 });
+    return NextResponse.json({ error: t("apiAuth.register.maintenance") }, { status: 503 });
   }
 
   const disableRow = await prisma.setting.findUnique({ where: { key: "disableLocalLogin" } });
   if (disableRow?.value === "true") {
-    return NextResponse.json({ error: "Local registration is disabled" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAuth.register.localDisabled") }, { status: 403 });
   }
 
   const rlRow = await prisma.setting.findUnique({ where: { key: "rateLimitRegister" } });
   const limit = parseRateLimit(rlRow?.value, 5);
   if (!checkRateLimit(`register:${getClientIpKey(req.headers)}`, limit, 15 * 60 * 1000)) {
-    return NextResponse.json({ error: "Too many requests — try again later" }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.common.tooManyRequestsTryLater") }, { status: 429 });
   }
   const parsed = await readJsonCapped<{ name?: string; email?: string; password?: string }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
@@ -64,51 +66,51 @@ export async function POST(req: NextRequest) {
   const { name, email, password } = body;
 
   if (!email || !password) {
-    return NextResponse.json({ error: "Email and password are required" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.register.credentialsRequired") }, { status: 400 });
   }
   if (typeof password !== "string") {
     // Guard before the .length checks + hashPassword below — a non-string password
     // (e.g. a JSON number) is truthy, so it slips past `!password` and then crashes
     // hashPassword with a TypeError. Mirrors the email typeof check.
-    return NextResponse.json({ error: "Invalid password" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.common.invalidPassword") }, { status: 400 });
   }
 
   if (typeof email !== "string" || email.length > 254 || /\s/.test(email)) {
-    return NextResponse.json({ error: "Invalid email address" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
   }
   const emailParts = email.split("@");
   if (emailParts.length !== 2 || !emailParts[0] || !emailParts[1]) {
-    return NextResponse.json({ error: "Invalid email address" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
   }
   const domainDot = emailParts[1].lastIndexOf(".");
   if (domainDot < 1 || domainDot === emailParts[1].length - 1) {
-    return NextResponse.json({ error: "Invalid email address" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
   }
 
   if (name !== undefined && name !== null && (typeof name !== "string" || name.trim().length > 100)) {
-    return NextResponse.json({ error: "Name must be under 100 characters" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.register.nameTooLong") }, { status: 400 });
   }
   const sanitizedName = sanitizeOptional(name);
 
   if (password.length < 12) {
-    return NextResponse.json({ error: "Password must be at least 12 characters" }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.register.passwordTooShort") }, { status: 400 });
   }
 
   if (password.length > MAX_PASSWORD_LENGTH) {
-    return NextResponse.json({ error: `Password must be at most ${MAX_PASSWORD_LENGTH} characters` }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.register.passwordTooLong", { max: MAX_PASSWORD_LENGTH }) }, { status: 400 });
   }
 
   const setupRow = await prisma.setting.findUnique({ where: { key: "setup_completed_at" } });
   if (setupRow) {
-    return NextResponse.json({ error: "Registration is closed" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAuth.register.closed") }, { status: 403 });
   }
   const existingCount = await prisma.user.count();
   if (existingCount > 0) {
-    return NextResponse.json({ error: "Registration is closed" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAuth.register.closed") }, { status: 403 });
   }
 
   if (registrationInFlight) {
-    return NextResponse.json({ error: "Registration is closed" }, { status: 403 });
+    return NextResponse.json({ error: t("apiAuth.register.closed") }, { status: 403 });
   }
   registrationInFlight = true;
 
@@ -156,11 +158,11 @@ export async function POST(req: NextRequest) {
     // `err` may not be an Error (anything can be thrown); fall back to "".
     const msg = err instanceof Error ? err.message : "";
     if (msg === "CLOSED") {
-      return NextResponse.json({ error: "Registration is closed" }, { status: 403 });
+      return NextResponse.json({ error: t("apiAuth.register.closed") }, { status: 403 });
     }
 
     if (msg.includes("Unique constraint")) {
-      return NextResponse.json({ error: "Registration is closed" }, { status: 403 });
+      return NextResponse.json({ error: t("apiAuth.register.closed") }, { status: 403 });
     }
     throw err;
   } finally {

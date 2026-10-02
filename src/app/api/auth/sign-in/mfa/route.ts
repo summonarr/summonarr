@@ -9,8 +9,10 @@ import { logAudit } from "@/lib/audit";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 import { commitToken, isTokenUsable, releaseToken, reserveToken, verifyMfaSigninToken } from "@/lib/mfa/mfa-token";
 import { passwordVersion, type SecondFactorInput } from "@/lib/mfa/mfa-store";
-import { MFA_LOCKED_MESSAGE, verifySecondFactorGuarded } from "@/lib/mfa/lockout";
+import { verifySecondFactorGuarded } from "@/lib/mfa/lockout";
 import { webAuthnConfigFromEnv, type AuthenticationResponseJSON } from "@/lib/mfa/webauthn";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
+import type { Translator } from "@/lib/i18n/translate";
 
 // POST /api/auth/sign-in/mfa — the second half of a local-credentials sign-in
 // for an account with two-factor enabled (guardrail 6d).
@@ -39,11 +41,8 @@ const IP_WINDOW_MS = 5 * 60 * 1000;
 const USER_LIMIT = 10;
 const USER_WINDOW_MS = 15 * 60 * 1000;
 
-const EXPIRED_MESSAGE = "Your sign-in has expired. Please sign in again.";
-const INVALID_MESSAGE = "Invalid verification code.";
-
-function expired(): NextResponse {
-  return NextResponse.json({ error: EXPIRED_MESSAGE, mfaExpired: true }, { status: 401 });
+function expired(t: Translator): NextResponse {
+  return NextResponse.json({ error: t("apiAuth.mfa.expired"), mfaExpired: true }, { status: 401 });
 }
 
 function parseInput(body: Record<string, unknown>): SecondFactorInput | null {
@@ -66,6 +65,7 @@ function sameString(a: string, b: string): boolean {
 }
 
 export async function POST(req: NextRequest) {
+  const t = translatorForRequest(req);
   const parsed = await readJsonCapped<Record<string, unknown>>(req, MAX_MFA_BODY_BYTES);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;
@@ -86,30 +86,30 @@ export async function POST(req: NextRequest) {
 
   if (!checkRateLimit(`mfa-ip:${ipBucketKey(ip)}`, IP_LIMIT, IP_WINDOW_MS)) {
     fail("mfa_rate_limited");
-    return NextResponse.json({ error: "Too many attempts — please wait a few minutes." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.mfa.tooManyAttemptsMinutes") }, { status: 429 });
   }
 
   const claims = await verifyMfaSigninToken(body.mfaToken);
-  if (!claims || !isTokenUsable(claims.jti)) return expired();
+  if (!claims || !isTokenUsable(claims.jti)) return expired(t);
 
   // The native-client header selects the session lifetime and whether the JWT
   // goes in the body (guardrails 6b/6c); it was fixed at the password step.
   if (hasNativeClientHeader(req.headers.get(NATIVE_CLIENT_HEADER)) !== claims.native) {
-    return NextResponse.json({ error: "Sign-in client changed. Please sign in again.", mfaExpired: true }, { status: 400 });
+    return NextResponse.json({ error: t("apiAuth.mfa.clientChanged"), mfaExpired: true }, { status: 400 });
   }
 
   const input = parseInput(body);
-  if (!input) return NextResponse.json({ error: "A verification method and code are required." }, { status: 400 });
+  if (!input) return NextResponse.json({ error: t("apiAuth.mfa.inputRequired") }, { status: 400 });
 
   const userKey = `mfa-user:${claims.userId}`;
   if (!checkRateLimit(userKey, USER_LIMIT, USER_WINDOW_MS)) {
     fail("mfa_rate_limited", claims.userId);
-    return NextResponse.json({ error: "Too many attempts — please wait 15 minutes." }, { status: 429 });
+    return NextResponse.json({ error: t("apiAuth.common.tooManyAttempts15") }, { status: 429 });
   }
 
   // Local login switched off after the password step ⇒ no completion either.
   const disableRow = await prisma.setting.findUnique({ where: { key: "disableLocalLogin" } });
-  if (disableRow?.value === "true") return expired();
+  if (disableRow?.value === "true") return expired(t);
 
   const user = await prisma.user.findUnique({
     where: { id: claims.userId },
@@ -117,7 +117,7 @@ export async function POST(req: NextRequest) {
   });
   // A password change (or a purge, which nulls the hash) since the password
   // step kills the challenge.
-  if (!user?.passwordHash || !sameString(passwordVersion(user.passwordHash), claims.pwv)) return expired();
+  if (!user?.passwordHash || !sameString(passwordVersion(user.passwordHash), claims.pwv)) return expired(t);
 
   // Claim the challenge BEFORE touching the factor. The factor verifiers burn
   // single-use state in the DB (a recovery code, a TOTP step, a passkey
@@ -126,8 +126,8 @@ export async function POST(req: NextRequest) {
   // codes. reserveToken is a synchronous check-and-set: the loser is refused
   // here without verifying anything.
   if (!reserveToken(claims.jti)) {
-    if (!isTokenUsable(claims.jti)) return expired();
-    return NextResponse.json({ error: "This sign-in is already being verified." }, { status: 409 });
+    if (!isTokenUsable(claims.jti)) return expired(t);
+    return NextResponse.json({ error: t("apiAuth.mfa.alreadyVerifying") }, { status: 409 });
   }
 
   let verdict;
@@ -149,18 +149,18 @@ export async function POST(req: NextRequest) {
       // account, so the token is released without a failure.
       releaseToken(claims.jti, { failed: false });
       fail("mfa_locked", user.id, { method: input.method });
-      return NextResponse.json({ error: MFA_LOCKED_MESSAGE }, { status: 429 });
+      return NextResponse.json({ error: t("apiAuth.mfa.locked") }, { status: 429 });
     }
     // The reserved account hit is KEPT (a real failed second factor), and the
     // token edges toward burning (counted synchronously at release).
     const failures = releaseToken(claims.jti, { failed: true });
     fail("mfa_invalid", user.id, { method: input.method, check: verdict.reason, failures });
-    return NextResponse.json({ error: INVALID_MESSAGE }, { status: 401 });
+    return NextResponse.json({ error: t("apiAuth.mfa.invalidCode") }, { status: 401 });
   }
 
   // One challenge, one session. Only the reservation holder gets here; this
   // fails only if the entry was evicted meanwhile.
-  if (!commitToken(claims.jti)) return expired();
+  if (!commitToken(claims.jti)) return expired(t);
   refundHit(userKey);
 
   const device = buildDeviceMeta(req.headers);
@@ -179,7 +179,7 @@ export async function POST(req: NextRequest) {
       secondFactor: input.method,
     });
   } catch (err) {
-    if (err instanceof AccountDeactivatedError) return disabledAccountResponse();
+    if (err instanceof AccountDeactivatedError) return disabledAccountResponse(t);
     throw err;
   }
   return buildSignInResponse(req, result);
