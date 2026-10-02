@@ -8,6 +8,7 @@ import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
+import { useT } from "@/components/i18n/i18n-provider";
 
 function generateSecret(): string {
   const bytes = new Uint8Array(24);
@@ -28,6 +29,7 @@ function WebhookSecretField({
   payloadKey: string;
   initialSecret: string;
 }) {
+  const t = useT();
   const [secret, setSecret] = useState(initialSecret);
   const [status, setStatus] = useState<SaveStatus>("idle");
   // An earlier save's idle timer must not fire into a later save (it would
@@ -65,7 +67,7 @@ function WebhookSecretField({
             type="password"
             value={secret}
             onChange={(e) => { setSecret(e.target.value); setStatus("idle"); }}
-            placeholder="Leave blank to turn this webhook off"
+            placeholder={t("settings.form.webhookSecret.placeholder")}
             className="bg-zinc-800 border-zinc-700 font-mono text-sm"
           />
           <Button
@@ -74,14 +76,14 @@ function WebhookSecretField({
             className="shrink-0 border-zinc-700 text-zinc-300 hover:text-zinc-100"
             onClick={() => { setSecret(generateSecret()); setStatus("idle"); }}
           >
-            Generate
+            {t("settings.form.webhookSecret.generate")}
           </Button>
         </div>
         <p className="text-xs text-zinc-500">{helpText}</p>
       </div>
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
-          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save Token"}
+          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.webhookSecret.save")}
         </Button>
         <SaveStatusMessage status={status} />
       </div>
@@ -102,56 +104,44 @@ export function WebhookSecretForm({
   initialSonarr4kSecret?: string;
   initialRadarr4kSecret?: string;
 }) {
+  const t = useT();
   return (
     <div className="space-y-6">
       <WebhookSecretField
         id="webhook-secret-sonarr"
-        label="Sonarr webhook secret"
+        label={t("settings.form.webhookSecret.label", { service: "Sonarr" })}
         payloadKey="sonarrWebhookSecret"
         initialSecret={initialSonarrSecret ?? ""}
-        helpText={
-          <>
-            Used by the Sonarr webhook endpoint. Falls back to the legacy secret below if blank.
-          </>
-        }
+        helpText={t("settings.form.webhookSecret.help", { service: "Sonarr" })}
       />
       <WebhookSecretField
         id="webhook-secret-radarr"
-        label="Radarr webhook secret"
+        label={t("settings.form.webhookSecret.label", { service: "Radarr" })}
         payloadKey="radarrWebhookSecret"
         initialSecret={initialRadarrSecret ?? ""}
-        helpText={
-          <>
-            Used by the Radarr webhook endpoint. Falls back to the legacy secret below if blank.
-          </>
-        }
+        helpText={t("settings.form.webhookSecret.help", { service: "Radarr" })}
       />
       <WebhookSecretField
         id="webhook-secret-radarr4k"
-        label="Radarr 4K webhook secret"
+        label={t("settings.form.webhookSecret.label", { service: "Radarr 4K" })}
         payloadKey="radarr4kWebhookSecret"
         initialSecret={initialRadarr4kSecret ?? ""}
-        helpText={<>Used by the 4K Radarr instance&apos;s webhook. Set only if you run a separate 4K Radarr.</>}
+        helpText={t("settings.form.webhookSecret.help4k", { service: "Radarr" })}
       />
       <WebhookSecretField
         id="webhook-secret-sonarr4k"
-        label="Sonarr 4K webhook secret"
+        label={t("settings.form.webhookSecret.label", { service: "Sonarr 4K" })}
         payloadKey="sonarr4kWebhookSecret"
         initialSecret={initialSonarr4kSecret ?? ""}
-        helpText={<>Used by the 4K Sonarr instance&apos;s webhook. Set only if you run a separate 4K Sonarr.</>}
+        helpText={t("settings.form.webhookSecret.help4k", { service: "Sonarr" })}
       />
       <div className="border-t border-zinc-800 pt-5">
         <WebhookSecretField
           id="webhook-secret-legacy"
-          label="Legacy webhook secret (fallback — to be removed in a future release)"
+          label={t("settings.form.webhookSecret.legacyLabel")}
           payloadKey="webhookSecret"
           initialSecret={initialSecret}
-          helpText={
-            <>
-              Shared fallback used when a source-specific secret above is blank. Prefer the per-source
-              secrets; this field will be removed in a future release.
-            </>
-          }
+          helpText={t("settings.form.webhookSecret.legacyHelp")}
         />
       </div>
     </div>

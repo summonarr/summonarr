@@ -25,6 +25,7 @@ import enProfile from "./messages/en/profile.json";
 import enRequest from "./messages/en/request.json";
 import enRequests from "./messages/en/requests.json";
 import enSearch from "./messages/en/search.json";
+import enSettingsForms from "./messages/en/settingsForms.json";
 import esAppearance from "./messages/es/appearance.json";
 import esAuth from "./messages/es/auth.json";
 import esBrowse from "./messages/es/browse.json";
@@ -37,10 +38,11 @@ import esProfile from "./messages/es/profile.json";
 import esRequest from "./messages/es/request.json";
 import esRequests from "./messages/es/requests.json";
 import esSearch from "./messages/es/search.json";
+import esSettingsForms from "./messages/es/settingsForms.json";
 
 export const CATALOGS: Record<Locale, Messages> = {
-  en: { ...enAppearance, ...enAuth, ...enBrowse, ...enDetail, ...enHome, ...enMedia, ...enNav, ...enPersonal, ...enProfile, ...enRequest, ...enRequests, ...enSearch },
-  es: { ...esAppearance, ...esAuth, ...esBrowse, ...esDetail, ...esHome, ...esMedia, ...esNav, ...esPersonal, ...esProfile, ...esRequest, ...esRequests, ...esSearch },
+  en: { ...enAppearance, ...enAuth, ...enBrowse, ...enDetail, ...enHome, ...enMedia, ...enNav, ...enPersonal, ...enProfile, ...enRequest, ...enRequests, ...enSearch, ...enSettingsForms },
+  es: { ...esAppearance, ...esAuth, ...esBrowse, ...esDetail, ...esHome, ...esMedia, ...esNav, ...esPersonal, ...esProfile, ...esRequest, ...esRequests, ...esSearch, ...esSettingsForms },
 };
 
 export const FALLBACK_MESSAGES: Messages = CATALOGS.en;

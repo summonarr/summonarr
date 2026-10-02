@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { XCircle, Loader2, RefreshCw, RefreshCcw, Trash2, Database } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
+import type { Translator } from "@/lib/i18n/translate";
+import { useT } from "@/components/i18n/i18n-provider";
 
 // Cache Management: a Clear and a Refetch button for each metadata source, plus
 // one "Clear & Refetch All" button.
@@ -18,7 +20,8 @@ type CacheSourceId = "tmdb" | "mdblist" | "omdb";
 interface CacheSourceDef {
   id: CacheSourceId;
   label: string;
-  description: string;
+  // Catalog key, translated at render.
+  descriptionKey: string;
   warmUrl: string;
   // Extra JSON body for the warm route. MDBList takes { force: true } to also
   // delete its saved "not found" markers first, so those titles are retried.
@@ -29,20 +32,20 @@ const CACHE_SOURCES: CacheSourceDef[] = [
   {
     id: "tmdb",
     label: "TMDB",
-    description: "Titles, overviews, genres, country, language, keywords, watch providers. Also resets grid metadata and the For You suggestion graph.",
+    descriptionKey: "settings.form.cache.desc.tmdb",
     warmUrl: "/api/admin/library-warm",
   },
   {
     id: "mdblist",
     label: "MDBList",
-    description: "IMDb, Rotten Tomatoes, Audience, Metacritic, Trakt, Letterboxd ratings.",
+    descriptionKey: "settings.form.cache.desc.mdblist",
     warmUrl: "/api/admin/mdblist-warm",
     warmBody: { force: true },
   },
   {
     id: "omdb",
     label: "OMDB",
-    description: "IMDb rating fallback when MDBList has no key configured.",
+    descriptionKey: "settings.form.cache.desc.omdb",
     warmUrl: "/api/admin/omdb-warm",
   },
 ];
@@ -54,23 +57,24 @@ type WarmResult = { fetched?: number; skipped?: number; total?: number; failed?:
 // alone would under-report what the button did.
 type ClearResult = WarmResult & { coreCleared?: number; edgesCleared?: number; verdictsCleared?: number };
 
-function summarizeClear(d: ClearResult): string {
-  const parts = [`${d.cleared ?? 0} cache entries`];
-  if ((d.coreCleared ?? 0) > 0) parts.push(`${d.coreCleared} metadata rows`);
-  if ((d.edgesCleared ?? 0) > 0) parts.push(`${d.edgesCleared} suggestion links`);
-  if ((d.verdictsCleared ?? 0) > 0) parts.push(`${d.verdictsCleared} rating verdicts`);
-  return `Cleared ${parts.join(", ")}`;
+function summarizeClear(t: Translator, d: ClearResult): string {
+  const parts = [t("settings.form.cache.clear.entries", { count: d.cleared ?? 0 })];
+  if ((d.coreCleared ?? 0) > 0) parts.push(t("settings.form.cache.clear.metadataRows", { count: d.coreCleared ?? 0 }));
+  if ((d.edgesCleared ?? 0) > 0) parts.push(t("settings.form.cache.clear.suggestionLinks", { count: d.edgesCleared ?? 0 }));
+  if ((d.verdictsCleared ?? 0) > 0) parts.push(t("settings.form.cache.clear.ratingVerdicts", { count: d.verdictsCleared ?? 0 }));
+  return t("settings.form.cache.clear.summary", { parts: parts.join(", ") });
 }
 
-function summarizeWarm(d: WarmResult): string {
+function summarizeWarm(t: Translator, d: WarmResult): string {
   if (d.error) return d.error;
-  const parts: string[] = [`fetched ${d.fetched ?? 0}`, `skipped ${d.skipped ?? 0}`];
-  if ((d.purged ?? 0) > 0) parts.push(`purged ${d.purged}`);
-  if ((d.failed ?? 0) > 0) parts.push(`failed ${d.failed}`);
+  const parts: string[] = [t("settings.form.cache.warm.fetched", { count: d.fetched ?? 0 }), t("settings.form.cache.warm.skipped", { count: d.skipped ?? 0 })];
+  if ((d.purged ?? 0) > 0) parts.push(t("settings.form.cache.warm.purged", { count: d.purged ?? 0 }));
+  if ((d.failed ?? 0) > 0) parts.push(t("settings.form.cache.warm.failed", { count: d.failed ?? 0 }));
   return parts.join(", ");
 }
 
 function CacheSourceRow({ source }: { source: CacheSourceDef }) {
+  const t = useT();
   const [busy, setBusy] = useState<null | "clear" | "refetch">(null);
   const [confirmClear, setConfirmClear] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
@@ -87,10 +91,10 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
     try {
       const res = await fetch(withBasePath(`/api/admin/clear-cache?source=${source.id}`), { method: "DELETE" });
       const data: ClearResult = await res.json().catch(() => ({}));
-      if (res.ok) setMsg({ kind: "ok", text: summarizeClear(data) });
-      else setMsg({ kind: "err", text: data.error ?? "Clear failed" });
+      if (res.ok) setMsg({ kind: "ok", text: summarizeClear(t, data) });
+      else setMsg({ kind: "err", text: data.error ?? t("settings.form.cache.clearFailed") });
     } catch {
-      setMsg({ kind: "err", text: "Request failed" });
+      setMsg({ kind: "err", text: t("settings.form.common.requestFailed") });
     }
     setBusy(null);
     msgTimer.current = setTimeout(() => setMsg(null), 8000);
@@ -107,10 +111,10 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
         body: JSON.stringify(source.warmBody ?? {}),
       });
       const data: WarmResult = await res.json().catch(() => ({}));
-      if (res.ok && !data.error) setMsg({ kind: "ok", text: summarizeWarm(data) });
-      else setMsg({ kind: "err", text: data.error ?? "Refetch failed" });
+      if (res.ok && !data.error) setMsg({ kind: "ok", text: summarizeWarm(t, data) });
+      else setMsg({ kind: "err", text: data.error ?? t("settings.form.cache.refetchFailed") });
     } catch {
-      setMsg({ kind: "err", text: "Request failed" });
+      setMsg({ kind: "err", text: t("settings.form.common.requestFailed") });
     }
     setBusy(null);
     msgTimer.current = setTimeout(() => setMsg(null), 10000);
@@ -120,14 +124,14 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
     <div className="flex flex-wrap items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2.5">
       <div className="min-w-[7rem] flex-1">
         <div className="text-sm font-medium text-zinc-200">{source.label}</div>
-        <div className="text-xs text-zinc-500">{source.description}</div>
+        <div className="text-xs text-zinc-500">{t(source.descriptionKey)}</div>
       </div>
 
       {confirmClear ? (
         <div className="flex items-center gap-2">
-          <span className="text-xs text-zinc-300">Clear {source.label}?</span>
-          <Button type="button" size="sm" onClick={doClear} className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] h-8 px-3 text-xs">Clear</Button>
-          <Button type="button" size="sm" variant="outline" onClick={() => setConfirmClear(false)} className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-8 px-3 text-xs">Cancel</Button>
+          <span className="text-xs text-zinc-300">{t("settings.form.cache.confirmClear", { source: source.label })}</span>
+          <Button type="button" size="sm" onClick={doClear} className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] h-8 px-3 text-xs">{t("settings.form.cache.clear")}</Button>
+          <Button type="button" size="sm" variant="outline" onClick={() => setConfirmClear(false)} className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-8 px-3 text-xs">{t("settings.form.common.cancel")}</Button>
         </div>
       ) : (
         <div className="flex items-center gap-2">
@@ -140,7 +144,7 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
             className="border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1.5 h-8 px-3 text-xs"
           >
             {busy === "clear" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-            Clear
+            {t("settings.form.cache.clear")}
           </Button>
           <Button
             type="button"
@@ -151,7 +155,7 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
             className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-1.5 h-8 px-3 text-xs"
           >
             {busy === "refetch" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-            Refetch
+            {t("settings.form.cache.refetch")}
           </Button>
         </div>
       )}
@@ -166,6 +170,7 @@ function CacheSourceRow({ source }: { source: CacheSourceDef }) {
 }
 
 export function CacheManagementPanel() {
+  const t = useT();
   const [status, setStatus] = useState<"idle" | "running" | "done" | "error">("idle");
   const [confirmAll, setConfirmAll] = useState(false);
   const [lines, setLines] = useState<string[]>([]);
@@ -186,11 +191,11 @@ export function CacheManagementPanel() {
     try {
       const clearRes = await fetch(withBasePath("/api/admin/clear-cache?source=all"), { method: "DELETE" });
       const clearData: ClearResult = await clearRes.json().catch(() => ({}));
-      if (clearRes.ok) out.push(summarizeClear(clearData));
-      else { anyError = true; out.push(`Clear failed: ${clearData.error ?? clearRes.status}`); }
+      if (clearRes.ok) out.push(summarizeClear(t, clearData));
+      else { anyError = true; out.push(t("settings.form.cache.clearFailedDetail", { detail: clearData.error ?? clearRes.status })); }
     } catch {
       anyError = true;
-      out.push("Clear failed: request error");
+      out.push(t("settings.form.cache.clearFailedRequest"));
     }
     setLines([...out]);
 
@@ -202,11 +207,11 @@ export function CacheManagementPanel() {
           body: JSON.stringify(source.warmBody ?? {}),
         });
         const data: WarmResult = await res.json().catch(() => ({}));
-        if (res.ok && !data.error) out.push(`${source.label}: ${summarizeWarm(data)}`);
-        else { anyError = true; out.push(`${source.label}: ${data.error ?? "refetch failed"}`); }
+        if (res.ok && !data.error) out.push(`${source.label}: ${summarizeWarm(t, data)}`);
+        else { anyError = true; out.push(`${source.label}: ${data.error ?? t("settings.form.cache.refetchFailedLower")}`); }
       } catch {
         anyError = true;
-        out.push(`${source.label}: request failed`);
+        out.push(`${source.label}: ${t("settings.form.cache.requestFailedLower")}`);
       }
       setLines([...out]);
     }
@@ -219,11 +224,10 @@ export function CacheManagementPanel() {
     <div className="space-y-4">
       <div className="flex items-center gap-2">
         <Database className="w-4 h-4 text-zinc-400" />
-        <h3 className="text-sm font-medium text-zinc-300">Cache Management</h3>
+        <h3 className="text-sm font-medium text-zinc-300">{t("settings.form.cache.title")}</h3>
       </div>
       <p className="text-xs text-zinc-500 -mt-1">
-        Clear and refetch each metadata source. Clearing forces fresh data on the next page visit;
-        refetch warms the cache for your whole library now. After changing API keys, clear then refetch.
+        {t("settings.form.cache.intro")}
       </p>
 
       <div className="space-y-2">
@@ -236,9 +240,9 @@ export function CacheManagementPanel() {
         {confirmAll ? (
           <div className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/60 px-3 py-2.5 w-fit">
             <XCircle className="w-4 h-4 text-amber-400 shrink-0" />
-            <p className="text-sm text-zinc-200">Clear and refetch all sources?</p>
-            <Button type="button" size="sm" onClick={runAll} className="bg-amber-600 text-black hover:bg-amber-600/90 h-8 px-3 text-xs">Run</Button>
-            <Button type="button" size="sm" variant="outline" onClick={() => setConfirmAll(false)} className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-8 px-3 text-xs">Cancel</Button>
+            <p className="text-sm text-zinc-200">{t("settings.form.cache.confirmAll")}</p>
+            <Button type="button" size="sm" onClick={runAll} className="bg-amber-600 text-black hover:bg-amber-600/90 h-8 px-3 text-xs">{t("settings.form.cache.run")}</Button>
+            <Button type="button" size="sm" variant="outline" onClick={() => setConfirmAll(false)} className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-8 px-3 text-xs">{t("settings.form.common.cancel")}</Button>
           </div>
         ) : (
           <Button
@@ -249,7 +253,7 @@ export function CacheManagementPanel() {
             className="border-zinc-700 text-zinc-300 hover:text-zinc-100 gap-2"
           >
             {status === "running" ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCcw className="w-4 h-4" />}
-            {status === "running" ? "Running…" : "Clear & Refetch All"}
+            {status === "running" ? t("settings.form.cache.running") : t("settings.form.cache.all")}
           </Button>
         )}
 

@@ -5,8 +5,10 @@ import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
 import { Switch } from "@/components/ui/switch";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export function Request4kAllToggle({ initialEnabled }: { initialEnabled: boolean }) {
+  const t = useT();
   const [enabled, setEnabled] = useState(initialEnabled);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const titleId = useId();
@@ -51,11 +53,9 @@ export function Request4kAllToggle({ initialEnabled }: { initialEnabled: boolean
   return (
     <div className="flex items-center justify-between gap-4">
       <div>
-        <p id={titleId} className="text-sm font-medium text-zinc-200">Allow everyone to request 4K</p>
+        <p id={titleId} className="text-sm font-medium text-zinc-200">{t("settings.form.request4kAll.title")}</p>
         <p id={descId} className="text-xs text-zinc-500 mt-0.5">
-          When on, any user who can request a given media type can also request it in 4K — no
-          per-user “Request 4K” permission needed. When off, 4K requires the per-user permission
-          (or admin). Either way a 4K Radarr/Sonarr instance must be configured above.
+          {t("settings.form.request4kAll.help")}
         </p>
       </div>
       <div className="flex items-center gap-2 shrink-0">

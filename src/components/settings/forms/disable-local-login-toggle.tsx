@@ -5,8 +5,10 @@ import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
 import { Switch } from "@/components/ui/switch";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export function DisableLocalLoginToggle({ initialDisabled }: { initialDisabled: boolean }) {
+  const t = useT();
   const [disabled, setDisabled] = useState(initialDisabled);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +38,7 @@ export function DisableLocalLoginToggle({ initialDisabled }: { initialDisabled: 
         // The switch was flipped before the server answered. Flip it back so it
         // doesn't show a setting the server rejected or never saved.
         setDisabled(prev);
-        setError(data.error ?? "Failed to save");
+        setError(data.error ?? t("settings.form.common.saveFailed"));
         setStatus("error");
       } else {
         setStatus("ok");
@@ -44,7 +46,7 @@ export function DisableLocalLoginToggle({ initialDisabled }: { initialDisabled: 
       }
     } catch {
       setDisabled(prev);
-      setError("Failed to save");
+      setError(t("settings.form.common.saveFailed"));
       setStatus("error");
     }
   }
@@ -52,9 +54,9 @@ export function DisableLocalLoginToggle({ initialDisabled }: { initialDisabled: 
   return (
     <div className="flex items-center justify-between gap-4">
       <div>
-        <p id={titleId} className="text-sm font-medium text-zinc-200">Disable local login</p>
+        <p id={titleId} className="text-sm font-medium text-zinc-200">{t("settings.form.disableLocalLogin.title")}</p>
         <p id={descId} className="text-xs text-zinc-500 mt-0.5">
-          Hides the password sign-in form and blocks local registration. Users must sign in via an external provider (Plex, Jellyfin, or SSO/OIDC). Make sure at least one external provider is configured before enabling.
+          {t("settings.form.disableLocalLogin.help")}
         </p>
       </div>
       <div className="flex items-center gap-2 shrink-0">

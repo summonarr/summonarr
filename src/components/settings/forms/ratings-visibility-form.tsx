@@ -5,8 +5,10 @@ import { CheckCircle, XCircle, Loader2 } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { RATING_SOURCES } from "@/lib/ratings-visibility";
 import type { SaveStatus } from "./shared";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export function RatingsVisibilityForm({ initialHidden }: { initialHidden: string[] }) {
+  const t = useT();
   const [hidden, setHidden] = useState<string[]>(initialHidden);
   const [status, setStatus] = useState<SaveStatus>("idle");
   // The timer that fades the ✓/✗ back to idle. A new save cancels the old
@@ -48,14 +50,13 @@ export function RatingsVisibilityForm({ initialHidden }: { initialHidden: string
   return (
     <div>
       <div className="flex items-center gap-2 mb-0.5">
-        <p className="text-sm font-medium text-zinc-200">Visible rating badges</p>
+        <p className="text-sm font-medium text-zinc-200">{t("settings.form.ratingsVisibility.title")}</p>
         {status === "saving" && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500" />}
         {status === "ok"     && <CheckCircle className="w-3.5 h-3.5 text-green-400" />}
         {status === "error"  && <XCircle className="w-3.5 h-3.5 text-red-400" />}
       </div>
       <p className="text-xs text-zinc-500 mb-3">
-        Untick a source to hide its badge everywhere ratings render (detail pages, cards, the
-        admin request list). Hiding a badge doesn&apos;t stop the data being fetched.
+        {t("settings.form.ratingsVisibility.help")}
       </p>
       <div className="flex flex-wrap gap-x-5 gap-y-2">
         {RATING_SOURCES.map((s) => (

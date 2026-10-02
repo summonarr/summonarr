@@ -8,8 +8,10 @@ import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
 import type { SaveStatus } from "./shared";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export function SiteTitleForm({ initialTitle }: { initialTitle: string }) {
+  const t = useT();
   const [title, setTitle] = useState(initialTitle);
   const [status, setStatus] = useState<SaveStatus>("idle");
   // An earlier save's idle timer must not fire into a later save (it would
@@ -40,7 +42,7 @@ export function SiteTitleForm({ initialTitle }: { initialTitle: string }) {
   return (
     <form onSubmit={handleSave} className="space-y-4">
       <div className="space-y-1.5">
-        <Label htmlFor="site-title">Site name</Label>
+        <Label htmlFor="site-title">{t("settings.form.siteTitle.label")}</Label>
         <Input
           id="site-title"
           value={title}
@@ -51,7 +53,7 @@ export function SiteTitleForm({ initialTitle }: { initialTitle: string }) {
       </div>
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
-          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Saving…</> : "Save"}
+          {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
         </Button>
         <SaveStatusMessage status={status} />
       </div>

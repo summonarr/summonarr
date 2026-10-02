@@ -130,12 +130,15 @@ test("f99 (route contract): a failed DEFAULT-variant Radarr test answers 422 wit
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ARR_FORM = path.join(here, "..", "src", "components", "settings", "forms", "arr-form.tsx");
 const src = readFileSync(ARR_FORM, "utf8");
+const EN = JSON.parse(
+  readFileSync(path.join(here, "..", "src", "lib", "i18n", "messages", "en", "settingsForms.json"), "utf8"),
+) as Record<string, string>;
 
 test("f99 (form): handleSave reads the per-variant `<service><v>Error` key BEFORE the generic `error`", () => {
   assert.match(src, /const errorKey\s*=\s*`\$\{service\}\$\{v\}Error`/, "errorKey is derived like versionKey");
   assert.match(
     src,
-    /setMessage\(data\[errorKey\] \?\? data\.error \?\? "Failed to save"\)/,
+    /setMessage\(data\[errorKey\] \?\? data\.error \?\? t\("settings\.form\.common\.saveFailed"\)\)/,
     "variant key first (only key present on a 422), then `error` (400/429), then the fallback",
   );
 });
@@ -143,22 +146,26 @@ test("f99 (form): handleSave reads the per-variant `<service><v>Error` key BEFOR
 test("f98 (form): all three selects surface a stored value the server no longer lists as '(not found on server)'", () => {
   assert.match(
     src,
-    /\{rootFolder && !options\.rootFolders\.some\(\(f\) => f\.path === rootFolder\) && \(\s*<option value=\{rootFolder\}>\{rootFolder\} \(not found on server\)<\/option>/,
+    /\{rootFolder && !options\.rootFolders\.some\(\(f\) => f\.path === rootFolder\) && \(\s*<option value=\{rootFolder\}>\{t\("settings\.form\.arr\.folderNotFound", \{ folder: rootFolder \}\)\}<\/option>/,
     "root folder",
   );
   assert.match(
     src,
-    /\{qualityProfileId && !options\.qualityProfiles\.some\(\(p\) => String\(p\.id\) === qualityProfileId\) && \(\s*<option value=\{qualityProfileId\}>Profile #\{qualityProfileId\} \(not found on server\)<\/option>/,
+    /\{qualityProfileId && !options\.qualityProfiles\.some\(\(p\) => String\(p\.id\) === qualityProfileId\) && \(\s*<option value=\{qualityProfileId\}>\{t\("settings\.form\.arr\.profileNotFound", \{ id: qualityProfileId \}\)\}<\/option>/,
     "quality profile",
   );
   assert.match(
     src,
-    /\{languageProfileId && !options\.languageProfiles!\.some\(\(p\) => String\(p\.id\) === languageProfileId\) && \(\s*<option value=\{languageProfileId\}>Profile #\{languageProfileId\} \(not found on server\)<\/option>/,
+    /\{languageProfileId && !options\.languageProfiles!\.some\(\(p\) => String\(p\.id\) === languageProfileId\) && \(\s*<option value=\{languageProfileId\}>\{t\("settings\.form\.arr\.profileNotFound", \{ id: languageProfileId \}\)\}<\/option>/,
     "language profile",
   );
   // The stale option must precede the live list so it sits directly under the
   // placeholder, matching arr-instances-manager's layout.
-  const stale = src.indexOf("(not found on server)");
+  // The labels are translated; the English catalog carries the wording.
+  assert.equal(EN["settings.form.arr.folderNotFound"], "{folder} (not found on server)");
+  assert.equal(EN["settings.form.arr.profileNotFound"], "Profile #{id} (not found on server)");
+  assert.equal(EN["settings.form.common.saveFailed"], "Failed to save");
+  const stale = src.indexOf('t("settings.form.arr.folderNotFound"');
   const live = src.indexOf("{options.rootFolders.map(");
   assert.ok(stale > 0 && live > stale, "stale-value option renders before the server list");
 });
