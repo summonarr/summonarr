@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse, after } from "next/server";
+import { emitNotificationEvent } from "@/lib/notify-agents";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { notifyAdminGrabCompletedPush, notifyAdminsManualInteractionRequiredPush } from "@/lib/push";
@@ -164,6 +165,7 @@ export async function POST(req: NextRequest) {
     }
     if (shouldNotify) {
       after(async () => {
+        emitNotificationEvent({ event: "arr.manual_interaction", text: `Radarr: ${title}`, request: { instance: arrInstance } });
         await notifyAdminsManualInteractionRequiredPush({ service: "Radarr", title, instanceName: instances.find((i) => i.slug === arrInstance)?.name })
           .catch((err) => console.warn("[webhook/radarr] manual-interaction alert failed:", err));
         // Bound the one-shot marker table: a Setting row is inserted per distinct stuck
@@ -323,6 +325,11 @@ export async function POST(req: NextRequest) {
         });
         if (claimed.count === 0) return;
 
+        emitNotificationEvent({
+          event: "arr.grab_completed",
+          media: { type: grab.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: grab.tmdbId, title: grab.title },
+          request: { instance: grab.arrInstance },
+        });
         const outcome = await notifyAdminGrabCompletedPush({
           userId: grab.triggeredById,
           title: grab.title,

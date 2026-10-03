@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { emitNotificationEvent } from "@/lib/notify-agents";
 import { withAuth } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
@@ -141,6 +142,14 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   emitSSE({ type: "issuemessage:created", issueId: id, userId: issue.reportedBy });
 
   const authorName = session.user.name ?? session.user.email ?? "Someone";
+
+  emitNotificationEvent({
+    event: "issue.reply",
+    media: { type: issue.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: issue.tmdbId, title: issue.title, posterPath: issue.posterPath ?? null },
+    issue: { id, type: issue.issueType },
+    actor: { name: authorName },
+    text: text.slice(0, 1_000),
+  });
 
   // When the issue is claimed, narrow the admin audience to the claimer only —
   // other admins/issue-admins are intentionally kept out of the conversation.

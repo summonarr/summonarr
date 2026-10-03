@@ -51,17 +51,18 @@ console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" "));
 console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
 
 // ── scripted fetch ───────────────────────────────────────────────────────────
-type FetchCall = { url: URL; token: string | null };
+type FetchCall = { url: URL; token: string | null; body: unknown };
 const fetchCalls: FetchCall[] = [];
-let respond: (url: URL, token: string | null) => Response | Promise<Response> = () => {
+let respond: (url: URL, token: string | null, body: unknown) => Response | Promise<Response> = () => {
   throw new Error("unexpected fetch");
 };
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   const headers = new Headers(init?.headers);
   const token = headers.get("x-plex-token");
-  fetchCalls.push({ url, token });
-  return respond(url, token);
+  const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+  fetchCalls.push({ url, token, body });
+  return respond(url, token, body);
 }) as typeof fetch;
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -82,6 +83,7 @@ const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 const { invalidateBlacklistCache } = await import("../src/lib/blacklist.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
+const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
 
 // ── op log ───────────────────────────────────────────────────────────────────
 type Op = { op: string; args?: unknown };
@@ -110,8 +112,23 @@ type DbUser = {
   maxContentRating: string | null;
   instanceGrants: unknown;
   plexWatchlistAutoRequest: boolean;
+  plexWatchlistOptInAt: Date | null;
   plexUserId: string | null;
 };
+// Evaluates the handful of `where` shapes the cron issues (token-path candidates,
+// friend resolution, server-path eligibility). An unknown key fails loudly.
+function matchesUserWhere(u: DbUser, where: Record<string, unknown> = {}): boolean {
+  for (const [k, v] of Object.entries(where)) {
+    if (k === "accounts") { if (!plexTokens.has(u.id)) return false; continue; }
+    if (k === "id") { if (!(v as { in: string[] }).in.includes(u.id)) return false; continue; }
+    if (k === "plexUserId") { if (!u.plexUserId || !(v as { in: string[] }).in.includes(u.plexUserId)) return false; continue; }
+    if (k === "deactivatedAt" || k === "purgedAt") { if (u[k] !== null) return false; continue; }
+    if (k === "plexWatchlistAutoRequest") { if (u.plexWatchlistAutoRequest !== v) return false; continue; }
+    if (k === "plexWatchlistOptInAt") { if (u.plexWatchlistOptInAt === null) return false; continue; }
+    throw new Error(`user.findMany stub: unhandled where key ${k}`);
+  }
+  return true;
+}
 const users = new Map<string, DbUser>();
 const sessionRows = new Set<string>();
 shadowPrismaModel(prisma, "authSession", {
@@ -126,10 +143,7 @@ shadowPrismaModel(prisma, "user", {
   },
   findMany: async (args: { where?: Record<string, unknown> }) => {
     rec("user.findMany", args.where);
-    // The cron's candidate query: active, opted-in, with a stored Plex token.
-    return [...users.values()].filter(
-      (u) => !u.deactivatedAt && !u.purgedAt && u.plexWatchlistAutoRequest && plexTokens.has(u.id),
-    );
+    return [...users.values()].filter((u) => matchesUserWhere(u, args.where)).map((u) => ({ ...u }));
   },
   update: async () => ({}),
 });
@@ -157,6 +171,7 @@ function addUser(over: Partial<DbUser> = {}): DbUser {
     maxContentRating: null,
     instanceGrants: null,
     plexWatchlistAutoRequest: true,
+    plexWatchlistOptInAt: null,
     plexUserId: `plex-${seq}`,
     ...over,
   };
@@ -187,9 +202,21 @@ shadowPrismaModel(prisma, "setting", {
     if (k?.startsWith) return all.filter((r) => r.key.startsWith(k.startsWith!));
     return all;
   },
-  upsert: async () => ({}),
+  upsert: async (args: { where: { key: string }; create: { value: string } }) => {
+    rec("setting.upsert", args);
+    settings.set(args.where.key, args.create.value);
+    return {};
+  },
 });
 const FLAG = "feature.behavior.watchlistAutoRequest";
+
+// ── plex MediaServerUser rows (server-path friend resolution) ───────────────
+type MsuRow = { source: string; sourceUserId: string; userId: string | null; manualUserLink: boolean };
+let msuRows: MsuRow[] = [];
+shadowPrismaModel(prisma, "mediaServerUser", {
+  findMany: async (args: { where: { source: string; sourceUserId: { in: string[] } } }) =>
+    msuRows.filter((r) => r.source === args.where.source && args.where.sourceUserId.in.includes(r.sourceUserId)),
+});
 
 // ── stored Plex tokens (Account rows) ───────────────────────────────────────
 const plexTokens = new Map<string, string>();
@@ -333,6 +360,8 @@ beforeEach(() => {
   inPlex = false;
   watchlistConflict = false;
   ledgerWriteFails = false;
+  msuRows = [];
+  resetLogDedup();
   invalidateFeatureFlagCache();
   invalidateBlacklistCache();
   respond = () => { throw new Error("unexpected fetch"); };
@@ -656,6 +685,295 @@ test("cron: an aborted lock signal stops before the next user (guardrail 41) and
   const r = await inScope(() => plexWatchlist.syncPlexWatchlists({ signal: controller.signal }));
   assert.equal(r.users, 0);
   assert.equal(fetchCalls.length, 0);
+});
+
+// ═══ the server-token path (guardrail 34b) ════════════════════════════════════
+//
+// A Plex instance's owner token lists friends (community GraphQL), bridges each
+// friend's uuid to the numeric account id (plex.tv/api/v2/friends), reads the
+// friend's watchlist (GraphQL), and resolves node ids to TMDB through the
+// metadata lookup. Node ids here are `n<tmdb>` so the metadata stub can answer.
+
+type Friend = { uuid: string; id: string; list: number[] | "private" };
+type ServerSpec = { owner?: string; ownerList?: number[]; friends: Friend[]; unbridged?: string[]; reject?: "list" | "watchlist" };
+function serverResponder(servers: Record<string, ServerSpec>, userLists: Record<string, Array<{ ratingKey: string; type: string; tmdb: number }>> = {}) {
+  const userToken = plexWatchlistResponder(userLists);
+  return (url: URL, token: string | null, body: unknown): Response => {
+    if (url.hostname === "metadata.provider.plex.tv") {
+      const id = url.pathname.split("/").pop()!;
+      return json({ MediaContainer: { Metadata: [{ Guid: [{ id: `tmdb://${id.slice(1)}` }] }] } });
+    }
+    const spec = token ? servers[token] : undefined;
+    if (!spec) return userToken(url, token);
+    if (url.hostname === "discover.provider.plex.tv") {
+      const list = spec.ownerList ?? [];
+      return json({ MediaContainer: { totalSize: list.length, Metadata: list.map((t) => ({ ratingKey: `o${t}`, type: "movie", title: "", Guid: [{ id: `tmdb://${t}` }] })) } });
+    }
+    if (spec.reject === "list") return json({}, 401);
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/friends") {
+      return json(spec.friends.map((f) => ({ id: Number(f.id), uuid: f.uuid })));
+    }
+    if (url.hostname === "plex.tv" && url.pathname === "/api/v2/user") return json({ id: Number(spec.owner ?? 0) });
+    if (url.hostname === "community.plex.tv") {
+      const q = (body as { query: string; variables?: { user: { id: string } } });
+      if (q.query.includes("allFriendsV2")) {
+        const all = [...spec.friends.map((f) => f.uuid), ...(spec.unbridged ?? [])];
+        return json({ data: { allFriendsV2: all.map((id) => ({ user: { id, username: id } })) } });
+      }
+      if (spec.reject === "watchlist") return json({}, 401);
+      const friend = spec.friends.find((f) => f.uuid === q.variables!.user.id);
+      if (!friend || friend.list === "private") return json({ data: { userV2: { watchlist: null } }, errors: [{ message: "not allowed" }] });
+      return json({ data: { userV2: { watchlist: { nodes: friend.list.map((t) => ({ id: `n${t}`, title: "", type: "MOVIE" })), pageInfo: { hasNextPage: false, endCursor: null } } } } });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+}
+function configurePlex(slug: string, token: string) {
+  const seg = slug ? slug[0].toUpperCase() + slug.slice(1) : "";
+  settings.set(`plex${seg}ServerUrl`, `http://plex-${slug || "default"}.lan:32400`);
+  settings.set(`plex${seg}AdminToken`, token);
+}
+const SERVER_SOURCE = "plexWatchlistServerSource";
+const AUTO_ENROLL = "plexWatchlistServerAutoEnroll";
+const graphqlWatchlistReads = () => fetchCalls.filter((c) => c.url.hostname === "community.plex.tv" && String((c.body as { query?: string })?.query).includes("userV2"));
+const serverStatus = () => JSON.parse(settings.get("plexWatchlistServerStatus") ?? "null");
+
+test("server path: off by default — a consenting friend is never read and community.plex.tv is never called", async () => {
+  settings.set(FLAG, "true");
+  configurePlex("", "admin-1");
+  addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  respond = serverResponder({ "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: [603] }] } });
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(r.server, undefined);
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("server path: files a consenting friend's titles with the ADMIN token (uuid → numeric id → plexUserId), same ledger + source", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  const friend = addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  respond = serverResponder({ "admin-1": { owner: "1", friends: [{ uuid: "uuid-501", id: "501", list: [603, 1399] }] } });
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(r.requested, 2);
+  assert.equal(r.server?.users, 1);
+  assert.equal(r.server?.matched, 1);
+  assert.equal(plexWatchlist.plexWatchlistRunProblems(r), 0);
+  assert.ok(fetchCalls.every((c) => c.token === "admin-1"), "only the server owner's token is ever sent");
+  const filed = opsOf("mediaRequest.create").map((o) => (o.args as { data: { requestedBy: string; note: string } }).data);
+  assert.deepEqual(filed.map((d) => d.requestedBy), [friend.id, friend.id]);
+  assert.ok(filed.every((d) => d.note === "Auto-requested from Plex watchlist"));
+  assert.ok([...ledger.values()].every((row) => row.source === "plex-watchlist"));
+  assert.deepEqual(serverStatus().users, { [friend.id]: "ok" });
+});
+
+test("server path: a user's OWN token takes precedence — their watchlist is never read through the admin token", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  const u = addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  plexTokens.set(u.id, "own-tok");
+  respond = serverResponder(
+    { "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: [1399] }] } },
+    { "own-tok": [{ ratingKey: "a", type: "movie", tmdb: 603 }] },
+  );
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(graphqlWatchlistReads().length, 0);
+  assert.equal(r.server?.users, 0);
+  const filed = opsOf("mediaRequest.create").map((o) => (o.args as { data: { tmdbId: number } }).data.tmdbId);
+  assert.deepEqual(filed, [603], "only the own-token list was filed");
+});
+
+test("server path: an admin-token 401 deletes NO Account rows, degrades the run, warns once, and the token-path users still run", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-bad");
+  addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  const tokenUser = addUser();
+  plexTokens.set(tokenUser.id, "own-tok");
+  respond = serverResponder(
+    { "admin-bad": { friends: [{ uuid: "uuid-501", id: "501", list: [1399] }], reject: "list" } },
+    { "own-tok": [{ ratingKey: "a", type: "movie", tmdb: 603 }] },
+  );
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(opsOf("account.deleteMany").length, 0, "the ADMIN token's rejection must never delete a user's token");
+  assert.equal(plexTokens.has(tokenUser.id), true);
+  assert.equal(r.tokensRevoked, 0);
+  assert.equal(r.server?.adminTokensRejected, 1);
+  assert.ok(plexWatchlist.plexWatchlistRunProblems(r) > 0, "the run is marked degraded");
+  assert.equal(r.requested, 1, "the own-token user was still processed");
+  assert.equal(warns.filter((w) => w.startsWith("[plex-watchlist]") && w.includes("admin token")).length, 1);
+
+  // Unchanged condition on the next run ⇒ no second line (guardrail 7b).
+  await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(warns.filter((w) => w.includes("admin token")).length, 1);
+});
+
+test("server path: an admin-token 401 MID-RUN (on a friend's watchlist) also deletes nothing and stops that instance", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-flaky");
+  const a = addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  const b = addUser({ plexUserId: "502", plexWatchlistOptInAt: new Date() });
+  respond = serverResponder({
+    "admin-flaky": { friends: [{ uuid: "uuid-501", id: "501", list: [603] }, { uuid: "uuid-502", id: "502", list: [604] }], reject: "watchlist" },
+  });
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(opsOf("account.deleteMany").length, 0);
+  assert.equal(r.server?.adminTokensRejected, 1);
+  assert.equal(graphqlWatchlistReads().length, 1, "the second friend is not tried with a rejected token");
+  assert.equal(r.errors, 0, "a rejected admin token is one instance problem, not N user errors");
+  assert.deepEqual(serverStatus().users, { [a.id]: "error", [b.id]: "error" });
+});
+
+test("server path: a private watchlist is a per-user status, not an error — the run is not degraded", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  const u = addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  respond = serverResponder({ "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: "private" }] } });
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(r.server?.private, 1);
+  assert.equal(r.errors, 0);
+  assert.equal(plexWatchlist.plexWatchlistRunProblems(r), 0);
+  assert.deepEqual(serverStatus().users, { [u.id]: "private" });
+});
+
+test("server path: CONSENT — a friend who never switched the toggle on is not read, unless the admin auto-enrolls", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  const u = addUser({ plexUserId: "501", plexWatchlistOptInAt: null }); // toggle defaults on — not consent
+  const optedOut = addUser({ plexUserId: "502", plexWatchlistAutoRequest: false });
+  respond = serverResponder({
+    "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: [603] }, { uuid: "uuid-502", id: "502", list: [604] }] },
+  });
+  const first = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(first.server?.users, 0);
+  assert.equal(graphqlWatchlistReads().length, 0);
+  assert.equal(opsOf("mediaRequest.create").length, 0);
+
+  settings.set(AUTO_ENROLL, "true");
+  fetchCalls.length = 0;
+  const second = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(second.server?.users, 1, "auto-enroll reads the permitted friend whose toggle is on…");
+  const filed = opsOf("mediaRequest.create").map((o) => (o.args as { data: { requestedBy: string } }).data.requestedBy);
+  assert.deepEqual(filed, [u.id], "…but never one who switched it off");
+  assert.ok(!filed.includes(optedOut.id));
+});
+
+test("server path: friends are unioned across Plex instances and deduped by account id; unmatched friends counted", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  configurePlex("remote", "admin-2");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  const shared = addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  const remoteOnly = addUser({ plexUserId: "777", plexWatchlistOptInAt: new Date() });
+  respond = serverResponder({
+    "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: [603] }, { uuid: "uuid-900", id: "900", list: [1] }], unbridged: ["uuid-unknown"] },
+    "admin-2": { friends: [{ uuid: "uuid-501", id: "501", list: [603] }, { uuid: "uuid-777", id: "777", list: [550] }] },
+  });
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(r.server?.instances, 2);
+  assert.equal(r.server?.friends, 4, "501 (on both), 900, 777, and the unbridged uuid");
+  assert.equal(r.server?.unmatchedFriends, 2, "900 has no account; the unbridged uuid has no numeric id");
+  const reads = graphqlWatchlistReads().map((c) => `${c.token}:${(c.body as { variables: { user: { id: string } } }).variables.user.id}`);
+  assert.deepEqual(reads.sort(), ["admin-1:uuid-501", "admin-2:uuid-777"], "the shared friend is read once, through the first instance");
+  const filed = opsOf("mediaRequest.create").map((o) => (o.args as { data: { requestedBy: string } }).data.requestedBy).sort();
+  assert.deepEqual(filed, [shared.id, remoteOnly.id].sort());
+  assert.equal(serverStatus().unmatchedFriends, 2);
+});
+
+test("server path: the owner is matched through plex.tv/api/v2/user and read from the discover list with the admin token", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  const owner = addUser({ role: "ADMIN", permissions: 0n, plexUserId: "1001", plexWatchlistOptInAt: new Date() });
+  respond = serverResponder({ "admin-1": { owner: "1001", ownerList: [603], friends: [] } });
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(r.server?.users, 1);
+  const filed = opsOf("mediaRequest.create").map((o) => (o.args as { data: { requestedBy: string; tmdbId: number } }).data);
+  assert.deepEqual(filed.map((d) => `${d.requestedBy}:${d.tmdbId}`), [`${owner.id}:603`]);
+});
+
+test("server path: new filings are capped per user per run, as on the token path", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  const cap = plexWatchlist.MAX_AUTO_REQUESTS_PER_USER_PER_RUN;
+  respond = serverResponder({ "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: Array.from({ length: cap + 3 }, (_, i) => 7000 + i) }] } });
+  await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(opsOf("mediaRequest.create").length, cap);
+});
+
+test("server path: the ledger is SHARED with the token path — moving a user between paths never re-files a title", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  const u = addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  plexTokens.set(u.id, "own-tok");
+  respond = serverResponder(
+    { "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: [603] }] } },
+    { "own-tok": [{ ratingKey: "a", type: "movie", tmdb: 603 }] },
+  );
+  await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(opsOf("mediaRequest.create").length, 1);
+
+  plexTokens.delete(u.id); // their own token is gone — now read through the server
+  ops.length = 0;
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(r.server?.users, 1);
+  assert.equal(r.alreadyHandled, 1);
+  assert.equal(opsOf("mediaRequest.create").length, 0);
+});
+
+test("server path: an aborted signal stops before any plex.tv call and returns (guardrail 41)", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  respond = serverResponder({ "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: [603] }] } });
+  const ctl = new AbortController();
+  ctl.abort();
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists({ signal: ctl.signal }));
+  assert.equal(fetchCalls.length, 0);
+  assert.equal(r.requested, 0);
+});
+
+test("server path: an abort between friends stops before the next friend's watchlist", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  addUser({ plexUserId: "502", plexWatchlistOptInAt: new Date() });
+  const ctl = new AbortController();
+  const inner = serverResponder({
+    "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: [603] }, { uuid: "uuid-502", id: "502", list: [604] }] },
+  });
+  respond = (url, token, body) => {
+    const res = inner(url, token, body);
+    if (url.hostname === "community.plex.tv" && String((body as { query: string }).query).includes("userV2")) ctl.abort();
+    return res;
+  };
+  await inScope(() => plexWatchlist.syncPlexWatchlists({ signal: ctl.signal }));
+  assert.equal(graphqlWatchlistReads().length, 1);
+});
+
+test("getPlexWatchlistConnection: token wins; server needs the source on, consent, and an ok status", async () => {
+  const u = addUser({ plexWatchlistOptInAt: null });
+  assert.deepEqual(await plexWatchlist.getPlexWatchlistConnection(u, true), { serverSource: false, serverOptedIn: false, serverStatus: null, connectedVia: "token" });
+  settings.set(SERVER_SOURCE, "true");
+  settings.set("plexWatchlistServerStatus", JSON.stringify({ updatedAt: new Date().toISOString(), users: { [u.id]: "ok" }, unmatchedFriends: 0 }));
+  assert.equal((await plexWatchlist.getPlexWatchlistConnection(u, false)).connectedVia, null, "no consent yet");
+  const opted = { id: u.id, plexWatchlistOptInAt: new Date() };
+  assert.deepEqual(await plexWatchlist.getPlexWatchlistConnection(opted, false), { serverSource: true, serverOptedIn: true, serverStatus: "ok", connectedVia: "server" });
+  settings.set("plexWatchlistServerStatus", JSON.stringify({ updatedAt: new Date().toISOString(), users: { [u.id]: "private" }, unmatchedFriends: 0 }));
+  const priv = await plexWatchlist.getPlexWatchlistConnection(opted, false);
+  assert.equal(priv.serverStatus, "private");
+  assert.equal(priv.connectedVia, null);
+  assert.equal(plexWatchlist.parsePlexWatchlistServerStatus("{not json"), null);
 });
 
 // ═══ token capture at sign-in ═════════════════════════════════════════════════

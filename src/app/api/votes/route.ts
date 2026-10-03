@@ -1,4 +1,5 @@
 import { NextResponse, after } from "next/server";
+import { emitNotificationEvent } from "@/lib/notify-agents";
 import { withAuth } from "@/lib/api-auth";
 import { parsePageParam } from "@/lib/pagination";
 import { readJsonCapped } from "@/lib/body-size";
@@ -288,6 +289,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
         if (recount >= threshold) {
           const data = { title: verified.title, mediaType, voteCount: recount, posterPath: verified.posterPath ?? null, tmdbId };
           after(async () => {
+            emitNotificationEvent({
+              event: "vote.threshold",
+              media: { type: mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId, title: verified.title, posterPath: verified.posterPath ?? null },
+              votes: recount,
+            });
             await Promise.allSettled([
               notifyAdminsDeletionVoteThreshold(data),
               notifyAdminsDeletionVoteThresholdPush(data),

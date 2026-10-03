@@ -188,7 +188,7 @@ test("group sizes are exact (pins accidental category reassignment)", () => {
   const groups = groupFeaturesByCategory();
   assert.equal(groups.pages.length, 8);
   assert.equal(groups.behaviors.length, 6);
-  assert.equal(groups.integrations.length, 8);
+  assert.equal(groups.integrations.length, 9);
   assert.equal(groups.admin.length, 7);
 });
 

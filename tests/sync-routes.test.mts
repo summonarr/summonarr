@@ -147,6 +147,8 @@ const episodeStagingLoads: number[] = [];
 const episodeStagingDeletes: (Record<string, unknown> | undefined)[] = [];
 
 const fakePrisma = {
+  // No outbound notification channels configured (notify-agents.ts).
+  notificationAgent: { findMany: async () => [] },
   setting: {
     findUnique: async (args: { where: { key: string } }) => {
       const value = settings.get(args.where.key);

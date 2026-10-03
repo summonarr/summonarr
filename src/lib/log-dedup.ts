@@ -63,6 +63,14 @@ export function warnOnChange(key: string, signature: string, message: string): v
   console.warn(message);
 }
 
+/**
+ * The condition under `key` has CLEARED: forget its signature so that, if it
+ * comes back, it logs again instead of being read as "unchanged since last time".
+ */
+export function forgetWarnOnChange(key: string): void {
+  lastSignature.delete(key);
+}
+
 /** Test seam: drop all suppression state so cases cannot leak into each other. */
 export function resetLogDedup(): void {
   lastSignature.clear();

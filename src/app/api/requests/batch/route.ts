@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { emitNotificationEvents } from "@/lib/notify-agents";
 import { withPermission } from "@/lib/api-auth";
 import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
@@ -286,6 +287,11 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
       notifyUsersRequestsApprovedPush(notifyTargets).catch(() => {});
       void fanOutEmails(notifyTargets, "APPROVED");
       void writeBatchInboxRows(notifyTargets, "REQUEST_APPROVED");
+      emitNotificationEvents(notifyTargets.map((r) => ({
+        event: "request.approved" as const,
+        media: { type: r.mediaType === "MOVIE" ? "MOVIE" as const : "TV" as const, tmdbId: r.tmdbId, title: r.title, posterPath: r.posterPath ?? null },
+        request: { id: r.id, instance: r.arrInstance },
+      })));
     }
   }
 
@@ -295,7 +301,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     // were left untouched by the claim above and must not get a duplicate decline ping.
     const declined = await prisma.mediaRequest.findMany({
       where: { id: { in: [...pendingBeforeIds] }, status: "DECLINED" },
-      select: { requestedBy: true, title: true, mediaType: true, tmdbId: true, posterPath: true },
+      select: { id: true, requestedBy: true, title: true, mediaType: true, tmdbId: true, posterPath: true, arrInstance: true },
     });
     // Skip rows the acting admin owns — no self-notification for one's own request.
     const declineTargets = declined.filter((r) => r.requestedBy !== session.user.id);
@@ -303,6 +309,12 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     notifyUsersRequestsDeclinedPush(declineTargets).catch(() => {});
     void fanOutEmails(declineTargets, "DECLINED", typedAdminNote);
     void writeBatchInboxRows(declineTargets, "REQUEST_DECLINED");
+    emitNotificationEvents(declineTargets.map((r) => ({
+      event: "request.declined" as const,
+      media: { type: r.mediaType === "MOVIE" ? "MOVIE" as const : "TV" as const, tmdbId: r.tmdbId, title: r.title, posterPath: r.posterPath ?? null },
+      request: { id: r.id, instance: r.arrInstance },
+      text: typedAdminNote ?? null,
+    })));
   }
 
   // Emit only for rows THIS call actually transitioned (claimedIds) — an

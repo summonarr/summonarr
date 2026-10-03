@@ -8,6 +8,7 @@ import { getPlexAccounts } from "@/lib/plex";
 import { getJellyfinUserCount } from "@/lib/jellyfin";
 import { countUniqueLibraryItems } from "@/lib/library-iterator";
 import { PageHeader } from "@/components/ui/design";
+import { NotificationAgentsManager } from "@/components/settings/notification-agents-manager";
 import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, JellyfinRestrictSignInToggle, EnableMachineSessionToggle, Request4kAllToggle, RatingsVisibilityForm, IosPushRelayForm, AnnounceUpdateButton, AuditRetentionForm } from "@/components/settings/settings-ui";
 import { ArrInstancesManager } from "@/components/settings/arr-instances-manager";
 import { MediaInstancesManager } from "@/components/settings/media-instances-manager";
@@ -20,7 +21,9 @@ import { SettingsTabNav, type TabId } from "@/components/settings/settings-tab-n
 import { SettingsNav } from "@/components/settings/settings-nav";
 import { CronJobTable, type CronJobInfo } from "@/components/settings/cron-job-table";
 import { FeaturesForm } from "@/components/settings/features-form";
-import { getFeatureFlags, groupFeaturesByCategory } from "@/lib/features";
+import { PlexWatchlistServerToggles } from "@/components/settings/forms/plex-watchlist-server-toggles";
+import { parsePlexWatchlistServerStatus } from "@/lib/plex-watchlist";
+import { getFeatureFlags, groupFeaturesByCategory, isFeatureEnabled } from "@/lib/features";
 import { parseHiddenRatingSources } from "@/lib/ratings-visibility";
 import { mfaEnforcementDisabledByEnv } from "@/lib/mfa/policy";
 import { RequireAdminMfaToggle } from "@/components/settings/forms/require-admin-mfa-toggle";
@@ -45,6 +48,7 @@ const TAB_SECTIONS: Record<TabId, TabSection[]> = {
   ],
   media: [
     { id: "plex", i18nKey: "settings.nav.plex", group: "settings.group.mediaServers" },
+    { id: "plex-watchlist", i18nKey: "settings.nav.plexWatchlist", group: "settings.group.mediaServers" },
     { id: "jellyfin", i18nKey: "settings.nav.jellyfin", group: "settings.group.mediaServers" },
     { id: "media-instances", i18nKey: "settings.nav.mediaInstances", group: "settings.group.mediaServers" },
     { id: "play-history", i18nKey: "settings.nav.playHistory", group: "settings.group.mediaServers" },
@@ -60,6 +64,7 @@ const TAB_SECTIONS: Record<TabId, TabSection[]> = {
     { id: "email", i18nKey: "settings.nav.email", group: "settings.group.notifications" },
     { id: "discord-bot", i18nKey: "settings.nav.discordBot", group: "settings.group.notifications" },
     { id: "ios-push-relay", i18nKey: "settings.nav.iosPushRelay", group: "settings.group.notifications" },
+    { id: "notification-agents", i18nKey: "settings.nav.notificationAgents", group: "settings.group.notifications" },
   ],
   integrations: [
     { id: "external-ratings", i18nKey: "settings.nav.externalRatings", group: "settings.group.integrations" },
@@ -153,6 +158,7 @@ const ALL_KEYS = [
   "ipinfoToken",
   "apnsRelayUrl", "apnsRelayKey", "recommendedIosBuild",
   "auditPiiRetentionDays",
+  "plexWatchlistServerSource", "plexWatchlistServerAutoEnroll", "plexWatchlistServerStatus",
 ] as const;
 
 const VALID_TABS: TabId[] = ["site", "media", "notifications", "integrations", "features", "system"];
@@ -171,6 +177,7 @@ export default async function SettingsPage({
 
   const rows = await prisma.setting.findMany({ where: { key: { in: [...ALL_KEYS] } } });
   const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  const agentsFeatureEnabled = tab === "notifications" ? await isFeatureEnabled("feature.integration.webhooks") : true;
   // Read AFTER findMany so the set reflects this render's decrypt outcomes.
   // safeDecryptSettingValue clears entries on successful read, so the banner
   // disappears automatically on the next page load after the operator re-saves.
@@ -648,6 +655,35 @@ export default async function SettingsPage({
               />
             </div>
 
+            <div id="plex-watchlist" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+              <div className="mb-5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.plexWatchlist.title")}</h2>
+                <p className="text-sm text-zinc-500 mt-1">{t("settings.section.plexWatchlist.description")}</p>
+              </div>
+              <PlexWatchlistServerToggles
+                initialServerSource={cfg.plexWatchlistServerSource === "true"}
+                initialAutoEnroll={cfg.plexWatchlistServerAutoEnroll === "true"}
+              />
+              {cfg.plexWatchlistServerSource === "true" && (() => {
+                // Rendered here, in the server component — no client clock (guardrail 16).
+                const st = parsePlexWatchlistServerStatus(cfg.plexWatchlistServerStatus);
+                if (!st) return <p className="text-xs text-zinc-500 mt-4">{t("settings.plexWatchlist.status.never")}</p>;
+                const counts = { ok: 0, private: 0, error: 0 };
+                for (const v of Object.values(st.users)) counts[v]++;
+                return (
+                  <p className="text-xs text-zinc-500 mt-4">
+                    {t("settings.plexWatchlist.status.summary", {
+                      time: new Date(st.updatedAt).toLocaleString(locale),
+                      ok: counts.ok,
+                      private: counts.private,
+                      error: counts.error,
+                      unmatched: st.unmatchedFriends,
+                    })}
+                  </p>
+                );
+              })()}
+            </div>
+
             <div id="jellyfin" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
               <div className="mb-5">
                 <div className="flex items-center gap-3 mb-0.5">
@@ -880,6 +916,14 @@ export default async function SettingsPage({
                   <AnnounceUpdateButton />
                 </div>
               </div>
+            </div>
+
+            <div id="notification-agents" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+              <div className="mb-5">
+                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.notificationAgents.title")}</h2>
+                <p className="text-sm text-zinc-500 mt-1">{t("settings.section.notificationAgents.description")}</p>
+              </div>
+              <NotificationAgentsManager featureEnabled={agentsFeatureEnabled} />
             </div>
           </>
         )}

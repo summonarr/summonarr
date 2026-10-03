@@ -124,7 +124,7 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
   {
     key: "feature.behavior.watchlistAutoRequest",
     label: "Watchlist auto-request",
-    description: "File a request automatically when a user adds a title to their watchlist — in Summonarr, and on their Plex watchlist (polled by the sync-plex-watchlists cron). Only for users granted an Auto-request permission; each request still goes through quota, blacklist and approval. Plex users must sign in with Plex once after this is enabled so their watchlist can be read.",
+    description: "File a request automatically when a user adds a title to their watchlist — in Summonarr, and on their Plex watchlist (polled by the sync-plex-watchlists cron). Only for users granted an Auto-request permission; each request still goes through quota, blacklist and approval. A Plex watchlist is read with the user's own Plex sign-in (once after this is enabled) or, when Settings → Media → Plex Watchlist allows it, through your Plex server owner's account for Plex friends who opt in.",
     category: "behaviors",
     defaultEnabled: false,
   },
@@ -178,6 +178,13 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
     key: "feature.integration.push",
     label: "Web push notifications",
     description: "Allow users to subscribe to browser push notifications.",
+    category: "integrations",
+    defaultEnabled: true,
+  },
+  {
+    key: "feature.integration.webhooks",
+    label: "Webhook, ntfy & Gotify channels",
+    description: "Send request and issue events to the webhook, ntfy and Gotify channels configured under Settings → Notifications.",
     category: "integrations",
     defaultEnabled: true,
   },

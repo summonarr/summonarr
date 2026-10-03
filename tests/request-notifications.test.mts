@@ -195,6 +195,8 @@ shadowPrismaModel(prisma, "notification", {
 });
 
 shadowPrismaModel(prisma, "pushSubscription", { findMany: async () => [] });
+// No outbound notification channels configured (notify-agents.ts).
+shadowPrismaModel(prisma, "notificationAgent", { findMany: async () => [] });
 
 // The CAS claim (notify-available.ts) runs through $queryRaw; the captured
 // Prisma.Sql exposes the statement + bind params. Default: every candidate wins.

@@ -141,6 +141,8 @@ type DbUser = {
 const usersById = new Map<string, DbUser>();
 const sessionRows = new Set<string>();
 
+// No outbound notification channels configured (notify-agents.ts).
+shadowPrismaModel(prisma, "notificationAgent", { findMany: async () => [] });
 shadowPrismaModel(prisma, "authSession", {
   findUnique: async (args: { where: { sessionId: string } }) =>
     sessionRows.has(args.where.sessionId)

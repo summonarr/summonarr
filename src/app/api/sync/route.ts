@@ -14,16 +14,14 @@ import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { getMediaInstances, getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { DEFAULT_MEDIA_INSTANCE, plexSettingKey, jellyfinSettingKey } from "@/lib/media-instances";
 import { syncDownloadPolicies } from "@/lib/download-policy";
-import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
 import { runDownloadCheck } from "@/lib/download-check";
-import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, replaceEpisodeCacheForSource, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
 import { sonarrIncompleteKeys } from "@/lib/arr-availability";
 import { isFeatureEnabled } from "@/lib/features";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
-import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
+import { fanOutAvailableWinners } from "@/lib/request-notifications";
 import { getArrInstances, getSyncableArrInstances } from "@/lib/arr-instance-registry";
 import { DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
 import { settleLimit } from "@/lib/concurrency";
@@ -290,10 +288,7 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
     marked = arrUnpinned.length;
   }
 
-  notifyUsersRequestsAvailable(arrNotify).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
-  notifyUsersRequestsAvailablePush(arrNotify).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
-  void notifyUsersRequestsAvailableEmail(arrNotify, "sync");
-  void writeAvailableInAppNotifications(arrNotify, "sync");
+  void fanOutAvailableWinners(arrNotify, "sync");
 
   const [plexEnabled, jellyfinEnabled, radarrEnabled, sonarrEnabled] = await Promise.all([
     isFeatureEnabled("feature.integration.plex"),
@@ -463,10 +458,7 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
       }
       if (deliverable.length > 0) {
         const secondNotify = deliverable.map((w) => ({ id: w.id, requestedBy: w.requestedBy, title: w.title, mediaType: w.mediaType, tmdbId: w.tmdbId, posterPath: w.posterPath }));
-        notifyUsersRequestsAvailable(secondNotify).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
-        notifyUsersRequestsAvailablePush(secondNotify).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
-        void notifyUsersRequestsAvailableEmail(secondNotify, "sync");
-        void writeAvailableInAppNotifications(secondNotify, "sync");
+        void fanOutAvailableWinners(secondNotify, "sync");
       }
     }
   }
@@ -1495,10 +1487,7 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
           void clearDeletionVotesForTmdbs(claimed);
         }
         if (deliverable.length > 0) {
-          notifyUsersRequestsAvailable(deliverable).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
-          notifyUsersRequestsAvailablePush(deliverable).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
-          void notifyUsersRequestsAvailableEmail(deliverable, "sync");
-          void writeAvailableInAppNotifications(deliverable, "sync");
+          void fanOutAvailableWinners(deliverable, "sync");
         }
       }
       if (toMarkOnly.length > 0) {
@@ -1652,10 +1641,7 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
         void clearDeletionVotesForTmdbs(claimed);
       }
       if (deliverable.length > 0) {
-        notifyUsersRequestsAvailable(deliverable).catch((err) => console.warn("[sync] Discord available notify failed:", err instanceof Error ? err.message : err));
-        notifyUsersRequestsAvailablePush(deliverable).catch((err) => console.warn("[sync] push available notify failed:", err instanceof Error ? err.message : err));
-        void notifyUsersRequestsAvailableEmail(deliverable, "sync");
-        void writeAvailableInAppNotifications(deliverable, "sync");
+        void fanOutAvailableWinners(deliverable, "sync");
       }
     }
   }

@@ -15,6 +15,7 @@ import { CalendarFeed } from "@/components/profile/calendar-feed";
 import { isFeatureEnabled } from "@/lib/features";
 import { canAutoRequest, hasPermission, Permission } from "@/lib/permissions";
 import { WATCHLIST_AUTO_REQUEST_FEATURE_KEY } from "@/lib/auto-request";
+import { getPlexWatchlistConnection } from "@/lib/plex-watchlist";
 import { CALENDAR_FEATURE_KEY } from "@/lib/calendar-feed";
 import { TwoFactorSettings } from "@/components/profile/two-factor";
 import { getMfaState } from "@/lib/mfa/mfa-store";
@@ -46,7 +47,7 @@ export default async function ProfilePage() {
         emailOnApproved: true, emailOnAvailable: true, emailOnDeclined: true,
         pushOnApproved: true, pushOnAvailable: true, pushOnDeclined: true,
         notifyOnIssue: true,
-        plexWatchlistAutoRequest: true,
+        plexWatchlistAutoRequest: true, plexWatchlistOptInAt: true,
         calendarTokenHash: true, calendarTokenCreatedAt: true,
       },
     }),
@@ -84,6 +85,12 @@ export default async function ProfilePage() {
         prisma.account.findFirst({ where: { userId: session.user.id, provider: "plex" }, select: { id: true } }),
       ])
     : [false, null];
+  const plexWatchlistConnection = autoRequestEnabled
+    ? await getPlexWatchlistConnection(
+        { id: session.user.id, plexWatchlistOptInAt: user?.plexWatchlistOptInAt ?? null },
+        plexAccount !== null,
+      )
+    : null;
   const discordInviteUrl = discordInviteSetting?.value || null;
 
   // Two-factor is offered only to local-credentials accounts (guardrail 6d).
@@ -263,6 +270,9 @@ export default async function ProfilePage() {
               <AutoRequestPrefs
                 initialPlexWatchlist={user?.plexWatchlistAutoRequest ?? true}
                 plexConnected={plexAccount !== null}
+                serverSource={plexWatchlistConnection?.serverSource ?? false}
+                serverOptedIn={plexWatchlistConnection?.serverOptedIn ?? false}
+                serverStatus={plexWatchlistConnection?.serverStatus ?? null}
               />
             </ProfileCard>
           )}

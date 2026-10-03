@@ -337,7 +337,7 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     // misleading "Approved!" ping for a request that's actually back to PENDING.
     // Skip when the admin approved their own request (selfAction).
     if (arrPushSucceeded && !selfAction) {
-      notifyRequestStatusChange("APPROVED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
+      notifyRequestStatusChange("APPROVED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId, requestId: updated.id, arrInstance: updated.arrInstance });
     }
 
     // Run the pendingNotifyAt check PROMPTLY at ~90s instead of leaving it to the
@@ -383,13 +383,13 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
     if (casCount === 1) {
       void clearDeletionVotesForTmdbs([{ tmdbId: updated.tmdbId, mediaType: updated.mediaType }]);
       if (!selfAction) {
-        notifyRequestStatusChange("AVAILABLE", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
+        notifyRequestStatusChange("AVAILABLE", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, posterPath: updated.posterPath, tmdbId: updated.tmdbId, requestId: updated.id, arrInstance: updated.arrInstance });
       }
     }
   }
 
   if (status === "DECLINED" && existing.status !== "DECLINED" && !selfAction) {
-    notifyRequestStatusChange("DECLINED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, adminNote: updated.adminNote, posterPath: updated.posterPath, tmdbId: updated.tmdbId });
+    notifyRequestStatusChange("DECLINED", { requestedBy: updated.requestedBy, title: updated.title, mediaType: updated.mediaType, adminNote: updated.adminNote, posterPath: updated.posterPath, tmdbId: updated.tmdbId, requestId: updated.id, arrInstance: updated.arrInstance });
   }
 
   return NextResponse.json(updated);
