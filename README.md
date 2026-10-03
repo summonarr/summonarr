@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.29.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.30.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,15 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.30.0
+
+**Added**
+
+- **Webhook, ntfy and Gotify notifications.** Admins can add any number of channels under Settings → Notifications and choose which events each one receives: new, approved, declined and available requests, new issues, issue replies and resolutions, deletion-vote thresholds, manual imports and finished replacement downloads. Webhooks get a versioned JSON payload or your own JSON template; ntfy and Gotify get a title, message and a link back to Summonarr. Each channel has a Send test button and shows its last delivery result, and failed deliveries are retried three times. Turn the whole feature off with the new "Webhook, ntfy & Gotify channels" feature switch.
+- **Plex watchlist auto-request without a Plex sign-in.** A new option reads your Plex friends' watchlists through the server owner's Plex account, so watchlist auto-request works for users who sign in another way. Each friend turns it on from their profile, unless an admin chooses to enroll everyone; a friend's watchlist must be visible to friends in their Plex privacy settings. Off by default, under Settings → Media → Plex Watchlist.
+- **"For You" shows every title behind a pick.** The "+ N more of yours" line now opens a list of every title in your history that led to the recommendation, each linking to its page.
+- **Links to the iOS app.** Safari on iPhone offers the Summonarr app in a banner, the login page links to it and shows the server address to enter, and the Push notification settings point to it.
 
 ### v0.29.0
 
@@ -786,7 +795,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.29.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.30.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
