@@ -6,13 +6,11 @@ import { resolvePlexLegacyGuids, mergeResolvedLegacyItems } from "@/lib/plex-leg
 import { getPlexConfig } from "@/lib/plex-config";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, plexSettingKey, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
-import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
-import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } from "@/lib/permissions";
 import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, patchPlexShowFilePaths, replaceEpisodeCacheForSource, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
-import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
+import { fanOutAvailableWinners } from "@/lib/request-notifications";
 import { sonarrIncompleteKeys } from "@/lib/arr-availability";
 import { deduplicatePlexRowsByRatingKey } from "@/lib/plex-dedupe";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
@@ -359,10 +357,7 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
           void clearDeletionVotesForTmdbs(claimed);
         }
         if (deliverable.length > 0) {
-          notifyUsersRequestsAvailable(deliverable).catch(() => {});
-          notifyUsersRequestsAvailablePush(deliverable).catch(() => {});
-          void notifyUsersRequestsAvailableEmail(deliverable, "sync/plex");
-          void writeAvailableInAppNotifications(deliverable, "sync/plex");
+          void fanOutAvailableWinners(deliverable, "sync/plex");
         }
       }
       if (toMarkOnly.length > 0) {

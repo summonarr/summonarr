@@ -8,6 +8,8 @@ import { resolveUserNotificationEmail } from "./notification-email";
 import { claimAvailableNotificationWinners } from "./notify-available";
 import { createInAppNotification } from "./in-app-notify";
 import { buildNotificationData } from "./notification-data";
+import { emitNotificationEvent, emitNotificationEvents } from "./notify-agents";
+import type { NotifyEvent } from "./notify-events";
 
 interface RequestInfo {
   requestedBy: string;
@@ -16,6 +18,9 @@ interface RequestInfo {
   adminNote?: string | null;
   posterPath?: string | null;
   tmdbId?: number;
+  // Optional context for the outbound channels (notify-agents.ts) only.
+  requestId?: string;
+  arrInstance?: string;
 }
 
 export interface PendingAvailableRequest {
@@ -105,18 +110,49 @@ export async function notifyAvailablePerServer(
   // today pre-filter to AVAILABLE (making this a no-op), but the guard keeps a future
   // caller from burning the once-only notifiedAvailable flag on a non-AVAILABLE row.
   const winners = await claimAvailableNotificationWinners(toNotify, { requireStatusAvailable: true });
-  if (winners.length > 0) {
-    const payload = winners.map((r) => ({ requestedBy: r.requestedBy, title: r.title, mediaType: r.mediaType, tmdbId: r.tmdbId ?? undefined }));
-    notifyUsersRequestsAvailable(payload).catch((err) => console.error(`[${logScope}] notification error:`, err instanceof Error ? err.message : err));
-    notifyUsersRequestsAvailablePush(payload).catch((err) => console.error(`[${logScope}] push error:`, err instanceof Error ? err.message : err));
+  await fanOutAvailableWinners(winners, logScope);
+}
 
-    // In-app inbox for the batch winners (one createMany, same CAS-once guarantee).
-    void writeAvailableInAppNotifications(winners, logScope);
+export interface AvailableWinner {
+  id?: string;
+  requestedBy: string;
+  title: string;
+  mediaType: string;
+  tmdbId?: number | null;
+  posterPath?: string | null;
+  arrInstance?: string | null;
+}
 
-    // Email channel, so the user's `emailOnAvailable` preference is honoured on
-    // the webhook/sync paths too.
-    await notifyUsersRequestsAvailableEmail(winners, logScope);
-  }
+// THE "now available" fan-out, for every path that has already won the
+// once-only claim (claimAvailableNotificationWinners / claimAvailableNotifications
+// — guardrail 14): the webhook poll above and all six sync-orchestrator /
+// per-source marking passes. Callers pass only the claimed, DELIVERABLE rows
+// (disabled requesters already dropped — guardrail 33), so every channel here
+// fires exactly once per transition. Adding a channel means adding it HERE, not
+// at the call sites — they used to repeat this list six times.
+//
+// Returns the email send (bounded, awaited inside); the sync callers `void` it,
+// the webhook path awaits it.
+export async function fanOutAvailableWinners(winners: AvailableWinner[], logScope: string): Promise<void> {
+  if (winners.length === 0) return;
+  const payload = winners.map((r) => ({ requestedBy: r.requestedBy, title: r.title, mediaType: r.mediaType, tmdbId: r.tmdbId ?? undefined }));
+  notifyUsersRequestsAvailable(payload).catch((err) => console.error(`[${logScope}] Discord available notify failed:`, err instanceof Error ? err.message : err));
+  notifyUsersRequestsAvailablePush(payload).catch((err) => console.error(`[${logScope}] push available notify failed:`, err instanceof Error ? err.message : err));
+  // In-app inbox for the batch winners (one createMany, same CAS-once guarantee).
+  void writeAvailableInAppNotifications(winners, logScope);
+  // Outbound channels: one event per claimed request.
+  emitNotificationEvents(winners.map((w) => availableEvent(w)));
+  // Email channel, so the user's `emailOnAvailable` preference is honoured on
+  // the webhook/sync paths too.
+  await notifyUsersRequestsAvailableEmail(winners, logScope);
+}
+
+function availableEvent(w: AvailableWinner): NotifyEvent {
+  return {
+    event: "request.available",
+    media: { type: w.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: w.tmdbId ?? null, title: w.title, posterPath: w.posterPath ?? null },
+    request: { id: w.id ?? null, instance: w.arrInstance ?? "" },
+  };
 }
 
 // Shared BATCH in-app inbox writer for the "now available" fan-out. The
@@ -307,6 +343,13 @@ function dispatchRequestStatusChange(
   request: RequestInfo,
 ): void {
   const { requestedBy, title, mediaType, posterPath, tmdbId } = request;
+
+  emitNotificationEvent({
+    event: status === "APPROVED" ? "request.approved" : status === "DECLINED" ? "request.declined" : "request.available",
+    media: { type: mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: tmdbId ?? null, title, posterPath: posterPath ?? null },
+    request: { id: request.requestId ?? null, instance: request.arrInstance ?? "" },
+    text: status === "DECLINED" ? (request.adminNote ?? null) : null,
+  });
 
   if (status === "APPROVED") {
     writeInAppNotification(requestedBy, "REQUEST_APPROVED", { title, mediaType, tmdbId, posterPath });

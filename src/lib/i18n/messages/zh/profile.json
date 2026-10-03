@@ -178,6 +178,10 @@
   "profile.autoRequest.plexLabel": "从我的 Plex 待看清单自动请求",
   "profile.autoRequest.plexConnected": "会定期请求你 Plex 待看清单中的新作品。",
   "profile.autoRequest.plexNotConnected": "使用 Plex 登录一次以连接你的 Plex 待看清单。",
+  "profile.autoRequest.plexServerOptIn": "开启此项以允许你的 Plex 服务器读取你的 Plex 待看清单，或用 Plex 登录一次。",
+  "profile.autoRequest.plexServerConnected": "已通过你的服务器连接——你的 Plex 待看清单中的新作品会定期被请求。",
+  "profile.autoRequest.plexServerPrivate": "你的 Plex 待看清单是私密的——请在 Plex 隐私设置中将待看清单可见性设为“好友”。",
+  "profile.autoRequest.plexServerPending": "如果你是该服务器的 Plex 好友，服务器会读取你的 Plex 待看清单——否则请用 Plex 登录一次。",
   "profile.push.title": "推送设备",
   "profile.push.description": "已注册推送通知的设备。移除你不再使用的设备。",
   "profile.push.empty": "没有注册推送通知的设备。",
@@ -216,5 +220,7 @@
   "profile.mfa.stepUp.hint": "（身份验证器验证码或恢复码）",
   "profile.mfa.stepUp.hintWithPasskey": "（身份验证器验证码或恢复码——留空则使用通行密钥）",
   "profile.mfa.stepUp.passkeyFailed": "无法在此设备上使用该通行密钥。",
-  "profile.mfa.stepUp.codeRequired": "输入身份验证器应用中的验证码或恢复码以确认此更改。"
+  "profile.mfa.stepUp.codeRequired": "输入身份验证器应用中的验证码或恢复码以确认此更改。",
+  "profile.notifications.iosApp.prompt": "使用 iPhone？Summonarr App 会以原生通知推送这些消息。",
+  "profile.notifications.iosApp.link": "前往 App Store 下载"
 }

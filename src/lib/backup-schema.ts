@@ -51,6 +51,9 @@ export const BACKUP_TABLES = [
   "IpLookupCache",
   "PlexTokenCache",
   "Setting",
+  // Outbound notification channels. `secret` travels as its enc:v1 ciphertext,
+  // restorable only under the same TOKEN_ENCRYPTION_KEY (like Setting secrets).
+  "NotificationAgent",
   "AuditLog",
   "MediaServerUser",
   "PlayHistory",

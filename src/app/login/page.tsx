@@ -1,7 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import { getSyncableMediaInstances } from "@/lib/media-instance-registry";
 import { redirect } from "next/navigation";
-import { Film, Wrench } from "@/components/icons";
+import { Film, Smartphone, Wrench } from "@/components/icons";
+import { IOS_APP_STORE_URL } from "@/lib/ios-app";
 import { LoginForm } from "./login-form";
 import { getMaintenanceStatus } from "@/lib/maintenance";
 import { getTranslator } from "@/lib/i18n/server";
@@ -53,79 +54,99 @@ export default async function LoginPage() {
       className="min-h-screen flex items-start md:items-center justify-center px-4 pt-16 md:pt-0"
       style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}
     >
-      <div
-        className="w-full max-w-sm"
-        style={{
-          background: "var(--ds-bg-1)",
-          border: "1px solid var(--ds-border)",
-          borderRadius: "var(--ds-r-xl)",
-          padding: 28,
-          boxShadow: "var(--ds-shadow-md)",
-        }}
-      >
-        {maintenance.enabled && (
-          <div
-            className="flex items-start gap-2.5 mb-5"
-            style={{
-              background: "color-mix(in oklab, var(--ds-warning) 12%, transparent)",
-              border: "1px solid color-mix(in oklab, var(--ds-warning) 28%, transparent)",
-              borderRadius: "var(--ds-r-md)",
-              padding: "10px 12px",
-            }}
-          >
-            <Wrench style={{ width: 14, height: 14, marginTop: 2, color: "var(--ds-warning)", flexShrink: 0 }} />
-            <p className="text-sm" style={{ color: "var(--ds-fg)", margin: 0 }}>
-              {maintenance.message || t("auth.login.maintenanceDefault")}
+      <div className="w-full max-w-sm">
+        <div
+          className="w-full"
+          style={{
+            background: "var(--ds-bg-1)",
+            border: "1px solid var(--ds-border)",
+            borderRadius: "var(--ds-r-xl)",
+            padding: 28,
+            boxShadow: "var(--ds-shadow-md)",
+          }}
+        >
+          {maintenance.enabled && (
+            <div
+              className="flex items-start gap-2.5 mb-5"
+              style={{
+                background: "color-mix(in oklab, var(--ds-warning) 12%, transparent)",
+                border: "1px solid color-mix(in oklab, var(--ds-warning) 28%, transparent)",
+                borderRadius: "var(--ds-r-md)",
+                padding: "10px 12px",
+              }}
+            >
+              <Wrench style={{ width: 14, height: 14, marginTop: 2, color: "var(--ds-warning)", flexShrink: 0 }} />
+              <p className="text-sm" style={{ color: "var(--ds-fg)", margin: 0 }}>
+                {maintenance.message || t("auth.login.maintenanceDefault")}
+              </p>
+            </div>
+          )}
+
+          <div className="flex flex-col items-center" style={{ marginBottom: 24 }}>
+            <WordmarkTag
+              className="m-0"
+              style={{
+                fontFamily: "var(--font-playfair)",
+                fontSize: 28,
+                fontWeight: 400,
+                color: "var(--ds-fg)",
+                letterSpacing: "0.02em",
+                marginBottom: 14,
+              }}
+            >
+              Summonarr
+            </WordmarkTag>
+            <div
+              className="flex items-center justify-center"
+              style={{
+                width: 44,
+                height: 44,
+                borderRadius: 10,
+                background: "var(--ds-accent)",
+                color: "var(--ds-accent-fg)",
+                boxShadow:
+                  "0 0 0 1px color-mix(in oklab, var(--ds-accent) 40%, transparent), inset 0 -1px 0 rgba(0,0,0,.15)",
+                marginBottom: 12,
+              }}
+            >
+              <Film style={{ width: 22, height: 22 }} />
+            </div>
+            {!isDefaultTitle && (
+              <h1
+                className="m-0 font-semibold"
+                style={{ fontSize: 18, color: "var(--ds-fg)", letterSpacing: "-0.01em" }}
+              >
+                {siteTitle}
+              </h1>
+            )}
+            <p
+              className="ds-mono m-0"
+              style={{ fontSize: 12, color: "var(--ds-fg-subtle)", marginTop: 4 }}
+            >
+              {t("auth.login.subtitle")}
             </p>
           </div>
-        )}
 
-        <div className="flex flex-col items-center" style={{ marginBottom: 24 }}>
-          <WordmarkTag
-            className="m-0"
-            style={{
-              fontFamily: "var(--font-playfair)",
-              fontSize: 28,
-              fontWeight: 400,
-              color: "var(--ds-fg)",
-              letterSpacing: "0.02em",
-              marginBottom: 14,
-            }}
-          >
-            Summonarr
-          </WordmarkTag>
-          <div
-            className="flex items-center justify-center"
-            style={{
-              width: 44,
-              height: 44,
-              borderRadius: 10,
-              background: "var(--ds-accent)",
-              color: "var(--ds-accent-fg)",
-              boxShadow:
-                "0 0 0 1px color-mix(in oklab, var(--ds-accent) 40%, transparent), inset 0 -1px 0 rgba(0,0,0,.15)",
-              marginBottom: 12,
-            }}
-          >
-            <Film style={{ width: 22, height: 22 }} />
-          </div>
-          {!isDefaultTitle && (
-            <h1
-              className="m-0 font-semibold"
-              style={{ fontSize: 18, color: "var(--ds-fg)", letterSpacing: "-0.01em" }}
-            >
-              {siteTitle}
-            </h1>
-          )}
-          <p
-            className="ds-mono m-0"
-            style={{ fontSize: 12, color: "var(--ds-fg-subtle)", marginTop: 4 }}
-          >
-            {t("auth.login.subtitle")}
-          </p>
+          <LoginForm plexEnabled={plexEnabled} jellyfinEnabled={jellyfinEnabled} jellyfinInstances={jellyfinInstances} oidcEnabled={oidcEnabled} oidcName={oidcName} localLoginDisabled={localLoginDisabled} siteUrl={siteUrl} />
         </div>
 
-        <LoginForm plexEnabled={plexEnabled} jellyfinEnabled={jellyfinEnabled} jellyfinInstances={jellyfinInstances} oidcEnabled={oidcEnabled} oidcName={oidcName} localLoginDisabled={localLoginDisabled} siteUrl={siteUrl} />
+        <div className="flex flex-col items-center text-center" style={{ marginTop: 18, gap: 4 }}>
+          <a
+            href={IOS_APP_STORE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 text-sm hover:underline"
+            style={{ color: "var(--ds-accent-text)" }}
+          >
+            <Smartphone style={{ width: 14, height: 14 }} />
+            {t("auth.login.iosApp.link")}
+          </a>
+          {siteUrl && (
+            <p className="m-0 text-xs" style={{ color: "var(--ds-fg-subtle)" }}>
+              {t("auth.login.iosApp.server")} <span className="ds-mono">{siteUrl}</span>
+            </p>
+          )}
+        </div>
       </div>
     </div>
   );

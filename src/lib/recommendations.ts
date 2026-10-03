@@ -1,6 +1,6 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
-import type { MediaType, RecommendationSeed } from "@/generated/prisma";
+import type { MediaType, Prisma, RecommendationSeed } from "@/generated/prisma";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { getTrending, getPopularMovies, getPopularTV } from "@/lib/tmdb";
 import { resolveLinkedMediaServerUserIds } from "@/lib/my-watch-history";
@@ -342,6 +342,79 @@ export interface RecommendationCandidate {
   reasonMediaType: MediaType | null;
   reasonSource: RecommendationSeed | null;
   seedCount: number;
+  // Every seed behind the candidate, strongest contribution first, capped at
+  // MAX_REASON_SEEDS — what "Because you watched X + N more" expands into.
+  // The first entry is the reason* seed above. null for fallback rows.
+  reasonSeeds: RecommendationReasonSeed[] | null;
+}
+
+// One title in a candidate's "because of" list. The four fields the reason*
+// columns carry for the strongest seed, for each of them.
+export interface RecommendationReasonSeed {
+  tmdbId: number;
+  title: string;
+  mediaType: MediaType;
+  source: RecommendationSeed;
+}
+
+// How many seeds a row keeps in reasonSeeds. A popular title can be surfaced by
+// dozens of a heavy viewer's seeds; past this the list stops explaining and
+// starts padding, and 200 rows × the cap is what each user's shelf stores.
+// seedCount still reports the true total.
+export const MAX_REASON_SEEDS = 25;
+
+function reasonSeedOf(seed: { tmdbId: number; title: string; mediaType: MediaType; source: RecommendationSeed }): RecommendationReasonSeed {
+  return { tmdbId: seed.tmdbId, title: seed.title, mediaType: seed.mediaType, source: seed.source };
+}
+
+// Strongest contribution first — the same order, and the same tie rule, that
+// picks the reason* seed (a stable sort keeps the incumbent on a tie), so the
+// list's first entry IS that seed. One entry per seed title: if a seed ever
+// reached a candidate twice, its stronger contribution is the one kept.
+export function orderReasonSeeds(
+  refs: { seed: RecommendationReasonSeed; contribution: number }[],
+): RecommendationReasonSeed[] {
+  const sorted = [...refs].sort((a, b) => b.contribution - a.contribution);
+  const seen = new Set<string>();
+  const out: RecommendationReasonSeed[] = [];
+  for (const { seed } of sorted) {
+    const key = candidateKey(seed.tmdbId, seed.mediaType);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(seed);
+    if (out.length >= MAX_REASON_SEEDS) break;
+  }
+  return out;
+}
+
+// The stored shape of UserRecommendation.reasonSeeds: an OBJECT wrapping the
+// list. A Json column must never hold a top-level array — db-export tells a
+// Postgres array column from a JSON one by JS shape alone, so an array here
+// would be dumped as an array literal and the restore would fail (22P02). See
+// the schema-invariants pin. `v` versions the shape for a later change.
+export function storedReasonSeeds(seeds: RecommendationReasonSeed[]): Prisma.InputJsonValue {
+  return { v: 1, seeds: seeds.map((s) => ({ ...s })) };
+}
+
+// Read-side guard for the JSON column: a row is only as trustworthy as the
+// code that wrote it, and a malformed entry must drop out rather than render
+// as "Because you watched undefined". Accepts only the { v: 1, seeds } shape.
+export function parseReasonSeeds(value: unknown): RecommendationReasonSeed[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const { v, seeds } = value as Record<string, unknown>;
+  if (v !== 1 || !Array.isArray(seeds)) return [];
+  const out: RecommendationReasonSeed[] = [];
+  for (const v of seeds) {
+    if (!v || typeof v !== "object") continue;
+    const { tmdbId, title, mediaType, source } = v as Record<string, unknown>;
+    if (typeof tmdbId !== "number" || !Number.isInteger(tmdbId)) continue;
+    if (typeof title !== "string" || title.length === 0) continue;
+    if (mediaType !== "MOVIE" && mediaType !== "TV") continue;
+    if (source !== "WATCH_HISTORY" && source !== "WATCHLIST" && source !== "REQUEST") continue;
+    out.push({ tmdbId, title, mediaType, source });
+    if (out.length >= MAX_REASON_SEEDS) break;
+  }
+  return out;
 }
 
 export interface Seed {
@@ -808,7 +881,7 @@ export async function computeRecommendationsForUser(
   // candidates are returned; none has a column. voteCount matters because the
   // graph's stored verdict leaves TMDB out, so this is the ONLY place the TMDB
   // term's vote count can come from (withTmdbTerm).
-  const scored = new Map<string, RecommendationCandidate & { reasonWeight: number; language?: string; voteCount: number; contributions: number[] }>();
+  const scored = new Map<string, RecommendationCandidate & { reasonWeight: number; language?: string; voteCount: number; contributions: number[]; seedRefs: { seed: RecommendationReasonSeed; contribution: number }[] }>();
   // Weighted language tally, accumulated in the same pass that scores.
   const languageWeight = new Map<string, number>();
   let totalLanguageWeight = 0;
@@ -846,6 +919,7 @@ export async function computeRecommendationsForUser(
       const existing = scored.get(key);
       if (existing) {
         existing.contributions.push(contribution);
+        existing.seedRefs.push({ seed: reasonSeedOf(seed), contribution });
         existing.seedCount++;
         // Keep the STRONGEST contribution as the reason, not the first one
         // encountered — seeds are not visited in weight order, so first-wins
@@ -879,9 +953,11 @@ export async function computeRecommendationsForUser(
         reasonSource: seed.source,
         reasonWeight: contribution,
         seedCount: 1,
+        reasonSeeds: null,
         language: item.originalLanguage ?? undefined,
         voteCount: item.voteCount ?? 0,
         contributions: [contribution],
+        seedRefs: [{ seed: reasonSeedOf(seed), contribution }],
       });
     }
   });
@@ -941,7 +1017,11 @@ export async function computeRecommendationsForUser(
     .sort((a, b) => b.score - a.score || b.voteAverage - a.voteAverage)
     .slice(0, MAX_STORED_RECOMMENDATIONS_PER_USER)
     .map(
-      ({ reasonWeight: _reasonWeight, language: _language, voteCount: _voteCount, contributions: _contributions, ...c }, i): RecommendationCandidate => ({ ...c, rank: i }),
+      ({ reasonWeight: _reasonWeight, language: _language, voteCount: _voteCount, contributions: _contributions, seedRefs, ...c }, i): RecommendationCandidate => ({
+        ...c,
+        rank: i,
+        reasonSeeds: orderReasonSeeds(seedRefs),
+      }),
     );
 
   // Thin shelf (few seeds, or a viewer who has watched most of their
@@ -1016,6 +1096,7 @@ async function buildFallbackCandidates(
       reasonMediaType: null,
       reasonSource: "TRENDING",
       seedCount: 0,
+      reasonSeeds: null,
       voteCount: item.voteCount ?? 0,
     });
     // Overfetch 2x before the quality sort so a badly-rated title near the top
@@ -1194,7 +1275,14 @@ export async function warmRecommendationsCache(opts: { signal?: AbortSignal } = 
         if (candidates.length > 0) {
           await batchCreateMany(
             tx.userRecommendation,
-            candidates.map((c) => ({ ...c, userId })),
+            // A Json? column takes undefined (omit) for "no value" — a bare null
+            // is refused by Prisma (it wants Prisma.DbNull).
+            candidates.map(({ reasonSeeds, ...c }) => ({
+              ...c,
+              userId,
+              // Wrapped in an object, never a bare array — see storedReasonSeeds.
+              ...(reasonSeeds && reasonSeeds.length > 0 ? { reasonSeeds: storedReasonSeeds(reasonSeeds) } : {}),
+            })),
           );
         }
       },
@@ -1238,6 +1326,24 @@ export async function warmRecommendationsCache(opts: { signal?: AbortSignal } = 
   };
 }
 
+function seedsForWire(value: unknown): { seeds?: NonNullable<TmdbMedia["recommendedBecause"]>["seeds"] } {
+  const seeds = parseReasonSeeds(value);
+  if (seeds.length === 0) return {};
+  const out: NonNullable<NonNullable<TmdbMedia["recommendedBecause"]>["seeds"]> = [];
+  for (const seed of seeds) {
+    // parseReasonSeeds already drops TRENDING (a fallback marker, never a
+    // seed); this check is what tells the compiler so.
+    if (seed.source === "TRENDING") continue;
+    out.push({
+      tmdbId: seed.tmdbId,
+      title: seed.title,
+      mediaType: toTmdbMediaType(seed.mediaType),
+      source: seed.source,
+    });
+  }
+  return { seeds: out };
+}
+
 function rowToTmdbMedia(row: {
   tmdbId: number;
   mediaType: MediaType;
@@ -1252,6 +1358,7 @@ function rowToTmdbMedia(row: {
   reasonMediaType: MediaType | null;
   reasonSource: RecommendationSeed | null;
   seedCount: number;
+  reasonSeeds?: unknown;
 }): TmdbMedia {
   return {
     id: row.tmdbId,
@@ -1276,6 +1383,10 @@ function rowToTmdbMedia(row: {
             mediaType: toTmdbMediaType(row.reasonMediaType),
             source: row.reasonSource,
             seedCount: row.seedCount,
+            // Every seed, strongest first. Omitted (not []) for a row written
+            // before the column existed, so a client keeps its old "+N more"
+            // text instead of offering a list it can't fill.
+            ...seedsForWire(row.reasonSeeds),
           },
         }
       : {}),

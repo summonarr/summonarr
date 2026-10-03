@@ -178,6 +178,10 @@
   "profile.autoRequest.plexLabel": "Automatisch aus meiner Plex-Merkliste anfragen",
   "profile.autoRequest.plexConnected": "Neue Titel auf Ihrer Plex-Merkliste werden regelmäßig angefragt.",
   "profile.autoRequest.plexNotConnected": "Melden Sie sich einmal mit Plex an, um Ihre Plex-Merkliste zu verbinden.",
+  "profile.autoRequest.plexServerOptIn": "Aktiviere dies, damit dein Plex-Server deine Plex-Merkliste lesen kann, oder melde dich einmal mit Plex an.",
+  "profile.autoRequest.plexServerConnected": "Über deinen Server verbunden – neue Titel auf deiner Plex-Merkliste werden regelmäßig angefragt.",
+  "profile.autoRequest.plexServerPrivate": "Deine Plex-Merkliste ist privat – stelle die Sichtbarkeit der Merkliste in den Plex-Datenschutzeinstellungen auf „Freunde“.",
+  "profile.autoRequest.plexServerPending": "Dein Server liest deine Plex-Merkliste, wenn du einer seiner Plex-Freunde bist – andernfalls melde dich einmal mit Plex an.",
   "profile.push.title": "Push-Geräte",
   "profile.push.description": "Für Push-Benachrichtigungen registrierte Geräte. Entfernen Sie alle, die Sie nicht mehr verwenden.",
   "profile.push.empty": "Keine Geräte für Push-Benachrichtigungen registriert.",
@@ -216,5 +220,7 @@
   "profile.mfa.stepUp.hint": "(Authenticator- oder Wiederherstellungscode)",
   "profile.mfa.stepUp.hintWithPasskey": "(Authenticator- oder Wiederherstellungscode – leer lassen, um einen Passkey zu verwenden)",
   "profile.mfa.stepUp.passkeyFailed": "Der Passkey konnte auf diesem Gerät nicht verwendet werden.",
-  "profile.mfa.stepUp.codeRequired": "Geben Sie einen Code aus Ihrer Authenticator-App oder einen Wiederherstellungscode ein, um diese Änderung zu bestätigen."
+  "profile.mfa.stepUp.codeRequired": "Geben Sie einen Code aus Ihrer Authenticator-App oder einen Wiederherstellungscode ein, um diese Änderung zu bestätigen.",
+  "profile.notifications.iosApp.prompt": "Auf dem iPhone? Die Summonarr-App stellt diese als native Mitteilungen zu.",
+  "profile.notifications.iosApp.link": "Im App Store laden"
 }

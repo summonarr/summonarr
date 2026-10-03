@@ -143,6 +143,13 @@ model User {
   // is on; the user can opt out on their profile. Default on so granting the
   // permission is enough.
   plexWatchlistAutoRequest Boolean @default(true)
+  // When the user explicitly turned that toggle ON (PATCH /api/profile/auto-request;
+  // cleared when they turn it off). The toggle defaults to true, so it is NOT
+  // consent for the server-token path (guardrail 34b): reading a Plex friend's
+  // watchlist through the server owner's token, for someone who may never have
+  // opened Summonarr, needs this stamp — unless the admin turned on
+  // plexWatchlistServerAutoEnroll. The user's own-token path ignores it.
+  plexWatchlistOptInAt     DateTime?
   // Personal iCal (.ics) subscription feed — /api/calendar/feed/<token>.ics.
   // Calendar apps cannot send cookies or headers, so the URL itself carries a
   // per-user secret. Only its SHA-256 HASH is stored (src/lib/calendar-token.ts):
@@ -206,6 +213,29 @@ model PushSubscription {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+// Admin-configured outbound notification channel (generic JSON webhook, ntfy,
+// Gotify). Instance-wide: one row per configured destination, so an admin can
+// run several of each kind. `config` holds the non-secret shape validated by
+// notify-events.ts (url, topic, priority, template…); `secret` holds the one
+// credential the kind needs (auth header value / ntfy access token / Gotify app
+// token) and is encrypted at rest by the Prisma extension in prisma.ts — never
+// pre-encrypt it at the call site (guardrail 7a).
+model NotificationAgent {
+  id            String    @id @default(cuid(2))
+  kind          String    @db.VarChar(16) // "webhook" | "ntfy" | "gotify"
+  name          String    @db.VarChar(100)
+  enabled       Boolean   @default(true)
+  events        String[]  @default([])
+  config        Json      @default("{}")
+  secret        String?
+  // Last delivery outcome, for the admin list. Best-effort bookkeeping.
+  lastStatus    String?   @db.VarChar(16) // "ok" | "failed"
+  lastError     String?   @db.VarChar(300)
+  lastAttemptAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 }
 
 model Account {
@@ -1373,6 +1403,16 @@ model UserRecommendation {
   reasonMediaType MediaType?
   reasonSource    RecommendationSeed?
   seedCount       Int        @default(1)
+  // EVERY seed that surfaced this title, strongest contribution first, as
+  // { v: 1, seeds: [{ tmdbId, title, mediaType, source }] } — the reason*
+  // columns above are its first entry. An OBJECT, never a bare array:
+  // db-export tells array columns apart by JS shape (schema-invariants pin). Capped at MAX_REASON_SEEDS (recommendations.ts); seedCount
+  // stays the true total, so a UI can say "and N more" past the cap. JSON
+  // rather than a child table because it is only ever read whole, alongside
+  // its row, and the table is rebuilt wholesale each cycle. Nullable: rows
+  // written before it existed (healed within one cron run) and cold-start
+  // fallback rows, which have no seed to name.
+  reasonSeeds     Json?
 
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)

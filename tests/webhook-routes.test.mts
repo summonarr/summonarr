@@ -173,6 +173,8 @@ type SettingDeleteManyArgs = {
 const settingCreateManyCalls: SettingCreateManyArgs[] = [];
 const settingDeleteManyCalls: SettingDeleteManyArgs[] = [];
 
+// No outbound notification channels configured (notify-agents.ts).
+shadowPrismaModel(prisma, "notificationAgent", { findMany: async () => [] });
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) =>
     settings.has(args.where.key) ? { key: args.where.key, value: settings.get(args.where.key)! } : null,

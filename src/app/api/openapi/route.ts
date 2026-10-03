@@ -284,7 +284,7 @@ const spec = {
           { name: "sort", in: "query", schema: { type: "string", enum: ["match", "newest", "rating"], default: "match" }, description: "Ordering; \"match\" keeps the engine's own ranking" },
         ],
         responses: {
-          "200": { description: "Ranked recommendation items ({ items, total, available }); each item carries recommendedBecause naming the strongest seed" },
+          "200": { description: "Ranked recommendation items ({ items, total, available }); each item carries recommendedBecause naming the strongest seed, plus recommendedBecause.seeds listing every seed (strongest first, capped at 25; seedCount is the true total)" },
           "404": { description: "feature.page.forYou is disabled" },
         },
       },
@@ -1404,7 +1404,11 @@ const spec = {
                       properties: { movie: { type: "boolean" }, tv: { type: "boolean" } },
                     },
                     plexWatchlist: { type: "boolean", description: "The caller's \"Auto-request from my Plex watchlist\" toggle" },
-                    plexConnected: { type: "boolean", description: "A Plex token is stored (captured at Plex sign-in while the feature is on)" },
+                    plexConnected: { type: "boolean", description: "A Plex token of the caller's own is stored (captured at Plex sign-in while the feature is on)" },
+                    plexServerSource: { type: "boolean", description: "The admin lets the cron read Plex friends' watchlists through the Plex server owner's token (plexWatchlistServerSource)" },
+                    plexServerOptedIn: { type: "boolean", description: "The caller's consent counts for that server-token path: they switched the toggle on themselves, or the admin auto-enrolls friends" },
+                    plexServerStatus: { type: "string", nullable: true, enum: ["ok", "private", "error"], description: "The last server-token run's verdict for the caller; null when it did not read them. \"private\" means their Plex watchlist is not visible to friends" },
+                    plexConnectedVia: { type: "string", nullable: true, enum: ["token", "server"], description: "How the cron reads the caller's Plex watchlist: their own token (always preferred), the server owner's token, or neither (null)" },
                   },
                 },
               },
@@ -1416,6 +1420,7 @@ const spec = {
       patch: {
         tags: ["Profile"],
         summary: "Turn the caller's Plex watchlist auto-request on or off",
+        description: "Turning it on also records the caller's explicit consent for the server-token path (it is read only for users who opted in, unless the admin auto-enrolls); turning it off clears that consent and deletes the caller's stored Plex token.",
         requestBody: {
           required: true,
           content: { "application/json": { schema: { type: "object", required: ["plexWatchlist"], properties: { plexWatchlist: { type: "boolean" } } } } },
@@ -2259,6 +2264,112 @@ const spec = {
           "403": { description: "Not ADMIN" },
           "404": { description: "Library cleanup is disabled" },
           "409": { description: "confirmTargets missing or not equal to the live count (the fresh plan is returned)" },
+        },
+      },
+    },
+
+    "/admin/notification-agents": {
+      get: {
+        tags: ["Admin – Settings"],
+        summary: "List the outbound notification channels (ADMIN)",
+        responses: {
+          "200": {
+            description: "Every configured channel",
+            content: { "application/json": { schema: { type: "object", properties: { agents: { type: "array", items: {
+                  type: "object",
+                  properties: {
+                    id: { type: "string" },
+                    kind: { type: "string", enum: ["webhook", "ntfy", "gotify"] },
+                    name: { type: "string" },
+                    enabled: { type: "boolean" },
+                    events: { type: "array", items: { type: "string" } },
+                    config: { type: "object", description: "webhook: { url, headerName, template|null }; ntfy: { url, topic, priority 1-5, attachPoster }; gotify: { url, priority 0-10 }" },
+                    hasSecret: { type: "boolean", description: "The secret itself is never returned." },
+                    lastStatus: { type: "string", nullable: true, enum: ["ok", "failed"] },
+                    lastError: { type: "string", nullable: true },
+                    lastAttemptAt: { type: "string", format: "date-time", nullable: true },
+                    createdAt: { type: "string", format: "date-time" },
+                  },
+                } } } } } },
+          },
+        },
+      },
+      post: {
+        tags: ["Admin – Settings"],
+        summary: "Create a webhook, ntfy or Gotify channel (ADMIN)",
+        description:
+          "Channel URLs may point at the LAN; cloud-metadata addresses are refused at send time. A webhook " +
+          "`template` is JSON with `{{field}}` placeholders and must render to valid JSON. At most 25 channels.",
+        requestBody: { required: true, content: { "application/json": { schema: {
+                type: "object",
+                properties: {
+                  kind: { type: "string", enum: ["webhook", "ntfy", "gotify"], description: "Create only — fixed afterwards." },
+                  name: { type: "string", maxLength: 100 },
+                  enabled: { type: "boolean" },
+                  events: {
+                    type: "array",
+                    items: {
+                      type: "string",
+                      enum: ["request.created", "request.approved", "request.declined", "request.available", "issue.created", "issue.reply", "issue.resolved", "vote.threshold", "arr.manual_interaction", "arr.grab_completed"],
+                    },
+                  },
+                  config: { type: "object" },
+                  secret: { type: "string", nullable: true, description: "Omit to keep the saved value, null or \"\" to clear. Gotify requires one." },
+                },
+              } } } },
+        responses: {
+          "201": { description: "Created" },
+          "400": { description: "Invalid input, or the channel limit is reached" },
+        },
+      },
+    },
+
+    "/admin/notification-agents/{id}": {
+      patch: {
+        tags: ["Admin – Settings"],
+        summary: "Update a channel (ADMIN)",
+        description: "Fields left out keep their stored value. The kind cannot change.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: { required: true, content: { "application/json": { schema: {
+                type: "object",
+                properties: {
+                  kind: { type: "string", enum: ["webhook", "ntfy", "gotify"], description: "Create only — fixed afterwards." },
+                  name: { type: "string", maxLength: 100 },
+                  enabled: { type: "boolean" },
+                  events: {
+                    type: "array",
+                    items: {
+                      type: "string",
+                      enum: ["request.created", "request.approved", "request.declined", "request.available", "issue.created", "issue.reply", "issue.resolved", "vote.threshold", "arr.manual_interaction", "arr.grab_completed"],
+                    },
+                  },
+                  config: { type: "object" },
+                  secret: { type: "string", nullable: true, description: "Omit to keep the saved value, null or \"\" to clear. Gotify requires one." },
+                },
+              } } } },
+        responses: { "200": { description: "Updated" }, "400": { description: "Invalid input" }, "404": { description: "No such channel" } },
+      },
+      delete: {
+        tags: ["Admin – Settings"],
+        summary: "Delete a channel (ADMIN)",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: { "200": { description: "Deleted" }, "404": { description: "No such channel" } },
+      },
+    },
+
+    "/admin/notification-agents/{id}/test": {
+      post: {
+        tags: ["Admin – Settings"],
+        summary: "Send a sample event to a channel now (ADMIN)",
+        description: "One attempt, no retry — works even while the channel is disabled. Rate-limited to 10 a minute.",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": {
+            description: "Delivery outcome",
+            content: { "application/json": { schema: { type: "object", properties: { ok: { type: "boolean" }, status: { type: "integer", nullable: true }, error: { type: "string", nullable: true } } } } },
+          },
+          "404": { description: "No such channel" },
+          "429": { description: "Too many test sends" },
         },
       },
     },

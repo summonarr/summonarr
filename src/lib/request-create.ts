@@ -1,4 +1,5 @@
 import { after } from "next/server";
+import { emitNotificationEvent } from "@/lib/notify-agents";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, addSeriesToSonarr, listQualityProfiles } from "@/lib/arr";
 import { Prisma, type MediaRequest } from "@/generated/prisma";
@@ -546,6 +547,13 @@ export async function createMediaRequest(
     if (!earlierPending) {
       const requestedBy = session.user.name ?? session.user.email ?? session.user.id;
       after(async () => {
+        emitNotificationEvent({
+          event: "request.created",
+          media: { type: mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId, title: meta.title, year: meta.releaseYear ?? null, posterPath: meta.posterPath ?? null },
+          request: { id: request.id, instance: instanceSlug },
+          actor: { name: requestedBy },
+          text: sanitizedNote ?? null,
+        });
         await Promise.allSettled([
           notifyAdminsNewRequest({ title: meta.title, mediaType, requestedBy, note: sanitizedNote ?? null, posterPath: meta.posterPath, tmdbId, releaseYear: meta.releaseYear, excludeUserId: session.user.id }),
           notifyAdminsNewRequestPush({ title: meta.title, mediaType, tmdbId, requestedBy, requestId: request.id, excludeUserId: session.user.id }),

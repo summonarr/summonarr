@@ -104,6 +104,15 @@ export interface TmdbMedia {
     // they surface through fromTrendingFallback below instead.
     source: "WATCH_HISTORY" | "WATCHLIST" | "REQUEST" | "TRENDING";
     seedCount: number;
+    // EVERY seed that surfaced it, strongest first (the fields above are the
+    // first entry), capped at MAX_REASON_SEEDS — seedCount is the true total.
+    // Absent on rows written before the list was stored.
+    seeds?: {
+      tmdbId: number;
+      title: string;
+      mediaType: MediaType;
+      source: "WATCH_HISTORY" | "WATCHLIST" | "REQUEST";
+    }[];
   };
 
   // Set on cold-start fallback rows only (reasonSource TRENDING): the title is

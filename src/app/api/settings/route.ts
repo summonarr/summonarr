@@ -171,6 +171,10 @@ const SETTINGS_SCHEMA = [
   ["trashGithubToken",                true ],
   ["trashLastRefreshTruncatedAt",     false],
   ["trashLastRefreshAt",              false],
+  // Plex watchlist auto-request through the server owner's token (guardrail
+  // 34b, src/lib/plex-friends-watchlist.ts). "true"|"false"; plaintext.
+  ["plexWatchlistServerSource",       false],
+  ["plexWatchlistServerAutoEnroll",   false],
   // Feature toggles — see src/lib/features.ts for the registry. All stored as "true"|"false".
   ["feature.page.top",                false],
   ["feature.page.popular",            false],
@@ -192,6 +196,7 @@ const SETTINGS_SCHEMA = [
   ["feature.integration.email",       false],
   ["feature.integration.push",        false],
   ["feature.integration.calendar",    false],
+  ["feature.integration.webhooks",    false],
   ["feature.admin.stats",             false],
   ["feature.admin.activity",          false],
   ["feature.admin.auditLog",          false],
@@ -257,7 +262,7 @@ const lastKeyWriteAt = new Map<string, number>();
 // the optimistic flip). Spam protection for this tab is handled client-side
 // via trailing-edge coalescing in features-form.tsx plus the general
 // admin-settings rate limit (10 PATCHes / minute).
-// The two standalone toggles below share that shape: each click PATCHes the same
+// The standalone toggles below share that shape: each click PATCHes the same
 // key and the control rolls back on a non-ok response, so a 429 inside the
 // cooldown snaps it to the state the admin just tried to leave. The ratings grid
 // is worse — 11 checkboxes all write ratingsHiddenSources.
@@ -265,6 +270,8 @@ const COOLDOWN_EXEMPT = new Set<string>([
   ...FEATURE_KEYS,
   "ratingsHiddenSources",
   "request4kAll",
+  "plexWatchlistServerSource",
+  "plexWatchlistServerAutoEnroll",
 ]);
 setInterval(() => {
   const cutoff = Date.now() - KEY_COOLDOWN_MS;
@@ -504,6 +511,17 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       if (!Number.isFinite(n) || n < 1 || n > 1_000_000) {
         return NextResponse.json(
           { error: t("apiAdmin.settings.intRangeMillion", { key }) },
+          { status: 400 },
+        );
+      }
+    }
+
+    // The server-token watchlist switches are read as `=== "true"`; anything
+    // else would silently read as off, so only the two literals are stored.
+    if (key === "plexWatchlistServerSource" || key === "plexWatchlistServerAutoEnroll") {
+      if (value !== "true" && value !== "false") {
+        return NextResponse.json(
+          { error: t("apiAdmin.settings.trueFalse", { key }) },
           { status: 400 },
         );
       }

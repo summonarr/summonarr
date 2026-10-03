@@ -109,7 +109,7 @@ if ((dns as { lookup: unknown }).lookup !== fakeLookup) {
 
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
-const { computeRecommendationsForUser, selectSeedPlan, warmRecommendationsCache, getUserRecommendations, getRecommendationsComputedAt, summarizeRecommendationSeeds, qualityScoreOf, SEED_RECENCY_HALF_LIFE_MS, SEED_RECENCY_FLOOR, SEED_COUNT_WEIGHT, MAX_WATCH_HISTORY_SEEDS } =
+const { computeRecommendationsForUser, selectSeedPlan, warmRecommendationsCache, getUserRecommendations, getRecommendationsComputedAt, summarizeRecommendationSeeds, qualityScoreOf, orderReasonSeeds, parseReasonSeeds, storedReasonSeeds, MAX_REASON_SEEDS, SEED_RECENCY_HALF_LIFE_MS, SEED_RECENCY_FLOOR, SEED_COUNT_WEIGHT, MAX_WATCH_HISTORY_SEEDS } =
   await import("../src/lib/recommendations.ts");
 const { invalidateBlacklistCache } = await import("../src/lib/blacklist.ts");
 const { refreshRecommendationGraph, prewarmSuggestionEdges } = await import("../src/lib/recommendation-graph.ts");
@@ -176,6 +176,7 @@ interface UserRecRow {
   reasonMediaType?: MT | null;
   reasonSource?: "WATCH_HISTORY" | "WATCHLIST" | null;
   seedCount?: number;
+  reasonSeeds?: unknown;
 }
 
 interface HiddenRow { userId: string; tmdbId: number; mediaType: MT; createdAt: Date }
@@ -1293,6 +1294,88 @@ test("reason: a WEAKER later seed does not steal the reason, and seedCount still
   assert.equal(candidates[0].reasonTitle, "Top Seed");
   assert.equal(candidates[0].reasonSource, "WATCH_HISTORY");
   assert.equal(candidates[0].seedCount, 2);
+});
+
+test("reasonSeeds: every corroborating seed is kept, strongest first, and the first IS the reason seed", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+
+  // Same fixture as the strongest-reason test above: the watchlist seed (1.5x)
+  // outweighs the history seed even though history is visited first.
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(5), title: "The Weak One" },
+  ];
+  watchlistRows = [{ userId: "u1", tmdbId: 30, mediaType: "MOVIE", createdAt: daysAgo(0), title: "The Strong One" }];
+  suggestionsFor.set("movie:10", [movieItem(999)]);
+  suggestionsFor.set("movie:30", [movieItem(999)]);
+
+  const { candidates } = await computeSeeded("u1");
+  const c = candidates[0];
+  assert.deepEqual(c.reasonSeeds, [
+    { tmdbId: 30, title: "The Strong One", mediaType: "MOVIE", source: "WATCHLIST" },
+    { tmdbId: 10, title: "The Weak One", mediaType: "MOVIE", source: "WATCH_HISTORY" },
+  ]);
+  assert.equal(c.reasonSeeds![0].tmdbId, c.reasonTmdbId, "list head and reason* columns agree");
+  assert.equal(c.reasonSeeds!.length, c.seedCount);
+});
+
+test("orderReasonSeeds: strongest first, ties keep visit order, one entry per seed, capped", () => {
+  const s = (id: number) => ({ tmdbId: id, title: `t${id}`, mediaType: "MOVIE" as const, source: "WATCH_HISTORY" as const });
+  assert.deepEqual(
+    orderReasonSeeds([
+      { seed: s(1), contribution: 1 },
+      { seed: s(2), contribution: 3 },
+      { seed: s(3), contribution: 1 },
+      { seed: s(2), contribution: 0.5 },
+    ]).map((x) => x.tmdbId),
+    [2, 1, 3],
+  );
+  const many = Array.from({ length: MAX_REASON_SEEDS + 10 }, (_, i) => ({ seed: s(i + 1), contribution: 1 }));
+  assert.equal(orderReasonSeeds(many).length, MAX_REASON_SEEDS);
+});
+
+test("parseReasonSeeds drops malformed entries and fallback markers instead of rendering them", () => {
+  assert.deepEqual(parseReasonSeeds(null), []);
+  assert.deepEqual(parseReasonSeeds({ not: "the shape" }), []);
+  // A bare array is NOT the stored shape (and must never be — db-export).
+  assert.deepEqual(parseReasonSeeds([{ tmdbId: 1, title: "Bare", mediaType: "TV", source: "REQUEST" }]), []);
+  assert.deepEqual(parseReasonSeeds({ v: 2, seeds: [] }), []);
+  assert.deepEqual(
+    parseReasonSeeds({ v: 1, seeds: [
+      { tmdbId: 1, title: "Good", mediaType: "TV", source: "REQUEST" },
+      { tmdbId: "2", title: "Bad id", mediaType: "MOVIE", source: "WATCHLIST" },
+      { tmdbId: 3, title: "", mediaType: "MOVIE", source: "WATCHLIST" },
+      { tmdbId: 4, title: "Bad type", mediaType: "movie", source: "WATCHLIST" },
+      { tmdbId: 5, title: "Trending", mediaType: "MOVIE", source: "TRENDING" },
+      null,
+    ] }),
+    [{ tmdbId: 1, title: "Good", mediaType: "TV", source: "REQUEST" }],
+  );
+});
+
+test("getUserRecommendations serves the seed list as recommendedBecause.seeds, lowercase types", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  userRecRows = [
+    {
+      id: "r1", userId: "u1", tmdbId: 501, mediaType: "MOVIE", title: "Pick",
+      overview: null, posterPath: null, backdropPath: null, releaseDate: "2021-05-05",
+      voteAverage: 7, score: 2, rank: 0, computedAt: daysAgo(0),
+      reasonTmdbId: 10, reasonTitle: "Lead", reasonMediaType: "MOVIE",
+      reasonSource: "WATCH_HISTORY", seedCount: 30,
+      reasonSeeds: storedReasonSeeds([
+        { tmdbId: 10, title: "Lead", mediaType: "MOVIE", source: "WATCH_HISTORY" },
+        { tmdbId: 20, title: "Second", mediaType: "TV", source: "WATCHLIST" },
+      ]),
+    },
+  ];
+  const out = await getUserRecommendations("u1");
+  assert.deepEqual(out[0].recommendedBecause?.seeds, [
+    { tmdbId: 10, title: "Lead", mediaType: "movie", source: "WATCH_HISTORY" },
+    { tmdbId: 20, title: "Second", mediaType: "tv", source: "WATCHLIST" },
+  ]);
+  // The list is capped; the true total still travels for "and N more".
+  assert.equal(out[0].recommendedBecause?.seedCount, 30);
 });
 
 test("reason: a TV seed's reason keeps its own mediaType, independent of the recommended title's", async () => {

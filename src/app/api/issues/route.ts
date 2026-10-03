@@ -1,4 +1,5 @@
 import { NextResponse, after } from "next/server";
+import { emitNotificationEvent } from "@/lib/notify-agents";
 import { withAuth } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
@@ -182,6 +183,13 @@ export const POST = withAuth(async (req, _ctx, session) => {
   emitSSE({ type: "issue:new", issueId: issue.id, userId: session.user.id });
   const reportedBy = session.user.name ?? session.user.email ?? session.user.id;
   after(async () => {
+    emitNotificationEvent({
+      event: "issue.created",
+      media: { type: mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId, title: verified.title, posterPath: verified.posterPath ?? null },
+      issue: { id: issue.id, type: issueType },
+      actor: { name: reportedBy },
+      text: sanitizedNote ?? null,
+    });
     await Promise.allSettled([
       notifyAdminsNewIssue({ title: verified.title, mediaType, tmdbId, issueType, reportedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath, issueId: issue.id, excludeUserId: session.user.id }),
       notifyAdminsNewIssuePush({ title: verified.title, tmdbId, mediaType, issueType, reportedBy, issueId: issue.id, excludeUserId: session.user.id }),

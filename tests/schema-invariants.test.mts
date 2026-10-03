@@ -383,6 +383,10 @@ test("no Json column may hold a top-level array — db-export discriminates arra
     "TrashSpec.payload",
     // Always a NotificationData object ({ v: 1, … } — notification-render.ts).
     "Notification.data",
+    // Always { v: 1, seeds: [...] } — storedReasonSeeds in recommendations.ts.
+    "UserRecommendation.reasonSeeds",
+    // Always the validated per-kind config object (validateAgentConfig in notify-events.ts).
+    "NotificationAgent.config",
   ]);
   for (const field of jsonFields) {
     assert.ok(

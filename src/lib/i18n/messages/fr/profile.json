@@ -178,6 +178,10 @@
   "profile.autoRequest.plexLabel": "Demander automatiquement depuis ma liste de suivi Plex",
   "profile.autoRequest.plexConnected": "Les nouveaux titres de votre liste de suivi Plex sont demandés périodiquement.",
   "profile.autoRequest.plexNotConnected": "Connectez-vous une fois avec Plex pour relier votre liste de suivi Plex.",
+  "profile.autoRequest.plexServerOptIn": "Activez cette option pour que votre serveur Plex puisse lire votre liste de suivi Plex, ou connectez-vous une fois avec Plex.",
+  "profile.autoRequest.plexServerConnected": "Connecté via votre serveur — les nouveaux titres de votre liste de suivi Plex sont demandés régulièrement.",
+  "profile.autoRequest.plexServerPrivate": "Votre liste de suivi Plex est privée — réglez sa visibilité sur Amis dans les paramètres de confidentialité de Plex.",
+  "profile.autoRequest.plexServerPending": "Votre serveur lit votre liste de suivi Plex si vous faites partie de ses amis Plex — sinon, connectez-vous une fois avec Plex.",
   "profile.push.title": "Appareils push",
   "profile.push.description": "Appareils enregistrés pour les notifications push. Supprimez ceux que vous n'utilisez plus.",
   "profile.push.empty": "Aucun appareil enregistré pour les notifications push.",
@@ -216,5 +220,7 @@
   "profile.mfa.stepUp.hint": "(code d'authentification ou de récupération)",
   "profile.mfa.stepUp.hintWithPasskey": "(code d'authentification ou de récupération — laissez vide pour utiliser une clé d'accès)",
   "profile.mfa.stepUp.passkeyFailed": "La clé d'accès n'a pas pu être utilisée sur cet appareil.",
-  "profile.mfa.stepUp.codeRequired": "Saisissez un code de votre application d'authentification ou un code de récupération pour confirmer cette modification."
+  "profile.mfa.stepUp.codeRequired": "Saisissez un code de votre application d'authentification ou un code de récupération pour confirmer cette modification.",
+  "profile.notifications.iosApp.prompt": "Sur iPhone ? L'app Summonarr affiche ces notifications en natif.",
+  "profile.notifications.iosApp.link": "Téléchargez-la sur l'App Store"
 }

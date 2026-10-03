@@ -178,6 +178,10 @@
   "profile.autoRequest.plexLabel": "Solicitar automáticamente desde mi lista de Plex",
   "profile.autoRequest.plexConnected": "Los títulos nuevos de tu lista de Plex se solicitan periódicamente.",
   "profile.autoRequest.plexNotConnected": "Inicia sesión con Plex una vez para conectar tu lista de Plex.",
+  "profile.autoRequest.plexServerOptIn": "Actívalo para que tu servidor Plex pueda leer tu lista de Plex, o inicia sesión con Plex una vez.",
+  "profile.autoRequest.plexServerConnected": "Conectado a través de tu servidor: los títulos nuevos de tu lista de Plex se solicitan periódicamente.",
+  "profile.autoRequest.plexServerPrivate": "Tu lista de Plex es privada: en la configuración de privacidad de Plex, cambia la visibilidad de la lista a Amigos.",
+  "profile.autoRequest.plexServerPending": "Tu servidor lee tu lista de Plex si eres uno de sus amigos de Plex; si no, inicia sesión con Plex una vez.",
   "profile.push.title": "Dispositivos push",
   "profile.push.description": "Dispositivos registrados para recibir notificaciones push. Elimina los que ya no uses.",
   "profile.push.empty": "No hay dispositivos registrados para notificaciones push.",
@@ -216,5 +220,7 @@
   "profile.mfa.stepUp.hint": "(código de la aplicación de autenticación o de recuperación)",
   "profile.mfa.stepUp.hintWithPasskey": "(código de la aplicación de autenticación o de recuperación; déjalo vacío para usar una llave de acceso)",
   "profile.mfa.stepUp.passkeyFailed": "No se pudo usar la llave de acceso en este dispositivo.",
-  "profile.mfa.stepUp.codeRequired": "Introduce un código de tu aplicación de autenticación o un código de recuperación para confirmar este cambio."
+  "profile.mfa.stepUp.codeRequired": "Introduce un código de tu aplicación de autenticación o un código de recuperación para confirmar este cambio.",
+  "profile.notifications.iosApp.prompt": "¿Usas iPhone? La app de Summonarr envía estas notificaciones de forma nativa.",
+  "profile.notifications.iosApp.link": "Descárgala en el App Store"
 }

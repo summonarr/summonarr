@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { emitNotificationEvent } from "@/lib/notify-agents";
 import { createPublicKey, verify as cryptoVerify } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
@@ -1064,6 +1065,12 @@ async function handleComponent(interaction: any): Promise<void> {
               select: { id: true },
             });
             if (!earlierPending) {
+              emitNotificationEvent({
+                event: "request.created",
+                media: { type: mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: selected.id, title: selected.title, year: selected.releaseYear ?? null, posterPath: selected.posterPath ?? null },
+                request: { id: pendingRequest.id, instance: routedSlug },
+                actor: { name: requestedBy },
+              });
               void notifyAdminsNewRequest({ title: selected.title, mediaType, requestedBy, note: null, posterPath: selected.posterPath ?? null, tmdbId: selected.id, releaseYear: selected.releaseYear ?? null, excludeUserId: dbUser.id });
               void notifyAdminsNewRequestPush({ title: selected.title, mediaType, tmdbId: selected.id, requestedBy, requestId: pendingRequest.id, excludeUserId: dbUser.id });
               void notifyAdminsNewRequestDiscord({ requestId: pendingRequest.id, title: selected.title, mediaType, tmdbId: selected.id, requestedBy, note: null, posterPath: selected.posterPath ?? null });

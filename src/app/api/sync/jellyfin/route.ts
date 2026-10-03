@@ -6,13 +6,11 @@ import { mapLimit } from "@/lib/concurrency";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { type MediaInstanceKey, DEFAULT_MEDIA_INSTANCE, jellyfinSettingKey, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { getMediaInstances } from "@/lib/media-instance-registry";
-import { notifyUsersRequestsAvailable } from "@/lib/discord-notify";
-import { notifyUsersRequestsAvailablePush } from "@/lib/push";
 import { logAudit } from "@/lib/audit";
 import { canViewMediaInstance, parseMediaServerGrants, effectivePermissions } from "@/lib/permissions";
 import { getCronActor, BATCH_TX_TIMEOUT, batchCreateMany, replaceEpisodeCacheForSource, withCronRunRecording, type CronActor } from "@/lib/cron-auth";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
-import { notifyUsersRequestsAvailableEmail, writeAvailableInAppNotifications } from "@/lib/request-notifications";
+import { fanOutAvailableWinners } from "@/lib/request-notifications";
 import { sonarrIncompleteKeys } from "@/lib/arr-availability";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
@@ -349,10 +347,7 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
           void clearDeletionVotesForTmdbs(claimed);
         }
         if (deliverable.length > 0) {
-          notifyUsersRequestsAvailable(deliverable).catch(() => {});
-          notifyUsersRequestsAvailablePush(deliverable).catch(() => {});
-          void notifyUsersRequestsAvailableEmail(deliverable, "sync/jellyfin");
-          void writeAvailableInAppNotifications(deliverable, "sync/jellyfin");
+          void fanOutAvailableWinners(deliverable, "sync/jellyfin");
         }
       }
       if (toMarkOnly.length > 0) {

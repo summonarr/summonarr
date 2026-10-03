@@ -6,6 +6,19 @@ import { mapLimit } from "@/lib/concurrency";
 import { canAutoRequest, Permission, AUTO_REQUEST_MASK, effectivePermissions } from "@/lib/permissions";
 import { sanitizeForLog } from "@/lib/sanitize";
 import { loadRequestContext } from "@/lib/request-create";
+import { getMediaInstances } from "@/lib/media-instance-registry";
+import { getPlexConfig } from "@/lib/plex-config";
+import { mediaInstanceLabel } from "@/lib/media-instances";
+import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
+import {
+  AdminTokenRejectedError,
+  fetchFriendUuidMap,
+  fetchFriendWatchlist,
+  fetchOwnerAccountId,
+  fetchPlexFriends,
+  friendAccountId,
+  resolvePlexAccountUsers,
+} from "@/lib/plex-friends-watchlist";
 import {
   WATCHLIST_AUTO_REQUEST_FEATURE_KEY,
   autoRequestTitle,
@@ -35,6 +48,16 @@ import {
 //       ?X-Plex-Container-Start=&X-Plex-Container-Size=&includeGuids=1
 //   GET https://metadata.provider.plex.tv/library/metadata/{ratingKey}
 //       — only for an item whose list entry carried no tmdb:// guid.
+//
+// SERVER SOURCE (optional, Setting plexWatchlistServerSource = "true"). For a
+// user with NO stored token, the cron can instead read their watchlist through
+// the Plex SERVER OWNER's admin token when they are the owner's Plex friend
+// (plex-friends-watchlist.ts). A user's own token always wins when present.
+// Consent: the profile toggle defaults ON, so the server path reads only users
+// who explicitly switched it on (User.plexWatchlistOptInAt) — unless the admin
+// sets plexWatchlistServerAutoEnroll = "true". Both paths share the ledger and
+// the "plex-watchlist" source, so switching between them never re-files a title.
+// A rejected ADMIN token never deletes any user's Account rows (guardrail 34b).
 
 export const PLEX_WATCHLIST_HOSTS = ["discover.provider.plex.tv", "metadata.provider.plex.tv"] as const;
 
@@ -148,22 +171,31 @@ export async function fetchPlexWatchlist(token: string, opts: { signal?: AbortSi
     if (page.length < PAGE_SIZE || (total !== null && start + PAGE_SIZE >= total)) break;
   }
 
-  const unresolved = items.filter((i) => i.tmdbId === null);
-  if (unresolved.length > 0 && !opts.signal?.aborted) {
-    await mapLimit(unresolved, METADATA_CONCURRENCY, async (item) => {
-      try {
-        const data = (await plexJson(`${METADATA_URL}${encodeURIComponent(item.ratingKey)}`, token)) as {
-          MediaContainer?: { Metadata?: Array<{ Guid?: unknown }> };
-        };
-        item.tmdbId = tmdbIdFromPlexGuids(data?.MediaContainer?.Metadata?.[0]?.Guid);
-      } catch (err) {
-        // A revoked token fails the whole read; a single bad lookup only skips
-        // that title (it is retried next run — nothing was recorded for it).
-        if (err instanceof PlexTokenRevokedError) throw err;
-      }
-    });
-  }
+  await resolveMissingTmdbIds(items, token, opts.signal);
   return items;
+}
+
+// One metadata lookup per entry whose list row carried no tmdb:// guid, bounded
+// (guardrail 31). A revoked token fails the whole read; a single bad lookup only
+// skips that title (it is retried next run — nothing was recorded for it).
+export async function resolveMissingTmdbIds(
+  items: PlexWatchlistItem[],
+  token: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const unresolved = items.filter((i) => i.tmdbId === null);
+  if (unresolved.length === 0 || signal?.aborted) return;
+  await mapLimit(unresolved, METADATA_CONCURRENCY, async (item) => {
+    if (signal?.aborted) return;
+    try {
+      const data = (await plexJson(`${METADATA_URL}${encodeURIComponent(item.ratingKey)}`, token)) as {
+        MediaContainer?: { Metadata?: Array<{ Guid?: unknown }> };
+      };
+      item.tmdbId = tmdbIdFromPlexGuids(data?.MediaContainer?.Metadata?.[0]?.Guid);
+    } catch (err) {
+      if (err instanceof PlexTokenRevokedError) throw err;
+    }
+  });
 }
 
 // ── token capture (called at Plex sign-in) ──────────────────────────────────
@@ -198,7 +230,97 @@ async function storedPlexToken(userId: string): Promise<string | null> {
   return row?.access_token || null;
 }
 
+// ── settings ────────────────────────────────────────────────────────────────
+
+// "true" ⇒ the cron also reads friends' watchlists through the Plex admin token
+// (plex-friends-watchlist.ts) for users without their own token.
+export const PLEX_WATCHLIST_SERVER_SOURCE_KEY = "plexWatchlistServerSource";
+// "true" ⇒ the server path reads every permitted friend whose profile toggle is
+// on, without waiting for them to switch it on themselves (consent by admin).
+export const PLEX_WATCHLIST_SERVER_AUTO_ENROLL_KEY = "plexWatchlistServerAutoEnroll";
+// JSON written once per run by the server path (best-effort): per-user status
+// for the profile copy and the admin card. Not admin-writable.
+export const PLEX_WATCHLIST_SERVER_STATUS_KEY = "plexWatchlistServerStatus";
+
+export type ServerWatchlistUserStatus = "ok" | "private" | "error";
+
+export interface PlexWatchlistServerStatus {
+  updatedAt: string;
+  users: Record<string, ServerWatchlistUserStatus>;
+  unmatchedFriends: number;
+}
+
+// Parse the stored status JSON; null for absent or malformed. Pure.
+export function parsePlexWatchlistServerStatus(raw: string | null | undefined): PlexWatchlistServerStatus | null {
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as Partial<PlexWatchlistServerStatus>;
+    if (!v || typeof v !== "object" || typeof v.updatedAt !== "string") return null;
+    const users: Record<string, ServerWatchlistUserStatus> = {};
+    if (v.users && typeof v.users === "object") {
+      for (const [id, st] of Object.entries(v.users)) {
+        if (st === "ok" || st === "private" || st === "error") users[id] = st;
+      }
+    }
+    const unmatched = typeof v.unmatchedFriends === "number" && Number.isFinite(v.unmatchedFriends) ? v.unmatchedFriends : 0;
+    return { updatedAt: v.updatedAt, users, unmatchedFriends: unmatched };
+  } catch {
+    return null;
+  }
+}
+
+async function settingIsTrue(key: string): Promise<boolean> {
+  const row = await prisma.setting.findUnique({ where: { key } });
+  return row?.value === "true";
+}
+
+// How the caller's Plex watchlist reaches the cron, for the profile card and
+// GET /api/profile/auto-request. `hasToken` is the caller's own stored token.
+export interface PlexWatchlistConnection {
+  serverSource: boolean;
+  // Their consent counts for the server path: they switched the toggle on
+  // themselves (plexWatchlistOptInAt), or the admin auto-enrolls.
+  serverOptedIn: boolean;
+  // The last server-path run's verdict for them; null when it did not read them.
+  serverStatus: ServerWatchlistUserStatus | null;
+  connectedVia: "token" | "server" | null;
+}
+
+export async function getPlexWatchlistConnection(
+  user: { id: string; plexWatchlistOptInAt: Date | null },
+  hasToken: boolean,
+): Promise<PlexWatchlistConnection> {
+  const [serverSource, autoEnroll, statusRow] = await Promise.all([
+    settingIsTrue(PLEX_WATCHLIST_SERVER_SOURCE_KEY),
+    settingIsTrue(PLEX_WATCHLIST_SERVER_AUTO_ENROLL_KEY),
+    prisma.setting.findUnique({ where: { key: PLEX_WATCHLIST_SERVER_STATUS_KEY } }),
+  ]);
+  const serverOptedIn = user.plexWatchlistOptInAt !== null || autoEnroll;
+  const serverStatus = serverSource ? parsePlexWatchlistServerStatus(statusRow?.value)?.users[user.id] ?? null : null;
+  const connectedVia = hasToken ? "token" : serverSource && serverOptedIn && serverStatus === "ok" ? "server" : null;
+  return { serverSource, serverOptedIn, serverStatus, connectedVia };
+}
+
 // ── the cron body ───────────────────────────────────────────────────────────
+
+export interface PlexWatchlistServerResult {
+  // Plex instances whose owner token was used (distinct tokens).
+  instances: number;
+  // Distinct friends across those instances (the owner excluded).
+  friends: number;
+  // Accounts (friends and the owner) resolved to an active Summonarr user.
+  matched: number;
+  // Friends with no bridgeable id or no Summonarr account — skipped.
+  unmatchedFriends: number;
+  // Users whose watchlist was read through the server path this run.
+  users: number;
+  // Of those, users whose watchlist is private to the owner.
+  private: number;
+  // Instances whose admin token plex.tv rejected (401/403) — skipped this run.
+  adminTokensRejected: number;
+  // Instances whose friend list could not be read for any other reason.
+  instanceErrors: number;
+}
 
 export interface PlexWatchlistSyncResult {
   skipped?: "disabled";
@@ -209,9 +331,24 @@ export interface PlexWatchlistSyncResult {
   alreadyHandled: number;
   // Users whose stored token plex.tv rejected — the token is deleted.
   tokensRevoked: number;
-  // Users whose watchlist could not be read or processed this run.
+  // Users whose watchlist could not be read or processed this run (either path).
   errors: number;
   outcomes: Partial<Record<AutoRequestOutcome, number>>;
+  // Present only while plexWatchlistServerSource is on.
+  server?: PlexWatchlistServerResult;
+}
+
+// How many problems make the run degraded (X-Cron-Degraded): user failures on
+// either path, plus server instances that could not be read at all.
+export function plexWatchlistRunProblems(result: PlexWatchlistSyncResult): number {
+  return result.errors + (result.server ? result.server.adminTokensRejected + result.server.instanceErrors : 0);
+}
+
+type CronUser = { id: string; role: string; permissions: bigint; name: string | null; email: string };
+
+function hasAutoRequestBit(u: { role: string; permissions: bigint }): boolean {
+  const perms = effectivePermissions(u.role, u.permissions);
+  return (perms & (AUTO_REQUEST_MASK | Permission.ADMIN)) !== 0n;
 }
 
 export async function syncPlexWatchlists(opts: { signal?: AbortSignal } = {}): Promise<PlexWatchlistSyncResult> {
@@ -234,10 +371,7 @@ export async function syncPlexWatchlists(opts: { signal?: AbortSignal } = {}): P
     },
     select: { id: true, role: true, permissions: true, name: true, email: true },
   });
-  const users = candidates.filter((u) => {
-    const perms = effectivePermissions(u.role, u.permissions);
-    return (perms & (AUTO_REQUEST_MASK | Permission.ADMIN)) !== 0n;
-  });
+  const users = candidates.filter(hasAutoRequestBit);
 
   // Users one at a time: each runs its own sequential request filing, and the
   // Prisma pool is five connections (guardrail 31). Per-user isolation — one
@@ -248,6 +382,8 @@ export async function syncPlexWatchlists(opts: { signal?: AbortSignal } = {}): P
     try {
       await syncOneUser(user, result, opts.signal);
     } catch (err) {
+      // The ONLY branch that deletes Account rows: the USER's own token was
+      // rejected. The server path below has its own catch and never gets here.
       if (err instanceof PlexTokenRevokedError) {
         result.tokensRevoked++;
         console.warn(`[plex-watchlist] plex.tv rejected the stored token for user ${user.id} — removed; they must sign in with Plex again`);
@@ -262,19 +398,184 @@ export async function syncPlexWatchlists(opts: { signal?: AbortSignal } = {}): P
       console.error(`[plex-watchlist] sync failed for user ${user.id}: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
     }
   }
+
+  if (!opts.signal?.aborted && (await settingIsTrue(PLEX_WATCHLIST_SERVER_SOURCE_KEY))) {
+    // Every user holding a token stays on the token path — own token wins, even
+    // one plex.tv just rejected (they become server-eligible from the next run).
+    const tokenUserIds = new Set(candidates.map((u) => u.id));
+    result.server = await syncServerPath(tokenUserIds, result, opts.signal);
+  }
   return result;
 }
 
-async function syncOneUser(
-  user: { id: string; role: string; permissions: bigint; name: string | null; email: string },
+const adminTokenWarnKey = (slug: string) => `plex-watchlist:admin-token:${slug}`;
+
+// A friend (or the owner, graphId null) reached through one instance's owner token.
+type ServerTarget = { graphId: string | null; token: string; slug: string };
+
+async function syncServerPath(
+  tokenUserIds: ReadonlySet<string>,
+  result: PlexWatchlistSyncResult,
+  signal: AbortSignal | undefined,
+): Promise<PlexWatchlistServerResult> {
+  const server: PlexWatchlistServerResult = {
+    instances: 0, friends: 0, matched: 0, unmatchedFriends: 0, users: 0, private: 0, adminTokensRejected: 0, instanceErrors: 0,
+  };
+  const statuses: Record<string, ServerWatchlistUserStatus> = {};
+  const rejectedTokens = new Set<string>();
+  const rejectToken = (token: string, slug: string) => {
+    if (rejectedTokens.has(token)) return;
+    rejectedTokens.add(token);
+    server.adminTokensRejected++;
+    // Restates an unchanged condition every run until fixed (guardrail 7b).
+    warnOnChange(
+      adminTokenWarnKey(slug),
+      "rejected",
+      `[plex-watchlist] plex.tv rejected the Plex admin token of ${mediaInstanceLabel("plex", slug)} — friends' watchlists are not read through it until the token is fixed in Settings → Media`,
+    );
+  };
+
+  // Union every configured instance's friends, deduped by numeric account id
+  // (guardrail 35 — findUnique-only config reads, skip-if-unconfigured).
+  const targets = new Map<string, ServerTarget>();
+  const friendIds = new Set<string>();
+  let unbridged = 0;
+  const seenTokens = new Set<string>();
+  for (const inst of await getMediaInstances("plex")) {
+    if (signal?.aborted) break;
+    const cfg = await getPlexConfig(inst.slug);
+    const token = cfg.token?.trim();
+    if (!token || !cfg.url?.trim()) continue;
+    if (seenTokens.has(token)) continue;
+    seenTokens.add(token);
+    server.instances++;
+    try {
+      const friends = await fetchPlexFriends(token, signal);
+      const uuidToId = await fetchFriendUuidMap(token, signal);
+      const ownerId = await fetchOwnerAccountId(token, signal);
+      forgetWarnOnChange(adminTokenWarnKey(inst.slug));
+      // The owner: the admin token IS their account token — read directly.
+      if (ownerId && !targets.has(ownerId)) targets.set(ownerId, { graphId: null, token, slug: inst.slug });
+      for (const f of friends) {
+        const accountId = friendAccountId(f.graphId, uuidToId);
+        if (!accountId) {
+          unbridged++;
+          continue;
+        }
+        friendIds.add(accountId);
+        if (!targets.has(accountId)) targets.set(accountId, { graphId: f.graphId, token, slug: inst.slug });
+      }
+    } catch (err) {
+      if (err instanceof AdminTokenRejectedError) {
+        rejectToken(token, inst.slug);
+        continue;
+      }
+      server.instanceErrors++;
+      console.error(`[plex-watchlist] could not list Plex friends for ${mediaInstanceLabel("plex", inst.slug)}: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
+    }
+  }
+  server.friends = friendIds.size + unbridged;
+
+  const resolved = targets.size > 0 && !signal?.aborted ? await resolvePlexAccountUsers([...targets.keys()]) : new Map<string, string>();
+  server.matched = resolved.size;
+  server.unmatchedFriends = unbridged + [...friendIds].filter((id) => !resolved.has(id)).length;
+
+  // userId → the first target that resolved to them.
+  const targetByUser = new Map<string, ServerTarget>();
+  for (const [accountId, userId] of resolved) {
+    if (tokenUserIds.has(userId) || targetByUser.has(userId)) continue;
+    targetByUser.set(userId, targets.get(accountId)!);
+  }
+
+  if (targetByUser.size > 0 && !signal?.aborted) {
+    const autoEnroll = await settingIsTrue(PLEX_WATCHLIST_SERVER_AUTO_ENROLL_KEY);
+    const rows = await prisma.user.findMany({
+      where: {
+        id: { in: [...targetByUser.keys()] },
+        deactivatedAt: null,
+        purgedAt: null,
+        plexWatchlistAutoRequest: true,
+        // Consent: the toggle defaults ON, so it alone is not consent to read a
+        // watchlist for someone who may never have opened Summonarr.
+        ...(autoEnroll ? {} : { plexWatchlistOptInAt: { not: null } }),
+      },
+      select: { id: true, role: true, permissions: true, name: true, email: true },
+    });
+
+    for (const user of rows.filter(hasAutoRequestBit)) {
+      if (signal?.aborted) break; // guardrail 41
+      const target = targetByUser.get(user.id)!;
+      if (rejectedTokens.has(target.token)) {
+        statuses[user.id] = "error";
+        continue;
+      }
+      server.users++;
+      try {
+        let items: PlexWatchlistItem[];
+        if (target.graphId === null) {
+          items = await fetchPlexWatchlist(target.token, { signal });
+        } else {
+          const list = await fetchFriendWatchlist(target.token, target.graphId, { maxItems: MAX_WATCHLIST_ITEMS, signal });
+          if (list.status === "private") {
+            statuses[user.id] = "private";
+            server.private++;
+            continue;
+          }
+          items = [];
+          for (const node of list.nodes) {
+            const item = parseWatchlistEntry({ ratingKey: node.id, title: node.title, type: node.type });
+            if (item) items.push(item);
+          }
+          await resolveMissingTmdbIds(items, target.token, signal);
+        }
+        await fileWatchlistTitles(user, items, result, signal);
+        statuses[user.id] = "ok";
+      } catch (err) {
+        statuses[user.id] = "error";
+        // The ADMIN token was rejected mid-run (GraphQL or a metadata lookup):
+        // stop using this instance. NEVER the user-token 401 branch — no Account
+        // row is touched.
+        if (err instanceof AdminTokenRejectedError || err instanceof PlexTokenRevokedError) {
+          rejectToken(target.token, target.slug);
+          continue;
+        }
+        result.errors++;
+        console.error(`[plex-watchlist] server-path sync failed for user ${user.id}: ${sanitizeForLog(err instanceof Error ? err.message : String(err))}`);
+      }
+    }
+  }
+
+  // Best-effort, swallowed: an observability write must never fail the run.
+  const status: PlexWatchlistServerStatus = { updatedAt: new Date().toISOString(), users: statuses, unmatchedFriends: server.unmatchedFriends };
+  try {
+    const value = JSON.stringify(status);
+    await prisma.setting.upsert({
+      where: { key: PLEX_WATCHLIST_SERVER_STATUS_KEY },
+      create: { key: PLEX_WATCHLIST_SERVER_STATUS_KEY, value },
+      update: { value },
+    });
+  } catch {
+    // ignored — see above
+  }
+  return server;
+}
+
+async function syncOneUser(user: CronUser, result: PlexWatchlistSyncResult, signal: AbortSignal | undefined): Promise<void> {
+  const token = await storedPlexToken(user.id);
+  if (!token) return;
+  const watchlist = await fetchPlexWatchlist(token, { signal });
+  await fileWatchlistTitles(user, watchlist, result, signal);
+}
+
+// Shared by both paths: same ledger, same source string, same per-run cap — so
+// switching a user between paths never re-files a title.
+async function fileWatchlistTitles(
+  user: CronUser,
+  watchlist: PlexWatchlistItem[],
   result: PlexWatchlistSyncResult,
   signal: AbortSignal | undefined,
 ): Promise<void> {
-  const token = await storedPlexToken(user.id);
-  if (!token) return;
   const session = sessionForUser(user);
-
-  const watchlist = await fetchPlexWatchlist(token, { signal });
   // One entry per title (a watchlist cannot hold duplicates, but a degraded page
   // overlap could), requestable types the user may auto-request only.
   const seen = new Set<string>();

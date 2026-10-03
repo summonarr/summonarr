@@ -178,6 +178,10 @@
   "profile.autoRequest.plexLabel": "Richiedi automaticamente dalla mia watchlist Plex",
   "profile.autoRequest.plexConnected": "I nuovi titoli nella tua watchlist Plex vengono richiesti periodicamente.",
   "profile.autoRequest.plexNotConnected": "Accedi una volta con Plex per collegare la tua watchlist Plex.",
+  "profile.autoRequest.plexServerOptIn": "Attivalo per consentire al tuo server Plex di leggere la tua watchlist Plex, oppure accedi una volta con Plex.",
+  "profile.autoRequest.plexServerConnected": "Connesso tramite il tuo server: i nuovi titoli della tua watchlist Plex vengono richiesti periodicamente.",
+  "profile.autoRequest.plexServerPrivate": "La tua watchlist Plex è privata: imposta la visibilità della watchlist su Amici nelle impostazioni sulla privacy di Plex.",
+  "profile.autoRequest.plexServerPending": "Il tuo server legge la tua watchlist Plex se sei tra i suoi amici Plex; altrimenti accedi una volta con Plex.",
   "profile.push.title": "Dispositivi push",
   "profile.push.description": "Dispositivi registrati per le notifiche push. Rimuovi quelli che non usi più.",
   "profile.push.empty": "Nessun dispositivo registrato per le notifiche push.",
@@ -216,5 +220,7 @@
   "profile.mfa.stepUp.hint": "(codice dell'app di autenticazione o di recupero)",
   "profile.mfa.stepUp.hintWithPasskey": "(codice dell'app di autenticazione o di recupero — lascia vuoto per usare una passkey)",
   "profile.mfa.stepUp.passkeyFailed": "Non è stato possibile usare la passkey su questo dispositivo.",
-  "profile.mfa.stepUp.codeRequired": "Inserisci un codice dalla tua app di autenticazione o un codice di recupero per confermare questa modifica."
+  "profile.mfa.stepUp.codeRequired": "Inserisci un codice dalla tua app di autenticazione o un codice di recupero per confermare questa modifica.",
+  "profile.notifications.iosApp.prompt": "Su iPhone? L'app Summonarr invia queste notifiche in modo nativo.",
+  "profile.notifications.iosApp.link": "Scaricala dall'App Store"
 }

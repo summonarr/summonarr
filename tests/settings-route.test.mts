@@ -419,6 +419,19 @@ test("PATCH: a malformed validated value (discordClientId not a snowflake) → 4
   assert.equal(upsertCalls.length, 0);
 });
 
+test("PATCH: the Plex watchlist server-source switches accept only \"true\"/\"false\" (read as === \"true\")", async () => {
+  const admin = await mintSession("ADMIN");
+  for (const key of ["plexWatchlistServerSource", "plexWatchlistServerAutoEnroll"]) {
+    const bad = await PATCH(patchReq(JSON.stringify({ [key]: "yes" }), admin.header), undefined);
+    assert.equal(bad.status, 400);
+    assert.deepEqual(await bad.json(), { error: `Setting "${key}" must be "true" or "false"` });
+  }
+  assert.equal(upsertCalls.length, 0);
+  const ok = await PATCH(patchReq(JSON.stringify({ plexWatchlistServerSource: "true" }), admin.header), undefined);
+  assert.equal(ok.status, 200);
+  assert.equal(upsertCalls.length, 1);
+});
+
 // ════════════════════════════════════════════════════════════════════════════
 // PATCH — rate limit + per-key write cooldown
 // ════════════════════════════════════════════════════════════════════════════

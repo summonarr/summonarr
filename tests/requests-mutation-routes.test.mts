@@ -131,6 +131,8 @@ type AppUser = Record<string, unknown> & { id: string; email: string };
 let appUsers: AppUser[] = [];
 const sessionRows = new Set<string>();
 
+// No outbound notification channels configured (notify-agents.ts).
+shadowPrismaModel(prisma, "notificationAgent", { findMany: async () => [] });
 shadowPrismaModel(prisma, "authSession", {
   findUnique: async (args: { where: { sessionId: string } }) =>
     sessionRows.has(args.where.sessionId) ? { id: `row-${args.where.sessionId}`, sessionId: args.where.sessionId } : null,

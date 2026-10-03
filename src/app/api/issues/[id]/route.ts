@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { emitNotificationEvent } from "@/lib/notify-agents";
 import { withIssueAdmin } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { isValidInstanceSlug } from "@/lib/arr-instances";
@@ -169,6 +170,12 @@ export const PATCH = withIssueAdmin(async (
   }
 
   if (status === "RESOLVED" && issue.status !== "RESOLVED") {
+    emitNotificationEvent({
+      event: "issue.resolved",
+      media: { type: issue.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: issue.tmdbId, title: issue.title, posterPath: issue.posterPath ?? null },
+      issue: { id, type: issue.issueType },
+      text: (sanitizedResolution ?? issue.resolution) || null,
+    });
     // One lookup decides whether the reporter-facing channels run, mirroring
     // notifyRequestStatusChange and the messages route's `reporterActive`
     // (guardrail 33 — gate at a chokepoint, never re-scatter it into the

@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { IOS_APP_STORE_ID } from "@/lib/ios-app";
 import { Geist, Geist_Mono, Playfair_Display } from "next/font/google";
 import { headers } from "next/headers";
 import "./globals.css";
@@ -54,6 +55,9 @@ export const metadata: Metadata = {
     title: "Summonarr",
     statusBarStyle: "black-translucent",
   },
+  // Safari's Smart App Banner: shown only by iOS Safari, only on devices that
+  // can install the app, and dismissed by Safari itself.
+  itunes: { appId: IOS_APP_STORE_ID },
 };
 
 export default async function RootLayout({

@@ -211,6 +211,45 @@ export function decryptTotpSecretInPlace(row: Record<string, unknown> | null | u
   }
 }
 
+// ─── NotificationAgent.secret (outbound channel credential) ─────────────────
+// Same shape as UserTotp.secret: every write of the column is sensitive, so bulk
+// writes are encrypted rather than refused. Guardrail 7a: no caller pre-encrypts.
+export function encryptAgentSecretInPlace(data: Record<string, unknown> | undefined | null): void {
+  if (!data) return;
+  const v = data.secret;
+  if (typeof v === "string" && v.length > 0) {
+    data.secret = encryptToken(v);
+  } else if (v && typeof v === "object" && typeof (v as { set?: unknown }).set === "string") {
+    const set = (v as { set: string }).set;
+    if (set.length > 0) (v as { set: string }).set = encryptToken(set);
+  }
+}
+
+function encryptAgentRowsInPlace(data: unknown): void {
+  const list = Array.isArray(data) ? data : data ? [data] : [];
+  for (const row of list) encryptAgentSecretInPlace(row as Record<string, unknown>);
+}
+
+export function decryptAgentSecretInPlace(row: Record<string, unknown> | null | undefined): void {
+  if (!row) return;
+  const v = row.secret;
+  if (typeof v !== "string" || v.length === 0) return;
+  const id = typeof row.id === "string" ? row.id : "?";
+  const label = `NotificationAgent.secret (id=${id})`;
+  try {
+    row.secret = decryptToken(v, label);
+  } catch (err) {
+    // Wrong TOKEN_ENCRYPTION_KEY (a backup restored onto another server) or a
+    // corrupt row. Fail closed: deliveries go out without the credential and the
+    // destination rejects them, which the agent's lastError surfaces.
+    console.error(
+      `[agent-crypto] Decrypt failed for ${label} — re-enter this channel's secret in Settings → Notifications. Original error:`,
+      err instanceof Error ? err.message : err,
+    );
+    row.secret = "";
+  }
+}
+
 function createPrismaClient() {
   const adapter = new PrismaPg({
     connectionString: process.env.DATABASE_URL,
@@ -515,6 +554,77 @@ function createPrismaClient() {
           encryptTotpRowsInPlace((args as { data?: unknown }).data);
           const rows = await query(args);
           for (const r of rows) decryptTotpSecretInPlace(r as Record<string, unknown>);
+          return rows;
+        },
+      },
+      notificationAgent: {
+        async findUnique({ args, query }) {
+          const row = await query(args);
+          decryptAgentSecretInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async findFirst({ args, query }) {
+          const row = await query(args);
+          decryptAgentSecretInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async findUniqueOrThrow({ args, query }) {
+          const row = await query(args);
+          decryptAgentSecretInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async findFirstOrThrow({ args, query }) {
+          const row = await query(args);
+          decryptAgentSecretInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async findMany({ args, query }) {
+          const rows = await query(args);
+          for (const r of rows) decryptAgentSecretInPlace(r as Record<string, unknown>);
+          return rows;
+        },
+        async create({ args, query }) {
+          encryptAgentSecretInPlace(args.data as Record<string, unknown> | undefined);
+          const row = await query(args);
+          decryptAgentSecretInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async update({ args, query }) {
+          encryptAgentSecretInPlace(args.data as Record<string, unknown> | undefined);
+          const row = await query(args);
+          decryptAgentSecretInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async upsert({ args, query }) {
+          encryptAgentSecretInPlace(args.create as Record<string, unknown> | undefined);
+          encryptAgentSecretInPlace(args.update as Record<string, unknown> | undefined);
+          const row = await query(args);
+          decryptAgentSecretInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async delete({ args, query }) {
+          const row = await query(args);
+          decryptAgentSecretInPlace(row as Record<string, unknown> | null);
+          return row;
+        },
+        async updateMany({ args, query }) {
+          encryptAgentSecretInPlace((args as { data?: Record<string, unknown> }).data);
+          return query(args);
+        },
+        async updateManyAndReturn({ args, query }) {
+          encryptAgentSecretInPlace((args as { data?: Record<string, unknown> }).data);
+          const rows = await query(args);
+          for (const r of rows) decryptAgentSecretInPlace(r as Record<string, unknown>);
+          return rows;
+        },
+        async createMany({ args, query }) {
+          encryptAgentRowsInPlace((args as { data?: unknown }).data);
+          return query(args);
+        },
+        async createManyAndReturn({ args, query }) {
+          encryptAgentRowsInPlace((args as { data?: unknown }).data);
+          const rows = await query(args);
+          for (const r of rows) decryptAgentSecretInPlace(r as Record<string, unknown>);
           return rows;
         },
       },

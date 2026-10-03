@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCronActor, withCronRunRecording } from "@/lib/cron-auth";
 import { withAdvisoryLock, PLEX_WATCHLIST_LOCK_ID } from "@/lib/advisory-lock";
-import { syncPlexWatchlists } from "@/lib/plex-watchlist";
+import { syncPlexWatchlists, plexWatchlistRunProblems } from "@/lib/plex-watchlist";
 
 // Watchlist auto-request, Plex half: read every opted-in, permitted user's
 // plex.tv watchlist and file new titles as requests (src/lib/plex-watchlist.ts,
-// src/lib/auto-request.ts). A no-op while feature.behavior.watchlistAutoRequest
-// is off. Scheduled by docker-entrypoint.sh every PLEX_WATCHLIST_SYNC_INTERVAL.
+// src/lib/auto-request.ts). Users without their own token are read through the
+// Plex server owner's token when plexWatchlistServerSource is on
+// (src/lib/plex-friends-watchlist.ts). A no-op while
+// feature.behavior.watchlistAutoRequest is off. Scheduled by
+// docker-entrypoint.sh every PLEX_WATCHLIST_SYNC_INTERVAL.
 export async function POST(request: NextRequest) {
   const authCtx = await getCronActor(request);
   if (!authCtx) {
@@ -24,17 +27,20 @@ export async function POST(request: NextRequest) {
 
       // Status stays 200 on a partial failure (the entrypoint fast-retries any
       // non-2xx); X-Cron-Degraded is what marks the run failed in the ledger.
-      const ok = result.errors === 0;
+      // A rejected Plex admin token on the server-token path degrades the run
+      // too — it never deletes anyone's own token (guardrail 34b).
+      const problems = plexWatchlistRunProblems(result);
+      const ok = problems === 0;
       return NextResponse.json(
         {
           ok,
           ...result,
-          ...(ok ? {} : { error: `${result.errors} user watchlist(s) could not be synced` }),
+          ...(ok ? {} : { error: `${problems} Plex watchlist source(s) could not be synced` }),
           durationMs,
           trigger: authCtx.trigger,
           timestamp: new Date().toISOString(),
         },
-        ok ? undefined : { headers: { "X-Cron-Degraded": String(result.errors) } },
+        ok ? undefined : { headers: { "X-Cron-Degraded": String(problems) } },
       );
     },
     () => NextResponse.json({ skipped: true, reason: "already running" }),
