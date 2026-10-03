@@ -110,12 +110,12 @@ test("ntfy: publishes to the server root with a Bearer token; gotify: token in X
   ];
   emitNotificationEvent(AVAILABLE);
   await settle();
-  const ntfy = calls.find((c) => c.url.startsWith("https://ntfy.example"))!;
+  const ntfy = calls.find((c) => new URL(c.url).hostname === "ntfy.example")!;
   assert.match(ntfy.url, /^https:\/\/ntfy\.example\/?$/, "the server ROOT — the topic rides in the body");
   assert.equal(ntfy.headers.get("authorization"), "Bearer tk_abc");
   assert.equal(JSON.parse(ntfy.body).topic, "media");
   assert.equal(JSON.parse(ntfy.body).priority, 4);
-  const gotify = calls.find((c) => c.url.startsWith("https://gotify.example"))!;
+  const gotify = calls.find((c) => new URL(c.url).hostname === "gotify.example")!;
   assert.equal(gotify.url, "https://gotify.example/message");
   assert.ok(!gotify.url.includes("AppTok"));
   assert.equal(gotify.headers.get("x-gotify-key"), "AppTok");
