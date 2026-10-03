@@ -220,5 +220,7 @@
   "profile.mfa.stepUp.hint": "（身份验证器验证码或恢复码）",
   "profile.mfa.stepUp.hintWithPasskey": "（身份验证器验证码或恢复码——留空则使用通行密钥）",
   "profile.mfa.stepUp.passkeyFailed": "无法在此设备上使用该通行密钥。",
-  "profile.mfa.stepUp.codeRequired": "输入身份验证器应用中的验证码或恢复码以确认此更改。"
+  "profile.mfa.stepUp.codeRequired": "输入身份验证器应用中的验证码或恢复码以确认此更改。",
+  "profile.notifications.iosApp.prompt": "使用 iPhone？Summonarr App 会以原生通知推送这些消息。",
+  "profile.notifications.iosApp.link": "前往 App Store 下载"
 }

@@ -220,5 +220,7 @@
   "profile.mfa.stepUp.hint": "(code d'authentification ou de récupération)",
   "profile.mfa.stepUp.hintWithPasskey": "(code d'authentification ou de récupération — laissez vide pour utiliser une clé d'accès)",
   "profile.mfa.stepUp.passkeyFailed": "La clé d'accès n'a pas pu être utilisée sur cet appareil.",
-  "profile.mfa.stepUp.codeRequired": "Saisissez un code de votre application d'authentification ou un code de récupération pour confirmer cette modification."
+  "profile.mfa.stepUp.codeRequired": "Saisissez un code de votre application d'authentification ou un code de récupération pour confirmer cette modification.",
+  "profile.notifications.iosApp.prompt": "Sur iPhone ? L'app Summonarr affiche ces notifications en natif.",
+  "profile.notifications.iosApp.link": "Téléchargez-la sur l'App Store"
 }

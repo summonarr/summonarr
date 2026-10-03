@@ -2,7 +2,8 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { Check, Loader2, MessageCircle, Mail, AlertTriangle, Bell } from "@/components/icons";
+import { Check, Loader2, MessageCircle, Mail, AlertTriangle, Bell, Smartphone } from "@/components/icons";
+import { IOS_APP_STORE_URL } from "@/lib/ios-app";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 import { Switch } from "@/components/ui/switch";
@@ -397,6 +398,15 @@ export function NotificationPrefs({
           onChange={() => toggle("pushOnDeclined")}
           disabled={saving}
         />
+        <p className="mt-2 flex items-start gap-2 text-xs text-zinc-500">
+          <Smartphone className="mt-0.5 w-3.5 h-3.5 shrink-0" />
+          <span>
+            {t("profile.notifications.iosApp.prompt")}{" "}
+            <a href={IOS_APP_STORE_URL} target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:underline">
+              {t("profile.notifications.iosApp.link")}
+            </a>
+          </span>
+        </p>
       </div>
 
       {isAdminRole && (

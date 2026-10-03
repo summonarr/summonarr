@@ -220,5 +220,7 @@
   "profile.mfa.stepUp.hint": "(Authenticator- oder Wiederherstellungscode)",
   "profile.mfa.stepUp.hintWithPasskey": "(Authenticator- oder Wiederherstellungscode – leer lassen, um einen Passkey zu verwenden)",
   "profile.mfa.stepUp.passkeyFailed": "Der Passkey konnte auf diesem Gerät nicht verwendet werden.",
-  "profile.mfa.stepUp.codeRequired": "Geben Sie einen Code aus Ihrer Authenticator-App oder einen Wiederherstellungscode ein, um diese Änderung zu bestätigen."
+  "profile.mfa.stepUp.codeRequired": "Geben Sie einen Code aus Ihrer Authenticator-App oder einen Wiederherstellungscode ein, um diese Änderung zu bestätigen.",
+  "profile.notifications.iosApp.prompt": "Auf dem iPhone? Die Summonarr-App stellt diese als native Mitteilungen zu.",
+  "profile.notifications.iosApp.link": "Im App Store laden"
 }
