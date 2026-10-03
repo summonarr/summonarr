@@ -15,7 +15,7 @@ const errors: string[] = [];
 console.error = (...a: unknown[]) => { errors.push(a.map(String).join(" ")); };
 
 const { prisma, encryptAgentSecretInPlace, decryptAgentSecretInPlace } = await import("../src/lib/prisma.ts");
-const { parseAgentInput, toPublicAgent } = await import("../src/lib/notify-agents-admin.ts");
+const { parseAgentInput, toPublicAgent, AGENT_BODY_CAP } = await import("../src/lib/notify-agents-admin.ts");
 const SOURCE = readFileSync(new URL("../src/lib/prisma.ts", import.meta.url), "utf8");
 
 const WEBHOOK = { kind: "webhook", name: "Hook", events: ["request.created"], config: { url: "https://h.example/x" } };
@@ -39,6 +39,10 @@ test("gotify cannot be created, or edited, without an application token", () => 
   const existing = { kind: "gotify", name: "G", enabled: true, events: [], config: { url: "https://g.example/" } };
   assert.ok(parseAgentInput({ name: "G2" }, existing).ok, "omitting the secret on edit keeps the saved one");
   assert.deepEqual(parseAgentInput({ secret: "" }, existing), { ok: false, error: "gotifyToken" });
+  // Whitespace-only trims to nothing: that is a CLEAR, never an empty token the
+  // guard above would wave through (every delivery then goes out without X-Gotify-Key).
+  assert.deepEqual(parseAgentInput({ ...g, secret: "   " }, null), { ok: false, error: "gotifyToken" });
+  assert.deepEqual(parseAgentInput({ secret: "   " }, existing), { ok: false, error: "gotifyToken" });
 });
 
 test("edit: the kind is fixed, omitted fields keep their stored value, secret is tri-state", () => {
@@ -53,7 +57,18 @@ test("edit: the kind is fixed, omitted fields keep their stored value, secret is
   assert.ok(clear.ok && clear.input.secret === null);
   const set = parseAgentInput({ secret: "  Bearer x  " }, existing);
   assert.ok(set.ok && set.input.secret === "Bearer x");
-  assert.deepEqual(parseAgentInput({ secret: "a\r\nX-Injected: 1" }, existing), { ok: false, error: "secret" }, "no header injection through the secret");
+  const blank = parseAgentInput({ secret: "   " }, existing);
+  assert.ok(blank.ok && blank.input.secret === null, "whitespace-only is stored as null (hasSecret: false), never as an empty string");
+  // CR/LF is header injection; NUL and the other C0 controls / DEL make undici's
+  // Headers throw a TypeError whose message EMBEDS the value, which would then
+  // land in lastError, the warn line and the Test response.
+  for (const bad of ["a\r\nX-Injected: 1", "tok\u0000en", "\u0001tok", "tok\u007f", "tok\ten"]) {
+    assert.deepEqual(parseAgentInput({ secret: bad }, existing), { ok: false, error: "secret" }, JSON.stringify(bad));
+  }
+});
+
+test("the route body cap is the text-bearing tier (guardrail 30): an 8,000-char CJK template must reach templateTooLong, not a 413", () => {
+  assert.equal(AGENT_BODY_CAP, 64 * 1024);
 });
 
 test("the wire shape carries hasSecret, never the secret", () => {
@@ -97,6 +112,10 @@ test("read handlers decrypt; write handlers encrypt", () => {
   for (const op of ["create", "update", "upsert", "updateMany", "createMany", "updateManyAndReturn", "createManyAndReturn"]) {
     assert.match(body(op), /encryptAgent(SecretInPlace|RowsInPlace)/, `${op} writes the secret in plaintext`);
   }
+  // upsert carries TWO write payloads. One encrypt call satisfies the loop above
+  // while the other branch stores plaintext — pin each argument by name.
+  assert.match(body("upsert"), /encryptAgentSecretInPlace\(args\.create\b/, "upsert's create branch writes the secret in plaintext");
+  assert.match(body("upsert"), /encryptAgentSecretInPlace\(args\.update\b/, "upsert's update branch writes the secret in plaintext");
 });
 
 test("round-trip: a written secret is enc:v1 ciphertext and reads back as the plaintext", () => {

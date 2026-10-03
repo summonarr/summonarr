@@ -1344,22 +1344,25 @@ function seedsForWire(value: unknown): { seeds?: NonNullable<TmdbMedia["recommen
   return { seeds: out };
 }
 
-function rowToTmdbMedia(row: {
-  tmdbId: number;
-  mediaType: MediaType;
-  title: string;
-  overview: string | null;
-  posterPath: string | null;
-  backdropPath: string | null;
-  releaseDate: string | null;
-  voteAverage: number;
-  reasonTmdbId: number | null;
-  reasonTitle: string | null;
-  reasonMediaType: MediaType | null;
-  reasonSource: RecommendationSeed | null;
-  seedCount: number;
-  reasonSeeds?: unknown;
-}): TmdbMedia {
+function rowToTmdbMedia(
+  row: {
+    tmdbId: number;
+    mediaType: MediaType;
+    title: string;
+    overview: string | null;
+    posterPath: string | null;
+    backdropPath: string | null;
+    releaseDate: string | null;
+    voteAverage: number;
+    reasonTmdbId: number | null;
+    reasonTitle: string | null;
+    reasonMediaType: MediaType | null;
+    reasonSource: RecommendationSeed | null;
+    seedCount: number;
+    reasonSeeds?: unknown;
+  },
+  includeSeeds: boolean,
+): TmdbMedia {
   return {
     id: row.tmdbId,
     mediaType: toTmdbMediaType(row.mediaType),
@@ -1383,10 +1386,15 @@ function rowToTmdbMedia(row: {
             mediaType: toTmdbMediaType(row.reasonMediaType),
             source: row.reasonSource,
             seedCount: row.seedCount,
-            // Every seed, strongest first. Omitted (not []) for a row written
+            // Every seed, strongest first — but ONLY for a surface that renders
+            // the list (/for-you and its native mirror /api/recommendations).
+            // The home rails (page.tsx, /api/home) never read it, and without
+            // the gate every one of their 20 overfetched For You titles carried
+            // up to MAX_REASON_SEEDS seed objects into the RSC payload and the
+            // native JSON for nothing. Omitted (not []) for a row written
             // before the column existed, so a client keeps its old "+N more"
             // text instead of offering a list it can't fill.
-            ...seedsForWire(row.reasonSeeds),
+            ...(includeSeeds ? seedsForWire(row.reasonSeeds) : {}),
           },
         }
       : {}),
@@ -1447,10 +1455,22 @@ export function summarizeRecommendationSeeds(items: TmdbMedia[]): Recommendation
   return { watchHistorySeeds, watchlistSeeds, requestSeeds };
 }
 
+export interface GetUserRecommendationsOptions {
+  // Attach `recommendedBecause.seeds` (the full per-pick seed list). Default
+  // OFF: only /for-you and /api/recommendations render it, and the home rails
+  // would otherwise ship up to 20 × MAX_REASON_SEEDS seed objects per load that
+  // nothing reads. `seedCount` and the rest of `recommendedBecause` travel
+  // regardless — the "+N more" text needs the count, not the list.
+  includeSeeds?: boolean;
+}
+
 // Read path for the stored shelf. Re-filters it against the user's CURRENT
 // state (see collectKnownTitleKeys) so nothing they have acted on since the
 // last 12h cron run shows up.
-export async function getUserRecommendations(userId: string): Promise<TmdbMedia[]> {
+export async function getUserRecommendations(
+  userId: string,
+  { includeSeeds = false }: GetUserRecommendationsOptions = {},
+): Promise<TmdbMedia[]> {
   const cached = await prisma.userRecommendation.findMany({
     where: { userId },
     orderBy: { rank: "asc" },
@@ -1483,7 +1503,7 @@ export async function getUserRecommendations(userId: string): Promise<TmdbMedia[
   // titles picked for everyone, eroding the chip's meaning everywhere.
   const realCount = served.filter((row) => row.reasonSource !== "TRENDING").length;
   return served.map((row, i) => {
-    const media = rowToTmdbMedia(row);
+    const media = rowToTmdbMedia(row, includeSeeds);
     const tier = row.reasonSource === "TRENDING" ? undefined : matchTierFor(i, realCount);
     return tier ? { ...media, matchTier: tier } : media;
   });

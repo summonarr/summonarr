@@ -87,7 +87,11 @@ export default async function ProfilePage() {
     : [false, null];
   const plexWatchlistConnection = autoRequestEnabled
     ? await getPlexWatchlistConnection(
-        { id: session.user.id, plexWatchlistOptInAt: user?.plexWatchlistOptInAt ?? null },
+        {
+          id: session.user.id,
+          plexWatchlistOptInAt: user?.plexWatchlistOptInAt ?? null,
+          plexWatchlistAutoRequest: user?.plexWatchlistAutoRequest ?? true,
+        },
         plexAccount !== null,
       )
     : null;

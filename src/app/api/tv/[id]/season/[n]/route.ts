@@ -34,9 +34,12 @@ export const GET = withAuth(async (
     return NextResponse.json({ error: t("apiUser.tv.seasonInvalid") }, { status: 400 });
   }
 
+  // `episodes` is what the viewer sees; `english` is the only list that may be
+  // written anywhere (guardrail 40a — see the metadata warm below).
   let episodes: TmdbEpisode[];
+  let english: TmdbEpisode[];
   try {
-    episodes = await getTVSeasonEpisodesLocalized(tmdbId, seasonNumber, tmdbLanguageFor(localeForRequest(req)));
+    ({ episodes, english } = await getTVSeasonEpisodesLocalized(tmdbId, seasonNumber, tmdbLanguageFor(localeForRequest(req))));
   } catch {
     return NextResponse.json({ error: t("apiUser.tv.seasonFetchFailed") }, { status: 502 });
   }
@@ -73,8 +76,13 @@ export const GET = withAuth(async (
   // Bounded (guardrail 31): `ownedRows` scales with season size × visible sources,
   // and rows whose cached metadata already matches are skipped, so a warm cache
   // issues zero writes.
-  if (ownedRows.length > 0 && episodes.length > 0) {
-    const metaMap = new Map(episodes.map((e) => [e.episodeNumber, e]));
+  // From the ENGLISH list, never the localized one: TVEpisodeCache is shared by
+  // every viewer and stored data stays English (guardrail 40a). Warming it with
+  // the viewer's language made viewers in different languages rewrite every
+  // owned row back and forth on each expand — and the "already matches" check
+  // compared against the previous viewer's language, so it never short-circuited.
+  if (ownedRows.length > 0 && english.length > 0) {
+    const metaMap = new Map(english.map((e) => [e.episodeNumber, e]));
     void settleLimit(ownedRows, 5, async (row) => {
       const ep = metaMap.get(row.episodeNumber);
       if (!ep) return;

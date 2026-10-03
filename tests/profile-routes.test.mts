@@ -5,6 +5,7 @@
 //   PATCH  /api/profile/notifications       — update notification preferences
 //   POST   /api/profile/notification-email  — begin verifying a notify email
 //   DELETE /api/profile                     — self-delete (disable the account)
+//   PATCH  /api/profile/auto-request        — the Plex-watchlist toggle + consent
 //
 // NOTE on scope: /api/profile itself exports ONLY DELETE — there is no GET/PATCH
 // profile handler. The DELETE self-delete carries its OWN password step-up (an
@@ -371,6 +372,7 @@ const { GET: notificationsGET, PATCH: notificationsPATCH } = await import("../sr
 const { PATCH: localePATCH } = await import("../src/app/api/profile/locale/route.ts");
 const { POST: notifEmailPOST } = await import("../src/app/api/profile/notification-email/route.ts");
 const { DELETE: profileDELETE } = await import("../src/app/api/profile/route.ts");
+const { PATCH: autoRequestPATCH } = await import("../src/app/api/profile/auto-request/route.ts");
 
 async function changePassword(token: string | null, body: unknown, raw?: string): Promise<Response> {
   const req = makeReq("/api/profile/password", { method: "PATCH", token, body: bodyOr(body, raw) });
@@ -837,4 +839,63 @@ test("locale PATCH needs a session", async () => {
   const res = await patchLocale(null, { locale: "es" });
   assert.equal(res.status, 401);
   assert.equal(opsOf("user.update").length, 0);
+});
+
+// ── PATCH /api/profile/auto-request ─────────────────────────────────────────
+// The ONLY writer of User.plexWatchlistOptInAt — the consent the server-token
+// Plex watchlist path requires (guardrail 34b). Turning the toggle ON stamps it;
+// turning it OFF clears it (null, not left alone) AND drops the stored plex.tv
+// token, which exists only to read the watchlist. Without these pins the stamp
+// could be dropped (nobody can ever consent without auto-enroll) or the clear
+// turned into `undefined` (opting out keeps consent) with every suite green.
+
+async function patchAutoRequest(token: string | null, body: unknown, raw?: string): Promise<Response> {
+  const req = makeReq("/api/profile/auto-request", { method: "PATCH", token, body: bodyOr(body, raw) });
+  return inScope(() => autoRequestPATCH(req, undefined));
+}
+
+test("auto-request PATCH true stamps plexWatchlistOptInAt (consent) on the caller's own row and keeps the token", async () => {
+  const { userId, token } = await mintSession();
+  const before = Date.now();
+  const res = await patchAutoRequest(token, { plexWatchlist: true });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { plexWatchlist: true });
+  const updates = opsOf("user.update").map((o) => o.args as { where: { id: string }; data: Record<string, unknown> });
+  assert.equal(updates.length, 1);
+  assert.deepEqual(updates[0].where, { id: userId });
+  assert.deepEqual(Object.keys(updates[0].data).sort(), ["plexWatchlistAutoRequest", "plexWatchlistOptInAt"]);
+  assert.equal(updates[0].data.plexWatchlistAutoRequest, true);
+  const stamp = updates[0].data.plexWatchlistOptInAt;
+  assert.ok(stamp instanceof Date, "consent is a timestamp, not a flag");
+  assert.ok(stamp.getTime() >= before && stamp.getTime() <= Date.now());
+  assert.equal(opsOf("account.deleteMany").length, 0, "opting in never touches the stored token");
+});
+
+test("auto-request PATCH false clears the consent stamp to NULL and deletes the caller's plex Account row", async () => {
+  const { userId, token } = await mintSession();
+  const res = await patchAutoRequest(token, { plexWatchlist: false });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { plexWatchlist: false });
+  const [up] = opsOf("user.update").map((o) => o.args as { where: { id: string }; data: Record<string, unknown> });
+  assert.deepEqual(up, {
+    where: { id: userId },
+    // `null`, never `undefined`: an omitted field would leave a stale stamp that
+    // auto-enroll (or re-enabling the toggle from the iOS app) honours.
+    data: { plexWatchlistAutoRequest: false, plexWatchlistOptInAt: null },
+  });
+  assert.ok("plexWatchlistOptInAt" in up.data && up.data.plexWatchlistOptInAt === null);
+  const deletes = opsOf("account.deleteMany").map((o) => o.args);
+  assert.deepEqual(deletes, [{ where: { userId, provider: "plex" } }], "the plex.tv token does not outlive its purpose");
+});
+
+test("auto-request PATCH refuses a non-boolean (400) or an unauthenticated caller (401) and writes nothing", async () => {
+  const { token } = await mintSession();
+  for (const body of [{ plexWatchlist: "true" }, { plexWatchlist: 1 }, {}]) {
+    const res = await patchAutoRequest(token, body);
+    assert.equal(res.status, 400, JSON.stringify(body));
+  }
+  const anon = await patchAutoRequest(null, { plexWatchlist: true });
+  assert.equal(anon.status, 401);
+  assert.equal(opsOf("user.update").length, 0);
+  assert.equal(opsOf("account.deleteMany").length, 0);
 });

@@ -78,6 +78,16 @@ function signBody(timestamp: string, body: string): string {
 const fetchCalls: URL[] = [];
 // Bodies of the Discord webhook edits (editOriginal), for the reply-language tests.
 const discordEdits: Array<{ content?: string }> = [];
+// One outbound notification agent (notify-agents.ts): a generic webhook on an
+// RFC1918 literal (admin-mode SSRF, no DNS). Its POST body is the only place the
+// emitted event's `request` block — the id the Discord buttons forward — can be
+// read back.
+const AGENT_URL = "http://10.77.0.9:9/hook";
+type AgentPost = { event: string; request: { id: string | null; instance: string } | null };
+const agentPosts: AgentPost[] = [];
+// A Radarr the admin_approve button can push to (the requests-mutation harness's
+// responder, trimmed): lookup → root folder → quality profile → add.
+const RADARR_HOST = "10.0.0.2";
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   fetchCalls.push(url);
@@ -85,6 +95,20 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     discordEdits.push(JSON.parse(init.body) as { content?: string });
   }
   const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { "content-type": "application/json" } });
+  if (url.href === AGENT_URL) {
+    agentPosts.push(JSON.parse(String(init?.body)) as AgentPost);
+    return json({});
+  }
+  if (url.hostname === RADARR_HOST) {
+    if (url.pathname.includes("/api/v3/qualityprofile")) return json([{ id: 1, name: "HD-1080p" }]);
+    if (url.pathname.includes("/api/v3/rootfolder")) return json([{ path: "/media" }]);
+    if (url.pathname.includes("/lookup")) {
+      const tmdbId = Number((url.searchParams.get("term") ?? "").replace(/^tmdb:/, "")) || 0;
+      return json([{ tmdbId, title: "The Matrix", year: 1999, titleSlug: "the-matrix", images: [], seasons: [] }]);
+    }
+    if (url.pathname.includes("/api/v3/movie")) return json({ id: 1, tvdbId: 4242 });
+    throw new Error(`unexpected Radarr fetch ${url.href}`);
+  }
   if ((url.hostname === "themoviedb.org" || url.hostname.endsWith(".themoviedb.org"))) {
     return json({ page: 1, total_pages: 1, results: [], id: 603, title: "The Matrix" });
   }
@@ -97,6 +121,7 @@ const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
 const { Prisma } = await import("@/generated/prisma");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
+const { invalidateAgentCache } = await import("../src/lib/notify-agents.ts");
 
 // ── op log ───────────────────────────────────────────────────────────────────
 type Op = { op: string; args?: unknown };
@@ -166,7 +191,17 @@ shadowPrismaModel(prisma, "user", {
         : undefined;
     return hit ? { ...hit } : null;
   },
-  findFirst: async () => null,
+  // The admin approve/decline buttons resolve the clicker by discordId with a
+  // `deactivatedAt: null` predicate; honour both so a seeded admin is found.
+  findFirst: async (args: { where: { discordId?: string; deactivatedAt?: null } }) => {
+    rec("user.findFirst", args.where);
+    const hit = appUsers.find(
+      (u) =>
+        (args.where.discordId === undefined || u.discordId === args.where.discordId) &&
+        (!("deactivatedAt" in args.where) || (u.deactivatedAt ?? null) === args.where.deactivatedAt),
+    );
+    return hit ? { ...hit } : null;
+  },
   findMany: async () => appUsers.map((u) => ({ ...u })),
   update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
     rec("user.update", args);
@@ -213,6 +248,48 @@ shadowPrismaClientMethod(prisma, "$queryRaw", async () => []);
 shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async () => []);
 shadowPrismaClientMethod(prisma, "$executeRaw", async () => 1);
 shadowPrismaClientMethod(prisma, "$executeRawUnsafe", async () => 1);
+
+// MediaRequest rows for the admin approve/decline buttons: findUnique by id and a
+// status-predicated updateMany (the CAS the handler relies on). Shadows the
+// generic no-op delegate installed above.
+type RequestRow = Record<string, unknown> & { id: string; status: string };
+let requestRows: RequestRow[] = [];
+shadowPrismaModel(prisma, "mediaRequest", {
+  findUnique: async (args: { where: { id: string } }) => {
+    const r = requestRows.find((x) => x.id === args.where.id);
+    return r ? { ...r } : null;
+  },
+  updateMany: async (args: { where: { id: string; status?: string }; data: Record<string, unknown> }) => {
+    rec("mediaRequest.updateMany", args);
+    let count = 0;
+    for (const r of requestRows) {
+      if (r.id !== args.where.id) continue;
+      if (args.where.status !== undefined && r.status !== args.where.status) continue;
+      Object.assign(r, args.data);
+      count++;
+    }
+    return { count };
+  },
+  findMany: async (args: unknown) => { rec("mediaRequest.findMany", args); return []; },
+  findFirst: async () => null, count: async () => 0,
+  groupBy: async () => [], aggregate: async () => ({ _count: { _all: 0 }, _sum: {} }),
+  create: async (args: unknown) => { rec("mediaRequest.create", args); return { id: "x" }; },
+  createMany: async () => ({ count: 0 }), update: async (args: unknown) => { rec("mediaRequest.update", args); return {}; },
+  upsert: async () => ({}), deleteMany: async () => ({ count: 0 }),
+});
+
+// Outbound notification channels (notify-agents.ts): none unless a test seeds
+// one. The feature flag defaults ON and the agent list is cached for 30s —
+// hence the invalidate in beforeEach.
+type AgentRow = { id: string; kind: string; name: string; events: string[]; config: unknown; secret: string | null };
+const agentRows: AgentRow[] = [];
+function agentRow(...events: string[]): AgentRow {
+  return { id: "agent-1", kind: "webhook", name: "Hook", events, config: { url: AGENT_URL, template: null, headerName: "Authorization" }, secret: null };
+}
+shadowPrismaModel(prisma, "notificationAgent", {
+  findMany: async () => agentRows.map((a) => ({ ...a })),
+  update: async () => ({ id: "agent-1" }),
+});
 
 const interactions = await import("../src/app/api/interactions/route.ts");
 
@@ -281,6 +358,10 @@ beforeEach(async () => {
   settings.set("discordBotToken", "a-bot-token");
   interactions.invalidatePublicKeyCache();
   invalidateFeatureFlagCache();
+  requestRows = [];
+  agentRows.length = 0;
+  agentPosts.length = 0;
+  invalidateAgentCache();
 });
 
 // ── 2: unconfigured bot refuses ──────────────────────────────────────────────
@@ -687,3 +768,58 @@ test("the route source contains no console.log (guardrail 7)", async () => {
   assert.ok(!code.some((l) => /console\.log\s*\(/.test(l)));
 });
 
+
+// ── admin approve/decline buttons → the requester-facing hub ─────────────────
+// notifyRequestStatusChange's RequestInfo names the request id `requestId`; the
+// raw MediaRequest row names it `id`. Passing the row straight through
+// type-checked (every other field lines up) and silently dropped the id, so
+// every Discord-driven decision reached the outbound channels as
+// `request.id: null` while the same decision from the web UI carried the id.
+// The agent wire is the only seam where the forwarded id can be read back.
+
+const ADMIN_DISCORD = "222222222222222222";
+const button = (customId: string, discordUserId = ADMIN_DISCORD) => ({
+  id: nextInteractionId(),
+  type: 3,
+  application_id: "app-1",
+  token: "interaction-token",
+  member: { user: { id: discordUserId, username: "admin" } },
+  data: { custom_id: customId },
+});
+function seedDecisionFixture(arrInstance: string): void {
+  appUsers.push({ id: "admin-1", email: "admin@example.com", name: "Admin", discordId: ADMIN_DISCORD, role: "ADMIN", permissions: 0n, deactivatedAt: null, locale: null });
+  appUsers.push({ id: "u-req", email: "req@example.com", name: "Requester", discordId: null, role: "USER", permissions: 0n, deactivatedAt: null, locale: null });
+  requestRows = [{ id: "req-1", title: "The Matrix", mediaType: "MOVIE", tmdbId: 603, posterPath: null, status: "PENDING", requestedBy: "u-req", qualityProfileId: null, arrInstance }];
+}
+
+test("admin_decline button: the outbound request.declined carries the ROW's id and instance, never null", async () => {
+  seedDecisionFixture("4k");
+  agentRows.push(agentRow("request.approved", "request.declined"));
+
+  const res = await post(button("admin_decline:req-1"));
+  assert.equal(res.status, 200);
+  await waitFor(() => agentPosts.length >= 1, 400);
+
+  assert.equal(requestRows[0].status, "DECLINED", "precondition: the button's CAS transitioned the row");
+  assert.deepEqual(
+    agentPosts.map((p) => [p.event, p.request]),
+    [["request.declined", { id: "req-1", instance: "4k" }]],
+  );
+});
+
+test("admin_approve button: the outbound request.approved carries the ROW's id, never null", async () => {
+  seedDecisionFixture("");
+  settings.set("radarrUrl", `http://${RADARR_HOST}:7878`);
+  settings.set("radarrApiKey", "radarr-key");
+  agentRows.push(agentRow("request.approved", "request.declined"));
+
+  const res = await post(button("admin_approve:req-1"));
+  assert.equal(res.status, 200);
+  await waitFor(() => agentPosts.length >= 1, 400);
+
+  assert.equal(requestRows[0].status, "APPROVED", "precondition: the Radarr push stuck, so the approval stands");
+  assert.deepEqual(
+    agentPosts.map((p) => [p.event, p.request]),
+    [["request.approved", { id: "req-1", instance: "" }]],
+  );
+});

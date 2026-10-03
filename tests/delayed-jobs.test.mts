@@ -260,6 +260,90 @@ test("parseInt semantics: MAX_PENDING of '1.9' truncates to a cap of 1", async (
   }
 });
 
+// ── onDrop: the fire-time drop signal ──────────────────────────────────────
+// A schedule-time refusal is the `false` return — the caller is still on the
+// stack. A FIRE-time drop happens long after the caller got `true`, so it is
+// reported through opts.onDrop (the notify-agents retry chain records it as the
+// delivery's final failure — guardrail 14c). Pinned both ways: it fires exactly
+// once per fire-time drop and never for a refusal, and a throwing hook is
+// logged by name without poisoning the pool.
+
+test("onDrop fires exactly once for a job dropped at FIRE time, and never for a schedule-time refusal", async () => {
+  const err = capture("error");
+  const warn = capture("warn");
+  const g = gate();
+  let started = 0;
+  let finished = 0;
+  const blocker = async () => {
+    started += 1;
+    await g.promise;
+    finished += 1;
+  };
+  const drops: Record<string, number> = { "d-fire": 0, "d-fire-2": 0, "d-refused": 0 };
+  const hook = (name: string) => () => {
+    drops[name] += 1;
+  };
+  try {
+    assert.equal(small.scheduleDelayed(1, blocker, { name: "d-active" }), true);
+    await waitFor(() => started === 1, "the blocking job to occupy the worker");
+    assert.equal(small.scheduleDelayed(1, blocker, { name: "d-queued" }), true);
+    await sleep(30); // fired → fills the 1-slot queue; pending is back to 0
+    // Two admitted (pending cap 2) — both will be dropped at fire time.
+    assert.equal(small.scheduleDelayed(1, async () => {}, { name: "d-fire", onDrop: hook("d-fire") }), true);
+    assert.equal(small.scheduleDelayed(1, async () => {}, { name: "d-fire-2", onDrop: hook("d-fire-2") }), true);
+    // The third is refused synchronously: `false` IS the signal, onDrop stays silent.
+    assert.equal(small.scheduleDelayed(1, async () => {}, { name: "d-refused", onDrop: hook("d-refused") }), false);
+    assert.match(warn.messages.at(-1) ?? "", /dropping "d-refused": pending cap reached \(2\)/);
+    await waitFor(() => err.messages.filter((m) => m.includes("at fire time")).length === 2, "both fire-time drops to be logged");
+    assert.deepEqual(drops, { "d-fire": 1, "d-fire-2": 1, "d-refused": 0 });
+    g.open();
+    await waitFor(() => finished === 2, "the two surviving jobs to finish");
+    await sleep(30);
+    assert.deepEqual(drops, { "d-fire": 1, "d-fire-2": 1, "d-refused": 0 }, "onDrop is once per drop, never re-fired");
+  } finally {
+    err.restore();
+    warn.restore();
+  }
+});
+
+test("a throwing onDrop is logged with the job's name and the pool keeps running", async () => {
+  const err = capture("error");
+  const g = gate();
+  let started = 0;
+  let finished = 0;
+  const blocker = async () => {
+    started += 1;
+    await g.promise;
+    finished += 1;
+  };
+  let survivorRan = false;
+  try {
+    assert.equal(small.scheduleDelayed(1, blocker, { name: "b-active" }), true);
+    await waitFor(() => started === 1, "the blocking job to occupy the worker");
+    assert.equal(small.scheduleDelayed(1, blocker, { name: "b-queued" }), true);
+    await sleep(30);
+    assert.equal(
+      small.scheduleDelayed(1, async () => {}, {
+        name: "b-boom",
+        onDrop: () => {
+          throw new Error("drop-hook kaboom");
+        },
+      }),
+      true,
+    );
+    await waitFor(() => err.messages.some((m) => m.includes('onDrop for "b-boom" failed')), "the hook failure to be logged");
+    assert.match(err.messages.find((m) => m.includes("onDrop for"))!, /\[delayed-jobs\] onDrop for "b-boom" failed:.*drop-hook kaboom/);
+    g.open();
+    await waitFor(() => finished === 2, "the two surviving jobs to finish");
+    assert.equal(small.scheduleDelayed(1, async () => {
+      survivorRan = true;
+    }, { name: "b-after" }), true);
+    await waitFor(() => survivorRan, "a job scheduled after the throwing hook to run");
+  } finally {
+    err.restore();
+  }
+});
+
 test("unset knobs use the defaults: 4 concurrent workers", async () => {
   const g = gate();
   let started = 0;

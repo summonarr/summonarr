@@ -88,7 +88,10 @@ function bodyFrom(d: Draft): Record<string, unknown> {
     config.headerName = d.headerName.trim() || "Authorization";
     config.template = d.template.trim() ? d.template : null;
   } else {
-    config.priority = Number(d.priority);
+    // Blank ⇒ leave the key out so the server applies its default (ntfy 3,
+    // Gotify 5). Number("") is 0, which Gotify would store and ntfy would 400 on.
+    const priority = d.priority.trim();
+    if (priority !== "") config.priority = Number(priority);
     if (d.kind === "ntfy") {
       config.topic = d.topic.trim();
       config.attachPoster = d.attachPoster;
@@ -113,6 +116,8 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState("");
+  // List-level actions (delete) have no form to report into.
+  const [actionError, setActionError] = useState("");
   const [testing, setTesting] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ id: string; ok: boolean; text: string } | null>(null);
 
@@ -159,20 +164,39 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
     }
   }
 
+  // The edit form is a snapshot taken at "Edit" and its save sends the full
+  // field set, so a list toggle has to reach the open draft too — otherwise the
+  // stale `enabled` there silently undoes the toggle on the next save.
+  function mirrorEnabled(id: string, enabled: boolean) {
+    setAgents((list) => list?.map((x) => (x.id === id ? { ...x, enabled } : x)) ?? list);
+    setDraft((d) => (d && d.id === id ? { ...d, enabled } : d));
+  }
+
   async function toggleEnabled(a: AgentView, next: boolean) {
-    setAgents((list) => list?.map((x) => (x.id === a.id ? { ...x, enabled: next } : x)) ?? list);
+    mirrorEnabled(a.id, next);
     const res = await fetch(withBasePath(`/api/admin/notification-agents/${a.id}`), {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled: next }),
     }).catch(() => null);
-    if (!res?.ok) await load();
+    if (!res?.ok) {
+      // Roll both back before the reload: load() can itself fail and would
+      // otherwise leave the optimistic state standing.
+      mirrorEnabled(a.id, a.enabled);
+      await load();
+    }
   }
 
   async function remove(a: AgentView) {
     if (!window.confirm(t("settings.form.agents.confirmDelete", { name: a.name }))) return;
+    setActionError("");
     const res = await fetch(withBasePath(`/api/admin/notification-agents/${a.id}`), { method: "DELETE" }).catch(() => null);
-    if (res?.ok && draft?.id === a.id) setDraft(null);
+    if (res?.ok) {
+      setDraft((d) => (d && d.id === a.id ? null : d));
+    } else {
+      // A silent failure reads as a UI glitch; say the delete did not happen.
+      setActionError((res ? await errorOf(res) : "") || t("settings.form.common.requestFailed"));
+    }
     await load();
   }
 
@@ -203,6 +227,7 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
       )}
 
       {loadError && <p className="text-sm text-red-400">{t("settings.form.agents.loadFailed")}</p>}
+      {actionError && <p className="text-sm text-red-400">{actionError}</p>}
 
       {agents && agents.length === 0 && !draft && (
         <p className="text-sm text-zinc-500">{t("settings.form.agents.empty")}</p>

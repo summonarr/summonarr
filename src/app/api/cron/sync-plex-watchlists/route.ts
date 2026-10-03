@@ -28,7 +28,10 @@ export async function POST(request: NextRequest) {
       // Status stays 200 on a partial failure (the entrypoint fast-retries any
       // non-2xx); X-Cron-Degraded is what marks the run failed in the ledger.
       // A rejected Plex admin token on the server-token path degrades the run
-      // too — it never deletes anyone's own token (guardrail 34b).
+      // too — it never deletes anyone's own token (guardrail 34b) — as does a
+      // user none of whose watchlist titles could be resolved because their
+      // metadata lookups failed (counted in `errors`; `server.lookupFailures`
+      // carries the raw count, partial failures included).
       const problems = plexWatchlistRunProblems(result);
       const ok = problems === 0;
       return NextResponse.json(

@@ -58,26 +58,38 @@ const MISS_BUDGET_MS = 2_500;
 const MAX_MISSES_PER_CALL = 120;
 // Process-wide cap on concurrent translation fetches across every request and
 // the prewarm, so they can't burst past TMDB's rate budget (guardrail 31).
-const MAX_IN_FLIGHT = 6;
+export const MAX_IN_FLIGHT = 6;
 
-interface Limiter {
-  active: number;
-  queue: (() => void)[];
+/**
+ * A bound on how many `fn`s run at once: the first `max` callers run, later
+ * ones park in FIFO order. A finishing task HANDS its slot to the next waiter
+ * instead of releasing it, so the count never drops while anyone is parked. The
+ * waiter only resumes a microtask after it is woken; with release-then-wake a
+ * caller arriving in that gap saw a free slot and ran, and the woken waiter then
+ * ran on top of it — one over the cap per woken waiter. mapLimit/settleLimit in
+ * concurrency.ts bound ONE call's fan-out; this bounds every call in the process.
+ */
+export function createInFlightLimiter(max: number): <T>(fn: () => Promise<T>) => Promise<T> {
+  let active = 0;
+  const queue: (() => void)[] = [];
+  return async function limited<T>(fn: () => Promise<T>): Promise<T> {
+    if (active >= max) {
+      // Resumes already holding the slot the finishing task handed over.
+      await new Promise<void>((resolve) => queue.push(resolve));
+    } else {
+      active++;
+    }
+    try {
+      return await fn();
+    } finally {
+      const next = queue.shift();
+      if (next) next(); // slot transferred, `active` unchanged
+      else active--;
+    }
+  };
 }
-const limiter = processSingleton<Limiter>("tmdb-localize:limiter", () => ({ active: 0, queue: [] }));
 
-async function limited<T>(fn: () => Promise<T>): Promise<T> {
-  if (limiter.active >= MAX_IN_FLIGHT) {
-    await new Promise<void>((resolve) => limiter.queue.push(resolve));
-  }
-  limiter.active++;
-  try {
-    return await fn();
-  } finally {
-    limiter.active--;
-    limiter.queue.shift()?.();
-  }
-}
+const limited = processSingleton("tmdb-localize:limiter", () => createInFlightLimiter(MAX_IN_FLIGHT));
 
 // Fetch + store one title's translations. Coalesced on the cache key, so a
 // stampede of pages listing the same title shares one fetch. A title with no
@@ -383,8 +395,9 @@ export async function nonEnglishInUse(): Promise<boolean> {
 
 /**
  * Fill translation rows for the titles people are most likely to see in a
- * list: the library, then requests and watchlists. Skips titles already cached
- * (an expired row counts as missing), stops at MAX_PREWARM_PER_RUN fetches, and
+ * list: requests and watchlists first (the iCal feed's titles, which it reads
+ * from the cache only), then the library. Skips titles already cached (an
+ * expired row counts as missing), stops at MAX_PREWARM_PER_RUN fetches, and
  * observes `signal` between chunks (guardrail 41). A no-op — zero fetches —
  * unless nonEnglishInUse().
  */

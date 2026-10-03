@@ -57,10 +57,17 @@ export interface LoadedAgent {
 const agentState = processSingleton("notify-agents:cache", () => ({
   cache: null as { agents: LoadedAgent[]; expiresAt: number } | null,
   inflight: null as Promise<LoadedAgent[]> | null,
+  // Generation counter (the features.ts pattern): a findMany already in flight
+  // when the admin route invalidated holds the PRE-write rows; without the gen
+  // check it would repopulate the cache after the invalidation and keep serving
+  // a deleted/disabled agent (or a rotated secret) for a full TTL.
+  gen: 0,
 }));
 
 export function invalidateAgentCache(): void {
+  agentState.gen++;
   agentState.cache = null;
+  agentState.inflight = null;
 }
 
 function toLoaded(row: { id: string; kind: string; name: string; events: string[]; config: unknown; secret: string | null }): LoadedAgent | null {
@@ -73,20 +80,24 @@ async function loadEnabledAgents(): Promise<LoadedAgent[]> {
   const now = Date.now();
   if (agentState.cache && agentState.cache.expiresAt > now) return agentState.cache.agents;
   if (agentState.inflight) return agentState.inflight;
-  agentState.inflight = (async () => {
+  const gen = agentState.gen;
+  const inflight = (async () => {
     try {
       const rows = await prisma.notificationAgent.findMany({
         where: { enabled: true },
         select: { id: true, kind: true, name: true, events: true, config: true, secret: true },
       });
       const agents = rows.map(toLoaded).filter((a): a is LoadedAgent => a !== null);
-      agentState.cache = { agents, expiresAt: Date.now() + AGENT_CACHE_TTL_MS };
+      // Only cache if no invalidation happened while this read was in flight.
+      if (gen === agentState.gen) agentState.cache = { agents, expiresAt: Date.now() + AGENT_CACHE_TTL_MS };
       return agents;
     } finally {
-      agentState.inflight = null;
+      // Clear only if a later invalidate/read hasn't already replaced the slot.
+      if (gen === agentState.gen) agentState.inflight = null;
     }
   })();
-  return agentState.inflight;
+  agentState.inflight = inflight;
+  return inflight;
 }
 
 // ─── Rendering ──────────────────────────────────────────────────────────────
@@ -170,37 +181,75 @@ export async function deliverOnce(agent: LoadedAgent, p: WebhookPayload): Promis
     const verdict = classifyStatus(res.status);
     return { verdict, status: res.status, error: verdict === "ok" ? null : `HTTP ${res.status}` };
   } catch (err) {
-    // An SSRF-policy refusal is a configuration problem — retrying can't fix it.
-    if (err instanceof SafeFetchError && err.reason !== "timeout" && err.reason !== "network") {
-      return { verdict: "fail", status: null, error: err.message.slice(0, 300) };
+    if (err instanceof SafeFetchError) {
+      // An SSRF-policy refusal is a configuration problem — retrying can't fix it.
+      if (err.reason !== "timeout" && err.reason !== "network") return { verdict: "fail", status: null, error: err.message.slice(0, 300) };
+      return { verdict: "retry", status: null, error: err.message.slice(0, 300) };
     }
-    return { verdict: "retry", status: null, error: (err instanceof Error ? err.message : String(err)).slice(0, 300) };
+    // safeFetch wraps every fetch-level failure in a SafeFetchError, so anything
+    // else was thrown BEFORE the network call — e.g. undici's Headers rejecting
+    // a header value. That is a config error (retrying can't fix it), and its
+    // message embeds the offending value, i.e. the secret, so it must never
+    // reach lastError, the warn line or the Test response.
+    return { verdict: "fail", status: null, error: "request could not be built (check the secret and URL)" };
   }
 }
 
-function recordOutcome(agentId: string, r: DeliveryResult): void {
-  void prisma.notificationAgent
+/** Bookkeeping only — never rejects. Awaited by the Test button, fire-and-forget on the dispatch path. */
+function recordOutcome(agentId: string, r: DeliveryResult): Promise<void> {
+  return prisma.notificationAgent
     .update({
       where: { id: agentId },
       data: { lastStatus: r.verdict === "ok" ? "ok" : "failed", lastError: r.error, lastAttemptAt: new Date() },
       select: { id: true },
     })
+    .then(() => undefined)
     .catch(() => {
       // Deleted between send and record, or a DB blip — bookkeeping only.
     });
+}
+
+function recordFailure(agent: LoadedAgent, p: WebhookPayload, r: DeliveryResult): void {
+  void recordOutcome(agent.id, r);
+  console.warn(`[notify-agents] "${agent.name}" (${agent.kind}) delivery of ${p.event} failed: ${r.error ?? "unknown error"}`);
+}
+
+/**
+ * A retry the shared pool refused (pending cap at schedule time, or queue cap
+ * at fire time) is TERMINAL: nothing will deliver this event, so the row must
+ * say so — guardrail 14c promises the last outcome is recorded on the row.
+ */
+function recordRetryDropped(agent: LoadedAgent, p: WebhookPayload, r: DeliveryResult): void {
+  recordFailure(agent, p, { ...r, error: `retry queue full: ${r.error ?? "unknown error"}`.slice(0, 300) });
 }
 
 async function deliverWithRetry(agent: LoadedAgent, p: WebhookPayload, attempt = 0): Promise<void> {
   const r = await deliverOnce(agent, p);
   if (r.verdict === "retry" && attempt < RETRY_DELAYS_MS.length) {
     // In-memory retry: a restart drops pending retries (accepted — guardrail 14c).
-    scheduleDelayed(RETRY_DELAYS_MS[attempt], () => deliverWithRetry(agent, p, attempt + 1), { name: `notify-agent:${agent.id}` });
+    // The retry re-resolves the agent by id rather than closing over this
+    // snapshot: an admin may disable, delete, unsubscribe or re-point the channel
+    // while a retry is pending, and the stale copy would keep posting to the old
+    // URL with the old secret, then overwrite the row's fresh status with its
+    // failure. A refused retry is recorded as the final failure (both drop paths).
+    const scheduled = scheduleDelayed(RETRY_DELAYS_MS[attempt], () => retryDelivery(agent.id, p, attempt + 1), {
+      name: `notify-agent:${agent.id}`,
+      onDrop: () => recordRetryDropped(agent, p, r),
+    });
+    if (!scheduled) recordRetryDropped(agent, p, r);
     return;
   }
-  recordOutcome(agent.id, r);
-  if (r.verdict !== "ok") {
-    console.warn(`[notify-agents] "${agent.name}" (${agent.kind}) delivery of ${p.event} failed: ${r.error ?? "unknown error"}`);
-  }
+  if (r.verdict === "ok") void recordOutcome(agent.id, r);
+  else recordFailure(agent, p, r);
+}
+
+async function retryDelivery(agentId: string, p: WebhookPayload, attempt: number): Promise<void> {
+  // loadEnabledAgents already filters enabled: true and re-validates the stored
+  // config; the admin routes invalidate its cache on every write. Absent, or no
+  // longer subscribed ⇒ the admin withdrew this delivery: no fetch, no outcome.
+  const current = (await loadEnabledAgents()).find((a) => a.id === agentId);
+  if (!current || !current.events.includes(p.event)) return;
+  await deliverWithRetry(current, p, attempt);
 }
 
 async function dispatch(events: NotifyEvent[]): Promise<void> {
@@ -232,7 +281,9 @@ export function emitNotificationEvents(events: NotifyEvent[]): void {
 export async function sendAgentTest(agent: LoadedAgent, ev: NotifyEvent): Promise<DeliveryResult> {
   const [p] = await buildPayloads([ev]);
   const r = await deliverOnce(agent, p);
-  recordOutcome(agent.id, r);
+  // Awaited here (unlike the dispatch path): the UI reloads the list the moment
+  // this responds, and a fire-and-forget write would let it read the pre-test status.
+  await recordOutcome(agent.id, r);
   return r;
 }
 

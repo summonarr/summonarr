@@ -12,11 +12,14 @@
 
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 const {
   instanceDefaultLocale,
+  instanceDefaultLocaleWarning,
   localeForRequest,
   localeForUser,
+  parseInstanceDefaultLocale,
   translatorFor,
   translatorForRequest,
 } = await import("../src/lib/i18n/server-locale.ts");
@@ -59,6 +62,45 @@ test("SUMMONARR_DEFAULT_LOCALE sets the fallback; an invalid value is ignored", 
   assert.equal(localeForRequest(req({ "x-summonarr-client": "ios" })), "es");
   process.env.SUMMONARR_DEFAULT_LOCALE = "klingon";
   assert.equal(instanceDefaultLocale(), "en");
+});
+
+test("a region- or script-tagged SUMMONARR_DEFAULT_LOCALE resolves on its primary subtag", () => {
+  // The README calls the languages "pt (Brazilian)" and "zh (Simplified)",
+  // which invites exactly these spellings; an exact match silently made every
+  // one of them English. Same rule as negotiateLocale's Accept-Language match.
+  process.env.SUMMONARR_DEFAULT_LOCALE = "pt-BR";
+  assert.equal(instanceDefaultLocale(), "pt");
+  assert.equal(localeForUser({ locale: null }), "pt", "notifications to users with no stored language follow it");
+  assert.equal(localeForRequest(req({ "x-summonarr-client": "ios" })), "pt", "so do native clients");
+  process.env.SUMMONARR_DEFAULT_LOCALE = "zh-Hans-CN";
+  assert.equal(instanceDefaultLocale(), "zh");
+  process.env.SUMMONARR_DEFAULT_LOCALE = " ES_es ";
+  assert.equal(instanceDefaultLocale(), "es");
+  process.env.SUMMONARR_DEFAULT_LOCALE = "pt_BR.UTF-8"; // the POSIX LANG spelling
+  assert.equal(instanceDefaultLocale(), "pt");
+  process.env.SUMMONARR_DEFAULT_LOCALE = "klingon";
+  assert.equal(instanceDefaultLocale(), "en");
+  assert.equal(parseInstanceDefaultLocale("fr-CA"), "fr");
+  assert.equal(parseInstanceDefaultLocale("ru-RU"), null, "an unsupported language is still null, region or not");
+  assert.equal(parseInstanceDefaultLocale("-BR"), null);
+  assert.equal(parseInstanceDefaultLocale(undefined), null);
+});
+
+test("the boot warning fires only for a SET value that names no supported language", () => {
+  delete process.env.SUMMONARR_DEFAULT_LOCALE;
+  assert.equal(instanceDefaultLocaleWarning(), null);
+  process.env.SUMMONARR_DEFAULT_LOCALE = "";
+  assert.equal(instanceDefaultLocaleWarning(), null, "the shipped .env.example leaves it blank");
+  process.env.SUMMONARR_DEFAULT_LOCALE = "pt-BR";
+  assert.equal(instanceDefaultLocaleWarning(), null, "a region tag is accepted, not warned about");
+  process.env.SUMMONARR_DEFAULT_LOCALE = "klingon";
+  const warning = instanceDefaultLocaleWarning();
+  assert.ok(warning?.startsWith('[i18n] SUMMONARR_DEFAULT_LOCALE="klingon" is not a supported locale'), String(warning));
+  assert.ok(warning?.endsWith('using "en"'), String(warning));
+  // instrumentation.ts is where it is logged, once at boot (guardrail 7: no
+  // success line — the helper returns null for a valid value).
+  const boot = readFileSync(new URL("../src/instrumentation.ts", import.meta.url), "utf8");
+  assert.match(boot, /instanceDefaultLocaleWarning\(\)/, "instrumentation.ts no longer checks SUMMONARR_DEFAULT_LOCALE at boot");
 });
 
 test("notifications use the recipient's stored locale, else the instance default", () => {

@@ -23,7 +23,7 @@ import { generateRequestToken } from "@/lib/request-token";
 import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { DetailExtras } from "@/components/media/detail-extras";
-import { languageName, regionName } from "@/lib/tmdb-types";
+import { languageName, localizedProductionCountry } from "@/lib/tmdb-types";
 import { formatDigitalRelease } from "@/lib/format-release-date";
 import { Chip } from "@/components/ui/design";
 import { canRequest, hasPermission, Permission } from "@/lib/permissions";
@@ -286,8 +286,11 @@ export default async function TVDetailPage({
                   ? t("detail.seasonCount", { count: media.numberOfSeasons })
                   : null,
                 formatDigitalRelease(media.releasedDigital, locale, (date) => t("detail.digitalRelease", { date })),
-                regionName(media.productionCountryCodes?.[0], locale) ?? media.productionCountries?.[0],
-                languageName(media.originalLanguage, locale),
+                // TMDB's English name unless Intl agrees on the country — never
+                // a bare code or ICU's successor-state alias (tmdb-types.ts).
+                localizedProductionCountry(media, locale),
+                // A code Intl has no name for renders as the code, as it always has.
+                languageName(media.originalLanguage, locale) ?? media.originalLanguage,
                 media.status ? translateTmdbStatus(media.status, t) : null,
               ]
                 .filter(Boolean)

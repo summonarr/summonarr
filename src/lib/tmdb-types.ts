@@ -72,8 +72,9 @@ export interface TmdbMedia {
   // DISPLAY names) — the anime auto-route predicate matches "JP" against these.
   originCountryCodes?: string[];
   // ISO codes for `productionCountries`, index-aligned, so the detail page can
-  // name the country in the viewer's language. Absent on rows cached before it
-  // existed — fall back to the English `productionCountries` name.
+  // name the country in the viewer's language — ONLY through
+  // localizedProductionCountry below, which keeps TMDB's English name where Intl
+  // disagrees with it. Absent on rows cached before it existed.
   productionCountryCodes?: string[];
   homepage?: string | null;
   budget?: number | null;
@@ -235,13 +236,14 @@ export function stillUrl(path: string | null, size: "w185" | "w300" | "original"
   return path && path.startsWith("/") ? `${IMAGE_BASE}/${size}${path}` : null;
 }
 
-// ISO code → display name in `locale` (English by default), with the raw code
-// as fallback. Intl.DisplayNames exists in both Node and the browser, but call
-// these from SERVER code only when rendering: Node's and the browser's ICU data
-// can word a name differently, which would be a hydration mismatch (guardrail 16).
+// ISO code → display name in `locale` (English by default), or null when Intl
+// has no name for the code — callers put their own fallback behind `??`.
+// Intl.DisplayNames exists in both Node and the browser, but call these from
+// SERVER code only when rendering: Node's and the browser's ICU data can word a
+// name differently, which would be a hydration mismatch (guardrail 16).
 // One formatter per (type, locale), built lazily and reused.
 const _displayNames = new Map<string, Intl.DisplayNames>();
-function displayName(type: "language" | "region", code: string, locale: string): string {
+function displayName(type: "language" | "region", code: string, locale: string): string | null {
   try {
     let dn = _displayNames.get(`${type}:${locale}`);
     if (!dn) {
@@ -249,14 +251,15 @@ function displayName(type: "language" | "region", code: string, locale: string):
       _displayNames.set(`${type}:${locale}`, dn);
     }
     const name = dn.of(type === "region" ? code.toUpperCase() : code);
-    // Intl echoes an unknown code back unchanged — that's the raw-code fallback,
-    // not a name, so it is returned as given.
-    if (!name || name === code || name === code.toUpperCase()) return code;
+    // Intl echoes an unknown code back unchanged. That is not a name: returned
+    // as one it defeated every `?? fallback` behind these helpers, and the
+    // detail pages showed a bare "XC" where TMDB had "Czechoslovakia".
+    if (!name || name === code || name === code.toUpperCase()) return null;
     // Several languages write language names in lower case ("français",
     // "español"); these are shown as standalone labels, so start upper-case.
     return name.charAt(0).toLocaleUpperCase(locale) + name.slice(1);
   } catch {
-    return code;
+    return null; // a malformed code (Intl throws RangeError) has no name either
   }
 }
 
@@ -266,4 +269,50 @@ export function languageName(code: string | null | undefined, locale = "en"): st
 
 export function regionName(code: string | null | undefined, locale = "en"): string | null {
   return code ? displayName("region", code, locale) : null;
+}
+
+// ICU re-targets a deprecated region code at its successor state (SU → RU,
+// YU/CS → RS, AN → CW, BU → MM, ZR → CD, TP → TL), so Intl names such a code
+// after a DIFFERENT country than TMDB files under it. True for those codes, and
+// for one Intl cannot canonicalize at all.
+function regionCodeRetargeted(code: string): boolean {
+  const tag = `und-${code.toUpperCase()}`;
+  try {
+    return Intl.getCanonicalLocales(tag)[0] !== tag;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The production country at `index` as the detail pages name it.
+ *
+ * TMDB's own `production_countries[].name` is the authoritative label, and an
+ * English viewer gets it unchanged (guardrail 40a: the English path is
+ * byte-identical to the cached payload). Another language gets Intl's name for
+ * the ISO code ONLY when Intl and TMDB agree on which country the code denotes:
+ * - a code Intl has no name for (TMDB's "XC" Czechoslovakia, "XG" East Germany)
+ *   keeps TMDB's English name;
+ * - a code ICU has re-targeted at a successor ("SU" → Russia, "YU" → Serbia,
+ *   "AN" → Curaçao, "BU" → Myanmar, "ZR" → Congo) keeps TMDB's English name,
+ *   unless Intl's English name already matches TMDB's;
+ * - everything else is translated — including where the two merely WORD one
+ *   country differently ("United States of America" vs "United States").
+ * Returns null when there is nothing to show, so the row is omitted. Server
+ * code only (see displayName).
+ */
+export function localizedProductionCountry(
+  media: Pick<TmdbMedia, "productionCountries" | "productionCountryCodes">,
+  locale: string,
+  index = 0,
+): string | null {
+  const tmdbName = media.productionCountries?.[index] ?? null;
+  const code = media.productionCountryCodes?.[index];
+  if (!code || locale === "en") return tmdbName;
+  if (tmdbName !== null) {
+    const english = regionName(code, "en");
+    if (english === null) return tmdbName;
+    if (english !== tmdbName && regionCodeRetargeted(code)) return tmdbName;
+  }
+  return regionName(code, locale) ?? tmdbName;
 }

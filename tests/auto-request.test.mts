@@ -19,6 +19,13 @@
 //   4. PLEX GUID → TMDB, PAGINATION, METADATA FALLBACK, 401 HANDLING, and the
 //      cron's per-user isolation: one user's plex.tv failure is counted and the
 //      next user is still processed; a revoked token is deleted.
+//   5. THE METADATA CACHE. A friend's GraphQL nodes carry no guid, so every one
+//      needs a metadata lookup; the in-process ratingKey cache (positive AND
+//      negative results, bounded, TTL'd) makes an unchanged watchlist cost ZERO
+//      metadata GETs on the next run. A FAILED lookup is never cached, and a
+//      user none of whose titles resolved because of failures reads "error"
+//      (not "ok") and degrades the run; a metadata 401 on the admin token still
+//      goes to rejectToken and never near an Account delete (guardrail 34b).
 //
 // Harness: in-memory prisma stubs, a REAL signed session JWT for the watchlist
 // route (tests/requests-route.test.mts idiom), a synthetic request scope with a
@@ -362,6 +369,7 @@ beforeEach(() => {
   ledgerWriteFails = false;
   msuRows = [];
   resetLogDedup();
+  plexWatchlist.__resetPlexMetadataCacheForTests();
   invalidateFeatureFlagCache();
   invalidateBlacklistCache();
   respond = () => { throw new Error("unexpected fetch"); };
@@ -961,19 +969,185 @@ test("server path: an abort between friends stops before the next friend's watch
   assert.equal(graphqlWatchlistReads().length, 1);
 });
 
-test("getPlexWatchlistConnection: token wins; server needs the source on, consent, and an ok status", async () => {
+// ─── the metadata lookup cache + lookup-failure accounting ───────────────────
+
+const metadataLookups = () => fetchCalls.filter((c) => c.url.hostname === "metadata.provider.plex.tv");
+// Wraps serverResponder so one metadata ratingKey can answer differently.
+function withMetadataOverride(
+  inner: ReturnType<typeof serverResponder>,
+  override: (ratingKey: string) => Response | null,
+): typeof respond {
+  return (url, token, body) => {
+    if (url.hostname === "metadata.provider.plex.tv") {
+      const res = override(url.pathname.split("/").pop()!);
+      if (res) return res;
+    }
+    return inner(url, token, body);
+  };
+}
+
+test("server path: a second run over an unchanged friend watchlist issues ZERO metadata lookups — positive AND negative results are cached, and expire", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  const u = addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  // n77 is a title Plex knows only by TVDB — a NEGATIVE lookup (no tmdb guid).
+  respond = withMetadataOverride(
+    serverResponder({ "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: [603, 1399, 77] }] } }),
+    (key) => (key === "n77" ? json({ MediaContainer: { Metadata: [{ Guid: [{ id: "tvdb://77" }] }] } }) : null),
+  );
+  const first = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(metadataLookups().length, 3, "every guid-less node costs one lookup on a cold cache");
+  assert.equal(first.requested, 2, "the TVDB-only title is skipped, never guessed");
+  assert.equal(first.server?.lookupFailures, 0);
+  assert.deepEqual(serverStatus().users, { [u.id]: "ok" });
+
+  fetchCalls.length = 0;
+  const second = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(metadataLookups().length, 0, "an unchanged watchlist costs no metadata GET on the next run");
+  assert.equal(second.server?.users, 1, "…and the user was still read and judged");
+  assert.equal(second.alreadyHandled, 2, "the ledger still saw both resolved titles");
+  assert.deepEqual(serverStatus().users, { [u.id]: "ok" });
+
+  // A negative result is re-checked sooner than a positive one.
+  const cache = plexWatchlist.__plexMetadataCacheForTests();
+  assert.ok(plexWatchlist.METADATA_CACHE_NEGATIVE_TTL_MS < plexWatchlist.METADATA_CACHE_POSITIVE_TTL_MS);
+  assert.equal(cache.get("n77")?.tmdbId, null);
+  assert.ok(cache.get("n77")!.expiresAt < cache.get("n603")!.expiresAt, "the negative entry expires first");
+
+  // Expired entries are looked up again.
+  for (const entry of cache.values()) entry.expiresAt = 0;
+  fetchCalls.length = 0;
+  await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(metadataLookups().length, 3, "expired entries are re-fetched, not served stale");
+});
+
+test("server path: the metadata cache is bounded — at the cap the least-recently-used entry makes room", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  const cache = plexWatchlist.__plexMetadataCacheForTests();
+  const fresh = Date.now() + 60_000;
+  for (let i = 0; i < plexWatchlist.METADATA_CACHE_MAX; i++) cache.set(`old${i}`, { tmdbId: i + 1, expiresAt: fresh });
+  respond = serverResponder({ "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: [603] }] } });
+  await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(cache.size, plexWatchlist.METADATA_CACHE_MAX, "never grows past the cap");
+  assert.equal(cache.has("old0"), false, "the oldest entry was evicted");
+  assert.equal(cache.has("old1"), true);
+  assert.equal(cache.get("n603")?.tmdbId, 603);
+});
+
+test("server path: when EVERY metadata lookup fails the user reads \"error\", not \"ok\" — a run error (degraded), nothing filed, nothing cached, no Account row touched", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  const u = addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  const inner = serverResponder({ "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: [603, 1399] }] } });
+  respond = withMetadataOverride(inner, () => json({}, 503));
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.deepEqual(serverStatus().users, { [u.id]: "error" });
+  assert.equal(r.errors, 1, "counted as a run error");
+  assert.ok(plexWatchlist.plexWatchlistRunProblems(r) > 0, "the run is degraded");
+  assert.equal(r.server?.lookupFailures, 2);
+  assert.equal(r.server?.adminTokensRejected, 0, "a 503 is not a rejected token");
+  assert.equal(opsOf("mediaRequest.create").length, 0);
+  assert.equal(opsOf("account.deleteMany").length, 0);
+  assert.equal(errors.filter((e) => e.includes("metadata lookup") && e.includes(u.id)).length, 1);
+
+  // Nothing is cached for a failure: once plex.tv answers again the titles are
+  // looked up and filed on the very next run.
+  fetchCalls.length = 0;
+  respond = inner;
+  const again = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(metadataLookups().length, 2);
+  assert.equal(again.requested, 2);
+  assert.equal(again.errors, 0);
+  assert.deepEqual(serverStatus().users, { [u.id]: "ok" });
+});
+
+test("server path: a PARTIAL lookup failure files what resolved, counts the failures, stays \"ok\" and is not degraded — the failed title alone is retried next run", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  const u = addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  const inner = serverResponder({ "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: [603, 1399] }] } });
+  respond = withMetadataOverride(inner, (key) => (key === "n1399" ? json({}, 503) : null));
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(r.requested, 1);
+  assert.equal(r.errors, 0);
+  assert.equal(r.server?.lookupFailures, 1);
+  assert.equal(plexWatchlist.plexWatchlistRunProblems(r), 0);
+  assert.deepEqual(serverStatus().users, { [u.id]: "ok" });
+
+  fetchCalls.length = 0;
+  respond = inner;
+  const again = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.deepEqual(metadataLookups().map((c) => c.url.pathname.split("/").pop()), ["n1399"], "only the failed title is looked up again");
+  assert.equal(again.requested, 1);
+  assert.equal(again.alreadyHandled, 1);
+});
+
+test("server path: a metadata-lookup 401 on the ADMIN token goes to rejectToken — degraded, no Account row, not a user error, not a lookup failure", async () => {
+  settings.set(FLAG, "true");
+  settings.set(SERVER_SOURCE, "true");
+  configurePlex("", "admin-1");
+  const u = addUser({ plexUserId: "501", plexWatchlistOptInAt: new Date() });
+  respond = withMetadataOverride(
+    serverResponder({ "admin-1": { friends: [{ uuid: "uuid-501", id: "501", list: [603, 1399] }] } }),
+    () => json({}, 401),
+  );
+  const r = await inScope(() => plexWatchlist.syncPlexWatchlists());
+  assert.equal(opsOf("account.deleteMany").length, 0, "the ADMIN token's rejection must never delete a user's token");
+  assert.equal(r.tokensRevoked, 0);
+  assert.equal(r.server?.adminTokensRejected, 1);
+  assert.equal(r.errors, 0, "an instance problem, not a user error");
+  assert.equal(r.server?.lookupFailures, 0, "a rejected token is not a swallowed lookup failure");
+  assert.ok(plexWatchlist.plexWatchlistRunProblems(r) > 0);
+  assert.deepEqual(serverStatus().users, { [u.id]: "error" });
+  assert.equal(warns.filter((w) => w.includes("admin token")).length, 1);
+});
+
+test("getPlexWatchlistConnection: token wins; server needs the source on, the toggle on, consent, and an ok status", async () => {
   const u = addUser({ plexWatchlistOptInAt: null });
   assert.deepEqual(await plexWatchlist.getPlexWatchlistConnection(u, true), { serverSource: false, serverOptedIn: false, serverStatus: null, connectedVia: "token" });
   settings.set(SERVER_SOURCE, "true");
   settings.set("plexWatchlistServerStatus", JSON.stringify({ updatedAt: new Date().toISOString(), users: { [u.id]: "ok" }, unmatchedFriends: 0 }));
   assert.equal((await plexWatchlist.getPlexWatchlistConnection(u, false)).connectedVia, null, "no consent yet");
-  const opted = { id: u.id, plexWatchlistOptInAt: new Date() };
+  const opted = { id: u.id, plexWatchlistOptInAt: new Date(), plexWatchlistAutoRequest: true };
   assert.deepEqual(await plexWatchlist.getPlexWatchlistConnection(opted, false), { serverSource: true, serverOptedIn: true, serverStatus: "ok", connectedVia: "server" });
   settings.set("plexWatchlistServerStatus", JSON.stringify({ updatedAt: new Date().toISOString(), users: { [u.id]: "private" }, unmatchedFriends: 0 }));
   const priv = await plexWatchlist.getPlexWatchlistConnection(opted, false);
   assert.equal(priv.serverStatus, "private");
   assert.equal(priv.connectedVia, null);
   assert.equal(plexWatchlist.parsePlexWatchlistServerStatus("{not json"), null);
+});
+
+test("getPlexWatchlistConnection: with auto-enroll on, a user who switched the toggle OFF reads opted-out and unconnected at once — not after the next cron run", async () => {
+  const u = addUser({ plexWatchlistOptInAt: null, plexWatchlistAutoRequest: true });
+  settings.set(SERVER_SOURCE, "true");
+  settings.set(AUTO_ENROLL, "true");
+  // The last run read them (toggle was on then) and wrote "ok".
+  settings.set("plexWatchlistServerStatus", JSON.stringify({ updatedAt: new Date().toISOString(), users: { [u.id]: "ok" }, unmatchedFriends: 0 }));
+  assert.deepEqual(
+    await plexWatchlist.getPlexWatchlistConnection(u, false),
+    { serverSource: true, serverOptedIn: true, serverStatus: "ok", connectedVia: "server" },
+    "toggle on + auto-enroll: read through the server",
+  );
+  // PATCH false: the toggle is off and the stamp cleared, but the status JSON
+  // still names them until the cron runs again. The cron will not read them.
+  const off = { id: u.id, plexWatchlistOptInAt: null, plexWatchlistAutoRequest: false };
+  assert.deepEqual(
+    await plexWatchlist.getPlexWatchlistConnection(off, false),
+    { serverSource: true, serverOptedIn: false, serverStatus: "ok", connectedVia: null },
+    "toggle off: not opted in, not connected — whatever the stale status says",
+  );
+  // The same holds when consent came from their own stamp rather than auto-enroll.
+  settings.delete(AUTO_ENROLL);
+  const stampedButOff = { id: u.id, plexWatchlistOptInAt: new Date(), plexWatchlistAutoRequest: false };
+  const c = await plexWatchlist.getPlexWatchlistConnection(stampedButOff, false);
+  assert.equal(c.serverOptedIn, false);
+  assert.equal(c.connectedVia, null);
 });
 
 // ═══ token capture at sign-in ═════════════════════════════════════════════════

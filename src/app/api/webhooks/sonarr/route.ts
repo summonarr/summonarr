@@ -426,9 +426,11 @@ export async function POST(req: NextRequest) {
       : null;
     if (!whereNotify) return;
 
+    // `arrInstance` is selected so the outbound `request.available` event names
+    // the firing instance off each winner row (guardrail 32).
     const pending = await prisma.mediaRequest.findMany({
       where: whereNotify,
-      select: { id: true, tmdbId: true, requestedBy: true, title: true, mediaType: true, posterPath: true, user: { select: { mediaServer: true } } },
+      select: { id: true, tmdbId: true, requestedBy: true, title: true, mediaType: true, posterPath: true, arrInstance: true, user: { select: { mediaServer: true } } },
     });
     if (pending.length === 0) return;
 

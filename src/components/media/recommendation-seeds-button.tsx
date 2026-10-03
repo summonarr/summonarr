@@ -34,15 +34,23 @@ export function RecommendationSeedsButton({
         ? t("browse.forYou.seeds.source.request")
         : t("browse.forYou.seeds.source.watched");
 
+  // ONE containment for every click this component produces. The whole thing
+  // renders inside MediaCard, whose root onClick navigates to the pick's page.
+  // The dialog is portalled to <body>, but React still bubbles its synthetic
+  // clicks through the REACT tree — i.e. through this wrapper and on to the
+  // card. That covers the trigger (opening must not navigate), the popup (a
+  // click on a seed link or Close must not ALSO navigate to the pick), and the
+  // backdrop: Base UI closes on the backdrop's `click` itself, so with only the
+  // popup guarded, click-outside-to-dismiss closed the list AND left the page.
+  // Containing it once here, above the portal, is what makes it impossible to
+  // leave one of the three out again. `display: contents` keeps the wrapper
+  // out of the card footer's flex layout; the Dialog root renders no DOM, so
+  // the span's only box-bearing child is the trigger.
   return (
-    <>
+    <span style={{ display: "contents" }} onClick={(e) => e.stopPropagation()}>
       <button
         type="button"
-        // The card root navigates on click; this must open the list instead.
-        onClick={(e) => {
-          e.stopPropagation();
-          setOpen(true);
-        }}
+        onClick={() => setOpen(true)}
         className="ds-mono m-0 text-left underline decoration-dotted underline-offset-2 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
         style={{ fontSize: 11.5, color: "var(--ds-accent-text)", lineHeight: 1.4, background: "none", border: 0, padding: 0 }}
         aria-haspopup="dialog"
@@ -53,9 +61,7 @@ export function RecommendationSeedsButton({
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogPortal>
           <DialogBackdrop />
-          {/* stopPropagation: the popup is portalled, but React still bubbles
-              its clicks through the card's tree — and the card navigates. */}
-          <DialogPopup className="max-w-md" onClick={(e) => e.stopPropagation()}>
+          <DialogPopup className="max-w-md">
             <div className="flex items-start justify-between gap-3 px-5 pt-5 pb-3">
               <div className="min-w-0">
                 <DialogTitle className="text-base">{t("browse.forYou.seeds.title")}</DialogTitle>
@@ -95,6 +101,6 @@ export function RecommendationSeedsButton({
           </DialogPopup>
         </DialogPortal>
       </Dialog>
-    </>
+    </span>
   );
 }

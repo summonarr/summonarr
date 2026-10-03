@@ -104,16 +104,39 @@ pgProto.query = async (text, values) => {
 pgProto.end = async () => {};
 
 // ── scripted fetch (Plex/Jellyfin only; RFC1918 literals, no DNS) ───────────
-type FetchCall = { url: URL; method: string };
+type FetchCall = { url: URL; method: string; body?: string };
 const fetchCalls: FetchCall[] = [];
 let respond: (url: URL) => Response | Promise<Response> = (url) => {
   throw new Error(`unexpected fetch ${url} — script a responder for this test`);
 };
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
-  fetchCalls.push({ url, method: init?.method ?? "GET" });
+  fetchCalls.push({ url, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : undefined });
   return respond(url);
 }) as typeof fetch;
+
+// One outbound notification agent (notify-agents.ts) — a generic webhook on an
+// RFC1918 literal (admin-mode SSRF, no DNS). Its POST body is the only seam where
+// the emitted `request.available` event's `request.instance` can be read back,
+// i.e. the only observable of WHICH instance a fan-out winner carried.
+const AGENT_BASE = "http://10.77.0.9:9";
+const AGENT_ORIGIN = new URL(AGENT_BASE).origin;
+const AGENT_URL = `${AGENT_BASE}/hook`;
+type AgentRow = { id: string; kind: string; name: string; events: string[]; config: unknown; secret: string | null };
+const agentRows: AgentRow[] = [];
+function agentRow(...events: string[]): AgentRow {
+  return { id: "agent-1", kind: "webhook", name: "Hook", events, config: { url: AGENT_URL, template: null, headerName: "Authorization" }, secret: null };
+}
+type AgentPost = { event: string; request: { id: string | null; instance: string } | null; media: { tmdbId: number | null } | null };
+function agentPosts(): AgentPost[] {
+  return fetchCalls.filter((c) => c.url.href === AGENT_URL && c.body).map((c) => JSON.parse(c.body!) as AgentPost);
+}
+// The emit is fire-and-forget behind the route's response; settle until the
+// expected post has landed, then keep draining so a surplus one would show.
+async function settleAgentPosts(expected: number): Promise<void> {
+  for (let i = 0; i < 400 && agentPosts().length < expected; i++) await new Promise<void>((r) => setImmediate(r));
+  for (let i = 0; i < 40; i++) await new Promise<void>((r) => setImmediate(r));
+}
 
 const okJson = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -418,6 +441,12 @@ const fakePrisma = {
     },
   },
   pushSubscription: { findMany: async () => [], deleteMany: async () => ({ count: 0 }) },
+  // Outbound channels: none unless a test seeds agentRows (the feature flag
+  // defaults ON; notify-agents caches this list for 30s — see beforeEach).
+  notificationAgent: {
+    findMany: async () => agentRows.map((a) => ({ ...a })),
+    update: async () => ({ id: "agent-1" }), // recordOutcome bookkeeping
+  },
   radarrAvailableItem: {
     findMany: async (args?: { where?: { tmdbId?: { in?: number[] } } }) =>
       arrAvailableRead("radarrAvailableItem", args?.where?.tmdbId?.in),
@@ -529,6 +558,7 @@ const { POST } = await import("../src/app/api/sync/route.ts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
+const { invalidateAgentCache } = await import("../src/lib/notify-agents.ts");
 
 type Req = InstanceType<typeof NextRequest>;
 
@@ -694,6 +724,8 @@ beforeEach(() => {
   lockAcquire = (id) => id !== 2009; // 2009 busy ⇒ syncDownloadPolicies skipped
   respond = (url) => { throw new Error(`unexpected fetch ${url} — script a responder for this test`); };
   invalidateFeatureFlagCache(); // module-global 10s flag cache — reset between tests
+  agentRows.length = 0;
+  invalidateAgentCache(); // notify-agents' 30s agent-list cache
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2495,6 +2527,67 @@ test("source-pinning: the ARR-available pass EXCLUDES a pinned user outright, le
   assert.equal(requests.get("r-pinned")!.status, "APPROVED", "a pinned user must not be flipped by the ARR pass");
   assert.equal(requests.get("r-pinned")!.notifiedAvailable, false);
   assert.ok(!notifiedUserIds().includes("u-pinned"), "pinned user was notified off an unreached library");
+});
+
+// ── guardrail 32: the ARR passes hand the fan-out the request's OWN instance ──
+// The outbound `request.available` event names `request.instance`. The two
+// ARR-cache marking passes (run-start cache, then the freshly rewritten cache)
+// used to project their winners WITHOUT arrInstance, so a 4K request marked by
+// Radarr-4K — the normal route to AVAILABLE for a 4K request, since the arr knows
+// about the file before any library scan does — was announced as the DEFAULT
+// instance, while the very same request marked by a library pass said "4k".
+// Both passes run here with empty libraries, so the ARR cache is the only thing
+// that can move a row; the agent's POST body is the observable.
+
+function withAgent(fallback: (url: URL) => Response): (url: URL) => Response {
+  return (url) => (url.origin === AGENT_ORIGIN ? okJson({}) : fallback(url));
+}
+
+test("guardrail 32: the FIRST ARR pass's request.available names the request's own instance (\"4k\"), not the default", async () => {
+  configureBothServers();
+  respond = withAgent(bothServersRespond([], []));
+  agentRows.push(agentRow("request.available"));
+  arrAvailableRows.push({ model: "radarrAvailableItem", tmdbId: 777, arrInstance: "4k" });
+  seedRequest({ id: "r-4k", tmdbId: 777, mediaType: "MOVIE", requestedBy: "u-4k", status: "APPROVED", arrInstance: "4k" });
+  // Same title on the default instance, where Radarr has NO file: the vkey is
+  // (tmdbId, arrInstance), so this row must stay APPROVED — and must not be the
+  // row the event is about.
+  seedRequest({ id: "r-default", tmdbId: 777, mediaType: "MOVIE", requestedBy: "u-default", status: "APPROVED" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+  await settleAgentPosts(1);
+
+  assert.equal(requests.get("r-4k")!.status, "AVAILABLE", "precondition: the first ARR pass flipped the 4k request");
+  assert.equal(requests.get("r-default")!.status, "APPROVED", "no 4k file is not a default-instance file");
+  assert.deepEqual(
+    agentPosts().map((p) => [p.event, p.request, p.media?.tmdbId]),
+    [["request.available", { id: "r-4k", instance: "4k" }, 777]],
+    "the outbound event must carry the winner row's OWN arrInstance",
+  );
+});
+
+test("guardrail 32: the SECOND ARR pass (fresh cache) names the request's own instance too", async () => {
+  configureBothServers();
+  respond = withAgent(bothServersRespond([], []));
+  agentRows.push(agentRow("request.available"));
+  // Visible only from the SECOND radarrAvailableItem read — imported since the
+  // run-start snapshot, which is exactly the pass that re-projects its winners.
+  arrAvailableRows.push({ model: "radarrAvailableItem", tmdbId: 778, arrInstance: "4k", fromCall: 2 });
+  seedRequest({ id: "r-4k-late", tmdbId: 778, mediaType: "MOVIE", requestedBy: "u-4k", status: "APPROVED", arrInstance: "4k" });
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+  await settleAgentPosts(1);
+
+  assert.equal(arrAvailableReadCounts.radarrAvailableItem, 2, "precondition: the second ARR pass read the fresh cache");
+  assert.equal(requests.get("r-4k-late")!.status, "AVAILABLE", "precondition: the SECOND pass flipped the 4k request");
+  assert.deepEqual(
+    agentPosts().map((p) => [p.event, p.request]),
+    [["request.available", { id: "r-4k-late", instance: "4k" }]],
+  );
 });
 
 // ── the pendingNotifyAt "download pending" backstop ─────────────────────────

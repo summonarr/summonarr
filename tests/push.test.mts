@@ -287,6 +287,30 @@ shadowPrismaModel(prisma, "user", {
   },
 });
 
+// TmdbCache: the cached TMDB title translations a non-English recipient's
+// title is resolved from (tmdb-localize's titleResolver — guardrail 40a).
+// Seeded per test with `<movie|tv>:<id>:i18n:v2` rows (seedTranslation); empty
+// ⇒ every title stays English. Reads are recorded so the English no-op (zero
+// DB reads) is pinnable. Without this shadow the Spanish-recipient case below
+// reached the REAL delegate — a connection attempt against DATABASE_URL that
+// titleResolver's catch swallowed, leaving the localized-title path unpinned.
+const translationRows = new Map<string, string>();
+const translationReads: string[][] = [];
+shadowPrismaModel(prisma, "tmdbCache", {
+  findMany: async (args: { where: { key: { in: string[] } } }) => {
+    translationReads.push([...args.where.key.in]);
+    return args.where.key.in
+      .filter((k) => translationRows.has(k))
+      .map((k) => ({ key: k, data: translationRows.get(k) as string, cachedAt: new Date(), expiresAt: new Date(Date.now() + 86_400_000) }));
+  },
+  upsert: async () => ({}),
+  deleteMany: async () => ({ count: 0 }),
+});
+function seedTranslation(mediaType: "movie" | "tv", tmdbId: number, titles: Record<string, string>): void {
+  const value = Object.fromEntries(Object.entries(titles).map(([locale, title]) => [locale, { title }]));
+  translationRows.set(`${mediaType}:${tmdbId}:i18n:v2`, JSON.stringify(value));
+}
+
 // ── fixtures ────────────────────────────────────────────────────────────────
 // E2E device: P-256 keypair whose public half is stored (plaintext base64) on
 // the subscription row. The decryptor mirrors PushCrypto.swift's recipe — the
@@ -392,6 +416,8 @@ beforeEach(() => {
   userRows = [];
   userFindUniqueCalls.length = 0;
   userFindManyCalls.length = 0;
+  translationRows.clear();
+  translationReads.length = 0;
 });
 
 // ── getOrCreateVapidPublicKey ───────────────────────────────────────────────
@@ -717,19 +743,26 @@ test("a Spanish recipient gets Spanish push text (generic alert AND E2E rich tex
     }),
   ];
 
-  // Per-user pref read carries the locale.
+  // Per-user pref read carries the locale; the title is display-localized
+  // from the cached TMDB translation (guardrail 40a), one read per send.
+  seedTranslation("movie", 438631, { es: "Duna" });
   await notifyUserRequestApprovedPush({ userId: "u-es", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 });
+  assert.deepEqual(translationReads, [["movie:438631:i18n:v2"]], "one translation read, keyed by the title's TMDB identity");
   const approved = relayCalls[0].body;
   assert.deepEqual(approved.payload.aps?.alert, { title: "Solicitud aprobada", body: "Abre Summonarr para ver los detalles" });
   assert.equal(approved.collapseId, "approved");
+  // The cleartext never carries the title, localized or not.
+  assert.ok(!JSON.stringify(approved.payload.aps).includes("Dun"));
   assert.deepEqual(decryptE2e(device, approved.payload.e2e!), {
     t: "Solicitud aprobada",
-    b: "Se aprobó tu solicitud de Dune (Película)",
+    b: "Se aprobó tu solicitud de Duna (Película)",
     u: "/media/movie/438631",
   });
 
-  // Subscription-joined locale (the reporter's own row).
+  // Subscription-joined locale (the reporter's own row). No tmdbId ⇒ the stored
+  // title as-is, and no translation read.
   await notifyUserIssueResolvedPush({ userId: "u-es", title: "Dune", issueId: "iss1" });
+  assert.equal(translationReads.length, 1);
   const resolved = relayCalls[1].body;
   assert.deepEqual(resolved.payload.aps?.alert, { title: "Incidencia resuelta", body: "Se resolvió una incidencia que reportaste" });
   assert.deepEqual(decryptE2e(device, resolved.payload.e2e!), {
@@ -739,6 +772,19 @@ test("a Spanish recipient gets Spanish push text (generic alert AND E2E rich tex
   // Machine fields are never translated.
   assert.equal(resolved.payload.url, "/issues?selected=iss1");
   assert.equal(resolved.collapseId, "issue_resolved");
+  assert.deepEqual(errors, []);
+});
+
+test("an English recipient's title costs no translation read even when a translation is cached (guardrail 40a no-op)", async () => {
+  const device = makeDevice();
+  userRows = [{ id: "u-en", pushOnApproved: true, locale: null }];
+  subRows = [iosSub("u-en", "apns-token-en", { e2e: device })];
+  seedTranslation("movie", 438631, { es: "Duna" });
+  await notifyUserRequestApprovedPush({ userId: "u-en", title: "Dune", mediaType: "MOVIE", tmdbId: 438631 });
+  assert.deepEqual(translationReads, [], "no DB read for an all-English recipient set");
+  assert.equal(relayCalls.length, 1);
+  assert.ok(decryptE2e(device, relayCalls[0].body.payload.e2e!).b.includes("Dune"), "the stored English title");
+  assert.ok(!fetchUrls.some((u) => u.includes("themoviedb")), "and no TMDB fetch");
   assert.deepEqual(errors, []);
 });
 

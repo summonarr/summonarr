@@ -259,7 +259,7 @@ interface PagedResponse<T> {
 }
 
 // Best-effort ISO-code → English display name (stored in the cache; the detail
-// page localizes from `productionCountryCodes` instead).
+// pages localize through localizedProductionCountry, from `productionCountryCodes`).
 function displayRegion(code: string): string {
   return regionName(code) ?? code;
 }
@@ -884,17 +884,20 @@ export async function getTVCredits(id: number): Promise<CastMember[]> {
   return result;
 }
 
-// The season in another language: TMDB's `language=` answer merged over the
-// English list episode by episode. TMDB fills an untranslated episode name with
-// a generic "Épisode 3" and leaves the overview blank, so a blank overview keeps
-// the English one. English (language null) is the plain cached path.
+// The season for a viewer: `episodes` is TMDB's `language=` answer merged over
+// the English list episode by episode, `english` the list it was merged over.
+// TMDB fills an untranslated episode name with a generic "Épisode 3" and leaves
+// the overview blank, so a blank overview keeps the English one. English
+// (language null) is the plain cached path and returns the same array as both.
+// `english` is the ONLY one a caller may STORE: TVEpisodeCache is shared by every
+// viewer and stored data stays English (guardrail 40a) — `episodes` is display-only.
 export async function getTVSeasonEpisodesLocalized(
   tmdbId: number,
   seasonNumber: number,
   language: string | null,
-): Promise<TmdbEpisode[]> {
+): Promise<{ episodes: TmdbEpisode[]; english: TmdbEpisode[] }> {
   const english = await getTVSeasonEpisodes(tmdbId, seasonNumber);
-  if (!language || english.length === 0) return english;
+  if (!language || english.length === 0) return { episodes: english, english };
   const key = `tv:${tmdbId}:season:${seasonNumber}:${language}`;
   let local = await getCache<{ n: number; name: string; overview: string }[]>(key);
   if (!local) {
@@ -903,15 +906,16 @@ export async function getTVSeasonEpisodesLocalized(
       local = (r.episodes ?? []).map((e) => ({ n: e.episode_number, name: (e.name ?? "").trim(), overview: (e.overview ?? "").trim() }));
       if (local.length > 0) await setCache(key, local, TTL.DETAILS);
     } catch {
-      return english; // a failed translation never fails the season
+      return { episodes: english, english }; // a failed translation never fails the season
     }
   }
   const byNumber = new Map(local.map((e) => [e.n, e]));
-  return english.map((e) => {
+  const episodes = english.map((e) => {
     const l = byNumber.get(e.episodeNumber);
     if (!l) return e;
     return { ...e, name: l.name || e.name, overview: l.overview || e.overview };
   });
+  return { episodes, english };
 }
 
 export async function getTVSeasonEpisodes(

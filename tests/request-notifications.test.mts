@@ -66,10 +66,19 @@ const errors: string[] = [];
 console.warn = (...args: unknown[]) => { warns.push(args.map(String).join(" ")); };
 console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
 
-// ── scripted fetch: only the Resend hop is real ─────────────────────────────
+// ── scripted fetch: only the Resend hop and the outbound agent are real ──────
 type ResendPost = { auth: string | null; body: { from: string; to: string; subject: string; html: string } };
 const resendPosts: ResendPost[] = [];
 const fetchUrls: string[] = [];
+
+// One outbound notification agent (notify-agents.ts) — a generic webhook on an
+// RFC1918 literal, so safeFetchAdminConfigured admits it with no DNS. Its POST
+// body is the observable for "which events left the hub, and with what
+// request id/instance": the agent wire is the only place the emitted
+// NotifyEvent's `request` block can be read back.
+const AGENT_URL = "http://10.77.0.9:9/hook";
+type AgentPost = { event: string; request: { id: string | null; instance: string } | null; media: { tmdbId: number | null; title: string } | null; text: string | null };
+const agentPosts: AgentPost[] = [];
 
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input);
@@ -84,7 +93,11 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       headers: { "content-type": "application/json" },
     });
   }
-  throw new Error(`unexpected fetch: ${url} — no channel other than Resend may reach the network`);
+  if (url === AGENT_URL) {
+    agentPosts.push(JSON.parse(String(init?.body)) as AgentPost);
+    return new Response(null, { status: 204 });
+  }
+  throw new Error(`unexpected fetch: ${url} — no channel other than Resend or the agent may reach the network`);
 }) as typeof fetch;
 
 // Dynamic imports so the stubs above genuinely precede the module-graph load.
@@ -98,6 +111,7 @@ const {
   pollAndNotifyAvailable,
   notifyRequestStatusChange,
 } = await import("../src/lib/request-notifications.ts");
+const { invalidateAgentCache } = await import("../src/lib/notify-agents.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
 // One Setting map serves the feature-flag read AND every channel's config read
@@ -195,8 +209,18 @@ shadowPrismaModel(prisma, "notification", {
 });
 
 shadowPrismaModel(prisma, "pushSubscription", { findMany: async () => [] });
-// No outbound notification channels configured (notify-agents.ts).
-shadowPrismaModel(prisma, "notificationAgent", { findMany: async () => [] });
+// Outbound notification channels (notify-agents.ts): none unless a test seeds
+// one with agentRow(). The feature flag defaults ON, so the agent list IS the
+// gate — and notify-agents caches it for 30s, hence the invalidate in beforeEach.
+type AgentRow = { id: string; kind: string; name: string; events: string[]; config: unknown; secret: string | null };
+const agentRows: AgentRow[] = [];
+function agentRow(...events: string[]): AgentRow {
+  return { id: "agent-1", kind: "webhook", name: "Hook", events, config: { url: AGENT_URL, template: null, headerName: "Authorization" }, secret: null };
+}
+shadowPrismaModel(prisma, "notificationAgent", {
+  findMany: async () => agentRows.map((a) => ({ ...a })),
+  update: async () => ({ id: "agent-1" }), // recordOutcome bookkeeping
+});
 
 // The CAS claim (notify-available.ts) runs through $queryRaw; the captured
 // Prisma.Sql exposes the statement + bind params. Default: every candidate wins.
@@ -217,6 +241,7 @@ function reqRow(id: string, mediaServer: string | null, over: Record<string, unk
     requestedBy: `user-${id}`,
     title: `Title ${id}`,
     mediaType: "MOVIE",
+    arrInstance: "",
     user: { mediaServer },
     ...over,
   };
@@ -255,6 +280,7 @@ async function quiesce(): Promise<void> {
       settingFindManyKeys.length, discordAvailableQueries.length, pushAvailableQueries.length,
       emailPrefQueries.length, discordUserReads.length, pushUserReads.length, emailUserReads.length,
       notifCreates.length, createManyCalls.length, resendPosts.length, fetchUrls.length, claims.length,
+      agentPosts.length,
     ]);
     if (now === snapshot) stable++;
     else { snapshot = now; stable = 0; }
@@ -287,6 +313,9 @@ beforeEach(() => {
   createManyImpl = async (args) => ({ count: args.data.length });
   claims.length = 0;
   claimImpl = async (q) => q.values.map((v) => ({ id: String(v) }));
+  agentRows.length = 0;
+  agentPosts.length = 0;
+  invalidateAgentCache(); // notify-agents caches the agent list for 30s
 });
 
 // ── notifyAvailablePerServer: per-server split ──────────────────────────────
@@ -587,8 +616,9 @@ test("gives up after 24 probes without burning the CAS — the orchestrator fall
 
 // ── notifyRequestStatusChange ───────────────────────────────────────────────
 
-test("APPROVED: synchronous void, unconditional in-app row, discord+push+email legs each fired; email honors emailOnApproved", async () => {
+test("APPROVED: synchronous void, unconditional in-app row, discord+push+email legs each fired; email honors emailOnApproved; ONE outbound request.approved", async () => {
   configureChannels();
+  agentRows.push(agentRow("request.approved", "request.available"));
   emailUserRow = { email: "app@example.com", notificationEmail: null, emailOnApproved: true };
 
   const ret = notifyRequestStatusChange("APPROVED", {
@@ -597,11 +627,19 @@ test("APPROVED: synchronous void, unconditional in-app row, discord+push+email l
     mediaType: "MOVIE",
     tmdbId: 438631,
     posterPath: "/d.jpg",
+    requestId: "req-app",
+    arrInstance: "anime",
   });
   assert.equal(ret, undefined); // void — the approve route is never blocked on channels
 
-  await waitFor(() => notifCreates.length === 1 && resendPosts.length === 1, "approved fan-out");
+  await waitFor(() => notifCreates.length === 1 && resendPosts.length === 1 && agentPosts.length === 1, "approved fan-out");
   await quiesce();
+
+  // The outbound channels got exactly one event, carrying the request's own
+  // id + instance (the APPROVED/DECLINED emit stays in the hub).
+  assert.equal(agentPosts.length, 1);
+  assert.equal(agentPosts[0].event, "request.approved");
+  assert.deepEqual(agentPosts[0].request, { id: "req-app", instance: "anime" });
 
   // In-app inbox row: unconditional, shaped by the shared shaper.
   assert.deepEqual(notifCreates[0].data, {
@@ -662,30 +700,86 @@ test("DECLINED with emailOnDeclined off: the inbox row is still written but no e
   assert.deepEqual(errors, []);
 });
 
-test("AVAILABLE: routes push through the batch helper and mails via emailOnAvailable", async () => {
+test("AVAILABLE: the manual admin path IS the batch fan-out — every legacy channel once, ONE outbound request.available, no second channel list (guardrail 14c)", async () => {
+  // requests/[id] "mark available" has already won its own notifiedAvailable CAS
+  // and passed the disabled-account gate, so it is a claimed winner like any
+  // sync/webhook row and must take THE fan-out (fanOutAvailableWinners) rather
+  // than a hand-maintained copy. Observable: the batch helpers' distinctive reads
+  // (notifyOnAvailable / pushOnAvailable findMany, the pref findMany, ONE
+  // createMany) fire exactly once each, the singular per-user reads never do,
+  // and the agent wire sees exactly one request.available — the old branch
+  // emitted its own event beside the four channels, so routing it through the
+  // fan-out without deleting that emit would have fired it twice.
   configureChannels();
-  emailUserRow = { email: "av@example.com", notificationEmail: null, emailOnAvailable: true };
+  agentRows.push(agentRow("request.available"));
+  emailPrefRows = [{ id: "u-av", email: "av@example.com", notificationEmail: null, emailOnAvailable: true }];
 
   notifyRequestStatusChange("AVAILABLE", {
     requestedBy: "u-av",
     title: "Dune",
     mediaType: "MOVIE",
     tmdbId: 438631,
+    posterPath: "/d.jpg",
+    requestId: "req-av",
+    arrInstance: "4k",
   });
 
   await waitFor(
-    () => notifCreates.length === 1 && pushAvailableQueries.length === 1 && resendPosts.length === 1,
+    () => createManyCalls.length === 1 && pushAvailableQueries.length === 1 && resendPosts.length === 1 && agentPosts.length === 1,
     "available fan-out",
   );
   await quiesce();
 
-  assert.equal(notifCreates[0].data.type, "REQUEST_AVAILABLE");
-  assert.equal(notifCreates[0].data.body, "Your movie is now available to watch.");
-  // The single-user AVAILABLE push reuses the batch fan-out (pushOnAvailable).
-  assert.deepEqual(pushAvailableQueries[0].where.id?.in, ["u-av"]);
-  assert.equal(discordUserReads.length, 1); // discord's per-user path also ran
-  assert.deepEqual(emailUserReads[0].select, { email: true, notificationEmail: true, emailOnAvailable: true, locale: true });
+  // One outbound event, carrying the request's own id + instance — and only one.
+  assert.equal(agentPosts.length, 1, "request.available must be emitted exactly once");
+  assert.equal(agentPosts[0].event, "request.available");
+  assert.deepEqual(agentPosts[0].request, { id: "req-av", instance: "4k" });
+  assert.equal(agentPosts[0].media?.tmdbId, 438631);
+
+  // Each legacy channel reached its BATCH recipient resolution exactly once …
+  assert.deepEqual(discordAvailableQueries.map((q) => q.where.id?.in), [["u-av"]]);
+  assert.deepEqual(pushAvailableQueries.map((q) => q.where.id?.in), [["u-av"]]);
+  assert.deepEqual(emailPrefQueries.map((q) => q.where.id?.in), [["u-av"]]);
+  assert.equal(resendPosts.length, 1);
   assert.equal(resendPosts[0].body.to, "av@example.com");
+  // … the inbox row came through the shared batch writer, shaped like every
+  // other AVAILABLE row (skipDuplicates and all) …
+  assert.equal(createManyCalls.length, 1);
+  assert.equal(createManyCalls[0].skipDuplicates, true);
+  assert.deepEqual(createManyCalls[0].data, [{
+    userId: "u-av",
+    type: "REQUEST_AVAILABLE",
+    title: "Dune",
+    body: "Your movie is now available to watch.",
+    tmdbId: 438631,
+    mediaType: "MOVIE",
+    posterPath: "/d.jpg",
+    data: { v: 1 },
+  }]);
+  // … and the singular per-user channel paths (the old second list) never ran.
+  assert.equal(notifCreates.length, 0, "no single-row inbox write beside the batch one");
+  assert.equal(discordUserReads.length, 0, "no singular discord read");
+  assert.equal(emailUserReads.length, 0, "no singular email-pref read");
+  assert.deepEqual(errors, []);
+});
+
+test("AVAILABLE for a DISABLED requester: the gate still runs first — nothing reaches the fan-out, no outbound event", async () => {
+  configureChannels();
+  agentRows.push(agentRow("request.available"));
+  requesterDisabled = true;
+  emailPrefRows = [{ id: "u-gone", email: "gone@example.com", notificationEmail: null, emailOnAvailable: true }];
+
+  notifyRequestStatusChange("AVAILABLE", { requestedBy: "u-gone", title: "Dune", mediaType: "MOVIE", tmdbId: 438631, requestId: "req-gone", arrInstance: "" });
+
+  await waitFor(() => activeGateReads.length === 1, "disabled-account gate read");
+  await quiesce();
+
+  assert.equal(createManyCalls.length, 0, "in-app");
+  assert.equal(discordAvailableQueries.length, 0, "discord");
+  assert.equal(pushAvailableQueries.length, 0, "push");
+  assert.equal(emailPrefQueries.length, 0, "email");
+  assert.equal(resendPosts.length, 0);
+  assert.equal(agentPosts.length, 0, "the outbound channels follow the gate too (guardrail 14c)");
   assert.deepEqual(errors, []);
 });
 
