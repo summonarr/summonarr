@@ -284,7 +284,7 @@ const spec = {
           { name: "sort", in: "query", schema: { type: "string", enum: ["match", "newest", "rating"], default: "match" }, description: "Ordering; \"match\" keeps the engine's own ranking" },
         ],
         responses: {
-          "200": { description: "Ranked recommendation items ({ items, total, available }); each item carries recommendedBecause naming the strongest seed" },
+          "200": { description: "Ranked recommendation items ({ items, total, available }); each item carries recommendedBecause naming the strongest seed, plus recommendedBecause.seeds listing every seed (strongest first, capped at 25; seedCount is the true total)" },
           "404": { description: "feature.page.forYou is disabled" },
         },
       },

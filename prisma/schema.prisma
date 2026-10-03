@@ -1373,6 +1373,16 @@ model UserRecommendation {
   reasonMediaType MediaType?
   reasonSource    RecommendationSeed?
   seedCount       Int        @default(1)
+  // EVERY seed that surfaced this title, strongest contribution first, as
+  // { v: 1, seeds: [{ tmdbId, title, mediaType, source }] } — the reason*
+  // columns above are its first entry. An OBJECT, never a bare array:
+  // db-export tells array columns apart by JS shape (schema-invariants pin). Capped at MAX_REASON_SEEDS (recommendations.ts); seedCount
+  // stays the true total, so a UI can say "and N more" past the cap. JSON
+  // rather than a child table because it is only ever read whole, alongside
+  // its row, and the table is rebuilt wholesale each cycle. Nullable: rows
+  // written before it existed (healed within one cron run) and cold-start
+  // fallback rows, which have no seed to name.
+  reasonSeeds     Json?
 
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)

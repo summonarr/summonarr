@@ -24,6 +24,7 @@ import { PageHeader, EmptyState } from "@/components/ui/design";
 import { PillFilter } from "@/components/media/pill-filter";
 import { NotInterestedButton } from "@/components/media/not-interested-button";
 import { RebuildRecommendationsButton } from "@/components/media/rebuild-recommendations-button";
+import { RecommendationSeedsButton } from "@/components/media/recommendation-seeds-button";
 import { Filter, Sparkles } from "@/components/icons";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { getTranslator } from "@/lib/i18n/server";
@@ -380,11 +381,16 @@ function RecommendationReason({ t, media, rankedOrder }: { t: Translator; media:
           {why.title}
         </span>
       </p>
-      {others > 0 && (
-        <p className="ds-mono m-0" style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", lineHeight: 1.4 }}>
-          {t("browse.forYou.moreOfYours", { count: others })}
-        </p>
-      )}
+      {/* With the seed list stored, "+ N more" opens it; a row written before
+          the list existed keeps the plain count until the next cron run. */}
+      {others > 0 &&
+        (why.seeds && why.seeds.length > 1 ? (
+          <RecommendationSeedsButton pickTitle={media.title} seeds={why.seeds} seedCount={why.seedCount} />
+        ) : (
+          <p className="ds-mono m-0" style={{ fontSize: 11.5, color: "var(--ds-fg-muted)", lineHeight: 1.4 }}>
+            {t("browse.forYou.moreOfYours", { count: others })}
+          </p>
+        ))}
     </div>
   );
 }
