@@ -26,8 +26,11 @@
 //   - requestedByMe / requestToken are scoped to the SESSION user, and the
 //     minted token verifies for that user and that credit only.
 //   - the season route's fire-and-forget episode-metadata warm is unawaited and
-//     swallows errors (the same deliberate pattern as guardrail 17), and must
-//     not run when the viewer can see no source.
+//     swallows errors (the same deliberate pattern as guardrail 17), must not
+//     run when the viewer can see no source, and writes TMDB's ENGLISH text
+//     whatever language the viewer reads (guardrail 40a) — TVEpisodeCache is
+//     shared by every viewer, and warming it from the localized list made a
+//     French and an English viewer rewrite every owned row back and forth.
 //   - provider narrowing, rate limits, and id validation on both.
 //
 // Harness: the tests/votes-route.test.mts idiom — real withAuth-wrapped handlers,
@@ -92,15 +95,18 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
   if (mode === "500") return new Response(JSON.stringify({ status_message: "server error" }), { status: 500, headers: { "content-type": "application/json" } });
 
   if (isSeason) {
-    return new Response(
-      JSON.stringify({
-        episodes: [
-          { episode_number: 1, name: "Winter Is Coming", air_date: "2011-04-17", still_path: "/e1.jpg", runtime: 62, overview: "one" },
-          { episode_number: 2, name: "The Kingsroad", air_date: "2011-04-24", still_path: "/e2.jpg", runtime: 56, overview: "two" },
-        ],
-      }),
-      { status: 200, headers: { "content-type": "application/json" } },
-    );
+    // A `language=` fetch is the viewer's-language overlay (getTVSeasonEpisodesLocalized);
+    // the plain fetch is the English list every other reader and the cache use.
+    const episodes = url.searchParams.has("language")
+      ? [
+        { episode_number: 1, name: "L'hiver vient", overview: "un" },
+        { episode_number: 2, name: "La Route royale", overview: "deux" },
+      ]
+      : [
+        { episode_number: 1, name: "Winter Is Coming", air_date: "2011-04-17", still_path: "/e1.jpg", runtime: 62, overview: "one" },
+        { episode_number: 2, name: "The Kingsroad", air_date: "2011-04-24", still_path: "/e2.jpg", runtime: 56, overview: "two" },
+      ];
+    return new Response(JSON.stringify({ episodes }), { status: 200, headers: { "content-type": "application/json" } });
   }
   if (url.pathname.includes("/person/")) {
     if (url.pathname.includes("combined_credits")) {
@@ -224,7 +230,11 @@ function libModel(name: string, rows: () => LibRow[]) {
 shadowPrismaModel(prisma, "plexLibraryItem", libModel("plexLibraryItem", () => plexLib));
 shadowPrismaModel(prisma, "jellyfinLibraryItem", libModel("jellyfinLibraryItem", () => jellyfinLib));
 
-type EpRow = { tmdbId: number; seasonNumber: number; episodeNumber: number; source: string };
+type EpRow = {
+  tmdbId: number; seasonNumber: number; episodeNumber: number; source: string;
+  // The cached metadata the warm compares against (absent ⇒ a row the warm fills).
+  episodeName?: string | null; airDate?: string | null; stillPath?: string | null; runtime?: number | null; overview?: string | null;
+};
 let episodeRows: EpRow[] = [];
 // Named so the tests that swap in their own stub can put THIS back in a finally.
 const tvEpisodeCacheModel = {
@@ -301,9 +311,9 @@ function getPerson(token: string | null, id: string): Promise<Response> {
   return inScope(() => person.GET(req, { params: Promise.resolve({ id }) }));
 }
 
-function getSeason(token: string | null, id: string, n: string): Promise<Response> {
+function getSeason(token: string | null, id: string, n: string, headers: Record<string, string> = {}): Promise<Response> {
   const req = new NextRequest(`http://localhost:3000/api/tv/${id}/season/${n}`, {
-    method: "GET", headers: token ? { cookie: `${COOKIE}=${token}` } : {},
+    method: "GET", headers: { ...(token ? { cookie: `${COOKIE}=${token}` } : {}), ...headers },
   });
   return inScope(() => season.GET(req, { params: Promise.resolve({ id, n }) }));
 }
@@ -750,4 +760,42 @@ test("season: an owned episode TMDB no longer lists is skipped by the warm rathe
   } finally {
     shadowPrismaModel(prisma, "tVEpisodeCache", tvEpisodeCacheModel);
   }
+});
+
+
+// ── season: the warm stores ENGLISH, whatever the viewer reads (guardrail 40a) ─
+
+// Episode 1 exactly as TMDB's English fixture above describes it.
+const EN_EP1 = { episodeName: "Winter Is Coming", airDate: "2011-04-17", stillPath: "/e1.jpg", runtime: 62, overview: "one" };
+
+test("season: a French viewer reads French episodes, but the metadata warm writes TMDB's ENGLISH text", async () => {
+  plexLib = [{ tmdbId: 1399, mediaType: "TV", serverInstance: "" }];
+  episodeRows = [{ tmdbId: 1399, seasonNumber: 1, episodeNumber: 1, source: "plex" }];
+  const me = await mintSession();
+  const res = await getSeason(me.token, "1399", "1", { "accept-language": "fr" });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.deepEqual([body.episodes[0].name, body.episodes[0].overview], ["L'hiver vient", "un"], "the response is localized");
+  assert.equal(body.episodes[0].runtime, 62, "non-text fields come from the English list");
+  assert.equal(fetchCalls.filter((u) => u.searchParams.get("language")?.startsWith("fr")).length, 1, "one fr season fetch beside the English one");
+  await new Promise((r) => setImmediate(r)); // let the unawaited warm settle
+  const updates = opsOf("tVEpisodeCache.update");
+  assert.equal(updates.length, 1);
+  const data = (updates[0].args as { data: Record<string, unknown> }).data;
+  assert.equal(data.episodeName, "Winter Is Coming", "the shared table stores English, never the viewer's language");
+  assert.equal(data.overview, "one");
+});
+
+test("season: rows already holding the English metadata are not rewritten — by an English viewer or a French one", async () => {
+  plexLib = [{ tmdbId: 1399, mediaType: "TV", serverInstance: "" }];
+  episodeRows = [{ tmdbId: 1399, seasonNumber: 1, episodeNumber: 1, source: "plex", ...EN_EP1 }];
+  const me = await mintSession();
+  assert.equal((await getSeason(me.token, "1399", "1")).status, 200);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(opsOf("tVEpisodeCache.update").length, 0, "English viewer, warm cache ⇒ zero writes");
+  assert.equal((await getSeason(me.token, "1399", "1", { "accept-language": "fr" })).status, 200);
+  await new Promise((r) => setImmediate(r));
+  // The warm compares English against English, so two viewers in two languages
+  // never ping-pong the shared rows between them.
+  assert.equal(opsOf("tVEpisodeCache.update").length, 0, "French viewer, warm cache ⇒ still zero writes");
 });

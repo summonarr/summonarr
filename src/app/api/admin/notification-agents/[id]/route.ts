@@ -5,7 +5,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { invalidateAgentCache } from "@/lib/notify-agents";
-import { AGENT_BODY_CAP, AGENT_PUBLIC_SELECT, parseAgentInput, toPublicAgent } from "@/lib/notify-agents-admin";
+import { AGENT_BODY_CAP, AGENT_PUBLIC_SELECT, destinationDetails, parseAgentInput, toPublicAgent } from "@/lib/notify-agents-admin";
 
 export const PATCH = withAdmin(async (
   req,
@@ -34,7 +34,7 @@ export const PATCH = withAdmin(async (
     userName: session.user.name ?? session.user.email,
     action: "SETTINGS_CHANGE",
     target: `notification-agent:${id}`,
-    details: { op: "update", name, events, enabled, secretChanged: secret !== undefined },
+    details: { op: "update", name, events, enabled, secretChanged: secret !== undefined, ...destinationDetails(config) },
     ...auditContext(req, session),
   });
   const row = await prisma.notificationAgent.findUnique({ where: { id }, select: AGENT_PUBLIC_SELECT });

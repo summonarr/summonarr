@@ -13,8 +13,16 @@ import {
 // `hasSecret`.
 
 export const MAX_AGENTS = 25;
-export const AGENT_BODY_CAP = 16 * 1024;
+// Text-bearing tier (guardrail 30): an 8,000-char template expands under JSON
+// encoding (escapes, 2–4 bytes per non-ASCII char) and rides beside a 2,000-char
+// secret and URL — at 16 KB a CJK template 413'd before `templateTooLong` could
+// name the real limit. The field-level caps remain the actual bound.
+export const AGENT_BODY_CAP = 64 * 1024;
 const MAX_SECRET_CHARS = 2_000;
+// Anything undici's Headers rejects. CR/LF is header injection; NUL (and the
+// other C0 controls / DEL) make `new Headers()` throw a TypeError whose message
+// EMBEDS the value — refusing them here keeps the secret out of lastError/logs.
+const SECRET_CONTROL_RE = /[\x00-\x1f\x7f]/;
 
 export const AGENT_PUBLIC_SELECT = {
   id: true,
@@ -60,6 +68,20 @@ export function toPublicAgent(row: AgentRow) {
   };
 }
 
+// The audit row names the DESTINATION — where events are sent — so a channel
+// re-pointed at another host can be read back after the fact. Never the secret:
+// only whether it changed is recorded (guardrail 14c). Shared by the create and
+// update routes so the two audit payloads cannot drift.
+export function destinationDetails(config: AgentConfig): Record<string, unknown> {
+  const out: Record<string, unknown> = { url: config.url };
+  if ("headerName" in config) {
+    out.headerName = config.headerName;
+    out.hasTemplate = config.template !== null;
+  }
+  if ("topic" in config) out.topic = config.topic;
+  return out;
+}
+
 export type AgentInput = {
   kind: AgentKind;
   name: string;
@@ -97,7 +119,9 @@ export function parseAgentInput(
   let secret: string | null | undefined;
   if (body.secret === undefined) secret = existing ? undefined : null;
   else if (body.secret === null || body.secret === "") secret = null;
-  else if (typeof body.secret === "string" && body.secret.length <= MAX_SECRET_CHARS && !/[\r\n]/.test(body.secret)) secret = body.secret.trim();
+  // A whitespace-only secret trims to "" and is a CLEAR, not a value — otherwise
+  // it is stored as an empty string and slips past the Gotify token guard below.
+  else if (typeof body.secret === "string" && body.secret.length <= MAX_SECRET_CHARS && !SECRET_CONTROL_RE.test(body.secret)) secret = body.secret.trim() || null;
   else return { ok: false, error: "secret" };
 
   // Gotify refuses every message without an application token.

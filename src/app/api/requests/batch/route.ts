@@ -123,6 +123,29 @@ async function writeBatchInboxRows(
   }
 }
 
+// Guardrail 33 / 14c: account removal DISABLES, so a removed requester's leftover
+// PENDING row still has a live email, Discord link and push subscriptions — and
+// the outbound channels (webhook/ntfy/Gotify) have no per-user gate of their own.
+// Every channel below must therefore start from the SAME already-filtered set,
+// resolved once per batch; the per-channel `deactivatedAt: null` predicates the
+// legacy notifiers carry stay as belt-and-braces. A failed lookup drops the
+// whole fan-out rather than guessing — the transition itself is already durable,
+// and telling a disabled account about it is the thing we must not do.
+async function filterActiveOwners<T extends { requestedBy: string }>(targets: T[]): Promise<T[]> {
+  if (targets.length === 0) return targets;
+  try {
+    const active = await prisma.user.findMany({
+      where: { id: { in: [...new Set(targets.map((t) => t.requestedBy))] }, deactivatedAt: null },
+      select: { id: true },
+    });
+    const activeIds = new Set(active.map((u) => u.id));
+    return targets.filter((t) => activeIds.has(t.requestedBy));
+  } catch (err) {
+    console.error("[requests/batch] active-owner lookup failed; skipping notifications:", err instanceof Error ? err.message : err);
+    return [];
+  }
+}
+
 export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const maint = await maintenanceGuard(session);
@@ -281,7 +304,10 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
     // Notify only the ones that actually made it into ARR — otherwise users get
     // a misleading "Approved!" ping for a request that's actually back to PENDING.
     // Skip rows the acting admin owns — no self-notification for one's own request.
-    const notifyTargets = approved.filter((r) => !failedIds.has(r.id) && r.requestedBy !== session.user.id);
+    // Then drop DISABLED owners once, for every channel (filterActiveOwners).
+    const notifyTargets = await filterActiveOwners(
+      approved.filter((r) => !failedIds.has(r.id) && r.requestedBy !== session.user.id),
+    );
     if (notifyTargets.length > 0) {
       notifyUsersRequestsApproved(notifyTargets).catch(() => {});
       notifyUsersRequestsApprovedPush(notifyTargets).catch(() => {});
@@ -304,7 +330,8 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
       select: { id: true, requestedBy: true, title: true, mediaType: true, tmdbId: true, posterPath: true, arrInstance: true },
     });
     // Skip rows the acting admin owns — no self-notification for one's own request.
-    const declineTargets = declined.filter((r) => r.requestedBy !== session.user.id);
+    // Then drop DISABLED owners once, for every channel (filterActiveOwners).
+    const declineTargets = await filterActiveOwners(declined.filter((r) => r.requestedBy !== session.user.id));
     notifyUsersRequestsDeclined(declineTargets, typedAdminNote).catch(() => {});
     notifyUsersRequestsDeclinedPush(declineTargets).catch(() => {});
     void fanOutEmails(declineTargets, "DECLINED", typedAdminNote);

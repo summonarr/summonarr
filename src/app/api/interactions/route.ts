@@ -1234,8 +1234,12 @@ async function handleComponent(interaction: any): Promise<void> {
         // Gate on the arr push sticking: on failure the row rolled back to PENDING, and
         // telling the requester "approved" would be a lie (the web PATCH path gates the
         // same way via arrPushSucceeded).
+        // `requestId`, not the row's `id`: RequestInfo names the field requestId
+        // (the web PATCH path passes `requestId: updated.id`), and the row's `id`
+        // is simply ignored — every Discord-driven decision used to emit
+        // `request.id: null` to the outbound channels.
         if (!arrFailed && request.requestedBy !== adminUser.id) {
-          notifyRequestStatusChange("APPROVED", request);
+          notifyRequestStatusChange("APPROVED", { ...request, requestId: request.id });
         }
         // Queued unconditionally, exactly like the web PATCH path: on an arr failure the
         // row rolled back to PENDING and the job's own status re-read bails, so there is
@@ -1289,7 +1293,7 @@ async function handleComponent(interaction: any): Promise<void> {
         emitSSE({ type: "request:updated", requestId: request.id, status: "DECLINED", userId: request.requestedBy });
         // Fan out push + email + Discord. Skip self-notify when the admin declined their own request.
         if (request.requestedBy !== adminUser.id) {
-          notifyRequestStatusChange("DECLINED", request);
+          notifyRequestStatusChange("DECLINED", { ...request, requestId: request.id });
         }
         const embed: Record<string, unknown> = {
           color: 0xED4245,

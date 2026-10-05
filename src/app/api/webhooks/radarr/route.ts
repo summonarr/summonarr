@@ -285,9 +285,12 @@ export async function POST(req: NextRequest) {
     // Scope by arrInstance to the instance that fired this webhook: one instance's
     // Download must not sweep in a sibling instance's request and notify it off the
     // wrong grab.
+    // `arrInstance` is selected, not taken from the handler's scope: the rows ARE
+    // the instance's own (the where scopes them), and the outbound event reads
+    // the slug off each winner row (guardrail 32).
     const pending = await prisma.mediaRequest.findMany({
       where: { tmdbId, mediaType: "MOVIE", arrInstance, status: "AVAILABLE", notifiedAvailable: false },
-      select: { id: true, requestedBy: true, title: true, mediaType: true, posterPath: true, tmdbId: true, user: { select: { mediaServer: true } } },
+      select: { id: true, requestedBy: true, title: true, mediaType: true, posterPath: true, tmdbId: true, arrInstance: true, user: { select: { mediaServer: true } } },
     });
     if (pending.length === 0) return;
 

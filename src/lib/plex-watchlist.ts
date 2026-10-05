@@ -10,6 +10,7 @@ import { getMediaInstances } from "@/lib/media-instance-registry";
 import { getPlexConfig } from "@/lib/plex-config";
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { forgetWarnOnChange, warnOnChange } from "@/lib/log-dedup";
+import { processSingleton } from "@/lib/process-singleton";
 import {
   AdminTokenRejectedError,
   fetchFriendUuidMap,
@@ -58,6 +59,14 @@ import {
 // sets plexWatchlistServerAutoEnroll = "true". Both paths share the ledger and
 // the "plex-watchlist" source, so switching between them never re-files a title.
 // A rejected ADMIN token never deletes any user's Account rows (guardrail 34b).
+//
+// METADATA LOOKUPS. A friend's GraphQL watchlist carries NO guids, so every node
+// needs one metadata.provider.plex.tv GET to learn its TMDB id — and the ledger
+// (keyed by tmdbId) cannot filter before that. Results are cached in-process by
+// ratingKey (see the metadata cache below) so an unchanged watchlist costs zero
+// GETs on the next run. A lookup that FAILS is never cached and the title is
+// retried next run; a user whose every title was lost to such failures reads
+// "error" rather than "ok", and the run degrades.
 
 export const PLEX_WATCHLIST_HOSTS = ["discover.provider.plex.tv", "metadata.provider.plex.tv"] as const;
 
@@ -73,6 +82,64 @@ const METADATA_CONCURRENCY = 4;
 // New titles filed per user per run. A first sync of a long watchlist would
 // otherwise file hundreds of requests at once; the rest follow on later runs.
 export const MAX_AUTO_REQUESTS_PER_USER_PER_RUN = 20;
+
+// ── metadata lookup cache ────────────────────────────────────────────────────
+//
+// A Plex metadata ratingKey names ONE global metadata item, so its tmdb guid is
+// the same whoever asks: the cache is keyed by ratingKey alone and shared across
+// users, tokens and both paths. Before it, three friends with 300-title lists
+// cost ~900 admin-token GETs per 30-minute run, indefinitely, even once every
+// title was terminal in the ledger. Process-wide (process-singleton — a
+// per-chunk Map would re-fetch once per server chunk) and bounded: at most
+// METADATA_CACHE_MAX entries, the least-recently-used evicted first. A POSITIVE
+// result (tmdb id found) lives METADATA_CACHE_POSITIVE_TTL_MS; a NEGATIVE one
+// (Plex knows the title only by TVDB/IMDb) lives METADATA_CACHE_NEGATIVE_TTL_MS
+// so a title that gains a tmdb guid is re-checked daily, not never. A FAILED
+// lookup is never cached — the title is retried next run (nothing was recorded
+// for it), and a restart always starts cold.
+export const METADATA_CACHE_MAX = 10_000;
+export const METADATA_CACHE_POSITIVE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+export const METADATA_CACHE_NEGATIVE_TTL_MS = 24 * 60 * 60 * 1000;
+
+export interface PlexMetadataCacheEntry {
+  tmdbId: number | null;
+  expiresAt: number;
+}
+
+const metadataCache = processSingleton(
+  "plex-watchlist:metadataCache",
+  () => new Map<string, PlexMetadataCacheEntry>(),
+);
+
+// A fresh entry, moved to the most-recently-used end; an expired one is dropped.
+function cachedMetadata(ratingKey: string, now: number): PlexMetadataCacheEntry | undefined {
+  const hit = metadataCache.get(ratingKey);
+  if (!hit) return undefined;
+  metadataCache.delete(ratingKey);
+  if (hit.expiresAt <= now) return undefined;
+  metadataCache.set(ratingKey, hit);
+  return hit;
+}
+
+function rememberMetadata(ratingKey: string, tmdbId: number | null, now: number): void {
+  metadataCache.delete(ratingKey);
+  if (metadataCache.size >= METADATA_CACHE_MAX) {
+    // Map iterates in insertion order, and a hit re-inserts, so the first key is
+    // the least recently used.
+    const oldest = metadataCache.keys().next().value;
+    if (oldest !== undefined) metadataCache.delete(oldest);
+  }
+  const ttl = tmdbId === null ? METADATA_CACHE_NEGATIVE_TTL_MS : METADATA_CACHE_POSITIVE_TTL_MS;
+  metadataCache.set(ratingKey, { tmdbId, expiresAt: now + ttl });
+}
+
+/** Test seams: the cache is process-wide, so a suite must clear it between cases. */
+export function __resetPlexMetadataCacheForTests(): void {
+  metadataCache.clear();
+}
+export function __plexMetadataCacheForTests(): Map<string, PlexMetadataCacheEntry> {
+  return metadataCache;
+}
 
 export class PlexTokenRevokedError extends Error {
   constructor() {
@@ -157,6 +224,15 @@ async function plexJson(url: string, token: string): Promise<unknown> {
 // one metadata lookup; one that still has none (e.g. a title Plex knows only by
 // TVDB/IMDb) comes back with tmdbId null and is skipped by the caller.
 export async function fetchPlexWatchlist(token: string, opts: { signal?: AbortSignal } = {}): Promise<PlexWatchlistItem[]> {
+  return (await fetchPlexWatchlistWithStats(token, opts)).items;
+}
+
+// The same read, plus how the metadata lookups went (the server path reads the
+// owner's list this way and needs to know whether a failure defeated the read).
+export async function fetchPlexWatchlistWithStats(
+  token: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<{ items: PlexWatchlistItem[]; lookups: MetadataLookupStats }> {
   const items: PlexWatchlistItem[] = [];
   for (let start = 0; start < MAX_WATCHLIST_ITEMS; start += PAGE_SIZE) {
     if (opts.signal?.aborted) break;
@@ -171,31 +247,62 @@ export async function fetchPlexWatchlist(token: string, opts: { signal?: AbortSi
     if (page.length < PAGE_SIZE || (total !== null && start + PAGE_SIZE >= total)) break;
   }
 
-  await resolveMissingTmdbIds(items, token, opts.signal);
-  return items;
+  const lookups = await resolveMissingTmdbIds(items, token, opts.signal);
+  return { items, lookups };
 }
 
-// One metadata lookup per entry whose list row carried no tmdb:// guid, bounded
-// (guardrail 31). A revoked token fails the whole read; a single bad lookup only
-// skips that title (it is retried next run — nothing was recorded for it).
+export interface MetadataLookupStats {
+  // Entries that needed a metadata GET this call — the cache answered the rest.
+  attempted: number;
+  // Of those, lookups that failed for a reason other than a revoked token. The
+  // title stays unresolved, nothing is cached for it, and it is retried next run.
+  failed: number;
+}
+
+// One metadata lookup per entry whose list row carried no tmdb:// guid and whose
+// ratingKey the cache cannot answer, bounded (guardrail 31). A revoked token
+// fails the whole read; a single bad lookup only skips that title (it is retried
+// next run — nothing was recorded or cached for it) and is counted for the
+// caller, which decides whether the failures defeated the read.
 export async function resolveMissingTmdbIds(
   items: PlexWatchlistItem[],
   token: string,
   signal?: AbortSignal,
-): Promise<void> {
-  const unresolved = items.filter((i) => i.tmdbId === null);
-  if (unresolved.length === 0 || signal?.aborted) return;
+): Promise<MetadataLookupStats> {
+  const stats: MetadataLookupStats = { attempted: 0, failed: 0 };
+  const now = Date.now();
+  const unresolved: PlexWatchlistItem[] = [];
+  for (const item of items) {
+    if (item.tmdbId !== null) continue;
+    const hit = cachedMetadata(item.ratingKey, now);
+    if (hit) item.tmdbId = hit.tmdbId;
+    else unresolved.push(item);
+  }
+  if (unresolved.length === 0 || signal?.aborted) return stats;
   await mapLimit(unresolved, METADATA_CONCURRENCY, async (item) => {
     if (signal?.aborted) return;
+    stats.attempted++;
     try {
       const data = (await plexJson(`${METADATA_URL}${encodeURIComponent(item.ratingKey)}`, token)) as {
         MediaContainer?: { Metadata?: Array<{ Guid?: unknown }> };
       };
       item.tmdbId = tmdbIdFromPlexGuids(data?.MediaContainer?.Metadata?.[0]?.Guid);
+      rememberMetadata(item.ratingKey, item.tmdbId, Date.now());
     } catch (err) {
       if (err instanceof PlexTokenRevokedError) throw err;
+      stats.failed++;
     }
   });
+  return stats;
+}
+
+// A read is DEFEATED when lookups failed and nothing on the list resolved: an
+// "ok" there would tell the user their list is read while nothing is. A list of
+// titles Plex knows only by TVDB/IMDb (no failures) is a genuine, if empty,
+// answer; a partial failure still files what resolved and retries the rest next
+// run. Pure.
+export function metadataLookupsDefeatedRead(items: readonly PlexWatchlistItem[], lookups: MetadataLookupStats): boolean {
+  return lookups.failed > 0 && items.every((i) => i.tmdbId === null);
 }
 
 // ── token capture (called at Plex sign-in) ──────────────────────────────────
@@ -278,8 +385,9 @@ async function settingIsTrue(key: string): Promise<boolean> {
 // GET /api/profile/auto-request. `hasToken` is the caller's own stored token.
 export interface PlexWatchlistConnection {
   serverSource: boolean;
-  // Their consent counts for the server path: they switched the toggle on
-  // themselves (plexWatchlistOptInAt), or the admin auto-enrolls.
+  // Their consent counts for the server path: the toggle is on AND they switched
+  // it on themselves (plexWatchlistOptInAt) or the admin auto-enrolls. Always
+  // false while the toggle is off — the cron's eligibility query requires it.
   serverOptedIn: boolean;
   // The last server-path run's verdict for them; null when it did not read them.
   serverStatus: ServerWatchlistUserStatus | null;
@@ -287,7 +395,7 @@ export interface PlexWatchlistConnection {
 }
 
 export async function getPlexWatchlistConnection(
-  user: { id: string; plexWatchlistOptInAt: Date | null },
+  user: { id: string; plexWatchlistOptInAt: Date | null; plexWatchlistAutoRequest: boolean },
   hasToken: boolean,
 ): Promise<PlexWatchlistConnection> {
   const [serverSource, autoEnroll, statusRow] = await Promise.all([
@@ -295,7 +403,11 @@ export async function getPlexWatchlistConnection(
     settingIsTrue(PLEX_WATCHLIST_SERVER_AUTO_ENROLL_KEY),
     prisma.setting.findUnique({ where: { key: PLEX_WATCHLIST_SERVER_STATUS_KEY } }),
   ]);
-  const serverOptedIn = user.plexWatchlistOptInAt !== null || autoEnroll;
+  // The toggle gates the answer from both sides: with auto-enroll on, a user who
+  // just switched it OFF is no longer read by the cron (its eligibility query
+  // requires the toggle), so they must not read as opted in or connected until a
+  // later run happens to rewrite the status JSON without them.
+  const serverOptedIn = user.plexWatchlistAutoRequest && (user.plexWatchlistOptInAt !== null || autoEnroll);
   const serverStatus = serverSource ? parsePlexWatchlistServerStatus(statusRow?.value)?.users[user.id] ?? null : null;
   const connectedVia = hasToken ? "token" : serverSource && serverOptedIn && serverStatus === "ok" ? "server" : null;
   return { serverSource, serverOptedIn, serverStatus, connectedVia };
@@ -320,6 +432,11 @@ export interface PlexWatchlistServerResult {
   adminTokensRejected: number;
   // Instances whose friend list could not be read for any other reason.
   instanceErrors: number;
+  // Metadata lookups (a friend's GraphQL nodes carry no guid) that failed this
+  // run for a reason other than a rejected token; each title is retried next
+  // run. A user NONE of whose titles resolved because of these is counted in
+  // `errors` and reads "error", not "ok" (metadataLookupsDefeatedRead).
+  lookupFailures: number;
 }
 
 export interface PlexWatchlistSyncResult {
@@ -419,7 +536,7 @@ async function syncServerPath(
   signal: AbortSignal | undefined,
 ): Promise<PlexWatchlistServerResult> {
   const server: PlexWatchlistServerResult = {
-    instances: 0, friends: 0, matched: 0, unmatchedFriends: 0, users: 0, private: 0, adminTokensRejected: 0, instanceErrors: 0,
+    instances: 0, friends: 0, matched: 0, unmatchedFriends: 0, users: 0, private: 0, adminTokensRejected: 0, instanceErrors: 0, lookupFailures: 0,
   };
   const statuses: Record<string, ServerWatchlistUserStatus> = {};
   const rejectedTokens = new Set<string>();
@@ -512,8 +629,9 @@ async function syncServerPath(
       server.users++;
       try {
         let items: PlexWatchlistItem[];
+        let lookups: MetadataLookupStats;
         if (target.graphId === null) {
-          items = await fetchPlexWatchlist(target.token, { signal });
+          ({ items, lookups } = await fetchPlexWatchlistWithStats(target.token, { signal }));
         } else {
           const list = await fetchFriendWatchlist(target.token, target.graphId, { maxItems: MAX_WATCHLIST_ITEMS, signal });
           if (list.status === "private") {
@@ -526,7 +644,17 @@ async function syncServerPath(
             const item = parseWatchlistEntry({ ratingKey: node.id, title: node.title, type: node.type });
             if (item) items.push(item);
           }
-          await resolveMissingTmdbIds(items, target.token, signal);
+          // No guid on a GraphQL node: every one is a cache hit or a lookup.
+          lookups = await resolveMissingTmdbIds(items, target.token, signal);
+        }
+        server.lookupFailures += lookups.failed;
+        if (metadataLookupsDefeatedRead(items, lookups)) {
+          // Nothing resolved and lookups failed: "ok" would be a lie. A run
+          // error (the run degrades); the titles are retried next run.
+          statuses[user.id] = "error";
+          result.errors++;
+          console.error(`[plex-watchlist] server-path sync for user ${user.id}: ${lookups.failed} of ${lookups.attempted} metadata lookup(s) failed and nothing on the watchlist could be resolved`);
+          continue;
         }
         await fileWatchlistTitles(user, items, result, signal);
         statuses[user.id] = "ok";

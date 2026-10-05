@@ -1,7 +1,7 @@
 import "server-only";
 import { settleLimit } from "./concurrency";
 import { prisma } from "./prisma";
-import { notifyUserRequestApproved, notifyUserRequestAvailable, notifyUserRequestDeclined, notifyUsersRequestsAvailable } from "./discord-notify";
+import { notifyUserRequestApproved, notifyUserRequestDeclined, notifyUsersRequestsAvailable } from "./discord-notify";
 import { notifyUserRequestApprovedPush, notifyUserRequestDeclinedPush, notifyUsersRequestsAvailablePush } from "./push";
 import { notifyUserRequestApprovedEmail, notifyUserRequestDeclinedEmail, notifyUserRequestAvailableEmail } from "./email";
 import { resolveUserNotificationEmail } from "./notification-email";
@@ -33,6 +33,10 @@ export interface PendingAvailableRequest {
   // branch in notifyAvailablePerServer.
   posterPath?: string | null;
   tmdbId?: number | null;
+  // REQUIRED: the outbound `request.available` event names the instance
+  // (guardrail 32), and a select that leaves it off would silently report the
+  // default slug for a 4K/named request — the webhook polls shipped that way.
+  arrInstance: string;
   user: { mediaServer: string | null } | null;
 }
 
@@ -120,16 +124,25 @@ export interface AvailableWinner {
   mediaType: string;
   tmdbId?: number | null;
   posterPath?: string | null;
-  arrInstance?: string | null;
+  // REQUIRED, not defaulted: the outbound event's `request.instance` is read
+  // from here (guardrail 32). It was optional-with-`""` once, and four of the
+  // seven callers silently dropped it — a 4K request marked by the arr-cache
+  // passes or the webhook poll reported the default instance while the same
+  // request marked by a library pass reported "4k". The compiler now makes
+  // every caller carry the row's own slug.
+  arrInstance: string;
 }
 
 // THE "now available" fan-out, for every path that has already won the
 // once-only claim (claimAvailableNotificationWinners / claimAvailableNotifications
-// — guardrail 14): the webhook poll above and all six sync-orchestrator /
-// per-source marking passes. Callers pass only the claimed, DELIVERABLE rows
-// (disabled requesters already dropped — guardrail 33), so every channel here
-// fires exactly once per transition. Adding a channel means adding it HERE, not
-// at the call sites — they used to repeat this list six times.
+// — guardrail 14): the webhook poll above, all six sync-orchestrator /
+// per-source marking passes, AND the manual admin "mark available"
+// (dispatchRequestStatusChange below, after its own CAS + disabled-account
+// gate). Callers pass only the claimed, DELIVERABLE rows (disabled requesters
+// already dropped — guardrail 33), so every channel here fires exactly once
+// per transition. Adding a channel means adding it HERE, not at a call site —
+// the sites used to repeat this list six times, and the manual path kept a
+// seventh, differently-shaped copy (guardrail 14c).
 //
 // Returns the email send (bounded, awaited inside); the sync callers `void` it,
 // the webhook path awaits it.
@@ -140,7 +153,9 @@ export async function fanOutAvailableWinners(winners: AvailableWinner[], logScop
   notifyUsersRequestsAvailablePush(payload).catch((err) => console.error(`[${logScope}] push available notify failed:`, err instanceof Error ? err.message : err));
   // In-app inbox for the batch winners (one createMany, same CAS-once guarantee).
   void writeAvailableInAppNotifications(winners, logScope);
-  // Outbound channels: one event per claimed request.
+  // Outbound channels: one event per claimed request. This is the ONLY
+  // `request.available` emit — dispatchRequestStatusChange routes here rather
+  // than emitting its own, or the manual path would fire the event twice.
   emitNotificationEvents(winners.map((w) => availableEvent(w)));
   // Email channel, so the user's `emailOnAvailable` preference is honoured on
   // the webhook/sync paths too.
@@ -151,18 +166,18 @@ function availableEvent(w: AvailableWinner): NotifyEvent {
   return {
     event: "request.available",
     media: { type: w.mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: w.tmdbId ?? null, title: w.title, posterPath: w.posterPath ?? null },
-    request: { id: w.id ?? null, instance: w.arrInstance ?? "" },
+    request: { id: w.id ?? null, instance: w.arrInstance },
   };
 }
 
-// Shared BATCH in-app inbox writer for the "now available" fan-out. The
-// webhook-poll path (notifyAvailablePerServer above) AND all six
-// sync-orchestrator/per-source claimAvailableNotificationWinners sites route their
-// winners through here, so the header bell / /notifications inbox gets a
-// REQUEST_AVAILABLE row for every AVAILABLE transition. The manual admin path
-// (notifyRequestStatusChange) writes single rows via createInAppNotification
-// instead. The CAS (compare-and-swap) in claimAvailableNotificationWinners has
-// already deduped the winner set; skipDuplicates is an extra safety net.
+// Shared BATCH in-app inbox writer for the "now available" fan-out. Every
+// AVAILABLE transition — the webhook poll (notifyAvailablePerServer above), all
+// six sync-orchestrator/per-source claimAvailableNotificationWinners sites and
+// the manual admin path (via fanOutAvailableWinners) — routes its winners
+// through here, so the header bell / /notifications inbox gets a
+// REQUEST_AVAILABLE row for every one of them. The CAS (compare-and-swap) in
+// claimAvailableNotificationWinners has already deduped the winner set;
+// skipDuplicates is an extra safety net.
 // One createMany = one DB round-trip.
 // Best-effort: swallows its own errors so an inbox-write blip never aborts the
 // sync run or the triggering action. Call fire-and-forget:
@@ -344,8 +359,22 @@ function dispatchRequestStatusChange(
 ): void {
   const { requestedBy, title, mediaType, posterPath, tmdbId } = request;
 
+  // The manual admin "mark available" is a claimed winner like any other
+  // (requests/[id] runs the notifiedAvailable CAS before calling here, and the
+  // disabled-account gate above has passed), so it takes THE "now available"
+  // fan-out — every legacy channel plus the one outbound emit — instead of a
+  // second, hand-maintained channel list (guardrail 14c). A channel added to
+  // fanOutAvailableWinners reaches this path for free.
+  if (status === "AVAILABLE") {
+    fanOutAvailableWinners(
+      [{ id: request.requestId, requestedBy, title, mediaType, tmdbId, posterPath, arrInstance: request.arrInstance ?? "" }],
+      "notify",
+    ).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
+    return;
+  }
+
   emitNotificationEvent({
-    event: status === "APPROVED" ? "request.approved" : status === "DECLINED" ? "request.declined" : "request.available",
+    event: status === "APPROVED" ? "request.approved" : "request.declined",
     media: { type: mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId: tmdbId ?? null, title, posterPath: posterPath ?? null },
     request: { id: request.requestId ?? null, instance: request.arrInstance ?? "" },
     text: status === "DECLINED" ? (request.adminNote ?? null) : null,
@@ -359,18 +388,6 @@ function dispatchRequestStatusChange(
       .then((u) => {
         const to = u && resolveUserNotificationEmail(u);
         if (to && u.emailOnApproved) notifyUserRequestApprovedEmail({ toEmail: to, title, mediaType, posterPath, tmdbId, locale: u.locale });
-      })
-      .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-  }
-
-  if (status === "AVAILABLE") {
-    writeInAppNotification(requestedBy, "REQUEST_AVAILABLE", { title, mediaType, tmdbId, posterPath });
-    notifyUserRequestAvailable(requestedBy, title, mediaType, tmdbId).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    notifyUsersRequestsAvailablePush([{ requestedBy, title, mediaType, tmdbId }]).catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
-    prisma.user.findUnique({ where: { id: requestedBy }, select: { email: true, notificationEmail: true, emailOnAvailable: true, locale: true } })
-      .then((u) => {
-        const to = u && resolveUserNotificationEmail(u);
-        if (to && u.emailOnAvailable) notifyUserRequestAvailableEmail({ toEmail: to, title, mediaType, posterPath, tmdbId, locale: u.locale });
       })
       .catch((err) => console.error("[notify]", err instanceof Error ? err.message : err));
   }

@@ -17,8 +17,9 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // Additive (the iOS app decodes this body — never remove or rename a field):
 //   plexServerSource  — the admin lets the cron read Plex friends' watchlists
 //                       through the server owner's token;
-//   plexServerOptedIn — the caller's consent counts for that path (they turned
-//                       the toggle on themselves, or the admin auto-enrolls);
+//   plexServerOptedIn — the caller's consent counts for that path (the toggle is
+//                       on AND they turned it on themselves, or the admin
+//                       auto-enrolls); false the moment they switch it off;
 //   plexServerStatus  — the last server-path run's verdict for them:
 //                       "ok" | "private" | "error" | null (not read);
 //   plexConnectedVia  — "token" | "server" | null: how the cron reads their list.
@@ -35,7 +36,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
   ]);
   if (!user) return NextResponse.json({ error: t("apiAuth.common.notFound") }, { status: 404 });
   const connection = await getPlexWatchlistConnection(
-    { id: session.user.id, plexWatchlistOptInAt: user.plexWatchlistOptInAt },
+    { id: session.user.id, plexWatchlistOptInAt: user.plexWatchlistOptInAt, plexWatchlistAutoRequest: user.plexWatchlistAutoRequest },
     plexAccount !== null,
   );
   return NextResponse.json({

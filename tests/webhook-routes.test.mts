@@ -120,6 +120,7 @@ const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers
 const { arrSettingKey } = await import("../src/lib/arr-instances.ts");
 const { POST: radarrPOST } = await import("../src/app/api/webhooks/radarr/route.ts");
 const { POST: sonarrPOST } = await import("../src/app/api/webhooks/sonarr/route.ts");
+const { invalidateAgentCache } = await import("../src/lib/notify-agents.ts");
 
 type Req = InstanceType<typeof NextRequest>;
 
@@ -173,8 +174,28 @@ type SettingDeleteManyArgs = {
 const settingCreateManyCalls: SettingCreateManyArgs[] = [];
 const settingDeleteManyCalls: SettingDeleteManyArgs[] = [];
 
-// No outbound notification channels configured (notify-agents.ts).
-shadowPrismaModel(prisma, "notificationAgent", { findMany: async () => [] });
+// Outbound notification channels (notify-agents.ts): none unless a test seeds
+// one with agentRow() — a generic webhook on an RFC1918 literal (admin-mode SSRF,
+// no DNS). The shared fetch stub records every call's init, so the agent's POST
+// body — the only seam where the emitted event's `request.instance` can be read
+// back — is in fetchCalls. The feature flag defaults ON and notify-agents caches
+// the agent list for 30s, hence the invalidate in beforeEach.
+const AGENT_URL = "http://10.77.0.9:9/hook";
+type AgentRow = { id: string; kind: string; name: string; events: string[]; config: unknown; secret: string | null };
+const agentRows: AgentRow[] = [];
+function agentRow(...events: string[]): AgentRow {
+  return { id: "agent-1", kind: "webhook", name: "Hook", events, config: { url: AGENT_URL, template: null, headerName: "Authorization" }, secret: null };
+}
+shadowPrismaModel(prisma, "notificationAgent", {
+  findMany: async () => agentRows.map((a) => ({ ...a })),
+  update: async () => ({ id: "agent-1" }), // recordOutcome bookkeeping
+});
+type AgentPost = { event: string; request: { id: string | null; instance: string } | null };
+function agentPosts(): AgentPost[] {
+  return fetchCalls
+    .filter((c) => c.url === AGENT_URL && typeof c.init?.body === "string")
+    .map((c) => JSON.parse(c.init!.body as string) as AgentPost);
+}
 shadowPrismaModel(prisma, "setting", {
   findUnique: async (args: { where: { key: string } }) =>
     settings.has(args.where.key) ? { key: args.where.key, value: settings.get(args.where.key)! } : null,
@@ -261,10 +282,34 @@ type RequestRow = {
   availableAt: Date | null;
   pendingNotifyAt: Date | null;
   notifiedAvailable: boolean;
+  // Read by the deferred poll's `pending` select (the notify fan-out).
+  requestedBy: string;
+  title: string;
+  posterPath: string | null;
 };
 const requests: RequestRow[] = [];
 type UpdateManyCall = { where: Record<string, unknown>; data: Record<string, unknown> };
 const requestUpdateManyCalls: UpdateManyCall[] = [];
+
+// findMany answers [] by default (the handlers' synchronous path never reads it).
+// A test that EXECUTES the deferred poll swaps in honourFindManyWhere() so the
+// `pending` select sees the rows the webhook just flipped. The `select` is
+// HONOURED, not ignored: the poll's winner rows carry exactly the columns the
+// route asked for, so a column the route forgets to select (arrInstance was
+// one) is genuinely absent downstream — returning whole rows would hide that.
+type FindManyArgs = { where?: Record<string, unknown>; select?: Record<string, unknown> };
+let mediaRequestFindManyImpl: (args: FindManyArgs) => Promise<unknown[]> = async () => [];
+function honourFindManyWhere(): void {
+  mediaRequestFindManyImpl = async (args) =>
+    requests
+      .filter((r) => rowMatches(r as unknown as Record<string, unknown>, args.where ?? {}))
+      .map((r) => {
+        const full: Record<string, unknown> = { ...r, user: { mediaServer: null } };
+        const sel = args.select;
+        if (!sel) return full;
+        return Object.fromEntries(Object.keys(sel).filter((k) => sel[k]).map((k) => [k, full[k]]));
+      });
+}
 
 const mediaRequestStub = {
   updateMany: async (args: UpdateManyCall) => {
@@ -281,7 +326,7 @@ const mediaRequestStub = {
     const hit = requests.find((r) => rowMatches(r as unknown as Record<string, unknown>, args.where));
     return hit ? { ...hit } : null;
   },
-  findMany: async () => [],
+  findMany: async (args: FindManyArgs = {}) => mediaRequestFindManyImpl(args),
 };
 shadowPrismaModel(prisma, "mediaRequest", mediaRequestStub);
 
@@ -354,6 +399,37 @@ shadowPrismaModel(prisma, "deletionVote", {
 // keys, the grab-completed outcome is "skipped-no-subs" (never a network send).
 shadowPrismaModel(prisma, "pushSubscription", { findMany: async () => [] });
 
+// The deferred poll's fan-out (notifyAvailablePerServer → fanOutAvailableWinners):
+// the disabled-requester read + the channels' recipient reads (nobody disabled,
+// nobody linked/opted in — the channels stop before their wires), the in-app
+// inbox createMany (recorded: the legacy-channel observable), and the
+// notifiedAvailable CAS, replayed against the request store with the same
+// predicate the real statement carries (notifiedAvailable=false, and status =
+// AVAILABLE when the SQL asks for it) so only a genuine winner comes back.
+shadowPrismaModel(prisma, "user", {
+  findMany: async () => [],
+  findUnique: async () => null,
+});
+const notificationRows: Array<{ userId: string; type: string; tmdbId: number | null }> = [];
+shadowPrismaModel(prisma, "notification", {
+  createMany: async (args: { data: Array<{ userId: string; type: string; tmdbId: number | null }> }) => {
+    notificationRows.push(...args.data);
+    return { count: args.data.length };
+  },
+});
+shadowPrismaClientMethod(prisma, "$queryRaw", async (q: { sql: string; values: unknown[] }) => {
+  const ids = (q.values ?? []).map(String);
+  const requireAvailable = q.sql.includes(`AND "status" = 'AVAILABLE'`);
+  const winners: { id: string }[] = [];
+  for (const row of requests) {
+    if (!ids.includes(row.id) || row.notifiedAvailable) continue;
+    if (requireAvailable && row.status !== "AVAILABLE") continue;
+    row.notifiedAvailable = true;
+    winners.push({ id: row.id });
+  }
+  return winners;
+});
+
 // $transaction: callback form (the route's advisory-lock txs) runs against the
 // shared in-memory delegates; array form (clearDeletionVotesForTmdbs) settles
 // the already-started promises. txError makes the next callback-form tx throw
@@ -419,6 +495,9 @@ function seedRequest(overrides: Partial<RequestRow> & { tmdbId: number; mediaTyp
     availableAt: null,
     pendingNotifyAt: null,
     notifiedAvailable: false,
+    requestedBy: "user-1",
+    title: "Some Title",
+    posterPath: null,
     ...overrides,
   };
   requests.push(row);
@@ -516,6 +595,10 @@ beforeEach(() => {
   deletionVoteDeletes.length = 0;
   executeRawCalls.length = 0;
   txError = null;
+  mediaRequestFindManyImpl = async () => [];
+  notificationRows.length = 0;
+  agentRows.length = 0;
+  invalidateAgentCache(); // notify-agents' 30s agent-list cache
   seedBaseSettings();
 });
 
@@ -662,6 +745,63 @@ test("radarr 4k Download: flips ONLY the 4k request, verified against the 4k ins
   assert.equal(fetchCalls.length, 1);
   assert.ok(fetchCalls[0].url.startsWith("http://127.0.0.1:7878/api/v3/movie?tmdbId=603"));
   assert.equal(new Headers(fetchCalls[0].init?.headers).get("x-api-key"), "radarr-4k-key");
+});
+
+test("radarr 4k Download → deferred poll → fan-out: the outbound request.available names the request's OWN instance (\"4k\"), read off the pending row (guardrail 32)", async () => {
+  // The poll's `pending` select used to omit arrInstance (the handler held the
+  // slug in scope but the winner rows never carried it), so the one event the
+  // webhook path emits reported the DEFAULT instance for every 4K/named request.
+  const fourKRow = seedRequest({ tmdbId: 603, mediaType: "MOVIE", arrInstance: "4k", requestedBy: "u-4k", title: "The Matrix" });
+  const defaultRow = seedRequest({ tmdbId: 603, mediaType: "MOVIE", arrInstance: "" }); // sibling: a 4k webhook never flips it
+  honourFindManyWhere();
+  agentRows.push(agentRow("request.available"));
+  fetchHandler = (raw) => {
+    const url = new URL(raw);
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (raw === AGENT_URL) return json({});
+    // The authoritative verify against the 4k instance's own Radarr …
+    if (url.pathname === "/api/v3/movie") return json([{ tmdbId: 603, hasFile: true }]);
+    // … and the library scan's queue probe (empty ⇒ scan proceeds; with no media
+    // server configured the scan itself is a no-op and the poll notifies at once).
+    if (url.pathname === "/api/v3/queue") return json({ records: [], totalRecords: 0 });
+    throw new Error(`unexpected fetch ${raw}`);
+  };
+
+  const { res, body, tasks } = await post(
+    radarrPOST,
+    webhookReq("radarr", { token: RADARR_4K_SECRET, body: { eventType: "Download", movie: { tmdbId: 603, title: "The Matrix" } } }),
+  );
+  assert.equal(res.status, 200);
+  assert.deepEqual(body, { ok: true, marked: 1 });
+  assert.equal(fourKRow.status, "AVAILABLE");
+  assert.equal(defaultRow.status, "APPROVED");
+  assert.equal(tasks.length, 1, "exactly one deferred task: the scan + poll");
+
+  // Run the deferred task under mock timers (scheduleLibraryScan arms a real 15s
+  // debounce — the 14a deferred-verify test's recipe), then let the fire-and-
+  // forget emit reach the agent on real turns.
+  const { mock } = await import("node:test");
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const running = runTasks(tasks);
+    await drainMicrotasks();
+    mock.timers.tick(15_000);
+    await running;
+  } finally {
+    mock.timers.reset();
+  }
+  for (let i = 0; i < 400 && agentPosts().length < 1; i++) await drainMicrotasks();
+  for (let i = 0; i < 40; i++) await drainMicrotasks();
+
+  assert.equal(fourKRow.notifiedAvailable, true, "precondition: the poll's CAS claimed the 4k row");
+  assert.equal(defaultRow.notifiedAvailable, false, "the default sibling was never a candidate");
+  assert.deepEqual(notificationRows.map((r) => [r.userId, r.type]), [["u-4k", "REQUEST_AVAILABLE"]], "the legacy inbox channel saw the same single winner");
+  assert.deepEqual(
+    agentPosts().map((p) => [p.event, p.request]),
+    [["request.available", { id: fourKRow.id, instance: "4k" }]],
+    "the outbound event must carry the winner row's OWN arrInstance",
+  );
 });
 
 test("radarr anime Download (connection unconfigured): optimistic flip, still scoped to anime, no network", async () => {

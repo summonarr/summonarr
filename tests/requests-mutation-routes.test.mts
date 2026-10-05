@@ -119,6 +119,7 @@ const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { Permission } = await import("../src/lib/permissions.ts");
+const { invalidateAgentCache } = await import("../src/lib/notify-agents.ts");
 
 // ── op log ───────────────────────────────────────────────────────────────────
 type Op = { op: string; args?: unknown };
@@ -131,8 +132,33 @@ type AppUser = Record<string, unknown> & { id: string; email: string };
 let appUsers: AppUser[] = [];
 const sessionRows = new Set<string>();
 
-// No outbound notification channels configured (notify-agents.ts).
-shadowPrismaModel(prisma, "notificationAgent", { findMany: async () => [] });
+// Outbound notification channels (notify-agents.ts): none unless a test seeds one
+// with agentRow(). A generic webhook on an RFC1918 literal (admin-mode SSRF, no
+// DNS); the scripted fetch above answers it 200 {} and records the body, which is
+// the only place the emitted event's `request` block can be read back. The
+// feature flag defaults ON and notify-agents caches the agent list for 30s —
+// hence the invalidate in beforeEach.
+const AGENT_URL = "http://10.77.0.9:9/hook";
+type AgentRow = { id: string; kind: string; name: string; events: string[]; config: unknown; secret: string | null };
+const agentRows: AgentRow[] = [];
+function agentRow(...events: string[]): AgentRow {
+  return { id: "agent-1", kind: "webhook", name: "Hook", events, config: { url: AGENT_URL, template: null, headerName: "Authorization" }, secret: null };
+}
+shadowPrismaModel(prisma, "notificationAgent", {
+  findMany: async () => agentRows.map((a) => ({ ...a })),
+  update: async () => ({ id: "agent-1" }), // recordOutcome bookkeeping
+});
+type AgentPost = { event: string; request: { id: string | null; instance: string } | null; text: string | null };
+function agentPosts(): AgentPost[] {
+  return fetchCalls.filter((c) => c.url.href === AGENT_URL && c.body).map((c) => JSON.parse(c.body!) as AgentPost);
+}
+// The emit is fire-and-forget behind the response; settle until the expected
+// post has landed, then keep draining so a SECOND post (the bug) has every
+// chance to show up before "exactly one" is asserted.
+async function settleAgentPosts(expected: number): Promise<void> {
+  for (let i = 0; i < 400 && agentPosts().length < expected; i++) await new Promise<void>((r) => setImmediate(r));
+  for (let i = 0; i < 40; i++) await new Promise<void>((r) => setImmediate(r));
+}
 shadowPrismaModel(prisma, "authSession", {
   findUnique: async (args: { where: { sessionId: string } }) =>
     sessionRows.has(args.where.sessionId) ? { id: `row-${args.where.sessionId}`, sessionId: args.where.sessionId } : null,
@@ -386,6 +412,8 @@ beforeEach(() => {
   arrFailTmdbIds = new Set();
   profilesOk = true;
   failTvdbBookkeeping = false;
+  agentRows.length = 0;
+  invalidateAgentCache();
 });
 
 // ── gating ───────────────────────────────────────────────────────────────────
@@ -608,6 +636,66 @@ test("a DEACTIVATED owner is excluded from the email fan-out (guardrail 33)", as
   });
   assert.ok(emailQuery, "the email fan-out must filter on deactivatedAt");
   assert.equal((emailQuery.args as { deactivatedAt: unknown }).deactivatedAt, null);
+});
+
+// The outbound channels (webhook/ntfy/Gotify) have no per-user gate of their
+// own, so the batch route must hand them — and every legacy channel — the SAME
+// set with disabled owners already dropped (guardrail 14c's "a disabled
+// requester sends nothing to them either", guardrail 33). The active owner in
+// the same batch is the inline control: their event has to appear in the very
+// same post list, so "nothing was sent" cannot pass vacuously.
+test("batch approve: a DEACTIVATED owner's request produces NO outbound request.approved — the active owner's in the same batch does (guardrails 14c + 33)", async () => {
+  const { token } = await manager();
+  const gone = await mintSession();
+  const live = await mintSession();
+  appUsers.find((u) => u.id === gone.userId)!.deactivatedAt = new Date();
+  agentRows.push(agentRow("request.approved", "request.declined"));
+  reqRows = [
+    reqRow({ id: "r-gone", requestedBy: gone.userId, tmdbId: 603 }),
+    reqRow({ id: "r-live", requestedBy: live.userId, tmdbId: 604 }),
+  ];
+
+  const res = await doBatch(token, { ids: ["r-gone", "r-live"], status: "APPROVED" });
+  assert.equal(res.status, 200);
+  await drainAfter();
+  await settleAgentPosts(1);
+
+  // Both rows DID transition — the gate is on delivery, never on the transition.
+  assert.equal(reqRows[0].status, "APPROVED");
+  assert.equal(reqRows[1].status, "APPROVED");
+  assert.deepEqual(
+    agentPosts().map((p) => [p.event, p.request?.id]),
+    [["request.approved", "r-live"]],
+    "exactly one outbound event, for the ACTIVE owner's request",
+  );
+  // The legacy inbox channel agrees — same filtered set.
+  const inbox = opsOf("notification.createMany").flatMap((o) => (o.args as { data: Array<{ userId: string }> }).data);
+  assert.deepEqual(inbox.map((r) => r.userId), [live.userId]);
+});
+
+test("batch decline: a DEACTIVATED owner's request produces NO outbound request.declined — the active owner's does, with the note", async () => {
+  const { token } = await manager();
+  const gone = await mintSession();
+  const live = await mintSession();
+  appUsers.find((u) => u.id === gone.userId)!.deactivatedAt = new Date();
+  agentRows.push(agentRow("request.approved", "request.declined"));
+  reqRows = [
+    reqRow({ id: "r-gone", requestedBy: gone.userId }),
+    reqRow({ id: "r-live", requestedBy: live.userId, tmdbId: 604 }),
+  ];
+
+  const res = await doBatch(token, { ids: ["r-gone", "r-live"], status: "DECLINED", adminNote: "not this year" });
+  assert.equal(res.status, 200);
+  await drainAfter();
+  await settleAgentPosts(1);
+
+  assert.equal(reqRows[0].status, "DECLINED");
+  assert.equal(reqRows[1].status, "DECLINED");
+  assert.deepEqual(
+    agentPosts().map((p) => [p.event, p.request?.id, p.text]),
+    [["request.declined", "r-live", "not this year"]],
+    "exactly one outbound event, for the ACTIVE owner's request",
+  );
 });
 
 // ── 2: the adminNote raw-field guard ─────────────────────────────────────────

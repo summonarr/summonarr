@@ -10,8 +10,29 @@ import type { Translator } from "./i18n/translate";
 
 // A label dropped mid-sentence ("a new movie request") is lowercased — except
 // in German, where nouns stay capitalized ("eine neue Film-Anfrage", not "film").
+// The ISSUE-TYPE labels are ALL CAPS in every catalog (English's historical
+// "BAD VIDEO" shape, which the other languages lowercase to "mala calidad de
+// vídeo"); passing one through made German the only language whose preheader
+// shouted "(SCHLECHTES VIDEO)", while lowercasing it would strip the nouns.
+// So an all-caps German label is title-cased per word ("Schlechtes Video",
+// "Falsche Tonspur") and a mixed-case one ("Film", "Serie") passes through.
+// English stays byte-identical to the pre-i18n output ("tv show").
 export function inlineLabel(label: string, locale: string): string {
-  return locale === "de" ? label : label.toLocaleLowerCase(locale);
+  if (locale !== "de") return label.toLocaleLowerCase(locale);
+  return isAllCaps(label, locale) ? titleCaseWords(label, locale) : label;
+}
+
+// At least one cased letter, none of them lowercase.
+function isAllCaps(s: string, locale: string): boolean {
+  return s !== s.toLocaleLowerCase(locale) && s === s.toLocaleUpperCase(locale);
+}
+
+// Each word's first letter up, the rest down; a hyphenated part counts as a
+// word ("FEHLENDE UNTERTITEL" → "Fehlende Untertitel").
+function titleCaseWords(s: string, locale: string): string {
+  return s
+    .toLocaleLowerCase(locale)
+    .replace(/(^|[\s-])(\p{L})/gu, (_m, sep: string, c: string) => sep + c.toLocaleUpperCase(locale));
 }
 
 export function mediaLabelT(t: Translator, mediaType: string): string {

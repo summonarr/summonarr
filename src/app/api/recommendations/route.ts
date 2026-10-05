@@ -42,7 +42,10 @@ export const GET = withAuth(async (request, _ctx, session) => {
 
   try {
     const [recommendations, show4k] = await Promise.all([
-      getUserRecommendations(session.user.id),
+      // includeSeeds: the wire shape of this route is the /for-you page's, seed
+      // list included (additive — `recommendedBecause.seeds`). The /api/home
+      // rail takes the default and carries only seedCount.
+      getUserRecommendations(session.user.id, { includeSeeds: true }),
       getShow4kVisibility(session),
     ]);
 

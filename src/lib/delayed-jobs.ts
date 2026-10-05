@@ -35,10 +35,17 @@ function pump(): void {
 
 // Schedules a best-effort job to run after delayMs, then through a bounded worker
 // pool. Returns false (dropped) when the pending-timer cap is already reached.
+//
+// Two drop points, two signals: a schedule-time refusal is the `false` return
+// (the caller is still on the stack and can react); a FIRE-time drop happens
+// long after the caller got `true`, so it is reported through `opts.onDrop`
+// instead — the only way a caller that must record every lost job (the
+// notify-agents retry chain) can learn about it. onDrop is best-effort too: it
+// is never awaited and a throw inside it cannot poison the pool.
 export function scheduleDelayed(
   delayMs: number,
   fn: () => Promise<void>,
-  opts: { name: string }
+  opts: { name: string; onDrop?: () => void }
 ): boolean {
   if (pendingTimers >= MAX_PENDING) {
     console.warn(
@@ -58,6 +65,13 @@ export function scheduleDelayed(
       console.error(
         `[delayed-jobs] dropping "${opts.name}" at fire time: queue cap reached (${MAX_QUEUE})`
       );
+      if (opts.onDrop) {
+        try {
+          opts.onDrop();
+        } catch (err) {
+          console.error(`[delayed-jobs] onDrop for "${opts.name}" failed:`, err);
+        }
+      }
       return;
     }
     runQueue.push({ name: opts.name, fn });

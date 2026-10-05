@@ -92,6 +92,15 @@ export function validateAgentConfig(kind: AgentKind, raw: unknown): ConfigResult
   const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const url = validateAgentUrl(r.url);
   if (!url) return { ok: false, error: "url" };
+  // ntfy and Gotify URLs are a BASE the request path is appended to
+  // (ntfyPublishUrl / gotifyMessageUrl), so a query or fragment would end up
+  // in the middle of the final URL: `https://g.example/?token=x` becomes
+  // `…/?token=x/message` — a 404 with no validation message pointing at the
+  // cause, and a token stored in the plaintext config column. Generic webhooks
+  // post to the URL as given and legitimately carry queries (Discord `?wait=true`).
+  // The normalized URL has no credentials, so a `?`/`#` can only be the
+  // delimiter itself (an escaped one is `%3F`/`%23`).
+  if (kind !== "webhook" && /[?#]/.test(url)) return { ok: false, error: "url" };
   if (kind === "webhook") {
     const headerName = typeof r.headerName === "string" && r.headerName.trim() ? r.headerName.trim() : "Authorization";
     if (!HEADER_NAME_RE.test(headerName) || RESERVED_HEADERS.has(headerName.toLowerCase())) return { ok: false, error: "headerName" };
@@ -99,10 +108,14 @@ export function validateAgentConfig(kind: AgentKind, raw: unknown): ConfigResult
     if (typeof r.template === "string" && r.template.trim()) {
       template = r.template;
       if (template.length > MAX_TEMPLATE_CHARS) return { ok: false, error: "templateTooLong" };
-      // A template must render to valid JSON for a representative event, or every
-      // delivery would be a malformed body the receiver rejects.
+      // A template must render to valid JSON for BOTH samples, or some delivery
+      // would be a malformed body the receiver rejects: the full sample catches a
+      // placeholder outside any JSON string, the sparse one (every nullable field
+      // null — `media` absent, no text, no votes) catches `{"id": {{media.tmdbId}}}`,
+      // which the full sample renders as a bare number and the live
+      // `arr.manual_interaction` event (no media) renders as `{"id": }`.
       try {
-        JSON.parse(renderTemplate(template, buildWebhookPayload(SAMPLE_EVENT, SAMPLE_CONTEXT)));
+        for (const [ev, ctx] of TEMPLATE_SAMPLES) JSON.parse(renderTemplate(template, buildWebhookPayload(ev, ctx)));
       } catch {
         return { ok: false, error: "templateInvalid" };
       }
@@ -319,3 +332,15 @@ const SAMPLE_CONTEXT: PayloadContext = {
   mediaTitle: "The Matrix",
   timestamp: "2026-01-01T00:00:00.000Z",
 };
+
+// The sparse twin: every nullable/optional payload field null or absent. This
+// is the shape of a real `arr.manual_interaction` event (no media, no request,
+// no actor) and of any event whose title has no tmdbId. Template validation
+// renders both — see validateAgentConfig.
+const SPARSE_SAMPLE_EVENT: NotifyEvent = { event: "agent.test", actor: null, text: null, votes: null };
+const SPARSE_SAMPLE_CONTEXT: PayloadContext = { siteUrl: null, title: "", message: "", mediaTitle: null, timestamp: "" };
+
+const TEMPLATE_SAMPLES: ReadonlyArray<readonly [NotifyEvent, PayloadContext]> = [
+  [SAMPLE_EVENT, SAMPLE_CONTEXT],
+  [SPARSE_SAMPLE_EVENT, SPARSE_SAMPLE_CONTEXT],
+];

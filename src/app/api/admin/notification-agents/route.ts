@@ -5,7 +5,7 @@ import { readJsonCapped } from "@/lib/body-size";
 import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { invalidateAgentCache } from "@/lib/notify-agents";
-import { AGENT_BODY_CAP, AGENT_PUBLIC_SELECT, MAX_AGENTS, parseAgentInput, toPublicAgent } from "@/lib/notify-agents-admin";
+import { AGENT_BODY_CAP, AGENT_PUBLIC_SELECT, MAX_AGENTS, destinationDetails, parseAgentInput, toPublicAgent } from "@/lib/notify-agents-admin";
 
 // Outbound notification channels (ADMIN). Instance-wide config, so ADMIN only —
 // a channel receives every request and issue event.
@@ -37,7 +37,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     userName: session.user.name ?? session.user.email,
     action: "SETTINGS_CHANGE",
     target: `notification-agent:${row.id}`,
-    details: { op: "create", kind, name, events, enabled },
+    details: { op: "create", kind, name, events, enabled, ...destinationDetails(config) },
     ...auditContext(req, session),
   });
   return NextResponse.json({ agent: toPublicAgent(row) }, { status: 201 });

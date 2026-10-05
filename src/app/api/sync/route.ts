@@ -192,7 +192,10 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   let marked = 0;
   let reverted = 0;
   let repushed = 0;
-  const arrNotify: Array<{ id: string; requestedBy: string; title: string; mediaType: string; tmdbId: number; posterPath: string | null }> = [];
+  // `arrInstance` rides along: the outbound `request.available` event names the
+  // instance (guardrail 32), and this pass is the normal route to AVAILABLE for a
+  // 4K/named request — the arr knows about the file before the library scan does.
+  const arrNotify: Array<{ id: string; requestedBy: string; title: string; mediaType: string; tmdbId: number; posterPath: string | null; arrInstance: string }> = [];
 
   const approvedMovieTmdbIds = approved.filter((r) => r.mediaType === "MOVIE").map((r) => r.tmdbId);
   const approvedTvTmdbIds    = approved.filter((r) => r.mediaType === "TV").map((r) => r.tmdbId);
@@ -243,7 +246,7 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
       : { claimed: [], deliverable: [] };
     const claimedIds = new Set(claimed.map((w) => w.id));
     for (const req of deliverable) {
-      arrNotify.push({ id: req.id, requestedBy: req.requestedBy, title: req.title, mediaType: req.mediaType, tmdbId: req.tmdbId, posterPath: req.posterPath });
+      arrNotify.push({ id: req.id, requestedBy: req.requestedBy, title: req.title, mediaType: req.mediaType, tmdbId: req.tmdbId, posterPath: req.posterPath, arrInstance: req.arrInstance });
     }
     // An ARR-driven re-add is an AVAILABLE transition: wipe stale deletion votes and the
     // per-item notify gate so a fresh round can re-arm (mirrors the library-marking path).
@@ -457,7 +460,7 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
         marked += claimed.length;
       }
       if (deliverable.length > 0) {
-        const secondNotify = deliverable.map((w) => ({ id: w.id, requestedBy: w.requestedBy, title: w.title, mediaType: w.mediaType, tmdbId: w.tmdbId, posterPath: w.posterPath }));
+        const secondNotify = deliverable.map((w) => ({ id: w.id, requestedBy: w.requestedBy, title: w.title, mediaType: w.mediaType, tmdbId: w.tmdbId, posterPath: w.posterPath, arrInstance: w.arrInstance }));
         void fanOutAvailableWinners(secondNotify, "sync");
       }
     }

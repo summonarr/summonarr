@@ -122,6 +122,14 @@ export async function register() {
       );
     }
 
+    // SUMMONARR_DEFAULT_LOCALE is read on its primary subtag (pt-BR → pt). A
+    // value naming no supported language falls back to English for every
+    // notification and API message to a user with no stored language — say so
+    // ONCE here rather than let it pass silently. A valid value logs nothing.
+    const { instanceDefaultLocaleWarning } = await import("@/lib/i18n/server-locale");
+    const defaultLocaleWarning = instanceDefaultLocaleWarning();
+    if (defaultLocaleWarning) console.warn(defaultLocaleWarning);
+
     // AUTH_TRUSTED_ORIGIN is a comma-separated allowlist of extra browser origins
     // (proxy.ts / cron-auth.ts). Those readers silently drop unparseable entries,
     // so a typo'd origin fails open as "not trusted" with no signal — warn here so

@@ -89,6 +89,7 @@
 import { test, beforeEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import dns from "node:dns/promises";
+import { readFileSync } from "node:fs";
 
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32); // prisma.ts pulls in token-crypto
 process.env.TMDB_READ_TOKEN = "test-tmdb-token"; // tmdbAuth() reads this directly, no Setting lookup
@@ -1369,13 +1370,110 @@ test("getUserRecommendations serves the seed list as recommendedBecause.seeds, l
       ]),
     },
   ];
-  const out = await getUserRecommendations("u1");
+  const out = await getUserRecommendations("u1", { includeSeeds: true });
   assert.deepEqual(out[0].recommendedBecause?.seeds, [
     { tmdbId: 10, title: "Lead", mediaType: "movie", source: "WATCH_HISTORY" },
     { tmdbId: 20, title: "Second", mediaType: "tv", source: "WATCHLIST" },
   ]);
   // The list is capped; the true total still travels for "and N more".
   assert.equal(out[0].recommendedBecause?.seedCount, 30);
+});
+
+// The list is OPT-IN. The home rails (src/app/(app)/page.tsx and /api/home)
+// read the shelf with the default and render neither the list nor anything
+// derived from it, so an unconditional attach shipped up to 20 × MAX_REASON_SEEDS
+// seed objects per home load — into the RSC payload and the native JSON — for
+// nothing. `seedCount` and the rest of the reason still travel on the default
+// path: the "+N more" text needs the count, not the list.
+test("getUserRecommendations: recommendedBecause.seeds travels ONLY with includeSeeds — the default keeps seedCount and drops the list", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  userRecRows = [
+    {
+      id: "r1", userId: "u1", tmdbId: 501, mediaType: "MOVIE", title: "Pick",
+      overview: null, posterPath: null, backdropPath: null, releaseDate: "2021-05-05",
+      voteAverage: 7, score: 2, rank: 0, computedAt: daysAgo(0),
+      reasonTmdbId: 10, reasonTitle: "Lead", reasonMediaType: "MOVIE",
+      reasonSource: "WATCH_HISTORY", seedCount: 30,
+      reasonSeeds: storedReasonSeeds([
+        { tmdbId: 10, title: "Lead", mediaType: "MOVIE", source: "WATCH_HISTORY" },
+        { tmdbId: 20, title: "Second", mediaType: "TV", source: "WATCHLIST" },
+      ]),
+    },
+  ];
+
+  const byDefault = await getUserRecommendations("u1");
+  const why = byDefault[0].recommendedBecause;
+  assert.ok(why, "the reason itself still travels on the default path");
+  assert.ok(!("seeds" in why), "the seed list does not — no key at all, not an empty array");
+  assert.equal(why.seedCount, 30, "the true total still travels for the '+N more' text");
+  assert.equal(why.tmdbId, 10);
+  assert.equal(why.title, "Lead");
+
+  const explicitOff = await getUserRecommendations("u1", { includeSeeds: false });
+  assert.ok(!("seeds" in explicitOff[0].recommendedBecause!));
+
+  const withSeeds = await getUserRecommendations("u1", { includeSeeds: true });
+  assert.equal(withSeeds[0].recommendedBecause?.seeds?.length, 2);
+});
+
+// Which read surfaces opt in is pinned by SOURCE: the consumers are a server
+// component and three route handlers with no harness in this file, and the
+// home rails' harness (tests/discovery-routes.test.mts) serves an empty shelf.
+// The two that render the list ask for it; the two home rails must not.
+test("includeSeeds: /for-you and /api/recommendations opt in; the home page and /api/home take the default", () => {
+  const src = (p: string) => readFileSync(new URL(`../${p}`, import.meta.url), "utf8");
+  const optIn = /getUserRecommendations\([^)]*\{\s*includeSeeds:\s*true\s*\}/;
+  for (const p of ["src/app/(app)/for-you/page.tsx", "src/app/api/recommendations/route.ts"]) {
+    assert.match(src(p), optIn, `${p} renders the seed list and must ask for it`);
+  }
+  for (const p of ["src/app/(app)/page.tsx", "src/app/api/home/route.ts"]) {
+    const s = src(p);
+    assert.match(s, /getUserRecommendations\(/, `${p} still reads the shelf`);
+    assert.ok(!/includeSeeds/.test(s), `${p} renders no seed list and must not ship one`);
+  }
+});
+
+// The cron's WRITE of reasonSeeds, end to end. Until this test the only
+// stored-shape assertion was a hand-built row, so a writer storing a BARE ARRAY
+// — the Postgres 22P02 restore failure the schema comment and the db-export
+// discriminator exist to prevent — or storing nothing at all passed every test
+// (the fake createMany records whatever shape arrives). Warm, then read the
+// stored row AND the wire back.
+test("warmRecommendationsCache stores reasonSeeds as the { v: 1, seeds } OBJECT, and getUserRecommendations reads it back", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  authSessions = [{ userId: "u1", lastSeenAt: daysAgo(0) }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  // Watchlist (1.5x) outweighs history, so the STORED order is checked too:
+  // strongest first, and the head agrees with the reason* columns.
+  playHistoryRows = [
+    { mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE", watched: true, startedAt: daysAgo(5), title: "The Weak One" },
+  ];
+  watchlistRows = [{ userId: "u1", tmdbId: 30, mediaType: "MOVIE", createdAt: daysAgo(0), title: "The Strong One" }];
+  suggestionsFor.set("movie:10", [movieItem(999)]);
+  suggestionsFor.set("movie:30", [movieItem(999)]);
+
+  const result = await warmRecommendationsCache();
+  assert.equal(result.usersUpdated, 1);
+
+  const stored = userRecRows.filter((r) => r.userId === "u1" && r.tmdbId === 999);
+  assert.equal(stored.length, 1);
+  const seeds = [
+    { tmdbId: 30, title: "The Strong One", mediaType: "MOVIE", source: "WATCHLIST" },
+    { tmdbId: 10, title: "The Weak One", mediaType: "MOVIE", source: "WATCH_HISTORY" },
+  ];
+  assert.ok(stored[0].reasonSeeds !== undefined && stored[0].reasonSeeds !== null, "the write must happen at all");
+  assert.ok(!Array.isArray(stored[0].reasonSeeds), "a Json column must never hold a top-level array (db-export 22P02)");
+  assert.deepEqual(stored[0].reasonSeeds, { v: 1, seeds });
+  assert.equal(stored[0].reasonTmdbId, 30, "the list head IS the reason seed");
+
+  const served = (await getUserRecommendations("u1", { includeSeeds: true })).find((m) => m.id === 999);
+  assert.ok(served);
+  assert.deepEqual(
+    served.recommendedBecause?.seeds,
+    seeds.map((s) => ({ ...s, mediaType: "movie" })),
+  );
+  assert.equal(served.recommendedBecause?.seedCount, 2);
 });
 
 test("reason: a TV seed's reason keeps its own mediaType, independent of the recommended title's", async () => {

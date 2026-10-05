@@ -427,9 +427,21 @@ test("PATCH: the Plex watchlist server-source switches accept only \"true\"/\"fa
     assert.deepEqual(await bad.json(), { error: `Setting "${key}" must be "true" or "false"` });
   }
   assert.equal(upsertCalls.length, 0);
-  const ok = await PATCH(patchReq(JSON.stringify({ plexWatchlistServerSource: "true" }), admin.header), undefined);
-  assert.equal(ok.status, 200);
-  assert.equal(upsertCalls.length, 1);
+  // BOTH literals must write, and "false" is the one that matters: a guard
+  // "tightened" to `value !== "true"` lets an admin switch the server-token
+  // source ON but 400s every attempt to switch it OFF. Both keys are
+  // cooldown-exempt, so the on→off pair lands within one test.
+  let written = 0;
+  for (const key of ["plexWatchlistServerSource", "plexWatchlistServerAutoEnroll"]) {
+    const on = await PATCH(patchReq(JSON.stringify({ [key]: "true" }), admin.header), undefined);
+    assert.equal(on.status, 200, `"true" must be accepted for ${key}`);
+    assert.equal(upsertCalls.length, ++written);
+    assert.equal(upsertFor(key).at(-1)?.create.value, "true");
+    const off = await PATCH(patchReq(JSON.stringify({ [key]: "false" }), admin.header), undefined);
+    assert.equal(off.status, 200, `"false" must be accepted for ${key} — it is the OFF direction`);
+    assert.equal(upsertCalls.length, ++written, `"false" must reach the DB for ${key}`);
+    assert.equal(upsertFor(key).at(-1)?.create.value, "false");
+  }
 });
 
 // ════════════════════════════════════════════════════════════════════════════

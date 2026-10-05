@@ -15,7 +15,18 @@
 //  - a failing fetch leaves items in English and never throws;
 //  - detail-row genres are renamed by id from the localized genre list, which is
 //    cached under its own key (the English key is untouched);
-//  - a localized season keeps the English overview where TMDB's is blank.
+//  - a localized season keeps the English overview where TMDB's is blank, and
+//    hands back the English list it merged over — the only one a caller may
+//    STORE (guardrail 40a: TVEpisodeCache is shared by every viewer);
+//  - the process-wide in-flight cap (guardrail 31) holds under the wake-up race:
+//    a finishing fetch HANDS its slot to the parked waiter, so a caller arriving
+//    in the microtask between the hand-off and the waiter's resumption parks
+//    too. Release-then-wake let that newcomer take the freed slot and the woken
+//    waiter then ran on top of it — one over the cap per woken waiter. Pinned
+//    on the primitive (deterministic microtask placement) and end to end
+//    through the prewarm + a concurrent biography read, sweeping the newcomer's
+//    arrival across every microtask offset so the pin survives internal
+//    refactors that shift the chains by a tick.
 //
 // No DB or network: prisma.tmdbCache is an in-memory map, fetch is scripted,
 // dns.lookup is stubbed (the tests/tmdb.test.mts harness).
@@ -45,6 +56,8 @@ const {
   nonEnglishInUse,
   localizedBiography,
   prewarmTitleTranslations,
+  createInFlightLimiter,
+  MAX_IN_FLIGHT,
 } = await import("../src/lib/tmdb-localize.ts");
 const { getTVSeasonEpisodesLocalized, tmdbLanguageFor, getMovieGenres } = await import("../src/lib/tmdb.ts");
 
@@ -81,6 +94,18 @@ shadowPrismaModel(prisma, "jellyfinLibraryItem", { findMany: async () => [] });
 shadowPrismaModel(prisma, "mediaRequest", { findMany: async () => requests });
 shadowPrismaModel(prisma, "watchlistItem", { findMany: async () => [] });
 
+type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void };
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => { resolve = r; });
+  return { promise, resolve };
+}
+// The in-flight race test parks ONE title's cache write here so it can place
+// that fetch's slot hand-off at a known distance from a newcomer's arrival.
+let gatedUpsertKey: string | null = null;
+let upsertGate: Deferred<void> | null = null;
+let upsertGateReached = false;
+
 shadowPrismaModel(prisma, "tmdbCache", {
   findUnique: async (args: { where: { key: string } }) => {
     cacheReads++;
@@ -91,6 +116,10 @@ shadowPrismaModel(prisma, "tmdbCache", {
     return args.where.key.in.flatMap((k) => (cacheRows.has(k) ? [cacheRows.get(k)!] : []));
   },
   upsert: async (args: { where: { key: string }; create: CacheRow }) => {
+    if (upsertGate && args.where.key === gatedUpsertKey) {
+      upsertGateReached = true;
+      await upsertGate.promise;
+    }
     cacheRows.set(args.where.key, args.create);
     return args.create;
   },
@@ -98,7 +127,7 @@ shadowPrismaModel(prisma, "tmdbCache", {
 });
 
 const fetched: URL[] = [];
-let respond: (url: URL) => Response = () => {
+let respond: (url: URL) => Response | Promise<Response> = () => {
   throw new Error("unexpected fetch");
 };
 globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -123,6 +152,9 @@ beforeEach(() => {
   respond = () => {
     throw new Error("unexpected fetch");
   };
+  gatedUpsertKey = null;
+  upsertGate = null;
+  upsertGateReached = false;
 });
 
 type Media = Parameters<typeof localizeMedia>[0][number];
@@ -231,7 +263,7 @@ test("detail-row genres are renamed by id from the localized list, cached under 
   assert.ok(cacheRows.has("genres:movie"));
 });
 
-test("a localized season keeps English where TMDB's translation is blank", async () => {
+test("a localized season keeps English where TMDB's translation is blank, and hands back the English list it merged over", async () => {
   seed("tv:40:season:1", [
     { episodeNumber: 1, seasonNumber: 1, name: "Pilot", overview: "English one", airDate: null, stillPath: null, runtime: 40, voteAverage: 8 },
     { episodeNumber: 2, seasonNumber: 1, name: "Second", overview: "English two", airDate: null, stillPath: null, runtime: 40, voteAverage: 8 },
@@ -240,13 +272,18 @@ test("a localized season keeps English where TMDB's translation is blank", async
     assert.equal(url.searchParams.get("language"), "de-DE");
     return json({ episodes: [{ episode_number: 1, name: "Pilotfolge", overview: "Deutsch eins" }, { episode_number: 2, name: "Folge 2", overview: "" }] });
   };
-  const eps = await getTVSeasonEpisodesLocalized(40, 1, "de-DE");
+  const { episodes: eps, english } = await getTVSeasonEpisodesLocalized(40, 1, "de-DE");
   assert.deepEqual(eps.map((e) => [e.name, e.overview]), [["Pilotfolge", "Deutsch eins"], ["Folge 2", "English two"]]);
   assert.equal(eps[0].runtime, 40, "non-text fields come from the English row");
+  // The season route stores episode metadata into TVEpisodeCache, a table every
+  // viewer shares — it must store THIS list, not the merged one (guardrail 40a).
+  assert.deepEqual(english.map((e) => [e.name, e.overview]), [["Pilot", "English one"], ["Second", "English two"]], "the English list is exposed unmerged");
   fetched.length = 0;
   await getTVSeasonEpisodesLocalized(40, 1, "de-DE");
   assert.equal(fetched.length, 0, "the localized season is cached");
-  assert.equal((await getTVSeasonEpisodesLocalized(40, 1, null))[0].name, "Pilot", "English is the plain path");
+  const plain = await getTVSeasonEpisodesLocalized(40, 1, null);
+  assert.equal(plain.episodes[0].name, "Pilot", "English is the plain path");
+  assert.equal(plain.episodes, plain.english, "…and the same array is both lists");
 });
 
 test("calendar titles come from the cache only — a miss stays English and nothing is fetched", async () => {
@@ -362,4 +399,116 @@ test("prewarm: an aborted signal stops before fetching", async () => {
   const r = await prewarmTitleTranslations({ signal: c.signal });
   assert.equal(r.fetched, 0);
   assert.equal(fetched.length, 0);
+});
+
+
+// ── the in-flight cap (guardrail 31) ────────────────────────────────────────
+
+const settle = () => new Promise<void>((r) => setImmediate(r));
+
+test("createInFlightLimiter: a finishing task hands its slot to the parked waiter — a newcomer in the wake-up gap never runs on top of it", async () => {
+  // The waiter resumes one microtask AFTER the finishing task's `finally` wakes
+  // it. The newcomer is placed at every offset d from that `finally` (d = 2 is
+  // the exact gap for this task shape), so the pin does not depend on counting
+  // ticks right: with release-then-wake, SOME offset lets the newcomer see a
+  // free slot and the woken waiter then runs as a third task.
+  for (let d = 0; d <= 5; d++) {
+    const limit = createInFlightLimiter(2);
+    let running = 0;
+    let most = 0;
+    const task = (g: Deferred<void>) => limit(async () => {
+      running++;
+      most = Math.max(most, running);
+      await g.promise;
+      running--;
+    });
+    const a = deferred<void>(), b = deferred<void>(), waiter = deferred<void>(), newcomer = deferred<void>();
+    const pa = task(a), pb = task(b), pw = task(waiter);
+    assert.equal(running, 2, "two run, the third parks");
+    a.resolve();
+    for (let i = 0; i < d; i++) await null;
+    const pn = task(newcomer);
+    await settle();
+    assert.equal(most, 2, `d=${d}: ${most} tasks ran at once under a cap of 2`);
+    b.resolve(); waiter.resolve(); newcomer.resolve();
+    await Promise.all([pa, pb, pw, pn]);
+    assert.equal(running, 0);
+  }
+});
+
+test("createInFlightLimiter: FIFO, and a rejecting task still passes its slot on while the rejection propagates", async () => {
+  const limit = createInFlightLimiter(1);
+  const order: string[] = [];
+  const first = limit(async () => { order.push("first"); throw new Error("boom"); });
+  const second = limit(async () => { order.push("second"); return 2; });
+  const third = limit(async () => { order.push("third"); return 3; });
+  await assert.rejects(first, /boom/);
+  assert.deepEqual([await second, await third], [2, 3]);
+  assert.deepEqual(order, ["first", "second", "third"]);
+});
+
+test("translation fetches never exceed MAX_IN_FLIGHT across concurrent callers, whatever microtask a newcomer lands on", async () => {
+  // End to end through the real limiter singleton: the prewarm parks seven
+  // titles (six fetch, one waits), one of the six is released and its cache
+  // write is held at the gate so its slot hand-off happens a known distance
+  // from where a concurrent biography read (another caller, another request)
+  // enters the limiter. The newcomer's arrival is swept across microtask
+  // offsets 0..8 — the hand-off-to-resumption gap is one specific offset, and
+  // the sweep finds it without the test knowing how many awaits sit inside
+  // setCache or getCacheMany.
+  users = [{ id: "u", locale: "fr", deactivatedAt: null }];
+  const pending = new Map<string, Deferred<Response>>();
+  let inFlight = 0;
+  let most = 0;
+  respond = (url) => {
+    inFlight++;
+    most = Math.max(most, inFlight);
+    const d = deferred<Response>();
+    pending.set(url.pathname, d);
+    return d.promise;
+  };
+  const release = (path: string) => {
+    const d = pending.get(path)!;
+    pending.delete(path);
+    inFlight--;
+    d.resolve(path.includes("/person/") ? json({ translations: [] }) : json({ translations: { translations: [] }, images: { posters: [] } }));
+  };
+  const until = async (pred: () => boolean, label: string) => {
+    for (let i = 0; i < 500 && !pred(); i++) await settle();
+    assert.ok(pred(), label);
+  };
+
+  for (let d = 0; d <= 8; d++) {
+    const base = 7000 + d * 10;
+    library = Array.from({ length: MAX_IN_FLIGHT + 1 }, (_, i) => ({ tmdbId: base + i, mediaType: "MOVIE" }));
+    const run = prewarmTitleTranslations();
+    await until(() => inFlight === MAX_IN_FLIGHT, `d=${d}: ${MAX_IN_FLIGHT} fetches in flight`);
+    await settle();
+    assert.equal(inFlight, MAX_IN_FLIGHT, `d=${d}: the ${MAX_IN_FLIGHT + 1}th title is parked, not fetched`);
+
+    // Release one fetch; its chain runs on to setCache, where the gate holds it.
+    const [aPath] = [...pending.keys()];
+    gatedUpsertKey = `movie:${aPath.split("/").pop()}:i18n:v2`;
+    upsertGate = deferred<void>();
+    upsertGateReached = false;
+    release(aPath);
+    await until(() => upsertGateReached, `d=${d}: the released fetch reached its cache write`);
+    upsertGate.resolve(); // its slot hand-off is now a fixed number of microtasks away
+    for (let i = 0; i < d; i++) await null;
+    const bio = localizedBiography(9000 + d, "fr"); // the newcomer enters the limiter d ticks later
+    for (let i = 0; i < 4; i++) await settle();
+    assert.ok(most <= MAX_IN_FLIGHT, `d=${d}: ${most} translation fetches in flight at once — the cap is ${MAX_IN_FLIGHT}`);
+
+    // Drain: everything parked must still run to completion.
+    gatedUpsertKey = null;
+    upsertGate = null;
+    let done = false;
+    void Promise.allSettled([run, bio]).then(() => { done = true; });
+    while (!done) {
+      for (const path of [...pending.keys()]) release(path);
+      await settle();
+    }
+    assert.equal(inFlight, 0, `d=${d}: drained`);
+    assert.equal(cacheRows.has(`person:${9000 + d}:i18n:v1`), true, `d=${d}: the newcomer did run`);
+  }
 });

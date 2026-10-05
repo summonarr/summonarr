@@ -1,6 +1,6 @@
 import "server-only";
 
-import { DEFAULT_LOCALE, isLocale, localeCookieFrom, negotiateLocale, type Locale } from "./locales";
+import { DEFAULT_LOCALE, LOCALES, isLocale, localeCookieFrom, negotiateLocale, type Locale } from "./locales";
 import { CATALOGS, FALLBACK_MESSAGES } from "./catalogs";
 import { createTranslator, type Translator } from "./translate";
 
@@ -13,9 +13,34 @@ import { createTranslator, type Translator } from "./translate";
 // every API response, and a Setting would add a DB read to all of them (and to
 // every route test's stubbed prisma).
 
+// SUMMONARR_DEFAULT_LOCALE is read on its PRIMARY SUBTAG — the rule
+// negotiateLocale already applies to Accept-Language. The README describes the
+// languages as "pt (Brazilian)" and "zh (Simplified)", which invites exactly
+// the spellings an exact match rejected: "pt-BR", "zh-CN", "zh-Hans-CN", the
+// POSIX "pt_BR.UTF-8". Null for a value that names no supported language (and
+// for an unset or blank variable).
+export function parseInstanceDefaultLocale(raw: string | undefined): Locale | null {
+  const primary = raw?.trim().toLowerCase().split(/[-_.]/)[0];
+  return isLocale(primary) ? primary : null;
+}
+
 export function instanceDefaultLocale(): Locale {
-  const v = process.env.SUMMONARR_DEFAULT_LOCALE?.trim().toLowerCase();
-  return isLocale(v) ? v : DEFAULT_LOCALE;
+  return parseInstanceDefaultLocale(process.env.SUMMONARR_DEFAULT_LOCALE) ?? DEFAULT_LOCALE;
+}
+
+// Boot-time check for instrumentation.ts: the ONE warning to log when the
+// variable is set but resolves to nothing. Without it every notification and
+// API message to a user with no stored language quietly came out in English
+// with nothing in the logs saying why. Null when unset, blank or valid — a
+// valid value logs nothing (guardrail 7).
+export function instanceDefaultLocaleWarning(): string | null {
+  const raw = process.env.SUMMONARR_DEFAULT_LOCALE;
+  if (raw === undefined || raw.trim() === "") return null;
+  if (parseInstanceDefaultLocale(raw)) return null;
+  return (
+    `[i18n] SUMMONARR_DEFAULT_LOCALE="${raw}" is not a supported locale ` +
+    `(${LOCALES.join(", ")}; a region tag such as pt-BR is read on its language part); using "${DEFAULT_LOCALE}"`
+  );
 }
 
 const translators = new Map<Locale, Translator>();

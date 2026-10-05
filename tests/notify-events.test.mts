@@ -145,6 +145,33 @@ test("gotify body: plain-text display + click URL; the message endpoint carries 
   assert.equal(gotifyMessageUrl("https://g.example/base/"), "https://g.example/base/message");
 });
 
+test("template validation renders a SPARSE sample too: a placeholder valid only while its field is set is refused", () => {
+  const url = "https://h.example/x";
+  // The full sample has media.tmdbId = 603 and year "1999", so an UNQUOTED
+  // numeric placeholder renders a bare number there and parses — then renders
+  // `{"id": }` for every event without media (arr.manual_interaction) or
+  // without a tmdbId. Both samples must parse.
+  assert.deepEqual(validateAgentConfig("webhook", { url, template: "{\"id\": {{media.tmdbId}}}" }), { ok: false, error: "templateInvalid" });
+  assert.deepEqual(validateAgentConfig("webhook", { url, template: "{\"year\": {{media.year}}}" }), { ok: false, error: "templateInvalid" });
+  assert.deepEqual(validateAgentConfig("webhook", { url, template: "{\"n\": {{votes}}}" }), { ok: false, error: "templateInvalid" });
+  // Quoted, the same placeholders render "" when null and stay valid JSON.
+  assert.ok(validateAgentConfig("webhook", { url, template: "{\"id\": \"{{media.tmdbId}}\", \"year\": \"{{media.year}}\", \"n\": \"{{votes}}\", \"u\": \"{{url}}\"}" }).ok);
+});
+
+test("ntfy/gotify URLs are a BASE the request path is appended to: a query or fragment is refused; a webhook keeps its query", () => {
+  // `https://g.example/?token=x` + "/message" would be `…/?token=x/message` — a
+  // 404 with no validation message, and a token in the plaintext config column.
+  for (const url of ["https://g.example/?token=x", "https://g.example/#frag", "https://g.example/?", "https://g.example/base?x=1"]) {
+    assert.deepEqual(validateAgentConfig("gotify", { url, priority: 5 }), { ok: false, error: "url" }, `gotify ${url}`);
+    assert.deepEqual(validateAgentConfig("ntfy", { url, topic: "t" }), { ok: false, error: "url" }, `ntfy ${url}`);
+  }
+  assert.ok(validateAgentConfig("gotify", { url: "https://g.example/base/" }).ok);
+  assert.ok(validateAgentConfig("ntfy", { url: "https://n.example/sub", topic: "t" }).ok);
+  // Generic webhooks post to the URL as given — Discord's `?wait=true` is legitimate.
+  const hook = validateAgentConfig("webhook", { url: "https://discord.com/api/webhooks/1/abc?wait=true" });
+  assert.ok(hook.ok && (hook.config as { url: string }).url === "https://discord.com/api/webhooks/1/abc?wait=true");
+});
+
 test("delivery policy: 2xx ok, 408/429/5xx retry, other 4xx fail; three retries", () => {
   assert.equal(classifyStatus(200), "ok");
   assert.equal(classifyStatus(204), "ok");

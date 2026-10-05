@@ -134,6 +134,30 @@ shadowPrismaModel(prisma, "user", {
   },
 });
 
+// TmdbCache: the cached TMDB title translations a non-English recipient's
+// title is resolved from (tmdb-localize's titleResolver — guardrail 40a).
+// Seeded per test with `<movie|tv>:<id>:i18n:v2` rows (seedTranslation); empty
+// ⇒ every title stays English. Reads are recorded so the English no-op (zero
+// DB reads) is pinnable. Without this shadow the Spanish-recipient case below
+// reached the REAL delegate — a live connection attempt that titleResolver's
+// catch swallowed, leaving the localized-title path with no pin at all.
+const translationRows = new Map<string, string>();
+const translationReads: string[][] = [];
+shadowPrismaModel(prisma, "tmdbCache", {
+  findMany: async (args: { where: { key: { in: string[] } } }) => {
+    translationReads.push([...args.where.key.in]);
+    return args.where.key.in
+      .filter((k) => translationRows.has(k))
+      .map((k) => ({ key: k, data: translationRows.get(k) as string, cachedAt: new Date(), expiresAt: new Date(Date.now() + 86_400_000) }));
+  },
+  upsert: async () => ({}),
+  deleteMany: async () => ({ count: 0 }),
+});
+function seedTranslation(mediaType: "movie" | "tv", tmdbId: number, titles: Record<string, string>): void {
+  const value = Object.fromEntries(Object.entries(titles).map(([locale, title]) => [locale, { title }]));
+  translationRows.set(`${mediaType}:${tmdbId}:i18n:v2`, JSON.stringify(value));
+}
+
 // ── helpers ─────────────────────────────────────────────────────────────────
 function configureResend(overrides: Record<string, string | undefined> = {}): void {
   settings.clear(); // each configure is a full baseline — no leakage between phases
@@ -162,6 +186,8 @@ beforeEach(() => {
   settings.clear();
   userRows = [];
   userFindManyCalls.length = 0;
+  translationRows.clear();
+  translationReads.length = 0;
   fetchCalls.length = 0;
   warns.length = 0;
   errors.length = 0;
@@ -429,12 +455,20 @@ test("notifyUserRequestAvailableEmail: single send, tmdb deep link, CRLF scrubbe
 
 // ── recipient language ──────────────────────────────────────────────────────
 
-test("a recipient with locale 'es' gets a Spanish email; a null locale stays English", async () => {
+test("a recipient with locale 'es' gets a Spanish email with the SPANISH TITLE; a null locale stays English and reads no translation", async () => {
   configureResend();
+  seedTranslation("movie", 550, { es: "Duna", fr: "Dune (fr)" });
   await notifyUserRequestAvailableEmail({ toEmail: "es@example.com", title: "Dune", mediaType: "MOVIE", tmdbId: 550, locale: "es" });
+  assert.deepEqual(translationReads, [["movie:550:i18n:v2"]], "one cache read, keyed by the title's TMDB identity");
   await notifyUserRequestAvailableEmail({ toEmail: "en@example.com", title: "Dune", mediaType: "MOVIE", tmdbId: 550, locale: null });
+  assert.equal(translationReads.length, 1, "English is a no-op: no translation read at all (guardrail 40a)");
   const [es, en] = sentEmails();
-  assert.equal(es.subject, "Ya disponible: Dune");
+  assert.equal(fetchCalls.length, 2, "two emails and no TMDB fetch — the seeded row answered");
+  // The stored English title is display-localized at send time, never written
+  // back (guardrail 40a): subject, preheader and body all carry "Duna".
+  assert.equal(es.subject, "Ya disponible: Duna");
+  assert.ok(es.html.includes("Duna"), "body carries the Spanish title");
+  assert.ok(!es.html.includes("Dune"), "the English title appears nowhere in the Spanish email");
   assert.ok(es.html.includes('<html lang="es">'));
   assert.ok(es.html.includes("Empezar a ver"), "CTA label translated");
   assert.ok(es.html.includes("Enviado por"), "footer translated");
@@ -458,6 +492,23 @@ test("admin fan-out: each admin is mailed in their own language, from the same s
   assert.ok(byTo.get("es-admin@example.com")?.html.includes("Solicitado por"));
   assert.equal(byTo.get("en-admin@example.com")?.subject, "New TV Show Request: Dune");
   assert.equal(byTo.get("bad-admin@example.com")?.subject, "New TV Show Request: Dune");
+  assert.deepEqual(errors, []);
+});
+
+test("a German admin's new-issue email title-cases the inline issue label instead of shouting the catalog's caps", async () => {
+  configureResend();
+  userRows = [{ ...adminUser("de-admin@example.com"), locale: "de" }];
+  await notifyAdminsNewIssue({ title: "Dune", mediaType: "MOVIE", issueType: "BAD_VIDEO", reportedBy: "alice", note: null });
+  const [mail] = sentEmails();
+  assert.equal(mail.subject, "Neue Problemmeldung: Dune");
+  // Mid-sentence: the de catalog's "SCHLECHTES VIDEO" becomes "Schlechtes Video"
+  // (fr/es/it/pt lowercase theirs; German would lose its nouns that way).
+  assert.ok(mail.html.includes("alice hat ein Problem (Schlechtes Video) bei Dune gemeldet"), mail.html);
+  assert.ok(!mail.html.includes("(SCHLECHTES VIDEO)"), "no shouting caps mid-sentence");
+  // The details table shows the catalog label as-is — it is a cell, not prose.
+  assert.ok(mail.html.includes("SCHLECHTES VIDEO"));
+  // The media noun keeps its capital either way.
+  assert.ok(mail.html.includes("Ein Benutzer hat ein Problem gemeldet (Film)."), mail.html);
   assert.deepEqual(errors, []);
 });
 

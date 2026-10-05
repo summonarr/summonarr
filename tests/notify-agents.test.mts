@@ -1,9 +1,11 @@
 // The outbound-channel dispatcher (src/lib/notify-agents.ts): which agents a
 // given event reaches, the exact HTTP request each kind sends, the retry policy
-// (5xx/network retried on a timer, 4xx and SSRF refusals never), the feature
-// flag, outcome bookkeeping, and the structural rules — admin-entered URLs go
-// through safeFetchAdminConfigured (guardrail 5a) and every "now available" path
-// goes through the one fan-out helper.
+// (5xx/network retried on a timer, 4xx and SSRF refusals never; a retry
+// re-resolves the agent and a retry the shared pool refuses is the recorded final
+// failure), the feature flag, outcome bookkeeping (the cache's invalidate-during-
+// load race, the Test button's awaited write), and the structural rules —
+// admin-entered URLs go through safeFetchAdminConfigured (guardrail 5a) and every
+// "now available" path goes through the one fan-out helper.
 //
 // No DB, network or DNS: prisma.notificationAgent / prisma.setting are shadowed
 // in memory, dns/promises.lookup is stubbed, globalThis.fetch is scripted.
@@ -46,12 +48,21 @@ type AgentRow = { id: string; kind: string; name: string; enabled: boolean; even
 let agents: AgentRow[] = [];
 let agentReads = 0;
 const updates: Array<{ where: { id: string }; data: Record<string, unknown> }> = [];
+// Parks the agent read mid-flight (rows already computed) so a test can
+// invalidate the cache while a load is in flight.
+let findManyGate: Promise<void> | null = null;
+// Delays the outcome write by N macrotask rounds AFTER it is called, so a
+// fire-and-forget recordOutcome is observable as "not yet written".
+let updateDelayRounds = 0;
 shadowPrismaModel(prisma, "notificationAgent", {
   findMany: async (args: { where?: { enabled?: boolean } }) => {
     agentReads++;
-    return agents.filter((a) => args.where?.enabled === undefined || a.enabled === args.where.enabled);
+    const rows = agents.filter((a) => args.where?.enabled === undefined || a.enabled === args.where.enabled);
+    if (findManyGate) await findManyGate;
+    return rows;
   },
   update: async (args: { where: { id: string }; data: Record<string, unknown> }) => {
+    if (updateDelayRounds > 0) await settle(updateDelayRounds);
     updates.push(args);
     return { id: args.where.id };
   },
@@ -64,9 +75,21 @@ shadowPrismaModel(prisma, "setting", {
 });
 
 const { emitNotificationEvent, emitNotificationEvents, invalidateAgentCache, sendAgentTest, loadedAgentFromRow } = await import("../src/lib/notify-agents.ts");
+// The SAME pool instance notify-agents retries through (same resolved module
+// URL) — the cap tests fill it from here.
+const { scheduleDelayed } = await import("../src/lib/delayed-jobs.ts");
 
 async function settle(rounds = 20): Promise<void> {
   for (let i = 0; i < rounds; i++) await new Promise((r) => setImmediate(r));
+}
+
+// A manually-opened latch.
+function gate(): { promise: Promise<void>; open: () => void } {
+  let release: (() => void) | undefined;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, open: () => release?.() };
 }
 
 const AVAILABLE = { event: "request.available" as const, media: { type: "MOVIE" as const, tmdbId: 438631, title: "Dune", posterPath: "/d.jpg" }, request: { id: "r1", instance: "" } };
@@ -79,6 +102,8 @@ beforeEach(() => {
   agentReads = 0;
   agents = [];
   settings.clear();
+  findManyGate = null;
+  updateDelayRounds = 0;
   respond = () => new Response("ok", { status: 200 });
   invalidateAgentCache();
   invalidateFeatureFlagCache();
@@ -258,6 +283,210 @@ test("the Test button sends one immediate attempt even for a disabled agent and 
   assert.equal(JSON.parse(calls[0].body).title, "Test notification");
 });
 
+// ── retries re-resolve the agent ────────────────────────────────────────────
+// The retry closure must not carry the LoadedAgent snapshot from attempt 0: an
+// admin may disable, delete, unsubscribe or re-point the channel while a retry
+// is pending, and the stale copy would keep posting to the old URL with the old
+// secret, then overwrite the row's fresh status with its failure. The admin
+// routes call invalidateAgentCache() after every write — the tests do the same.
+
+test("a retry re-resolves the agent: one disabled or deleted in the meantime is neither fetched nor recorded", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    for (const withdraw of ["disabled", "deleted", "unsubscribed"] as const) {
+      calls.length = 0;
+      updates.length = 0;
+      warns.length = 0;
+      respond = () => new Response("down", { status: 503 });
+      agents = [{ id: "a", kind: "webhook", name: "hook", enabled: true, events: ["request.available"], config: { url: "https://a.example/" }, secret: null }];
+      invalidateAgentCache();
+      emitNotificationEvent(AVAILABLE);
+      await settle();
+      assert.equal(calls.length, 1, withdraw);
+      assert.equal(updates.length, 0, withdraw);
+      if (withdraw === "disabled") agents = [{ ...agents[0], enabled: false }];
+      else if (withdraw === "deleted") agents = [];
+      else agents = [{ ...agents[0], events: ["issue.created"] }];
+      invalidateAgentCache();
+      mock.timers.tick(30_000);
+      await settle();
+      mock.timers.tick(15 * 60_000);
+      await settle();
+      assert.equal(calls.length, 1, `${withdraw}: the retry posted with the stale snapshot`);
+      assert.equal(updates.length, 0, `${withdraw}: the retry wrote an outcome onto a channel the admin withdrew`);
+      assert.equal(warns.filter((w) => w.includes("[notify-agents]")).length, 0, withdraw);
+    }
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a retry delivers with the agent's CURRENT url and secret, not the snapshot from attempt 0", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    respond = (c) => (new URL(c.url).hostname === "typo.example" ? new Response("", { status: 503 }) : new Response(null, { status: 204 }));
+    agents = [{ id: "a", kind: "webhook", name: "hook", enabled: true, events: ["request.available"], config: { url: "https://typo.example/" }, secret: "Bearer old" }];
+    emitNotificationEvent(AVAILABLE);
+    await settle();
+    assert.equal(calls.length, 1);
+    // The admin fixes the host and rotates the token before the 30s retry.
+    agents = [{ ...agents[0], config: { url: "https://fixed.example/" }, secret: "Bearer new" }];
+    invalidateAgentCache();
+    mock.timers.tick(30_000);
+    await settle();
+    assert.equal(calls.length, 2);
+    assert.equal(new URL(calls[1].url).hostname, "fixed.example");
+    assert.equal(calls[1].headers.get("authorization"), "Bearer new");
+    assert.deepEqual(updates.map((u) => u.data.lastStatus), ["ok"]);
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+// ── a refused retry is the recorded final failure ───────────────────────────
+// The retry pool is shared with download-check and has two drop points. Either
+// way nothing will deliver this event, so the row must say so (guardrail 14c:
+// the last outcome is recorded on the row) instead of keeping a stale "ok".
+
+test("a retry the pool refuses at schedule time (pending cap) is recorded as the final failure, not lost", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  let fillers = 0;
+  try {
+    // Fill the pending-timer cap with far-future no-ops (knob-independent: stop
+    // at the first refusal). Staggered so draining them later never saturates the
+    // run queue.
+    while (scheduleDelayed(60_000 + fillers * 10, async () => {}, { name: `filler-${fillers}` })) {
+      fillers++;
+      assert.ok(fillers < 10_000, "the pending cap never engaged");
+    }
+    warns.length = 0;
+    respond = () => new Response("down", { status: 503 });
+    agents = [{ id: "a", kind: "webhook", name: "hook", enabled: true, events: ["request.available"], config: { url: "https://a.example/" }, secret: null }];
+    emitNotificationEvent(AVAILABLE);
+    await settle();
+    assert.equal(calls.length, 1);
+    assert.deepEqual(updates.map((u) => [u.data.lastStatus, u.data.lastError]), [["failed", "retry queue full: HTTP 503"]]);
+    assert.ok(warns.some((w) => w.includes('[delayed-jobs] dropping "notify-agent:a"')), "the pool refused the retry");
+    assert.equal(warns.filter((w) => w.includes("[notify-agents]") && w.includes("retry queue full: HTTP 503")).length, 1);
+    mock.timers.tick(15 * 60_000);
+    await settle();
+    assert.equal(calls.length, 1, "nothing retried a refused retry");
+    assert.equal(updates.length, 1);
+  } finally {
+    // Drain the fillers one tick at a time so pendingTimers returns to 0 for the
+    // tests that follow (mock.timers.reset() would discard the timers, not the count).
+    mock.timers.tick(60_000);
+    for (let i = 0; i < fillers; i++) {
+      mock.timers.tick(10);
+      await settle(2);
+    }
+    mock.timers.reset();
+  }
+});
+
+test("a retry the pool drops at FIRE time (queue cap) is recorded as the final failure, not lost", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  const g = gate();
+  let started = 0;
+  let finished = 0;
+  const blocker = async () => {
+    started += 1;
+    await g.promise;
+    finished += 1;
+  };
+  try {
+    // Occupy every worker and fill the run queue (knob-independent: stop at the
+    // first fire-time drop, which means the queue is exactly full).
+    let fillers = 0;
+    while (!errors.some((e) => e.includes("at fire time"))) {
+      assert.ok(scheduleDelayed(1, blocker, { name: `blocker-${fillers++}` }), "pending cap hit before the queue filled");
+      mock.timers.tick(1);
+      await settle(2);
+      assert.ok(fillers < 10_000, "the queue cap never engaged");
+    }
+    errors.length = 0;
+    respond = () => new Response("down", { status: 503 });
+    agents = [{ id: "a", kind: "webhook", name: "hook", enabled: true, events: ["request.available"], config: { url: "https://a.example/" }, secret: null }];
+    emitNotificationEvent(AVAILABLE);
+    await settle();
+    assert.equal(calls.length, 1);
+    assert.equal(updates.length, 0, "accepted at schedule time — nothing recorded yet");
+    mock.timers.tick(30_000);
+    await settle();
+    assert.equal(calls.length, 1, "a dropped retry must not fetch");
+    assert.deepEqual(updates.map((u) => [u.data.lastStatus, u.data.lastError]), [["failed", "retry queue full: HTTP 503"]]);
+    assert.ok(errors.some((e) => e.includes('dropping "notify-agent:a" at fire time')));
+    assert.equal(warns.filter((w) => w.includes("[notify-agents]") && w.includes("retry queue full: HTTP 503")).length, 1);
+    g.open();
+    for (let i = 0; i < 200 && finished < started; i++) await settle(5);
+    assert.equal(finished, started, "the pool did not drain");
+    mock.timers.tick(15 * 60_000);
+    await settle();
+    assert.equal(calls.length, 1);
+    assert.equal(updates.length, 1);
+  } finally {
+    g.open();
+    mock.timers.reset();
+  }
+});
+
+// ── a secret the transport rejects ──────────────────────────────────────────
+
+test("a secret undici's Headers rejects (NUL byte) is a config failure: never fetched, never retried, and the secret never appears in the outcome or logs", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    const secret = "tok\u0000en";
+    // The admin route refuses control characters; this is the row an older or
+    // hand-edited deployment could still hold.
+    agents = [{ id: "nul", kind: "webhook", name: "nul", enabled: true, events: ["request.available"], config: { url: "https://a.example/" }, secret }];
+    emitNotificationEvent(AVAILABLE);
+    await settle();
+    mock.timers.tick(15 * 60_000);
+    await settle();
+    assert.equal(calls.length, 0, "Headers rejected the value before any network call");
+    assert.deepEqual(updates.map((u) => [u.data.lastStatus, u.data.lastError]), [["failed", "request could not be built (check the secret and URL)"]]);
+    const leaks = (s: string) => s.includes(secret) || s.includes("invalid header value");
+    assert.ok(!warns.some(leaks) && !errors.some(leaks), "the Headers TypeError (which embeds the secret) reached a log line");
+    const r = await sendAgentTest(loadedAgentFromRow({ id: "nul", kind: "webhook", name: "nul", events: [], config: { url: "https://a.example/" }, secret })!, { event: "agent.test" });
+    assert.equal(r.verdict, "fail");
+    assert.ok(!leaks(JSON.stringify(r)), "the Test response carried the secret");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+// ── cache + bookkeeping races ───────────────────────────────────────────────
+
+test("invalidating the cache during an in-flight load does not repopulate it with the pre-invalidate rows", async () => {
+  const g = gate();
+  findManyGate = g.promise;
+  agents = [{ id: "gone", kind: "webhook", name: "gone", enabled: true, events: ["request.available"], config: { url: "https://gone.example/" }, secret: null }];
+  emitNotificationEvent(AVAILABLE);
+  await settle();
+  assert.equal(agentReads, 1, "the read is parked mid-flight");
+  // The admin deletes the agent and the route invalidates while that read is in flight.
+  agents = [];
+  invalidateAgentCache();
+  g.open();
+  await settle();
+  // The in-flight read already held the pre-delete rows — that one dispatch goes out (accepted).
+  assert.equal(calls.length, 1);
+  findManyGate = null;
+  emitNotificationEvent(AVAILABLE);
+  await settle();
+  assert.equal(agentReads, 2, "the stale read repopulated the cache after the invalidation");
+  assert.equal(calls.length, 1, "the deleted agent was served from the stale cache");
+});
+
+test("the Test button's outcome is committed before it responds (the UI reloads the list the moment it does)", async () => {
+  updateDelayRounds = 3;
+  respond = () => new Response(null, { status: 204 });
+  const agent = loadedAgentFromRow({ id: "t", kind: "webhook", name: "t", events: [], config: { url: "https://t.example/" }, secret: null })!;
+  const r = await sendAgentTest(agent, { event: "agent.test" });
+  assert.equal(r.verdict, "ok");
+  assert.deepEqual(updates.map((u) => [u.where.id, u.data.lastStatus]), [["t", "ok"]], "lastStatus was not yet written when sendAgentTest resolved");
+});
+
 test("a dispatch failure never throws into the caller", async () => {
   shadowPrismaModel(prisma, "notificationAgent", { findMany: async () => { throw new Error("db down"); }, update: async () => ({}) });
   assert.doesNotThrow(() => emitNotificationEvent(AVAILABLE));
@@ -287,12 +516,27 @@ test("guardrail 7a: nothing on the channel path pre-encrypts the secret", () => 
 });
 
 test("every 'now available' sync path goes through fanOutAvailableWinners — no per-site channel list", () => {
+  // The channel modules fanOutAvailableWinners itself composes. A sync route that
+  // imports ANY of them (aliased or not), or emits to the outbound channels
+  // itself, has re-listed a channel at the call site (guardrail 14c). Matching
+  // the import side closes the alias hole a call-paren regex leaves open.
+  const CHANNEL_MODULES = ["discord-notify", "push", "email", "in-app-notify", "notify-agents"];
+  const hub = read("src/lib/request-notifications.ts");
+  for (const m of CHANNEL_MODULES) {
+    assert.match(hub, new RegExp(`from "\\./${m}"`), `the hub no longer imports ./${m} — the channel list above has rotted`);
+  }
+  const channelImport = new RegExp(`\\blib/(${CHANNEL_MODULES.join("|")})(\\.ts)?["']`);
   for (const p of ["src/app/api/sync/route.ts", "src/app/api/sync/plex/route.ts", "src/app/api/sync/jellyfin/route.ts"]) {
     const src = read(p);
     assert.match(src, /fanOutAvailableWinners\(/, p);
-    assert.doesNotMatch(src, /notifyUsersRequestsAvailable(Push|Email)?\(|writeAvailableInAppNotifications\(/, `${p} re-lists the channels instead of using the shared fan-out`);
+    assert.doesNotMatch(src, channelImport, `${p} imports a notification channel module directly`);
+    assert.doesNotMatch(src, /emitNotificationEvents?\(/, `${p} emits to the outbound channels at the call site`);
+    assert.doesNotMatch(
+      src,
+      /notifyUsersRequestsAvailable|notifyUserRequestAvailable|writeAvailableInAppNotifications|writeInAppNotification/,
+      `${p} names a channel helper (an aliased import still has to spell it once)`,
+    );
   }
-  const hub = read("src/lib/request-notifications.ts");
   const fan = hub.slice(hub.indexOf("export async function fanOutAvailableWinners"));
   assert.match(fan.slice(0, fan.indexOf("\n}\n")), /emitNotificationEvents\(/, "the shared fan-out feeds the outbound channels");
 });

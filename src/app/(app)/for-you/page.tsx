@@ -79,7 +79,10 @@ export default async function ForYouPage({
   });
 
   const [recommendations, computedAt, show4k] = await Promise.all([
-    getUserRecommendations(session.user.id),
+    // includeSeeds: this page renders the per-pick seed list (the "+N more of
+    // yours" dialog below). The home rails take the default and get only
+    // seedCount — don't copy this flag there.
+    getUserRecommendations(session.user.id, { includeSeeds: true }),
     getRecommendationsComputedAt(session.user.id),
     getShow4kVisibility(session),
   ]);
