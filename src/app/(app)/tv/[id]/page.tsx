@@ -24,7 +24,6 @@ import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName, localizedProductionCountry } from "@/lib/tmdb-types";
-import { formatDigitalRelease } from "@/lib/format-release-date";
 import { Chip } from "@/components/ui/design";
 import { canRequest, hasPermission, Permission } from "@/lib/permissions";
 import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
@@ -285,7 +284,6 @@ export default async function TVDetailPage({
                 media.numberOfSeasons
                   ? t("detail.seasonCount", { count: media.numberOfSeasons })
                   : null,
-                formatDigitalRelease(media.releasedDigital, locale, (date) => t("detail.digitalRelease", { date })),
                 // TMDB's English name unless Intl agrees on the country — never
                 // a bare code or ICU's successor-state alias (tmdb-types.ts).
                 localizedProductionCountry(media, locale),
@@ -328,7 +326,7 @@ export default async function TVDetailPage({
                 {t("detail.nextEpisode")}{" "}
                 {/* TMDB air dates are date-only ("YYYY-MM-DD"), which Date parses
                     as UTC midnight — format in UTC too, or a server running west
-                    of UTC renders the day before (same fix as formatDigitalRelease). */}
+                    of UTC renders the day before (same fix as formatReleaseDate). */}
                 {new Date(media.nextEpisodeAirDate).toLocaleDateString(locale, {
                   month: "short",
                   day: "numeric",

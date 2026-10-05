@@ -508,7 +508,7 @@ export async function notifyUserAwaitingRelease(userId: string, title: string, m
   // Formatted in UTC: TMDB release dates and Sonarr firstAired are DATE values
   // carried as UTC midnight ("2024-05-01" / "…T00:00:00Z"), so the server's local
   // zone (any TZ west of UTC) would name the PREVIOUS day. Same convention as
-  // formatDigitalRelease (format-release-date.ts).
+  // formatReleaseDate (format-release-date.ts).
   const parsed = releaseDate ? new Date(releaseDate) : null;
   await notifyUser(userId, (t, locale, local) => {
     const expected = parsed && !Number.isNaN(parsed.getTime())

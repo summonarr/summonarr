@@ -135,6 +135,7 @@ test("movie details cached: the lazy ratings upgrade forwards the row's imdbId �
     posterPath: "/m.jpg", backdropPath: null, releaseDate: "1999-03-31", releaseYear: "1999",
     voteAverage: 8.2, voteCount: 24_000, trailerKey: null,
     imdbId: "tt0133093",
+    digitalReleaseDate: null, physicalReleaseDate: null,
     // imdbRating undefined ⇒ lazy upgrade fires (prewarm-written rows without a
     // prior carry NO ratings fields at all — this is that shape).
     keywords: [], keywordList: [],

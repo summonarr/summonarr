@@ -7,6 +7,7 @@ import { iterateLibrary, LIBRARY_PAGE_SIZE } from "./library-iterator";
 import type { LibraryItem } from "./library-iterator";
 import { tmdbAuth } from "./tmdb-auth";
 import type { TmdbMedia } from "./tmdb-types";
+import { extractHomeReleaseDates } from "./home-release-dates";
 
 const CONCURRENCY = 5;
 const BATCH_DELAY_MS = 250;
@@ -96,7 +97,7 @@ interface RawItem {
   keywords?: { keywords?: { id: number; name: string }[]; results?: { id: number; name: string }[] };
   "watch/providers"?: { results?: Record<string, { flatrate?: RawProvider[]; rent?: RawProvider[]; buy?: RawProvider[] }> };
   external_ids?: { imdb_id?: string | null; tvdb_id?: number | null };
-  release_dates?: { results?: { iso_3166_1: string; release_dates: { certification?: string }[] }[] };
+  release_dates?: { results?: { iso_3166_1: string; release_dates: { certification?: string; type?: number; release_date?: string }[] }[] };
   content_ratings?: { results?: { iso_3166_1: string; rating?: string }[] };
 }
 
@@ -285,6 +286,12 @@ async function fetchAndStore(tmdbId: number, mediaType: "MOVIE" | "TV"): Promise
     voteAverage: raw.vote_average ?? 0,
     voteCount: raw.vote_count ?? 0,
     ...(certification && { certification }),
+    // Same extraction as getMovieDetails — omitting it would erase the detail
+    // page's Release dates section on every prewarm rewrite (the cert-drop class).
+    ...(mediaType === "MOVIE" && (() => {
+      const home = extractHomeReleaseDates(raw.release_dates);
+      return { digitalReleaseDate: home.digital, physicalReleaseDate: home.physical };
+    })()),
     ...(seasons !== undefined && { seasons }),
     // trailerKey/collection mirror getMovieDetails/getTVDetails — omitting them
     // made every prewarm refresh erase the trailer button and the collection

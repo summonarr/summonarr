@@ -17,6 +17,7 @@ import type {
 // languageName / regionName are the ONE ISO-code → display-name helpers (the
 // detail pages use the same exports, in the viewer's locale). Don't add a private copy here.
 import { languageName, regionName } from "./tmdb-types";
+import { extractHomeReleaseDates } from "./home-release-dates";
 
 // Merge a unified ratings payload (fetchUnifiedRatings) onto a media object.
 // `trailerUrl` must never displace an already-extracted TMDB YouTube trailerKey
@@ -168,7 +169,7 @@ interface RawMovie {
   budget?: number | null;
   revenue?: number | null;
   release_dates?: {
-    results: { iso_3166_1: string; release_dates: { certification: string; type: number }[] }[];
+    results: { iso_3166_1: string; release_dates: { certification: string; type: number; release_date?: string }[] }[];
   };
   videos?: RawVideos;
   belongs_to_collection?: { id: number; name: string } | null;
@@ -694,6 +695,20 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
         needsWrite = true;
       }
     }
+    // Rows cached before the home-release fields existed: one small
+    // /release_dates call fills them in place instead of waiting out the 7-day
+    // TTL. A failure leaves them undefined so the next read retries.
+    if (cached.digitalReleaseDate === undefined || cached.physicalReleaseDate === undefined) {
+      try {
+        const rd = await tmdbFetch<NonNullable<RawMovie["release_dates"]>>(`/movie/${id}/release_dates`);
+        const home = extractHomeReleaseDates(rd);
+        cached.digitalReleaseDate = home.digital;
+        cached.physicalReleaseDate = home.physical;
+        needsWrite = true;
+      } catch (err) {
+        console.warn(`[tmdb] movie:${id} release_dates fetch failed:`, err instanceof Error ? err.message : err);
+      }
+    }
     if (needsWrite) await setCache(key, cached, TTL.DETAILS);
     return cached;
   }
@@ -711,6 +726,9 @@ export async function getMovieDetails(id: number): Promise<TmdbMedia> {
   const usEntry = r.release_dates?.results.find((x) => x.iso_3166_1 === "US");
   const cert = usEntry?.release_dates.find((d) => d.certification)?.certification;
   if (cert) media.certification = cert;
+  const home = extractHomeReleaseDates(r.release_dates);
+  media.digitalReleaseDate = home.digital;
+  media.physicalReleaseDate = home.physical;
   media.trailerKey = extractTrailerKey(r.videos);
   if (r.belongs_to_collection) {
     media.collectionId = r.belongs_to_collection.id;

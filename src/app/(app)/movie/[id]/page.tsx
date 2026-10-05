@@ -25,7 +25,6 @@ import { VoteDeleteButton } from "@/components/votes/vote-delete-button";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
 import { DetailExtras } from "@/components/media/detail-extras";
 import { languageName, localizedProductionCountry } from "@/lib/tmdb-types";
-import { formatDigitalRelease } from "@/lib/format-release-date";
 import { Chip } from "@/components/ui/design";
 import { canRequest, hasPermission, Permission } from "@/lib/permissions";
 import { resolveNamedInstanceTargets } from "@/lib/named-instance-targets";
@@ -256,7 +255,6 @@ export default async function MovieDetailPage({
                 media.releaseYear,
                 media.certification,
                 media.runtime ? t("detail.runtime.minutes", { minutes: media.runtime }) : null,
-                formatDigitalRelease(media.releasedDigital, locale, (date) => t("detail.digitalRelease", { date })),
                 // TMDB's English name unless Intl agrees on the country — never
                 // a bare code or ICU's successor-state alias (tmdb-types.ts).
                 localizedProductionCountry(media, locale),
