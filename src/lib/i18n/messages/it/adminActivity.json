@@ -321,6 +321,7 @@
   "adminActivity.common.unknownTitle": "Sconosciuto",
   "adminActivity.stats.title": "Statistiche",
   "adminActivity.stats.subtitle": "Analisi di riproduzione più approfondite su Plex e Jellyfin.",
+  "adminActivity.stats.requestStatsLink": "Statistiche delle richieste →",
   "adminActivity.stats.watchHours": "Ore di visione",
   "adminActivity.stats.uniqueViewers": "Spettatori unici",
   "adminActivity.stats.repeatRate": "Tasso di ripetizione",

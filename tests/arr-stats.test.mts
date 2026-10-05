@@ -15,7 +15,8 @@
 //     default);
 //   - a registered-but-unconfigured instance is skipped entirely (no fetch);
 //   - one failing instance DEGRADES to null/omitted instead of sinking the
-//     whole result: an upstream HTTP error (ArrResponseError) is silent at
+//     whole result, and is listed in the additive `unreachable` array (so the
+//     page can tell "down" from "not configured"): an upstream HTTP error (ArrResponseError) is silent at
 //     this layer (arrFetch already logs it), while a transport-level failure
 //     warns with the [arr-stats] scope — both leave the other instances'
 //     results intact.
@@ -120,8 +121,8 @@ beforeEach(() => {
 
 // ── tests ───────────────────────────────────────────────────────────────────
 
-test("nothing configured → { radarr: null, sonarr: null, extra: [] } with zero fetches", async () => {
-  assert.deepEqual(await getArrDiskSpace(), { radarr: null, sonarr: null, extra: [] });
+test("nothing configured → { radarr: null, sonarr: null, extra: [], unreachable: [] } with zero fetches", async () => {
+  assert.deepEqual(await getArrDiskSpace(), { radarr: null, sonarr: null, extra: [], unreachable: [] });
   assert.equal(fetchCalls.length, 0);
 });
 
@@ -135,7 +136,7 @@ test("default radarr+sonarr: entries pass through verbatim on the back-compat fi
   configureInstance("sonarr", SONARR_URL, "sonarr-key", sonarrEntries);
 
   const result = await getArrDiskSpace();
-  assert.deepEqual(result, { radarr: radarrEntries, sonarr: sonarrEntries, extra: [] });
+  assert.deepEqual(result, { radarr: radarrEntries, sonarr: sonarrEntries, extra: [], unreachable: [] });
 
   const urls = fetchCalls.map((c) => c.url).sort();
   assert.deepEqual(urls, [
@@ -209,6 +210,7 @@ test("a registered-but-unconfigured instance is skipped without a fetch and abse
 
   const result = await getArrDiskSpace();
   assert.deepEqual(result.extra, []);
+  assert.deepEqual(result.unreachable, []); // unconfigured is not "down"
   assert.equal(fetchCalls.length, 1); // only the default instance was contacted
 });
 
@@ -223,6 +225,8 @@ test("an upstream HTTP error on one instance degrades just that instance — sil
   assert.deepEqual(result.radarr, entriesFor("movies"));
   assert.deepEqual(result.sonarr, entriesFor("tv"));
   assert.deepEqual(result.extra, []); // failed anime dropped, not a null placeholder
+  // …but reported, so the page can say it is down rather than unconfigured.
+  assert.deepEqual(result.unreachable, [{ service: "radarr", slug: "anime", label: "Radarr (Anime)" }]);
   // arrFetch already logged the non-2xx; arr-stats must not double-report it.
   assert.ok(errors.some((e) => e.includes("[arr]") && e.includes("500")));
   assert.equal(warns.filter((w) => w.includes("[arr-stats]")).length, 0);
@@ -237,6 +241,7 @@ test("a transport-level failure degrades the instance AND warns with the [arr-st
   const result = await getArrDiskSpace();
   assert.equal(result.radarr, null);
   assert.deepEqual(result.sonarr, entriesFor("tv")); // the healthy service survives
+  assert.deepEqual(result.unreachable, [{ service: "radarr", slug: "", label: "Radarr" }]);
   assert.ok(
     warns.some((w) => w.includes("[arr-stats] radarr diskspace failed")),
     "transport failures must be attributed to the instance in the warn",

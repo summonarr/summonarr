@@ -321,6 +321,7 @@
   "adminActivity.common.unknownTitle": "未知",
   "adminActivity.stats.title": "统计",
   "adminActivity.stats.subtitle": "跨 Plex 和 Jellyfin 的深入播放分析。",
+  "adminActivity.stats.requestStatsLink": "请求统计 →",
   "adminActivity.stats.watchHours": "观看小时数",
   "adminActivity.stats.uniqueViewers": "独立观众",
   "adminActivity.stats.repeatRate": "重看率",

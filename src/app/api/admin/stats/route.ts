@@ -2,9 +2,22 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { getArrDiskSpace } from "@/lib/arr-stats";
+import {
+  countActiveUsers,
+  getFulfillmentStats,
+  getLibraryStats,
+  getPendingQueue,
+  getRequestsByMonth,
+  getStuckRequests,
+  getTopRequesters,
+} from "@/lib/admin-stats-data";
 
 export const dynamic = "force-dynamic";
 
+// The native client decodes this body (iOS AdminStats). Every field it reads
+// keeps its name and type; new figures are additive only. The aggregates are
+// the same functions /admin/stats renders (admin-stats-data.ts), so the two
+// can't disagree about what a number means.
 export const GET = withAdmin(async (_req, _ctx, _session) => {
   const [
     totalRequests,
@@ -15,17 +28,17 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
     movieRequests,
     tvRequests,
     totalUsers,
-    plexItems,
-    jellyfinItems,
     totalIssues,
     openIssues,
-    avgFulfillment,
+    inProgressIssues,
+    fulfillment,
     requestsByMonth,
     recentRequests,
-    plexLibByType,
-    jellyfinLibByType,
+    library,
     episodesBySource,
     topRequesters,
+    pendingQueue,
+    stuck,
     diskSpace,
   ] = await Promise.all([
     prisma.mediaRequest.count(),
@@ -35,68 +48,45 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
     prisma.mediaRequest.count({ where: { status: "DECLINED" } }),
     prisma.mediaRequest.count({ where: { mediaType: "MOVIE" } }),
     prisma.mediaRequest.count({ where: { mediaType: "TV" } }),
-    prisma.user.count(),
-    prisma.plexLibraryItem.count(),
-    prisma.jellyfinLibraryItem.count(),
+    // Accounts that can sign in — disabled and purged ones used to be counted.
+    countActiveUsers(),
     prisma.issue.count(),
     prisma.issue.count({ where: { status: "OPEN" } }),
-    prisma.$queryRaw<{ avg_hours: number | null }[]>`
-      SELECT (EXTRACT(EPOCH FROM AVG("availableAt" - "createdAt")) / 3600)::float8 AS avg_hours
-      FROM "MediaRequest"
-      WHERE status = 'AVAILABLE' AND "availableAt" IS NOT NULL
-    `,
-    prisma.$queryRaw<{ month: string; count: bigint }[]>`
-      SELECT to_char(date_trunc('month', "createdAt"), 'YYYY-MM') AS month,
-             COUNT(*)::bigint AS count
-      FROM "MediaRequest"
-      WHERE "createdAt" >= NOW() - INTERVAL '12 months'
-      GROUP BY month
-      ORDER BY month
-    `,
+    prisma.issue.count({ where: { status: "IN_PROGRESS" } }),
+    getFulfillmentStats(null),
+    getRequestsByMonth(),
     prisma.mediaRequest.findMany({
       orderBy: { createdAt: "desc" },
       take: 10,
       select: { title: true, mediaType: true, status: true, createdAt: true },
     }),
-    // Per-server library breakdown (mirrors the web admin stats page's
-    // LibraryServerCard): movies/series counts by media type, plus episode
-    // counts and summed episode runtime by source.
-    prisma.plexLibraryItem.groupBy({ by: ["mediaType"], _count: { _all: true } }),
-    prisma.jellyfinLibraryItem.groupBy({ by: ["mediaType"], _count: { _all: true } }),
-    prisma.tVEpisodeCache.groupBy({ by: ["source"], _count: { _all: true }, _sum: { runtime: true } }),
-    // Top 10 requesters by request count (mirrors the web admin stats page).
-    prisma.$queryRaw<{ name: string | null; email: string; count: bigint }[]>`
-      SELECT u.name, u.email, COUNT(r.id)::bigint AS count
-      FROM "MediaRequest" r
-      JOIN "User" u ON u.id = r."requestedBy"
-      GROUP BY u.name, u.email
-      ORDER BY 3 DESC
-      LIMIT 10
-    `,
+    getLibraryStats(),
+    prisma.tVEpisodeCache.groupBy({ by: ["source"], _sum: { runtime: true } }),
+    getTopRequesters(null),
+    getPendingQueue(),
+    getStuckRequests(),
     // External Radarr/Sonarr HTTP fan-out — runs inside the batch so its
     // latency overlaps the DB aggregates instead of adding to them serially.
     getArrDiskSpace(),
   ]);
 
-  const libCount = (
-    rows: { mediaType: string; _count: { _all: number } }[],
-    type: "MOVIE" | "TV",
-  ) => rows.find((r) => r.mediaType === type)?._count._all ?? 0;
-  const episodeRow = (source: string) =>
-    episodesBySource.find((r) => r.source === source);
-  const serverBreakdown = (
-    libByType: { mediaType: string; _count: { _all: number } }[],
-    source: string,
-  ) => {
-    const runtimeMin = episodeRow(source)?._sum.runtime ?? 0;
+  const serverBreakdown = (source: "plex" | "jellyfin") => {
+    const p = library.perService[source];
+    // Episode runtime is only known for seasons someone opened recently (the
+    // library sync rewrites TVEpisodeCache without it), so this undercounts.
+    // Kept for the native client, which decodes the field; the web page no
+    // longer shows it.
+    const runtimeMin = episodesBySource.find((r) => r.source === source)?._sum.runtime ?? 0;
     return {
-      movies: libCount(libByType, "MOVIE"),
-      series: libCount(libByType, "TV"),
-      episodes: episodeRow(source)?._count._all ?? 0,
+      movies: p.movies,
+      series: p.series,
+      episodes: p.episodes,
       episodeRuntimeMinutes: runtimeMin,
       episodeRuntimeHours: runtimeMin / 60,
     };
   };
+
+  const avgSeconds = fulfillment.total.avgSeconds;
 
   return NextResponse.json({
     requests: {
@@ -110,22 +100,32 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
     },
     users: totalUsers,
     library: {
-      // Back-compat: existing integer counts (total items per server).
-      plex: plexItems,
-      jellyfin: jellyfinItems,
-      // Additive: per-server movies/series/episodes + episode-runtime hours.
-      plexBreakdown: serverBreakdown(plexLibByType, "plex"),
-      jellyfinBreakdown: serverBreakdown(jellyfinLibByType, "jellyfin"),
+      // Distinct titles per service: a title on two servers of one service
+      // counts once (it used to count once per server).
+      plex: library.perService.plex.movies + library.perService.plex.series,
+      jellyfin: library.perService.jellyfin.movies + library.perService.jellyfin.series,
+      plexBreakdown: serverBreakdown("plex"),
+      jellyfinBreakdown: serverBreakdown("jellyfin"),
+      // Additive: distinct titles across every server of both services.
+      unique: library.unique,
     },
-    issues: { total: totalIssues, open: openIssues },
-    avgFulfillmentHours: avgFulfillment[0]?.avg_hours ?? null,
-    requestsByMonth: requestsByMonth.map((r) => ({ month: r.month, count: Number(r.count) })),
+    issues: { total: totalIssues, open: openIssues, inProgress: inProgressIssues },
+    // Request → available, over APPROVED requests only (see getFulfillmentStats).
+    avgFulfillmentHours: avgSeconds === null ? null : avgSeconds / 3600,
+    // Every one of the last 12 calendar months, zero months included.
+    requestsByMonth: requestsByMonth.map((m) => ({ month: m.month, count: m.count, byStatus: m.byStatus })),
     topRequesters: topRequesters.map((u) => ({
       name: u.name,
       email: u.email,
-      count: Number(u.count),
+      count: u.count,
+      available: u.available,
+      declined: u.declined,
     })),
     recentRequests,
     diskSpace,
+    // Additive figures.
+    fulfillment,
+    pendingQueue,
+    stuckRequests: stuck.counts,
   });
 });

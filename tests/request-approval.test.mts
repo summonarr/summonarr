@@ -192,7 +192,11 @@ const DECISION_ROUTES = [
 ];
 const BACKFILL = "src/lib/request-approval.ts";
 // May read the column (or document it), never write it.
-const READERS = ["src/app/api/openapi/route.ts", "src/lib/watch-grade-data.ts"];
+const READERS = ["src/app/api/openapi/route.ts", "src/lib/watch-grade-data.ts", "src/lib/admin-stats-data.ts", "src/app/(app)/admin/stats/page.tsx"];
+// Readers that name the column inside raw SQL. The AST write scan below can't
+// see into SQL text, so each one is held to read-only SQL instead: no
+// $executeRaw at all and no UPDATE/INSERT/DELETE statement in its templates.
+const RAW_SQL_READERS = ["src/lib/admin-stats-data.ts"];
 const WRITE_METHODS = new Set(["create", "createMany", "createManyAndReturn", "update", "updateMany", "updateManyAndReturn", "upsert"]);
 
 function walkSrc(dir = "src", out: string[] = []): string[] {
@@ -317,7 +321,16 @@ test("approvedAt is mentioned only where requests are decided, by the backfill, 
   const stray = [...mentions.keys()].filter((rel) => !allowed.has(rel));
   assert.deepEqual(stray, [], "only decisions record approval — reading it somewhere new means adding that file to READERS on purpose");
   for (const rel of [...DECISION_ROUTES, BACKFILL]) assert.ok(mentions.has(rel), `${rel} records approval`);
-  assert.deepEqual([...mentions].filter(([, m]) => m.sql).map(([rel]) => rel), [BACKFILL], "raw SQL names the column only in the backfill");
+  assert.deepEqual(
+    [...mentions].filter(([, m]) => m.sql).map(([rel]) => rel).sort(),
+    [BACKFILL, ...RAW_SQL_READERS].sort(),
+    "raw SQL names the column only in the backfill and the declared read-only SQL readers",
+  );
+  for (const rel of RAW_SQL_READERS) {
+    const text = readFileSync(join(ROOT, rel), "utf8");
+    assert.ok(!text.includes("$executeRaw"), `${rel} reads approvedAt in raw SQL and must never execute a write`);
+    assert.ok(!/\b(UPDATE|INSERT INTO|DELETE FROM)\s+"/.test(text), `${rel} reads approvedAt in raw SQL and must contain no write statement`);
+  }
 
   for (const rel of READERS) {
     const writes = mediaRequestWrites(rel).filter((w) => approvedAtAssignments(w.data).length > 0);

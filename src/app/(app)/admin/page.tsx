@@ -77,7 +77,8 @@ export default async function AdminPage({
 
   const [statusCounts, userCount, distinctGroups, pagedGroups, userRequestCounts] = await Promise.all([
     prisma.mediaRequest.groupBy({ by: ["status"], _count: { status: true } }),
-    prisma.user.count(),
+    // Accounts that can sign in — the same figure /admin/stats reports.
+    prisma.user.count({ where: { deactivatedAt: null } }),
     prisma.$queryRaw<[{ count: bigint }]>(Prisma.sql`
       SELECT COUNT(DISTINCT ("tmdbId", "mediaType")) AS count
       FROM "MediaRequest"

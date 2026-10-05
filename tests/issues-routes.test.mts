@@ -671,6 +671,8 @@ test("PATCH OPEN→RESOLVED: CAS updateMany, an issue:updated SSE, a resolved in
   assert.equal(cas.where.status, "OPEN", "the CAS guards the observed status");
   assert.equal(cas.data.status, "RESOLVED");
   assert.equal(cas.data.resolution, "Re-downloaded a clean copy.");
+  // resolvedAt backs the /admin/stats time-to-resolve figure.
+  assert.ok(cas.data.resolvedAt instanceof Date, "resolving stamps resolvedAt");
 
   assert.deepEqual(sseEvents.map((e) => e.type), ["issue:updated"]);
   assert.equal((sseEvents[0] as { userId: string }).userId, "reporter-victim", "the SSE targets the reporter");
@@ -993,12 +995,55 @@ test("PATCH reopen (RESOLVED→OPEN) clears the stale resolution; a non-reopen m
   assert.equal(cas.data.status, "OPEN");
   assert.ok("resolution" in cas.data, "the reopen must write the resolution column");
   assert.equal(cas.data.resolution, null);
+  assert.ok("resolvedAt" in cas.data, "the reopen must clear resolvedAt");
+  assert.equal(cas.data.resolvedAt, null);
 
   // Control: an OPEN→IN_PROGRESS move never touches the resolution.
   issueRow = { id: "issue-ro2", status: "OPEN", reportedBy: "r", title: "t", mediaType: "MOVIE", tmdbId: 1, resolution: null, posterPath: null };
   await patchIssue(admin.token, "issue-ro2", { status: "IN_PROGRESS" });
   const cas2 = opsOf("issue.updateMany")[1].args as { data: Record<string, unknown> };
   assert.ok(!("resolution" in cas2.data));
+});
+
+test("PATCH resolution-only edit on a RESOLVED issue leaves resolvedAt alone (the resolve time is the transition, not the last edit)", async () => {
+  issueRow = { id: "issue-rn", status: "RESOLVED", reportedBy: "r", title: "t", mediaType: "MOVIE", tmdbId: 1, resolution: "old", posterPath: null };
+  const admin = await mintSession({ role: "ISSUE_ADMIN" });
+  const res = await patchIssue(admin.token, "issue-rn", { resolution: "clarified note" });
+  assert.equal(res.status, 200);
+  const write = opsOf("issue.updateMany")[0].args as { data: Record<string, unknown> };
+  assert.equal(write.data.resolution, "clarified note");
+  assert.ok(!("resolvedAt" in write.data), "a note edit must not move resolvedAt");
+
+  // Re-sending the SAME status (a native client may echo it with a note) is not
+  // a transition either.
+  issueRow = { id: "issue-rn2", status: "RESOLVED", reportedBy: "r", title: "t", mediaType: "MOVIE", tmdbId: 1, resolution: "old", posterPath: null };
+  await patchIssue(admin.token, "issue-rn2", { status: "RESOLVED", resolution: "same status, new note" });
+  const write2 = opsOf("issue.updateMany")[1].args as { data: Record<string, unknown> };
+  assert.ok(!("resolvedAt" in write2.data), "an unchanged status must not re-stamp resolvedAt");
+});
+
+test("messages POST: the reporter replying to a RESOLVED issue reopens it AND clears resolvedAt", async () => {
+  issueRow = { id: "issue-rr", status: "RESOLVED", reportedBy: "reporter-rr", title: "Heat", mediaType: "MOVIE", tmdbId: 949, posterPath: null, claimedBy: null, resolution: "fixed" };
+  usersById.set("reporter-rr", {
+    role: "USER", permissions: 0n, mediaServer: null, sessionsRevokedAt: null,
+    passwordChangedAt: null, deactivatedAt: null, email: null, notificationEmail: null,
+  });
+  const iat = Math.floor(Date.now() / 1000);
+  sessionRows.add("sess-rr");
+  const token = await signSessionJwt(
+    { id: "reporter-rr", role: "USER", permissions: "0", provider: "credentials", sessionId: "sess-rr", expiresAt: iat + 86_400 },
+    { expiresInSeconds: 7_200, iat },
+  );
+  const res = await postMessage(token, "issue-rr", { body: "it broke again" });
+  assert.equal(res.status, 201);
+  const reopen = opsOf("issue.updateMany").find(
+    (o) => (o.args as { data: Record<string, unknown> }).data.status === "OPEN",
+  );
+  assert.ok(reopen, "the reporter's reply reopens the issue");
+  const data = (reopen.args as { data: Record<string, unknown> }).data;
+  assert.ok("resolvedAt" in data);
+  assert.equal(data.resolvedAt, null);
+  await flushMicrotasks();
 });
 
 // An issue admin who REPORTED the issue and then replies is talking to
