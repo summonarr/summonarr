@@ -535,7 +535,9 @@ test("movie details cold: append_to_response wire, certification kept, official 
           { iso_3166_1: "DE", release_dates: [{ certification: "16", type: 3 }] },
           // The US entry's first row has no certification — the extractor must
           // skip it and keep the first NON-EMPTY one.
-          { iso_3166_1: "US", release_dates: [{ certification: "", type: 1 }, { certification: "R", type: 3 }] },
+          { iso_3166_1: "US", release_dates: [{ certification: "", type: 1 }, { certification: "R", type: 3 }, { certification: "", type: 4, release_date: "1999-09-21T00:00:00.000Z" }] },
+          // No US physical date ⇒ the earliest anywhere.
+          { iso_3166_1: "AU", release_dates: [{ certification: "", type: 5, release_date: "1999-10-11T00:00:00.000Z" }] },
         ],
       },
       videos: {
@@ -568,6 +570,9 @@ test("movie details cold: append_to_response wire, certification kept, official 
   const before = Date.now();
   const result = await getMovieDetails(603);
   const after = Date.now();
+  // Home-release dates ride the same append — no extra call.
+  assert.equal(result.digitalReleaseDate, "1999-09-21");
+  assert.equal(result.physicalReleaseDate, "1999-10-11");
 
   assert.equal(fetchCalls.length, 1);
   const call = fetchCalls[0];
@@ -686,6 +691,8 @@ test("movie details cached: a fresh normalized row (ratings pinned null) serves 
     imdbRating: null, rtAudienceScore: null, mdblistScore: null,
     // String-form keywords ⇒ no shape migration.
     keywords: ["one"], keywordList: [{ id: 1, name: "one" }],
+    // Home-release fields present (null = TMDB has none) ⇒ no release_dates fill.
+    digitalReleaseDate: null, physicalReleaseDate: null,
   };
   seedCache("movie:888:details", cachedMedia);
   const result = await getMovieDetails(888);
@@ -701,6 +708,7 @@ test("movie details cached: object-form keywords are migrated to names + keyword
     voteAverage: 6.5, voteCount: 50, trailerKey: null,
     imdbRating: null, rtAudienceScore: null, mdblistScore: null,
     keywords: [{ id: 1, name: "heist" }, { id: 2, name: "crew" }], // pre-split object form
+    digitalReleaseDate: null, physicalReleaseDate: null,
   });
   const result = await getMovieDetails(889);
   assert.equal(fetchCalls.length, 0);
@@ -709,6 +717,51 @@ test("movie details cached: object-form keywords are migrated to names + keyword
   const rewrite = upsertFor("movie:889:details");
   assert.ok(rewrite, "the migrated shape must be written back");
   assert.deepEqual((JSON.parse(rewrite.data) as { keywords: unknown }).keywords, ["heist", "crew"]);
+});
+
+test("movie details cached: a row from before the home-release fields fills them with ONE /release_dates call and re-persists", async () => {
+  seedCache("movie:890:details", {
+    id: 890, mediaType: "movie", title: "Pre-Release-Dates", overview: "",
+    posterPath: null, backdropPath: null, releaseDate: "2020-02-02", releaseYear: "2020",
+    voteAverage: 6, voteCount: 10, trailerKey: null,
+    imdbRating: null, rtAudienceScore: null, mdblistScore: null,
+    keywords: [], keywordList: [],
+  });
+  respond = (url) => {
+    assert.equal(url.pathname, "/3/movie/890/release_dates");
+    return jsonResponse({
+      id: 890,
+      results: [
+        { iso_3166_1: "GB", release_dates: [{ type: 4, release_date: "2020-03-01T00:00:00.000Z" }] },
+        { iso_3166_1: "US", release_dates: [{ type: 3, release_date: "2020-02-02T00:00:00.000Z" }, { type: 4, release_date: "2020-04-10T00:00:00.000Z" }] },
+      ],
+    });
+  };
+  const result = await getMovieDetails(890);
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(result.digitalReleaseDate, "2020-04-10"); // US beats the earlier GB date
+  assert.equal(result.physicalReleaseDate, null);        // none anywhere ⇒ null, not undefined
+  const rewrite = upsertFor("movie:890:details");
+  assert.ok(rewrite, "the filled fields must be written back so the next read makes no call");
+  const stored = JSON.parse(rewrite.data) as { digitalReleaseDate: unknown; physicalReleaseDate: unknown };
+  assert.equal(stored.digitalReleaseDate, "2020-04-10");
+  assert.equal(stored.physicalReleaseDate, null);
+});
+
+test("movie details cached: a failed /release_dates fill leaves the fields undefined (retried next read) and still serves the row", async () => {
+  seedCache("movie:891:details", {
+    id: 891, mediaType: "movie", title: "Flaky", overview: "",
+    posterPath: null, backdropPath: null, releaseDate: "2020-02-02", releaseYear: "2020",
+    voteAverage: 6, voteCount: 10, trailerKey: null,
+    imdbRating: null, rtAudienceScore: null, mdblistScore: null,
+    keywords: [], keywordList: [],
+  });
+  respond = () => jsonResponse({ status_message: "boom" }, 500);
+  const result = await getMovieDetails(891);
+  assert.equal(result.title, "Flaky");
+  assert.equal(result.digitalReleaseDate, undefined);
+  assert.equal(result.physicalReleaseDate, undefined);
+  assert.equal(upsertFor("movie:891:details"), undefined, "a failure must not pin nulls");
 });
 
 test("TV details: a cached row without seasons is BUSTED (point delete) and re-fetched; seasons/cert normalize", async () => {

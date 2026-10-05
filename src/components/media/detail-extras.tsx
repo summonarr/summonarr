@@ -3,7 +3,8 @@ import Link from "next/link";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { Chip } from "@/components/ui/design";
 import { safeExternalHref } from "@/lib/safe-url";
-import { getTranslator } from "@/lib/i18n/server";
+import { getTranslator, getLocale } from "@/lib/i18n/server";
+import { formatReleaseDate } from "@/lib/format-release-date";
 
 const PROVIDER_LOGO_BASE = "https://image.tmdb.org/t/p/w92";
 
@@ -29,9 +30,20 @@ export async function DetailExtras({ media, mediaType }: { media: TmdbMedia; med
   const homepage = safeExternalHref(media.homepage) ?? null;
   const hasProviders = providers.length > 0;
   const hasKeywords = keywords.length > 0;
+  // Movies: TMDB's Digital (type 4) / Physical (type 5) dates, Digital falling
+  // back to MDBList's. TV: TMDB has no release types for TV, so Digital is
+  // MDBList's alone and Physical never has a source.
+  const digitalRaw = (mediaType === "movie" ? media.digitalReleaseDate : null) ?? media.releasedDigital ?? null;
+  const physicalRaw = mediaType === "movie" ? (media.physicalReleaseDate ?? null) : null;
+  const hasReleases = !!(digitalRaw || physicalRaw);
 
-  if (!hasProviders && !hasKeywords && !homepage) return null;
+  if (!hasProviders && !hasKeywords && !homepage && !hasReleases) return null;
   const t = await getTranslator();
+  const locale = await getLocale();
+  const releases = [
+    { label: t("detail.release.digital"), date: formatReleaseDate(digitalRaw, locale) },
+    { label: t("detail.release.physical"), date: formatReleaseDate(physicalRaw, locale) },
+  ].filter((r): r is { label: string; date: string } => r.date !== null);
 
   // Group providers by offering type, preserving the stream → rent → buy order.
   const grouped: { type: NonNullable<TmdbMedia["watchProviders"]>[number]["type"]; items: typeof providers }[] = [];
@@ -45,6 +57,22 @@ export async function DetailExtras({ media, mediaType }: { media: TmdbMedia; med
       className="ds-detail-section flex flex-col"
       style={{ gap: 20 }}
     >
+      {releases.length > 0 && (
+        <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <h3 className="ds-mono" style={{ fontSize: 11, letterSpacing: "0.04em", color: "var(--ds-fg-subtle)", margin: 0, textTransform: "uppercase" }}>
+            {t("detail.releaseDates")}
+          </h3>
+          <dl className="flex flex-wrap items-start" style={{ gap: 18, margin: 0 }}>
+            {releases.map((r) => (
+              <div key={r.label} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <dt className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}>{r.label}</dt>
+                <dd style={{ fontSize: 13.5, color: "var(--ds-fg)", margin: 0 }}>{r.date}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      )}
+
       {hasProviders && (
         <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {/* h3, not h2: these are small sub-labels, below the page's real

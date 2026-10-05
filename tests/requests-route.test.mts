@@ -368,6 +368,8 @@ function seedMovieDetails(tmdbId: number, over: Record<string, unknown> = {}): v
     letterboxdRating: null,
     malRating: null,
     rogerEbertRating: null,
+    digitalReleaseDate: null,
+    physicalReleaseDate: null,
     ...over,
   };
   detailsRows.set(`movie:${tmdbId}:details`, {

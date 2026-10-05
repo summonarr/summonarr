@@ -44,6 +44,10 @@ export interface TmdbMedia {
   malRating?: string | null;
   rogerEbertRating?: string | null;
   releasedDigital?: string | null;
+  // Movies only, from TMDB release types 4/5 (home-release-dates.ts). Absent ⇒
+  // not fetched yet (a row cached before these existed); null ⇒ TMDB has none.
+  digitalReleaseDate?: string | null;
+  physicalReleaseDate?: string | null;
   trailerUrl?: string | null;
 
   trailerKey?: string | null;
