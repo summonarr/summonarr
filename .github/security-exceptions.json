@@ -32,5 +32,13 @@
     "    \"reason\": \"Dev-only; not present in the runtime image. Upstream fix tracked in #123.\"",
     "  }"
   ],
-  "exceptions": []
+  "exceptions": [
+    {
+      "id": "GHSA-vfj7-8cjw-p6xm",
+      "package": "braces",
+      "owner": "@gadgetusaf",
+      "expires": "2026-10-26",
+      "reason": "Dev-only: reached solely via eslint-config-next -> @next/eslint-plugin-next -> fast-glob -> micromatch, a lint-time dependency absent from the standalone runtime image. No patched braces release exists (all <=3.0.3 affected). Remove once upstream publishes a fix."
+    }
+  ]
 }

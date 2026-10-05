@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.30.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.30.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,22 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.30.1
+
+**Fixed**
+
+- **v0.30.0 never published a Docker image** — its release build was stopped by a security check on a development-only tool. This release ships everything listed under v0.30.0.
+- **Webhook, ntfy and Gotify channels:** a retry now uses the channel's current settings, and a disabled or deleted channel is no longer retried. Retries that couldn't be queued now show as failed on the channel. Templates that would break when optional fields are empty are refused on save, and ntfy/Gotify addresses with a query string are refused. Fixes to the enable toggle, a blank priority, and delete errors that went unreported.
+- **"Now available" notifications** reach webhook, ntfy and Gotify channels when an admin marks a request available by hand, and name the right Radarr/Sonarr instance.
+- **Plex friends' watchlists:** unchanged watchlists no longer repeat Plex lookups on every run, and a friend whose lookups all failed is reported as an error instead of OK.
+- **"For You":** clicking outside the "+ N more" list closes it instead of opening the title behind it.
+- **Country names:** films from the Soviet Union, Czechoslovakia and other former countries show the historical country again instead of a modern successor or a bare code.
+- German labels that were shown in all capitals are title-cased. `SUMMONARR_DEFAULT_LOCALE` accepts region tags like `pt-BR` and warns once at startup about an unsupported value.
+
+**Changed**
+
+- Updated Next.js (16.3.8), the Node.js base image (26.10.0) and the PostgreSQL driver.
 
 ### v0.30.0
 
@@ -795,7 +811,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.30.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.30.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
