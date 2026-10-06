@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.31.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.32.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,28 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.32.0
+
+**Added**
+
+- **A rebuilt Statistics page** (Admin → Statistics), with a 30-day / 90-day / 12-month / all-time filter. New:
+  - a **Needs attention** section: how many requests are waiting for a decision and for how long, the most-wanted pending titles, and approved requests that are stuck (the add to Radarr/Sonarr failed, the title is missing from Radarr/Sonarr, or it's still downloading after a week)
+  - approval, decline, fulfillment and auto-approve rates, where requests come from, and counts per Radarr/Sonarr instance
+  - time to fulfill as a median with the 90th percentile, split into time to approve and time to download, for movies and TV
+  - requests per month split by status, active users and sign-ups per month, and titles added to the library per month
+  - the issue backlog: open, in progress, unclaimed, waiting for an admin reply, oldest unresolved, by type, and time to resolve
+  - the most-voted titles for deletion, library size on disk per Radarr/Sonarr instance, space Library cleanup could free, and the spread of request watch grades
+- Links between the request statistics and playback statistics pages.
+
+**Fixed**
+
+- **Average fulfillment time** read far too fast: requests made for a title that was already available, and requests nobody approved, counted as instant. It now counts approved requests only.
+- **Users** counted disabled and deleted accounts — on the Statistics page, the request queue and the admin stats API.
+- **Library counts** counted a title twice when it was on two servers.
+- **Disk space** listed a disk twice when Radarr and Sonarr shared it, and an instance that didn't respond silently disappeared. It's now listed as unreachable.
+- **Episode Runtime** showed close to zero and has been removed.
+- One slow or unreachable Radarr/Sonarr no longer holds the whole Statistics page blank for up to 30 seconds.
 
 ### v0.31.0
 
@@ -821,7 +843,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.31.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.32.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
