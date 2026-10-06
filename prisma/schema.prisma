@@ -757,6 +757,13 @@ model Issue {
 
   status     IssueStatus @default(OPEN)
   resolution String?     @db.VarChar(2000)
+  // When the issue last moved to RESOLVED; cleared on reopen. Written only by the
+  // status PATCH (issues/[id]/route.ts) and the reporter-reply reopen
+  // (issues/[id]/messages/route.ts). Backs the time-to-resolve figure on
+  // /admin/stats. Issues resolved before the column existed carry null and are
+  // simply left out of that figure (updatedAt moves on every edit, so it can't
+  // stand in for it).
+  resolvedAt DateTime?
 
   messages IssueMessage[]
   grabs    IssueGrab[]

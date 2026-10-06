@@ -128,8 +128,11 @@ export const PATCH = withIssueAdmin(async (
     return NextResponse.json({ error: t("apiUser.issues.resolutionEmpty") }, { status: 400 });
   }
 
-  const updateData: { status?: ValidStatus; resolution?: string | null } = {};
+  const updateData: { status?: ValidStatus; resolution?: string | null; resolvedAt?: Date | null } = {};
   if (status) updateData.status = status as ValidStatus;
+  // resolvedAt follows the status transition only (a resolution-only edit leaves
+  // it alone): stamped on → RESOLVED, cleared on any move away from it.
+  if (status && status !== issue.status) updateData.resolvedAt = status === "RESOLVED" ? new Date() : null;
   if (sanitizedResolution != null) updateData.resolution = sanitizedResolution;
   // Reopening (RESOLVED → OPEN/IN_PROGRESS) clears the old resolution, matching the
   // reporter-reply reopen in the messages route. Otherwise a later re-resolve with no

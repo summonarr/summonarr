@@ -2561,7 +2561,54 @@ const spec = {
       get: {
         tags: ["Admin – Stats"],
         summary: "System statistics (ADMIN)",
-        responses: { "200": { description: "Aggregate stats across requests, users, library, and sync" } },
+        description:
+          "All-time aggregates, shared with the /admin/stats page (src/lib/admin-stats-data.ts). `users` counts accounts that can sign in (disabled ones excluded). `library.plex`/`library.jellyfin` are distinct titles per service; `library.unique` is distinct titles across every server. `avgFulfillmentHours` is request → available over APPROVED requests only (copies created already-available and library-marked unapproved requests are excluded). `requestsByMonth` always holds the last 12 calendar months (UTC), zero months included. `diskSpace.unreachable` lists configured instances whose diskspace call failed. `fulfillment` (median/p90 seconds for approve, download and total), `pendingQueue` and `stuckRequests` are additive.",
+        responses: {
+          "200": {
+            description: "Aggregate stats across requests, users, library, issues and storage",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    requests: { type: "object", additionalProperties: { type: "integer" } },
+                    users: { type: "integer" },
+                    library: { type: "object" },
+                    issues: {
+                      type: "object",
+                      properties: { total: { type: "integer" }, open: { type: "integer" }, inProgress: { type: "integer" } },
+                    },
+                    avgFulfillmentHours: { type: "number", nullable: true },
+                    requestsByMonth: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          month: { type: "string", example: "2026-10" },
+                          count: { type: "integer" },
+                          byStatus: { type: "object", additionalProperties: { type: "integer" } },
+                        },
+                      },
+                    },
+                    topRequesters: { type: "array", items: { type: "object" } },
+                    recentRequests: { type: "array", items: { type: "object" } },
+                    diskSpace: { type: "object" },
+                    fulfillment: { type: "object" },
+                    pendingQueue: { type: "object" },
+                    stuckRequests: {
+                      type: "object",
+                      properties: {
+                        "push-failed": { type: "integer" },
+                        "not-in-arr": { type: "integer" },
+                        "slow-download": { type: "integer" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
       },
     },
 

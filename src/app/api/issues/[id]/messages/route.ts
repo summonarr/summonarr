@@ -124,7 +124,7 @@ export const POST = withAuth(async (req, { params }: RouteContext, session) => {
   if (!isAdmin && issue.status === "RESOLVED" && issue.reportedBy === session.user.id) {
     const reopened = await prisma.issue.updateMany({
       where: { id, status: "RESOLVED" },
-      data: { status: "OPEN", resolution: null },
+      data: { status: "OPEN", resolution: null, resolvedAt: null },
     });
     if (reopened.count > 0) {
       emitSSE({ type: "issue:updated", issueId: id, status: "OPEN", userId: issue.reportedBy });

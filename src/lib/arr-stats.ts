@@ -23,12 +23,19 @@ export interface ArrDiskSpace {
   sonarr: DiskSpaceEntry[] | null;
   // Non-default (4K/named) instances, additive so older consumers ignore it.
   extra: ArrInstanceDiskSpace[];
+  // Configured instances whose diskspace call failed this time. Additive. Without
+  // it a failing instance's group just vanished, which read as "not configured".
+  unreachable: Array<{ service: "radarr" | "sonarr"; slug: string; label: string }>;
 }
+
+// Thrown-away marker for a configured instance whose call failed — distinct from
+// null, which means "not configured".
+const FAILED = Symbol("diskspace-failed");
 
 async function fetchDiskSpace(
   service: "radarr" | "sonarr",
   slug: string,
-): Promise<DiskSpaceEntry[] | null> {
+): Promise<DiskSpaceEntry[] | null | typeof FAILED> {
   const cfg = await getArrCfg(service, slug);
   if (!cfg) return null;
 
@@ -37,10 +44,13 @@ async function fetchDiskSpace(
     // injects X-Api-Key, throws ArrResponseError on non-2xx.
     return await arrFetch<DiskSpaceEntry[]>(cfg, "/api/v3/diskspace");
   } catch (err) {
+    // arrFetch already logs a non-2xx (ArrResponseError); only a transport
+    // failure needs attributing here. Either way the instance is reported as
+    // unreachable to the caller instead of vanishing.
     if (!(err instanceof ArrResponseError)) {
-      console.warn(`[arr-stats] ${service}${slug ? ` (${slug})` : ""} diskspace failed:`, err);
+      console.warn(`[arr-stats] ${service}${slug ? ` (${slug})` : ""} diskspace failed:`, err instanceof Error ? err.message : err);
     }
-    return null;
+    return FAILED;
   }
 }
 
@@ -50,10 +60,14 @@ export async function getArrDiskSpace(): Promise<ArrDiskSpace> {
     getSyncableArrInstances("sonarr"),
   ]);
 
-  const [radarr, sonarr] = await Promise.all([
+  const [radarrRaw, sonarrRaw] = await Promise.all([
     radarrInstances.some((i) => i.slug === "") ? fetchDiskSpace("radarr", "") : Promise.resolve(null),
     sonarrInstances.some((i) => i.slug === "") ? fetchDiskSpace("sonarr", "") : Promise.resolve(null),
   ]);
+
+  const unreachable: ArrDiskSpace["unreachable"] = [];
+  if (radarrRaw === FAILED) unreachable.push({ service: "radarr", slug: "", label: "Radarr" });
+  if (sonarrRaw === FAILED) unreachable.push({ service: "sonarr", slug: "", label: "Sonarr" });
 
   const namedTargets = [
     ...radarrInstances.filter((i) => i.slug !== "").map((i) => ({ service: "radarr" as const, inst: i })),
@@ -62,15 +76,20 @@ export async function getArrDiskSpace(): Promise<ArrDiskSpace> {
   const extraResults = await Promise.all(
     namedTargets.map(async ({ service, inst }) => {
       const entries = await fetchDiskSpace(service, inst.slug);
+      const label = `${service === "radarr" ? "Radarr" : "Sonarr"} (${inst.name})`;
+      if (entries === FAILED) {
+        unreachable.push({ service, slug: inst.slug, label });
+        return null;
+      }
       if (!entries) return null;
-      return {
-        service,
-        slug: inst.slug,
-        label: `${service === "radarr" ? "Radarr" : "Sonarr"} (${inst.name})`,
-        entries,
-      } satisfies ArrInstanceDiskSpace;
+      return { service, slug: inst.slug, label, entries } satisfies ArrInstanceDiskSpace;
     }),
   );
 
-  return { radarr, sonarr, extra: extraResults.filter((r) => r !== null) };
+  return {
+    radarr: radarrRaw === FAILED ? null : radarrRaw,
+    sonarr: sonarrRaw === FAILED ? null : sonarrRaw,
+    extra: extraResults.filter((r) => r !== null),
+    unreachable,
+  };
 }

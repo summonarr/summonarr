@@ -493,6 +493,17 @@ There is no version constant in `src/`. Don't add one — `package.json` + the g
     - live **outside** the transaction as an idempotent `createMany({ data: [...], skipDuplicates: true })` one-shot gate (`count === 1` ⇒ this caller won), OR
     - use `upsert`. Never a bare `create` whose error is caught-and-ignored mid-transaction.
 
+23a. **NEVER interpolate an SQL fragment into a TAGGED `$queryRaw`/`$executeRaw`. Build the query with `Prisma.sql` and pass it as ONE value: `prisma.$queryRaw(Prisma.sql\`…${fragment}…\`)`.**
+
+    Why:
+    - Inside the Next bundle, the client's tagged-template path did not recognise a `Prisma.sql`/`Prisma.empty` fragment imported from `@/generated/prisma` as SQL, and bound it as a parameter. Postgres answered `syntax error at or near "$1"` and `/admin/stats` 500'd on every query that carried an optional `AND createdAt >= …` clause.
+    - The unit loader shares one module instance, so the identical call passed every unit test **and** a direct run against a real Postgres. Only a live `next dev` render showed it. The `Prisma.sql(...)` builder composes fragments itself, so the form above is immune; every other raw query in `src/` already used it.
+
+    Rules:
+    - A fragment is anything from `Prisma.sql` / `Prisma.empty` / `Prisma.join` / `Prisma.raw`, or a variable or helper that produces one (`sinceClause(since)`, `statusCond`). Plain values — a `Date`, a number, `String(now)` — are what a tagged template is for, and stay as they are.
+    - `tests/raw-sql-composition.test.mts` scans `src/` for the tagged shape (a fragment named directly, or an identifier/call declared in the same file from one). It is mutation-verified against reverting one `admin-stats-data.ts` query. A fragment produced in ANOTHER file and interpolated here is invisible to it — so the rule, not the scan, is the boundary.
+    - A test stub of `$queryRaw` must accept both call shapes (a template-strings array, or a single `{ sql, values }` object) — see `tests/admin-stats.test.mts`.
+
 24. **The native-client version gate (426) fails SOFT and is NEVER an authz input.**
 
     Why:
