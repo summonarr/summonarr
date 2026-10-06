@@ -43,17 +43,14 @@ export const POST = withAuth(async (req, _ctx, session) => {
     );
   }
 
-  const alreadyLinked = await prisma.user.findUnique({ where: { discordId } });
-  if (
-    alreadyLinked &&
-    alreadyLinked.id !== session.user.id &&
-    !alreadyLinked.email.endsWith("@discord.local")
-  ) {
-    return NextResponse.json(
-      { error: t("apiUser.discord.merge.initiateFailed") },
-      { status: 409 }
-    );
-  }
+  // Deliberately NO "is this snowflake already linked to another account" check
+  // here. Answering 409 before the DM let any signed-in caller map which guild
+  // members hold a real Summonarr account (a free id answered 200/502). The
+  // collision is surfaced by confirm-merge instead — mergeDiscordIntoWebAccount
+  // refuses it — i.e. only AFTER the caller has proven control of the Discord
+  // account by reading the code. The owner of a taken id receives a DM they did
+  // not ask for; the text says to ignore it, and the per-target limit above
+  // bounds how often. A @discord.local shadow proceeds as before.
 
   const botTokenRow = await prisma.setting.findUnique({ where: { key: "discordBotToken" } });
   if (!botTokenRow?.value) {
@@ -93,15 +90,17 @@ export const POST = withAuth(async (req, _ctx, session) => {
       method: "POST",
       headers: { Authorization: `Bot ${botToken}`, "Content-Type": "application/json" },
       allowedHosts: DISCORD_HOSTS,
+      // Written in the requesting user's language (the same translator every
+      // other reply of this route uses); the code itself is interpolated.
       body: JSON.stringify({
         content: [
-          "🔗 **Summonarr account verification**",
+          t("notify.bot.merge.dm.title"),
           "",
-          `Your verification code is: **${code}**`,
+          t("notify.bot.merge.dm.code", { code }),
           "",
-          "Enter this 12-character code on your Profile page to link your Discord account. It expires in 10 minutes.",
+          t("notify.bot.merge.dm.instructions"),
           "",
-          "If you did not request this, ignore this message.",
+          t("notify.bot.merge.dm.ignore"),
         ].join("\n"),
       }),
     });

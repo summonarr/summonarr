@@ -157,7 +157,10 @@ export default async function StatsPage({
       key: "approval",
       label: t("adminManage.stats.approvalRate"),
       value: f.pct(share(overview.approved, decisions)),
-      hint: t("adminManage.stats.ofDecisions", { count: decisions }),
+      // `count` picks the plural form; `value` is the Intl-grouped number shown,
+      // so the hint agrees with the formatted KPI above it (translate.ts
+      // interpolates String(v), never Intl).
+      hint: t("adminManage.stats.ofDecisions", { count: decisions, value: f.num(decisions) }),
     },
     {
       key: "fulfil",
@@ -169,7 +172,7 @@ export default async function StatsPage({
       key: "users",
       label: t("adminManage.stats.activeUsers"),
       value: f.num(users.active),
-      hint: t("adminManage.stats.seenLast30", { count: users.seenLast30Days }),
+      hint: t("adminManage.stats.seenLast30", { count: users.seenLast30Days, value: f.num(users.seenLast30Days) }),
     },
     {
       key: "issues",
@@ -362,7 +365,7 @@ function PipelineSection({
         <MetricGrid
           columns="grid-cols-2 sm:grid-cols-3 lg:grid-cols-6"
           items={[
-            { label: t("adminManage.stats.approvalRate"), value: f.pct(share(overview.approved, decisions)), hint: t("adminManage.stats.ofDecisions", { count: decisions }) },
+            { label: t("adminManage.stats.approvalRate"), value: f.pct(share(overview.approved, decisions)), hint: t("adminManage.stats.ofDecisions", { count: decisions, value: f.num(decisions) }) },
             { label: t("adminManage.stats.declineRate"), value: f.pct(share(s.DECLINED, decisions)) },
             { label: t("adminManage.stats.fulfillmentRate"), value: f.pct(share(s.AVAILABLE, greenlit)), hint: t("adminManage.stats.fulfillmentRateHint") },
             { label: t("adminManage.stats.alreadyAvailable"), value: f.num(overview.mirrored), hint: t("adminManage.stats.alreadyAvailableHint") },
@@ -413,7 +416,7 @@ function durationItems(f: Fmt, label: string, d: DurationStat, hint?: string) {
   };
 }
 function t90(f: Fmt, d: DurationStat, of: "requests" | "issues" = "requests") {
-  const vars = { p90: f.duration(d.p90Seconds), count: d.count };
+  const vars = { p90: f.duration(d.p90Seconds), count: d.count, value: f.num(d.count) };
   return of === "issues" ? f.t("adminManage.stats.p90OfIssues", vars) : f.t("adminManage.stats.p90Of", vars);
 }
 
@@ -774,6 +777,7 @@ async function StorageSection({ f }: { f: Fmt }) {
                   : t("adminManage.stats.reclaimableValue", {
                       size: f.bytes(storage.reclaimable.bytes),
                       count: storage.reclaimable.titles,
+                      value: f.num(storage.reclaimable.titles),
                     })}{" "}
                 <Link href="/admin/cleanup" className="hover:underline" style={{ color: "var(--ds-accent-text)" }}>
                   {t("adminManage.stats.reviewCleanup")}
@@ -817,7 +821,7 @@ async function WatchGradesSection({ f }: { f: Fmt }) {
           { label: "F", value: spread.F, color: "var(--ds-danger)" },
         ]}
       />
-      <StatsNote>{t("adminManage.stats.notGradedCount", { count: spread.notGraded, graded: f.num(graded) })}</StatsNote>
+      <StatsNote>{t("adminManage.stats.notGradedCount", { count: spread.notGraded, value: f.num(spread.notGraded), graded: f.num(graded) })}</StatsNote>
     </StatsSection>
   );
 }

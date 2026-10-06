@@ -186,6 +186,15 @@ const { proxy: proxySelfOrigin } = (await import(
 process.env.AUTH_URL = savedAuthUrl;
 process.env.AUTH_TRUSTED_ORIGIN = savedAltOrigin;
 
+// A fourth instance with the docker-README-shaped mistake in the allowlist: a
+// bare `host:port` entry beside a real origin. `new URL("summonarr.local:3001")`
+// does not throw — it parses as scheme `summonarr.local:` with origin "null".
+process.env.AUTH_TRUSTED_ORIGIN = "summonarr.local:3001,https://alt.example.com";
+const { proxy: proxyBareOrigin } = (await import(
+  bustedProxyHref("bare-origin")
+)) as typeof import("../src/proxy.ts");
+process.env.AUTH_TRUSTED_ORIGIN = savedAltOrigin;
+
 // ── fixtures ────────────────────────────────────────────────────────────────
 const SELF = "http://localhost:3000";
 const EVIL = "https://evil.example";
@@ -593,7 +602,10 @@ test("own-auth routes are CSRF-exempt: webhooks, sync, cron, oidc-callback, and 
 // ── public paths and unauthenticated gating ─────────────────────────────────
 
 test("public paths serve anonymously, stamped with the coarse-integer X-Summonarr-Api (guardrail 25)", async () => {
-  for (const path of ["/login", "/register", "/api/config/compat", "/api/health"]) {
+  // /.well-known/ carries RFC 9116 security.txt (public/.well-known/) — its only
+  // audience is anonymous, so a login redirect made it unreachable everywhere
+  // it was meant to be read.
+  for (const path of ["/login", "/register", "/api/config/compat", "/api/health", "/.well-known/security.txt"]) {
     const res = await proxy(req(path));
     assertPassedThrough(res, `${path} must be public`);
     assert.equal(
@@ -622,6 +634,39 @@ test("an unauthenticated protected PAGE → 302 to /login with callbackUrl, sess
   // The full request path rides along so login can bounce back.
   const deep = await proxy(req("/requests/123"));
   assert.equal(deep.headers.get("location"), `${SELF}/login?callbackUrl=%2Frequests%2F123`);
+
+  // …and so does the QUERY: a shared `/movies?genre=28&sort=rating` link must
+  // land on the filtered page after sign-in, not on bare /movies. The login form
+  // validates the value with safeInternalPath, which keeps a query it is given.
+  const filtered = await proxy(req("/movies?genre=28&sort=rating"));
+  assert.equal(
+    filtered.headers.get("location"),
+    `${SELF}/login?callbackUrl=${encodeURIComponent("/movies?genre=28&sort=rating")}`,
+  );
+});
+
+test("a bare host:port AUTH_TRUSTED_ORIGIN entry is SKIPPED — it never trusts `Origin: null`, and the intended host is not trusted either", async () => {
+  // `new URL("summonarr.local:3001").origin === "null"`; the old try/catch
+  // reader added that literal to the allowlist, so a sandboxed-iframe /
+  // cross-origin-redirected POST (Origin: null) passed CSRF while the operator's
+  // LAN host still 403'd with no boot warning.
+  const { token } = await mintSession();
+  const nullOrigin = await proxyBareOrigin(
+    req("/api/requests", { method: "POST", headers: { origin: "null", ...asCookie(token) } }),
+  );
+  assert.equal(nullOrigin.status, 403, "Origin: null must never be trusted");
+  assert.deepEqual(await bodyOf(nullOrigin), { error: "Forbidden" });
+
+  const intendedHost = await proxyBareOrigin(
+    req("/api/requests", { method: "POST", headers: { origin: "http://summonarr.local:3001", ...asCookie(token) } }),
+  );
+  assert.equal(intendedHost.status, 403, "the scheme-less entry is skipped, not guessed at — instrumentation warns at boot");
+
+  // The well-formed sibling entry on the same list still works.
+  const alt = await proxyBareOrigin(
+    req("/api/requests", { method: "POST", headers: { origin: "https://alt.example.com" } }),
+  );
+  assert.equal(alt.status, 401, "a real origin on the same list passes CSRF and reaches the auth gate");
 });
 
 test("an unauthenticated protected API → machine-readable 401 JSON, never an HTML login redirect", async () => {

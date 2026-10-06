@@ -81,7 +81,9 @@ function normalizeEntry(raw: unknown): ArrInstanceConfig | null {
   }
   return {
     slug,
-    name: typeof o.name === "string" && o.name.trim() ? o.name : slug,
+    // Trimmed + bounded on READ too: rows written before the write-side cap can
+    // carry an untrimmed or oversized name, and this label lands on buttons and chips.
+    name: typeof o.name === "string" && o.name.trim() ? o.name.trim().slice(0, 100) : slug,
     restricted: o.restricted === true,
     serverAll: o.serverAll === true,
     skipLibraryCheck: o.skipLibraryCheck === true,

@@ -90,12 +90,27 @@ export const roleLabelKey: Record<User["role"], string> = {
   USER:        "adminManage.users.role.USER",
 };
 
-export function AdminToggleRow({ label, checked, onChange, disabled }: { label: string; checked: boolean; onChange: () => void; disabled: boolean }) {
-  const labelId = useId();
+// The row is a <label> for the switch, so the whole 36px row toggles — the
+// 16×32px sm track alone was the only hit target on touch.
+//
+// `busy` NEVER disables the switch. Disabling the focused button drops focus to
+// <body>, and the modal's Tab trap (use-modal-a11y) then reads the next Tab as
+// "outside the container" and sends it back to Close — every toggle threw a
+// keyboard user to the top of the dialog. While a save is in flight the change
+// is ignored instead and aria-busy says so; the same decision QuotaRow
+// documents for its inputs.
+export function AdminToggleRow({ label, checked, onChange, busy }: { label: string; checked: boolean; onChange: () => void; busy: boolean }) {
+  const switchId = useId();
   return (
-    <div className="flex items-center justify-between py-2 border-b border-zinc-800 last:border-0">
-      <span id={labelId} className="text-xs text-zinc-300">{label}</span>
-      <Switch size="sm" checked={checked} disabled={disabled} onCheckedChange={onChange} aria-labelledby={labelId} />
-    </div>
+    <label htmlFor={switchId} className="flex items-center justify-between py-2 border-b border-zinc-800 last:border-0">
+      <span className="text-xs text-zinc-300">{label}</span>
+      <Switch
+        id={switchId}
+        size="sm"
+        checked={checked}
+        aria-busy={busy || undefined}
+        onCheckedChange={() => { if (!busy) onChange(); }}
+      />
+    </label>
   );
 }

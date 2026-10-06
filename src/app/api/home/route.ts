@@ -178,20 +178,20 @@ export const GET = withAuth(async (request, _ctx, session) => {
     );
 
     const carousels = [
-      { id: "trending", title: "Trending this week", items: trendingRest },
+      { id: "trending", title: t("home.trending.title"), items: trendingRest },
       // Additive: a carousel id older clients don't know renders generically.
       ...(recentEnabled
-        ? [{ id: "recently-added", title: "Recently Added", items: project(recent, emap, hideAvailable, showPlex, showJellyfin, RECENTLY_ADDED_SIZE) }]
+        ? [{ id: "recently-added", title: t("home.rail.recent.title"), items: project(recent, emap, hideAvailable, showPlex, showJellyfin, RECENTLY_ADDED_SIZE) }]
         : []),
       ...(flags["feature.page.forYou"]
-        ? [{ id: "for-you", title: "For You", items: project(forYou, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) }]
+        ? [{ id: "for-you", title: t("home.rail.forYou.title"), items: project(forYou, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) }]
         : []),
-      { id: "popular-movies", title: "Popular Movies", items: project(popMovies, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
-      { id: "popular-tv", title: "Popular TV", items: project(popTV, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
-      { id: "upcoming-movies", title: "Upcoming Movies", items: project(upMovies, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
-      { id: "on-the-air-tv", title: "On The Air TV", items: project(upTV, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
-      { id: "top-rated-movies", title: "Top Rated Movies", items: project(topMovies, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
-      { id: "top-rated-tv", title: "Top Rated TV", items: project(topTV, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
+      { id: "popular-movies", title: t("home.rail.popularMovies.title"), items: project(popMovies, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
+      { id: "popular-tv", title: t("home.rail.popularTv.title"), items: project(popTV, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
+      { id: "upcoming-movies", title: t("home.rail.upcomingMovies.title"), items: project(upMovies, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
+      { id: "on-the-air-tv", title: t("home.rail.onTheAir.title"), items: project(upTV, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
+      { id: "top-rated-movies", title: t("home.rail.topMovies.title"), items: project(topMovies, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
+      { id: "top-rated-tv", title: t("home.rail.topTv.title"), items: project(topTV, emap, hideAvailable, showPlex, showJellyfin, RAIL_SIZE) },
     ].filter((c) => c.items.length > 0);
 
     const featured = [featuredMovie, featuredTV].filter((m): m is TmdbMedia => m != null);

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
+import { isCronAuthorized, withCronRunRecording, cronSkippedResponse } from "@/lib/cron-auth";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { syncDownloadPolicies } from "@/lib/download-policy";
 
@@ -24,16 +24,20 @@ export async function POST(request: NextRequest) {
         { upserted: 0, enforced: 0, errors: 0 },
       );
 
-      // Non-2xx on errors so withCronRunRecording marks ok=false.
-      const status = totals.errors > 0 ? 500 : 200;
+      // Status stays 200 on a partial failure; X-Cron-Degraded marks the run
+      // failed in the ledger (withCronRunRecording), and `error` (singular) is
+      // the field the admin Run-now badge surfaces — `errors` (the count) alone
+      // rendered as a bare "HTTP 500" where every sibling names the failure.
+      const ok = totals.errors === 0;
       return NextResponse.json({
-        ok: totals.errors === 0,
+        ok,
         durationMs,
         ...totals,
+        ...(ok ? {} : { error: `${totals.errors} download-policy error(s)` }),
         sources: results.map((r) => r.source),
         timestamp: new Date().toISOString(),
-      }, { status });
+      }, ok ? undefined : { headers: { "X-Cron-Degraded": String(totals.errors) } });
     },
-    () => NextResponse.json({ skipped: true, reason: "already running" }),
+    () => cronSkippedResponse(),
   ));
 }

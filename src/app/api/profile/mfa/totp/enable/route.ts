@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { tooManyRequests } from "@/lib/http";
 import { withAuth } from "@/lib/api-auth";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
@@ -27,7 +28,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
   if (!checkRateLimit(`mfa-totp-enable:${session.user.id}`, 10, 15 * 60 * 1000)) {
-    return NextResponse.json({ error: t("apiAuth.common.tooManyAttempts15") }, { status: 429 });
+    return tooManyRequests(15 * 60, t("apiAuth.common.tooManyAttempts15"));
   }
   const parsed = await readJsonCapped<{ code?: unknown }>(req, 4096);
   if (parsed instanceof NextResponse) return parsed;

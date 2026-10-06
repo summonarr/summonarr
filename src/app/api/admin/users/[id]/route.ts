@@ -6,8 +6,11 @@ import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
-import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, parseInstanceGrants, serializeInstanceGrants, parseMediaServerGrants, serializeMediaServerGrants } from "@/lib/permissions";
-import { isValidContentRatingCap } from "@/lib/content-rating";
+import { Permission, hasPermission, parseAndValidatePermissions, defaultPermissionsForRole, parseInstanceGrants, serializeInstanceGrants, parseMediaServerGrants, serializeMediaServerGrants, canRequestInstance, canAutoApproveInstance, canViewMediaInstance } from "@/lib/permissions";
+import type { InstanceGrants, MediaServerGrants } from "@/lib/permissions";
+import { getArrInstances } from "@/lib/arr-instance-registry";
+import { getMediaInstances } from "@/lib/media-instance-registry";
+import { isValidContentRatingCap, exceedsCap } from "@/lib/content-rating";
 import { deactivateUserInTx, LastAdminError } from "@/lib/account-lifecycle";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
@@ -18,6 +21,65 @@ class TargetBecameAdminError extends Error {}
 // Module-scoped so the self-escalation gate below and the quota branch read the
 // SAME list — a second copy would drift and silently reopen the hole.
 const QUOTA_FIELDS = ["movieQuotaLimit", "movieQuotaDays", "tvQuotaLimit", "tvQuotaDays"] as const;
+
+// ── Delegate SUBSET rule (non-ADMIN caller) ──────────────────────────────────
+// A MANAGE_USERS holder may hand out only what it holds itself. The isSelf gates
+// in PATCH stop a delegate editing its OWN privileges, but a delegate can mint a
+// sock-puppet (POST /api/admin/users — it knows the password) or pick an
+// accomplice, and the target is then not "self": without these checks it could
+// grant that account every non-ADMIN bit (MANAGE_REQUESTS, AUTO_APPROVE,
+// QUOTA_UNLIMITED, REQUEST_4K, REQUEST_ON_BEHALF, …), access to a RESTRICTED
+// named arr instance, visibility into a RESTRICTED Plex/Jellyfin server, or a
+// looser content cap, and sign in as it — the self-grant gate defeated in two
+// requests. Each helper answers "does the proposed value exceed the caller's
+// own?"; the branches 403 with cannotGrantBeyondOwn when it does. ADMIN callers
+// never reach them.
+
+// An unregistered slug is judged as a RESTRICTED instance with no serverAll:
+// the grant is dormant today but goes live the moment an admin registers that
+// slug as restricted, so a delegate must already hold it. Radarr and Sonarr
+// share instanceGrants' flat slug namespace, so a slug registered on both must
+// be held on both.
+function instanceGrantsBeyondOwn(
+  proposed: InstanceGrants,
+  callerPerms: bigint,
+  callerGrants: InstanceGrants,
+  registry: ReadonlyMap<string, { slug: string; restricted: boolean; serverAll: boolean }[]>,
+): boolean {
+  for (const [slug, g] of Object.entries(proposed)) {
+    if (!g.request && !g.autoApprove) continue; // a no-op entry grants nothing
+    const configs = registry.get(slug) ?? [{ slug, restricted: true, serverAll: false }];
+    for (const cfg of configs) {
+      if (g.request && !(canRequestInstance(callerPerms, cfg, callerGrants, "MOVIE") || canRequestInstance(callerPerms, cfg, callerGrants, "TV"))) return true;
+      if (g.autoApprove && !(canAutoApproveInstance(callerPerms, cfg, callerGrants, "MOVIE") || canAutoApproveInstance(callerPerms, cfg, callerGrants, "TV"))) return true;
+    }
+  }
+  return false;
+}
+
+function mediaServerGrantsBeyondOwn(
+  proposed: MediaServerGrants,
+  callerPerms: bigint,
+  callerGrants: MediaServerGrants,
+  registry: { plex: ReadonlyMap<string, { slug: string; restricted: boolean }>; jellyfin: ReadonlyMap<string, { slug: string; restricted: boolean }> },
+): boolean {
+  for (const service of ["plex", "jellyfin"] as const) {
+    for (const [slug, g] of Object.entries(proposed[service] ?? {})) {
+      if (!g.view) continue;
+      const cfg = registry[service].get(slug) ?? { slug, restricted: true };
+      if (!canViewMediaInstance(callerPerms, cfg, callerGrants, service)) return true;
+    }
+  }
+  return false;
+}
+
+// `null` (no cap) is the loosest value: a capped caller may not clear a cap, and
+// may not set one more mature than its own. An uncapped caller may set anything.
+function contentCapBeyondOwn(proposed: string | null, callerCap: string | null): boolean {
+  if (callerCap === null) return false;
+  if (proposed === null) return true;
+  return exceedsCap(proposed, callerCap);
+}
 
 export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   req,
@@ -79,6 +141,13 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   // or a higher content-rating cap. Each branch ends in invalidateUserSession(id),
   // which re-signs the JWT from the DB, so such a self-grant would take effect on
   // their very next request.
+  //
+  // This self gate alone does NOT close the hole: the target of a sock-puppet or
+  // accomplice edit is not "self". The SUBSET rule (helpers above, applied in the
+  // permissions / maxContentRating / instanceGrants / mediaServerGrants branches)
+  // is what bounds a delegate to handing out only what it holds. Quota stays
+  // delegate-editable on other accounts by design — it is a per-user limit the
+  // Users page exists to tune, and QUOTA_UNLIMITED (the bit) is subset-checked.
   if (!callerIsAdmin && isSelf) {
     const selfPrivilegeEdit =
       "maxContentRating" in body ||
@@ -92,6 +161,13 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       );
     }
   }
+
+  // The caller's OWN grants/cap, read once, only when a non-admin is about to
+  // hand one out (session.user.permissions already carries the effective mask).
+  const callerOwn =
+    !callerIsAdmin && ("maxContentRating" in body || body.instanceGrants !== undefined || body.mediaServerGrants !== undefined)
+      ? await prisma.user.findUnique({ where: { id: session.user.id }, select: { instanceGrants: true, mediaServerGrants: true, maxContentRating: true } })
+      : null;
 
   if ("mediaServer" in body) {
     const ms = body.mediaServer;
@@ -118,6 +194,9 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     const mcr = raw == null || raw === "" ? null : raw; // empty select ⇒ clear the cap
     if (mcr !== null && !isValidContentRatingCap(mcr)) {
       return NextResponse.json({ error: t("apiAdmin.users.maxContentRatingInvalid") }, { status: 400 });
+    }
+    if (!callerIsAdmin && contentCapBeyondOwn(mcr, callerOwn?.maxContentRating ?? null)) {
+      return NextResponse.json({ error: t("apiAdmin.users.cannotGrantBeyondOwn") }, { status: 403 });
     }
     const prev = await prisma.user.findUnique({ where: { id }, select: { maxContentRating: true } });
     if (!prev) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
@@ -172,6 +251,11 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
       return NextResponse.json({ error: t("apiAdmin.users.cannotChangeOwnPermissions") }, { status: 403 });
     }
 
+    // Subset rule: a delegate may grant only bits it holds itself (effective mask).
+    if (!callerIsAdmin && (parsed & ~session.user.permissions) !== 0n) {
+      return NextResponse.json({ error: t("apiAdmin.users.cannotGrantBeyondOwn") }, { status: 403 });
+    }
+
     // Never let the editor strip the ADMIN bit from a role=ADMIN user — demote the
     // role first (which routes through the last-admin CAS below). Keeps the
     // "never lock out the last admin" invariant on a single code path.
@@ -208,7 +292,16 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     if (body.instanceGrants !== null && (typeof body.instanceGrants !== "object" || Array.isArray(body.instanceGrants))) {
       return NextResponse.json({ error: t("apiAdmin.users.instanceGrantsInvalid") }, { status: 400 });
     }
-    const grants = serializeInstanceGrants(parseInstanceGrants(body.instanceGrants));
+    const parsedGrants = parseInstanceGrants(body.instanceGrants);
+    if (!callerIsAdmin) {
+      const [radarr, sonarr] = await Promise.all([getArrInstances("radarr"), getArrInstances("sonarr")]);
+      const registry = new Map<string, { slug: string; restricted: boolean; serverAll: boolean }[]>();
+      for (const cfg of [...radarr, ...sonarr]) registry.set(cfg.slug, [...(registry.get(cfg.slug) ?? []), cfg]);
+      if (instanceGrantsBeyondOwn(parsedGrants, session.user.permissions, parseInstanceGrants(callerOwn?.instanceGrants), registry)) {
+        return NextResponse.json({ error: t("apiAdmin.users.cannotGrantBeyondOwn") }, { status: 403 });
+      }
+    }
+    const grants = serializeInstanceGrants(parsedGrants);
     const prev = await prisma.user.findUnique({ where: { id }, select: { instanceGrants: true, name: true, email: true } });
     if (!prev) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
     try {
@@ -241,7 +334,18 @@ export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
     if (body.mediaServerGrants !== null && (typeof body.mediaServerGrants !== "object" || Array.isArray(body.mediaServerGrants))) {
       return NextResponse.json({ error: t("apiAdmin.users.mediaServerGrantsInvalid") }, { status: 400 });
     }
-    const grants = serializeMediaServerGrants(parseMediaServerGrants(body.mediaServerGrants));
+    const parsedGrants = parseMediaServerGrants(body.mediaServerGrants);
+    if (!callerIsAdmin) {
+      const [plex, jellyfin] = await Promise.all([getMediaInstances("plex"), getMediaInstances("jellyfin")]);
+      const registry = {
+        plex: new Map(plex.map((cfg) => [cfg.slug as string, cfg])),
+        jellyfin: new Map(jellyfin.map((cfg) => [cfg.slug as string, cfg])),
+      };
+      if (mediaServerGrantsBeyondOwn(parsedGrants, session.user.permissions, parseMediaServerGrants(callerOwn?.mediaServerGrants), registry)) {
+        return NextResponse.json({ error: t("apiAdmin.users.cannotGrantBeyondOwn") }, { status: 403 });
+      }
+    }
+    const grants = serializeMediaServerGrants(parsedGrants);
     const prev = await prisma.user.findUnique({ where: { id }, select: { mediaServerGrants: true, name: true, email: true } });
     if (!prev) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
     try {

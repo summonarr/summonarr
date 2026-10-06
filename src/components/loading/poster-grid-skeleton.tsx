@@ -157,7 +157,10 @@ export function DetailHeroSkeleton() {
 // (56px circles, name + role lines) as cast-section.tsx.
 export function CastSectionSkeleton({ count = 8 }: { count?: number }) {
   return (
-    <section style={{ padding: "0 16px 32px" }}>
+    // The real section's class, not a hardcoded padding: .ds-detail-section is
+    // 16px on phones and 28px from lg, and a fixed 16px put the skeleton's cast
+    // grid 12px left of the hero text above it (and of the real grid on swap).
+    <section className="ds-detail-section">
       <Bar w={60} h={18} style={{ marginBottom: 12 }} />
       <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 xl:grid-cols-12 2xl:grid-cols-16 gap-3">
         {Array.from({ length: count }).map((_, i) => (

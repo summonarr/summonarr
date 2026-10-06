@@ -20,6 +20,10 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
   const [password, setPassword] = useState("");
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The word the user types is translated (a French user is not asked to type
+  // DELETE), and the compare ignores case and surrounding whitespace.
+  const confirmWord = t("profile.close.confirmWord");
+  const confirmed = confirmText.trim().toUpperCase() === confirmWord.trim().toUpperCase();
 
   async function handleDelete() {
     setError(null);
@@ -69,15 +73,16 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
     <div className="space-y-3">
       <p className="text-sm text-zinc-400">
         {t("profile.close.confirmPrompt").split("{word}").map((part, i) => (
-          <span key={i}>{i > 0 && <span className="font-semibold text-zinc-200">DELETE</span>}{part}</span>
+          <span key={i}>{i > 0 && <span className="font-semibold text-zinc-200">{confirmWord}</span>}{part}</span>
         ))}
       </p>
       <Input
         value={confirmText}
         onChange={(e) => setConfirmText(e.target.value)}
-        placeholder="DELETE"
+        placeholder={confirmWord}
         autoComplete="off"
-        aria-label={t("profile.close.confirmLabel", { word: "DELETE" })}
+        autoCapitalize="characters"
+        aria-label={t("profile.close.confirmLabel", { word: confirmWord })}
       />
       {requiresPassword && (
         <Input
@@ -89,12 +94,12 @@ export function DeleteAccount({ requiresPassword = false }: { requiresPassword?:
           aria-label={t("profile.password.current")}
         />
       )}
-      {error && <p className="text-sm text-red-400">{error}</p>}
+      {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
       <div className="flex flex-wrap gap-2">
         <Button
           type="button"
           variant="destructive"
-          disabled={confirmText !== "DELETE" || (requiresPassword && password.length === 0) || deleting}
+          disabled={!confirmed || (requiresPassword && password.length === 0) || deleting}
           onClick={handleDelete}
           className="w-full sm:w-auto"
         >

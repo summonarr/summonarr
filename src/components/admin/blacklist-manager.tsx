@@ -1,9 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { Ban, X, Loader2 } from "@/components/icons";
 import { useT } from "@/components/i18n/i18n-provider";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { LocalDateText } from "@/components/local-date";
 
 interface BlacklistRow {
   tmdbId: number;
@@ -34,8 +37,20 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
   const [searched, setSearched] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
+  // Client-side narrowing of the blocked list (the page ships up to 1,000 rows).
+  const [filter, setFilter] = useState("");
 
   const blocked = new Set(items.map((i) => rowKey(i.tmdbId, i.mediaType)));
+  const visible = useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    if (!needle) return items;
+    return items.filter(
+      (i) =>
+        (i.title ?? `TMDB #${i.tmdbId}`).toLowerCase().includes(needle) ||
+        (i.reason ?? "").toLowerCase().includes(needle) ||
+        String(i.tmdbId) === needle,
+    );
+  }, [items, filter]);
 
   async function runSearch(e: React.FormEvent) {
     e.preventDefault();
@@ -116,6 +131,10 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
         },
         ...prev.filter((i) => !(i.tmdbId === r.id && i.mediaType === mediaType)),
       ]);
+      // The placeholder promises the reason is "saved with the NEXT title you
+      // block" — one-shot — so it must not silently ride along onto a second,
+      // unrelated title from the same result list.
+      setReason("");
     } catch {
       setError(t("shared.thread.networkError"));
     } finally {
@@ -154,55 +173,26 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
       >
         <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--ds-fg)", margin: 0 }}>{t("adminQueue.blacklist.blockHeading")}</h2>
         <form onSubmit={runSearch} className="flex items-center gap-2">
-          <input
+          <Input
+            type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value.slice(0, 200))}
             placeholder={t("adminQueue.blacklist.searchPlaceholder")}
             aria-label={t("adminQueue.blacklist.searchAria")}
-            className="flex-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            style={{
-              padding: "8px 12px",
-              fontSize: 13,
-              color: "var(--ds-fg)",
-              background: "var(--ds-bg-2)",
-              border: "1px solid var(--ds-border)",
-              borderRadius: 6,
-            }}
+            className="flex-1"
           />
-          <button
-            type="submit"
-            disabled={searching || !query.trim()}
-            className="inline-flex items-center gap-1.5"
-            style={{
-              padding: "8px 14px",
-              height: 34,
-              borderRadius: 6,
-              fontSize: 13,
-              fontWeight: 500,
-              background: "var(--ds-accent)",
-              color: "var(--ds-accent-fg)",
-              opacity: searching || !query.trim() ? 0.7 : 1,
-            }}
-          >
-            {searching ? <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} /> : null}
+          {/* Button defaults to type="button"; this one really submits the form. */}
+          <Button type="submit" disabled={searching || !query.trim()}>
+            {searching ? <Loader2 className="animate-spin" /> : null}
             {t("adminQueue.actions.search")}
-          </button>
+          </Button>
         </form>
 
-        <input
+        <Input
           value={reason}
           onChange={(e) => setReason(e.target.value.slice(0, 500))}
           placeholder={t("adminQueue.blacklist.reasonPlaceholder")}
           aria-label={t("adminQueue.blacklist.reasonAria")}
-          className="focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          style={{
-            padding: "8px 12px",
-            fontSize: 13,
-            color: "var(--ds-fg)",
-            background: "var(--ds-bg-2)",
-            border: "1px solid var(--ds-border)",
-            borderRadius: 6,
-          }}
         />
 
         {searched && !searching && results.length === 0 && (
@@ -228,29 +218,16 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
                     {r.releaseYear ? <span style={{ color: "var(--ds-fg-subtle)" }}> ({r.releaseYear})</span> : null}
                     <span style={{ color: "var(--ds-fg-subtle)", marginLeft: 8 }}>{r.mediaType === "movie" ? t("adminQueue.blacklist.movie") : t("adminQueue.blacklist.tv")}</span>
                   </span>
-                  <button
-                    type="button"
+                  <Button
+                    variant={isBlocked ? "outline" : "destructive"}
+                    size="sm"
                     onClick={() => add(r)}
                     disabled={isBlocked || busy === k}
-                    className="inline-flex items-center gap-1"
-                    style={{
-                      padding: "4px 10px",
-                      borderRadius: 6,
-                      fontSize: 12,
-                      fontWeight: 500,
-                      color: isBlocked ? "var(--ds-fg-subtle)" : "var(--ds-danger)",
-                      border: "1px solid var(--ds-border)",
-                      background: "transparent",
-                      cursor: isBlocked ? "default" : "pointer",
-                    }}
+                    className="shrink-0"
                   >
-                    {busy === k ? (
-                      <Loader2 className="animate-spin" style={{ width: 12, height: 12 }} />
-                    ) : (
-                      <Ban style={{ width: 12, height: 12 }} />
-                    )}
+                    {busy === k ? <Loader2 className="animate-spin" /> : <Ban />}
                     {isBlocked ? t("adminQueue.blacklist.blocked") : t("adminQueue.blacklist.block")}
-                  </button>
+                  </Button>
                 </div>
               );
             })}
@@ -274,47 +251,58 @@ export function BlacklistManager({ initial }: { initial: BlacklistRow[] }) {
             {t("adminQueue.blacklist.empty")}
           </p>
         ) : (
-          <div className="flex flex-col" style={{ gap: 4 }}>
-            {items.map((row) => {
-              const k = rowKey(row.tmdbId, row.mediaType);
-              return (
-                <div
-                  key={k}
-                  className="flex items-center justify-between"
-                  style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid var(--ds-border)", background: "var(--ds-bg-1)" }}
-                >
-                  <span style={{ fontSize: 13, color: "var(--ds-fg)" }}>
-                    {row.title ?? `TMDB #${row.tmdbId}`}
-                    <span style={{ color: "var(--ds-fg-subtle)", marginLeft: 8 }}>{row.mediaType === "MOVIE" ? t("adminQueue.blacklist.movie") : t("adminQueue.blacklist.tv")}</span>
-                    {row.reason ? <span style={{ color: "var(--ds-fg-subtle)", marginLeft: 8 }}>· {row.reason}</span> : null}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => remove(row)}
-                    disabled={busy === k}
-                    title={t("adminQueue.blacklist.removeTitle")}
-                    aria-label={t("adminQueue.blacklist.unblockAria", { title: row.title ?? row.tmdbId })}
-                    className="inline-flex items-center gap-1"
-                    style={{
-                      padding: "4px 10px",
-                      borderRadius: 6,
-                      fontSize: 12,
-                      color: "var(--ds-fg-muted)",
-                      border: "1px solid var(--ds-border)",
-                      background: "transparent",
-                    }}
-                  >
-                    {busy === k ? (
-                      <Loader2 className="animate-spin" style={{ width: 12, height: 12 }} />
-                    ) : (
-                      <X style={{ width: 12, height: 12 }} />
-                    )}
-                    {t("adminQueue.blacklist.unblock")}
-                  </button>
-                </div>
-              );
-            })}
-          </div>
+          <>
+            <Input
+              type="search"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value.slice(0, 200))}
+              placeholder={t("adminQueue.blacklist.filterPlaceholder")}
+              aria-label={t("adminQueue.blacklist.filterAria")}
+            />
+            {visible.length === 0 ? (
+              <p role="status" style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>
+                {t("adminQueue.blacklist.filterNoMatch")}
+              </p>
+            ) : (
+              <div className="flex flex-col" style={{ gap: 4 }}>
+                {visible.map((row) => {
+                  const k = rowKey(row.tmdbId, row.mediaType);
+                  return (
+                    <div
+                      key={k}
+                      className="flex items-center justify-between gap-3"
+                      style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid var(--ds-border)", background: "var(--ds-bg-1)" }}
+                    >
+                      <div className="flex flex-col min-w-0" style={{ gap: 2 }}>
+                        <span style={{ fontSize: 13, color: "var(--ds-fg)" }}>
+                          {row.title ?? `TMDB #${row.tmdbId}`}
+                          <span style={{ color: "var(--ds-fg-subtle)", marginLeft: 8 }}>{row.mediaType === "MOVIE" ? t("adminQueue.blacklist.movie") : t("adminQueue.blacklist.tv")}</span>
+                        </span>
+                        {/* Blocked-on date in the viewer's locale/timezone (hydration-gated
+                            inside LocalDateText — guardrail 16) plus the stored reason. */}
+                        <span className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
+                          <LocalDateText iso={row.createdAt} />
+                          {row.reason ? ` · ${row.reason}` : null}
+                        </span>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => remove(row)}
+                        disabled={busy === k}
+                        title={t("adminQueue.blacklist.removeTitle")}
+                        aria-label={t("adminQueue.blacklist.unblockAria", { title: row.title ?? row.tmdbId })}
+                        className="shrink-0"
+                      >
+                        {busy === k ? <Loader2 className="animate-spin" /> : <X />}
+                        {t("adminQueue.blacklist.unblock")}
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

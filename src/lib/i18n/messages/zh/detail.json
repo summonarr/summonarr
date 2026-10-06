@@ -84,5 +84,6 @@
   "detail.status.ended": "已完结",
   "detail.status.pilot": "试播集",
   "detail.seasons.numbered": "第 {number} 季",
-  "detail.seasons.specials": "特别篇"
+  "detail.seasons.specials": "特别篇",
+  "detail.seasons.episodeAbbrev": "第{number}集"
 }

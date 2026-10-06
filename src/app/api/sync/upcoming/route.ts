@@ -94,8 +94,17 @@ export async function POST(request: NextRequest) {
 
       // A fetch failed and nothing was cached → 502 so the cron dashboard doesn't
       // show green on a total failure. A partial failure (one source) that still
-      // wrote rows stays 200.
+      // wrote rows stays 200 — but DEGRADED, the orchestrator's shape: the
+      // X-Cron-Degraded header is what withCronRunRecording reads to mark the
+      // ledger row ok:false, and `error` is what the Run-now button's verdict
+      // reads. Without both, a TV endpoint failing every run recorded a green
+      // run while /upcoming served its last good TV rows indefinitely.
       const failed = errors > 0 && rows.length === 0;
+      const failedSources = [
+        ...(movies.status === "rejected" ? ["movies"] : []),
+        ...(tv.status === "rejected" ? ["tv"] : []),
+      ];
+      const degraded = !failed && failedSources.length > 0;
       return NextResponse.json({
         movies: movieItems.length,
         tv: tvItems.length,
@@ -103,7 +112,12 @@ export async function POST(request: NextRequest) {
         errors,
         durationMs,
         calendar,
-      }, failed ? { status: 502 } : {});
+        ...(degraded ? { error: t("apiAdmin.sync.degraded", { sources: failedSources.join(", ") }) } : {}),
+      }, failed
+        ? { status: 502 }
+        : degraded
+          ? { headers: { "X-Cron-Degraded": failedSources.join(",") } }
+          : {});
     },
     () => NextResponse.json({ skipped: true, reason: "already running" }),
   ));

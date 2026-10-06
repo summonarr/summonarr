@@ -42,7 +42,12 @@ export function HeatmapCellPopover({
 }) {
   const t = useT();
   const [detail, setDetail] = useState<HeatmapCellDetail | null>(null);
+  // A catalog key, translated at render (the raw transport/server message goes
+  // to the console) — so a 500 or "Failed to fetch" never reaches the UI in
+  // browser-English regardless of the UI language.
   const [error, setError] = useState<string | null>(null);
+  // Bumped by Retry to re-run the fetch effect for the same cell.
+  const [attempt, setAttempt] = useState(0);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -85,12 +90,14 @@ export function HeatmapCellPopover({
         if (!cancelled) setDetail(d);
       })
       .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        if (cancelled) return;
+        console.error("[heatmap-cell]", e);
+        setError("adminActivity.history.loadError");
       });
     return () => {
       cancelled = true;
     };
-  }, [queryString]);
+  }, [queryString, attempt]);
 
   // Position below the cell when there's room, else above; clamp horizontally to
   // the viewport. Measured after layout so the height is known before placing.
@@ -108,7 +115,10 @@ export function HeatmapCellPopover({
     setPos({ left, top: Math.max(MARGIN, top) });
   }, [anchor, detail, error]);
 
-  // Dismiss on outside click + Escape.
+  // Dismiss on outside click, Escape, and ANY scroll. The popover is
+  // position:fixed on an anchor measured once at click time, so a scroll would
+  // leave it floating over whatever moved underneath. Scroll events don't
+  // bubble, hence `capture` — the heatmaps' own overflow containers scroll too.
   useEffect(() => {
     function onDown(e: MouseEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
@@ -116,11 +126,17 @@ export function HeatmapCellPopover({
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
     }
+    function onScroll() {
+      onClose();
+    }
+    const scrollOpts: AddEventListenerOptions = { passive: true, capture: true };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, scrollOpts);
     return () => {
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, scrollOpts);
     };
   }, [onClose]);
 
@@ -160,7 +176,7 @@ export function HeatmapCellPopover({
           onClick={onClose}
           aria-label={t("adminActivity.common.close")}
           className="inline-flex items-center justify-center rounded-full"
-          style={{ width: 32, height: 32, margin: "-6px -8px -6px 0", background: "transparent", border: 0, color: "var(--ds-fg-muted)", cursor: "pointer" }}
+          style={{ width: 32, height: 32, margin: "-6px -8px -6px 0", background: "transparent", border: 0, color: "var(--ds-fg-muted)" }}
         >
           <X style={{ width: 13, height: 13 }} />
         </button>
@@ -168,7 +184,25 @@ export function HeatmapCellPopover({
 
       <div style={{ padding: "10px 12px" }}>
         {error ? (
-          <p style={{ color: "var(--ds-danger)", margin: 0 }}>{error}</p>
+          <div>
+            <p role="alert" style={{ color: "var(--ds-danger)", margin: 0 }}>{t(error)}</p>
+            <button
+              type="button"
+              className="ds-hover-tint ds-mono"
+              onClick={() => setAttempt((n) => n + 1)}
+              style={{
+                marginTop: 8,
+                fontSize: 10.5,
+                padding: "4px 10px",
+                borderRadius: 6,
+                background: "transparent",
+                border: "1px solid var(--ds-border)",
+                color: "var(--ds-fg-muted)",
+              }}
+            >
+              {t("adminActivity.common.retry")}
+            </button>
+          </div>
         ) : !detail ? (
           <div
             className="ds-mono flex items-center"
@@ -222,8 +256,8 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
       {/* Headline numbers */}
       <div style={{ display: "flex", gap: 14, alignItems: "baseline" }}>
         <Stat value={detail.totalPlays.toLocaleString(locale)} unit={t("adminActivity.popover.unitPlays", { count: detail.totalPlays })} big />
-        <Stat value={`${detail.watchHours}`} unit={t("adminActivity.popover.unitHoursWatched")} />
-        <Stat value={`${detail.avgSessionMinutes}`} unit={t("adminActivity.popover.unitMinAvg")} />
+        <Stat value={detail.watchHours.toLocaleString(locale, { maximumFractionDigits: 1 })} unit={t("adminActivity.popover.unitHoursWatched")} />
+        <Stat value={detail.avgSessionMinutes.toLocaleString(locale)} unit={t("adminActivity.popover.unitMinAvg")} />
       </div>
 
       {/* Transcode / stream mix */}
@@ -296,8 +330,8 @@ function CellBody({ detail }: { detail: HeatmapCellDetail }) {
 
       {/* Quality & network */}
       <Section title={t("adminActivity.popover.qualityNetwork")}>
-        {detail.avgBitrateMbps > 0 && <KV k={t("adminActivity.popover.avgBitrate")} v={`${detail.avgBitrateMbps} Mbps`} />}
-        {detail.dataTransferredGb > 0 && <KV k={t("adminActivity.popover.data")} v={`${detail.dataTransferredGb} GB`} />}
+        {detail.avgBitrateMbps > 0 && <KV k={t("adminActivity.popover.avgBitrate")} v={`${detail.avgBitrateMbps.toLocaleString(locale, { maximumFractionDigits: 1 })} Mbps`} />}
+        {detail.dataTransferredGb > 0 && <KV k={t("adminActivity.popover.data")} v={`${detail.dataTransferredGb.toLocaleString(locale, { maximumFractionDigits: 1 })} GB`} />}
         {detail.topResolutions.length > 0 && (
           <KV
             k={t("adminActivity.popover.resolution")}

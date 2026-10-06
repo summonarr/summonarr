@@ -39,6 +39,9 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // sentinel MASKED_VALUE back unchanged for a field it didn't edit.
 
 const MASKED_VALUE = "••••••••";
+// The display name renders on the server picker, availability badges and admin
+// chips; bounded like the arr-instances and notification-agent siblings.
+const INSTANCE_NAME_MAX_LEN = 100;
 
 // EVERY per-instance Setting field a service owns. Removing an instance must
 // delete ALL of them: the cleanup used to drop only the connection pair, so
@@ -224,6 +227,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       const err = validateServerUrl(rawUrl.trim(), {}, t);
       if (err) return NextResponse.json({ error: t("apiAdmin.mediaInstances.invalidServerUrl", { slug: inst.slug, reason: err }) }, { status: 400 });
     }
+    if (typeof inst.name === "string" && inst.name.trim().length > INSTANCE_NAME_MAX_LEN) {
+      return NextResponse.json({ error: t("apiAdmin.common.instanceNameTooLong", { slug: inst.slug, max: INSTANCE_NAME_MAX_LEN }) }, { status: 400 });
+    }
   }
 
   // Which named slugs existed before — so removing one from the list cleans up
@@ -249,7 +255,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       .filter((i) => i.slug !== DEFAULT_MEDIA_INSTANCE)
       .map((i) => ({
         slug: i.slug,
-        name: typeof i.name === "string" && i.name.trim() ? i.name : i.slug,
+        name: (typeof i.name === "string" ? i.name.trim() : "") || i.slug,
         // Strict === true, matching the registry normalizer. The default ("")
         // is filtered out above and is never restrictable (guardrail 35).
         restricted: i.restricted === true,

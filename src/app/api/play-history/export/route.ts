@@ -7,11 +7,25 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { composeWhere, parsePlayHistoryFilters, PLAY_METHODS } from "@/lib/play-history-filters";
 import { SEARCH_TERM_MAX_LEN } from "@/lib/sanitize";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { bitrateToKbps } from "@/lib/bitrate";
 
 export const dynamic = "force-dynamic";
 
 const MAX_EXPORT_ROWS = 10_000;
 const PAGE_SIZE = 1000;
+
+// UTF-8 byte-order mark. Excel (Windows) sniffs a double-clicked .csv's encoding
+// from a BOM, not from the Content-Type charset, so without it any non-ASCII
+// title ("Amélie", a CJK series) opens as mojibake.
+const UTF8_BOM = "\uFEFF";
+
+// The stored `bitrate` is UNITLESS without `source` — Plex rows are kbps, Jellyfin
+// rows are bps (guardrail 19a) — so the raw column never leaves the DB: both
+// export paths emit kbps via bitrateToKbps, null when the row has none.
+function exportBitrateKbps(r: ExportRow): number | null {
+  const kbps = bitrateToKbps(r.bitrate, r.source);
+  return kbps > 0 ? kbps : null;
+}
 
 // The exported column set, shared by the CSV and JSON paths so the two can
 // never drift. `mediaServerUser.username` is the one non-PlayHistory field, so
@@ -200,7 +214,7 @@ export async function GET(request: NextRequest) {
       videoCodec: r.videoCodec,
       audioCodec: r.audioCodec,
       resolution: r.resolution,
-      bitrate: r.bitrate,
+      bitrateKbps: exportBitrateKbps(r),
       videoDecision: r.videoDecision,
       audioDecision: r.audioDecision,
       container: r.container,
@@ -218,7 +232,7 @@ export async function GET(request: NextRequest) {
     "Username", "Source", "Started At", "Stopped At",
     "Duration (s)", "Play Duration (s)", "Paused Duration (s)", "Watched",
     "Platform", "Player", "Device",
-    "Play Method", "Video Codec", "Audio Codec", "Resolution", "Bitrate",
+    "Play Method", "Video Codec", "Audio Codec", "Resolution", "Bitrate (kbps)",
     "Video Decision", "Audio Decision", "Container",
   ];
 
@@ -227,7 +241,9 @@ export async function GET(request: NextRequest) {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        controller.enqueue(encoder.encode(headers.join(",") + "\n"));
+        // The column headers are deliberately fixed English identifiers (machine-
+        // readable, stable across locales); only the prose notice below is localized.
+        controller.enqueue(encoder.encode(UTF8_BOM + headers.join(",") + "\n"));
 
         // Keyset cursor over (startedAt, id) DESC — the same predicate Prisma's
         // `cursor` + `skip: 1` compiled to, written out because the filters are
@@ -277,7 +293,7 @@ export async function GET(request: NextRequest) {
               escapeCSV(r.watched), escapeCSV(r.platform), escapeCSV(r.player),
               escapeCSV(r.device), escapeCSV(r.playMethod),
               escapeCSV(r.videoCodec), escapeCSV(r.audioCodec), escapeCSV(r.resolution),
-              escapeCSV(r.bitrate), escapeCSV(r.videoDecision), escapeCSV(r.audioDecision),
+              escapeCSV(exportBitrateKbps(r)), escapeCSV(r.videoDecision), escapeCSV(r.audioDecision),
               escapeCSV(r.container),
             ].join(",");
             controller.enqueue(encoder.encode(line + "\n"));
@@ -298,9 +314,7 @@ export async function GET(request: NextRequest) {
           // pointed at a knob that does not exist.
           controller.enqueue(
             encoder.encode(
-              escapeCSV(
-                `Export truncated at ${MAX_EXPORT_ROWS} rows — narrow startDate/endDate and export again`,
-              ) + "\n",
+              escapeCSV(t("apiUser.playHistory.exportTruncated", { max: MAX_EXPORT_ROWS })) + "\n",
             )
           );
         }

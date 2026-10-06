@@ -26,9 +26,12 @@ const MEDIA_TYPES = [
   { labelKey: "adminActivity.filter.tv", value: "TV" },
 ];
 
-const SUB_PAGES: { labelKey: string; href: string; exact?: boolean; tab?: string }[] = [
+// Every tab is a real <Link> (cmd/middle-click opens a new tab, right-click
+// offers "Open link"). History is its own route segment, not a `?tab=` of the
+// overview, so it gets a table-shaped loading.tsx instead of the KPI skeleton.
+const SUB_PAGES: { labelKey: string; href: string; exact?: boolean }[] = [
   { labelKey: "adminActivity.tab.overview", href: "/admin/activity", exact: true },
-  { labelKey: "adminActivity.tab.history", href: "/admin/activity", tab: "history" },
+  { labelKey: "adminActivity.tab.history", href: "/admin/activity/history" },
   { labelKey: "adminActivity.tab.users", href: "/admin/activity/users" },
   { labelKey: "adminActivity.tab.stats", href: "/admin/activity/stats" },
   { labelKey: "adminActivity.tab.recentlyAdded", href: "/admin/activity/recent" },
@@ -42,7 +45,6 @@ export function ActivityFilterBar() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  const currentTab = searchParams.get("tab") ?? "";
   const currentDays = searchParams.get("days") ?? "30";
   const currentSource = searchParams.get("source") ?? "";
   const currentMediaType = searchParams.get("mediaType") ?? "";
@@ -65,12 +67,7 @@ export function ActivityFilterBar() {
   }
 
   function isSubPageActive(page: typeof SUB_PAGES[0]): boolean {
-    if (page.href === "/admin/activity" && page.exact) {
-      return pathname === "/admin/activity" && !currentTab;
-    }
-    if (page.tab) {
-      return pathname === "/admin/activity" && currentTab === page.tab;
-    }
+    if (page.exact) return pathname === page.href;
     return pathname === page.href || pathname.startsWith(page.href + "/");
   }
 
@@ -78,8 +75,7 @@ export function ActivityFilterBar() {
   // `force-dynamic` and Next does not cache dynamic pages on the client
   // (`staleTimes.dynamic` defaults to 0), so `router.push` to the new URL
   // already renders the page fresh on the server. An extra refresh made the
-  // heaviest admin page render twice per click. The same holds for the
-  // Overview/History tab buttons below.
+  // heaviest admin page render twice per click.
   const setParam = useCallback(
     (key: string, value: string) => {
       const params = new URLSearchParams(searchParams.toString());
@@ -115,7 +111,10 @@ export function ActivityFilterBar() {
     setParam("days", String(num));
   };
 
-  const showFilters = pathname === "/admin/activity" || pathname === "/admin/activity/stats";
+  const showFilters =
+    pathname === "/admin/activity" ||
+    pathname === "/admin/activity/history" ||
+    pathname === "/admin/activity/stats";
 
   return (
     <div className="mb-6 space-y-3">
@@ -123,38 +122,6 @@ export function ActivityFilterBar() {
       <div className="flex items-center gap-1 border-b border-zinc-800 pb-3 overflow-x-auto">
         {SUB_PAGES.map((page) => {
           const active = isSubPageActive(page);
-          if (page.tab) {
-            return (
-              <button
-                key={page.labelKey}
-                onClick={() => router.push(`/admin/activity?tab=${page.tab}`)}
-                aria-current={active ? "page" : undefined}
-                className={`inline-flex items-center min-h-8 px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
-                  active
-                    ? "bg-zinc-800 text-zinc-100"
-                    : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60"
-                }`}
-              >
-                {t(page.labelKey)}
-              </button>
-            );
-          }
-          if (page.href === "/admin/activity" && page.exact) {
-            return (
-              <button
-                key={page.labelKey}
-                onClick={() => router.push("/admin/activity")}
-                aria-current={active ? "page" : undefined}
-                className={`inline-flex items-center min-h-8 px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
-                  active
-                    ? "bg-zinc-800 text-zinc-100"
-                    : "text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60"
-                }`}
-              >
-                {t(page.labelKey)}
-              </button>
-            );
-          }
           return (
             <Link
               key={page.labelKey}

@@ -249,11 +249,16 @@ async function syncJellyfin(request: NextRequest, actor: CronActor) {
   // Stamp last-success so the orchestrator's 24h-stale fallback (sync/route.ts
   // pendingAvailableNotify gate) doesn't fire falsely on deployments where the
   // admin runs the per-source resync more recently than the orchestrator.
-  await prisma.setting.upsert({
-    where: { key: "lastJellyfinSyncSucceededAt" },
-    update: { value: String(Date.now()) },
-    create: { key: "lastJellyfinSyncSucceededAt", value: String(Date.now()) },
-  }).catch((err) => console.error("[sync/jellyfin] failed to stamp lastJellyfinSyncSucceededAt:", err));
+  // ONLY for the shape whose success the orchestrator's own stamp means — a FULL
+  // replace of the DEFAULT instance (see the Plex twin for the starvation a
+  // named-instance or recentOnly stamp causes).
+  if (instance === DEFAULT_MEDIA_INSTANCE && !recentOnly) {
+    await prisma.setting.upsert({
+      where: { key: "lastJellyfinSyncSucceededAt" },
+      update: { value: String(Date.now()) },
+      create: { key: "lastJellyfinSyncSucceededAt", value: String(Date.now()) },
+    }).catch((err) => console.error("[sync/jellyfin] failed to stamp lastJellyfinSyncSucceededAt:", err));
+  }
 
   const requests = await prisma.mediaRequest.findMany({
     where: { status: { in: ["PENDING", "APPROVED"] } },

@@ -1,11 +1,16 @@
 import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
-import { withAdmin } from "@/lib/api-auth";
+import { withPermission } from "@/lib/api-auth";
+import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
-export const GET = withAdmin(async (_req, _ctx, _session) => {
+// MANAGE_USERS (not withAdmin), like /api/admin/users: the Users page mounts the
+// server-user table for every MANAGE_USERS holder, so an ADMIN-only API here left
+// every control on that half of the page answering 403 for the delegates the
+// page was opened to. Same bit on all four server-users routes.
+export const GET = withPermission(Permission.MANAGE_USERS)(async (_req, _ctx, _session) => {
   const [users, autoDisableRow] = await Promise.all([
     prisma.mediaServerUser.findMany({
       where: { active: true }, // hide soft-deleted (departed) server users from active management
@@ -40,7 +45,7 @@ export const GET = withAdmin(async (_req, _ctx, _session) => {
   return NextResponse.json({ users, autoDisableNew: autoDisableRow?.value === "true" });
 });
 
-export const PATCH = withAdmin(async (req, _ctx, session) => {
+export const PATCH = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const parsed = await readJsonCapped<{ autoDisableNew?: boolean }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;

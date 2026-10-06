@@ -1633,7 +1633,11 @@ export interface TrashSyncResult {
 const REFRESH_MIN_INTERVAL_MS = 60 * 60 * 1000;
 
 // Cron entry point: refreshes the catalog from GitHub (gated to hourly) when enabled, then applies all enabled specs across every configured instance per service.
-export async function runTrashSync(): Promise<TrashSyncResult> {
+// `signal` is the advisory lock's AbortSignal (guardrail 41): the apply phase is
+// an unbounded sequential arrFetch walk, so a run that outlives the lock's work
+// timeout must STOP at the next instance boundary and return its partial result
+// — never keep applying lock-free beside the retry the entrypoint schedules.
+export async function runTrashSync(opts: { signal?: AbortSignal } = {}): Promise<TrashSyncResult> {
   const settings = await prisma.setting.findMany({
     where: {
       key: {
@@ -1715,9 +1719,13 @@ export async function runTrashSync(): Promise<TrashSyncResult> {
   // service's specs only target that service's instances.
   const applied: ApplyResult[] = [];
   for (const service of services) {
+    if (opts.signal?.aborted) break;
     const arrService = service === "RADARR" ? "radarr" : "sonarr";
     const instances = await getSyncableArrInstances(arrService);
     for (const inst of instances) {
+      // Return, never throw, on abort: withAdvisoryLock's race has already
+      // settled on the timeout rejection and a throw here would be unhandled.
+      if (opts.signal?.aborted) break;
       // Per-instance containment, mirroring the refresh loop above: one
       // instance's thrown apply (its arr down mid-batch, a DB blip) must not
       // abort every remaining instance's — and the other service's — applies.

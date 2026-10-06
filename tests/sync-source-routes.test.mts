@@ -36,11 +36,24 @@
 // Harness: real handlers invoked directly, in-memory prisma stubs with a
 // recording $transaction, a monkey-patched `pg` Client.prototype for the
 // advisory locks, and scripted upstreams. No DB, no network.
-import { test, beforeEach } from "node:test";
+import { test, beforeEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { Client } from "pg";
 import dns from "node:dns/promises";
+
+// Only Date is mocked (timers stay real — the advisory-lock timeout and the held
+// upstream responses below need them): omdb.ts and mdblist.ts each memoize their
+// API-key read for 30s, null included, so a test that ran WITHOUT a key primes
+// "no key" for the next one. beforeEach steps past both memos so every test reads
+// the keys it set. Same shape as tests/ratings-refresh.test.mts.
+const T0 = Date.UTC(2026, 0, 15, 12, 0, 0);
+mock.timers.enable({ apis: ["Date"], now: T0 });
+let clockNow = T0;
+function advanceClock(ms: number): void {
+  clockNow += ms;
+  mock.timers.setTime(clockNow);
+}
 
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32);
 process.env.NEXTAUTH_SECRET = "sync-source-routes-secret-0123456789ab";
@@ -70,24 +83,56 @@ let plexOk = true;             // Plex sections + episodes
 let jellyfinOk = true;         // Jellyfin episodes
 let tmdbOk = true;             // TMDB list endpoints
 let tmdbTrendingResults: unknown[] = []; // /trending/ rows (ratings pre-warm pin)
+let tmdbUpcomingMovieResults: unknown[] = []; // /movie/upcoming rows (upcoming degraded pin)
+let mdblistBatchOk = true;     // MDBList batch POST (ratings per-item awaited-twin pin)
+// Guardrail 31a pin: a stale ratings row's refresh is ONE upstream call — a TMDB
+// external_ids lookup (OMDB not-found sentinel), an OMDB call by stored imdbId
+// (rated OMDB row) or an MDBList single-id GET (stale MDBList row). Each is held
+// open for a moment so overlapping calls are observable, and counted so the
+// per-item pass's concurrency bound can be asserted rather than inferred.
+let refreshInFlight = 0;
+let refreshPeak = 0;
+let refreshCalls = 0;
 
 globalThis.fetch = (async (input: RequestInfo | URL) => {
   const url = new URL(String(input));
   fetchCalls.push(url);
   const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { "content-type": "application/json" } });
+  const held = async (b: unknown) => {
+    refreshCalls++;
+    refreshInFlight++;
+    refreshPeak = Math.max(refreshPeak, refreshInFlight);
+    try {
+      await new Promise((r) => setTimeout(r, 10));
+      return json(b);
+    } finally {
+      refreshInFlight--;
+    }
+  };
 
   if ((url.hostname === "themoviedb.org" || url.hostname.endsWith(".themoviedb.org"))) {
     if (!tmdbOk) return json({ status_message: "TMDB DOWN" }, 500);
+    // An OMDB sentinel's refresh: answered with no imdb id, so no OMDB call follows.
+    if (url.pathname.includes("/external_ids")) return held({ imdb_id: null });
     // Trending only — lets the ratings batch-pre-warm pin pool a known item
     // set without touching what the other list endpoints return.
     if (url.pathname.includes("/trending/")) return json({ page: 1, total_pages: 1, results: tmdbTrendingResults });
+    if (url.pathname.includes("/movie/upcoming")) return json({ page: 1, total_pages: 1, results: tmdbUpcomingMovieResults });
     return json({ page: 1, total_pages: 1, results: [] });
+  }
+  if (url.hostname === "www.omdbapi.com") {
+    // A rated OMDB row's refresh, by its stored imdbId.
+    return held({ Response: "True", imdbRating: "7.0", imdbVotes: "1,000" });
   }
   if (url.hostname === "api.mdblist.com") {
     // Batch POST endpoints have no id in the path (/tmdb/movie/ vs /tmdb/movie/603/).
     // Echo one row per requested-set id so the batch parser writes FOUND rows.
-    if (url.pathname === "/tmdb/movie/") return json([{ tmdb_id: 603 }]);
-    if (url.pathname === "/tmdb/show/") return json([{ tmdb_id: 1399 }]);
+    if (url.pathname === "/tmdb/movie/" || url.pathname === "/tmdb/show/") {
+      if (!mdblistBatchOk) return json({ error: "MDBLIST DOWN" }, 500);
+      return json(url.pathname === "/tmdb/movie/" ? [{ tmdb_id: 603 }] : [{ tmdb_id: 1399 }]);
+    }
+    // A stale MDBList row's single-id refresh.
+    if (/^\/tmdb\/(movie|show)\/\d+\/$/.test(url.pathname)) return held({ title: "T", ratings: [{ source: "imdb", value: 7 }] });
     return json({});
   }
   if (url.pathname.includes("/library/sections")) {
@@ -188,12 +233,19 @@ shadowPrismaModel(prisma, "tmdbCache", {
       const r = tmdbCacheRows.get(k);
       return r ? [{ ...r }] : [];
     }),
-  findUnique: async (args: { where: { key: string } }) => tmdbCacheRows.get(args.where.key) ?? null,
+  findUnique: async (args: { where: { key: string } }) => {
+    // The one seam that makes a TMDB LIST helper reject: getUpcomingMovies/TV
+    // swallow their page fetches (settleLimit never rejects), so only a failing
+    // cache read reaches the route as `status: "rejected"`.
+    if (tmdbCacheThrowOnKey !== null && args.where.key === tmdbCacheThrowOnKey) throw new Error("DB DOWN");
+    return tmdbCacheRows.get(args.where.key) ?? null;
+  },
   upsert: async (args: { where: { key: string }; create: { key: string; data: string; cachedAt: Date; expiresAt: Date } }) => {
     tmdbCacheRows.set(args.where.key, args.create);
     return args.create;
   },
 });
+let tmdbCacheThrowOnKey: string | null = null;
 
 // sync/upcoming AWAITS a logAudit before returning. Leaving auditLog unstubbed
 // sends it to the real client, which then blocks on a DB connection that does
@@ -283,6 +335,7 @@ function registerArrInstance(service: "radarr" | "sonarr", slug: string): void {
 }
 
 beforeEach(() => {
+  advanceClock(31_000); // past both 30s API-key memos (see the Date mock above)
   ops = [];
   txOptions = [];
   pgLockCalls = [];
@@ -296,6 +349,12 @@ beforeEach(() => {
   jellyfinOk = true;
   tmdbOk = true;
   tmdbTrendingResults = [];
+  tmdbUpcomingMovieResults = [];
+  mdblistBatchOk = true;
+  tmdbCacheThrowOnKey = null;
+  refreshInFlight = 0;
+  refreshPeak = 0;
+  refreshCalls = 0;
   tmdbCacheRows.clear();
   lockAcquire = () => true;
 });
@@ -695,6 +754,43 @@ test("a TMDB failure is logged and does not throw out of the handler", async () 
   assert.equal(res.status, 200, "a fetch failure is a partial result, not a 500");
 });
 
+test("upcoming: ONE source failing while the other wrote rows is 200 but DEGRADED — X-Cron-Degraded + `error`, the orchestrator's shape", async () => {
+  // getUpcomingTV rejects (its cache read throws), movies succeed with a row.
+  // Before the fix this answered a plain 200 with `errors: 1`: withCronRunRecording
+  // marks a run failed only on status >= 400 or the X-Cron-Degraded header, and
+  // the Run-now button's verdict is `res.ok && !data.error` — so a TV endpoint
+  // failing every run recorded green while /upcoming served stale TV rows forever.
+  tmdbCacheThrowOnKey = "tv:upcoming";
+  tmdbUpcomingMovieResults = [
+    { id: 7001, title: "Future Movie", poster_path: "/f.jpg", release_date: "2999-01-01", vote_average: 7, vote_count: 10 },
+  ];
+
+  const res = await call(upcoming);
+  assert.equal(res.status, 200, "a partial failure that still wrote rows is NOT the 502 total-failure case");
+  assert.equal(res.headers.get("x-cron-degraded"), "tv", "the ledger reads this header to record ok:false");
+  const body = await res.json();
+  assert.equal(body.errors, 1);
+  assert.equal(body.movies, 1);
+  assert.equal(body.tv, 0);
+  assert.equal(body.error, "Sync degraded — tv failed to refresh", "the Run-now verdict reads `error`");
+  // The movie half was still replaced — a degraded run is not a skipped one.
+  assert.deepEqual(deletesOf("upcomingCacheItem").map((w) => w.mediaType), ["MOVIE"]);
+});
+
+test("upcoming: a clean run carries neither the degraded header nor `error`; a TOTAL failure stays 502", async () => {
+  const clean = await call(upcoming);
+  assert.equal(clean.status, 200);
+  assert.equal(clean.headers.get("x-cron-degraded"), null);
+  assert.equal("error" in (await clean.json()), false);
+
+  // Movies reject and TV is fulfilled-but-EMPTY (the stub lists nothing upcoming),
+  // so a failure happened and NOTHING was cached — the pre-existing total-failure rule.
+  tmdbCacheThrowOnKey = "movies:upcoming";
+  const movieFail = await call(upcoming);
+  assert.equal(movieFail.status, 502, "nothing cached and a failure → the pre-existing 502");
+  assert.equal(movieFail.headers.get("x-cron-degraded"), null, "502 already marks the ledger; no header on top");
+});
+
 // ── ratings ──────────────────────────────────────────────────────────────────
 
 const ratings = ROUTES[4];
@@ -783,6 +879,93 @@ test("ratings pre-warms MDBList through the batch endpoint — one POST per type
     !fetchCalls.some((u) => u.hostname === "api.themoviedb.org" && u.pathname.includes("/external_ids")),
     "no external_ids resolves may fire from the warm pass",
   );
+});
+
+// ── ratings: guardrail 31a — the per-item pass bounds the UPSTREAM work ──────
+// fetchUnifiedRatings' getters serve a stale row at once and DETACH its refresh,
+// so `Promise.all(batch.map(fetchUnifiedRatings))` bounded only the cache reads:
+// every stale row's upstream call started together, BATCH (5) or not. Twelve
+// stale rows under a limit of five is what makes an unbounded fan-out fail here.
+
+const RATINGS_BATCH = 5; // mirrors src/app/api/sync/ratings/route.ts
+const STALE_TITLES = 12;
+const STALE_AT = () => new Date(Date.now() - 60_000);
+const FRESH_AT = () => new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+function seedCacheRow(key: string, value: unknown, expiresAt: Date): void {
+  tmdbCacheRows.set(key, { key, data: JSON.stringify(value), cachedAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000), expiresAt });
+}
+function trendingMovies(firstId: number): void {
+  tmdbTrendingResults = Array.from({ length: STALE_TITLES }, (_, i) => ({
+    id: firstId + i, media_type: "movie", title: `Movie ${firstId + i}`, poster_path: "/m.jpg",
+    release_date: "2001-01-01", vote_average: 7, vote_count: 100,
+  }));
+}
+
+test("guardrail 31a: stale OMDB rows are refreshed through the awaited twin, so BATCH bounds the upstream calls", async () => {
+  // OMDB-only instance (the finding's worst case: no MDBList key, so the batch
+  // pre-warm never runs). Even ids hold a stale not-found sentinel (refresh = one
+  // TMDB external_ids lookup), odd ids a stale rated row (refresh = one OMDB call
+  // by the stored imdbId). One refresh is one held upstream call either way.
+  settings.set("omdbApiKey", "a-key");
+  trendingMovies(5000);
+  for (let i = 0; i < STALE_TITLES; i++) {
+    const id = 5000 + i;
+    seedCacheRow(`omdb:tmdb:movie:${id}`, id % 2 === 0
+      ? { _notFound: true }
+      : { imdbId: `tt${id}`, imdbRating: "6.0", imdbVotes: null, rottenTomatoes: null, metacritic: null }, STALE_AT());
+  }
+
+  const res = await call(ratings);
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).total, STALE_TITLES);
+  assert.equal(refreshCalls, STALE_TITLES, "each stale row refreshed exactly once — no detached retry behind the awaited one");
+  assert.equal(refreshInFlight, 0, "every refresh finished before the route answered (nothing detached)");
+  assert.equal(refreshPeak, RATINGS_BATCH, "bounded by BATCH, and still parallel");
+  assert.equal(fetchCalls.filter((u) => u.hostname === "www.omdbapi.com").length, STALE_TITLES / 2, "a rated row refreshes by its stored imdbId, a sentinel by external_ids");
+});
+
+test("guardrail 31a: stale MDBList rows the batch pre-warm could not refresh go through the awaited twin, bounded the same way", async () => {
+  // MDBList configured, but its batch POST fails this run — exactly when the
+  // per-item pass used to detach a single-item GET per stale row. OMDB is
+  // unconfigured, so the ONLY upstream calls are the MDBList single-id GETs.
+  settings.set("mdblistApiKey", "a-key");
+  mdblistBatchOk = false;
+  trendingMovies(6000);
+  for (let i = 0; i < STALE_TITLES; i++) {
+    seedCacheRow(`mdblist:tmdb:movie:${6000 + i}`, {
+      imdbId: `tt${6000 + i}`, imdbRating: "6.0", imdbVotes: null, rottenTomatoes: null, rtAudienceScore: null, metacritic: null,
+      traktRating: null, letterboxdRating: null, mdblistScore: null, malRating: null, rogerEbertRating: null, releasedDigital: null, trailerUrl: null,
+    }, STALE_AT());
+  }
+
+  const res = await call(ratings);
+  assert.equal(res.status, 200);
+  assert.equal(refreshCalls, STALE_TITLES, "each stale MDBList row refreshed exactly once");
+  assert.equal(refreshInFlight, 0, "every refresh finished before the route answered");
+  assert.equal(refreshPeak, RATINGS_BATCH, "bounded by BATCH, and still parallel");
+  assert.ok(!fetchCalls.some((u) => u.hostname === "www.omdbapi.com" || u.pathname.includes("/external_ids")), "no OMDB spend without an OMDB key");
+});
+
+test("guardrail 31a corollary: a stale OMDB row BEHIND a scored MDBList row is not refreshed — no read path ever refreshes it either", async () => {
+  // fetchUnifiedRatings reads OMDB cache-only (an overlay) behind a usable MDBList
+  // row, so the cron must not turn that into OMDB spend. Fresh scored MDBList rows,
+  // stale OMDB rows beside them: zero upstream calls.
+  settings.set("mdblistApiKey", "a-key");
+  settings.set("omdbApiKey", "a-key");
+  trendingMovies(7000);
+  for (let i = 0; i < STALE_TITLES; i++) {
+    const id = 7000 + i;
+    seedCacheRow(`mdblist:tmdb:movie:${id}`, {
+      imdbId: `tt${id}`, imdbRating: "8.0", imdbVotes: null, rottenTomatoes: null, rtAudienceScore: null, metacritic: null,
+      traktRating: null, letterboxdRating: null, mdblistScore: null, malRating: null, rogerEbertRating: null, releasedDigital: null, trailerUrl: null,
+    }, FRESH_AT());
+    seedCacheRow(`omdb:tmdb:movie:${id}`, { _notFound: true }, STALE_AT());
+  }
+
+  const res = await call(ratings);
+  assert.equal(res.status, 200);
+  assert.equal(refreshCalls, 0, "a scored MDBList row shadows the OMDB row for every read path, so nothing refreshes it");
 });
 
 test("ratings uses a DISTINCT advisory lock from upcoming", async () => {

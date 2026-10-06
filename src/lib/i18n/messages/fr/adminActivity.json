@@ -295,7 +295,6 @@
   "adminActivity.user.lastSeen": "Vu pour la dernière fois",
   "adminActivity.user.lastN": "{count} derniers",
   "adminActivity.user.linkedTo": "Lié à {name}",
-  "adminActivity.method.directStreamRemux": "Flux direct (Remux)",
   "adminActivity.play.backToHistory": "Retour à l’historique",
   "adminActivity.play.notWatched": "Non regardé",
   "adminActivity.play.pctComplete": "{pct} % terminé",
@@ -365,5 +364,11 @@
   "adminActivity.transcode.usersSub": "le plus de transcodages · {days} derniers jours",
   "adminActivity.transcode.titles": "Pression de transcodage · titres",
   "adminActivity.transcode.titlesSub": "les plus transcodés · {days} derniers jours",
-  "adminActivity.transcode.none": "Aucun transcodage sur cette période."
+  "adminActivity.transcode.none": "Aucun transcodage sur cette période.",
+  "adminActivity.common.hoursSuffix": "h",
+  "adminActivity.trackingOff.title": "Le suivi de l'historique de lecture est désactivé",
+  "adminActivity.trackingOff.description": "Rien n'est enregistré, ce tableau de bord n'a donc ni lectures, ni temps de visionnage, ni spectateurs à afficher. Activez le suivi dans Paramètres → Médias → Historique de lecture pour commencer à le remplir.",
+  "adminActivity.trackingOff.cta": "Ouvrir les paramètres de l'historique de lecture",
+  "adminActivity.common.hoursShort": "{n} h",
+  "adminActivity.detail.openPlay": "Ouvrir la lecture →"
 }

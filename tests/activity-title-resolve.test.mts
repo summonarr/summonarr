@@ -145,8 +145,9 @@ test("a TV ActiveSession-shaped entry keeps its type and is not linked to the sa
 test("calendar 'View these plays' link carries watched=true and the page seeds it", async () => {
   const { readFileSync } = await import("node:fs");
   const cal = readFileSync(new URL("../src/components/admin/activity-calendar.tsx", import.meta.url), "utf8");
-  assert.match(cal, /tab: "history", from: date, to: date, watched: "true"/);
-  const page = readFileSync(new URL("../src/app/(app)/admin/activity/page.tsx", import.meta.url), "utf8");
+  assert.match(cal, /from: date, to: date, watched: "true"/);
+  // The history table moved to its own route segment; the overview only redirects.
+  const page = readFileSync(new URL("../src/app/(app)/admin/activity/history/page.tsx", import.meta.url), "utf8");
   assert.match(page, /initialWatched=\{initialWatched\}/);
   const table = readFileSync(new URL("../src/components/admin/activity-history-table.tsx", import.meta.url), "utf8");
   assert.match(table, /useState<"" \| "true" \| "false">\(initialWatched \?\? ""\)/);

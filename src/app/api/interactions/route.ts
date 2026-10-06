@@ -3,7 +3,8 @@ import { emitNotificationEvent } from "@/lib/notify-agents";
 import { createPublicKey, verify as cryptoVerify } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
-import { assignDiscordRolesOnLink, notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
+import { assignDiscordRolesOnLink, escMd, notifyAdminsNewRequestDiscord } from "@/lib/discord-notify";
+import { localizedTitleFor } from "@/lib/tmdb-localize";
 import { notifyAdminsNewRequest } from "@/lib/email";
 import { notifyAdminsNewRequestPush } from "@/lib/push";
 import { notifyRequestStatusChange } from "@/lib/request-notifications";
@@ -302,7 +303,7 @@ function buildResultsPayload(t: Translator, query: string, results: TmdbResult[]
   }];
 
   return {
-    content: t("notify.bot.results.found", { n: results.length, query }),
+    content: t("notify.bot.results.found", { n: results.length, query: escMd(query) }),
     embeds,
     components,
   };
@@ -485,7 +486,7 @@ async function handleCommand(interaction: any): Promise<void> {
           statusLabel = inQueue ? t("notify.bot.status.APPROVED_QUEUE") : t("notify.bot.status.APPROVED_PENDING");
         }
         const media = r.mediaType === "MOVIE" ? t("notify.bot.status.movie") : t("notify.bot.status.tv");
-        return `${emoji[r.status] ?? "❓"} **${r.title}** (${media}) — ${statusLabel}`;
+        return `${emoji[r.status] ?? "❓"} **${escMd(r.title)}** (${media}) — ${statusLabel}`;
       });
       await editOriginal(appId, token, { content: `${t("notify.bot.status.header")}\n${lines.join("\n")}` });
     }
@@ -556,7 +557,7 @@ async function handleCommand(interaction: any): Promise<void> {
       await prisma.discordLinkToken.deleteMany({ where: { token: tokenValue } });
       void assignDiscordRolesOnLink(discordUserId, row.user.email, row.user.role);
       const userName = row.user.name ?? row.user.email;
-      await editOriginal(appId, token, { content: t("notify.bot.link.success", { name: userName, transfer: transferNote }) });
+      await editOriginal(appId, token, { content: t("notify.bot.link.success", { name: escMd(userName), transfer: transferNote }) });
     }
   } catch (err) {
     console.error("[interactions] handleCommand error:", err);
@@ -606,7 +607,11 @@ async function handleComponent(interaction: any): Promise<void> {
         return;
       }
 
-      prisma.discordSearchCache.delete({ where: { queryKey: key } }).catch(() => {});
+      // The pending search row is NOT consumed here. Every gate below (maintenance,
+      // permission, blacklist, rating, quota, already-requested, permanently denied)
+      // answers without creating anything; consuming the row first made the user's
+      // next pick from the same results answer "search expired". It is deleted
+      // just before the create transactions, once a pick is actually being filed.
 
       // Maintenance gate: a user who ran /request BEFORE maintenance was enabled could
       // still click a result button afterward and create a request (incl. auto-approve
@@ -857,18 +862,20 @@ async function handleComponent(interaction: any): Promise<void> {
         mediaAccess.plex,
         mediaAccess.jellyfin,
       );
+      // The routed instance's *arr-available cache is read for EVERY slug, the default
+      // included (parity with request-create.ts): an auto-approver treats a hit as
+      // already-here, and the mirror branch below needs it as the only evidence (short
+      // of a visible library copy) that an AVAILABLE peer's status is true for THIS
+      // requester too. Reading it only for named instances let an auto-approver
+      // re-request a default-instance title Radarr/Sonarr already had on disk.
       const [plexItem, jellyfinItem, arrAvailableRow] = await Promise.all([
         prisma.plexLibraryItem.findFirst({ where: { tmdbId: selected.id, mediaType, serverInstance: { in: visibleServers.plex } } }),
         prisma.jellyfinLibraryItem.findFirst({ where: { tmdbId: selected.id, mediaType, serverInstance: { in: visibleServers.jellyfin } } }),
-        // For a routed non-default instance, that instance's own availability also
-        // short-circuits (the shared library only counts when !skipLibraryCheck).
-        routedSlug !== ""
-          ? mediaType === "MOVIE"
-            ? prisma.radarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: selected.id, arrInstance: routedSlug } } })
-            : prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: selected.id, arrInstance: routedSlug } } })
-          : Promise.resolve(null),
+        mediaType === "MOVIE"
+          ? prisma.radarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: selected.id, arrInstance: routedSlug } } })
+          : prisma.sonarrAvailableItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId: selected.id, arrInstance: routedSlug } } }),
       ]);
-      const alreadyAvailable = !!arrAvailableRow || (!skipLibraryCheck && (!!plexItem || !!jellyfinItem));
+      const arrHasInstance = arrAvailableRow !== null;
 
       const baseData = {
         tmdbId: selected.id,
@@ -890,6 +897,15 @@ async function handleComponent(interaction: any): Promise<void> {
       const hasAutoApproveRole = autoApproveRoles.length > 0 && memberRoles.some((r) => autoApproveRoles.includes(r));
 
       const mayAutoApprove = hasAutoApproveRole || canAutoApproveInstance(effPerms, routedAccess, grants, mediaType);
+
+      // A visible library copy is "already available" for everyone (skipped for
+      // skipLibraryCheck instances); the instance's arr cache only for an auto-approver,
+      // exactly as request-create.ts computes `arrAvailable = isAutoApprove && arrHasInstance`.
+      const alreadyAvailable = (!skipLibraryCheck && (!!plexItem || !!jellyfinItem)) || (mayAutoApprove && arrHasInstance);
+
+      // Consume the pending search row only now: every gate above has passed and a
+      // reply that settles this pick follows. Best-effort — the row also expires.
+      prisma.discordSearchCache.delete({ where: { queryKey: key } }).catch(() => {});
 
       // Clear the requester's own delete-vote for this title — a request and a deletion
       // vote are contradictory, and the vote route already blocks the reverse.
@@ -1026,14 +1042,22 @@ async function handleComponent(interaction: any): Promise<void> {
               });
               if (alreadyGreenlit) {
                 mirrored = true;
-                // Mirror availableAt when the greenlit status is AVAILABLE, matching the
+                // An AVAILABLE peer is copied only when the title is available to THIS
+                // requester: the peer may have been marked off a restricted server this
+                // requester holds no grant for (guardrail 35). No visible library copy
+                // exists (that returned above), so the instance's *arr-available cache is
+                // the remaining evidence. Otherwise mirror APPROVED (no availableAt) and
+                // let the grant-gated sync marking pass promote and notify it — the same
+                // rule as request-create.ts.
+                const mirrorStatus = alreadyGreenlit.status === "AVAILABLE" && !arrHasInstance ? "APPROVED" : alreadyGreenlit.status;
+                // Mirror availableAt when the copied status is AVAILABLE, matching the
                 // alreadyAvailable branch — otherwise an AVAILABLE mirror row has a null
                 // availableAt and looks freshly approved.
                 return tx.mediaRequest.create({
                   data: {
                     ...baseData,
-                    status: alreadyGreenlit.status,
-                    ...(alreadyGreenlit.status === "AVAILABLE" ? { availableAt: new Date() } : {}),
+                    status: mirrorStatus,
+                    ...(mirrorStatus === "AVAILABLE" ? { availableAt: new Date() } : {}),
                   },
                 });
               }
@@ -1160,18 +1184,32 @@ async function handleComponent(interaction: any): Promise<void> {
         select: { id: true, title: true, mediaType: true, tmdbId: true, posterPath: true, status: true, requestedBy: true, qualityProfileId: true, arrInstance: true },
       });
 
+      // The shared admin-channel embed is written in the instance default language,
+      // and so is the title in it — the pending embed it edits was built that way
+      // (discord-notify.ts, guardrail 40a); an English MediaRequest.title would
+      // flip it back on click. Embed titles don't render markdown, so no escMd.
+      const channelTitle = request
+        ? await localizedTitleFor({ title: request.title, tmdbId: request.tmdbId, mediaType: request.mediaType }, null)
+        : null;
+
+      // Every final edit below passes `content: ""`: Discord's edit is a partial
+      // PATCH, and withDiscordTimeout may already have written its "taking longer"
+      // line into `content` on a slow arr push — an omitted field would leave it
+      // standing above the finished embed.
       if (!request || request.status !== "PENDING") {
         const embed: Record<string, unknown> = {
           color: 0x71767B,
-          title: request?.title ?? channelT("notify.bot.admin.requestFallback"),
+          title: channelTitle ?? channelT("notify.bot.admin.requestFallback"),
           description: channelT("notify.bot.admin.handled"),
           timestamp: new Date().toISOString(),
         };
-        await editOriginal(appId, token, { embeds: [embed], components: [] });
+        await editOriginal(appId, token, { content: "", embeds: [embed], components: [] });
         return;
       }
 
       const adminName = adminUser.name ?? adminUser.email;
+      // Non-null from here: `request` survived the guard above.
+      const localizedTitle: string = channelTitle ?? request.title;
 
       if (action === "admin_approve") {
         // Match the /api/requests/[id] PATCH path: set pendingNotifyAt so the sync
@@ -1186,11 +1224,11 @@ async function handleComponent(interaction: any): Promise<void> {
         if (claimed.count === 0) {
           const embed: Record<string, unknown> = {
             color: 0x71767B,
-            title: request.title,
+            title: localizedTitle,
             description: channelT("notify.bot.admin.handled"),
             timestamp: new Date().toISOString(),
           };
-          await editOriginal(appId, token, { embeds: [embed], components: [] });
+          await editOriginal(appId, token, { content: "", embeds: [embed], components: [] });
           return;
         }
         let arrFailed = false;
@@ -1255,15 +1293,15 @@ async function handleComponent(interaction: any): Promise<void> {
         const embed: Record<string, unknown> = {
           color: arrFailed ? 0xFEE75C : 0x57F287,
           title: arrFailed
-            ? channelT("notify.bot.admin.approvedArrFailedTitle", { title: request.title })
-            : channelT("notify.bot.admin.approvedTitle", { title: request.title }),
+            ? channelT("notify.bot.admin.approvedArrFailedTitle", { title: localizedTitle })
+            : channelT("notify.bot.admin.approvedTitle", { title: localizedTitle }),
           description: arrFailed
             ? channelT("notify.bot.admin.approvedByArrFailed", { admin: adminName })
             : channelT("notify.bot.admin.approvedBy", { admin: adminName }),
           timestamp: new Date().toISOString(),
         };
         if (request.posterPath) embed.thumbnail = { url: `${TMDB_POSTER_BASE}${request.posterPath}` };
-        await editOriginal(appId, token, { embeds: [embed], components: [] });
+        await editOriginal(appId, token, { content: "", embeds: [embed], components: [] });
       } else {
         // approvedAt: null — a decline withdraws any approval, including one whose
         // push failed and rolled back to PENDING (MediaRequest.approvedAt).
@@ -1274,11 +1312,11 @@ async function handleComponent(interaction: any): Promise<void> {
         if (claimed.count === 0) {
           const embed: Record<string, unknown> = {
             color: 0x71767B,
-            title: request.title,
+            title: localizedTitle,
             description: channelT("notify.bot.admin.handled"),
             timestamp: new Date().toISOString(),
           };
-          await editOriginal(appId, token, { embeds: [embed], components: [] });
+          await editOriginal(appId, token, { content: "", embeds: [embed], components: [] });
           return;
         }
         void logAudit({
@@ -1297,12 +1335,12 @@ async function handleComponent(interaction: any): Promise<void> {
         }
         const embed: Record<string, unknown> = {
           color: 0xED4245,
-          title: channelT("notify.bot.admin.declinedTitle", { title: request.title }),
+          title: channelT("notify.bot.admin.declinedTitle", { title: localizedTitle }),
           description: channelT("notify.bot.admin.declinedBy", { admin: adminName }),
           timestamp: new Date().toISOString(),
         };
         if (request.posterPath) embed.thumbnail = { url: `${TMDB_POSTER_BASE}${request.posterPath}` };
-        await editOriginal(appId, token, { embeds: [embed], components: [] });
+        await editOriginal(appId, token, { content: "", embeds: [embed], components: [] });
       }
     } else {
       await editOriginal(appId, token, { content: t("notify.bot.inactiveButton") }).catch(() => {});

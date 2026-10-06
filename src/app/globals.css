@@ -39,11 +39,16 @@
   --color-popover: var(--popover);
   --color-card-foreground: var(--card-foreground);
   --color-card: var(--card);
-  --radius-sm: calc(var(--radius) * 0.6);
-  --radius-md: calc(var(--radius) * 0.8);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.4);
-  --radius-2xl: calc(var(--radius) * 1.8);
+  /* shadcn's radius scale is mapped onto the DS scale (--ds-r-*: 4/6/8/12px)
+     so `rounded-md|lg|xl` on Button/Input/Card/Dialog land on the same corners
+     as every inline `borderRadius: 6|8|12` and `.ds-surface`. The stock
+     0.625rem base gave 10/14/18px — values that exist nowhere else in the DS,
+     so no two adjacent primitives shared a corner radius. */
+  --radius-sm: var(--ds-r-sm);
+  --radius-md: var(--ds-r-md);
+  --radius-lg: var(--ds-r-lg);
+  --radius-xl: var(--ds-r-xl);
+  --radius-2xl: 16px;
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
 }
@@ -138,13 +143,22 @@
   summary {
     cursor: pointer;
   }
+  /* Native checkboxes/radios/progress rendered browser-default blue under
+     every accent; follow the accent token (a utility such as accent-* still
+     wins, this is base-layer). */
+  input[type="checkbox"],
+  input[type="radio"],
+  progress {
+    accent-color: var(--ds-accent);
+  }
 }
 
-/* Safe area bottom padding for iOS standalone/PWA mode */
-@supports (padding-bottom: env(safe-area-inset-bottom)) {
-  .pb-safe-bottom-20 {
-    padding-bottom: calc(5rem + env(safe-area-inset-bottom));
-  }
+/* Safe area bottom padding for iOS standalone/PWA mode. Declared as a
+   Tailwind utility (not an unlayered rule) so it sorts with the other padding
+   utilities and a responsive variant such as `lg:pb-10` can still win at lg —
+   as an unlayered rule it beat every `pb-*` on the element at every width. */
+@utility pb-safe-bottom-20 {
+  padding-bottom: calc(5rem + env(safe-area-inset-bottom));
 }
 
 /* Safe area top support — iOS notch/Dynamic Island + Android punch-hole cameras.
@@ -218,6 +232,9 @@
 /* Dark (primary). The existing `html.dark` continues to drive shadcn tokens;
    this block adds the design-system surface tokens alongside. */
 [data-theme="dark"] {
+  /* Native form controls (scrollbars, date pickers, selects) follow the theme
+     instead of rendering light-on-dark; checkbox/radio accent is set in @layer base. */
+  color-scheme: dark;
   --ds-bg:       oklch(0.145 0.004 275);
   --ds-bg-1:     oklch(0.175 0.005 275);
   --ds-bg-2:     oklch(0.205 0.005 275);
@@ -245,6 +262,7 @@
 }
 
 [data-theme="light"] {
+  color-scheme: light;
   --ds-bg:       oklch(0.99  0.002 275);
   --ds-bg-1:     oklch(0.975 0.003 275);
   --ds-bg-2:     oklch(1 0 0);
@@ -313,6 +331,24 @@
      focus. The accent TEXT token is tuned ≥4.5:1 against every surface in
      both themes, so the solid `border-ring` edge now clears 3:1 everywhere. */
   --ring: var(--ds-accent-text);
+  /* shadcn's `destructive` was a second red (hue 22-27, L .70/.58) beside the
+     tuned `--ds-danger` every chip, toast and text-red-* resolves to — two
+     reds for one meaning, and the light-mode one was lighter than the tuned
+     token. One red. Same for the control borders: `--border` is the default
+     border colour of every element and `--input` is the Input/StyledSelect
+     edge; both now sit on the DS border tokens so a form field's edge matches
+     the card it sits in instead of drawing ~2x brighter. */
+  --destructive: var(--ds-danger);
+  --border: var(--ds-border);
+  --input: var(--ds-border-strong);
+  /* Chart series. One system that follows the accent in both themes: a
+     lightness ramp off the accent plus the subtle foreground, instead of
+     hand-picked oklch literals that collided with three of the six accents and
+     never got the light-theme darkening. Use in order for 1-4 series. */
+  --ds-chart-1: var(--ds-accent);
+  --ds-chart-2: color-mix(in oklab, var(--ds-accent) 55%, var(--ds-fg));
+  --ds-chart-3: color-mix(in oklab, var(--ds-accent) 30%, var(--ds-fg-subtle));
+  --ds-chart-4: var(--ds-fg-subtle);
 
   /* Accent (was indigo): align every indigo shade to the DS accent.
      All `bg-indigo-*`, `text-indigo-*`, `border-indigo-*`, `ring-indigo-*`
@@ -539,8 +575,8 @@ a:focus-visible > .ds-chip-link { color: var(--ds-fg); border-color: var(--ds-ac
    coordinates, and the rank badge wins on z-index, so it clipped the label on
    every card in the grid. Push the chips clear of the badge instead of moving
    the rank somewhere less legible. /for-you does NOT use this class: MediaCard
-   already moves the chips DOWN when it is given an overlayAction, and adding
-   this rightward shift on top stranded them mid-poster. */
+   stacks its overlayAction under the chips in the same corner, and adding this
+   rightward shift on top stranded them mid-poster. */
 .ds-ranked-card [data-media-chips] { left: 2rem; }
 
 /* ───── Settings section anchors ─────
@@ -616,6 +652,13 @@ a:focus-visible > .ds-chip-link { color: var(--ds-fg); border-color: var(--ds-ac
 .lb-row:hover { background: color-mix(in oklab, var(--ds-fg) 4%, transparent); }
 .recent-row { transition: background 120ms var(--ds-ease); }
 .recent-row:hover { background: color-mix(in oklab, var(--ds-fg) 3%, transparent); }
+/* Admin → Activity → History rows carried these class names with no rule
+   behind them: no hover feedback, and the icon-only delete painted in the
+   disabled token read as inactive. */
+.history-row { transition: background 120ms var(--ds-ease); }
+.history-row:hover { background: color-mix(in oklab, var(--ds-fg) 3%, transparent); }
+.history-delete { transition: color var(--ds-fast) var(--ds-ease), border-color var(--ds-fast) var(--ds-ease); }
+.history-delete:hover, .history-delete:focus-visible { color: var(--ds-danger) !important; border-color: var(--ds-border-strong) !important; }
 
 .ds-stat-row {
   display: grid;

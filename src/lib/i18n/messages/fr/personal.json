@@ -51,7 +51,6 @@
   "personal.votes.emptyFilteredDescription": "Aucun vote ne correspond à ces filtres.",
   "personal.votes.emptyTitle": "Aucun vote de suppression pour l'instant",
   "personal.votes.emptyDescription": "Parcourez votre bibliothèque et votez pour les éléments qui devraient selon vous être supprimés.",
-  "personal.votes.noPoster": "Pas d'affiche",
   "personal.votes.count_one": "{count} vote",
   "personal.votes.count_other": "{count} votes",
   "personal.votes.anonymous": "Anonyme",
@@ -189,5 +188,10 @@
   "personal.donate.zelleHint": "Envoyez via Zelle depuis votre banque à :",
   "personal.donate.amazonHint": "Voir ma liste de souhaits Amazon",
   "personal.donate.patreonHint": "Devenez mécène sur Patreon",
-  "personal.donate.coffeeHint": "Offrez-moi un café"
+  "personal.donate.coffeeHint": "Offrez-moi un café",
+  "personal.common.trackingOff.title": "Le suivi de l'historique de lecture est désactivé",
+  "personal.common.trackingOff.description": "Rien n'est enregistré, cette page ne peut donc pas se remplir. Un administrateur peut activer le suivi de l'historique dans Paramètres → Fonctionnalités.",
+  "personal.common.trackingOff.cta": "Ouvrir les paramètres",
+  "personal.common.showingMostRecent": "Affichage de vos {n} titres les plus récents. Les plus anciens ne figurent pas ici.",
+  "personal.watchlist.removeError": "Impossible de retirer « {title} » de votre liste de suivi. Veuillez réessayer."
 }

@@ -15,8 +15,9 @@ import { isFeatureEnabled } from "@/lib/features";
 import { AvailabilityBadges } from "@/components/media/availability-badges";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { Chip, EmptyState, PageHeader } from "@/components/ui/design";
+import { LocalDateText } from "@/components/local-date";
 import { REQUEST_STATUS_TONE } from "@/lib/status-labels";
-import { getLocale, getTranslator } from "@/lib/i18n/server";
+import { getTranslator } from "@/lib/i18n/server";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
 
 export const dynamic = "force-dynamic";
@@ -39,7 +40,7 @@ export default async function RequestsPage({
   searchParams: Promise<{ page?: string; status?: string; sort?: string; q?: string }>;
 }) {
   const session = await requireAppSession();
-  const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
+  const t = await getTranslator();
 
   const { page: pageParam, status: statusParam, sort: sortParam, q: qParam } = await searchParams;
   const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
@@ -193,27 +194,20 @@ export default async function RequestsPage({
                 : t("requests.empty.noneTitle")
           }
           description={
-            total > 0 ? (
-              <>
-                {t("requests.empty.pageDescription")}{" "}
-                <Link
-                  href={pageHref(1)}
-                  className="hover:underline"
-                  style={{ color: "var(--ds-accent-text)", fontWeight: 500 }}
-                >
-                  {t("requests.empty.backToFirst")}
-                </Link>
-              </>
-            ) : hasFilters ? (
-              t("requests.empty.filteredDescription")
-            ) : (
-              t("requests.empty.noneDescription")
-            )
+            total > 0
+              ? t("requests.empty.pageDescription")
+              : hasFilters
+                ? t("requests.empty.filteredDescription")
+                : t("requests.empty.noneDescription")
           }
+          // The recovery action rides the primitive's cta slot (same position,
+          // weight and hover as /votes and /issues), not an inline link.
           cta={
-            total === 0 && !hasFilters
-              ? { href: "/movies", label: t("requests.empty.browseMovies") }
-              : undefined
+            total > 0
+              ? { href: pageHref(1), label: t("requests.empty.backToFirst") }
+              : !hasFilters
+                ? { href: "/movies", label: t("requests.empty.browseMovies") }
+                : undefined
           }
         />
       ) : (
@@ -295,7 +289,12 @@ export default async function RequestsPage({
                           {r.releaseYear ? ` · ${r.releaseYear}` : ""}
                         </span>
                         <span>·</span>
-                        <span>{new Date(r.createdAt).toLocaleDateString(locale)}</span>
+                        <span>
+                          {/* Viewer's timezone, not the container's — a server-side
+                              toLocaleDateString() formats in the runtime TZ (UTC in
+                              Docker), so an evening request showed tomorrow's date. */}
+                          <LocalDateText iso={r.createdAt.toISOString()} />
+                        </span>
                       </div>
                       <AvailabilityBadges
                         plexAvailable={availability?.plexAvailable}
@@ -308,6 +307,10 @@ export default async function RequestsPage({
                       />
                       {r.note && (
                         <p
+                          // Clamped in the list row (a 500-char note is otherwise a
+                          // ~9-line row) and keeps its line breaks, like /issues. No
+                          // quotation marks — the sibling pages never had them.
+                          className="line-clamp-3 whitespace-pre-wrap"
                           style={{
                             marginTop: 8,
                             padding: "6px 10px",
@@ -319,7 +322,7 @@ export default async function RequestsPage({
                             color: "var(--ds-fg-muted)",
                           }}
                         >
-                          &quot;{r.note}&quot;
+                          {r.note}
                         </p>
                       )}
                     </div>

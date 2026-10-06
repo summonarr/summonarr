@@ -50,5 +50,9 @@
   "shared.discordJoin.message": "Join our Discord server to request media directly from Discord, then {link}.",
   "shared.discordJoin.linkAccount": "link your account",
   "shared.discordJoin.join": "Join Discord",
-  "shared.skipToContent": "Skip to main content"
+  "shared.skipToContent": "Skip to main content",
+  "shared.bell.loadFailed": "Couldn't load notifications.",
+  "shared.bell.loading": "Loading notifications…",
+  "shared.common.clearSearch": "Clear search",
+  "shared.thread.placeholderShortcut": "Write a message… ({shortcut} to send)"
 }

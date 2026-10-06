@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Chip } from "@/components/ui/design";
 import { CheckCircle, XCircle, Loader2, RefreshCcw } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
@@ -29,8 +30,14 @@ function JellyfinLibraryPicker({ initialSelected, folders, loadStatus, errorMess
     () => new Set(initialSelected.split(",").map((k) => k.trim()).filter(Boolean))
   );
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  const [saveError, setSaveError] = useState("");
+  // Only the "Saved" tick fades; an error stays until the next change or save.
+  // Ref'd so a second save cancels the first save's timer and unmount clears it.
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
 
   function toggle(id: string) {
+    setSaveStatus("idle");
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -40,19 +47,26 @@ function JellyfinLibraryPicker({ initialSelected, folders, loadStatus, errorMess
   }
 
   async function handleSave() {
+    if (resetTimer.current) clearTimeout(resetTimer.current);
     setSaveStatus("saving");
+    setSaveError("");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ jellyfinLibraries: Array.from(selected).join(",") }),
       });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
-      setSaveStatus(res.ok && data.ok !== false ? "ok" : "error");
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (res.ok && data.ok !== false) {
+        setSaveStatus("ok");
+        resetTimer.current = setTimeout(() => setSaveStatus("idle"), 3000);
+      } else {
+        setSaveError(data.error ?? "");
+        setSaveStatus("error");
+      }
     } catch {
       setSaveStatus("error");
     }
-    setTimeout(() => setSaveStatus("idle"), 3000);
   }
 
   return (
@@ -86,9 +100,9 @@ function JellyfinLibraryPicker({ initialSelected, folders, loadStatus, errorMess
                   <span className="text-sm text-zinc-300 group-hover:text-zinc-100 transition-colors">
                     {f.name}
                   </span>
-                  <span className="text-xs px-1.5 py-0.5 rounded bg-zinc-700 text-zinc-400">
+                  <Chip tone="neutral">
                     {f.collectionType === "movies" ? t("search.filter.movies") : t("search.filter.tv")}
-                  </span>
+                  </Chip>
                 </label>
               ))}
             </div>
@@ -105,7 +119,7 @@ function JellyfinLibraryPicker({ initialSelected, folders, loadStatus, errorMess
             >
               {saveStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.library.saveSelection")}
             </Button>
-            <SaveStatusMessage status={saveStatus} />
+            <SaveStatusMessage status={saveStatus} errorLabel={saveError || undefined} />
           </div>
         </>
       )}
@@ -130,6 +144,19 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
   const [librariesCount, setLibrariesCount] = useState<number | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
   const [syncResult, setSyncResult] = useState<{ marked: number; scanned: { movies: number; tv: number } } | null>(null);
+  const [syncError, setSyncError] = useState("");
+  // Whether the server holds a SAVED Jellyfin URL + key. /api/sync/jellyfin
+  // syncs the stored config, not what is typed in the fields, so the Sync
+  // button must follow this and not the inputs: on a fresh install the typed,
+  // unsaved credentials used to show a Sync button whose click answered
+  // "server not configured" (guardrail 36 — decide configured-ness before the
+  // request). Starts from the page-load props and flips after a successful save.
+  const [configured, setConfigured] = useState(Boolean(initialUrl && initialApiKey));
+  // Only the "Connected" line fades; an error stays until the next edit or
+  // save. Ref'd so a second save cancels the first save's timer and unmount
+  // clears it.
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (saveTimer.current) clearTimeout(saveTimer.current); }, []);
 
   const [folders, setFolders] = useState<JellyfinMediaFolder[]>([]);
   const [librariesStatus, setLibrariesStatus] = useState<LoadStatus>(
@@ -168,6 +195,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    if (saveTimer.current) clearTimeout(saveTimer.current);
     setSaveStatus("saving");
     setSaveErrorMessage("");
     setLibrariesCount(null);
@@ -193,13 +221,16 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
       setSaveStatus("error");
       return;
     }
+    // The route only answers ok after its own connection test passed and the
+    // values were written, so the stored config is now usable by Sync.
+    setConfigured(true);
 
     setSaveStatus("testing");
     const result = await loadLibraries();
     if (result.ok) {
       setLibrariesCount(result.count);
       setSaveStatus("ok");
-      setTimeout(() => setSaveStatus("idle"), 4000);
+      saveTimer.current = setTimeout(() => setSaveStatus("idle"), 4000);
     } else {
       setSaveErrorMessage(result.error ?? t("settings.form.library.connectFailed", { server: "Jellyfin" }));
       setSaveStatus("error");
@@ -209,6 +240,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
   async function handleSync() {
     setSyncStatus("running");
     setSyncResult(null);
+    setSyncError("");
     try {
       // { full: true } asks for a full sync: delete this server's library rows
       // and rebuild them (like the Plex form's "Import from Plex" button).
@@ -219,9 +251,18 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ full: true }),
       });
-      if (!res.ok) throw new Error(await res.text());
-      const data: { marked: number; scanned: { movies: number; tv: number } } = await res.json();
-      setSyncResult(data);
+      const body = (await res.json().catch(() => ({}))) as
+        | { marked: number; scanned: { movies: number; tv: number } }
+        | { error?: string };
+      if (!res.ok || !("marked" in body)) {
+        // Show the server's own reason (409 "sync already running", 429, the
+        // not-configured message) instead of one fixed sentence that blames
+        // the credentials for every failure.
+        setSyncError("error" in body && typeof body.error === "string" ? body.error : "");
+        setSyncStatus("error");
+        return;
+      }
+      setSyncResult(body);
       setSyncStatus("done");
     } catch {
       setSyncStatus("error");
@@ -240,7 +281,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
               value={url}
               onChange={(e) => { setUrl(e.target.value); setSaveStatus("idle"); }}
               placeholder="http://192.168.1.100:8096"
-              className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+              className="bg-zinc-800 border-zinc-700 font-mono"
             />
           </div>
           <div className="space-y-1.5">
@@ -251,7 +292,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
               value={apiKey}
               onChange={(e) => { setApiKey(e.target.value); setSaveStatus("idle"); }}
               placeholder={t("settings.form.jellyfin.apiKeyPlaceholder")}
-              className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+              className="bg-zinc-800 border-zinc-700 font-mono"
             />
             <p className="text-xs text-zinc-500">
               {t("settings.form.jellyfin.apiKeyHelp")}
@@ -287,7 +328,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
             </span>
           )}
 
-          {url && apiKey && (
+          {configured && (
             <Button
               type="button"
               onClick={handleSync}
@@ -315,7 +356,7 @@ export function JellyfinSyncForm({ initialUrl, initialApiKey, initialJellyfinLib
         )}
         {syncStatus === "error" && (
           <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400">
-            <XCircle className="w-4 h-4" />{t("settings.form.jellyfin.syncFailed")}
+            <XCircle className="w-4 h-4" />{syncError || t("settings.form.jellyfin.syncFailed")}
           </span>
         )}
       </form>

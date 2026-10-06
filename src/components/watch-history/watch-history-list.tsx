@@ -15,19 +15,10 @@ import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { EmptyState, FilterBar, type FilterSegment } from "@/components/ui/design";
+import { Button } from "@/components/ui/button";
 import { ReportIssueButton } from "@/components/media/report-issue-button";
+import { formatDurationHM } from "@/lib/format-duration";
 import type { MyWatchHistoryItem, MyWatchHistoryPage } from "@/lib/my-watch-history";
-
-// Local copy of the tiny duration formatter (activity-ui's fmtDuration) so the
-// user-facing bundle doesn't pull in the whole admin activity chart module.
-function fmtDuration(seconds: number): string {
-  if (!seconds || seconds <= 0) return "—";
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m`;
-  return `${Math.round(seconds)}s`;
-}
 
 function episodeLine(item: MyWatchHistoryItem): string | null {
   if (item.mediaType !== "TV" || item.seasonNumber == null) return null;
@@ -202,7 +193,7 @@ export function WatchHistoryList({
             <span className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>
               {t("personal.history.summary", {
                 count: initial.stats.plays,
-                duration: fmtDuration(initial.stats.playSeconds),
+                duration: formatDurationHM(initial.stats.playSeconds, locale),
               })}
             </span>
             <input
@@ -372,7 +363,7 @@ export function WatchHistoryList({
                     {mounted ? formatRelativeTimeLocalized(item.startedAt, locale) : ""}
                   </span>
                   <span className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-muted)" }}>
-                    {fmtDuration(groupSeconds)}
+                    {formatDurationHM(groupSeconds, locale)}
                   </span>
                   {item.watched ? (
                     <span
@@ -435,16 +426,11 @@ export function WatchHistoryList({
 
       {nextCursor && items.length > 0 && (
         <div className="flex flex-col items-center gap-1.5" style={{ marginTop: 12 }}>
-          <button
-            type="button"
-            onClick={loadMore}
-            disabled={loadingMore}
-            className="rounded-md border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 px-4 py-1.5 text-xs text-zinc-200 transition-colors"
-          >
+          <Button variant="outline" size="sm" onClick={loadMore} disabled={loadingMore}>
             {loadingMore
               ? t("personal.common.loading")
               : t("personal.common.loadMore", { count: Math.max(0, total - items.length) })}
-          </button>
+          </Button>
           {loadError && (
             <span role="alert" aria-live="assertive" className="text-xs text-red-400">{loadError}</span>
           )}

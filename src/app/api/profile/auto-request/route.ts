@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { maintenanceGuard } from "@/lib/maintenance";
+import { logAudit, auditContext } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { isFeatureEnabled } from "@/lib/features";
@@ -61,6 +63,10 @@ export const GET = withAuth(async (req, _ctx, session) => {
 // it off clears that consent.
 export const PATCH = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
+  // Personal mutation — blocked during maintenance like push/subscribe (the
+  // opt-out below also deletes a stored plex.tv credential).
+  const maint = await maintenanceGuard(session);
+  if (maint) return maint;
   const parsed = await readJsonCapped<{ plexWatchlist?: unknown }>(req, 4096);
   if (parsed instanceof NextResponse) return parsed;
   if (typeof parsed.plexWatchlist !== "boolean") {
@@ -78,6 +84,16 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
   // Opting back in needs one Plex sign-in to store a fresh one.
   if (!parsed.plexWatchlist) {
     await prisma.account.deleteMany({ where: { userId: session.user.id, provider: "plex" } });
+    // A stored credential was deleted — leave a trail beside the password-change
+    // audit. After the commit, swallowing (guardrail 26).
+    void logAudit({
+      userId: session.user.id,
+      userName: session.user.name ?? session.user.email ?? "unknown",
+      action: "SETTINGS_CHANGE",
+      target: `user:${session.user.id}`,
+      details: { kind: "plex-watchlist-opt-out" },
+      ...auditContext(req, session),
+    });
   }
   return NextResponse.json({ plexWatchlist: parsed.plexWatchlist });
 });

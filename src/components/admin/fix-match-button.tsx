@@ -6,8 +6,9 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import type { PlexCandidate, CandidateMatch, CandidatesResponse } from "@/app/api/admin/fix-match/candidates/route";
 import { withBasePath } from "@/lib/base-path";
-import { runFixMatch, type FixMatchProgressView } from "@/lib/client/fix-match";
+import { runFixMatch, fixMatchErrorMessage, fixMatchWarningMessage, type FixMatchProgressView } from "@/lib/client/fix-match";
 import { DEFAULT_MEDIA_INSTANCE, mediaInstanceLabel } from "@/lib/media-instances";
+import { rich } from "@/components/settings/forms/rich";
 import { useT } from "@/components/i18n/i18n-provider";
 
 type Phase = "idle" | "fetching" | "selecting" | "applying" | "success" | "conflated" | "error";
@@ -142,13 +143,15 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
           <div className="mx-6 mt-3 flex-shrink-0 space-y-1.5">
             {plexFileName && (
               <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold text-yellow-400 w-16 shrink-0">Plex</span>
+                {/* Brand identity as TEXT takes the per-theme text token, never
+                    the warning colour (guardrail 42) — one colour per brand. */}
+                <span className="text-xs font-semibold text-[var(--ds-plex-text)] w-16 shrink-0">Plex</span>
                 <p className="text-xs font-mono text-zinc-500 truncate" title={plexFilePath ?? undefined}>{plexFileName}</p>
               </div>
             )}
             {jellyfinFileName && (
               <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold text-purple-400 w-16 shrink-0">Jellyfin</span>
+                <span className="text-xs font-semibold text-[var(--ds-jellyfin-text)] w-16 shrink-0">Jellyfin</span>
                 <p className="text-xs font-mono text-zinc-500 truncate" title={jellyfinFilePath ?? undefined}>{jellyfinFileName}</p>
               </div>
             )}
@@ -181,8 +184,17 @@ function FixMatchModal({ server, data, currentTmdbId, correctTmdbId, arrTmdbId, 
         {server === "jellyfin" ? (
           <div className="px-6 py-4 flex-1 overflow-y-auto">
             <p className="text-sm text-zinc-300 leading-snug">
-              {t("adminQueue.fixMatch.reidentify", { from: currentTmdbId, to: correctTmdbId })}
-              {instanceLabel && <span className="text-orange-400"> {t("adminQueue.fixMatch.onInstance", { instance: instanceLabel })}</span>}.
+              {/* One sentence with an {instance} slot and its full stop INSIDE
+                  the translation, so each language places the server phrase
+                  (and its own terminal punctuation — "。" in zh) itself. The
+                  slot is a React node via rich(); interpolate leaves an
+                  unsupplied placeholder intact for it. Empty on the default
+                  server. */}
+              {rich(t("adminQueue.fixMatch.reidentify", { from: currentTmdbId, to: correctTmdbId }), {
+                instance: instanceLabel
+                  ? <span className="text-orange-400"> {t("adminQueue.fixMatch.onInstance", { instance: instanceLabel })}</span>
+                  : null,
+              })}
             </p>
             <p className="text-xs text-zinc-500 mt-2 leading-snug">
               {t("adminQueue.fixMatch.jellyfinNote")}
@@ -310,11 +322,11 @@ function CandidateRow({
           )}
           {arrMatch ? (
             <span className="text-xs px-1.5 py-0.5 rounded border font-semibold bg-emerald-500/20 text-emerald-400 border-emerald-500/40">
-              Radarr/Sonarr ✓
+              {t("adminQueue.fixMatch.arrBadge")}
             </span>
           ) : (
             <span className={`text-xs px-1.5 py-0.5 rounded border font-medium ${style.badge}`}>
-              {candidate.radarrConfirmed ? "Arr ✓" : t(`adminQueue.fixMatch.level.${effectiveLevel}`)}
+              {candidate.radarrConfirmed ? t("adminQueue.fixMatch.arrShort") : t(`adminQueue.fixMatch.level.${effectiveLevel}`)}
             </span>
           )}
           {isSuggested && !arrMatch && (
@@ -427,7 +439,7 @@ export function FixMatchButton({
       const res = await fetch(withBasePath(`/api/admin/fix-match/candidates?${params}`));
       // A reverse proxy's HTML 502/504 is not JSON — report the status, not a parser error.
       const json = await res.json().catch(() => null) as (CandidatesResponse & { error?: string }) | null;
-      if (!res.ok || !json) throw new Error(json?.error ?? `HTTP ${res.status}`);
+      if (!res.ok || !json) throw new Error(json?.error ?? t("adminQueue.common.requestFailed", { status: res.status }));
       setCandidates(json);
       setPhase("selecting");
     } catch (err) {
@@ -454,8 +466,12 @@ export function FixMatchButton({
         ...(serverInstance ? { serverInstance } : {}),
       }, { onProgress: setProgress, signal: ac.signal });
       setCandidates(null);
-      if (json.warning) {
-        setErrorMsg(json.warning);
+      // The server's partial-remap note and/or the translated "joined" notice;
+      // the helper never returns English of its own (the lib only hands back
+      // codes).
+      const warning = fixMatchWarningMessage(json, t);
+      if (warning) {
+        setErrorMsg(warning);
         setPhase("conflated");
       } else {
         setPhase("success");
@@ -463,7 +479,7 @@ export function FixMatchButton({
       router.refresh();
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return; // unmounted; job runs on
-      setErrorMsg(err instanceof Error ? err.message : t("adminQueue.fixMatch.unknownError"));
+      setErrorMsg(fixMatchErrorMessage(err, t));
       setPhase("error");
     }
   }

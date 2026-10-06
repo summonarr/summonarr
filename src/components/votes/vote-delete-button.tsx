@@ -15,6 +15,11 @@ interface Props {
   alreadyVoted: boolean;
 }
 
+// Server cap on DeletionVote.reason (VarChar(200)); the counter appears once a
+// reason is within 20 characters of it so the silent slice below isn't a surprise.
+const REASON_MAX = 200;
+const REASON_COUNTER_AT = 180;
+
 export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted }: Props) {
   const router = useRouter();
   const { toast } = useToast();
@@ -81,13 +86,18 @@ export function VoteDeleteButton({ tmdbId, mediaType, requestToken, alreadyVoted
         <input
           type="text"
           value={reason}
-          onChange={(e) => setReason(e.target.value.slice(0, 200))}
+          onChange={(e) => setReason(e.target.value.slice(0, REASON_MAX))}
           placeholder={t("request.vote.reasonPlaceholder")}
           aria-label={t("request.vote.reason")}
           className="h-[34px] w-48 rounded-md border border-zinc-700 bg-zinc-800 px-3 text-[13px] text-zinc-100 focus:outline-none focus:ring-2 focus:ring-red-500"
           autoFocus
           onKeyDown={(e) => { if (e.key === "Enter") handleVote(); if (e.key === "Escape") setState("idle"); }}
         />
+        {reason.length > REASON_COUNTER_AT && (
+          <span className="ds-mono text-[10px] tabular-nums text-zinc-500" aria-live="polite">
+            {reason.length}/{REASON_MAX}
+          </span>
+        )}
         <DetailActionButton variant="danger" onClick={handleVote}>
           {t("request.vote.vote")}
         </DetailActionButton>

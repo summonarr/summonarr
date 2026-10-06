@@ -338,6 +338,12 @@ export function SearchBar({
               );
             })}
           </div>
+          {/* The results body scrolls on its own: the listbox lives in the
+              sticky top bar (not the scrolling <main>) and the outer container
+              clips overflow for its rounded corners, so on a short viewport
+              (landscape phone, keyboard up) rows past the fold were
+              unreachable. */}
+          <div style={{ maxHeight: "min(70vh, 480px)", overflowY: "auto" }}>
           {query.trim() && results.length === 0 && !loading ? (
             <div
               className="text-center"
@@ -411,7 +417,7 @@ export function SearchBar({
                       style={{ fontSize: 10, color: "var(--ds-fg-subtle)" }}
                     >
                       {media.releaseYear && `${media.releaseYear} · `}
-                      {media.mediaType === "movie" ? "MOVIE" : "TV"}
+                      {t(media.mediaType === "movie" ? "media.type.movie" : "media.type.tv")}
                       {showPlex && media.plexAvailable && (
                         <span style={{ color: "var(--ds-plex-text)", marginLeft: 6 }}>
                           · plex
@@ -437,6 +443,7 @@ export function SearchBar({
               );
             })
           )}
+          </div>
         </div>
       )}
     </div>
@@ -548,7 +555,9 @@ export function Header() {
               target clears the 32–36px minimum the other header controls use. */}
           <DropdownMenuTrigger
             aria-label={t("nav.accountMenu")}
-            className="inline-flex items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+            // ds-hover-tint gives this the same hover feedback as the bells
+            // beside it — the three header controls used to react unevenly.
+            className="ds-hover-tint inline-flex items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
             style={{ width: 36, height: 36 }}
           >
             <Avatar

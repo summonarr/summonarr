@@ -551,7 +551,39 @@ test("arr-state: a TV query with a configured Sonarr + scripted lookup surfaces 
 
   const cacheTable = body.cacheTable as { tableName: string };
   assert.equal(cacheTable.tableName, "sonarrWantedItem", "a TV query reads the Sonarr wanted table");
-  assert.deepEqual(body.tvdbInfo, { tvdbId: 5678, cachedMapping: { tmdbId: 1399 } });
+  // tvdbId comes from the per-instance completion result (lookupSeriesByTmdbId,
+  // the pipeline's own resolver) — the legacy `cachedMapping` shape is kept and
+  // the raw row rides beside it.
+  const info = body.tvdbInfo as { tvdbId: number; tvdbIdInstance: string; cachedMapping: unknown; cachedMappingRow: { data: string; cachedAt: string; expiresAt: string; stale: boolean } };
+  assert.equal(info.tvdbId, 5678);
+  assert.equal(info.tvdbIdInstance, "");
+  assert.deepEqual(info.cachedMapping, { tmdbId: 1399 });
+  assert.equal(info.cachedMappingRow.stale, false);
+  assert.equal(info.cachedMappingRow.data, JSON.stringify({ tmdbId: 1399 }));
+  assert.equal(
+    fetchCalls.filter((u) => u.pathname.endsWith("/series/lookup")).length, 1,
+    "ONE Sonarr lookup per instance: liveArrApi is derived from the completion result, and tvdbInfo from the same call — not a second/third private lookup",
+  );
+  const instances = body.instances as Array<{ liveArrApi: { result: boolean }; liveCompletion: { complete: boolean } }>;
+  assert.equal(instances[0].liveArrApi.result, !instances[0].liveCompletion.complete, "liveArrApi is !complete, derived from the same read");
+  assert.equal(writes.length, 0, "arr-state is read-only");
+});
+
+test("arr-state: an EXPIRED negative tvdb→tmdb row is reported as stale, never lazily deleted (getCache would have destroyed the evidence)", async () => {
+  configureSonarr();
+  seedCache("tvdb-to-tmdb:5678", { tmdbId: null }, -60_000);
+  fetchImpl = (url) => {
+    if (url.pathname.endsWith("/series/lookup")) return jsonResponse([{ tvdbId: 5678 }]);
+    if (url.pathname.endsWith("/api/v3/series")) return jsonResponse([{ tvdbId: 5678, statistics: { episodeFileCount: 0 } }]);
+    throw new Error(`unexpected Arr path ${url.pathname}`);
+  };
+  const token = await mintSession();
+  const body = await bodyOf(await arrStateGET(arrReq(token, "?tmdbId=1399&type=tv"), undefined));
+  const info = body.tvdbInfo as { tvdbId: number; cachedMapping: unknown; cachedMappingRow: { stale: boolean } | null };
+  assert.equal(info.tvdbId, 5678);
+  assert.deepEqual(info.cachedMapping, { tmdbId: null }, "the genuine negative entry is still visible");
+  assert.equal(info.cachedMappingRow?.stale, true);
+  assert.equal(writes.length, 0, "no lazy expired-row delete — the row is read directly");
 });
 
 test("arr-state: a FAILED Sonarr lookup reports cachedMapping=null + the generic error — never the `{ tmdbId: null }` look-alike of a negative cache hit", async () => {
@@ -575,7 +607,7 @@ test("arr-state: a FAILED Sonarr lookup reports cachedMapping=null + the generic
     readLog.filter((r) => r === "tmdbCache.findUnique").length, 0,
     "no tvdb→tmdb cache read happens when the lookup never yielded a tvdbId",
   );
-  assert.ok(errors.some((e) => e.startsWith("[arr-state] sonarr series lookup failed:")), "the real failure is logged server-side");
+  assert.ok(errors.some((e) => e.startsWith("[arr-state] live Sonarr completion check failed")), "the real failure is logged server-side");
   assert.ok(!JSON.stringify(body).includes("sonarr.debug-test"), "the configured server URL never reaches the client");
   assert.equal(writes.length, 0);
 });

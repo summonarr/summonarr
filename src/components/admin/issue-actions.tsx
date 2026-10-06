@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
+import { StyledSelect } from "@/components/ui/styled-select";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import {
   Loader2, Check, RefreshCw, AlertTriangle, Clock, Trash2,
@@ -290,7 +291,13 @@ export function IssueActions({
   const rejectedCount = releases.filter((r) => r.rejected).length;
 
   return (
-    <div className="flex flex-col items-end gap-1.5 min-w-0 shrink-0">
+    // No `shrink-0`: a non-shrinking flex item keeps its max-content width, and
+    // the max-content of the wrapping button row below is the SUM of its
+    // buttons, so the inner flex-wrap could never engage. A TV-episode issue
+    // (Refetch + Replace + In progress + Resolve + delete ≈ 500px) was clipped
+    // by the xl aside (442px of content) and pushed off a phone-width card.
+    // `min-w-0` is what lets the column shrink below that sum so the row wraps.
+    <div className="flex flex-col items-end gap-1.5 min-w-0">
       {scopeDetail && (
         <span className="text-[10px] text-zinc-500 font-mono">{scopeDetail}</span>
       )}
@@ -396,12 +403,12 @@ export function IssueActions({
             size="sm"
             onClick={() => updateStatus("RESOLVED", resolution || undefined)}
             disabled={loading !== null}
-            className="h-6 px-2 text-xs bg-green-700 text-white hover:bg-green-800 gap-1"
+            className="h-6 px-2 text-xs bg-green-600 text-[var(--ds-on-status)] hover:bg-green-600/90 gap-1"
           >
             {loading === "status" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
             {t("adminQueue.actions.done")}
           </Button>
-          <button onClick={() => setPanel(null)} className="text-zinc-500 hover:text-zinc-400 text-xs">{t("shared.common.cancel")}</button>
+          <button type="button" onClick={() => setPanel(null)} className="rounded px-2 py-1 text-zinc-500 hover:text-zinc-400 text-xs">{t("shared.common.cancel")}</button>
         </div>
       )}
 
@@ -412,12 +419,12 @@ export function IssueActions({
             size="sm"
             onClick={deleteIssue}
             disabled={loading !== null}
-            className="h-6 px-2 text-xs bg-red-800 text-white hover:bg-red-700 gap-1"
+            className="h-6 px-2 text-xs bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
           >
             {loading === "delete" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
             {t("adminQueue.actions.delete")}
           </Button>
-          <button onClick={() => setPanel(null)} className="text-zinc-500 hover:text-zinc-400 text-xs">{t("shared.common.cancel")}</button>
+          <button type="button" onClick={() => setPanel(null)} className="rounded px-2 py-1 text-zinc-500 hover:text-zinc-400 text-xs">{t("shared.common.cancel")}</button>
         </div>
       )}
 
@@ -432,17 +439,18 @@ export function IssueActions({
               </DialogTitle>
               <div className="flex items-center gap-3">
                 {(instances?.length ?? 0) > 1 && (
-                  <select
+                  <StyledSelect
+                    compact
                     value={instance}
                     onChange={(e) => switchInstance(e.target.value)}
                     disabled={loading !== null}
                     aria-label={t("adminQueue.issueActions.instance")}
-                    className="text-xs rounded-md bg-zinc-800 border border-zinc-700 text-zinc-200 px-2 py-1 disabled:opacity-50"
+                    className="w-auto md:text-xs"
                   >
                     {(instances ?? []).map((i) => (
                       <option key={i.slug || "default"} value={i.slug}>{i.name}</option>
                     ))}
-                  </select>
+                  </StyledSelect>
                 )}
                 <DialogClose
                   disabled={loading === "grab"}
@@ -491,10 +499,11 @@ export function IssueActions({
                     />
                     {releaseFilter && (
                       <button
+                        type="button"
                         onClick={() => setReleaseFilter("")}
                         aria-label={t("adminQueue.issueActions.clearFilter")}
                         title={t("adminQueue.issueActions.clearFilter")}
-                        className="absolute right-3 text-zinc-500 hover:text-zinc-300"
+                        className="absolute right-1 rounded px-2 py-1 text-zinc-500 hover:text-zinc-300"
                       >
                         <X className="w-4 h-4" />
                       </button>
@@ -515,7 +524,9 @@ export function IssueActions({
                     return (
                       <button
                         key={rel.guid}
+                        type="button"
                         onClick={() => setSelectedGuid(rel.guid)}
+                        aria-pressed={isSelected}
                         className={`w-full text-left px-6 py-3.5 flex items-start gap-4 hover:bg-zinc-800/60 transition-colors ${isSelected ? "bg-zinc-800" : ""}`}
                       >
                         <span className={`mt-0.5 shrink-0 ${rel.protocol === "torrent" ? "text-green-500" : "text-sky-400"}`}>
@@ -562,14 +573,16 @@ export function IssueActions({
                 )}
 
                 <div className="flex items-center justify-between px-6 py-4 border-t border-zinc-700 bg-zinc-900 flex-shrink-0">
-                  <button onClick={() => setPanel(null)} className="text-sm text-zinc-500 hover:text-zinc-300">{t("shared.common.cancel")}</button>
+                  <button type="button" onClick={() => setPanel(null)} className="rounded px-2 py-1 text-sm text-zinc-500 hover:text-zinc-300">{t("shared.common.cancel")}</button>
+                  {/* The accent Button, like every other primary CTA — the old
+                      bg-blue-700 had no --color-blue-* remap, so it was a fixed
+                      blue under every accent (guardrail 42). */}
                   <Button
                     size="sm"
                     onClick={grabRelease}
                     disabled={!selectedGuid || loading === "grab"}
-                    className="h-8 px-4 text-sm bg-blue-700 text-white hover:bg-blue-600 gap-2"
                   >
-                    {loading === "grab" ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                    {loading === "grab" ? <Loader2 className="animate-spin" /> : <Download />}
                     {t("adminQueue.issueActions.grab")}
                   </Button>
                 </div>

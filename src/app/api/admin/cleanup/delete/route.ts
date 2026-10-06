@@ -156,7 +156,6 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json(
       {
         error: targetCount === 0 ? t("apiAdmin.cleanup.nothingToDelete") : t("apiAdmin.cleanup.confirmationRequired"),
-        hint: `POST {"confirmTargets": ${targetCount}} with the same items to confirm.`,
         targetCount,
         items: plan,
         skipped,
@@ -167,6 +166,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
   // ── execute ────────────────────────────────────────────────────────────────
   const scanTypes = new Set<"movie" | "tv">();
+  // Resolved once, outside the per-title task (whose `for (const t of targets)`
+  // shadows the translator): the stored reason follows the instance language
+  // like every admin-typed reason beside it in the Blacklist list.
+  const blacklistReason = t("apiAdmin.cleanup.blacklistReason");
   const results = await mapLimit(planned, TITLE_CONCURRENCY, async ({ row, targets }) => {
     const { tmdbId, mediaType, title } = row;
     // Stamp FIRST: if the stamp can't be written the delete must not happen, or
@@ -210,19 +213,31 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     scanTypes.add(mediaType === "MOVIE" ? "movie" : "tv");
     const complete = failed.length === 0;
     let blacklisted = false;
+    // Everything past this point is bookkeeping for a delete that is already
+    // durable upstream. mapLimit rejects the WHOLE batch on one rejected task,
+    // which would 500 the response after Radarr/Sonarr removed the files and
+    // leave the admin not knowing which titles went — so a failed vote clear or
+    // blacklist write is recorded on this title's result, never thrown.
+    let bookkeepingError: string | undefined;
     if (complete) {
-      await clearDeletionVotesForTmdbs([{ tmdbId, mediaType }]);
+      try {
+        await clearDeletionVotesForTmdbs([{ tmdbId, mediaType }]);
+      } catch (err) {
+        console.error(`[cleanup] clearing deletion votes for ${mediaType}:${tmdbId} after its delete failed:`, err);
+        bookkeepingError = err instanceof Error ? err.message : String(err);
+      }
       if (blacklist) {
         // The files are already gone; a failed blacklist write is reported, not thrown.
         try {
           await prisma.blacklistItem.upsert({
             where: { tmdbId_mediaType: { tmdbId, mediaType } },
-            create: { tmdbId, mediaType, title, reason: "Removed by library cleanup", addedBy: session.user.id },
+            create: { tmdbId, mediaType, title, reason: blacklistReason, addedBy: session.user.id },
             update: {},
           });
           blacklisted = true;
         } catch (err) {
           console.error(`[cleanup] blacklisting ${mediaType}:${tmdbId} after its delete failed:`, err);
+          bookkeepingError ??= err instanceof Error ? err.message : String(err);
         }
       }
     }
@@ -244,7 +259,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       },
       ...auditContext(req, session),
     });
-    return { tmdbId, mediaType, title, status: complete ? ("deleted" as const) : ("partial" as const), deleted, failed, blacklisted };
+    return {
+      tmdbId, mediaType, title,
+      status: complete ? ("deleted" as const) : ("partial" as const),
+      deleted, failed, blacklisted,
+      ...(bookkeepingError ? { bookkeepingError } : {}),
+    };
   });
 
   if (results.some((r) => r.blacklisted)) invalidateBlacklistCache();

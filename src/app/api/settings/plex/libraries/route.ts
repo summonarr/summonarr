@@ -17,7 +17,9 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   const { url, token } = await getPlexConfig(raw);
 
   if (!url || !token) {
-    return NextResponse.json({ error: t("apiAdmin.common.plexNotConfiguredShort") }, { status: 400 });
+    // 422, not 400: "not configured yet" is server state, not a bad request —
+    // the same status arr-options uses, so the three pickers agree.
+    return NextResponse.json({ error: t("apiAdmin.common.plexNotConfiguredShort") }, { status: 422 });
   }
 
   try {

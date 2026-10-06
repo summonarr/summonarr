@@ -1,8 +1,12 @@
 import { requireAppSession } from "@/lib/require-app-session";
 import { getMyWatchHistory } from "@/lib/my-watch-history";
 import { isFeatureEnabled } from "@/lib/features";
+import { isPlayHistoryEnabled } from "@/lib/play-history";
+import { hasPermission, Permission } from "@/lib/permissions";
+import { Clock } from "@/components/icons";
 import { PageHeader } from "@/components/ui/design";
 import { WatchHistoryList } from "@/components/watch-history/watch-history-list";
+import { TrackingOffState } from "@/components/watch-history/tracking-off-state";
 import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
@@ -14,6 +18,26 @@ export const dynamic = "force-dynamic";
 export default async function WatchHistoryPage() {
   const session = await requireAppSession();
   const t = await getTranslator();
+
+  // Tracking off ⇒ nothing is recorded, so the list's "plays will show up
+  // here" copy would be false. Say so (the /popular gate) and skip the history
+  // read entirely.
+  if (!(await isPlayHistoryEnabled())) {
+    return (
+      <div className="ds-page-enter">
+        <PageHeader
+          title={t("personal.history.title")}
+          subtitle={t("personal.history.subtitle")}
+        />
+        <TrackingOffState
+          icon={Clock}
+          t={t}
+          canOpenSettings={hasPermission(session.user.permissions, Permission.ADMIN)}
+        />
+      </div>
+    );
+  }
+
   const [initial, issuesEnabled] = await Promise.all([
     getMyWatchHistory(session.user.id),
     // Row-level "Report issue" buttons only render when the issues feature is

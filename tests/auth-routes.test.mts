@@ -709,6 +709,21 @@ test("machine-session mint: a valid request mints an admin-provider JWT delivere
   assert.ok(claims.sessionId && authSessions.has(claims.sessionId), "the AuthSession row must be created");
 });
 
+test("machine-session floors a fractional expiresIn — RFC 6265 cookie jars IGNORE a non-digit Max-Age", async () => {
+  // `{ expiresIn: 120.5 }` used to interpolate as `Max-Age=120.5`, which a
+  // compliant jar drops entirely: the cookie became a session cookie with NO
+  // expiry instead of a shorter one. The clamp bounded the range, not the type.
+  settings.set("enableMachineSession", "true");
+  seedUser({ id: "admin-1", email: "admin@example.com", name: "Root Admin", role: "ADMIN" });
+
+  const res = await machineSessionPost(machineReq({ bearer: CRON_SECRET, body: { expiresIn: 120.5 } }));
+  assert.equal(res.status, 200);
+  const setCookie = res.headers.getSetCookie()[0];
+  assert.match(setCookie, /Max-Age=120(;|$)/, `Max-Age must be whole seconds: ${setCookie}`);
+  const body = await bodyOf(res);
+  assert.ok(Number.isInteger(body.expiresAt), `expiresAt must be an integer epoch second, got ${body.expiresAt}`);
+});
+
 test("machine-session mint carries the admin's `permissions` claim — omitting it self-revokes every session of the impersonated admin", async () => {
   settings.set("enableMachineSession", "true");
   // A real admin's column is seeded to defaultPermissionsForRole("ADMIN") === 1n

@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { readJsonCapped } from "@/lib/body-size";
-import { withAdmin } from "@/lib/api-auth";
+import { withPermission } from "@/lib/api-auth";
+import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { setJellyfinDownloadPolicy } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
@@ -14,7 +15,7 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // saturate the Prisma pool / burst the Jellyfin admin API in one shot.
 const POLICY_PUSH_CONCURRENCY = 8;
 
-export const POST = withAdmin(async (req, _ctx, session) => {
+export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   // Each call pushes a policy to every Jellyfin user, so cap it at 5 per minute per admin.
   if (!checkRateLimit(`server-users-bulk:${session.user.id}`, 5, 60_000)) {

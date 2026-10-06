@@ -3,6 +3,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "@/components/icons";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogBackdrop,
+  DialogClose,
+  DialogContent,
+  DialogPopup,
+  DialogPortal,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useT } from "@/components/i18n/i18n-provider";
 
 interface MotdModalProps {
@@ -24,14 +33,18 @@ function contentKey(title: string, body: string): string {
   return `motd_dismissed:${(h >>> 0).toString(36)}`;
 }
 
+// Rendered on the shared Dialog primitive: @base-ui supplies the focus trap,
+// Escape, click-outside, scroll lock, return-focus and the aria wiring that a
+// previous hand-rolled overlay re-implemented (and had already drifted from
+// the primitive's scrim and border).
 export function MotdModal({ title, body }: MotdModalProps) {
   // Starts hidden so the first client render matches the server (which renders
   // nothing); the effect below shows it after hydration.
   const [visible, setVisible] = useState(false);
   const t = useT();
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const openerRef = useRef<HTMLElement | null>(null);
-  const titleId = "motd-modal-title";
+  // Initial focus lands on the primary action so Enter/Space dismisses at once
+  // (base-ui would otherwise focus the first tabbable — the close X).
+  const primaryRef = useRef<HTMLButtonElement>(null);
   const sessionKey = contentKey(title, body);
 
   // sessionStorage throws (SecurityError) when site data is blocked, and an
@@ -56,96 +69,43 @@ export function MotdModal({ title, body }: MotdModalProps) {
     setVisible(false);
   }, [sessionKey]);
 
-  // Focus a sensible element on open, return focus to the opener on close, ESC closes.
-  useEffect(() => {
-    if (!visible) return;
-    openerRef.current = document.activeElement as HTMLElement | null;
-    // Focus the primary action ("Got it") so Enter/Space dismisses immediately.
-    const primary =
-      dialogRef.current?.querySelector<HTMLElement>("[data-motd-primary]") ??
-      dialogRef.current?.querySelector<HTMLElement>("[data-motd-close]");
-    primary?.focus();
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        dismiss();
-        return;
-      }
-      // Trap Tab within the dialog so focus can't leak to the page behind this
-      // aria-modal overlay.
-      if (e.key !== "Tab") return;
-      const container = dialogRef.current;
-      if (!container) return;
-      const focusables = Array.from(
-        container.querySelectorAll<HTMLElement>(
-          'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ),
-      ).filter((el) => el.offsetParent !== null || el === document.activeElement);
-      if (focusables.length === 0) return;
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      const active = document.activeElement;
-      if (e.shiftKey) {
-        if (active === first || !container.contains(active)) {
-          e.preventDefault();
-          last.focus();
-        }
-      } else if (active === last || !container.contains(active)) {
-        e.preventDefault();
-        first.focus();
-      }
-    }
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      openerRef.current?.focus?.();
-    };
-  }, [visible, dismiss]);
-
-  if (!visible) return null;
-
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
-      onClick={dismiss}
+    <Dialog
+      open={visible}
+      onOpenChange={(open) => {
+        // Escape, backdrop click and the close control all arrive here; every
+        // way out counts as a dismissal so the announcement stays gone.
+        if (!open) dismiss();
+      }}
     >
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={title ? titleId : undefined}
-        aria-label={title ? undefined : t("shared.motd.announcement")}
-        className="relative w-full max-w-md rounded-xl bg-zinc-900 border border-zinc-700 shadow-[var(--ds-shadow-lg)] p-6"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <button
-          type="button"
-          onClick={dismiss}
-          className="ds-hover-tint absolute top-3 right-3 inline-flex items-center justify-center rounded-md text-zinc-500 hover:text-zinc-100 transition-colors"
-          style={{ width: 32, height: 32 }}
-          data-motd-close
-          aria-label={t("shared.common.dismiss")}
-        >
-          <X className="w-5 h-5" />
-        </button>
-
-        {title && (
-          <h2
-            id={titleId}
-            className="text-lg font-bold text-zinc-100 mb-3 pr-8"
+      <DialogPortal>
+        <DialogBackdrop />
+        <DialogPopup className="max-w-md" initialFocus={primaryRef}>
+          <DialogClose
+            aria-label={t("shared.common.dismiss")}
+            className="ds-hover-tint absolute top-3 right-3 z-10 inline-flex items-center justify-center rounded-md text-zinc-500 hover:text-zinc-100 transition-colors"
+            style={{ width: 32, height: 32 }}
           >
-            {title}
-          </h2>
-        )}
+            <X className="w-5 h-5" />
+          </DialogClose>
+          <DialogContent>
+            {title ? (
+              <DialogTitle className="font-bold mb-3 pr-8">{title}</DialogTitle>
+            ) : (
+              // An untitled announcement still needs an accessible name.
+              <DialogTitle className="sr-only">{t("shared.motd.announcement")}</DialogTitle>
+            )}
 
-        <p className="text-zinc-300 text-sm leading-relaxed whitespace-pre-wrap">{body}</p>
+            <p className="text-zinc-300 text-sm leading-relaxed whitespace-pre-wrap">{body}</p>
 
-        <div className="mt-6 flex justify-end">
-          <Button data-motd-primary onClick={dismiss}>
-            {t("shared.motd.gotIt")}
-          </Button>
-        </div>
-      </div>
-    </div>
+            <div className="mt-6 flex justify-end">
+              <Button ref={primaryRef} onClick={dismiss}>
+                {t("shared.motd.gotIt")}
+              </Button>
+            </div>
+          </DialogContent>
+        </DialogPopup>
+      </DialogPortal>
+    </Dialog>
   );
 }

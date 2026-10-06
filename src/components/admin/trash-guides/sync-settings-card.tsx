@@ -7,16 +7,24 @@ import { CheckCircle, Clock, Loader2, Play, RefreshCw, XCircle } from "@/compone
 import type { ActionState, ApplyResult, TrashSettings } from "./types";
 import { withBasePath } from "@/lib/base-path";
 import { RefreshErrorBanner } from "./banners";
-import { useT } from "@/components/i18n/i18n-provider";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { useHasMounted } from "@/hooks/use-has-mounted";
+import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 
 interface SyncSettingsCardProps {
   initialSettings: TrashSettings;
+  // ISO timestamp of the last catalog refresh (the `trashLastRefreshAt`
+  // Setting, read by the server page); null when the catalog was never pulled.
+  lastRefreshAt?: string | null;
   // Notifies the parent page so it can re-fetch specs after a refresh / sync-now run.
   onAfterAction?: (results: ApplyResult[]) => void;
 }
 
-export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSettingsCardProps) {
+export function SyncSettingsCard({ initialSettings, lastRefreshAt = null, onAfterAction }: SyncSettingsCardProps) {
   const t = useT();
+  const locale = useLocale();
+  // Relative time is client-only (guardrail 16): empty until mounted.
+  const mounted = useHasMounted();
   const [settings, setSettings] = useState<TrashSettings>(initialSettings);
   const [saveState, setSaveState] = useState<ActionState>("idle");
   const [refreshState, setRefreshState] = useState<ActionState>("idle");
@@ -202,6 +210,13 @@ export function SyncSettingsCard({ initialSettings, onAfterAction }: SyncSetting
         {refreshSkipped && <span className="text-xs text-amber-400 flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" />{t("trash.sync.refreshAlreadyRunning")}</span>}
         {syncSkipped && <span className="text-xs text-amber-400 flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" />{t("trash.sync.alreadyRunning")}</span>}
       </div>
+      <p className="mt-2 text-xs text-zinc-500">
+        {lastRefreshAt
+          ? mounted
+            ? t("trash.sync.lastRefreshed", { ago: formatRelativeTimeLocalized(lastRefreshAt, locale) })
+            : ""
+          : t("trash.sync.neverRefreshed")}
+      </p>
 
       {refreshError && (
         <div className="mt-4">

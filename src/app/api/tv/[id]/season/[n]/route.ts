@@ -7,6 +7,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { settleLimit } from "@/lib/concurrency";
 import { getVisibleServerInstances, visibleEpisodeSourcesFor } from "@/lib/media-visibility";
 import { localeForRequest, translatorForRequest } from "@/lib/i18n/server-locale";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 
 export interface TVSeasonResponse {
   episodes: TmdbEpisode[];
@@ -29,6 +30,11 @@ export const GET = withAuth(async (
   const seasonNumber = parseInt(rawN, 10);
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
     return NextResponse.json({ error: t("apiUser.common.idPositive") }, { status: 400 });
+  }
+  // INT4 ceiling shared with tv-availability and media/[type]/[tmdbId]: the
+  // TVEpisodeCache read below is keyed on tmdbId and throws past it.
+  if (!isTmdbIdInRange(tmdbId)) {
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdOutOfRange") }, { status: 400 });
   }
   if (!Number.isInteger(seasonNumber) || seasonNumber < 0) {
     return NextResponse.json({ error: t("apiUser.tv.seasonInvalid") }, { status: 400 });

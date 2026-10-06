@@ -688,8 +688,30 @@ test("requests/users leaks only id, name and email — no role, permissions or p
   for (const u of body.users) {
     assert.deepEqual(Object.keys(u).sort(), ["email", "id", "name"]);
   }
+  // role + permissions are read ONLY to apply the bulk route's subset rule below
+  // and are stripped before the response; nothing else (password hash, tokens)
+  // may be selected.
   const select = (opsOf("user.findMany")[0].args as { select: Record<string, boolean> }).select;
-  assert.deepEqual(Object.keys(select).sort(), ["email", "id", "name"]);
+  assert.deepEqual(Object.keys(select).sort(), ["email", "id", "name", "permissions", "role"]);
+});
+
+// The bulk route refuses a non-ADMIN actor whose target holds any bit they lack
+// (403 targetMorePermissions), so the picker must not offer such targets — every
+// pick would end in that 403. An ADMIN caller still sees everyone.
+test("requests/users hides users more privileged than a non-ADMIN caller, and shows them all to an ADMIN", async () => {
+  const power = await mintSession({ permissions: Permission.REQUEST_ON_BEHALF });
+  const admin = await mintSession({ role: "ADMIN", permissions: Permission.ADMIN });
+  const peer = await mintSession({ permissions: Permission.REQUEST });
+
+  const asPower = await inScope(() => requestsUsers.GET(mk("/api/requests/users", power.token, { method: "GET" }), undefined));
+  const powerIds = ((await asPower.json()).users as { id: string }[]).map((u) => u.id);
+  assert.ok(!powerIds.includes(admin.userId), "an ADMIN target would always 403 in bulk — not pickable");
+  assert.ok(!powerIds.includes(peer.userId), "a target holding a bit the caller lacks (REQUEST) is not pickable");
+  assert.ok(powerIds.includes(power.userId), "the caller's own account is a subset of itself");
+
+  const asAdmin = await inScope(() => requestsUsers.GET(mk("/api/requests/users", admin.token, { method: "GET" }), undefined));
+  const adminIds = ((await asAdmin.json()).users as { id: string }[]).map((u) => u.id);
+  for (const id of [admin.userId, peer.userId, power.userId]) assert.ok(adminIds.includes(id), `ADMIN sees ${id}`);
 });
 
 test("requests/users bounds its page size", async () => {

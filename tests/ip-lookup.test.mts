@@ -54,7 +54,7 @@ console.warn = () => {};
 // (static imports would hoist above them — the trakt.test pattern).
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel } = await import("./_helpers.mts");
-const { getIpLookup, testIpinfoConnection } = await import("../src/lib/ip-lookup.ts");
+const { getIpLookup, testIpinfoConnection, IpLookupUnavailableError } = await import("../src/lib/ip-lookup.ts");
 
 // ── prisma stubs ────────────────────────────────────────────────────────────
 let ipinfoToken: string | null = null;
@@ -360,7 +360,11 @@ test("HTTP non-2xx degrades to the stale row (or null) and logs with the [ip-loo
   assert.ok(errors.some((e) => e.includes("[ip-lookup]") && e.includes("HTTP 429")));
   assert.equal(upsertCalls.length, 0, "a failed refresh must not touch the cache row");
 
-  assert.equal(await getIpLookup("203.0.113.41"), null); // no cached fallback → null
+  // No cached fallback → the TYPED transient error, not null. null is reserved
+  // for the permanent cases (invalid ip, no token) that the route answers 404
+  // and the activity UI negative-caches for the whole session; a 429/5xx for a
+  // new ip must come back as 503 so the next open retries.
+  await assert.rejects(() => getIpLookup("203.0.113.41"), IpLookupUnavailableError);
 });
 
 test("a network error and an unparseable body both degrade (stale row / null) and log, never throw", async () => {
@@ -372,10 +376,23 @@ test("a network error and an unparseable body both degrade (stale row / null) an
   assert.equal((await getIpLookup("203.0.113.50"))?.org, "Cached Org");
   assert.ok(errors.some((e) => e.includes("[ip-lookup] fetch failed for 203.0.113.50")));
 
-  // HTTP 200 with a non-JSON body → res.json() throws inside the try → same degrade.
+  // HTTP 200 with a non-JSON body → res.json() throws inside the try → same
+  // degrade: stale row if any, otherwise the typed transient error.
   respond = () => new Response("<html>challenge</html>", { status: 200 });
-  assert.equal(await getIpLookup("203.0.113.51"), null);
+  await assert.rejects(() => getIpLookup("203.0.113.51"), IpLookupUnavailableError);
   assert.equal(upsertCalls.length, 0);
+});
+
+test("a transient upstream failure never masquerades as the permanent null (route 503 vs 404)", async () => {
+  ipinfoToken = "tok";
+  respond = () => { throw new TypeError("socket hang up"); };
+  let caught: unknown;
+  try { await getIpLookup("203.0.113.60"); } catch (err) { caught = err; }
+  assert.ok(caught instanceof IpLookupUnavailableError);
+  assert.equal((caught as InstanceType<typeof IpLookupUnavailableError>).name, "IpLookupUnavailableError");
+  // The permanent cases still answer null — the route keeps its 404 for them.
+  ipinfoToken = null;
+  assert.equal(await getIpLookup("203.0.113.61"), null);
 });
 
 test("testIpinfoConnection: no token throws; probe hits 8.8.8.8; org preferred over ip; HTTP/malformed map to errors", async () => {

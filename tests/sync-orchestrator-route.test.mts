@@ -447,14 +447,31 @@ const fakePrisma = {
     findMany: async () => agentRows.map((a) => ({ ...a })),
     update: async () => ({ id: "agent-1" }), // recordOutcome bookkeeping
   },
+  // The top-level deleteMany on each *arr model is the end-of-run de-registered
+  // sweep (not in a tx — the arm's scoped clears go through the $transaction
+  // delegates below). Recorded into orphanSweepDeletes beside the library sweeps.
   radarrAvailableItem: {
     findMany: async (args?: { where?: { tmdbId?: { in?: number[] } } }) =>
       arrAvailableRead("radarrAvailableItem", args?.where?.tmdbId?.in),
+    deleteMany: async (args?: { where?: Record<string, unknown> }) => {
+      orphanSweepDeletes.push({ model: "radarrAvailableItem", where: args?.where });
+      return { count: 0 };
+    },
   },
-  radarrWantedItem: { findMany: async () => [] },
+  radarrWantedItem: {
+    findMany: async () => [],
+    deleteMany: async (args?: { where?: Record<string, unknown> }) => {
+      orphanSweepDeletes.push({ model: "radarrWantedItem", where: args?.where });
+      return { count: 0 };
+    },
+  },
   sonarrAvailableItem: {
     findMany: async (args?: { where?: { tmdbId?: { in?: number[] } } }) =>
       arrAvailableRead("sonarrAvailableItem", args?.where?.tmdbId?.in),
+    deleteMany: async (args?: { where?: Record<string, unknown> }) => {
+      orphanSweepDeletes.push({ model: "sonarrAvailableItem", where: args?.where });
+      return { count: 0 };
+    },
   },
   // Seedable (guardrail 14a): a wanted row is what HOLDS a TV request back from
   // the library marking passes. The read is recorded so the gate's shape — one
@@ -467,6 +484,10 @@ const fakePrisma = {
       return sonarrWantedRows
         .filter((r) => (!ids || ids.includes(r.tmdbId)) && (!slugs || slugs.includes(r.arrInstance)))
         .map((r) => ({ tmdbId: r.tmdbId, arrInstance: r.arrInstance }));
+    },
+    deleteMany: async (args?: { where?: Record<string, unknown> }) => {
+      orphanSweepDeletes.push({ model: "sonarrWantedItem", where: args?.where });
+      return { count: 0 };
     },
   },
   plexLibraryItem: {
@@ -559,6 +580,7 @@ const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { getSessionCookieName } = await import("../src/lib/session-cookie.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 const { invalidateAgentCache } = await import("../src/lib/notify-agents.ts");
+const { resetLogDedup } = await import("../src/lib/log-dedup.ts");
 
 type Req = InstanceType<typeof NextRequest>;
 
@@ -569,6 +591,11 @@ const PLEX_ORIGIN = new URL(PLEX_BASE).origin;
 // RFC1918 literal like the others: admin-configured SSRF mode, no DNS lookup.
 const RADARR_BASE = "http://10.77.0.3:7878";
 const RADARR_ORIGIN = new URL(RADARR_BASE).origin;
+// The legacy 4K Radarr instance (slug "4k", keys radarr4kUrl/radarr4kApiKey —
+// guardrail 32): its own RFC1918 literal so a responder can tell the two
+// instances apart by origin.
+const RADARR_4K_BASE = "http://10.77.0.5:7878";
+const RADARR_4K_ORIGIN = new URL(RADARR_4K_BASE).origin;
 const COOKIE = getSessionCookieName();
 const AS_CRON = { authorization: `Bearer ${CRON_SECRET}` };
 
@@ -598,6 +625,12 @@ function configureBothServers(): void {
 function configureRadarr(): void {
   settings.set("radarrUrl", RADARR_BASE);
   settings.set("radarrApiKey", "radarr-api-key");
+}
+// The legacy 4K instance is configured-derived: getArrInstances synthesizes it
+// only while BOTH keys are present (it is never registry-backed).
+function configureRadarr4k(): void {
+  settings.set("radarr4kUrl", RADARR_4K_BASE);
+  settings.set("radarr4kApiKey", "radarr-4k-api-key");
 }
 
 // Answers the one endpoint getRadarrWantedTmdbIds hits. `tmdbIds` are the movies Radarr
@@ -726,6 +759,7 @@ beforeEach(() => {
   invalidateFeatureFlagCache(); // module-global 10s flag cache — reset between tests
   agentRows.length = 0;
   invalidateAgentCache(); // notify-agents' 30s agent-list cache
+  resetLogDedup(); // warnOnChange is process-wide; a prior test's signature must not mute this one's warn
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1964,6 +1998,48 @@ test("the sweep spares a REGISTERED but unconfigured instance — an admin mid-e
   );
 });
 
+test("the *arr sweep spares the legacy \"4k\" slug while it is merely UNCONFIGURED — it is configured-derived, so it can only be blanked, never de-registered", async () => {
+  // getArrInstances synthesizes "4k" ONLY while url+apiKey are BOTH present
+  // (normalizeEntry rejects a registry "4k" entry, so it is never registry-
+  // backed). An admin blanking one field mid key-rotation dropped it from the
+  // "registered" list and the next run deleted every 4K wanted/available row —
+  // a badge hole for every title until the key was re-entered AND the following
+  // sync rebuilt the cache. The sweep's promise ("registered but temporarily
+  // unconfigured keeps its rows") must hold for this slug too.
+  settings.set("radarr4kUrl", RADARR_4K_BASE); // url only — the mid-rotation shape; nothing fans out to it
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200);
+  await settle();
+
+  for (const model of ["radarrWantedItem", "radarrAvailableItem", "sonarrWantedItem", "sonarrAvailableItem"]) {
+    const sweep = orphanSweepDeletes.filter((d) => d.model === model);
+    assert.equal(sweep.length, 1, `${model}: exactly one sweep per model`);
+    assert.deepEqual(
+      sweep[0].where,
+      { arrInstance: { notIn: ["", "4k"] } },
+      `${model}: "4k" is spared beside the synthesized default even though it is not configured`,
+    );
+  }
+
+  // Fully configured it IS in the registered list — spared once, no duplicate.
+  orphanSweepDeletes.length = 0;
+  configureRadarr4k();
+  respond = radarrResponder([]); // pathname-only: answers the 4K origin's /api/v3/movie
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+  assert.deepEqual(
+    orphanSweepDeletes.find((d) => d.model === "radarrWantedItem")?.where,
+    { arrInstance: { notIn: ["", "4k"] } },
+    "a configured 4K is listed by the registry reader and must not be appended twice",
+  );
+  assert.deepEqual(
+    orphanSweepDeletes.find((d) => d.model === "sonarrWantedItem")?.where,
+    { arrInstance: { notIn: ["", "4k"] } },
+    "each service spares its OWN 4K — Sonarr's is unconfigured here and still spared",
+  );
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Sequencing + Promise.allSettled isolation
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2267,6 +2343,37 @@ test("demote: a registered instance that still HOLDS preserved rows does veto th
   );
 });
 
+test("guardrail 7b: the demote-skip veto warns ONCE for an unchanged missing-server set, and again when the SET changes even at the same count", async () => {
+  // A registered-but-unconfigured server that still holds rows is a STANDING
+  // state until the admin acts. The orchestrator re-derives it identically on
+  // every run — hourly, and once per SSE-triggered run during a Plex scan —
+  // which is exactly the polling-rate flood warnOnChange exists to stop.
+  settings.set("plexRemoteServerUrl", PLEX_REMOTE_BASE);
+  settings.set("plexRemoteAdminToken", "plex-admin-token-remote");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }, { slug: "attic", name: "Attic" }]));
+  preservedRowSlugs.plexLibraryItem.add("attic"); // registered, token cleared, rows survive
+  respond = plexResponder([]);
+  const demoteSkips = () => warns.filter((w) => w.includes("skipping AVAILABLE->APPROVED demotes")).length;
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+  assert.equal(demoteSkips(), 1, "the first run announces the veto");
+
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+  assert.equal(demoteSkips(), 1, "an identical run restates nothing — cadence is read from the cron run history, never counted in log lines");
+
+  // Same COUNT (one missing Plex server), different SERVER. The signature is the
+  // slug LIST the message's count is derived from, so this must re-log — a
+  // count-only signature would swallow the swap.
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }, { slug: "cellar", name: "Cellar" }]));
+  preservedRowSlugs.plexLibraryItem.delete("attic");
+  preservedRowSlugs.plexLibraryItem.add("cellar");
+  await POST(syncReq({ headers: AS_CRON }));
+  await settle();
+  assert.equal(demoteSkips(), 2, "a changed missing-server set logs immediately");
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Stale-sync notify fallback — a source that has NEVER synced clean
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2379,6 +2486,41 @@ test("a CONFIGURED server that fails is reported as failed, never as skipped", a
   assert.ok(
     !((b.skippedSources ?? []) as string[]).includes("jellyfin"),
     "a configured server must never appear as skipped — that would hide the outage",
+  );
+});
+
+test("guardrail 36: a NAMED *arr instance's fetch failure surfaces in failedSources + X-Cron-Degraded while the default's rows are still rewritten", async () => {
+  // Default Radarr healthy, legacy 4K Radarr down. The default's cache is still
+  // rewritten — radarrSyncSucceeded keeps meaning "the step did not blow up",
+  // and the revert/re-push gates key on radarrSyncedSlugs — but a CONFIGURED
+  // instance failed, so the run must read degraded. Before this the flag alone
+  // decided, so the 4K cache sat stale for the whole outage while the System
+  // tab and the admin sync button were painted green.
+  configureRadarr();
+  configureRadarr4k();
+  const radarr = radarrResponder([]);
+  respond = (url) => (url.origin === RADARR_4K_ORIGIN ? new Response("down", { status: 503 }) : radarr(url));
+
+  const res = await POST(syncReq({ headers: AS_CRON }));
+  assert.equal(res.status, 200, "degraded stays 200 — a 502 would make the entrypoint re-run the full replace every 5 minutes");
+  const b = await bodyOf(res);
+  await settle();
+
+  assert.deepEqual(b.failedSources, ["radarr"], "a named instance's fetch failure IS a Radarr failure");
+  assert.equal(res.headers.get("X-Cron-Degraded"), "radarr", "the header is what withCronRunRecording turns into ok:false on the System tab");
+  assert.match(String(b.error), /radarr \(4k\)/, "the degraded message names WHICH instance to go look at");
+  assert.ok(!((b.skippedSources ?? []) as string[]).includes("radarr"), "attempted-and-failed is never also reported as skipped");
+
+  // The flag kept its meaning: the healthy default's rows were rewritten, and
+  // ONLY its rows — the down instance's cache survives its outage (guardrail 13).
+  const radarrTx = txTouching("radarrWantedItem");
+  assert.equal(radarrTx.length, 1, "the wanted-sync transaction still ran for the healthy instance");
+  assert.deepEqual(
+    radarrTx[0].ops
+      .filter((o) => o.model === "radarrWantedItem" && o.method === "deleteMany")
+      .map((o) => (o.args as { where?: { arrInstance?: string } } | null)?.where?.arrInstance ?? null),
+    [""],
+    "only the default instance is cleared+rewritten; the 4K rows must survive its outage",
   );
 });
 

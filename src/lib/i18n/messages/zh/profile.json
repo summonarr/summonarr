@@ -222,5 +222,12 @@
   "profile.mfa.stepUp.passkeyFailed": "无法在此设备上使用该通行密钥。",
   "profile.mfa.stepUp.codeRequired": "输入身份验证器应用中的验证码或恢复码以确认此更改。",
   "profile.notifications.iosApp.prompt": "使用 iPhone？Summonarr App 会以原生通知推送这些消息。",
-  "profile.notifications.iosApp.link": "前往 App Store 下载"
+  "profile.notifications.iosApp.link": "前往 App Store 下载",
+  "profile.close.confirmWord": "关闭",
+  "profile.mfa.confirmRemoveTotp": "移除身份验证器应用？登录时仍会要求使用通行密钥。",
+  "profile.mfa.confirmRemovePasskey": "移除通行密钥 {name}？登录时仍会要求第二重验证。",
+  "profile.mfa.confirmRemoveLast": "这是你唯一的第二重验证方式。移除后将关闭双重验证、删除恢复代码，并退出你的其他设备。",
+  "profile.mfa.totp.copyKey": "复制设置密钥",
+  "profile.notifications.verificationPending": "{email} 的验证待处理——请查看收件箱。",
+  "profile.notifications.resendVerification": "重新发送"
 }

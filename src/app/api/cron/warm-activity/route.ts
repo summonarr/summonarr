@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { clearActivityCache, warmActivityCache } from "@/lib/play-history";
 import { logAudit } from "@/lib/audit";
-import { withAdvisoryLock } from "@/lib/advisory-lock";
+import { withAdvisoryLock, WARM_ACTIVITY_LOCK_ID } from "@/lib/advisory-lock";
 import { getCronActor, recordCronRun } from "@/lib/cron-auth";
 
 export async function POST(request: NextRequest) {
@@ -11,7 +11,7 @@ export async function POST(request: NextRequest) {
   }
 
   return withAdvisoryLock(
-    2003,
+    WARM_ACTIVITY_LOCK_ID,
     async () => {
       clearActivityCache();
       const startTime = Date.now();

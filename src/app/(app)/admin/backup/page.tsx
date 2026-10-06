@@ -14,6 +14,10 @@ export default async function BackupPage() {
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
   const t = await getTranslator();
+  // Mirrors the db-export route's MIN_BACKUP_PASSWORD_LEN gate (it answers 503
+  // below this), so the card can say "not configured" before a click opens a tab
+  // of raw JSON. Read on the server only — the value itself never leaves here.
+  const exportReady = (process.env.BACKUP_DB_PASSWORD ?? "").length >= 12;
 
   return (
     <div className="ds-page-enter">
@@ -70,7 +74,7 @@ export default async function BackupPage() {
           tag={t("adminManage.backup.export.tag")}
           description={t("adminManage.backup.export.description")}
         >
-          <BackupUI mode="db-export" />
+          <BackupUI mode="db-export" exportReady={exportReady} />
         </BackupCard>
 
         <BackupCard

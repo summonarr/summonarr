@@ -248,7 +248,11 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                         }}
                       >
                         <Calendar style={{ width: 10, height: 10 }} />
-                        {mounted ? new Date(season.airDate).getUTCFullYear() : ""}
+                        {/* Not gated on `mounted`: a bare YYYY-MM-DD parses as UTC
+                            midnight everywhere, so getUTCFullYear() is identical on
+                            server and client (guardrail 16 is about values that
+                            differ between the two). */}
+                        {new Date(season.airDate).getUTCFullYear()}
                       </span>
                     )}
                   </div>
@@ -397,7 +401,7 @@ export function TVSeasons({ tmdbId, seasons, ownedBySeason }: TVSeasonsProps) {
                                   background: "color-mix(in oklab, black 70%, transparent)",
                                 }}
                               >
-                                E{ep.episodeNumber}
+                                {t("detail.seasons.episodeAbbrev", { number: ep.episodeNumber })}
                               </div>
                             </div>
                             <div className="flex-1 min-w-0">

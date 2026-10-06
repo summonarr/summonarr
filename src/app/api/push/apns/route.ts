@@ -6,6 +6,8 @@ import { encryptToken } from "@/lib/token-crypto";
 import { sanitizeText } from "@/lib/sanitize";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { maintenanceGuard } from "@/lib/maintenance";
+import { isFeatureEnabled } from "@/lib/features";
 
 const DEFAULT_MAX_PUSH_SUBSCRIPTIONS = 5;
 // APNs device tokens are 32 bytes (64 hex) today; Apple reserves the right to
@@ -18,6 +20,16 @@ const DEVICE_TOKEN_RE = /^(?:[0-9a-fA-F]{2}){32,100}$/;
 // push subscription for the caller, capped per-user with oldest-eviction.
 export const POST = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
+  // Same two gates as /api/push/subscribe: registration is a personal mutation
+  // (blocked during maintenance like profile delete/password — DELETE stays open
+  // so a device can always opt out), and a registration stored while push is off
+  // would never deliver. Without them one user's web and iOS devices answered
+  // "can I register for push" in opposite ways.
+  const maint = await maintenanceGuard(session);
+  if (maint) return maint;
+  if (!(await isFeatureEnabled("feature.integration.push"))) {
+    return NextResponse.json({ error: t("apiUser.push.disabled") }, { status: 403 });
+  }
   if (!checkRateLimit(`push-apns:${session.user.id}`, 10, 60 * 1000)) {
     return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }

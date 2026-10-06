@@ -369,6 +369,34 @@ for (const route of LOCKING) {
   });
 }
 
+// The withCronRunRecording-wrapped routes mark their busy answer X-Cron-Skipped
+// so NO ledger row is written for a run that never happened — otherwise the
+// System tab's runs/h (guardrail 7b's cadence readout) over-counts whenever a
+// run outlasts its tick. The warm-* routes record inside the work callback and
+// never recorded their skips; these now agree with them. sync-plex-watchlists
+// still answers a plain 200 skip and is recorded — not changed here.
+for (const name of ["trash-sync", "sync-download-policies"]) {
+  test(`${name}: a BUSY lock writes NO cron:lastRun ledger row`, async () => {
+    const route = ROUTES.find((r) => r.name === name)!;
+    lockAcquire = () => false;
+    const res = await route.POST(authed(route));
+    assert.equal(res.headers.get("X-Cron-Skipped"), "1");
+    assert.equal(ops.filter(isBookkeeping).length, 0, `${name} recorded a run it skipped`);
+  });
+}
+
+test("trash-sync: TRaSH Guides OFF (the default) is a 200 skip — no 500, no audit row, no degraded header", async () => {
+  // runTrashSync answers a disabled feature with errors:["trashGuidesEnabled is
+  // off"]; turned into a 500 that made the DAILY job a 300s retry loop on every
+  // stock deployment (288 failed runs + 288 SETTINGS_CHANGE audit rows a day).
+  const route = ROUTES.find((r) => r.name === "trash-sync")!;
+  const res = await route.POST(authed(route));
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { skipped: true, reason: "TRaSH Guides disabled" });
+  assert.equal(res.headers.get("x-cron-degraded"), null);
+  assert.equal(opsOf("auditLog.create").length, 0, "a disabled feature is not a settings change");
+});
+
 for (const route of LOCKING) {
   test(`${route.name}: takes lock ${route.lockId} and RELEASES it`, async () => {
     await route.POST(authed(route));
@@ -629,7 +657,7 @@ test("no cron route source contains a console.log call (guardrail 7)", async () 
 // Status stays 200: the container reschedules any non-2xx every
 // CRON_RETRY_INTERVAL, so the degraded signal is `error` + X-Cron-Degraded.
 
-const DERIVED_OK_ROUTES = ["warm-library", "warm-list-cache", "warm-mdblist", "warm-omdb", "warm-recommendations"] as const;
+const DERIVED_OK_ROUTES = ["warm-library", "warm-list-cache", "warm-mdblist", "warm-omdb", "warm-recommendations", "sync-download-policies"] as const;
 
 function ledgerOk(target: string): boolean | undefined {
   const row = opsOf("setting.upsert")
@@ -645,6 +673,7 @@ const LEDGER_TARGET: Record<(typeof DERIVED_OK_ROUTES)[number], string> = {
   "warm-mdblist": "mdblist",
   "warm-omdb": "omdb",
   "warm-recommendations": "recommendations",
+  "sync-download-policies": "download-policies",
 };
 
 for (const name of DERIVED_OK_ROUTES) {

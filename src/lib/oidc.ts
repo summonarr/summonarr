@@ -27,11 +27,26 @@ export const OIDC_STATE_COOKIE = "summonarr-oidc-flow";
 export const OIDC_STATE_COOKIE_PATH = `${process.env.BASE_PATH ?? ""}/api/auth/oidc`;
 const OIDC_STATE_TTL_SECONDS = 5 * 60;
 
+// openid-client refuses every non-https request unless `allowInsecureRequests`
+// is passed, and it is deliberately NOT passed here: TLS to the IdP is the right
+// default, LAN or not. So an `http://` OIDC_ISSUER could never complete a
+// sign-in — it only made the login page offer a tab whose every click failed.
+// Treat it as unconfigured (the tab hides, the routes 503/redirect) and let
+// instrumentation.ts say why ONCE at boot. Pure, so the boot check and the three
+// OIDC routes share one definition.
+export function isOidcIssuerSecure(issuer: string | undefined): boolean {
+  if (!issuer) return false;
+  try {
+    return new URL(issuer).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export function isOidcConfigured(): boolean {
-  return !!(
-    process.env.OIDC_ISSUER &&
-    process.env.OIDC_CLIENT_ID &&
-    process.env.OIDC_CLIENT_SECRET
+  return (
+    !!(process.env.OIDC_ISSUER && process.env.OIDC_CLIENT_ID && process.env.OIDC_CLIENT_SECRET) &&
+    isOidcIssuerSecure(process.env.OIDC_ISSUER)
   );
 }
 

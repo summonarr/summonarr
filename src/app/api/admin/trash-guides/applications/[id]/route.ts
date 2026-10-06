@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
-import { logAudit } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const PATCH = withAdmin(async (
@@ -35,7 +35,8 @@ export const PATCH = withAdmin(async (
 
   await logAudit({
     userId: session.user.id,
-    userName: session.user.name ?? "admin",
+    userName: session.user.name ?? session.user.email,
+    ...auditContext(req, session),
     action: "SETTINGS_CHANGE",
     target: "trash:application-toggle",
     details: { trashId: app.trashSpec.trashId, kind: app.trashSpec.kind, enabled: body.enabled },
@@ -64,7 +65,8 @@ export const DELETE = withAdmin(async (
 
   await logAudit({
     userId: session.user.id,
-    userName: session.user.name ?? "admin",
+    userName: session.user.name ?? session.user.email,
+    ...auditContext(req, session),
     action: "SETTINGS_CHANGE",
     target: "trash:application-delete",
     details: { trashId: app.trashSpec.trashId, kind: app.trashSpec.kind },

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { useHasMounted } from "@/hooks/use-has-mounted";
@@ -20,6 +20,15 @@ import {
 } from "@/components/icons";
 import { Permission, parsePermissions, AUTO_APPROVE_MASK } from "@/lib/permissions";
 import { withBasePath } from "@/lib/base-path";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { NotificationsModal } from "./user-modals/notifications-modal";
 import { PermissionsModal } from "./user-modals/permissions-modal";
 import { SessionsModal } from "./user-modals/sessions-modal";
@@ -44,9 +53,15 @@ interface UserTableProps {
   mediaInstances?: RestrictedMediaInstance[];
 }
 
+// Jellyfin is the one DS brand token (`--ds-jellyfin`, the `.ds-chip-jellyfin`
+// recipe — black text, white is 2.86:1) everywhere on this page: chip, avatar,
+// the Assign icon and the "Jellyfin access" meta line. The old purple-* set
+// put the same identity in two hues within one list.
 const sourceStyles: Record<User["source"], string> = {
-  plex:     "border-yellow-600/30 bg-yellow-500/10 text-yellow-400",
-  jellyfin: "border-purple-600/30 bg-purple-500/10 text-purple-400",
+  // Both provider chips use the DS brand recipes (solid brand fill, black text)
+  // so Plex and Jellyfin read as one family here and in the server-users table.
+  plex:     "ds-chip-plex",
+  jellyfin: "ds-chip-jellyfin",
   oidc:     "border-sky-600/30 bg-sky-500/10 text-sky-400",
   local:    "border-zinc-700 bg-zinc-800 text-zinc-400",
   discord:  "border-indigo-600/30 bg-indigo-500/10 text-indigo-400",
@@ -58,14 +73,14 @@ const roleStyles: Record<User["role"], string> = {
   USER:        "border-zinc-700 bg-zinc-800 text-zinc-500",
 };
 
-// Fill + initials colour together. yellow/purple/sky-700 are fixed fills the
-// theme remap doesn’t touch, so their text is fixed too: black on the light
-// yellow-600 (white there is ~2.9:1), white on the dark purple and sky.
-// indigo-600/700 ARE the accent, so they take the accent foreground (dark on
-// the amber/emerald/cyan/mono accents).
+// Fill + initials colour together. yellow-600, sky-700 and the Jellyfin brand
+// are fixed fills the theme remap doesn't touch, so their text is fixed too:
+// black on the light yellow-600 (white there is ~2.9:1) and on #00a4dc (7.3:1
+// vs 2.9:1), white on the dark sky. indigo-600/700 ARE the accent, so they
+// take the accent foreground (dark on the amber/emerald/cyan/mono accents).
 const avatarColors: Record<User["source"], string> = {
   plex:     "bg-yellow-600 text-black",
-  jellyfin: "bg-purple-700 text-white",
+  jellyfin: "bg-[var(--ds-jellyfin)] text-black",
   oidc:     "bg-sky-700 text-white",
   local:    "bg-indigo-700 text-[var(--ds-accent-fg)]",
   discord:  "bg-indigo-600 text-[var(--ds-accent-fg)]",
@@ -79,6 +94,10 @@ const adminAssignsServer = (source: User["source"]) => source === "local" || sou
 interface ActionsMenuProps {
   u: User;
   onPatch: (key: string, body: object) => void;
+  // Promotion to ADMIN goes through the table's inline confirm — the bit
+  // short-circuits every permission check, so a mis-click on the first menu
+  // item must not grant it outright while the reversible Disable asks first.
+  onPromote: () => void;
   onDisable: () => void;
   onReactivate: () => void;
   onPurge: () => void;
@@ -88,15 +107,14 @@ interface ActionsMenuProps {
   mediaInstances?: RestrictedMediaInstance[];
 }
 
-function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, onResetMfa, has4k, namedInstances, mediaInstances }: ActionsMenuProps) {
+const MENU_LABEL_CLASS = "px-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500";
+
+function ActionsMenu({ u, onPatch, onPromote, onDisable, onReactivate, onPurge, onResetMfa, has4k, namedInstances, mediaInstances }: ActionsMenuProps) {
   const t = useT();
-  const [open, setOpen]             = useState(false);
   const [notifOpen, setNotifOpen]   = useState(false);
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [permOpen, setPermOpen]     = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
 
   // Stable identities — useModalA11y keys its effect on onClose, so an inline
   // arrow would re-run the focus-trap setup (and steal focus) on every render.
@@ -104,29 +122,12 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, onResetMfa,
   const closeSessions = useCallback(() => setSessionsOpen(false), []);
   const closePerm = useCallback(() => setPermOpen(false), []);
 
-  useEffect(() => {
-    if (!open) return;
-    // Move focus into the menu so a keyboard user lands on the first item.
-    menuRef.current?.querySelector<HTMLElement>("button")?.focus();
-    function handleClick(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    }
-    function handleKey(e: KeyboardEvent) {
-      if (e.key === "Escape") {
-        setOpen(false);
-        triggerRef.current?.focus(); // return focus to the trigger on dismiss
-      }
-    }
-    document.addEventListener("mousedown", handleClick);
-    document.addEventListener("keydown", handleKey);
-    return () => {
-      document.removeEventListener("mousedown", handleClick);
-      document.removeEventListener("keydown", handleKey);
-    };
-  }, [open]);
-
+  // Every item hands focus back to the ⋯ trigger BEFORE running its action. The
+  // item unmounts with the menu in the same commit that mounts a modal, so the
+  // modal's useModalA11y would otherwise capture `document.activeElement ===
+  // body` as its opener and Escape would land at the top of the page instead
+  // of this row. base-ui's own return-focus runs after the exit animation and
+  // stands down once focus has moved into the modal, so the two never fight.
   function item(
     onClick: () => void,
     icon: React.ReactNode,
@@ -134,55 +135,48 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, onResetMfa,
     destructive = false,
   ) {
     return (
-      <button
-        onClick={() => { onClick(); setOpen(false); }}
-        className={`w-full flex items-center gap-2 px-3 py-1.5 text-sm rounded-md transition-colors text-left
-          ${destructive
-            ? "text-red-400 hover:bg-red-500/10"
-            : "text-zinc-300 hover:bg-zinc-700/60"
-          }`}
+      <DropdownMenuItem
+        variant={destructive ? "destructive" : "default"}
+        className="gap-2 px-2 py-1.5"
+        onClick={() => { triggerRef.current?.focus(); onClick(); }}
       >
         {icon}
         {label}
-      </button>
+      </DropdownMenuItem>
     );
   }
 
   return (
-    <div ref={ref} className="relative shrink-0">
-      <button
-        ref={triggerRef}
-        onClick={() => setOpen((v) => !v)}
-        aria-label={t("adminManage.users.actions")}
-        aria-haspopup="true"
-        aria-expanded={open}
-        className="h-8 w-8 flex items-center justify-center rounded-md border border-zinc-700 text-zinc-400 hover:text-zinc-100 hover:border-zinc-500 transition-colors"
-      >
-        <MoreHorizontal className="w-4 h-4" />
-      </button>
+    <div className="shrink-0">
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          ref={triggerRef}
+          aria-label={t("adminManage.users.actions")}
+          className="h-8 w-8 inline-flex items-center justify-center rounded-md border border-zinc-700 text-zinc-400 hover:text-zinc-100 hover:border-zinc-500 transition-colors outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+        >
+          <MoreHorizontal className="w-4 h-4" />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-52">
+          <DropdownMenuGroup>
+            <DropdownMenuLabel className={MENU_LABEL_CLASS}>{t("adminManage.users.setRole")}</DropdownMenuLabel>
+            {u.role !== "ADMIN" && item(
+              onPromote,
+              <ShieldCheck className="w-3.5 h-3.5 text-indigo-400 shrink-0" />,
+              t(roleLabelKey.ADMIN),
+            )}
+            {u.role !== "ISSUE_ADMIN" && item(
+              () => onPatch("ISSUE_ADMIN", { role: "ISSUE_ADMIN" }),
+              <ShieldAlert className="w-3.5 h-3.5 text-amber-400 shrink-0" />,
+              t(roleLabelKey.ISSUE_ADMIN),
+            )}
+            {u.role !== "USER" && item(
+              () => onPatch("USER", { role: "USER" }),
+              <ShieldOff className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
+              t(roleLabelKey.USER),
+            )}
+          </DropdownMenuGroup>
 
-      {open && (
-        <div ref={menuRef} className="absolute right-0 top-9 z-50 w-44 rounded-lg bg-zinc-900 border border-zinc-800 shadow-xl p-1">
-          <p className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-            {t("adminManage.users.setRole")}
-          </p>
-          {u.role !== "ADMIN" && item(
-            () => onPatch("ADMIN", { role: "ADMIN" }),
-            <ShieldCheck className="w-3.5 h-3.5 text-indigo-400 shrink-0" />,
-            t(roleLabelKey.ADMIN),
-          )}
-          {u.role !== "ISSUE_ADMIN" && item(
-            () => onPatch("ISSUE_ADMIN", { role: "ISSUE_ADMIN" }),
-            <ShieldAlert className="w-3.5 h-3.5 text-amber-400 shrink-0" />,
-            t(roleLabelKey.ISSUE_ADMIN),
-          )}
-          {u.role !== "USER" && item(
-            () => onPatch("USER", { role: "USER" }),
-            <ShieldOff className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
-            t(roleLabelKey.USER),
-          )}
-
-          <div className="my-1 border-t border-zinc-800" />
+          <DropdownMenuSeparator />
 
           {item(
             () => setPermOpen(true),
@@ -192,13 +186,11 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, onResetMfa,
 
           {adminAssignsServer(u.source) && (
             <>
-              <div className="my-1 border-t border-zinc-800" />
+              <DropdownMenuSeparator />
 
               {u.mediaServer === null && (
-                <>
-                  <p className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
-                    {t("adminManage.users.menu.serverAccess")}
-                  </p>
+                <DropdownMenuGroup>
+                  <DropdownMenuLabel className={MENU_LABEL_CLASS}>{t("adminManage.users.menu.serverAccess")}</DropdownMenuLabel>
                   {item(
                     () => onPatch("mediaServer", { mediaServer: "plex" }),
                     <Server className="w-3.5 h-3.5 text-yellow-400 shrink-0" />,
@@ -206,10 +198,10 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, onResetMfa,
                   )}
                   {item(
                     () => onPatch("mediaServer", { mediaServer: "jellyfin" }),
-                    <Server className="w-3.5 h-3.5 text-purple-400 shrink-0" />,
+                    <Server className="w-3.5 h-3.5 text-[var(--ds-jellyfin-text)] shrink-0" />,
                     t("adminManage.users.menu.assignJellyfin"),
                   )}
-                </>
+                </DropdownMenuGroup>
               )}
 
               {u.mediaServer !== null && item(
@@ -220,13 +212,15 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, onResetMfa,
             </>
           )}
 
-          <div className="my-1 border-t border-zinc-800" />
+          <DropdownMenuSeparator />
 
           {item(
             () => setNotifOpen(true),
             <Bell className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
             t("adminManage.users.menu.notifications"),
           )}
+          {/* Offered to every MANAGE_USERS delegate: the route admits them and
+              answers 403 for an ADMIN target, which the modal shows verbatim. */}
           {item(
             () => setSessionsOpen(true),
             <KeyRound className="w-3.5 h-3.5 text-zinc-400 shrink-0" />,
@@ -240,7 +234,7 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, onResetMfa,
             t("adminManage.users.menu.resetMfa"),
           )}
 
-          <div className="my-1 border-t border-zinc-800" />
+          <DropdownMenuSeparator />
 
           {/* Account removal is two steps: disable (reversible — nothing is
               scrubbed, and the user's watch history keeps being attributed) and
@@ -253,8 +247,8 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, onResetMfa,
             t("adminManage.users.menu.reenable"),
           )}
           {u.disabled && !u.purged && item(onPurge, <Trash2 className="w-3.5 h-3.5 shrink-0" />, t("adminManage.users.menu.purge"), true)}
-        </div>
-      )}
+        </DropdownMenuContent>
+      </DropdownMenu>
 
       {notifOpen    && <NotificationsModal u={u} onClose={closeNotif} />}
       {sessionsOpen && <SessionsModal      u={u} onClose={closeSessions} />}
@@ -262,6 +256,8 @@ function ActionsMenu({ u, onPatch, onDisable, onReactivate, onPurge, onResetMfa,
     </div>
   );
 }
+
+type ConfirmKind = "disable" | "purge" | "resetMfa" | "promote";
 
 export function UserTable({ users, currentUserId, has4k, namedInstances, mediaInstances }: UserTableProps) {
   const router = useRouter();
@@ -271,8 +267,10 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
   // working further down it, and didn't say which user it was about.
   const [error, setError] = useState<{ id: string; message: string } | null>(null);
   // Inline confirm state, keyed by user id. "disable" is reversible; "purge"
-  // is not, so they confirm separately and never share a button.
-  const [confirming, setConfirming] = useState<{ id: string; kind: "disable" | "purge" | "resetMfa" } | null>(null);
+  // is not, so they confirm separately and never share a button. "promote"
+  // (→ ADMIN) is the one role change that asks: the bit bypasses every
+  // permission check, so it must not be a single mis-click away.
+  const [confirming, setConfirming] = useState<{ id: string; kind: ConfirmKind } | null>(null);
   const mounted = useHasMounted();
   const t = useT();
   const locale = useLocale();
@@ -349,12 +347,14 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
 
         return (
           <div key={u.id}>
+          {/* Background is a CLASS, not inline: a hover utility can't beat an
+              inline background (guardrail 42), and the server-users table 40px
+              below highlights its rows — these didn't. */}
           <div
-            className="flex items-center transition-colors"
+            className="flex items-center bg-[var(--ds-bg-2)] hover:bg-[var(--ds-bg-3)] transition-colors"
             style={{
               gap: 12,
               padding: "12px 16px",
-              background: "var(--ds-bg-2)",
               border: "1px solid var(--ds-border)",
               borderRadius: 8,
             }}
@@ -385,7 +385,7 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                 </span>
                 {u.name && (
                   <span
-                    className="ds-mono truncate hidden sm:block"
+                    className="ds-mono truncate min-w-0 max-w-full hidden sm:block"
                     style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
                   >
                     {u.email}
@@ -400,6 +400,16 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
                   </span>
                 )}
               </div>
+              {/* Below sm the email moves to its own line: two same-named users
+                  were otherwise indistinguishable on a phone. */}
+              {u.name && (
+                <p
+                  className="ds-mono truncate block sm:hidden"
+                  style={{ marginTop: 2, fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
+                >
+                  {u.email}
+                </p>
+              )}
               <p
                 className="ds-mono flex items-center flex-wrap"
                 style={{
@@ -502,41 +512,74 @@ export function UserTable({ users, currentUserId, has4k, namedInstances, mediaIn
             ) : isSelf ? (
               <div className="w-8 shrink-0" />
             ) : confirming?.id === u.id ? (
-              <div className="flex items-center gap-1.5 shrink-0">
-                <button
-                  type="button"
-                  aria-label={
-                    confirming.kind === "disable"
-                      ? t("adminManage.users.confirm.disableAria", { name: displayName })
+              /* The consequence is VISIBLE, not aria-label-only: a sighted admin
+                 saw a red "Purge data" with no "cannot be undone", and Disable
+                 never said it was reversible (guardrail 33's vocabulary lived in
+                 a badge tooltip shown after the fact). Basis 260px, shrink 1:
+                 the sentence wraps rather than widening the row on a phone. */
+              <div className="flex flex-col items-end gap-1 min-w-0" style={{ flex: "0 1 260px" }}>
+                <span className="text-[11px] text-zinc-400 text-right">
+                  {confirming.kind === "disable"
+                    ? t("adminManage.users.confirm.disableHint")
+                    : confirming.kind === "purge"
+                      ? t("adminManage.users.confirm.purgeHint")
                       : confirming.kind === "resetMfa"
-                        ? t("adminManage.users.confirm.resetMfaAria", { name: displayName })
-                        : t("adminManage.users.confirm.purgeAria", { name: displayName })
-                  }
-                  onClick={() => lifecycle(u.id, confirming.kind)}
-                  autoFocus
-                  className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
-                >
-                  {confirming.kind === "disable" ? (
-                    <><UserX className="w-3.5 h-3.5" />{t("adminManage.users.confirm.disable")}</>
-                  ) : confirming.kind === "resetMfa" ? (
-                    <><ShieldOff className="w-3.5 h-3.5" />{t("adminManage.users.confirm.resetMfa")}</>
-                  ) : (
-                    <><Trash2 className="w-3.5 h-3.5" />{t("adminManage.users.confirm.purge")}</>
-                  )}
-                </button>
-                <button
-                  type="button"
-                  aria-label={t("adminManage.common.cancel")}
-                  onClick={() => setConfirming(null)}
-                  className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
-                >
-                  {t("adminManage.common.cancel")}
-                </button>
+                        ? t("adminManage.users.confirm.resetMfaHint")
+                        : t("adminManage.users.confirm.promoteHint")}
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    aria-label={
+                      confirming.kind === "disable"
+                        ? t("adminManage.users.confirm.disableAria", { name: displayName })
+                        : confirming.kind === "resetMfa"
+                          ? t("adminManage.users.confirm.resetMfaAria", { name: displayName })
+                          : confirming.kind === "promote"
+                            ? t("adminManage.users.confirm.promoteAria", { name: displayName })
+                            : t("adminManage.users.confirm.purgeAria", { name: displayName })
+                    }
+                    onClick={() => {
+                      if (confirming.kind === "promote") {
+                        setConfirming(null);
+                        void patch(u.id, "ADMIN", { role: "ADMIN" });
+                      } else {
+                        void lifecycle(u.id, confirming.kind);
+                      }
+                    }}
+                    autoFocus
+                    className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                      confirming.kind === "promote"
+                        // Granting, not destroying: the accent, not danger.
+                        ? "bg-[var(--ds-accent)] text-[var(--ds-accent-fg)] hover:bg-[var(--ds-accent-hover)]"
+                        : "bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]"
+                    }`}
+                  >
+                    {confirming.kind === "disable" ? (
+                      <><UserX className="w-3.5 h-3.5" />{t("adminManage.users.confirm.disable")}</>
+                    ) : confirming.kind === "resetMfa" ? (
+                      <><ShieldOff className="w-3.5 h-3.5" />{t("adminManage.users.confirm.resetMfa")}</>
+                    ) : confirming.kind === "promote" ? (
+                      <><ShieldCheck className="w-3.5 h-3.5" />{t("adminManage.users.confirm.promote")}</>
+                    ) : (
+                      <><Trash2 className="w-3.5 h-3.5" />{t("adminManage.users.confirm.purge")}</>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={t("adminManage.common.cancel")}
+                    onClick={() => setConfirming(null)}
+                    className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+                  >
+                    {t("adminManage.common.cancel")}
+                  </button>
+                </div>
               </div>
             ) : (
               <ActionsMenu
                 u={u}
                 onPatch={(key, body) => patch(u.id, key, body)}
+                onPromote={() => setConfirming({ id: u.id, kind: "promote" })}
                 onDisable={() => setConfirming({ id: u.id, kind: "disable" })}
                 onReactivate={() => lifecycle(u.id, "reactivate")}
                 onPurge={() => setConfirming({ id: u.id, kind: "purge" })}

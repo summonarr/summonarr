@@ -1,9 +1,10 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { StyledSelect } from "@/components/ui/styled-select";
 import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
@@ -20,26 +21,39 @@ export function QuotaForm({ initialLimit, initialPeriod }: QuotaFormProps) {
   const [limit, setLimit] = useState(initialLimit);
   const [period, setPeriod] = useState(initialPeriod || "week");
   const [status, setStatus] = useState<SaveStatus>("idle");
+  // The route's own reason (out-of-range limit, a 429 cooldown) — shown in
+  // place of the bare "Failed to save".
+  const [message, setMessage] = useState("");
   // An earlier save's idle timer must not fire into a later save (it would
-  // re-enable Save mid-flight or clear the new result early).
+  // re-enable Save mid-flight or hide the new result early).
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+  }, []);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     if (idleTimer.current) clearTimeout(idleTimer.current);
     setStatus("saving");
+    setMessage("");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ quotaLimit: limit, quotaPeriod: period }),
       });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
-      setStatus(res.ok && data.ok !== false ? "ok" : "error");
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (res.ok && data.ok !== false) {
+        setStatus("ok");
+      } else {
+        setMessage(data.error ?? t("settings.form.common.saveFailed"));
+        setStatus("error");
+      }
     } catch {
       setStatus("error");
     }
-    idleTimer.current = setTimeout(() => setStatus("idle"), 3000);
+    // Only an "ok" fades; an error stays until the next edit or save.
+    idleTimer.current = setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
   }
 
   return (
@@ -54,29 +68,29 @@ export function QuotaForm({ initialLimit, initialPeriod }: QuotaFormProps) {
             value={limit}
             onChange={(e) => { setLimit(e.target.value); setStatus("idle"); }}
             placeholder="0"
-            className="bg-zinc-800 border-zinc-700 text-sm"
+            className="bg-zinc-800 border-zinc-700"
           />
           <p className="text-xs text-zinc-500">{t("settings.form.quota.limitHelp")}</p>
         </div>
         <div className="space-y-1.5">
           <Label htmlFor="quota-period">{t("settings.form.quota.periodLabel")}</Label>
-          <select
+          <StyledSelect
             id="quota-period"
+            compact
             value={period}
             onChange={(e) => { setPeriod(e.target.value); setStatus("idle"); }}
-            className="w-full h-9 rounded-md border border-zinc-700 bg-zinc-800 px-3 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
           >
             <option value="day">{t("settings.form.quota.perDay")}</option>
             <option value="week">{t("settings.form.quota.perWeek")}</option>
             <option value="month">{t("settings.form.quota.perMonth")}</option>
-          </select>
+          </StyledSelect>
         </div>
       </div>
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
           {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
         </Button>
-        <SaveStatusMessage status={status} />
+        <SaveStatusMessage status={status} errorLabel={message || t("settings.form.common.saveFailed")} />
       </div>
     </form>
   );

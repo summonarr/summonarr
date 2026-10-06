@@ -1,11 +1,13 @@
 export const dynamic = "force-dynamic";
 
+import type { Metadata } from "next";
 import { getMostPopularOnServer, isPlayHistoryEnabled, POPULAR_PER_PAGE, type PopularSort } from "@/lib/play-history";
 import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { prisma } from "@/lib/prisma";
 import { MediaCard } from "@/components/media/media-card";
 import { PaginationBar } from "@/components/media/pagination-bar";
+import { RangeLabel } from "@/components/media/range-label";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { settleLimit } from "@/lib/concurrency";
 import { requireAppSession } from "@/lib/require-app-session";
@@ -47,6 +49,12 @@ const TYPE_OPTIONS = [
   { labelKey: "nav.movies", value: "movies" },
   { labelKey: "nav.tvShows", value: "tv" },
 ] as const;
+
+// Tab / bookmark / history title — the nav label, in the viewer's language.
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getTranslator();
+  return { title: t("nav.popularOnServer") };
+}
 
 export default async function PopularOnServerPage({
   searchParams,
@@ -190,8 +198,10 @@ export default async function PopularOnServerPage({
 
   // "first–last of N" from the surviving ranks, not from the survivor count:
   // a filtered title in the middle of the page leaves the ends where they are.
-  const rankRange = (items: EnrichedMedia[], total: number) =>
-    t("browse.popular.rankRange", { from: items[0]!.rank, to: items[items.length - 1]!.rank, total });
+  // The shared RangeLabel (the label /top renders) carries the string.
+  const rankRange = (items: EnrichedMedia[], total: number) => (
+    <RangeLabel t={t} from={items[0]!.rank} to={items[items.length - 1]!.rank} total={total} />
+  );
 
   function buildHref(overrides: Record<string, string | undefined>) {
     const merged: Record<string, string> = {};
@@ -317,7 +327,7 @@ export default async function PopularOnServerPage({
             <section>
               <SectionHeader
                 title={t("nav.movies")}
-                right={<RangeLabel>{rankRange(movies, totalMovies)}</RangeLabel>}
+                right={rankRange(movies, totalMovies)}
               />
               <MediaGrid
                 items={movies}
@@ -333,7 +343,7 @@ export default async function PopularOnServerPage({
             <section>
               <SectionHeader
                 title={t("nav.tvShows")}
-                right={<RangeLabel>{rankRange(tv, totalTv)}</RangeLabel>}
+                right={rankRange(tv, totalTv)}
               />
               <MediaGrid
                 items={tv}
@@ -351,18 +361,6 @@ export default async function PopularOnServerPage({
         <PaginationBar currentPage={page} totalPages={totalPages} />
       </Suspense>
     </div>
-  );
-}
-
-// "1–40 of 200 titles" beside a section title. Same label /top uses.
-function RangeLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <span
-      className="ds-mono uppercase"
-      style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", letterSpacing: "0.06em" }}
-    >
-      {children}
-    </span>
   );
 }
 

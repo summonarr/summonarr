@@ -252,7 +252,7 @@
   "adminQueue.fixMatch.arrSays": "Arr says TMDB #{id}",
   "adminQueue.fixMatch.arrRecommends": "Radarr/Sonarr recommends a different match:",
   "adminQueue.fixMatch.arrConfirmsHighlighted": "Radarr/Sonarr confirms TMDB #{id} — matching candidates highlighted below.",
-  "adminQueue.fixMatch.reidentify": "Re-identify this Jellyfin item from TMDB #{from} to TMDB #{to}",
+  "adminQueue.fixMatch.reidentify": "Re-identify this Jellyfin item from TMDB #{from} to TMDB #{to}{instance}.",
   "adminQueue.fixMatch.jellyfinNote": "Jellyfin applies this exact TMDB id and runs a full metadata refresh — there are no alternative candidates to choose from. Large items can take a few minutes to confirm.",
   "adminQueue.fixMatch.plexCandidatesHeading": "Plex candidates — select the correct match",
   "adminQueue.fixMatch.found": "{count} found",
@@ -287,5 +287,17 @@
   "adminQueue.blacklist.unblockAria": "Unblock {title}",
   "adminQueue.blacklist.unblock": "Unblock",
   "adminQueue.blacklist.title": "Blacklist",
-  "adminQueue.blacklist.subtitle": "Block specific titles from discovery and requests"
+  "adminQueue.blacklist.subtitle": "Block specific titles from discovery and requests",
+  "adminQueue.blacklist.filterPlaceholder": "Filter blocked titles…",
+  "adminQueue.blacklist.filterAria": "Filter the blocked titles by title or reason",
+  "adminQueue.blacklist.filterNoMatch": "No blocked titles match this filter.",
+  "adminQueue.fixMatch.outcome.joined": "An identical fix was already running — your candidate selection may not have been applied.",
+  "adminQueue.fixMatch.outcome.jobLost": "The server lost track of this fix-match (restarted?) — run a library re-sync to see whether it landed.",
+  "adminQueue.fixMatch.outcome.pollLost": "Lost contact while the fix-match was running — run a library re-sync to see whether it landed.",
+  "adminQueue.fixMatch.outcome.timedOut": "The fix-match is still running after 20 minutes — check the item on the media server or run a library re-sync.",
+  "adminQueue.fixMatch.outcome.failed": "Fix-match operation failed",
+  "adminQueue.fixMatch.arrBadge": "Radarr/Sonarr ✓",
+  "adminQueue.fixMatch.arrShort": "Arr ✓",
+  "adminQueue.fixMatch.resolutionNote": "Match corrected to “{title}”",
+  "adminQueue.fixMatch.autoRequestNote": "Added from fix-match — was incorrectly matched in library"
 }

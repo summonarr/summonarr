@@ -190,7 +190,7 @@ function FeedUrl({ label, url }: { label: string; url: string }) {
           value={url}
           aria-label={t("profile.calendar.feedUrlLabel", { label })}
           onFocus={(e) => e.currentTarget.select()}
-          className="font-mono text-xs"
+          className="ds-mono md:text-xs"
         />
         <Button
           type="button"
@@ -198,7 +198,7 @@ function FeedUrl({ label, url }: { label: string; url: string }) {
           onClick={copy}
           aria-label={t("profile.calendar.copyFeedUrl", { label })}
           title={t("profile.calendar.copyLink")}
-          className="h-9 w-9 shrink-0 p-0 text-zinc-400 hover:text-zinc-100"
+          className="h-10 w-10 shrink-0 p-0 text-zinc-400 hover:text-zinc-100"
         >
           {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
         </Button>

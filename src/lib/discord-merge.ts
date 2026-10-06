@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { revokeDiscordRolesOnUnlink } from "@/lib/discord-notify";
 
 export interface MergeResult {
   migrated: number;
@@ -11,7 +12,7 @@ export async function mergeDiscordIntoWebAccount(
   discordUserId: string
 ): Promise<MergeResult> {
 
-  const result = await prisma.$transaction(async (tx) => {
+  const { migrated, previousDiscordId } = await prisma.$transaction(async (tx) => {
     // Per-Discord-user advisory lock (a Postgres lock held until the transaction ends)
     // so two fast clicks of the link button can't run the merge twice at once.
     // The key is built from the first 7 characters of the id, so unrelated users
@@ -21,11 +22,21 @@ export async function mergeDiscordIntoWebAccount(
 
     const existing = await tx.user.findUnique({ where: { discordId: discordUserId } });
 
+    // A non-synthetic email means the Discord account is a real web user, not a
+    // bot-created shadow — refuse the merge before any read of the web row or write.
+    if (existing && existing.id !== webUserId && !existing.email.endsWith("@discord.local")) {
+      throw new Error("This Discord account is already linked to another user.");
+    }
+
+    // The web user's CURRENT link, read inside the tx: a re-link (generate-link
+    // and initiate-merge don't refuse an already-linked caller) overwrites it
+    // below, and the superseded Discord member would otherwise keep every role
+    // Summonarr granted it — nothing else ever revisits a replaced id (sync-roles
+    // iterates current links only). Revoked after commit, guardrail 27.
+    const webRow = await tx.user.findUnique({ where: { id: webUserId }, select: { discordId: true } });
+    const previousDiscordId = webRow?.discordId ?? null;
+
     if (existing && existing.id !== webUserId) {
-      // A non-synthetic email means the Discord account is a real web user, not a bot-created shadow — refuse merge
-      if (!existing.email.endsWith("@discord.local")) {
-        throw new Error("This Discord account is already linked to another user.");
-      }
 
       const webRequests = await tx.mediaRequest.findMany({
         where: { requestedBy: webUserId },
@@ -99,12 +110,20 @@ export async function mergeDiscordIntoWebAccount(
       await tx.user.delete({ where: { id: existing.id } });
       await tx.user.update({ where: { id: webUserId }, data: { discordId: discordUserId } });
 
-      return { migrated: toMigrate };
+      return { migrated: toMigrate, previousDiscordId };
     }
 
     await tx.user.update({ where: { id: webUserId }, data: { discordId: discordUserId } });
-    return { migrated: 0 };
+    return { migrated: 0, previousDiscordId };
   });
 
-  return result;
+  // Only AFTER the commit (guardrail 27): the DB now says the account belongs to
+  // the new Discord member, so the old one loses the roles that link granted.
+  // Fire-and-forget and self-swallowing, like the unlink route — a Discord API
+  // hiccup must not fail a link that has already succeeded.
+  if (previousDiscordId && previousDiscordId !== discordUserId) {
+    void revokeDiscordRolesOnUnlink(previousDiscordId);
+  }
+
+  return { migrated };
 }

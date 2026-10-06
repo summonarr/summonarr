@@ -39,7 +39,6 @@
   "browse.popular.sort.viewersDescription": "Ranked by number of unique viewers",
   "browse.popular.sort.plays": "Most Played",
   "browse.popular.sort.playsDescription": "Ranked by total play count across all users",
-  "browse.popular.rankRange": "{from}–{to} of {total} titles",
   "browse.popular.noRecentPlays.title": "No plays in the last 30 days",
   "browse.popular.noRecentPlays.description": "Nothing was played in this window.",
   "browse.popular.noRecentPlays.cta": "Switch to Most Played",

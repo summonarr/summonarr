@@ -4,7 +4,7 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import Link from "next/link";
 import { Card } from "@/components/ui/card";
 import { getAllUsersStats } from "@/lib/play-history";
-import { PageHeader } from "@/components/ui/design";
+import { Chip, PageHeader } from "@/components/ui/design";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
 import { ArrowDown, ArrowUp, ArrowUpDown } from "@/components/icons";
 import { relativeWithDateFallback } from "../_relative";
@@ -193,11 +193,11 @@ export default async function UsersActivityPage({
                       </Link>
                     </td>
                     <td className="py-3 px-4">
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                        u.source === "plex" ? "bg-amber-500/15 text-amber-400" : "bg-purple-500/15 text-purple-400"
-                      }`}>
-                        {u.source === "plex" ? "Plex" : "Jellyfin"}
-                      </span>
+                      {u.source === "plex" ? (
+                        <Chip tone="plex">Plex</Chip>
+                      ) : (
+                        <Chip tone="jellyfin">Jellyfin</Chip>
+                      )}
                     </td>
                     <td className="py-3 px-4 text-right text-zinc-300 tabular-nums font-medium">
                       {u.plays > 0 ? u.plays.toLocaleString(locale) : <span className="text-zinc-500">0</span>}

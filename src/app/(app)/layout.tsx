@@ -37,7 +37,9 @@ const readLayoutSettings = cache(async () =>
 export async function generateMetadata(): Promise<Metadata> {
   try {
     const title = (await readLayoutSettings()).find((r) => r.key === "siteTitle")?.value;
-    if (title) return { title };
+    // The root layout's template names the app "Summonarr"; an instance with a
+    // configured site title must carry it into every tab title too.
+    if (title) return { title: { default: title, template: `%s · ${title}` } };
   } catch { }
   return {};
 }
@@ -134,7 +136,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         {discordInviteUrl && !userDiscordId && (
           <DiscordJoinModal inviteUrl={discordInviteUrl} />
         )}
-        <main id="main-content" tabIndex={-1} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 pb-24 pb-safe-bottom-20 lg:px-7 lg:py-6 lg:pb-10">
+        <main id="main-content" tabIndex={-1} className="flex-1 min-h-0 overflow-y-auto px-4 py-4 pb-safe-bottom-20 lg:px-7 lg:py-6 lg:pb-10">
           {children}
         </main>
       </div>

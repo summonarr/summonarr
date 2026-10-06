@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
+import { auditContext, logAudit } from "@/lib/audit";
 import { withAuth } from "@/lib/api-auth";
+import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
 import { normalizeEmail } from "@/lib/auth";
 import { isNotificationEmailEnabled } from "@/lib/email";
@@ -35,6 +37,10 @@ export const GET = withAuth(async (req, _ctx, session) => {
 
 export const PATCH = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
+  // Personal mutation — blocked during maintenance like push/subscribe and the
+  // profile delete/password routes. GET stays open.
+  const maint = await maintenanceGuard(session);
+  if (maint) return maint;
   const parsed = await readJsonCapped<{
     notifyOnApproved?: boolean; notifyOnAvailable?: boolean; notifyOnDeclined?: boolean;
     emailOnApproved?: boolean;  emailOnAvailable?: boolean;  emailOnDeclined?: boolean;
@@ -122,5 +128,18 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
   }
 
   await prisma.user.update({ where: { id: session.user.id }, data });
+  // Clearing the notification address changes where the server's outbound
+  // mail goes, so it leaves a trail like the verified bind does (guardrail 26:
+  // swallowing variant, after the committed write).
+  if ("notificationEmail" in body && data.notificationEmail === null) {
+    void logAudit({
+      userId: session.user.id,
+      userName: session.user.name ?? session.user.email,
+      action: "SETTINGS_CHANGE",
+      target: `user:${session.user.id}`,
+      details: { kind: "notification-email-cleared" },
+      ...auditContext(req, session),
+    });
+  }
   return NextResponse.json({ ok: true });
 });

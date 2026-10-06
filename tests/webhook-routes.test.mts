@@ -145,6 +145,12 @@ function p2025(): InstanceType<typeof Prisma.PrismaClientKnownRequestError> {
 // future route change can't silently mismatch against the stub.
 function rowMatches(row: Record<string, unknown>, where: Record<string, unknown>): boolean {
   for (const [field, cond] of Object.entries(where)) {
+    // Prisma's OR: an array of sub-wheres, any of which must match (the Sonarr
+    // grab lookup ORs the payload's tmdbId and tvdbId).
+    if (field === "OR") {
+      if (!(cond as Record<string, unknown>[]).some((sub) => rowMatches(row, sub))) return false;
+      continue;
+    }
     const v = row[field];
     if (cond !== null && typeof cond === "object" && !(cond instanceof Date)) {
       const c = cond as Record<string, unknown>;
@@ -976,6 +982,26 @@ test("radarr Test event short-circuits BEFORE the replay digest — repeated Tes
   assert.equal(replayCreates.length, 0, "Test events must never be digest-recorded (second click would 409)");
 });
 
+test("Health / HealthRestored are acknowledged BEFORE the replay digest on both routes — an indexer flapping twice is never 409'd", async () => {
+  // Fixed per-issue payload, nothing processed: a second identical delivery
+  // inside the 24h TTL must not be refused (Radarr/Sonarr would then mark
+  // Summonarr's notification as failing). Reverting the carve-out makes the
+  // second POST 409 and records a digest.
+  for (const [route, service, secret] of [[radarrPOST, "radarr", RADARR_SECRET], [sonarrPOST, "sonarr", SONARR_SECRET]] as const) {
+    for (const eventType of ["Health", "HealthRestored"]) {
+      const payload = { eventType, level: "warning", message: "Indexers unavailable due to failures", type: "IndexerStatusCheck" };
+      for (let i = 0; i < 2; i++) {
+        const { res, body, tasks } = await post(route, webhookReq(service, { token: secret, body: payload }));
+        assert.equal(res.status, 200, `${service} ${eventType} delivery ${i + 1} must be acknowledged`);
+        assert.deepEqual(body, { ok: true, skipped: true });
+        assert.equal(tasks.length, 0);
+      }
+    }
+  }
+  assert.equal(replayCreates.length, 0, "Health events must never be digest-recorded");
+  assert.equal(requestUpdateManyCalls.length, 0);
+});
+
 test("radarr replay: an identical Download delivered twice → 409 with no double processing", async () => {
   seedRequest({ tmdbId: 603, mediaType: "MOVIE" });
   const payload = { eventType: "Download", movie: { tmdbId: 603, title: "The Matrix" } };
@@ -1333,6 +1359,46 @@ test("sonarr ManualInteractionRequired: stable key prefers tvdbId, falls back to
   assert.equal(tmdbKeyed.tasks.length, 2);
   const lastClaim = settingCreateManyCalls[settingCreateManyCalls.length - 1];
   assert.deepEqual(lastClaim.data.map((d) => d.key), ["manualInteractionNotified:sonarr::43"]);
+});
+
+test("sonarr grab completion is scoped to WHAT the Download delivered: an S03E02 import never claims an S01E05 EPISODE grab or an S01 SEASON grab, FULL matches any", async () => {
+  configureSonarr("");
+  // Still-incomplete series: the request flip is skipped (guardrail 14a) but the
+  // grab block runs — exactly the mid-import state where per-episode events
+  // for OTHER episodes arrive before the grabbed release does.
+  scriptSonarr({ series: () => [{ tvdbId: 777, tmdbId: 888, status: "continuing", seasons: [season(1, 3, 10), season(3, 2, 10)] }] });
+  const episodeGrab = seedGrab({ tmdbId: 888, tvdbId: 777, mediaType: "TV", scope: "EPISODE", seasonNumber: 1, episodeNumber: 5 });
+  const seasonGrab = seedGrab({ tmdbId: 888, tvdbId: 777, mediaType: "TV", scope: "SEASON", seasonNumber: 1 });
+  const fullGrab = seedGrab({ tmdbId: 888, tvdbId: 777, mediaType: "TV", scope: "FULL" });
+
+  const other = await post(
+    sonarrPOST,
+    webhookReq("sonarr", {
+      token: SONARR_SECRET,
+      body: { eventType: "Download", series: { tvdbId: 777, tmdbId: 888, title: "Frieren" }, episodes: [{ seasonNumber: 3, episodeNumber: 2 }] },
+    }),
+  );
+  assert.equal(other.res.status, 200);
+  assert.equal(episodeGrab.notifiedAt, null, "S03E02 must not claim the S01E05 EPISODE grab");
+  assert.equal(seasonGrab.notifiedAt, null, "S03E02 must not claim the S01 SEASON grab");
+  assert.ok(fullGrab.notifiedAt instanceof Date, "a FULL grab is claimed by any delivery");
+  assert.equal(grabUpdateManyCalls.length, 1, "exactly one CAS — the filter runs BEFORE the claim, never a claim-then-reset");
+  assert.deepEqual(grabUpdateManyCalls[0].where, { id: fullGrab.id, notifiedAt: null });
+
+  const matching = await post(
+    sonarrPOST,
+    webhookReq("sonarr", {
+      token: SONARR_SECRET,
+      body: { eventType: "Download", series: { tvdbId: 777, tmdbId: 888, title: "Frieren" }, episodes: [{ seasonNumber: 1, episodeNumber: 5 }] },
+    }),
+  );
+  assert.equal(matching.res.status, 200);
+  // Re-read through the table: TS narrowed the locals to `null` after the
+  // equal(…, null) asserts above.
+  const after = (id: string) => grabs.find((g) => g.id === id)?.notifiedAt ?? null;
+  assert.ok(after(episodeGrab.id) instanceof Date, "the matching S01E05 delivery claims the EPISODE grab");
+  assert.ok(after(seasonGrab.id) instanceof Date, "an S01 episode claims the S01 SEASON grab");
+  assert.equal(grabUpdateManyCalls.length, 3);
 });
 
 test("sonarr: non-Download events and a Download without series are acknowledged skips with no writes", async () => {

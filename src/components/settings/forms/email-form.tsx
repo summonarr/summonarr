@@ -119,7 +119,7 @@ export function EmailForm({
                 value={host}
                 onChange={(e) => { setHost(e.target.value); setStatus("idle"); }}
                 placeholder="smtp.example.com"
-                className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                className="bg-zinc-800 border-zinc-700 font-mono"
               />
             </div>
             <div className="space-y-1.5">
@@ -129,7 +129,7 @@ export function EmailForm({
                 value={port}
                 onChange={(e) => { setPort(e.target.value); setStatus("idle"); }}
                 placeholder="587"
-                className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                className="bg-zinc-800 border-zinc-700 font-mono"
               />
             </div>
           </div>
@@ -141,7 +141,7 @@ export function EmailForm({
                 value={user}
                 onChange={(e) => { setUser(e.target.value); setStatus("idle"); }}
                 placeholder="user@example.com"
-                className="bg-zinc-800 border-zinc-700 text-sm"
+                className="bg-zinc-800 border-zinc-700"
               />
             </div>
             <div className="space-y-1.5">
@@ -152,7 +152,7 @@ export function EmailForm({
                 value={password}
                 onChange={(e) => { setPassword(e.target.value); setStatus("idle"); }}
                 placeholder="••••••••••••••••"
-                className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                className="bg-zinc-800 border-zinc-700 font-mono"
               />
             </div>
           </div>
@@ -163,7 +163,7 @@ export function EmailForm({
               value={from}
               onChange={(e) => { setFrom(e.target.value); setStatus("idle"); }}
               placeholder="Summonarr <noreply@example.com>"
-              className="bg-zinc-800 border-zinc-700 text-sm"
+              className="bg-zinc-800 border-zinc-700"
             />
             <p className="text-xs text-zinc-500">{t("settings.form.email.fromHelp")}</p>
           </div>
@@ -178,7 +178,7 @@ export function EmailForm({
               value={resendApiKey}
               onChange={(e) => { setResendApiKey(e.target.value); setStatus("idle"); }}
               placeholder="re_••••••••••••••••"
-              className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+              className="bg-zinc-800 border-zinc-700 font-mono"
             />
             <p className="text-xs text-zinc-500">
               {rich(t("settings.form.email.resendKeyHelp"), {
@@ -197,7 +197,7 @@ export function EmailForm({
               value={resendFrom}
               onChange={(e) => { setResendFrom(e.target.value); setStatus("idle"); }}
               placeholder="Summonarr <noreply@yourdomain.com>"
-              className="bg-zinc-800 border-zinc-700 text-sm"
+              className="bg-zinc-800 border-zinc-700"
             />
             <p className="text-xs text-zinc-500">{t("settings.form.email.resendFromHelp")}</p>
           </div>

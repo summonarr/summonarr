@@ -458,10 +458,38 @@ export async function fetchMdblistBatch(
 // Coalesce concurrent cold-miss callers — see omdb.ts inflightCold rationale.
 const mdblistInflightCold = new Map<string, Promise<MdblistResult>>();
 
-export async function getMdblistRatingsForTmdb(
+// Public entry: cache-first (stale-while-revalidate) MDBList ratings lookup keyed by
+// TMDB id. A stale row is served immediately and its refresh is DETACHED.
+export function getMdblistRatingsForTmdb(
   tmdbId: number,
   mediaType: "movie" | "tv",
   releaseDate?: string | null,
+): Promise<MdblistResult> {
+  return readMdblistForTmdb(tmdbId, mediaType, releaseDate, false);
+}
+
+// The batch counterpart (guardrail 31a): the same read, except that a stale row's
+// refresh is AWAITED. Wrapping the getter in mapLimit/Promise.all bounds only the
+// cache read — every detached upstream GET starts together no matter what limit
+// the caller picked. A caller that refreshes a LIST of stale rows one by one (the
+// ratings cron's per-item pass, once its batch pre-warm has failed or is locked
+// out) must use this so its limit covers the upstream work too. The twin of
+// omdb.ts's revalidateOmdbForTmdb.
+//
+// A refresh already in flight is not waited on: whoever started it owns it.
+export async function revalidateMdblistForTmdb(
+  tmdbId: number,
+  mediaType: "movie" | "tv",
+  releaseDate?: string | null,
+): Promise<void> {
+  await readMdblistForTmdb(tmdbId, mediaType, releaseDate, true);
+}
+
+async function readMdblistForTmdb(
+  tmdbId: number,
+  mediaType: "movie" | "tv",
+  releaseDate: string | null | undefined,
+  awaitRefresh: boolean,
 ): Promise<MdblistResult> {
   const cacheKey = `mdblist:tmdb:${mediaType}:${tmdbId}`;
   const { value: cached, isStale } = await getCacheStale<MdblistRatings | typeof NOT_FOUND_SENTINEL>(cacheKey);
@@ -471,9 +499,10 @@ export async function getMdblistRatingsForTmdb(
       const revalKey = `mdblist:tmdb:${mediaType}:${tmdbId}`;
       if (!mdblistRevalidating.has(revalKey)) {
         mdblistRevalidating.add(revalKey);
-        fetchAndCacheMdblistForTmdb(tmdbId, mediaType, cacheKey, releaseDate).catch(() => {}).finally(() => {
+        const refresh = fetchAndCacheMdblistForTmdb(tmdbId, mediaType, cacheKey, releaseDate).catch(() => {}).finally(() => {
           mdblistRevalidating.delete(revalKey);
         });
+        if (awaitRefresh) await refresh;
       }
     }
     if ("_notFound" in cached) return { found: false, keyConfigured: true };

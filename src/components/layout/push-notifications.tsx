@@ -252,7 +252,7 @@ export function PushNotifications() {
           placeholder={t("shared.push.devicePlaceholder")}
           maxLength={100}
           aria-label={t("shared.push.deviceName")}
-          className="w-40 shrink text-xs md:text-xs"
+          className="w-40 shrink md:text-xs md:text-xs"
         />
         <Button
           type="submit"

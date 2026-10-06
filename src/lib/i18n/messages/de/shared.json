@@ -50,5 +50,9 @@
   "shared.discordJoin.message": "Treten Sie unserem Discord-Server bei, um Medien direkt über Discord anzufragen, und {link}.",
   "shared.discordJoin.linkAccount": "verknüpfen Sie anschließend Ihr Konto",
   "shared.discordJoin.join": "Discord beitreten",
-  "shared.skipToContent": "Zum Hauptinhalt springen"
+  "shared.skipToContent": "Zum Hauptinhalt springen",
+  "shared.bell.loadFailed": "Benachrichtigungen konnten nicht geladen werden.",
+  "shared.bell.loading": "Benachrichtigungen werden geladen…",
+  "shared.common.clearSearch": "Suche löschen",
+  "shared.thread.placeholderShortcut": "Nachricht schreiben… ({shortcut} zum Senden)"
 }

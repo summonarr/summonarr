@@ -23,11 +23,12 @@ import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { claimAvailableNotifications, clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { fanOutAvailableWinners } from "@/lib/request-notifications";
 import { getArrInstances, getSyncableArrInstances } from "@/lib/arr-instance-registry";
-import { DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
+import { DEFAULT_ARR_INSTANCE, FOURK_ARR_INSTANCE } from "@/lib/arr-instances";
 import { settleLimit } from "@/lib/concurrency";
 import { effectivePermissions, parseMediaServerGrants } from "@/lib/permissions";
 import { visibleInstancesFor, type VisibleServerInstances } from "@/lib/media-visibility";
 import { deduplicatePlexRowsByRatingKey } from "@/lib/plex-dedupe";
+import { warnOnChange, forgetWarnOnChange } from "@/lib/log-dedup";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 
@@ -307,6 +308,15 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   let radarrWanted = 0;
   let radarrSyncSucceeded = false;
   let radarrSyncedSlugs = new Set<string>();
+  // Every configured instance whose fetch returned null THIS run. Kept apart
+  // from radarrSyncSucceeded on purpose: that flag means "the step did not blow
+  // up" and stays true when only a NAMED instance (legacy 4K, "anime") is down,
+  // because the default's rows are still rewritten and the revert/re-push gates
+  // below key on radarrSyncedSlugs. Without this list a named-instance outage
+  // left failedSources / X-Cron-Degraded empty, so the System tab and the admin
+  // sync button read green while that instance's cache sat stale (guardrail 36:
+  // a CONFIGURED server that failed is red, never neutral).
+  let radarrFailedSlugs: string[] = [];
   if (radarrEnabled && !windDownBefore("Radarr")) {
     try {
       // Fan out over every configured Radarr instance (default first, plus the legacy
@@ -320,6 +330,7 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
       const fetched = settled.map((s, i) =>
         s.status === "fulfilled" ? s.value : { slug: instances[i].slug, result: null },
       );
+      radarrFailedSlugs = fetched.filter((f) => f.result === null).map((f) => f.slug);
       // The default instance ("") is authoritative: if its fetch failed, skip the whole
       // cache update (matches the legacy "HD fetch failed ⇒ skip everything" gate) so a
       // transient default outage can't mass-demote AVAILABLE requests below.
@@ -369,6 +380,8 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   // still hold (sonarrSyncedSlugs would drop the slug and let an incomplete
   // series flip off library presence mid-outage).
   let sonarrConfiguredSlugs = new Set<string>();
+  // Same contract as radarrFailedSlugs — see the comment there.
+  let sonarrFailedSlugs: string[] = [];
   if (sonarrEnabled && !windDownBefore("Sonarr")) {
     try {
       // Fan out over every configured Sonarr instance; same contract as the Radarr block.
@@ -381,6 +394,7 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
       const fetched = settled.map((s, i) =>
         s.status === "fulfilled" ? s.value : { slug: instances[i].slug, result: null },
       );
+      sonarrFailedSlugs = fetched.filter((f) => f.result === null).map((f) => f.slug);
       const defaultFailed = fetched.some((f) => f.slug === DEFAULT_ARR_INSTANCE && f.result === null);
       if (defaultFailed) {
         console.warn("[sync] skipping Sonarr cache update — ARR fetch failed");
@@ -1103,13 +1117,25 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   // getArrInstances is the REGISTERED reader (and synthesizes the default ""
   // slug), never getSyncableArrInstances — an instance that is registered but
   // temporarily unconfigured must keep its rows, same rationale as above.
+  //
+  // The legacy "4k" slug is the one exception to "registered ⇒ listed": it is
+  // never registry-backed (normalizeEntry rejects a "4k" entry) and
+  // getArrInstancesWithConfigured synthesizes it ONLY while url+apiKey are BOTH
+  // present. So an admin blanking one field mid key-rotation would drop it from
+  // this list and the sweep would delete every 4K row — a badge hole for every
+  // title until the key is re-entered and the following sync rebuilds the cache.
+  // It can never be DE-REGISTERED, only unconfigured, so it is always spared.
   try {
     const [registeredRadarr, registeredSonarr] = await Promise.all([
       getArrInstances("radarr"),
       getArrInstances("sonarr"),
     ]);
-    const radarrSlugs = registeredRadarr.map((i) => i.slug);
-    const sonarrSlugs = registeredSonarr.map((i) => i.slug);
+    const spared = (registered: { slug: string }[]): string[] => {
+      const slugs = registered.map((i) => i.slug);
+      return slugs.includes(FOURK_ARR_INSTANCE) ? slugs : [...slugs, FOURK_ARR_INSTANCE];
+    };
+    const radarrSlugs = spared(registeredRadarr);
+    const sonarrSlugs = spared(registeredSonarr);
     const swept = await Promise.all([
       prisma.radarrWantedItem.deleteMany({ where: { arrInstance: { notIn: radarrSlugs } } }),
       prisma.radarrAvailableItem.deleteMany({ where: { arrInstance: { notIn: radarrSlugs } } }),
@@ -1181,12 +1207,23 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   const jellyfinUnionIncomplete =
     jellyfinInstances.length > 0 && missingJellyfin.length > 0 &&
     !!(await prisma.jellyfinLibraryItem.findFirst({ where: { serverInstance: { in: missingJellyfin } }, select: { tmdbId: true } }));
+  // A registered-but-unconfigured server that still holds rows is a STANDING
+  // state until the admin acts, re-derived identically on every run — hourly,
+  // and once per SSE-triggered run during a Plex scan. Guardrail 7b: log the
+  // condition once and again when it differs; cadence is read from the cron run
+  // history. The signature is the slug LISTS the counts are derived from, so a
+  // swap of which server is missing (same count) still re-logs.
+  const demoteSkipKey = "sync:demote-skip";
   if (plexUnionIncomplete || jellyfinUnionIncomplete) {
-    console.warn(
+    warnOnChange(
+      demoteSkipKey,
+      `${plexUnionIncomplete ? missingPlex.join(",") : ""}|${jellyfinUnionIncomplete ? missingJellyfin.join(",") : ""}`,
       `[sync] skipping AVAILABLE->APPROVED demotes: ${plexUnionIncomplete ? missingPlex.length : 0} Plex and ` +
       `${jellyfinUnionIncomplete ? missingJellyfin.length : 0} Jellyfin server(s) are registered but not configured, ` +
       "so their preserved library rows are not in this run's union and absence cannot be proven.",
     );
+  } else {
+    forgetWarnOnChange(demoteSkipKey);
   }
   // These visibility helpers are declared before the revert because the demote is a
   // per-user decision too, and needs the same helpers the marking pass uses.
@@ -1711,12 +1748,26 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   // after CRON_RETRY_INTERVAL (300s), so a 502 during a sustained Radarr/Plex
   // outage would run this full library replace every 5 minutes instead of hourly.
   // The correctness guards above already gate on the *SyncSucceeded flags.
+  // For *arr the flag alone is not the verdict: it stays true when only a NAMED
+  // instance's fetch failed (the default's rows were still rewritten), so the
+  // per-instance failed-slug lists are OR'd in. Plex/Jellyfin already fold every
+  // instance into their flag (`fetched.every(result !== null)`).
+  const radarrFailed = radarrEnabled && (!radarrSyncSucceeded || radarrFailedSlugs.length > 0);
+  const sonarrFailed = sonarrEnabled && (!sonarrSyncSucceeded || sonarrFailedSlugs.length > 0);
   const failedSources = [
-    ...(radarrEnabled && !radarrSyncSucceeded ? ["radarr"] : []),
-    ...(sonarrEnabled && !sonarrSyncSucceeded ? ["sonarr"] : []),
+    ...(radarrFailed ? ["radarr"] : []),
+    ...(sonarrFailed ? ["sonarr"] : []),
     ...(plexConfiguredEnabled && !plexSyncSucceeded ? ["plex"] : []),
     ...(jellyfinConfiguredEnabled && !jellyfinSyncSucceeded ? ["jellyfin"] : []),
   ];
+  // Human-readable only — the `failedSources` array and the X-Cron-Degraded
+  // header stay plain source names (the admin SyncButton and the cron recorder
+  // key on them). The slug list says WHICH instance to go look at.
+  const slugLabel = (slug: string): string => (slug === DEFAULT_ARR_INSTANCE ? "default" : slug);
+  const failedSourceLabels = failedSources.map((source) => {
+    const slugs = source === "radarr" ? radarrFailedSlugs : source === "sonarr" ? sonarrFailedSlugs : [];
+    return slugs.length > 0 ? `${source} (${slugs.map(slugLabel).join(", ")})` : source;
+  });
 
   // The counterpart to failedSources: a source that is not configured (or whose
   // feature flag is off) was never ATTEMPTED, which is a different thing from
@@ -1733,9 +1784,12 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
   // radarrSyncedSlugs above). So the synced-slug set, not the flag, is what
   // says whether any instance was actually there to sync. Plex/Jellyfin already
   // have a genuine configured-and-enabled predicate.
+  // A source is never BOTH failed and skipped: an install whose only configured
+  // Radarr is a named instance that is down has synced nothing, but it was
+  // attempted — that is a failure, so the failed predicate wins.
   const skippedSources = [
-    ...(!radarrEnabled || (radarrSyncSucceeded && radarrSyncedSlugs.size === 0) ? ["radarr"] : []),
-    ...(!sonarrEnabled || (sonarrSyncSucceeded && sonarrSyncedSlugs.size === 0) ? ["sonarr"] : []),
+    ...(!radarrEnabled || (!radarrFailed && radarrSyncedSlugs.size === 0) ? ["radarr"] : []),
+    ...(!sonarrEnabled || (!sonarrFailed && sonarrSyncedSlugs.size === 0) ? ["sonarr"] : []),
     ...(!plexConfiguredEnabled ? ["plex"] : []),
     ...(!jellyfinConfiguredEnabled ? ["jellyfin"] : []),
   ];
@@ -1752,7 +1806,7 @@ async function runSyncOrchestrator(actor: CronActor, t: Translator, signal?: Abo
       sonarrWanted,
       // `error` is what the admin SyncButton surfaces; failedSources is for logs.
       ...(failedSources.length > 0
-        ? { failedSources, error: t("apiAdmin.sync.degraded", { sources: failedSources.join(", ") }) }
+        ? { failedSources, error: t("apiAdmin.sync.degraded", { sources: failedSourceLabels.join(", ") }) }
         : {}),
       // Both source lists are omitted when empty, matching failedSources above:
       // absent means "nothing skipped", which is the correct reading for an

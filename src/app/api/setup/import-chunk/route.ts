@@ -16,6 +16,7 @@ import {
 } from "@/lib/import-session";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
+import { localizeBackupMessage } from "@/lib/backup-messages";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -130,6 +131,14 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Before startSession, as the admin twin orders it: a body-less chunk 0 used
+  // to claim the single global upload slot and then 400 without releasing it,
+  // so the operator's real first-run restore 409'd "in progress" for up to the
+  // 10-minute idle TTL.
+  if (!req.body) {
+    return NextResponse.json({ error: t("apiAuth.setup.emptyChunk") }, { status: 400 });
+  }
+
   if (chunkIndex === 0) {
     const start = await startSession({ uploadId, totalSize: fileSize, totalChunks: chunkTotal });
     if (!start.ok) {
@@ -148,10 +157,6 @@ export async function POST(req: NextRequest) {
       }
       return NextResponse.json({ error: t("apiAuth.setup.badParams") }, { status: 400 });
     }
-  }
-
-  if (!req.body) {
-    return NextResponse.json({ error: t("apiAuth.setup.emptyChunk") }, { status: 400 });
   }
 
   const chunkBytes = new Uint8Array(await req.arrayBuffer());
@@ -222,7 +227,7 @@ export async function POST(req: NextRequest) {
         errors: result.errors,
       });
     }
-    return NextResponse.json({ error: result.error, complete: true }, { status: result.status });
+    return NextResponse.json({ error: localizeBackupMessage(result.error, t), complete: true }, { status: result.status });
   }
 
   try {

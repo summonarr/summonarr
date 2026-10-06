@@ -124,6 +124,7 @@ shadowPrismaClientMethod(prisma, "$queryRawUnsafe", async () => []);
 const setupImport = await import("../src/app/api/setup/import/route.ts");
 const setupChunk = await import("../src/app/api/setup/import-chunk/route.ts");
 const events = await import("../src/app/api/events/route.ts");
+const { emitSSE } = await import("../src/lib/sse-emitter.ts");
 const openapi = await import("../src/app/api/openapi/route.ts");
 
 // ── scope + helpers ──────────────────────────────────────────────────────────
@@ -430,6 +431,76 @@ test("events uses a DB-CHECKED session read, not a JWT-only one", async () => {
   sessionRows.clear(); // the row is revoked; the JWT is still perfectly valid
   const res = await inScope(() => events.GET(), `${COOKIE}=${token}`);
   assert.equal(res.status, 401, "a revoked session must not open a stream");
+});
+
+// Reads SSE frames off an open stream until `want` data frames (heartbeat
+// comments excluded) have arrived or the deadline passes.
+async function readFrames(res: Response, want: number, ms = 1500): Promise<string[]> {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  const frames: string[] = [];
+  let buf = "";
+  const deadline = Date.now() + ms;
+  while (frames.length < want && Date.now() < deadline) {
+    const chunk = await Promise.race([
+      reader.read(),
+      new Promise<{ done: true; value: undefined }>((r) => setTimeout(() => r({ done: true, value: undefined }), Math.max(1, deadline - Date.now()))),
+    ]);
+    if (chunk.done) break;
+    buf += decoder.decode(chunk.value, { stream: true });
+    let at: number;
+    while ((at = buf.indexOf("\n\n")) !== -1) {
+      const frame = buf.slice(0, at);
+      buf = buf.slice(at + 2);
+      if (frame.startsWith("data: ")) frames.push(frame.slice(6));
+    }
+  }
+  await reader.cancel().catch(() => {});
+  return frames;
+}
+
+test("events: MANAGE_REQUESTS (without the ADMIN bit) receives OTHER users' request:* frames — the admin queue it is allowed to work refreshes live", async () => {
+  // /admin admits MANAGE_REQUESTS alone and its queue refreshes ONLY from
+  // request:* SSE frames; the route's bypass used to consult ADMIN (and
+  // MANAGE_ISSUES for issue:*) but never MANAGE_REQUESTS, so a delegated manager
+  // saw no new request land until a manual reload.
+  const token = await mintSession({ permissions: Permission.MANAGE_REQUESTS });
+  const res = await inScope(() => events.GET(), `${COOKIE}=${token}`);
+  assert.equal(res.status, 200);
+  emitSSE({ type: "request:new", requestId: "r-other", userId: "someone-else" });
+  const frames = await readFrames(res, 2);
+  assert.deepEqual(frames.map((f) => JSON.parse(f)), [
+    { type: "connected" },
+    { type: "request:new", requestId: "r-other" }, // userId stripped, as for every frame
+  ]);
+});
+
+test("events: MANAGE_REQUESTS does NOT widen anything else — another user's issue:* frame is still filtered", async () => {
+  const token = await mintSession({ permissions: Permission.MANAGE_REQUESTS });
+  const res = await inScope(() => events.GET(), `${COOKIE}=${token}`);
+  emitSSE({ type: "issue:new", issueId: "i-other", userId: "someone-else" });
+  // The caller's own frame arrives AFTER the foreign one; seeing it first proves
+  // the foreign one was dropped rather than merely delayed.
+  const me = `u-${seq}`;
+  emitSSE({ type: "issue:new", issueId: "i-mine", userId: me });
+  const frames = await readFrames(res, 2);
+  assert.deepEqual(frames.map((f) => JSON.parse(f)), [
+    { type: "connected" },
+    { type: "issue:new", issueId: "i-mine" },
+  ]);
+});
+
+test("events: a plain USER never receives another user's request:* frame (the bypass is the bit, not the role)", async () => {
+  const token = await mintSession({ permissions: 0n });
+  const res = await inScope(() => events.GET(), `${COOKIE}=${token}`);
+  emitSSE({ type: "request:new", requestId: "r-other", userId: "someone-else" });
+  const me = `u-${seq}`;
+  emitSSE({ type: "request:new", requestId: "r-mine", userId: me });
+  const frames = await readFrames(res, 2);
+  assert.deepEqual(frames.map((f) => JSON.parse(f)), [
+    { type: "connected" },
+    { type: "request:new", requestId: "r-mine" },
+  ]);
 });
 
 test("events caps concurrent connections per user with 429", async () => {

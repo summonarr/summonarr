@@ -5,7 +5,7 @@ import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { addMovieToRadarr, addSeriesToSonarr } from "@/lib/arr";
 import { getMovieDetails, getTVDetails } from "@/lib/tmdb";
 import { exceedsCap } from "@/lib/content-rating";
-import { checkRateLimit } from "@/lib/rate-limit";
+import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
 import { emitSSE } from "@/lib/sse-emitter";
 import { scheduleDownloadChecks, type DownloadCheckTarget } from "@/lib/download-check";
 import { maintenanceGuard } from "@/lib/maintenance";
@@ -110,7 +110,11 @@ export const POST = withPermission([
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
 
-  if (!checkRateLimit(`bulk:${session.user.id}`, 10, 60_000)) {
+  // Honour the admin's "requests per minute" Setting like the single POST and
+  // the votes route do; a lower configured cap must bound "Request all" too.
+  const rlRow = await prisma.setting.findUnique({ where: { key: "rateLimitRequests" } });
+  const bulkLimit = parseRateLimit(rlRow?.value, 10);
+  if (!checkRateLimit(`bulk:${session.user.id}`, bulkLimit, 60_000)) {
     return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
 
@@ -146,7 +150,12 @@ export const POST = withPermission([
     return true;
   });
 
-  // Resolve the target user.
+  // Resolve the target user. A PRESENT but non-string id is a client bug, not
+  // "no target": silently filing the rows under the caller re-targets requests
+  // to the wrong account with a 201, where every other malformed field is a 400.
+  if (body.onBehalfOfUserId !== undefined && body.onBehalfOfUserId !== null && typeof body.onBehalfOfUserId !== "string") {
+    return NextResponse.json({ error: t("apiUser.requests.bulk.onBehalfIdInvalid") }, { status: 400 });
+  }
   const onBehalfId =
     typeof body.onBehalfOfUserId === "string" && body.onBehalfOfUserId.length > 0
       ? body.onBehalfOfUserId
@@ -540,22 +549,24 @@ export const POST = withPermission([
               where: { status: { in: ["APPROVED", "AVAILABLE"] }, OR: createPairs },
               select: { tmdbId: true, mediaType: true, status: true },
             });
-            const greenlitMap = new Map<string, "APPROVED" | "AVAILABLE">();
-            for (const g of greenlit) {
-              const k = keyOf(g.tmdbId, g.mediaType);
-              // Prefer AVAILABLE over APPROVED if both exist for the title.
-              if (g.status === "AVAILABLE" || !greenlitMap.has(k)) {
-                greenlitMap.set(k, g.status as "APPROVED" | "AVAILABLE");
-              }
-            }
+            // An AVAILABLE peer is mirrored as APPROVED, matching the single route
+            // (request-create.ts): the peer may have been marked off a restricted
+            // server this target holds no grant for (guardrail 35). Every item here
+            // has ALREADY been found absent from the target's visible libraries AND
+            // from the routed instance's *arr-available cache (the already-available
+            // gate above), so the one ungated signal that would justify copying
+            // AVAILABLE is known to be missing. The grant-gated sync marking pass
+            // promotes (and notifies) the row once the title is visible to them.
+            const greenlitKeys = new Set<string>();
+            for (const g of greenlit) greenlitKeys.add(keyOf(g.tmdbId, g.mediaType));
             mirroredKeys.clear();
             const now = new Date();
             await tx.mediaRequest.createMany({
               data: prepared.map((p) => {
                 const k = keyOf(p.tmdbId, p.mediaType);
-                const mirror = greenlitMap.get(k);
+                const mirror = greenlitKeys.has(k);
                 if (mirror) mirroredKeys.add(k);
-                const status = mirror ?? (p.autoApprove ? "APPROVED" : "PENDING");
+                const status = mirror || p.autoApprove ? "APPROVED" : "PENDING";
                 // Auto-approved (non-mirrored) rows arm the orchestrator's 90s
                 // download-pending backstop, matching the single POST route. Mirrored
                 // rows skip it — the original greenlit row drives notifications.
@@ -570,7 +581,7 @@ export const POST = withPermission([
                   note: null,
                   requestedBy: targetUserId,
                   status,
-                  ...(mirror === "AVAILABLE" ? { availableAt: now } : {}),
+                  // No availableAt: a mirrored row is never created AVAILABLE (above).
                   // Auto-approve is an approval (MediaRequest.approvedAt). A mirrored
                   // row gets none of its own: the watch grade counts it through the
                   // approval of the request it copied.
@@ -637,7 +648,9 @@ export const POST = withPermission([
     // Mirrored rows (greenlit by another user) are already in *arr — re-pushing
     // would be a no-op at best; just track the row.
     if (mirroredKeys.has(keyOf(p.tmdbId, p.mediaType))) {
-      return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: row.status === "AVAILABLE" ? "already-available" : "auto-approved" };
+      // Mirrored rows are APPROVED by construction (never AVAILABLE — see the
+      // create tx), so they read as auto-approved, not already-available.
+      return { tmdbId: p.tmdbId, mediaType: p.mediaType, result: "auto-approved" };
     }
 
     if (row.status !== "APPROVED") {
@@ -710,5 +723,8 @@ export const POST = withPermission([
     });
   }
 
-  return NextResponse.json({ results, created: createdCount }, { status: 201 });
+  // 201 only when something was created — a batch where every item fell to
+  // metaFailed / no row is the same zero-row outcome the all-skipped path
+  // answers 200 for.
+  return NextResponse.json({ results, created: createdCount }, { status: createdCount > 0 ? 201 : 200 });
 });

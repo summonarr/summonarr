@@ -125,6 +125,19 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, message: "Sonarr webhook connected" });
   }
 
+  // Health / HealthRestored are the same shape: a fixed per-issue payload
+  // (level/message/type/wikiUrl — nothing per delivery) that nothing below
+  // processes. An indexer flapping twice inside the 24h replay TTL would
+  // otherwise see its second identical POST answered 409, and Sonarr then
+  // records Summonarr's notification as failing and raises its own health
+  // warning — for an event we ignore anyway. Acknowledge before the digest,
+  // like Test. Every OTHER unhandled eventType stays replay-recorded (the
+  // Grab pin in tests/webhook-routes.test.mts): those payloads carry
+  // per-delivery fields, so a byte-identical repeat IS a replay.
+  if (payload.eventType === "Health" || payload.eventType === "HealthRestored") {
+    return NextResponse.json({ ok: true, skipped: true });
+  }
+
   // Canonical-JSON replay digest: a replay with reordered keys still produces the same digest
   if (!await checkAndRecordWebhookJson("sonarr", secret, payload)) {
     return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });
@@ -469,7 +482,32 @@ export async function POST(req: NextRequest) {
     ? { OR: grabIdFilters, mediaType: "TV" as const, arrInstance, notifiedAt: null }
     : null;
   if (grabWhere) {
-    const pendingGrabs = await prisma.issueGrab.findMany({ where: grabWhere });
+    const candidateGrabs = await prisma.issueGrab.findMany({ where: grabWhere });
+    // Scope the claim to WHAT this event delivered, BEFORE the CAS. Sonarr fires
+    // one Download per EPISODE (guardrail 14a), and the id-keyed WHERE above
+    // matches every pending grab for the series — so without this, tonight's
+    // S03E02 import claimed an EPISODE grab fired for S01E05 (or a SEASON grab
+    // for S01): the admin was pushed "grab completed" for a file that had not
+    // landed, and when it finally did there was no notification left to send
+    // (notifiedAt is reset only on a push "failed"). EPISODE needs a delivered
+    // episode matching season AND episode; SEASON needs a matching season; FULL
+    // matches any delivery. A grab with no season/episode to match on (not a
+    // shape the releases route writes) keeps the old any-delivery behaviour
+    // rather than being stranded. The Radarr twin needs none of this — one
+    // file per movie.
+    const delivered = (payload.episodes ?? []).filter(
+      (e): e is { seasonNumber: number; episodeNumber?: number } => Number.isInteger(e?.seasonNumber),
+    );
+    const matchesDelivery = (grab: { scope: string; seasonNumber: number | null; episodeNumber: number | null }): boolean => {
+      if (grab.scope === "EPISODE" && grab.seasonNumber != null && grab.episodeNumber != null) {
+        return delivered.some((e) => e.seasonNumber === grab.seasonNumber && e.episodeNumber === grab.episodeNumber);
+      }
+      if (grab.scope === "SEASON" && grab.seasonNumber != null) {
+        return delivered.some((e) => e.seasonNumber === grab.seasonNumber);
+      }
+      return true;
+    };
+    const pendingGrabs = candidateGrabs.filter(matchesDelivery);
     if (pendingGrabs.length > 0) {
       const now = new Date();
       await Promise.all(

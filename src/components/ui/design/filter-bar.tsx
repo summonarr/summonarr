@@ -47,7 +47,7 @@ export function FilterBar<V extends string = string>({
               aria-pressed={isActive}
               // min-h-9 (36px) on phones, 32px from sm: these are the main
               // filter controls on list pages, packed into a scrolling track.
-              className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 font-medium border-0 min-h-9 sm:min-h-8"
+              className="ds-hover-tint inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 font-medium border-0 min-h-9 sm:min-h-8"
               style={{
                 padding: "5px 12px",
                 borderRadius: 6,
@@ -56,9 +56,12 @@ export function FilterBar<V extends string = string>({
                 // was nearly invisible — so the active segment also carries a
                 // border-strong edge and a small shadow, visible in both themes.
                 background: isActive ? "var(--ds-bg-2)" : "transparent",
+                // Inactive segments leave box-shadow unset so .ds-hover-tint's
+                // inset tint (a box-shadow) can show on hover; an inline "none"
+                // beat the class rule and the segments had no hover state.
                 boxShadow: isActive
                   ? "var(--ds-shadow-sm), inset 0 0 0 1px var(--ds-border-strong)"
-                  : "none",
+                  : undefined,
                 color: isActive ? "var(--ds-fg)" : "var(--ds-fg-muted)",
                 fontSize: 12,
                 transition: "all 120ms var(--ds-ease)",

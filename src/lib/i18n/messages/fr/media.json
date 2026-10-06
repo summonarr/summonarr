@@ -39,7 +39,6 @@
   "media.filter.sort.newest": "Plus récents",
   "media.filter.sort.oldest": "Plus anciens",
   "media.filter.anyRating": "Toutes les notes",
-  "media.filter.audience": "🍿 Public {pct} %+",
   "media.filter.anyVotes": "Tous les votes",
   "media.filter.votesMin": "{n}+ votes",
   "media.filter.thousandsSeparator": " ",
@@ -76,5 +75,7 @@
   "media.ratings.letterboxd": "Moyenne Letterboxd",
   "media.ratings.mdblist": "Score MDBList",
   "media.ratings.jellyfin": "Note de la communauté Jellyfin",
-  "media.ratings.tmdb": "Score TMDB"
+  "media.ratings.tmdb": "Score TMDB",
+  "media.pager.label": "Pagination",
+  "media.filter.audienceScore": "Public {pct} %+"
 }

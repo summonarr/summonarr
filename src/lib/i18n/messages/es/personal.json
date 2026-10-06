@@ -51,7 +51,6 @@
   "personal.votes.emptyFilteredDescription": "Ningún voto coincide con estos filtros.",
   "personal.votes.emptyTitle": "Aún no hay votos para eliminar",
   "personal.votes.emptyDescription": "Explora tu biblioteca y vota los títulos que creas que deberían eliminarse.",
-  "personal.votes.noPoster": "Sin póster",
   "personal.votes.count_one": "{count} voto",
   "personal.votes.count_other": "{count} votos",
   "personal.votes.anonymous": "Anónimo",
@@ -189,5 +188,10 @@
   "personal.donate.zelleHint": "Envía con Zelle desde tu banco a:",
   "personal.donate.amazonHint": "Ver mi lista de deseos de Amazon",
   "personal.donate.patreonHint": "Hazte mecenas en Patreon",
-  "personal.donate.coffeeHint": "Invítame a un café"
+  "personal.donate.coffeeHint": "Invítame a un café",
+  "personal.common.trackingOff.title": "El seguimiento del historial de reproducción está desactivado",
+  "personal.common.trackingOff.description": "No se está registrando nada, así que esta página no puede llenarse. Un administrador puede activar el seguimiento del historial en Ajustes → Funciones.",
+  "personal.common.trackingOff.cta": "Abrir ajustes",
+  "personal.common.showingMostRecent": "Se muestran tus {n} títulos más recientes. Los más antiguos no aparecen aquí.",
+  "personal.watchlist.removeError": "No se pudo quitar “{title}” de Mi lista. Inténtalo de nuevo."
 }

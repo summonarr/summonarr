@@ -66,6 +66,10 @@ export default async function MediaActivityPage({
   const mediaType = type === "TV" || type === "tv" ? "TV" : type === "MOVIE" || type === "movie" ? "MOVIE" : undefined;
 
   const stats = await getMediaPlayStats(tmdbId, mediaType);
+  // No plays at all (an unknown id, a negative one, or a title whose plays were
+  // all deleted) is a 404, not a dashboard headed "TMDB 999999999" with three
+  // empty charts and an "Open in library" button to a page that may not exist.
+  if (stats.totalPlays === 0 && stats.recentPlays.length === 0) notFound();
 
   // Real TMDB poster art from the cache (same source the overview uses).
   // Pass the mediaType we already know: TMDB numbers movies and TV separately,

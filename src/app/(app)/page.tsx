@@ -1,5 +1,6 @@
 export const dynamic = "force-dynamic";
 
+import type { Metadata } from "next";
 import {
   getTrending,
   getPopularMovies,
@@ -105,6 +106,12 @@ function emptiedByHideAvailable(
 
 function settled<T>(r: PromiseSettledResult<T[]>): T[] {
   return r.status === "fulfilled" ? r.value : [];
+}
+
+// Tab / bookmark / history title — the page title, in the viewer's language.
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getTranslator();
+  return { title: t("home.title") };
 }
 
 export default async function DiscoverPage({

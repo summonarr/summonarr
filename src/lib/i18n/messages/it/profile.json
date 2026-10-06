@@ -135,11 +135,11 @@
   "profile.close.intro": "Chiudi il tuo account ed esci da tutti i dispositivi. Non potrai più accedere — solo un amministratore può ripristinare l'accesso. Le tue richieste, i voti, le segnalazioni e la cronologia visioni vengono conservati. Chiedi a un amministratore se vuoi anche cancellare i tuoi dati personali.",
   "profile.close.button": "Chiudi account",
   "profile.close.confirmPrompt": "Digita {word} per confermare. Questa operazione chiude il tuo account e ti disconnette da tutti i dispositivi — non potrai più accedere a meno che un amministratore non lo ripristini.",
-  "profile.close.confirmLabel": "Digita {word} per confermare l'eliminazione dell'account",
+  "profile.close.confirmLabel": "Digita {word} per confermare la chiusura dell'account",
   "profile.close.confirmButton": "Chiudi il mio account",
   "profile.close.closing": "Chiusura…",
-  "profile.close.error.failed": "Impossibile eliminare l'account",
-  "profile.close.error.retry": "Impossibile eliminare l'account. Riprova.",
+  "profile.close.error.failed": "Impossibile chiudere l'account",
+  "profile.close.error.retry": "Impossibile chiudere l'account. Riprova.",
   "profile.notifications.title": "Preferenze di notifica",
   "profile.notifications.description": "Scegli quali notifiche ricevere su ciascun canale.",
   "profile.notifications.pushOnly": "Le notifiche push del browser/dispositivo sono al momento l'unico canale disponibile per te — attivale dalla campanella nella barra in alto. Collega il tuo account Discord per aggiungere un altro canale, oppure chiedi a un amministratore di configurare l'invio delle email.",
@@ -222,5 +222,12 @@
   "profile.mfa.stepUp.passkeyFailed": "Non è stato possibile usare la passkey su questo dispositivo.",
   "profile.mfa.stepUp.codeRequired": "Inserisci un codice dalla tua app di autenticazione o un codice di recupero per confermare questa modifica.",
   "profile.notifications.iosApp.prompt": "Su iPhone? L'app Summonarr invia queste notifiche in modo nativo.",
-  "profile.notifications.iosApp.link": "Scaricala dall'App Store"
+  "profile.notifications.iosApp.link": "Scaricala dall'App Store",
+  "profile.close.confirmWord": "CHIUDI",
+  "profile.mfa.confirmRemoveTotp": "Rimuovere l'app di autenticazione? All'accesso ti verrà comunque chiesta una passkey.",
+  "profile.mfa.confirmRemovePasskey": "Rimuovere la passkey {name}? All'accesso ti verrà comunque chiesto un secondo fattore.",
+  "profile.mfa.confirmRemoveLast": "Questo è il tuo unico secondo fattore. Rimuovendolo disattivi l'autenticazione a due fattori, elimini i codici di recupero e disconnetti gli altri dispositivi.",
+  "profile.mfa.totp.copyKey": "Copia la chiave di configurazione",
+  "profile.notifications.verificationPending": "Verifica in attesa per {email}: controlla la tua casella di posta.",
+  "profile.notifications.resendVerification": "Invia di nuovo"
 }

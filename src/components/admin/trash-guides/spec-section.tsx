@@ -3,6 +3,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Chip } from "@/components/ui/design";
 import { stripTrashHtml } from "@/lib/trash-html";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
@@ -38,33 +39,25 @@ interface SpecSectionProps {
   disabled: boolean;
   // Notify parent to refetch e.g. KPI counts when the application set changes.
   onChanged?: () => void;
+  // Controlled mode: a page rendering several sections fetches /status ONCE
+  // (it returns every kind) via useSpecStatus and hands the result to each
+  // section — see SpecSections. Omitted, the section fetches for itself.
+  status?: SpecStatusState;
 }
 
-export function SpecSection({
-  title,
-  description,
-  service,
-  kind,
-  variant = "",
-  disabled,
-  onChanged,
-}: SpecSectionProps) {
-  const mounted = useHasMounted();
-  const t = useT();
-  const locale = useLocale();
+export interface SpecStatusState {
+  specs: SpecStatus[];
+  loaded: boolean;
+  loadError: string | null;
+  reload: () => Promise<void>;
+}
+
+// One /status fetch for a (service, variant) pair. `enabled: false` makes it
+// inert (a section handed a controlled `status` must not fetch a second copy).
+export function useSpecStatus(service: TrashService, variant: string, enabled = true): SpecStatusState {
   const [specs, setSpecs] = useState<SpecStatus[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [details, setDetails] = useState<Map<string, SpecDetail>>(new Map());
-  const [applyState, setApplyState] = useState<"idle" | "running" | "ok" | "error">("idle");
-  const [applyLog, setApplyLog] = useState<ApplyResult[]>([]);
-  const [applyError, setApplyError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<"all" | "managed" | "unmanaged" | "errored">("all");
-  const [search, setSearch] = useState("");
-  const [confirmingForget, setConfirmingForget] = useState<string | null>(null);
-  const [rowError, setRowError] = useState<string | null>(null);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -90,10 +83,41 @@ export function SpecSection({
   }, [service, variant]);
 
   useEffect(() => {
+    if (!enabled) return;
     const controller = new AbortController();
     void load(controller.signal);
     return () => controller.abort();
-  }, [load]);
+  }, [load, enabled]);
+
+  const reload = useCallback(() => load(), [load]);
+  return { specs, loaded, loadError, reload };
+}
+
+export function SpecSection({
+  title,
+  description,
+  service,
+  kind,
+  variant = "",
+  disabled,
+  onChanged,
+  status,
+}: SpecSectionProps) {
+  const mounted = useHasMounted();
+  const t = useT();
+  const locale = useLocale();
+  const own = useSpecStatus(service, variant, status === undefined);
+  const { specs, loaded, loadError, reload: load } = status ?? own;
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [details, setDetails] = useState<Map<string, SpecDetail>>(new Map());
+  const [applyState, setApplyState] = useState<"idle" | "running" | "ok" | "error">("idle");
+  const [applyLog, setApplyLog] = useState<ApplyResult[]>([]);
+  const [applyError, setApplyError] = useState<string | null>(null);
+  const [filter, setFilter] = useState<"all" | "managed" | "unmanaged" | "errored">("all");
+  const [search, setSearch] = useState("");
+  const [confirmingForget, setConfirmingForget] = useState<string | null>(null);
+  const [rowError, setRowError] = useState<string | null>(null);
 
   const specsHere = useMemo(
     () => specs.filter((s) => s.service === service && s.kind === kind),
@@ -191,7 +215,6 @@ export function SpecSection({
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
         setApplyError(body?.error ?? t("trash.spec.error.apply", { status: res.status }));
         setApplyState("error");
-        setTimeout(() => setApplyState("idle"), 3000);
         return;
       }
       const data = (await res.json()) as { ok: boolean; results: ApplyResult[] };
@@ -208,7 +231,10 @@ export function SpecSection({
       setApplyError(t("trash.spec.error.network"));
       setApplyState("error");
     }
-    setTimeout(() => setApplyState("idle"), 3000);
+    // Clear a success message after 3s; an error stays until dismissed or the
+    // next Apply (the sibling cards' RefreshErrorBanner rule) — a 409/429
+    // reason that vanished after 3s left no trace of why nothing happened.
+    setTimeout(() => setApplyState((s) => (s === "error" ? s : "idle")), 3000);
   }
 
   async function toggleManagement(appId: string, enabled: boolean) {
@@ -278,6 +304,8 @@ export function SpecSection({
           {(["all", "managed", "unmanaged", "errored"] as const).map((f) => (
             <button
               key={f}
+              type="button"
+              aria-pressed={filter === f}
               onClick={() => setFilter(f)}
               className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
                 filter === f
@@ -300,12 +328,20 @@ export function SpecSection({
 
         <div className="flex flex-wrap items-center gap-2 mb-3 text-xs">
           <span className="text-zinc-500">{t("trash.starter.quickSelect")}</span>
-          <BulkButton onClick={selectAllFiltered}>{t("trash.spec.allVisible", { count: filtered.length })}</BulkButton>
-          <BulkButton onClick={() => selectBy((s) => !s.application)}>{t("trash.spec.filter.unmanaged")}</BulkButton>
-          <BulkButton onClick={() => selectBy((s) => !!s.application?.enabled)}>{t("trash.spec.filter.managed")}</BulkButton>
-          <BulkButton onClick={() => selectBy((s) => !!s.application?.lastError)}>{t("trash.spec.filter.errored")}</BulkButton>
+          <BulkButton onClick={selectAllFiltered} disabled={disabled}>{t("trash.spec.allVisible", { count: filtered.length })}</BulkButton>
+          <BulkButton onClick={() => selectBy((s) => !s.application)} disabled={disabled}>{t("trash.spec.filter.unmanaged")}</BulkButton>
+          <BulkButton onClick={() => selectBy((s) => !!s.application?.enabled)} disabled={disabled}>{t("trash.spec.filter.managed")}</BulkButton>
+          <BulkButton onClick={() => selectBy((s) => !!s.application?.lastError)} disabled={disabled}>{t("trash.spec.filter.errored")}</BulkButton>
           {selected.size > 0 && (
-            <BulkButton onClick={clearSelection} tone="ghost">{t("trash.starter.clearCount", { count: selected.size })}</BulkButton>
+            // Counts what Apply will act on (the visible intersection), so the two
+            // counters agree; a selection the filter hides is called out — Clear
+            // still drops it.
+            <>
+              <BulkButton onClick={clearSelection} tone="ghost">{t("trash.starter.clearCount", { count: visibleSelected.length })}</BulkButton>
+              {selected.size > visibleSelected.length && (
+                <span className="text-zinc-500">{t("trash.spec.hiddenSelected", { count: selected.size - visibleSelected.length })}</span>
+              )}
+            </>
           )}
         </div>
 
@@ -330,6 +366,7 @@ export function SpecSection({
                       checked={allSelected}
                       ref={(el) => { if (el) el.indeterminate = someSelected; }}
                       onChange={() => (allSelected ? clearSelection() : selectAllFiltered())}
+                      disabled={disabled}
                       className="w-4 h-4 rounded border-zinc-600 bg-zinc-800 accent-indigo-500"
                     />
                   </th>
@@ -376,8 +413,10 @@ export function SpecSection({
                               <span
                                 className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 font-mono"
                                 title={
-                                  spec.application.lastErrorAt
-                                    ? t("trash.spec.failuresLast", { count: spec.application.errorCount, last: spec.application.lastErrorAt })
+                                  // Relative time is client-only (guardrail 16); before mount the
+                                  // count-only form stands in rather than a raw ISO stamp.
+                                  spec.application.lastErrorAt && mounted
+                                    ? t("trash.spec.failuresLast", { count: spec.application.errorCount, last: formatRelativeTimeLocalized(spec.application.lastErrorAt, locale) })
                                     : t("trash.spec.failures", { count: spec.application.errorCount })
                                 }
                               >
@@ -415,7 +454,7 @@ export function SpecSection({
                                   type="button"
                                   aria-label={t("trash.spec.cancelForgetAria")}
                                   onClick={() => setConfirmingForget(null)}
-                                  className="text-xs px-2 py-0.5 text-zinc-400 hover:text-zinc-100"
+                                  className="text-xs px-2 py-1.5 -my-1.5 text-zinc-400 hover:text-zinc-100"
                                 >
                                   {t("trash.spec.cancel")}
                                 </button>
@@ -423,8 +462,9 @@ export function SpecSection({
                             ) : (
                               <div className="flex items-center gap-2 justify-end">
                                 <button
+                                  type="button"
                                   onClick={() => toggleManagement(spec.application!.id, !spec.application!.enabled)}
-                                  className="text-xs text-zinc-400 hover:text-zinc-100 inline-flex items-center gap-1"
+                                  className="text-xs py-1.5 px-2 -my-1.5 text-zinc-400 hover:text-zinc-100 inline-flex items-center gap-1"
                                   title={spec.application.enabled ? t("trash.spec.pauseTitle") : t("trash.spec.resumeTitle")}
                                 >
                                   {spec.application.enabled
@@ -432,8 +472,9 @@ export function SpecSection({
                                     : <><ShieldOff className="w-3.5 h-3.5" />{t("trash.spec.status.paused")}</>}
                                 </button>
                                 <button
+                                  type="button"
                                   onClick={() => setConfirmingForget(spec.application!.id)}
-                                  className="text-xs text-zinc-500 hover:text-red-400"
+                                  className="text-xs py-1.5 px-2 -my-1.5 text-zinc-500 hover:text-red-400"
                                 >
                                   {t("trash.spec.forget")}
                                 </button>
@@ -471,7 +512,19 @@ export function SpecSection({
               : <>{t("trash.starter.applySelected", { count: visibleSelected.length })}</>}
           </Button>
           {applyState === "ok"    && <span className="text-xs text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />{t("trash.spec.applied")}</span>}
-          {applyState === "error" && <span className="text-xs text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />{applyError ?? t("trash.spec.someFailedLog")}</span>}
+          {applyState === "error" && (
+            <span className="text-xs text-red-400 flex items-center gap-1.5 flex-wrap">
+              <XCircle className="w-3.5 h-3.5 shrink-0" />
+              <span className="break-words">{applyError ?? t("trash.spec.someFailedLog")}</span>
+              <button
+                type="button"
+                onClick={() => { setApplyState("idle"); setApplyError(null); }}
+                className="py-1.5 px-2 -my-1.5 text-red-400 hover:text-[var(--ds-danger-hover)]"
+              >
+                {t("trash.common.dismiss")}
+              </button>
+            </span>
+          )}
         </div>
       </Card>
 
@@ -484,19 +537,23 @@ function BulkButton({
   onClick,
   children,
   tone = "solid",
+  disabled = false,
 }: {
   onClick: () => void;
   children: React.ReactNode;
   tone?: "solid" | "ghost";
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       className={
-        tone === "ghost"
+        (tone === "ghost"
           ? "px-2 py-0.5 text-xs text-zinc-400 hover:text-zinc-100 rounded"
-          : "px-2 py-0.5 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-zinc-100 rounded"
+          : "px-2 py-0.5 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-zinc-100 rounded") +
+        " disabled:opacity-50 disabled:cursor-not-allowed"
       }
     >
       {children}
@@ -504,22 +561,16 @@ function BulkButton({
   );
 }
 
+// The DS status Chip, so a TRaSH application state looks like a request/issue
+// state everywhere else in admin.
 function StatusBadge({ spec }: { spec: SpecStatus }) {
   const t = useT();
   const app = spec.application;
-  if (!app) {
-    return <span className="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-500 font-medium">{t("trash.spec.filter.unmanaged")}</span>;
-  }
-  if (app.lastError) {
-    return <span className="text-xs px-2 py-0.5 rounded bg-red-500/20 text-red-400 font-medium">{t("trash.spec.status.error")}</span>;
-  }
-  if (!app.enabled) {
-    return <span className="text-xs px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 font-medium">{t("trash.spec.status.paused")}</span>;
-  }
-  if (app.appliedAt) {
-    return <span className="text-xs px-2 py-0.5 rounded bg-green-500/20 text-green-400 font-medium">{t("trash.spec.status.managed")}</span>;
-  }
-  return <span className="text-xs px-2 py-0.5 rounded bg-amber-500/20 text-amber-400 font-medium">{t("trash.spec.status.pending")}</span>;
+  if (!app) return <Chip tone="neutral">{t("trash.spec.filter.unmanaged")}</Chip>;
+  if (app.lastError) return <Chip tone="declined">{t("trash.spec.status.error")}</Chip>;
+  if (!app.enabled) return <Chip tone="neutral">{t("trash.spec.status.paused")}</Chip>;
+  if (app.appliedAt) return <Chip tone="approved">{t("trash.spec.status.managed")}</Chip>;
+  return <Chip tone="pending">{t("trash.spec.status.pending")}</Chip>;
 }
 
 function SpecDetailView({ detail, kind }: { detail: SpecDetail | null; kind: TrashSpecKind }) {

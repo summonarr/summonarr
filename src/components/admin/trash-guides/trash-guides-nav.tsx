@@ -64,12 +64,17 @@ export function TrashGuidesNav({
   const currentVariant =
     rawVariant && instanceOptions.some((i) => i.slug === rawVariant) ? rawVariant : "";
 
-  // Hide the service/instance toggles on tabs that don't depend on them.
+  // Hide the service/instance toggles on tabs that don't depend on them. The
+  // Overview's KPI strip is service-scoped, so the service toggle shows there
+  // too; its instance toggle stays hidden because the Overview (starter pack +
+  // KPIs) targets the default instance by design (guardrail 32).
+  const isOverview = pathname === "/admin/trash-guides";
   const showServiceToggle =
+    isOverview ||
     pathname.startsWith("/admin/trash-guides/custom-formats") ||
     pathname.startsWith("/admin/trash-guides/quality-profiles") ||
     pathname.startsWith("/admin/trash-guides/naming-sizes");
-  const showVariantToggle = showServiceToggle && instanceOptions.length > 1;
+  const showVariantToggle = showServiceToggle && !isOverview && instanceOptions.length > 1;
 
   function isPageActive(page: typeof SUB_PAGES[0]) {
     if (page.exact) return pathname === page.href;
@@ -149,6 +154,8 @@ export function TrashGuidesNav({
                 return (
                   <button
                     key={s.value}
+                    type="button"
+                    aria-pressed={active}
                     onClick={() => setService(s.value)}
                     className={`px-2.5 py-1 text-xs font-medium transition-colors inline-flex items-center gap-1.5 ${
                       active
@@ -178,6 +185,8 @@ export function TrashGuidesNav({
                   return (
                     <button
                       key={v.slug || "default"}
+                      type="button"
+                      aria-pressed={active}
                       onClick={() => setVariant(v.slug)}
                       className={`px-2.5 py-1 text-xs font-medium transition-colors ${
                         active

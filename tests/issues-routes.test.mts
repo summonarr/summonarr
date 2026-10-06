@@ -334,7 +334,7 @@ shadowPrismaModel(prisma, "pushSubscription", {
 const { GET: getIssues, POST: postIssues } = await import("../src/app/api/issues/route.ts");
 const { PATCH: patchIssueRoute } = await import("../src/app/api/issues/[id]/route.ts");
 const { POST: postMessageRoute } = await import("../src/app/api/issues/[id]/messages/route.ts");
-const { POST: postReleaseRoute } = await import("../src/app/api/issues/[id]/releases/route.ts");
+const { GET: getReleaseRoute, POST: postReleaseRoute } = await import("../src/app/api/issues/[id]/releases/route.ts");
 const { POST: postClaimRoute } = await import("../src/app/api/issues/[id]/claim/route.ts");
 
 // ── synthetic request scope with a recording afterContext ────────────────────
@@ -398,6 +398,10 @@ async function postMessage(token: string | null, id: string, body: unknown, rawB
 async function postRelease(token: string | null, id: string, body: unknown): Promise<Response> {
   const req = issuesReq(token, { method: "POST", body: JSON.stringify(body), path: `/${id}/releases` });
   return inScope(() => postReleaseRoute(req, idCtx(id)));
+}
+async function getReleases(token: string | null, id: string, query = ""): Promise<Response> {
+  const req = issuesReq(token, { method: "GET", path: `/${id}/releases`, query });
+  return inScope(() => getReleaseRoute(req, idCtx(id)));
 }
 // `body` omitted ⇒ a genuinely BODY-LESS POST (the legacy caller shape), not `{}`.
 async function postClaim(token: string | null, id: string, body?: unknown): Promise<Response> {
@@ -860,7 +864,17 @@ test("releases POST (happy grab): the resolved instance slug flows into IssueGra
   const claim = opsOf("issue.updateMany")[0].args as { where: Record<string, unknown>; data: Record<string, unknown> };
   assert.deepEqual(claim.where.status, { not: "RESOLVED" });
   assert.equal(claim.data.status, "IN_PROGRESS");
-  assert.equal(opsOf("auditLog.create").length, 1, "the grab is audited");
+  // Two audit rows: the OPEN→IN_PROGRESS flip (written right after its CAS, so
+  // it exists even when the grab then fails — pinned below) and the grab itself.
+  // audit.ts stores `details` as a JSON string.
+  const audits = opsOf("auditLog.create").map((o) => JSON.parse((o.args as { data: { details: string } }).data.details) as Record<string, unknown>);
+  assert.equal(audits.length, 2, "the status flip and the grab are each audited");
+  assert.deepEqual(audits[0], { trigger: "grab", scope: "FULL", before: { status: "OPEN" }, after: { status: "IN_PROGRESS" } });
+  assert.equal(audits[1].trigger, "grab");
+  assert.ok(typeof audits[1].grabId === "string" && (audits[1].grabId as string).startsWith("grab-"), "the grab audit carries the IssueGrab id");
+  assert.equal(audits[1].instance, "4k");
+  assert.equal(audits[1].indexerId, 7);
+  assert.equal(audits[1].before, undefined, "the flip is not recorded twice");
 
   // The OPEN→IN_PROGRESS flip is broadcast like every sibling transition (refetch,
   // claim, message auto-promote): without it other admins' lists and the reporter's
@@ -886,6 +900,8 @@ test("releases POST: an already-IN_PROGRESS issue is not re-announced, and a gra
   assert.equal(same.status, 200);
   assert.equal(opsOf("issue.updateMany").length, 1, "the CAS still runs");
   assert.equal(sseEvents.length, 0, "an unchanged IN_PROGRESS status is not re-broadcast");
+  assert.equal(opsOf("auditLog.create").length, 1, "an unchanged status is not audited as a flip — only the grab is");
+  assert.equal((JSON.parse((opsOf("auditLog.create")[0].args as { data: { details: string } }).data.details) as Record<string, unknown>).before, undefined);
 
   // A 502 grab failure leaves the row IN_PROGRESS by design (an admin attempted it),
   // so the SSE must fire BEFORE the grab — the early return cannot swallow it.
@@ -899,9 +915,108 @@ test("releases POST: an already-IN_PROGRESS issue is not re-announced, and a gra
   issueRow = { id: "issue-r5", status: "OPEN", reportedBy: "r", title: "The Matrix", mediaType: "MOVIE", tmdbId: 603, tvdbId: null, scope: "FULL", seasonNumber: null, episodeNumber: null };
   const failed = await postRelease(admin.token, "issue-r5", { guid: "release-guid-123", indexerId: 7, instance: "4k" });
   assert.equal(failed.status, 502);
+  // The client gets the translated generic; the upstream detail ("Arr server
+  // error (500) — check the arr service logs") goes to console.error only.
+  assert.deepEqual(await failed.json(), { error: "Arr service request failed" });
+  assert.ok(errors.some((e) => e.includes("[releases] Grab failed")), "the detail is logged");
   assert.equal(opsOf("issueGrab.create").length, 0, "no grab row for a failed grab");
   assert.deepEqual(sseEvents.map((e) => e.type), ["issue:updated"], "the flip the row still holds is announced");
   assert.equal((sseEvents[0] as { status: string }).status, "IN_PROGRESS");
+  // ...and AUDITED: the row is IN_PROGRESS for good (an admin did try), so the
+  // audit log must say who moved it even though the grab 502'd. Before the fix
+  // the only logAudit sat after the catch's early return — a failed grab left
+  // a committed flip with no ISSUE_STATUS_CHANGE row.
+  const flipAudits = opsOf("auditLog.create").map((o) => (o.args as { data: { action: string; details: string } }).data);
+  assert.equal(flipAudits.length, 1, "exactly the flip is audited — no grab audit for a grab that failed");
+  assert.equal(flipAudits[0].action, "ISSUE_STATUS_CHANGE");
+  assert.deepEqual(JSON.parse(flipAudits[0].details), { trigger: "grab", scope: "FULL", before: { status: "OPEN" }, after: { status: "IN_PROGRESS" } });
+});
+
+test("releases GET returns ONLY the ArrRelease field list — an upstream downloadUrl/infoUrl/magnetUrl (indexer apikey carriers) never reaches a MANAGE_ISSUES holder", async () => {
+  issueRow = { id: "issue-g1", status: "OPEN", reportedBy: "r", title: "The Matrix", mediaType: "MOVIE", tmdbId: 603, tvdbId: null, scope: "FULL", seasonNumber: null, episodeNumber: null };
+  settings.set("radarr4kUrl", "http://radarr-4k.example.com:7878");
+  settings.set("radarr4kApiKey", "4k-api-key");
+  // A raw Radarr ReleaseResource: the ArrRelease fields PLUS the ones the
+  // interface only pretends aren't there. Newznab/Torznab download URLs embed
+  // the admin's indexer apikey.
+  const raw = (over: Record<string, unknown>) => ({
+    guid: "g1", title: "The.Matrix.1999.2160p", size: 123, indexerId: 7, indexer: "NZBGeek",
+    quality: { quality: { id: 19, name: "Remux-2160p", source: "bluray", resolution: 2160 }, revision: { version: 1, real: 0, isRepack: false } },
+    qualityWeight: 100, protocol: "usenet", seeders: null, leechers: null, age: 3, rejected: false, rejections: [], downloadAllowed: true,
+    downloadUrl: "https://api.nzbgeek.info/api?t=get&id=abc&apikey=INDEXER-SECRET",
+    infoUrl: "https://nzbgeek.info/geekseek.php?guid=abc",
+    magnetUrl: "magnet:?xt=urn:btih:abc",
+    publishDate: "2026-10-01T00:00:00Z", releaseGroup: "GRP", languages: [{ id: 1, name: "English" }],
+    ...over,
+  });
+  fetchImpl = (url: URL) => {
+    if (url.pathname.startsWith("/api/v3/movie")) return jsonResponse([{ id: 42, tmdbId: 603 }]);
+    if (url.pathname === "/api/v3/release") return jsonResponse([raw({}), raw({ guid: "g2", downloadAllowed: false })]);
+    throw new Error(`unexpected releases fetch: ${url.href}`);
+  };
+  const issueAdmin = await mintSession({ role: "ISSUE_ADMIN" });
+
+  const res = await getReleases(issueAdmin.token, "issue-g1", "?instance=4k");
+  assert.equal(res.status, 200);
+  const text = await res.text();
+  for (const leak of ["downloadUrl", "infoUrl", "magnetUrl", "INDEXER-SECRET", "publishDate", "releaseGroup", "isRepack", "resolution"]) {
+    assert.ok(!text.includes(leak), `response must not carry ${leak}`);
+  }
+  const body = JSON.parse(text) as Array<Record<string, unknown>>;
+  assert.equal(body.length, 1, "a downloadAllowed=false release is still filtered out");
+  assert.deepEqual(
+    Object.keys(body[0]).sort(),
+    ["age", "downloadAllowed", "guid", "indexer", "indexerId", "leechers", "protocol", "qualityWeight", "quality", "rejected", "rejections", "seeders", "size", "title"].sort(),
+    "exactly the ArrRelease field list",
+  );
+  assert.deepEqual(body[0].quality, { quality: { id: 19, name: "Remux-2160p" }, revision: { version: 1 } }, "nested quality is projected too");
+  assert.equal(body[0].guid, "g1");
+});
+
+test("releases GET/POST: an UNCONFIGURED DEFAULT instance is a translated 422 before any wire, not an English 502; an upstream failure is the translated generic", async () => {
+  issueRow = { id: "issue-g2", status: "OPEN", reportedBy: "r", title: "The Matrix", mediaType: "MOVIE", tmdbId: 603, tvdbId: null, scope: "FULL", seasonNumber: null, episodeNumber: null };
+  const admin = await mintSession({ role: "ADMIN" });
+
+  // No radarrUrl/radarrApiKey ⇒ the default "" instance is not configured. The
+  // old code only checked NAMED slugs and let the arr helper throw "Radarr is not
+  // configured" into the catch → 502 + raw English. Same rule for GET and POST.
+  const get = await getReleases(admin.token, "issue-g2");
+  assert.equal(get.status, 422);
+  assert.deepEqual(await get.json(), { error: "Radarr is not configured" });
+  const post = await postRelease(admin.token, "issue-g2", { guid: "abc", indexerId: 1 });
+  assert.equal(post.status, 422);
+  assert.deepEqual(await post.json(), { error: "Radarr is not configured" });
+  assert.equal(fetchCalls.length, 0, "a config gap is answered without touching Radarr");
+  assert.equal(opsOf("issue.updateMany").length, 0, "the POST never reaches the CAS");
+
+  // Translated: the same two conditions in Spanish.
+  const es = new NextRequest("http://localhost:3000/api/issues/issue-g2/releases", {
+    method: "GET",
+    headers: { cookie: `${COOKIE}=${admin.token}`, "accept-language": "es-ES,es;q=0.9" },
+  });
+  const esRes = await inScope(() => getReleaseRoute(es, idCtx("issue-g2")));
+  assert.equal(esRes.status, 422);
+  assert.deepEqual(await esRes.json(), { error: "Radarr no está configurado" });
+
+  // Configured, but Radarr 500s on the release search: 502 with the translated
+  // generic — never arrErrorMessage's English/raw err.message.
+  settings.set("radarrUrl", "http://radarr.example.com:7878");
+  settings.set("radarrApiKey", "hd-api-key");
+  fetchImpl = (url: URL) => {
+    if (url.pathname.startsWith("/api/v3/movie")) return jsonResponse([{ id: 42, tmdbId: 603 }]);
+    if (url.pathname === "/api/v3/release") return new Response("boom", { status: 500 });
+    throw new Error(`unexpected releases fetch: ${url.href}`);
+  };
+  errors.length = 0;
+  const upstream = await getReleases(admin.token, "issue-g2");
+  assert.equal(upstream.status, 502);
+  assert.deepEqual(await upstream.json(), { error: "Arr service request failed" });
+  assert.ok(errors.some((e) => e.includes("[releases] Fetch failed")), "the detail is logged, not returned");
+  const esUpstream = await inScope(() => getReleaseRoute(new NextRequest("http://localhost:3000/api/issues/issue-g2/releases", {
+    method: "GET",
+    headers: { cookie: `${COOKIE}=${admin.token}`, "accept-language": "es" },
+  }), idCtx("issue-g2")));
+  assert.deepEqual(await esUpstream.json(), { error: "La solicitud al servicio Radarr/Sonarr falló" });
 });
 
 // ── refetch instance routing (guardrail 32) ────────────────────────────────

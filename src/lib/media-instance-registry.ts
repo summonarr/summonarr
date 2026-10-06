@@ -62,7 +62,9 @@ function normalizeEntry(raw: unknown): MediaInstanceConfig | null {
   if (slug === DEFAULT_MEDIA_INSTANCE || !isValidMediaInstanceSlug(slug)) return null;
   return {
     slug,
-    name: typeof o.name === "string" && o.name.trim() ? o.name : slug,
+    // Trimmed + bounded on READ too: rows written before the write-side cap can
+    // carry an untrimmed or oversized name, and this label lands on buttons and chips.
+    name: typeof o.name === "string" && o.name.trim() ? o.name.trim().slice(0, 100) : slug,
     // Strict === true (the arr-instance-registry.ts idiom), not truthiness: a
     // hand-edited "false"/"0"/1 must not be read as restricted, and an absent
     // field on a pre-restricted-field registry blob reads as open, which is the

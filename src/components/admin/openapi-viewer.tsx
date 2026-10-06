@@ -3,6 +3,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
+import { AlertTriangle } from "@/components/icons";
+import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/design";
+import { Bar } from "@/components/loading/poster-grid-skeleton";
+
+// Keyboard focus on the endpoint rows and the copy button; the toggle fills a
+// card with overflow:hidden, so its ring has to sit inside the edge to be seen.
+const FOCUS_RING = "outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]";
+const FOCUS_RING_INSET = `${FOCUS_RING} focus-visible:ring-inset`;
+
+// aria-controls needs an id; the "<method> <path>" key is unique per operation
+// and stable across filtering, so it is sanitised into one here.
+const panelIdFor = (key: string) => `op-${key.replace(/[^a-zA-Z0-9]+/g, "-")}`;
 
 interface SchemaObject {
   $ref?: string;
@@ -144,6 +157,13 @@ export function OpenApiViewer() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [revealed, setRevealed] = useState<{ key: string; command: string } | null>(null);
+  // Bumped by Retry; the effect below re-runs the fetch for the new value.
+  const [attempt, setAttempt] = useState(0);
+
+  const retry = () => {
+    setError(null);
+    setAttempt((n) => n + 1);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -161,7 +181,7 @@ export function OpenApiViewer() {
     return () => {
       cancelled = true;
     };
-  }, [t]);
+  }, [t, attempt]);
 
   const ops = useMemo<FlatOp[]>(() => {
     if (!spec) return [];
@@ -187,15 +207,35 @@ export function OpenApiViewer() {
 
   if (error) {
     return (
-      <div style={{ padding: "1.5rem", color: "var(--ds-danger)" }}>
-        {t("adminManage.apiDocs.loadError", { error })}
+      <div style={{ padding: "1.25rem" }}>
+        <EmptyState
+          icon={AlertTriangle}
+          description={t("adminManage.apiDocs.loadError", { error })}
+          action={
+            <Button variant="secondary" size="sm" onClick={retry}>
+              {t("adminManage.apiDocs.retry")}
+            </Button>
+          }
+        />
       </div>
     );
   }
 
   if (!spec) {
+    // Four endpoint-row-sized bars so the list lands in roughly the same frame
+    // instead of popping in under a single line of text.
     return (
-      <div style={{ padding: "1.5rem", color: "var(--ds-fg-muted)" }}>{t("adminManage.apiDocs.loading")}</div>
+      <div
+        role="status"
+        aria-busy="true"
+        aria-label={t("adminManage.apiDocs.loading")}
+        className="flex flex-col"
+        style={{ padding: "1.25rem", gap: "0.35rem" }}
+      >
+        {[0, 1, 2, 3].map((i) => (
+          <Bar key={i} w="100%" h={38} r={8} />
+        ))}
+      </div>
     );
   }
 
@@ -342,6 +382,8 @@ export function OpenApiViewer() {
               {entries.map(({ key, method, path, op }) => {
                 const isOpen = expanded.has(key);
                 const color = METHOD_COLOR[method] ?? "var(--ds-fg-subtle)";
+                const panelId = panelIdFor(key);
+                const opLabel = `${method.toUpperCase()} ${path}`;
                 return (
                   <div
                     key={key}
@@ -356,6 +398,8 @@ export function OpenApiViewer() {
                       type="button"
                       onClick={() => toggle(key)}
                       aria-expanded={isOpen}
+                      aria-controls={panelId}
+                      className={FOCUS_RING_INSET}
                       style={{
                         display: "flex",
                         flexWrap: "wrap",
@@ -365,7 +409,6 @@ export function OpenApiViewer() {
                         padding: "0.5rem 0.7rem",
                         background: "transparent",
                         border: "none",
-                        cursor: "pointer",
                         textAlign: "left",
                       }}
                     >
@@ -400,6 +443,9 @@ export function OpenApiViewer() {
 
                     {isOpen && (
                       <div
+                        id={panelId}
+                        role="region"
+                        aria-label={opLabel}
                         style={{
                           padding: "0.75rem 0.9rem",
                           borderTop: "1px solid var(--ds-border)",
@@ -515,6 +561,7 @@ export function OpenApiViewer() {
                         <button
                           type="button"
                           onClick={() => void copyCurl(method, path, op)}
+                          className={FOCUS_RING}
                           style={{
                             fontSize: 12,
                             padding: "0.3rem 0.7rem",
@@ -522,7 +569,6 @@ export function OpenApiViewer() {
                             color: "var(--ds-accent-text)",
                             border: "1px solid var(--ds-accent-ring)",
                             borderRadius: "var(--ds-r-sm)",
-                            cursor: "pointer",
                           }}
                         >
                           {copiedKey === key ? t("adminManage.apiDocs.copied") : t("adminManage.apiDocs.copyCurl")}

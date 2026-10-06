@@ -59,6 +59,15 @@ export const AUDIT_PII_RETENTION_DEFAULT_DAYS = 90;
 export const AUDIT_PII_RETENTION_MIN_DAYS = 7;
 export const AUDIT_PII_RETENTION_MAX_DAYS = 3650;
 
+// The userName the PII scrub (DELETE /api/admin/audit-log + the
+// scrub-audit-pii cron) writes over every row past the retention window. The
+// scrub route writes this literal; the admin audit-log viewer compares against
+// it to render a muted, translated "redacted" instead of an English token
+// dressed as an account name — so the two must keep agreeing. This module pulls
+// in prisma, so a "use client" component never imports it: the audit-log page
+// (a server component) hands the value down as a prop.
+export const REDACTED_USER_NAME = "[redacted]";
+
 export async function getAuditPiiRetentionDays(): Promise<number> {
   try {
     const row = await prisma.setting.findUnique({ where: { key: "auditPiiRetentionDays" } });

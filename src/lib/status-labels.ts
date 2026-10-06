@@ -11,7 +11,11 @@ export const REQUEST_STATUS_TONE: Record<string, ChipTone> = {
   PENDING: "pending",
   APPROVED: "approved",
   DECLINED: "declined",
-  AVAILABLE: "approved",
+  // Its own tone, not `approved`: both used to render `.ds-chip-approved`, so a
+  // requester scanning their list couldn't tell "approved, still downloading"
+  // from "ready to watch" without reading each chip. Picked up by every
+  // consumer (requests page, admin queue) — pinned in tests/status-labels.test.mts.
+  AVAILABLE: "accent",
 };
 
 export const REQUEST_STATUS_LABEL: Record<string, string> = {

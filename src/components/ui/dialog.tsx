@@ -58,6 +58,23 @@ function DialogPopup({
   );
 }
 
+// The scrolling body of a popup. DialogPopup caps at the viewport and clips
+// overflow, so without this wrapper a tall dialog's bottom buttons are cut off
+// on a short viewport; every consumer re-derived `min-h-0 flex-1 overflow-y-auto`
+// (or forgot to). Mirrors DrawerContent.
+function DialogContent({
+  className,
+  ...props
+}: React.ComponentPropsWithoutRef<"div">) {
+  return (
+    <div
+      data-slot="dialog-content"
+      className={cn("min-h-0 flex-1 overflow-y-auto overscroll-contain p-6", className)}
+      {...props}
+    />
+  );
+}
+
 function DialogTitle({
   className,
   ...props
@@ -91,6 +108,7 @@ export {
   DialogClose,
   DialogBackdrop,
   DialogPopup,
+  DialogContent,
   DialogTitle,
   DialogDescription,
 };

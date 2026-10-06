@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Loader2 } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
@@ -23,28 +24,45 @@ export function MotdForm({ initialEnabled, initialTitle, initialBody }: MotdForm
   const [title,  setTitle]  = useState(initialTitle);
   const [body,   setBody]   = useState(initialBody);
   const [motdStatus, setMotdStatus] = useState<SaveStatus>("idle");
+  // The route's own reason (too long, a 429 cooldown) — shown in place of the
+  // bare "Failed to save".
+  const [errorMessage, setErrorMessage] = useState("");
+  // An earlier save's idle timer must not fire into a later save (it would
+  // re-enable Save mid-flight or hide the new result early).
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+  }, []);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    if (idleTimer.current) clearTimeout(idleTimer.current);
     setMotdStatus("saving");
+    setErrorMessage("");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ motdEnabled: enabled ? "true" : "false", motdTitle: title, motdBody: body }),
       });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
-      setMotdStatus(res.ok && data.ok !== false ? "ok" : "error");
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (res.ok && data.ok !== false) {
+        setMotdStatus("ok");
+      } else {
+        setErrorMessage(data.error ?? t("settings.form.common.saveFailed"));
+        setMotdStatus("error");
+      }
     } catch {
       setMotdStatus("error");
     }
-    setTimeout(() => setMotdStatus("idle"), 3000);
+    // Only an "ok" fades; an error stays until the next edit or save.
+    idleTimer.current = setTimeout(() => setMotdStatus((s) => (s === "ok" ? "idle" : s)), 3000);
   }
 
   return (
     <form onSubmit={handleSave} className="space-y-4">
       <div className="flex items-center justify-between gap-4 pb-4 border-b border-zinc-800">
-        <div>
+        <div className="min-w-0">
           <p id="motd-enabled-label" className="text-sm font-medium text-zinc-200">{t("settings.form.motd.showTitle")}</p>
           <p id="motd-enabled-desc" className="text-xs text-zinc-500 mt-0.5">{t("settings.form.motd.showHelp")}</p>
         </div>
@@ -53,6 +71,7 @@ export function MotdForm({ initialEnabled, initialTitle, initialBody }: MotdForm
           onCheckedChange={() => { setEnabled(!enabled); setMotdStatus("idle"); }}
           aria-labelledby="motd-enabled-label"
           aria-describedby="motd-enabled-desc"
+          className="shrink-0"
         />
       </div>
       <div className="space-y-1.5">
@@ -62,25 +81,25 @@ export function MotdForm({ initialEnabled, initialTitle, initialBody }: MotdForm
           value={title}
           onChange={(e) => { setTitle(e.target.value); setMotdStatus("idle"); }}
           placeholder={t("settings.form.motd.titlePlaceholder")}
-          className="bg-zinc-800 border-zinc-700 text-sm"
+          className="bg-zinc-800 border-zinc-700"
         />
       </div>
       <div className="space-y-1.5">
         <Label htmlFor="motd-body">{t("settings.form.motd.messageLabel")}</Label>
-        <textarea
+        <Textarea
           id="motd-body"
           value={body}
           onChange={(e) => { setBody(e.target.value); setMotdStatus("idle"); }}
           placeholder={t("settings.form.motd.messagePlaceholder")}
           rows={4}
-          className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+          className="resize-none"
         />
       </div>
       <div className="flex items-center gap-3">
         <Button type="submit" disabled={motdStatus === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
           {motdStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
         </Button>
-        <SaveStatusMessage status={motdStatus} />
+        <SaveStatusMessage status={motdStatus} errorLabel={errorMessage || t("settings.form.common.saveFailed")} />
       </div>
     </form>
   );

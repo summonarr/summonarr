@@ -3,7 +3,7 @@ import { withAuth, withPermission } from "@/lib/api-auth";
 import { Permission, hasPermission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { addMovieToRadarr, searchMovieInRadarr, arrErrorMessage } from "@/lib/arr";
-import { addSeriesToSonarr, searchSeriesInSonarr } from "@/lib/arr";
+import { addSeriesToSonarr, searchSeriesInSonarr, listQualityProfiles } from "@/lib/arr";
 import { emitSSE } from "@/lib/sse-emitter";
 import { logAudit, auditContext } from "@/lib/audit";
 import { sanitizeOptional } from "@/lib/sanitize";
@@ -85,19 +85,25 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
       }
     }
     const variant = existing.arrInstance;
+    const searchedNote = adminNote !== undefined ? sanitizedAdminNote : existing.adminNote;
+    // A TV request with no stored tvdbId was never pushed (or predates the
+    // bookkeeping write): there is nothing to search. Answer with a translated
+    // arrError rather than throwing an English Error into the generic arr catch.
+    if (existing.mediaType !== "MOVIE" && !existing.tvdbId) {
+      return NextResponse.json({ ...existing, adminNote: searchedNote, arrError: t("apiUser.requests.searchNoTvdbId") });
+    }
     let arrError: string | null = null;
     try {
       if (existing.mediaType === "MOVIE") {
         await searchMovieInRadarr(existing.tmdbId, variant);
       } else {
-        if (!existing.tvdbId) throw new Error("No TVDB ID stored — re-push the request first");
-        await searchSeriesInSonarr(existing.tvdbId, variant);
+        await searchSeriesInSonarr(existing.tvdbId as number, variant);
       }
     } catch (err) {
       console.error("[arr] Search failed:", err);
       arrError = arrErrorMessage(err);
     }
-    return NextResponse.json({ ...existing, adminNote: adminNote !== undefined ? sanitizedAdminNote : existing.adminNote, arrError });
+    return NextResponse.json({ ...existing, adminNote: searchedNote, arrError });
   }
 
   if (retry) {
@@ -200,6 +206,25 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (
   }
 
   if (status === "APPROVED" && existing.status !== "APPROVED") {
+    // Validate the one-time profile override against the request's OWN instance
+    // BEFORE the CAS — the same membership check the create path runs
+    // (request-create.ts). A stale picker id (profile deleted in Radarr/Sonarr
+    // since the list loaded) otherwise CAS'd the row to APPROVED, audited the
+    // approval, had the arr answer 400 and rolled back to PENDING, surfacing a
+    // generic "Arr request failed (400)" instead of this clean 400.
+    if (qualityProfileId !== undefined) {
+      const service = existing.mediaType === "MOVIE" ? "radarr" : "sonarr";
+      let profileList: Awaited<ReturnType<typeof listQualityProfiles>>;
+      try {
+        profileList = await listQualityProfiles(service, existing.arrInstance);
+      } catch (err) {
+        console.error(`[requests] Failed to fetch ${service} profiles:`, err);
+        return NextResponse.json({ error: t("apiUser.common.couldNotConnect", { service }) }, { status: 502 });
+      }
+      if (!profileList || !profileList.profiles.some((p) => p.id === qualityProfileId)) {
+        return NextResponse.json({ error: t("apiUser.create.profileInvalid") }, { status: 400 });
+      }
+    }
     // CAS (compare-and-swap): the write only lands if the status is still the one
     // we read, so two admins approving at once can't both succeed.
     const claimed = await prisma.mediaRequest.updateMany({

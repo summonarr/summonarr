@@ -2,11 +2,18 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { attachArrPending } from "@/lib/arr-availability";
-import { arrFetch, getArrCfg, getSonarrSeriesCompletion, isArrConfigured, isMovieWantedInRadarr, isSeriesWantedInSonarr, pickSeriesByTmdbId } from "@/lib/arr";
+import { getSonarrSeriesCompletion, isArrConfigured, isMovieWantedInRadarr } from "@/lib/arr";
 import { getArrInstances } from "@/lib/arr-instance-registry";
 import { mapLimit } from "@/lib/concurrency";
-import { getCache } from "@/lib/tmdb-cache";
 import type { TmdbMedia } from "@/lib/tmdb-types";
+
+// Read-only diagnostic. The one write it can cause is indirect and deliberate:
+// the TV live check goes through lookupSeriesByTmdbId, whose TMDB TVDB
+// cross-reference fallback (guardrail 14a) populates the `tmdb-to-tvdb:` cache
+// row exactly as every real read path does. Nothing here writes a row of its
+// own, and the `tvdb-to-tmdb:` dump below reads its row directly rather than
+// through getCache, whose lazy expired-row delete would destroy the very
+// evidence (a stale negative mapping) this route exists to show.
 
 export const GET = withAdmin(async (req, _ctx, _session) => {
   const sp = req.nextUrl.searchParams;
@@ -53,17 +60,6 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
       ? await prisma.radarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: inst.slug } } })
       : await prisma.sonarrWantedItem.findUnique({ where: { tmdbId_arrInstance: { tmdbId, arrInstance: inst.slug } } });
     let liveArrApi: { result: boolean; error?: string };
-    try {
-      const result = type === "movie"
-        ? await isMovieWantedInRadarr(tmdbId, inst.slug)
-        : await isSeriesWantedInSonarr(tmdbId, inst.slug);
-      liveArrApi = { result };
-    } catch (err) {
-      // Don't leak raw Arr error detail (may carry the configured server URL /
-      // upstream body) to the client — log it server-side, return a generic flag.
-      console.error(`[arr-state] live Arr check failed (instance=${inst.slug}):`, err instanceof Error ? err.message : err);
-      liveArrApi = { result: false, error: "live Arr check failed" };
-    }
     // TV only: WHY a request has not flipped. A TV request goes AVAILABLE only
     // once Sonarr reports the series complete (guardrail 14a), so the aired
     // counts here — e.g. 59/60 — are the answer to "it's in Plex, why is it
@@ -73,12 +69,30 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
       | { tvdbId: number; episodeFileCount: number; episodeCount: number; complete: boolean; basis: "seasons" | "series" }
       | { result: null; error?: string }
       | undefined;
-    if (type === "tv") {
+    if (type === "movie") {
       try {
-        liveCompletion = (await getSonarrSeriesCompletion(tmdbId, inst.slug)) ?? { result: null };
+        liveArrApi = { result: await isMovieWantedInRadarr(tmdbId, inst.slug) };
+      } catch (err) {
+        // Don't leak raw Arr error detail (may carry the configured server URL /
+        // upstream body) to the client — log it server-side, return a generic flag.
+        console.error(`[arr-state] live Arr check failed (instance=${inst.slug}):`, err instanceof Error ? err.message : err);
+        liveArrApi = { result: false, error: "live Arr check failed" };
+      }
+    } else {
+      // ONE Sonarr conversation per instance (lookup + the ?tvdbId= library
+      // read). isSeriesWantedInSonarr is `match && !complete` over the identical
+      // two fetches, so running it beside the completion check doubled the
+      // 30s-timeout round-trips on a route reached precisely when Sonarr is slow
+      // — and let a transient failure make `liveArrApi` and `liveCompletion`
+      // disagree about the same series in one response. Derive it instead.
+      try {
+        const completion = await getSonarrSeriesCompletion(tmdbId, inst.slug);
+        liveCompletion = completion ?? { result: null };
+        liveArrApi = { result: completion ? !completion.complete : false };
       } catch (err) {
         console.error(`[arr-state] live Sonarr completion check failed (instance=${inst.slug}):`, err instanceof Error ? err.message : err);
         liveCompletion = { result: null, error: "live Sonarr completion check failed" };
+        liveArrApi = { result: false, error: "live Arr check failed" };
       }
     }
     return {
@@ -108,40 +122,57 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   const enriched = await attachArrPending([stub]);
   const arrPendingResult = enriched[0]?.arrPending ?? false;
 
+  // The tvdb→tmdb section. The tvdbId comes from the per-instance completion
+  // results above — i.e. from lookupSeriesByTmdbId, the SAME resolver (direct
+  // tmdb lookup, then TMDB's TVDB cross-reference) every real read path and the
+  // approve use (guardrail 14a). The former private `term=tmdb:` lookup against
+  // the DEFAULT instance contradicted the pipeline it diagnoses twice over: it
+  // reported `tvdbId: null` for the lagging-index case 14a documents while
+  // `instances[].liveCompletion` on the same response carried the resolved id,
+  // and on a deployment whose only Sonarr is a NAMED instance it was null for
+  // every title. Default instance first, then the first instance that resolved.
   let tvdbInfo: {
     tvdbId: number | null;
+    tvdbIdInstance?: string;
     cachedMapping?: { tmdbId: number | null } | null;
+    cachedMappingRow?: { data: string; cachedAt: string; expiresAt: string; stale: boolean } | null;
     error?: string;
   } | null = null;
   if (type === "tv") {
-    try {
-      // Route through arrFetch so the lookup inherits the 30s timeout, 50 MB
-      // cap, X-Api-Key injection, and ArrResponseError handling (vs. a bare
-      // safeFetchAdminConfigured that defaulted to a 10 MB cap / 15s timeout).
-      const cfg = await getArrCfg("sonarr");
-      if (cfg) {
-        const lookup = await arrFetch<{ tmdbId?: number; tvdbId?: number }[]>(
-          cfg, `/api/v3/series/lookup?term=tmdb:${tmdbId}`,
-        );
-        // Same row selection as every real read path (guardrail 14a): a degraded
-        // lookup can answer with a DIFFERENT show, and reporting lookup[0]'s
-        // tvdbId would send the diagnosis after the wrong series.
-        const tvdbId = pickSeriesByTmdbId(lookup, tmdbId)?.tvdbId ?? null;
-        let cachedMapping: { tmdbId: number | null } | null = null;
-        // Expose any negative-cached tvdb→tmdb mapping so stale entries can be diagnosed
-        if (tvdbId) {
-          cachedMapping = await getCache<{ tmdbId: number | null }>(`tvdb-to-tmdb:${tvdbId}`);
-        }
-        tvdbInfo = { tvdbId, cachedMapping };
+    const resolvedFrom = [defaultInst, ...instances.filter((i) => i.slug !== "")]
+      .find((i) => i?.liveCompletion !== undefined && "tvdbId" in i.liveCompletion);
+    const tvdbId = resolvedFrom && resolvedFrom.liveCompletion && "tvdbId" in resolvedFrom.liveCompletion
+      ? resolvedFrom.liveCompletion.tvdbId
+      : null;
+    if (tvdbId) {
+      // Read the row DIRECTLY (ratings-state's rule): getCache lazily DELETES an
+      // expired row and answers null — indistinguishable from "never cached",
+      // and the stale negative mapping the operator came to inspect is gone.
+      // `stale` carries the expiry verdict instead; `cachedMapping` keeps the
+      // parsed shape (`{ tmdbId: null }` IS a genuine negative entry) for the
+      // existing readers, now including an expired row.
+      const row = await prisma.tmdbCache.findUnique({ where: { key: `tvdb-to-tmdb:${tvdbId}` } });
+      let cachedMapping: { tmdbId: number | null } | null = null;
+      if (row) {
+        try { cachedMapping = JSON.parse(row.data) as { tmdbId: number | null }; } catch { cachedMapping = null; }
       }
-    } catch (err) {
-      // Don't surface raw Arr error detail (configured server URL / upstream
-      // body) to the client — log server-side, return a generic flag.
-      console.error("[arr-state] sonarr series lookup failed:", err instanceof Error ? err.message : err);
+      tvdbInfo = {
+        tvdbId,
+        tvdbIdInstance: resolvedFrom!.slug,
+        cachedMapping,
+        cachedMappingRow: row
+          ? { data: row.data, cachedAt: row.cachedAt.toISOString(), expiresAt: row.expiresAt.toISOString(), stale: row.expiresAt.getTime() <= Date.now() }
+          : null,
+      };
+    } else {
       // `cachedMapping` must be null here, not `{ tmdbId: null }` — that shape is
       // exactly what a genuine NEGATIVE tvdb→tmdb cache entry looks like, and
-      // nothing was read (the lookup never produced a tvdbId to key on).
-      tvdbInfo = { tvdbId: null, cachedMapping: null, error: "sonarr lookup failed" };
+      // nothing was read (no instance produced a tvdbId to key on). The error
+      // flag is set only when some configured instance's check actually failed
+      // (its real detail is already logged above); "Sonarr simply doesn't know
+      // this show" on every instance is a null without an error.
+      const anyFailed = instances.some((i) => i.liveCompletion !== undefined && "error" in i.liveCompletion);
+      tvdbInfo = { tvdbId: null, cachedMapping: null, ...(anyFailed ? { error: "sonarr lookup failed" } : {}) };
     }
   }
 

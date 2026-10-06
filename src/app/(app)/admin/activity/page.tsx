@@ -5,7 +5,8 @@ import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getPlayHistoryStats, getMostRewatched, getActivityCalendar, getTranscodeOffenders, appendPlayHistoryFilter, isPlayHistoryEnabled, isSourceEnabled } from "@/lib/play-history";
-import { PageHeader } from "@/components/ui/design";
+import { EmptyState, PageHeader } from "@/components/ui/design";
+import { Activity } from "@/components/icons";
 import { ActivityNowPlaying } from "@/components/admin/activity-now-playing";
 import {
   KpiStrip,
@@ -16,7 +17,6 @@ import {
 } from "@/components/admin/activity-sections";
 import { ActivityRecentPlays } from "@/components/admin/activity-recent-plays";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
-import { ActivityHistoryTable } from "@/components/admin/activity-history-table";
 import { ActivityCalendar } from "@/components/admin/activity-calendar";
 import { TranscodePressure } from "@/components/admin/transcode-pressure";
 import { ActivityWarmButton } from "@/components/admin/activity-warm-button";
@@ -94,44 +94,40 @@ export default async function ActivityPage({
 
   const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
   const fmtDay = (day: string) => shortDay(day, locale);
+  // One decimal, locale-separated: the integers beside these already go through
+  // toLocaleString, so a bare toFixed(1) mixed "1.234 plays" with "12.3 Mbps".
+  const dec1 = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
+  const hoursSuffix = t("adminActivity.common.hoursSuffix");
 
   const { days: daysParam, source: sourceParam, mediaType: mediaTypeParam, tab, from: fromParam, to: toParam, watched: watchedParam } = await searchParams;
-  const isHistoryTab = tab === "history";
+
+  // The History tab moved to its own route segment (history/page.tsx) so it
+  // gets a table-shaped loading.tsx instead of flashing this page's KPI/chart
+  // skeleton. Older `?tab=history` links — the calendar "View these plays",
+  // the recent-plays "View history", the play-detail back link, the
+  // delete-play redirect — still land here and are forwarded with every filter
+  // they carried.
+  if (tab === "history") {
+    const forward = new URLSearchParams();
+    const carried: Record<string, string | undefined> = {
+      days: daysParam,
+      source: sourceParam,
+      mediaType: mediaTypeParam,
+      from: fromParam,
+      to: toParam,
+      watched: watchedParam,
+    };
+    for (const [k, v] of Object.entries(carried)) if (v) forward.set(k, v);
+    const qs = forward.toString();
+    redirect(`/admin/activity/history${qs ? `?${qs}` : ""}`);
+  }
+
   const days = Math.min(Math.max(parseInt(daysParam ?? "30", 10) || 30, 1), 3650);
   const source = sourceParam && ["plex", "jellyfin"].includes(sourceParam) ? sourceParam : undefined;
   const mediaType = mediaTypeParam && ["MOVIE", "TV"].includes(mediaTypeParam) ? mediaTypeParam : undefined;
-  // Date deep-link from a calendar-cell "View these plays" link. Seeds the
-  // history table's date filter. Validated to YYYY-MM-DD; anything else ignored.
-  const isYmd = (v?: string) => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v);
-  const fromDate = isYmd(fromParam) ? fromParam : undefined;
-  const toDate = isYmd(toParam) ? toParam : undefined;
-  const initialWatched = watchedParam === "true" || watchedParam === "false" ? watchedParam : undefined;
 
   // eslint-disable-next-line react-hooks/purity -- server component; Date.now() runs once per request
   const periodCutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-
-  if (isHistoryTab) {
-    return (
-      <div className="ds-page-enter">
-        <ActivityLiveRefresher />
-        <PageHeader
-          title={t("adminActivity.title")}
-          subtitle={t("adminActivity.subtitle")}
-        />
-        <ActivityFilterBar />
-        <ActivityHistoryTable
-          key={`ht-${days}-${source ?? ""}-${mediaType ?? ""}-${fromDate ?? ""}-${toDate ?? ""}-${initialWatched ?? ""}`}
-          source={source}
-          mediaType={mediaType}
-          days={days}
-          startDateIso={periodCutoff.toISOString()}
-          initialFromDate={fromDate}
-          initialToDate={toDate}
-          initialWatched={initialWatched}
-        />
-      </div>
-    );
-  }
 
   const prismaWhere: Record<string, unknown> = { startedAt: { gte: periodCutoff } };
   if (source) prismaWhere.source = source;
@@ -540,11 +536,11 @@ export default async function ActivityPage({
     },
     {
       label: t("adminActivity.kpi.watchTime"),
-      value: `${watchHoursNd.toLocaleString(locale)}h`,
+      value: `${watchHoursNd.toLocaleString(locale)}${hoursSuffix}`,
       delta: kpiDelta(t, watchHoursNd, Math.round(prevWatchTimeNum)),
       spark: stats.watchTimeByDay.map((d) => d.hours),
       sparkLabels: stats.watchTimeByDay.map((d) => fmtDay(d.day)),
-      sparkSuffix: "h",
+      sparkSuffix: hoursSuffix,
     },
     {
       label: t("adminActivity.kpi.activeUsers"),
@@ -553,7 +549,7 @@ export default async function ActivityPage({
     },
     {
       label: t("adminActivity.kpi.completionRate"),
-      value: `${stats.completionRate}%`,
+      value: `${dec1.format(stats.completionRate)}%`,
     },
     {
       label: t("adminActivity.kpi.busiestDay"),
@@ -564,11 +560,11 @@ export default async function ActivityPage({
     },
     {
       label: t("adminActivity.kpi.bandwidth"),
-      value: stats.avgBitrateMbps > 0 ? `${stats.avgBitrateMbps} Mbps` : "—",
+      value: stats.avgBitrateMbps > 0 ? `${dec1.format(stats.avgBitrateMbps)} Mbps` : "—",
       sub:
         stats.totalBandwidthGB >= 1000
-          ? t("adminActivity.kpi.total", { amount: `${(stats.totalBandwidthGB / 1000).toFixed(1)} TB` })
-          : t("adminActivity.kpi.total", { amount: `${stats.totalBandwidthGB} GB` }),
+          ? t("adminActivity.kpi.total", { amount: `${dec1.format(stats.totalBandwidthGB / 1000)} TB` })
+          : t("adminActivity.kpi.total", { amount: `${dec1.format(stats.totalBandwidthGB)} GB` }),
     },
   ];
 
@@ -629,16 +625,22 @@ export default async function ActivityPage({
           : r.type === "MOVIE"
             ? t("adminActivity.overview.movies")
             : r.type,
-      color: r.type === "TV" ? "var(--ds-accent)" : "oklch(0.72 0.10 275)",
+      // Both bars follow the theme: the TV bar is the accent, the Movies bar the
+      // second chart token (a baked indigo hue ignored the accent and nearly
+      // vanished on the light card — guardrail 42).
+      color: r.type === "TV" ? "var(--ds-accent)" : "var(--ds-chart-2)",
       value: r.count.toLocaleString(locale),
       pct: mediaTotal > 0 ? Math.round((r.count / mediaTotal) * 100) : 0,
     }));
 
+  // Up to five evenly spaced axis labels — never more than there are days, or a
+  // custom 2–4 day window prints the same date twice.
   const axisLabels: string[] = [];
   if (stats.playsByDay.length > 1) {
     const n = stats.playsByDay.length;
-    for (let i = 0; i < 5; i++) {
-      const idx = Math.round((i / 4) * (n - 1));
+    const count = Math.min(5, n);
+    for (let i = 0; i < count; i++) {
+      const idx = Math.round((i / (count - 1)) * (n - 1));
       axisLabels.push(fmtDay(stats.playsByDay[idx].day));
     }
   }
@@ -697,49 +699,64 @@ export default async function ActivityPage({
         />
       )}
 
-      <KpiStrip kpis={kpis} />
+      {!phEnabled ? (
+        // Tracking off: every aggregate below would read as an all-zero quiet
+        // server with nothing saying why. Now playing stays above (the SSE feed
+        // is independent of play-history recording).
+        <EmptyState
+          icon={Activity}
+          title={t("adminActivity.trackingOff.title")}
+          description={t("adminActivity.trackingOff.description")}
+          cta={{ href: "/settings?tab=media#play-history", label: t("adminActivity.trackingOff.cta") }}
+        />
+      ) : (
+        <>
+          <KpiStrip kpis={kpis} />
 
-      <AnalyticsRow
-        playsByDay={stats.playsByDay.map((d) => d.count)}
-        playsByDayLabels={stats.playsByDay.map((d) => fmtDay(d.day))}
-        heatmapMatrix={heatmapMatrix}
-        heatmapDetailBase={{ days, source, mediaType }}
-        streamMix={streamMix}
-        mediaMix={mediaMix}
-        days={days}
-        peakSub={peakSub}
-        axisLabels={axisLabels}
-        heatmapInsight={heatmapInsight}
-      />
-
-      <Leaderboards
-        users={leaderUsers}
-        rewatched={leaderRewatched}
-        days={days}
-      />
-
-      <TranscodePressure data={transcodeOffenders} days={days} />
-
-      {showActivityCalendar && calendarData.length > 0 && (
-        <CalendarSection
-          activeDays={activeDays}
-          totalPlays={totalCalPlays}
-        >
-          <ActivityCalendar
-            data={calendarData}
-            today={new Date().toISOString()}
-            detailBase={{ source, mediaType, historyPath: "/admin/activity" }}
+          <AnalyticsRow
+            playsByDay={stats.playsByDay.map((d) => d.count)}
+            playsByDayLabels={stats.playsByDay.map((d) => fmtDay(d.day))}
+            heatmapMatrix={heatmapMatrix}
+            heatmapDetailBase={{ days, source, mediaType }}
+            streamMix={streamMix}
+            mediaMix={mediaMix}
+            days={days}
+            peakSub={peakSub}
+            axisLabels={axisLabels}
+            heatmapInsight={heatmapInsight}
           />
-        </CalendarSection>
-      )}
 
-      <ActivityRecentPlays
-        key={`rp-${days}-${source ?? ""}-${mediaType ?? ""}`}
-        plays={serializedRecentPlays}
-        source={source}
-        mediaType={mediaType}
-        startDateIso={periodCutoff.toISOString()}
-      />
+          <Leaderboards
+            users={leaderUsers}
+            rewatched={leaderRewatched}
+            days={days}
+          />
+
+          <TranscodePressure data={transcodeOffenders} days={days} />
+
+          {showActivityCalendar && calendarData.length > 0 && (
+            <CalendarSection
+              activeDays={activeDays}
+              totalPlays={totalCalPlays}
+            >
+              <ActivityCalendar
+                data={calendarData}
+                today={new Date().toISOString()}
+                detailBase={{ source, mediaType, historyPath: "/admin/activity/history" }}
+              />
+            </CalendarSection>
+          )}
+
+          <ActivityRecentPlays
+            key={`rp-${days}-${source ?? ""}-${mediaType ?? ""}`}
+            plays={serializedRecentPlays}
+            source={source}
+            mediaType={mediaType}
+            days={days}
+            startDateIso={periodCutoff.toISOString()}
+          />
+        </>
+      )}
     </div>
   );
 }

@@ -53,9 +53,13 @@ export function RequireAdminMfaToggle({ initialRequired, envOverride }: { initia
     }
   }
 
+  // Same row recipe as the three sibling toggles in the Authentication card:
+  // the card owns the dividers (divide-y), each row owns its vertical padding,
+  // and a server error wraps onto its own full-width line instead of pushing
+  // the switch off-card at 375px.
   return (
-    <div className="flex items-center justify-between gap-4 mt-4">
-      <div>
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 py-3 first:pt-0 last:pb-0">
+      <div className="min-w-0 flex-1">
         <p id={titleId} className="text-sm font-medium text-zinc-200">{t("settings.form.requireAdminMfa.title")}</p>
         <p id={descId} className="text-xs text-zinc-500 mt-0.5">
           {t("settings.form.requireAdminMfa.help")}
@@ -66,23 +70,24 @@ export function RequireAdminMfaToggle({ initialRequired, envOverride }: { initia
           )}
         </p>
       </div>
-      <div className="flex items-center gap-2 shrink-0">
-        {status === "saving" && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500" />}
-        {status === "ok"     && <CheckCircle className="w-3.5 h-3.5 text-green-400" />}
-        {status === "error"  && (
-          <span role="alert" className="flex max-w-xs items-center gap-1 text-right text-xs text-red-400">
-            <XCircle className="w-3.5 h-3.5" aria-hidden />
-            {error}
-          </span>
-        )}
+      <div className="flex items-center gap-2">
+        {status === "saving" && <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-500" aria-hidden />}
+        {status === "ok"     && <CheckCircle className="w-3.5 h-3.5 text-green-400" aria-hidden />}
         <Switch
           checked={required}
           onCheckedChange={toggle}
           disabled={status === "saving"}
           aria-labelledby={titleId}
           aria-describedby={descId}
+          className="shrink-0"
         />
       </div>
+      {status === "error" && (
+        <span role="alert" className="basis-full flex items-center gap-1 text-xs text-red-400">
+          <XCircle className="w-3.5 h-3.5 shrink-0" aria-hidden />
+          {error}
+        </span>
+      )}
     </div>
   );
 }

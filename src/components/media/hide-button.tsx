@@ -61,8 +61,10 @@ export function HideButton({
     }
   }
 
+  // flex-col: the error renders UNDER the button (as RequestButton's does), never
+  // squeezed beside a 34px control in the wrapping action row.
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex flex-col items-start gap-2">
       <DetailActionButton
         variant={hidden ? "muted" : "secondary"}
         onClick={toggle}
@@ -82,9 +84,13 @@ export function HideButton({
         {hidden ? t("detail.hide.hidden") : t("detail.hide.notInterested")}
       </DetailActionButton>
       {msg && (
-        <span className="ds-mono" style={{ fontSize: 11, color: "var(--ds-danger)" }}>
+        <p
+          className="ds-mono max-w-sm"
+          role="alert"
+          style={{ fontSize: 11, color: "var(--ds-danger)", margin: 0 }}
+        >
           {msg}
-        </span>
+        </p>
       )}
     </div>
   );

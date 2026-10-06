@@ -19,8 +19,16 @@ function stripComments(src: string): string {
 test("activity-filter-bar never follows router.push with router.refresh (f65)", () => {
   const src = stripComments(readFileSync(FILE, "utf8"));
   assert.doesNotMatch(src, /router\.refresh\s*\(/, "router.refresh() reintroduced — the push already re-renders a dynamic page");
-  // Sanity: the navigation itself is still there (the pin must not pass by the file going empty).
-  assert.ok((src.match(/router\.push\s*\(/g) ?? []).length >= 3, "expected the three router.push call sites to remain");
+  // Sanity: the filter navigation itself is still there (the pin must not pass
+  // by the file going empty). Only `setParam` pushes now — the five sub-page
+  // tabs are <Link>s (review 2026-10 / U11), so cmd/middle-click opens a tab.
+  assert.ok((src.match(/router\.push\s*\(/g) ?? []).length >= 1, "expected the setParam router.push call site to remain");
+  assert.doesNotMatch(
+    src,
+    /router\.push\(\s*[`"']\/admin\/activity/,
+    "a sub-page tab is a push button again — every tab must be a <Link> (U11)",
+  );
+  assert.match(src, /href:\s*"\/admin\/activity\/history"/, "History tab must link to its own route segment");
 });
 
 test("next.config.ts does not override staleTimes (the premise of the f65 pin)", () => {

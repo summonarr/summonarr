@@ -1,4 +1,5 @@
 import "server-only";
+import { tooManyRequests } from "@/lib/http";
 
 // Password step-up shared by every two-factor ENROLLMENT change under
 // /api/profile/mfa — the same shape as the existing step-ups on password change
@@ -53,10 +54,7 @@ export async function mfaReauthStepUp(
   t: Translator,
 ): Promise<StepUpUser | NextResponse> {
   if (!checkRateLimit(`mfa-stepup:${session.user.id}`, 10, 15 * 60 * 1000)) {
-    return NextResponse.json(
-      { error: t("apiAuth.common.tooManyAttemptsWait15") },
-      { status: 429 },
-    );
+    return tooManyRequests(15 * 60, t("apiAuth.common.tooManyAttemptsWait15"));
   }
   const user = await prisma.user.findUnique({
     where: { id: session.user.id },

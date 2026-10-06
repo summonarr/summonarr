@@ -16,6 +16,7 @@ import { settleLimit } from "@/lib/concurrency";
 import { buildArrInstanceRegistryWrite, getArrInstances } from "@/lib/arr-instance-registry";
 import { BATCH_TX_TIMEOUT } from "@/lib/cron-auth";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { validateServerUrl, stripUrlUserinfo } from "@/lib/server-url";
 
 // Admin management surface for the full Radarr/Sonarr instance list (multi-
 // instance support): the registry metadata (slug/name/routing/access) AND each
@@ -28,6 +29,9 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // and sends the sentinel MASKED_VALUE back unchanged for a field it didn't edit.
 
 const MASKED_VALUE = "••••••••";
+// The display name renders on every "Request on <instance>" button, request-queue
+// chip and admin badge; bounded like the notification-agent sibling.
+const INSTANCE_NAME_MAX_LEN = 100;
 // The full per-instance Setting field set — readInstanceView reads it, the save
 // loop writes it, and removal cleanup deletes it, so a field added here is
 // covered everywhere at once. MinimumAvailability is Radarr-meaningful and
@@ -69,7 +73,10 @@ async function readInstanceView(service: ArrService, instance: ArrInstanceConfig
     serverAll: instance.serverAll,
     skipLibraryCheck: instance.skipLibraryCheck,
     autoRoute: instance.autoRoute,
-    url: map[arrSettingKey(service, instance.slug, "Url")] ?? "",
+    // Redacted like the media-instances and /api/settings GETs: never echo an
+    // embedded credential (older rows may predate the write-time URL check in
+    // POST below).
+    url: stripUrlUserinfo(map[arrSettingKey(service, instance.slug, "Url")] ?? ""),
     rootFolder: map[arrSettingKey(service, instance.slug, "RootFolder")] ?? "",
     qualityProfileId: map[arrSettingKey(service, instance.slug, "QualityProfileId")] ?? "",
     minimumAvailability: map[arrSettingKey(service, instance.slug, "MinimumAvailability")] ?? "",
@@ -126,6 +133,26 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         return NextResponse.json({ error: t("apiAdmin.arrInstances.invalidLanguageProfileId", { slug: inst.slug }) }, { status: 400 });
       }
     }
+    // Same rule for the quality profile: getCfg drops a non-numeric stored value
+    // on read, but the junk row would still be echoed by GET and render as the
+    // blank "server default" choice until re-saved.
+    if (inst.qualityProfileId !== undefined && inst.qualityProfileId !== null && inst.qualityProfileId !== "") {
+      const n = Number(inst.qualityProfileId);
+      if (!Number.isInteger(n) || n < 1) {
+        return NextResponse.json({ error: t("apiAdmin.arrInstances.invalidQualityProfileId", { slug: inst.slug }) }, { status: 400 });
+      }
+    }
+    // Same URL rules as the /api/settings and media-instances siblings: the value
+    // ships out on every safeFetchAdminConfigured call, so reject a bad scheme or
+    // an embedded credential here rather than storing it verbatim and echoing it
+    // back on GET.
+    if (typeof inst.url === "string" && inst.url.trim().length > 0) {
+      const err = validateServerUrl(inst.url.trim(), {}, t);
+      if (err) return NextResponse.json({ error: t("apiAdmin.arrInstances.invalidUrl", { slug: inst.slug, reason: err }) }, { status: 400 });
+    }
+    if (typeof inst.name === "string" && inst.name.trim().length > INSTANCE_NAME_MAX_LEN) {
+      return NextResponse.json({ error: t("apiAdmin.common.instanceNameTooLong", { slug: inst.slug, max: INSTANCE_NAME_MAX_LEN }) }, { status: 400 });
+    }
   }
 
   // Which named slugs existed before — so removing one from the list cleans up its
@@ -139,6 +166,24 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const before = await getArrInstances(service);
   const beforeNamed = new Set(before.filter((i) => isNamedSlug(i.slug)).map((i) => i.slug));
   const nextNamed = new Set(instances.filter((i) => isNamedSlug(i.slug)).map((i) => i.slug));
+  const removed = [...beforeNamed].filter((slug) => !nextNamed.has(slug));
+
+  // Requests that still target a removed slug are STRANDED: every later approve
+  // or retry resolves the instance through getCfg, which returns null once the
+  // slug's Url/ApiKey rows are gone, and the [id] PATCH has no re-point path.
+  // The removal is NOT refused (decommissioning a server is a legitimate
+  // reason) but the count travels with it — in the response so the manager UI
+  // can warn, and in the audit so the row answers "what did this strand".
+  // Scoped by mediaType: the Radarr and Sonarr registries are independent, so
+  // the same slug on both is the normal shape, and a MOVIE request on "anime"
+  // belongs to Radarr's "anime" while a TV one belongs to Sonarr's.
+  const removedInfo: Array<{ slug: string; openRequests: number }> = [];
+  for (const slug of removed) {
+    const openRequests = await prisma.mediaRequest.count({
+      where: { arrInstance: slug, mediaType: service === "radarr" ? "MOVIE" : "TV", status: { in: ["PENDING", "APPROVED"] } },
+    });
+    removedInfo.push({ slug, openRequests });
+  }
 
   // Persist registry metadata (built-ins excluded — the default ("") and legacy 4K
   // ("4k") instances are synthesized in getArrInstances, never registry-backed; a
@@ -148,7 +193,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     .filter((i) => i.slug !== DEFAULT_ARR_INSTANCE && i.slug !== FOURK_ARR_INSTANCE)
     .map((i) => ({
       slug: i.slug,
-      name: typeof i.name === "string" && i.name.trim() ? i.name : i.slug,
+      name: (typeof i.name === "string" ? i.name.trim() : "") || i.slug,
       restricted: i.restricted === true,
       serverAll: i.serverAll === true,
       skipLibraryCheck: i.skipLibraryCheck === true,
@@ -163,6 +208,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // committed. The next attempt reads a `before` that no longer contains it.
   // Mirrors the media-instances route. Network I/O stays outside (below).
   const registryWrite = buildArrInstanceRegistryWrite(service, registry);
+  const removedCounts: Record<string, { wantedItems: number; availableItems: number; trashApplications: number }> = {};
   await prisma.$transaction(async (tx) => {
   await tx.setting.upsert({
     where: { key: registryWrite.key },
@@ -214,28 +260,39 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // availability attach reads them unscoped, so its titles read "in arr"
   // forever. Mirrors the media-instances route's removal cleanup (guardrail
   // 35); like it, this is not retroactive for slugs removed before the fix.
-  for (const slug of beforeNamed) {
-    if (!nextNamed.has(slug)) {
-      await tx.setting.deleteMany({
-        where: { key: { in: FIELDS.map((f) => arrSettingKey(service, slug, f)) } },
-      });
-      if (service === "radarr") {
-        await tx.radarrWantedItem.deleteMany({ where: { arrInstance: slug } });
-        await tx.radarrAvailableItem.deleteMany({ where: { arrInstance: slug } });
-      } else {
-        await tx.sonarrWantedItem.deleteMany({ where: { arrInstance: slug } });
-        await tx.sonarrAvailableItem.deleteMany({ where: { arrInstance: slug } });
-      }
-      // TRaSH applications are per-instance CACHE, not history: recordApply
-      // upserts them on every apply and they mirror what was pushed upstream.
-      // Left behind, they resurrect on a REUSED slug — listSpecs would report a
-      // stale remoteId as "applied" to a different server, and buildProfileBody
-      // would treat the spec as satisfied and skip re-creating the custom format,
-      // embedding a remoteId that does not exist there into a live profile push.
-      // (IssueGrab also carries arrInstance but is deliberately NOT deleted — it
-      // is a per-action record that already cascades from its Issue.)
-      await tx.trashApplication.deleteMany({ where: { arrInstance: slug } });
-    }
+  for (const slug of removed) {
+    await tx.setting.deleteMany({
+      where: { key: { in: FIELDS.map((f) => arrSettingKey(service, slug, f)) } },
+    });
+    const [wanted, available] = service === "radarr"
+      ? [
+          await tx.radarrWantedItem.deleteMany({ where: { arrInstance: slug } }),
+          await tx.radarrAvailableItem.deleteMany({ where: { arrInstance: slug } }),
+        ]
+      : [
+          await tx.sonarrWantedItem.deleteMany({ where: { arrInstance: slug } }),
+          await tx.sonarrAvailableItem.deleteMany({ where: { arrInstance: slug } }),
+        ];
+    // TRaSH applications are per-instance CACHE, not history: recordApply
+    // upserts them on every apply and they mirror what was pushed upstream.
+    // Left behind, they resurrect on a REUSED slug — listSpecs would report a
+    // stale remoteId as "applied" to a different server, and buildProfileBody
+    // would treat the spec as satisfied and skip re-creating the custom format,
+    // embedding a remoteId that does not exist there into a live profile push.
+    // (IssueGrab also carries arrInstance but is deliberately NOT deleted — it
+    // is a per-action record that already cascades from its Issue.)
+    //
+    // Scoped to THIS service through the TrashSpec relation: TrashApplication
+    // has no service column of its own, and the Radarr and Sonarr registries
+    // are independent, so the same slug on both is the normal shape. An
+    // unscoped delete here wiped Sonarr "anime"'s applications when Radarr
+    // "anime" was removed — listSpecs then reported every CF "not applied"
+    // and the next apply re-created them upstream as duplicates. Same
+    // relation filter the trash.ts readers use.
+    const trash = await tx.trashApplication.deleteMany({
+      where: { arrInstance: slug, trashSpec: { service: service === "radarr" ? "RADARR" : "SONARR" } },
+    });
+    removedCounts[slug] = { wantedItems: wanted.count, availableItems: available.count, trashApplications: trash.count };
   }
   }, { timeout: BATCH_TX_TIMEOUT });
 
@@ -266,10 +323,13 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     userName: session.user.name ?? session.user.email,
     action: "SETTINGS_CHANGE",
     target: `arr-instances:${service}`,
-    details: { service, instances: instances.map((i) => i.slug) },
+    // Records what the removal destroyed and stranded, like the media sibling.
+    details: { service, instances: instances.map((i) => i.slug), removed: removedInfo, removedCounts },
     ...auditContext(req, session),
   });
 
   const view = await Promise.all(configured.map((i) => readInstanceView(service, i)));
-  return NextResponse.json({ ok: true, instances: view, testResults });
+  // `removed` is additive (the iOS app decodes this response): one entry per
+  // de-registered slug with the PENDING/APPROVED requests it left behind.
+  return NextResponse.json({ ok: true, instances: view, testResults, removed: removedInfo });
 });

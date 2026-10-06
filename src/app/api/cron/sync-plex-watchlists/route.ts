@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getCronActor, withCronRunRecording } from "@/lib/cron-auth";
+import { cronSkippedResponse, getCronActor, withCronRunRecording } from "@/lib/cron-auth";
 import { withAdvisoryLock, PLEX_WATCHLIST_LOCK_ID } from "@/lib/advisory-lock";
 import { syncPlexWatchlists, plexWatchlistRunProblems } from "@/lib/plex-watchlist";
 
@@ -46,6 +46,8 @@ export async function POST(request: NextRequest) {
         ok ? undefined : { headers: { "X-Cron-Degraded": String(problems) } },
       );
     },
-    () => NextResponse.json({ skipped: true, reason: "already running" }),
+    // A lock-busy skip is not a run: X-Cron-Skipped keeps it out of the ledger
+    // (otherwise a long run earned a second "ok, 0 ms" entry per tick — 7b).
+    () => cronSkippedResponse(),
   ));
 }

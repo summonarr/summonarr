@@ -7,7 +7,7 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { X, Film, Tv2, EyeOff } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { EmptyState } from "@/components/ui/design";
-import { useT } from "@/components/i18n/i18n-provider";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 export interface HiddenGridItem {
   tmdbId: number;
@@ -18,11 +18,21 @@ export interface HiddenGridItem {
 
 // Client grid for the /hidden page. Lists the user's "not interested" titles with
 // an optimistic un-hide (X) that DELETEs the entry (restoring it to discovery).
-export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] }) {
+// `cap` is the server page's `take` — when the initial list is exactly that
+// long, older titles exist that this page cannot show (and this is the only
+// un-hide UI), so a footer says so instead of failing silently.
+export function HiddenGrid({
+  initialItems,
+  cap,
+}: {
+  initialItems: HiddenGridItem[];
+  cap?: number;
+}) {
   const [items, setItems] = useState(initialItems);
   const [removing, setRemoving] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const t = useT();
+  const locale = useLocale();
 
   async function unhide(it: HiddenGridItem) {
     const key = `${it.tmdbId}:${it.mediaType}`;
@@ -67,6 +77,8 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
     );
   }
 
+  const capped = cap != null && initialItems.length >= cap;
+
   return (
     <>
     {error && (
@@ -101,6 +113,8 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
                 {it.title}
               </div>
             </Link>
+            {/* 40px hit area (the icon stays 14px): the control sits over the
+                poster link, so a near-miss navigates instead of un-hiding. */}
             <button
               type="button"
               onClick={() => unhide(it)}
@@ -111,8 +125,8 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
               style={{
                 top: 6,
                 right: 6,
-                width: 32,
-                height: 32,
+                width: 40,
+                height: 40,
                 display: "inline-flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -129,6 +143,14 @@ export function HiddenGrid({ initialItems }: { initialItems: HiddenGridItem[] })
         );
       })}
     </div>
+    {capped && (
+      <p
+        className="ds-mono"
+        style={{ fontSize: 11.5, color: "var(--ds-fg-subtle)", marginTop: 14, marginBottom: 0 }}
+      >
+        {t("personal.common.showingMostRecent", { n: cap.toLocaleString(locale) })}
+      </p>
+    )}
     </>
   );
 }

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { EmptyState } from "@/components/ui/design";
 import { List, Activity, Download, X, ChevronDown, ChevronRight, Monitor, Globe, Shield, Bot } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
@@ -43,29 +44,70 @@ function actionLabel(action: string, t: Translator): string {
   return action in ACTION_LABELS ? t(`adminManage.audit.action.${action}`) : action;
 }
 
-const DOT_COLORS: Record<string, string> = {
-  REQUEST_APPROVE:    "bg-green-500",
-  REQUEST_DECLINE:    "bg-red-500",
-  REQUEST_DELETE:     "bg-red-500",
-  USER_ROLE_CHANGE:   "bg-blue-500",
-  USER_DELETE:        "bg-red-500",
-  SETTINGS_CHANGE:    "bg-yellow-500",
-  LIBRARY_SYNC:       "bg-purple-500",
-  ISSUE_STATUS_CHANGE:"bg-orange-500",
-  ISSUE_CLAIM:        "bg-orange-500",
-  ISSUE_UNCLAIM:      "bg-zinc-500",
-  ISSUE_DELETE:       "bg-red-500",
-  MAINTENANCE_TOGGLE: "bg-yellow-500",
-  BACKUP_EXPORT:      "bg-indigo-500",
-  BACKUP_IMPORT:      "bg-indigo-500",
-  AUTH_LOGIN:         "bg-emerald-500",
-  AUTH_LOGIN_FAILED:  "bg-red-500",
-  AUTH_LOGOUT:        "bg-zinc-500",
-  SESSION_REVOKE:     "bg-orange-500",
-  CACHE_WARM:         "bg-purple-500",
-  RATINGS_CACHE_CLEAR:"bg-purple-500",
-  PLAY_HISTORY_BACKFILL: "bg-purple-500",
+// The Timeline dot takes its colour FROM the action chip rather than from a
+// second hand-kept table: a per-action map covered 22 of 44 actions, so a red
+// "User Data Purged" chip sat beside a grey dot, and its one fixed blue ignored
+// the theme while the chip used the info token. The chip's text class names its
+// status tone (guardrail 42's remapped shades), so a new action can never land
+// with a dot that disagrees with its chip.
+type DotTone = "danger" | "success" | "warning" | "info" | "accent" | "neutral";
+
+function dotToneOf(chipColor: string): DotTone {
+  if (/\btext-(?:red|rose)-/.test(chipColor)) return "danger";
+  if (/\btext-(?:green|emerald)-/.test(chipColor)) return "success";
+  if (/\btext-(?:yellow|amber|orange)-/.test(chipColor)) return "warning";
+  if (/\btext-indigo-/.test(chipColor)) return "accent";
+  if (/\btext-(?:sky|purple)-/.test(chipColor)) return "info";
+  return "neutral";
+}
+
+// All remapped shades (--ds-danger/success/warning/info/accent); zinc-500 is
+// the neutral rail colour the dot already used.
+const DOT_CLASS: Record<DotTone, string> = {
+  danger:  "bg-red-500",
+  success: "bg-green-500",
+  warning: "bg-amber-500",
+  info:    "bg-sky-500",
+  accent:  "bg-indigo-500",
+  neutral: "bg-zinc-500",
 };
+
+// The PII scrub overwrites userName with a sentinel; shown as a muted,
+// translated label instead of an English token dressed as an account name.
+// The sentinel itself is REDACTED_USER_NAME in @/lib/audit — a server module —
+// so the page passes it down rather than this client component importing it.
+function UserName({ name, redactedUserName, className }: { name: string; redactedUserName: string; className: string }) {
+  const t = useT();
+  if (name === redactedUserName) {
+    return <span className={`italic text-zinc-500 ${className}`}>{t("adminManage.audit.redacted")}</span>;
+  }
+  return <span className={className}>{name}</span>;
+}
+
+// Local-day bounds for the date filter. `<input type="date">` yields a plain
+// YYYY-MM-DD, which `new Date()` on the server would read as UTC midnight —
+// so a UTC-7 viewer filtering "from Oct 5" got rows from Oct 4 17:00 local,
+// filed under an "Oct 4" heading by the Timeline view (which groups by LOCAL
+// day). The URL and every API call instead carry the ISO instant of the start
+// of the viewer's local day; the server adds one UTC day to `dateTo`.
+function localDayStartIso(ymd: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!m) return "";
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return isNaN(d.getTime()) ? "" : d.toISOString();
+}
+
+// Inverse for the input's value. A bare YYYY-MM-DD (an old bookmark) passes
+// through. Depends on the viewer's time zone, so every callsite is mounted-
+// gated (guardrail 16): the SSR server's zone could file the instant under a
+// different calendar day than the browser's.
+function isoToLocalDateInput(value: string): string {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
 
 function useAuditNav() {
   const router = useRouter();
@@ -141,6 +183,7 @@ function AuditLogFilters({
 }) {
   const t = useT();
   const navigate = useAuditNav();
+  const mounted = useHasMounted();
   const [userInput, setUserInput] = useState(currentUser);
   const [targetInput, setTargetInput] = useState(currentTarget);
   const userTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -152,10 +195,14 @@ function AuditLogFilters({
 
   const hasFilters = currentAction || currentGroup || currentDateFrom || currentDateTo || currentUser || currentTarget || currentHideCron;
 
-  // When a group is selected, scope the per-action pills to that group
-  const visibleActions = currentGroup
-    ? ALL_ACTIONS.filter((a) => ACTION_GROUP[a as AuditAction] === currentGroup)
-    : ALL_ACTIONS;
+  // The per-action pills show only once a group scopes them: all 44 at once
+  // wrapped into ~12 rows at phone width before the table was even visible.
+  // An action reached without a group (an old bookmark) still shows its own
+  // group's pills so the active one stays visible and clearable.
+  const pillGroup = currentGroup || (currentAction ? ACTION_GROUP[currentAction as AuditAction] ?? "" : "");
+  const visibleActions = pillGroup
+    ? ALL_ACTIONS.filter((a) => ACTION_GROUP[a as AuditAction] === pillGroup)
+    : [];
 
   // Copy the URL value into the text box when the user presses Back/Forward.
   // That kind of navigation doesn't remount this component, so without this the
@@ -234,26 +281,33 @@ function AuditLogFilters({
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-2">
+        {/* Always rendered (even empty) so the right-hand controls stay right-aligned. */}
         <div className="flex flex-wrap gap-1.5">
-          <button
-            onClick={() => navigate({ action: "" })}
-            className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-              !currentAction ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
-            }`}
-          >
-            {t("adminManage.audit.group.all")}
-          </button>
-          {visibleActions.map((a) => (
-            <button
-              key={a}
-              onClick={() => navigate({ action: a })}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                currentAction === a ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
-              }`}
-            >
-              {actionLabel(a, t)}
-            </button>
-          ))}
+          {visibleActions.length > 0 && (
+            <>
+              <button
+                onClick={() => navigate({ action: "" })}
+                aria-pressed={!currentAction}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  !currentAction ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
+                }`}
+              >
+                {t("adminManage.audit.group.all")}
+              </button>
+              {visibleActions.map((a) => (
+                <button
+                  key={a}
+                  onClick={() => navigate({ action: a })}
+                  aria-pressed={currentAction === a}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                    currentAction === a ? "bg-indigo-600 text-[var(--ds-accent-fg)]" : "bg-zinc-800 text-zinc-400 hover:text-zinc-100"
+                  }`}
+                >
+                  {actionLabel(a, t)}
+                </button>
+              ))}
+            </>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -308,8 +362,8 @@ function AuditLogFilters({
           <input
             id="audit-date-from"
             type="date"
-            value={currentDateFrom}
-            onChange={(e) => navigate({ dateFrom: e.target.value })}
+            value={mounted ? isoToLocalDateInput(currentDateFrom) : ""}
+            onChange={(e) => navigate({ dateFrom: localDayStartIso(e.target.value) })}
             className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:[color-scheme:dark]"
           />
         </div>
@@ -318,8 +372,8 @@ function AuditLogFilters({
           <input
             id="audit-date-to"
             type="date"
-            value={currentDateTo}
-            onChange={(e) => navigate({ dateTo: e.target.value })}
+            value={mounted ? isoToLocalDateInput(currentDateTo) : ""}
+            onChange={(e) => navigate({ dateTo: localDayStartIso(e.target.value) })}
             className="rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-300 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:[color-scheme:dark]"
           />
         </div>
@@ -374,6 +428,17 @@ function ExportButton({
   const t = useT();
   const [open, setOpen] = useState(false);
 
+  // Escape dismisses the menu wherever focus is — the backdrop only answers to
+  // a click, which left keyboard users with no way to close it.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
   function exportAs(format: "csv" | "json") {
     const params = new URLSearchParams();
     params.set("format", format);
@@ -392,6 +457,8 @@ function ExportButton({
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
+        aria-haspopup="menu"
+        aria-expanded={open}
         className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-800 text-zinc-400 hover:text-zinc-100 transition-colors"
       >
         <Download size={14} /> {t("adminManage.audit.export")}
@@ -399,11 +466,11 @@ function ExportButton({
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1 z-20 bg-zinc-800 border border-zinc-700 rounded-md shadow-lg overflow-hidden">
-            <button onClick={() => exportAs("csv")} className="block w-full text-left px-4 py-2 text-xs text-zinc-300 hover:bg-zinc-700">
+          <div role="menu" className="absolute right-0 top-full mt-1 z-20 bg-zinc-800 border border-zinc-700 rounded-md shadow-lg overflow-hidden">
+            <button role="menuitem" onClick={() => exportAs("csv")} className="block w-full text-left px-4 py-2 text-xs text-zinc-300 hover:bg-zinc-700">
               {t("adminManage.audit.exportCsv")}
             </button>
-            <button onClick={() => exportAs("json")} className="block w-full text-left px-4 py-2 text-xs text-zinc-300 hover:bg-zinc-700">
+            <button role="menuitem" onClick={() => exportAs("json")} className="block w-full text-left px-4 py-2 text-xs text-zinc-300 hover:bg-zinc-700">
               {t("adminManage.audit.exportJson")}
             </button>
           </div>
@@ -848,7 +915,7 @@ function DetailSection({ details, action, expanded }: { details: string | null; 
   );
 }
 
-function AuditLogTable({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }) {
+function AuditLogTable({ logs, mounted, redactedUserName }: { logs: AuditRow[]; mounted: boolean; redactedUserName: string }) {
   const t = useT();
   const locale = useLocale();
   return (
@@ -878,15 +945,24 @@ function AuditLogTable({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }
                   <td className="px-4 py-3 text-zinc-400 whitespace-nowrap text-xs" title={mounted ? new Date(log.createdAt).toLocaleString(locale) : undefined}>
                     {mounted ? relativeTime(log.createdAt, locale) : ""}
                   </td>
-                  <td className="px-4 py-3 text-zinc-100 text-sm">{log.userName}</td>
+                  <td className="px-4 py-3">
+                    <UserName name={log.userName} redactedUserName={redactedUserName} className="text-zinc-100 text-sm" />
+                  </td>
                   <td className="px-4 py-3">
                     <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${actionInfo.color}`}>
                       {label}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-zinc-300 max-w-[200px] truncate text-xs font-mono">{log.target}</td>
-                  <td className="hidden sm:table-cell px-4 py-3 max-w-[300px]">
-                    <DetailSection details={log.details} action={log.action} />
+                  {/* max-width on a <td> is ignored in auto table layout, so the
+                      bound lives on an inner block: without it a long target
+                      never ellipsized and widened the table past its wrapper. */}
+                  <td className="px-4 py-3 text-zinc-300 text-xs font-mono">
+                    <div className="max-w-[200px] truncate" title={log.target}>{log.target}</div>
+                  </td>
+                  <td className="hidden sm:table-cell px-4 py-3">
+                    <div className="max-w-[300px]">
+                      <DetailSection details={log.details} action={log.action} />
+                    </div>
                   </td>
                   <td className="hidden sm:table-cell px-4 py-3">
                     <div className="flex items-center gap-2 text-xs text-zinc-500">
@@ -917,7 +993,7 @@ function AuditLogTable({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }
   );
 }
 
-function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolean }) {
+function AuditLogTimeline({ logs, mounted, redactedUserName }: { logs: AuditRow[]; mounted: boolean; redactedUserName: string }) {
   const t = useT();
   const locale = useLocale();
   const groups: { date: string; logs: AuditRow[] }[] = [];
@@ -952,7 +1028,7 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
             <div className="space-y-3">
               {group.logs.map((log) => {
                 const actionInfo = ACTION_LABELS[log.action as AuditAction] ?? { label: log.action, color: "bg-zinc-800 text-zinc-400" };
-                const dotColor = DOT_COLORS[log.action] ?? "bg-zinc-500";
+                const dotColor = DOT_CLASS[dotToneOf(actionInfo.color)];
                 const label = actionLabel(log.action, t);
 
                 return (
@@ -962,7 +1038,7 @@ function AuditLogTimeline({ logs, mounted }: { logs: AuditRow[]; mounted: boolea
                     <Card className="bg-zinc-900 border-zinc-800 p-3">
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-sm font-medium text-zinc-100">{log.userName}</span>
+                          <UserName name={log.userName} redactedUserName={redactedUserName} className="text-sm font-medium text-zinc-100" />
                           <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${actionInfo.color}`}>
                             {label}
                           </span>
@@ -1021,6 +1097,7 @@ export function AuditLogView({
   currentUser,
   currentTarget,
   currentHideCron,
+  redactedUserName,
 }: {
   initialLogs: AuditRow[];
   initialNextCursor: string | null;
@@ -1032,7 +1109,13 @@ export function AuditLogView({
   currentUser: string;
   currentTarget: string;
   currentHideCron: boolean;
+  /** The PII scrub's userName sentinel (REDACTED_USER_NAME, a server-side constant). */
+  redactedUserName: string;
 }) {
+  const navigate = useAuditNav();
+  const hasFilters = Boolean(
+    currentAction || currentGroup || currentDateFrom || currentDateTo || currentUser || currentTarget || currentHideCron,
+  );
   const [logs, setLogs] = useState(initialLogs);
   const [nextCursor, setNextCursor] = useState(initialNextCursor);
   const [hasMore, setHasMore] = useState(initialHasMore);
@@ -1120,15 +1203,27 @@ export function AuditLogView({
       />
 
       {logs.length === 0 ? (
-        <Card className="bg-zinc-900 border-zinc-800">
-          <div className="p-8 text-center text-zinc-500 text-sm">
-            {t("adminManage.audit.empty")}
-          </div>
-        </Card>
+        <EmptyState
+          icon={List}
+          title={t("adminManage.audit.empty")}
+          description={hasFilters ? t("adminManage.audit.emptyFiltered") : undefined}
+          action={
+            hasFilters ? (
+              <button
+                onClick={() =>
+                  navigate({ action: "", group: "", dateFrom: "", dateTo: "", user: "", target: "", hideCron: "" })
+                }
+                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-xs text-zinc-400 hover:text-zinc-100 bg-zinc-800 hover:bg-zinc-700 transition-colors"
+              >
+                <X size={12} /> {t("adminManage.audit.clear")}
+              </button>
+            ) : undefined
+          }
+        />
       ) : viewMode === "table" ? (
-        <AuditLogTable logs={logs} mounted={mounted} />
+        <AuditLogTable logs={logs} mounted={mounted} redactedUserName={redactedUserName} />
       ) : (
-        <AuditLogTimeline logs={logs} mounted={mounted} />
+        <AuditLogTimeline logs={logs} mounted={mounted} redactedUserName={redactedUserName} />
       )}
 
       {hasMore && (

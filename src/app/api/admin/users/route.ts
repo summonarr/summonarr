@@ -10,6 +10,7 @@ import { sanitizeOptional } from "@/lib/sanitize";
 import { Permission, hasPermission, defaultPermissionsForRole } from "@/lib/permissions";
 import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { deriveUserSource } from "@/lib/user-source";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +26,8 @@ const USER_SELECT = {
   mediaServer: true,
   maxContentRating: true,
   passwordHash: true, // not serialized — only to derive `source` (local vs OAuth)
+  plexUserId: true, // not serialized — only to derive `source`
+  jellyfinUserId: true, // not serialized — only to derive `source`
   movieQuotaLimit: true,
   movieQuotaDays: true,
   tvQuotaLimit: true,
@@ -45,7 +48,7 @@ const USER_SELECT = {
 
 type UserRow = Prisma.UserGetPayload<{ select: typeof USER_SELECT }>;
 
-function serializeUser(u: UserRow) {
+function serializeUser(u: UserRow, hasOidcAccount: boolean) {
   return {
     id: u.id,
     name: u.name,
@@ -59,13 +62,18 @@ function serializeUser(u: UserRow) {
     purgedAt: u.purgedAt,
     mediaServer: u.mediaServer,
     maxContentRating: u.maxContentRating,
-    // Derive auth source (mirrors the web admin page): a passwordHash means a
-    // local-credentials account; the @jellyfin.local synthetic email marks a
-    // Jellyfin user; everything else is Plex. The native client gates the
-    // media-server-access control on `source === "local"`.
-    source: u.passwordHash != null
-      ? "local"
-      : ((u.email ?? "").endsWith("@jellyfin.local") ? "jellyfin" : "plex"),
+    // Auth source — the SAME derivation the web admin page uses (user-source.ts),
+    // so the chip never disagrees between web and native: local (passwordHash),
+    // oidc (an `oidc` Account row), jellyfin (subject id or synthetic email),
+    // plex, discord. The native client gates the media-server-access control on
+    // `source === "local"`; the value set is additive over the old local/jellyfin/plex.
+    source: deriveUserSource({
+      email: u.email ?? "",
+      plexUserId: u.plexUserId,
+      jellyfinUserId: u.jellyfinUserId,
+      hasLocalCredentials: u.passwordHash != null,
+      hasOidcAccount,
+    }),
     movieQuotaLimit: u.movieQuotaLimit,
     movieQuotaDays: u.movieQuotaDays,
     tvQuotaLimit: u.tvQuotaLimit,
@@ -100,8 +108,28 @@ export const GET = withPermission(Permission.MANAGE_USERS)(async (_req, _ctx, _s
     take: 1000,
   });
 
-  return NextResponse.json(users.map(serializeUser));
+  const oidcIds = await oidcAccountHolders(users);
+  return NextResponse.json(users.map((u) => serializeUser(u, oidcIds.has(u.id))));
 });
+
+// One Account read for the whole list (like the admin page), and only for the
+// rows that can be OIDC at all — a passwordHash already decides "local". The
+// label is cosmetic, so a failed read degrades to "no OIDC binding" rather than
+// taking the user list down.
+async function oidcAccountHolders(users: readonly { id: string; passwordHash: string | null }[]): Promise<Set<string>> {
+  const candidates = users.filter((u) => u.passwordHash == null).map((u) => u.id);
+  if (candidates.length === 0) return new Set();
+  try {
+    const rows = await prisma.account.findMany({
+      where: { provider: "oidc", userId: { in: candidates } },
+      select: { userId: true },
+    });
+    return new Set(rows.map((r) => r.userId));
+  } catch (err) {
+    console.warn("[admin-users] OIDC account read failed; source labels fall back to local/jellyfin/plex", err);
+    return new Set();
+  }
+}
 
 // Create a local-credentials user (web + native admin "Create user"). Registration
 // is otherwise closed after the first user, so this is the only in-app path to a
@@ -128,11 +156,20 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
     return NextResponse.json({ error: t("apiAdmin.users.onlyAdminCreate") }, { status: 403 });
   }
 
-  const email = body.email;
-  if (!email || typeof email !== "string" || email.length > 254 || /\s/.test(email)) {
+  // Normalize FIRST, validate the normalized value: NFKC folds a fullwidth "＠"
+  // (not whitespace, not "@") into a real "@", so checking the raw string let
+  // `a＠b@c.com` pass the single-@ rule and be stored as `a@b@c.com`.
+  // Whitespace is still refused on the RAW value (padding is rejected, never
+  // trimmed, so two addresses differing only by padding can't both be accepted).
+  const rawEmail = body.email;
+  if (!rawEmail || typeof rawEmail !== "string" || rawEmail.length > 254 || /\s/.test(rawEmail)) {
     return NextResponse.json({ error: t("apiAdmin.users.invalidEmail") }, { status: 400 });
   }
-  const parts = email.split("@");
+  const normalized = normalizeEmail(rawEmail);
+  if (!normalized || normalized.length > 254 || /\s/.test(normalized)) {
+    return NextResponse.json({ error: t("apiAdmin.users.invalidEmail") }, { status: 400 });
+  }
+  const parts = normalized.split("@");
   const domainDot = parts[1]?.lastIndexOf(".") ?? -1;
   if (parts.length !== 2 || !parts[0] || !parts[1] || domainDot < 1 || domainDot === parts[1].length - 1) {
     return NextResponse.json({ error: t("apiAdmin.users.invalidEmail") }, { status: 400 });
@@ -142,7 +179,10 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
   if (!password || typeof password !== "string") {
     return NextResponse.json({ error: t("apiAdmin.users.passwordRequired") }, { status: 400 });
   }
-  if (password.length < 8) {
+  // 12, the same floor as first-admin registration and the profile password
+  // change — an admin-created account (the only post-setup path to a local one,
+  // ADMIN role included) must not be weaker than what the user could set alone.
+  if (password.length < 12) {
     return NextResponse.json({ error: t("apiAdmin.users.passwordTooShort") }, { status: 400 });
   }
   if (password.length > MAX_PASSWORD_LENGTH) {
@@ -153,7 +193,6 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
     return NextResponse.json({ error: t("apiAdmin.users.nameTooLong") }, { status: 400 });
   }
 
-  const normalized = normalizeEmail(email);
   const name = sanitizeOptional(body.name);
   const passwordHash = await hashPassword(password);
 
@@ -185,5 +224,6 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, se
     ...auditContext(req, session),
   });
 
-  return NextResponse.json(serializeUser(user), { status: 201 });
+  // A row created with a passwordHash is "local" by construction — no Account read.
+  return NextResponse.json(serializeUser(user, false), { status: 201 });
 });

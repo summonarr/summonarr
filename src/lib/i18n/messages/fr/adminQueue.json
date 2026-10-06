@@ -252,7 +252,7 @@
   "adminQueue.fixMatch.arrSays": "Arr indique TMDB #{id}",
   "adminQueue.fixMatch.arrRecommends": "Radarr/Sonarr recommande une autre correspondance :",
   "adminQueue.fixMatch.arrConfirmsHighlighted": "Radarr/Sonarr confirme TMDB #{id} — les candidats correspondants sont mis en évidence ci-dessous.",
-  "adminQueue.fixMatch.reidentify": "Réidentifier cet élément Jellyfin de TMDB #{from} vers TMDB #{to}",
+  "adminQueue.fixMatch.reidentify": "Ré-identifier cet élément Jellyfin de TMDB #{from} vers TMDB #{to}{instance}.",
   "adminQueue.fixMatch.jellyfinNote": "Jellyfin applique exactement cet ID TMDB et lance une actualisation complète des métadonnées — il n'y a pas d'autres candidats parmi lesquels choisir. La confirmation des éléments volumineux peut prendre quelques minutes.",
   "adminQueue.fixMatch.plexCandidatesHeading": "Candidats Plex — sélectionnez la bonne correspondance",
   "adminQueue.fixMatch.found": "{count} trouvés",
@@ -287,5 +287,17 @@
   "adminQueue.blacklist.unblockAria": "Débloquer {title}",
   "adminQueue.blacklist.unblock": "Débloquer",
   "adminQueue.blacklist.title": "Liste noire",
-  "adminQueue.blacklist.subtitle": "Bloquer des titres précis dans la découverte et les demandes"
+  "adminQueue.blacklist.subtitle": "Bloquer des titres précis dans la découverte et les demandes",
+  "adminQueue.blacklist.filterPlaceholder": "Filtrer les titres bloqués…",
+  "adminQueue.blacklist.filterAria": "Filtrer les titres bloqués par titre ou motif",
+  "adminQueue.blacklist.filterNoMatch": "Aucun titre bloqué ne correspond à ce filtre.",
+  "adminQueue.fixMatch.outcome.joined": "Une correction identique était déjà en cours — votre sélection de candidat n'a peut-être pas été appliquée.",
+  "adminQueue.fixMatch.outcome.jobLost": "Le serveur a perdu la trace de cette correction (redémarré ?) — relancez une synchronisation de la bibliothèque pour voir si elle a été appliquée.",
+  "adminQueue.fixMatch.outcome.pollLost": "Contact perdu pendant l'exécution de la correction — relancez une synchronisation de la bibliothèque pour voir si elle a été appliquée.",
+  "adminQueue.fixMatch.outcome.timedOut": "La correction est toujours en cours après 20 minutes — vérifiez l'élément sur le serveur multimédia ou relancez une synchronisation de la bibliothèque.",
+  "adminQueue.fixMatch.outcome.failed": "La correction de correspondance a échoué",
+  "adminQueue.fixMatch.arrBadge": "Radarr/Sonarr ✓",
+  "adminQueue.fixMatch.arrShort": "Arr ✓",
+  "adminQueue.fixMatch.resolutionNote": "Correspondance corrigée en « {title} »",
+  "adminQueue.fixMatch.autoRequestNote": "Ajouté depuis la correction de correspondance — mal associé dans la bibliothèque"
 }

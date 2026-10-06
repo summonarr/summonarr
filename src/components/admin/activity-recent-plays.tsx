@@ -17,6 +17,8 @@ import {
   sourceDotColor,
 } from "@/components/admin/activity-ui";
 import { IpInfo } from "@/components/admin/ip-info";
+import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/design";
 import { withBasePath } from "@/lib/base-path";
 
 export interface RecentPlay {
@@ -150,6 +152,7 @@ export function ActivityRecentPlays({
   source,
   mediaType,
   startDateIso,
+  days,
 }: {
   plays: RecentPlay[];
   source?: string;
@@ -157,6 +160,9 @@ export function ActivityRecentPlays({
   // Period lower bound, computed once on the server so paginated client
   // fetches stay consistent with the server-rendered first page (guardrail 16).
   startDateIso?: string;
+  // The overview's selected period, forwarded to the "View history" link so
+  // the history page opens on the same window this card was filtered to.
+  days?: number;
 }) {
   const [plays, setPlays] = useState<RecentPlay[]>(initialPlays);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -167,6 +173,16 @@ export function ActivityRecentPlays({
   const mounted = useHasMounted();
   const t = useT();
   const locale = useLocale();
+
+  // "View history" keeps the Source / Type / Period filters this card was
+  // rendered under — the history page honours all three, so dropping them
+  // turned a "Jellyfin · TV · 90d" card into an unfiltered 30-day history.
+  const historyParams = new URLSearchParams();
+  if (source) historyParams.set("source", source);
+  if (mediaType) historyParams.set("mediaType", mediaType);
+  if (days) historyParams.set("days", String(days));
+  const historyQuery = historyParams.toString();
+  const historyHref = `/admin/activity/history${historyQuery ? `?${historyQuery}` : ""}`;
 
   // When a stream finishes, ActivityLiveRefresher calls router.refresh(). That
   // sends new props but keeps this component (and its useState) alive, so we
@@ -303,7 +319,7 @@ export function ActivityRecentPlays({
             </span>
           </div>
           <Link
-            href="/admin/activity?tab=history"
+            href={historyHref}
             className="ds-mono"
             style={{
               fontSize: 11,
@@ -317,17 +333,11 @@ export function ActivityRecentPlays({
         </div>
 
         {plays.length === 0 ? (
-          <p
-            style={{
-              padding: "28px 18px",
-              margin: 0,
-              color: "var(--ds-fg-subtle)",
-              fontSize: 13,
-              textAlign: "center",
-            }}
-          >
-            {t("adminActivity.recentPlays.empty")}
-          </p>
+          // The card is padding-0 (the table runs edge to edge), so the shared
+          // empty block gets its own gutter rather than touching the card edges.
+          <div style={{ padding: 14 }}>
+            <EmptyState description={t("adminActivity.recentPlays.empty")} />
+          </div>
         ) : (
           <div className="resp-table-scroll">
             <table
@@ -623,36 +633,16 @@ export function ActivityRecentPlays({
                 {t("adminActivity.recentPlays.loadMoreError")}
               </span>
             )}
-            <button
-              onClick={loadMore}
-              disabled={loading}
-              className="ds-mono"
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 8,
-                fontSize: 11.5,
-                padding: "6px 14px",
-                borderRadius: 6,
-                background: "var(--ds-bg-3)",
-                border: "1px solid var(--ds-border)",
-                color: "var(--ds-fg-muted)",
-                cursor: loading ? "default" : "pointer",
-                opacity: loading ? 0.5 : 1,
-              }}
-            >
+            <Button variant="ghost" size="sm" onClick={loadMore} disabled={loading}>
               {loading ? (
                 <>
-                  <Loader2
-                    style={{ width: 14, height: 14 }}
-                    className="animate-spin"
-                  />
+                  <Loader2 className="animate-spin" />
                   {t("adminActivity.common.loading")}
                 </>
               ) : (
                 t("adminActivity.common.loadMore")
               )}
-            </button>
+            </Button>
           </div>
         )}
       </ActivityCard>

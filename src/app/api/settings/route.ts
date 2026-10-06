@@ -114,7 +114,9 @@ const SETTINGS_SCHEMA = [
   ["traktClientId",                 true ],
   ["ratingsHiddenSources",          false],
   ["ipinfoToken",                   true ],
-  ["vapidPrivateKey",               true ],
+  // vapidPrivateKey is deliberately NOT here: push.ts generates the VAPID pair
+  // itself and nothing in the UI types it. Admin-writable, a lone private half
+  // no longer matched the stored public key and every web-push send failed.
   ["sessionDefaultDuration",        false],
   ["sessionMobileDuration",         false],
   ["sessionMaxDuration",            false],
@@ -169,8 +171,8 @@ const SETTINGS_SCHEMA = [
   ["trashSyncNaming",                 false],
   ["trashSyncQualitySizes",           false],
   ["trashGithubToken",                true ],
-  ["trashLastRefreshTruncatedAt",     false],
-  ["trashLastRefreshAt",              false],
+  // trashLastRefreshAt / trashLastRefreshTruncatedAt are cron bookkeeping rows
+  // written by trash.ts, not settings — an admin-typed value there read as NaN.
   // Plex watchlist auto-request through the server owner's token (guardrail
   // 34b, src/lib/plex-friends-watchlist.ts). "true"|"false"; plaintext.
   ["plexWatchlistServerSource",       false],
@@ -223,10 +225,13 @@ const SENSITIVE_KEYS = new Set<string>(
       );
     }
   }
+  // A sensitive key the route does not expose at all (vapidPrivateKey — generated
+  // by push.ts, never admin-typed) is fine: GET never returns it and PATCH never
+  // writes it. The hole this guards is a key the route DOES expose as plaintext.
   for (const k of SETTINGS_SENSITIVE_KEYS_SET) {
-    if (!SENSITIVE_KEYS.has(k)) {
+    if ((ALLOWED_KEYS as readonly string[]).includes(k) && !SENSITIVE_KEYS.has(k)) {
       throw new Error(
-        `[settings] '${k}' is in SETTINGS_SENSITIVE_KEYS but not marked sensitive in SETTINGS_SCHEMA — encryption gate is dead-coded`,
+        `[settings] '${k}' is in SETTINGS_SENSITIVE_KEYS but not marked sensitive in SETTINGS_SCHEMA — GET would return it in cleartext`,
       );
     }
   }
@@ -272,6 +277,7 @@ const COOLDOWN_EXEMPT = new Set<string>([
   "request4kAll",
   "plexWatchlistServerSource",
   "plexWatchlistServerAutoEnroll",
+  "requireMfaForAdmins",
 ]);
 setInterval(() => {
   const cutoff = Date.now() - KEY_COOLDOWN_MS;
@@ -279,6 +285,62 @@ setInterval(() => {
     if (ts < cutoff) lastKeyWriteAt.delete(key);
   }
 }, 60_000).unref();
+
+// Boolean switches. Every reader compares against the literal ("=== \"true\"", or
+// "!== \"false\"" for the default-on ones), so any other string silently reads as
+// one side while the audit row still records a toggle — `maintenanceEnabled: "yes"`
+// was audited MAINTENANCE_TOGGLE and enabled nothing. Only the two literals are
+// stored. Every FEATURE_KEYS entry is "true"|"false" too (features.ts).
+const BOOLEAN_KEYS = new Set<string>([
+  ...FEATURE_KEYS,
+  "maintenanceEnabled",
+  "motdEnabled",
+  "enableUserEmails",
+  "disableLocalLogin",
+  "requireMfaForAdmins",
+  "enableMachineSession",
+  "playHistoryEnabled",
+  "playHistoryPlexEnabled",
+  "playHistoryJellyfinEnabled",
+  "jellyfinRestrictSignIn",
+  "request4kAll",
+  "discordRequireLinkedAccount",
+  "discordRequireLinkedAccountSite",
+  "trashGuidesEnabled",
+  "trashSyncCustomFormats",
+  "trashSyncCustomFormatGroups",
+  "trashSyncQualityProfiles",
+  "trashSyncNaming",
+  "trashSyncQualitySizes",
+  "plexWatchlistServerSource",
+  "plexWatchlistServerAutoEnroll",
+]);
+
+// 90 days. auth.ts cap()s the three session TTLs to the same ceiling on READ as
+// the backstop; the write side REFUSES an out-of-range value instead of silently
+// rewriting it (the old loop stored "3600" for "30" / "abc" and the cap for
+// anything larger, so the form said Saved for a value that was never saved).
+const MAX_SESSION_SECONDS = 7_776_000;
+
+// Integer settings with inclusive bounds, mirroring each reader's clamp so a value
+// accepted here can never be silently replaced by the default on read:
+// play-history.ts (thresholds 0–100, else 80/90; arc gap 1–365, else 14;
+// retention — 0 = keep forever, a typo like "9O" used to read as 0 = OFF),
+// quota.ts / votes (0 = off, "abc" used to read as off), push/subscribe (the
+// per-user subscription cap), auth.ts (session TTLs). Digits only, like the
+// sibling integer checks: parseInt would read "1e3" as 1.
+const NUMERIC_BOUNDS: Partial<Record<AllowedKey, readonly [min: number, max: number]>> = {
+  playHistoryWatchedThreshold: [0, 100],
+  playHistoryCompletionThreshold: [0, 100],
+  playHistoryArcGapDays: [1, 365],
+  playHistoryRetentionDays: [0, 3650],
+  quotaLimit: [0, 10_000],
+  deletionVoteThreshold: [0, 10_000],
+  maxPushSubscriptions: [1, 100],
+  sessionDefaultDuration: [60, MAX_SESSION_SECONDS],
+  sessionMobileDuration: [60, MAX_SESSION_SECONDS],
+  sessionMaxDuration: [60, MAX_SESSION_SECONDS],
+};
 
 // The connectivity-test messages are recorded in English (the rollback audit row
 // stores testResults verbatim — audit details are data, never translated) and
@@ -434,19 +496,15 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
           const parsed = new URL(value);
           if (parsed.protocol !== "https:") {
             return NextResponse.json(
-              {
-                error: "invalid-url",
-                message: t("apiAdmin.settings.donationHttps"),
-              },
+              { error: t("apiAdmin.settings.donationHttps"), code: "invalid-url" },
               { status: 400 },
             );
           }
         } catch {
+          // Same { error } shape as every other 400 here, so the form can show the
+          // reason; `code` keeps a machine-readable discriminator for API clients.
           return NextResponse.json(
-            {
-              error: "invalid-url",
-              message: t("apiAdmin.settings.donationHttps"),
-            },
+            { error: t("apiAdmin.settings.donationHttps"), code: "invalid-url" },
             { status: 400 },
           );
         }
@@ -474,9 +532,11 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     // silently disables throttling in checkRateLimit, which treats a limit of
     // 0 as "always allowed" — an admin must never be able to turn off a limiter
     // by typo.
+    // Digits only: parseInt("1e3") is 1, so a typed "1e3" (which a number input
+    // accepts) passed the range and was stored verbatim — read back as 1/min.
     if (key.startsWith("rateLimit")) {
       const n = parseInt(value, 10);
-      if (!Number.isFinite(n) || n < 1 || n > 10_000) {
+      if (!/^\d+$/.test(value) || !Number.isFinite(n) || n < 1 || n > 10_000) {
         return NextResponse.json(
           { error: t("apiAdmin.settings.intRange10000", { key }) },
           { status: 400 },
@@ -516,12 +576,23 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       }
     }
 
-    // The server-token watchlist switches are read as `=== "true"`; anything
-    // else would silently read as off, so only the two literals are stored.
-    if (key === "plexWatchlistServerSource" || key === "plexWatchlistServerAutoEnroll") {
-      if (value !== "true" && value !== "false") {
+    // Every boolean switch (incl. the server-token watchlist pair) stores only
+    // the two literals — see BOOLEAN_KEYS.
+    if (BOOLEAN_KEYS.has(key) && value !== "true" && value !== "false") {
+      return NextResponse.json(
+        { error: t("apiAdmin.settings.trueFalse", { key }) },
+        { status: 400 },
+      );
+    }
+
+    // Bounded integers — see NUMERIC_BOUNDS. A 400 here replaces the old
+    // silent session-duration rewrite and the readers' silent fallbacks.
+    const bounds = NUMERIC_BOUNDS[key as AllowedKey];
+    if (bounds) {
+      const n = /^\d+$/.test(value) ? parseInt(value, 10) : NaN;
+      if (!Number.isInteger(n) || n < bounds[0] || n > bounds[1]) {
         return NextResponse.json(
-          { error: t("apiAdmin.settings.trueFalse", { key }) },
+          { error: t("apiAdmin.settings.intRange", { key, min: bounds[0], max: bounds[1] }) },
           { status: 400 },
         );
       }
@@ -580,6 +651,23 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
           { status: 400 },
         );
       }
+    }
+
+    // The Discord public key is a raw 32-byte Ed25519 key: exactly 64 hex chars.
+    // /api/interactions decodes it with Buffer.from(hex) inside a try/catch that
+    // reads as "signature invalid", so a pasted key with a stray newline or a typo
+    // saved fine and then EVERY interaction answered 401 — while command
+    // registration (which never reads the key) kept succeeding. Trim first (a
+    // trailing newline is the routine paste) and store the trimmed value.
+    if (key === "discordPublicKey") {
+      const trimmed = value.trim();
+      if (!/^[0-9a-f]{64}$/i.test(trimmed)) {
+        return NextResponse.json(
+          { error: t("apiAdmin.settings.discordPublicKey", { key }) },
+          { status: 400 },
+        );
+      }
+      body[key] = trimmed; // the write filter below reads `body`, not this loop's snapshot
     }
   }
 
@@ -651,6 +739,12 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     "apnsRelayKey",
     "recommendedIosBuild",
     "apnsRelayUrl",
+    // Third-party API keys: the Integrations forms offer a Remove action, and a
+    // blank value that is silently dropped would report Saved while the old key
+    // keeps working (ApiKeySettingForm). Readers treat "" as unset.
+    "ipinfoToken",
+    "omdbApiKey",
+    "mdblistApiKey",
     // Webhook secrets must be clearable or the admin form silently lies: it
     // offers a blank field to remove the secret, the write is skipped as an
     // empty value, and the UI still reports Saved while the OLD secret stays
@@ -709,6 +803,11 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     // domain feeding the Plex forwardUrl and email links) could only be
     // replaced, never removed, while the form still said "Saved".
     "siteUrl",
+    // Blank = the default "Summonarr" (the form's own placeholder); the sidebar,
+    // login and setup pages all read it with `|| "Summonarr"` and the layout's
+    // generateMetadata skips a falsy title. Same bug as siteUrl: emptying the
+    // field said Saved while the old custom name stayed.
+    "siteTitle",
     // /api/config publishes these to every visitor, so removing a payment
     // handle (a Zelle phone/email is personal data) has to actually remove it.
     "donationPaypal",
@@ -751,15 +850,6 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       return true;
     })
     .map(([k, v]) => [k, USER_FACING_KEYS.has(k) ? sanitizeText(v) : v] as [string, string]);
-
-  const MAX_SESSION_SECONDS = 7_776_000;
-  for (const entry of entries) {
-    if (entry[0] === "sessionDefaultDuration" || entry[0] === "sessionMobileDuration" || entry[0] === "sessionMaxDuration") {
-      const n = parseInt(entry[1], 10);
-      if (isNaN(n) || n < 60) entry[1] = "3600";
-      else if (n > MAX_SESSION_SECONDS) entry[1] = String(MAX_SESSION_SECONDS);
-    }
-  }
 
   const changedKeys = entries.map(([k]) => k);
   const oldRows = await prisma.setting.findMany({ where: { key: { in: changedKeys } } });

@@ -70,6 +70,7 @@ const ROUTES = [
   "/donate",
   "/admin/activity",
   "/admin/activity?tab=history",
+  "/admin/activity/history",
   "/admin/activity/recent",
   "/admin/activity/users",
   "/admin/users",

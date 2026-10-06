@@ -604,7 +604,9 @@ export async function createMediaRequest(
       // must be announced like one — and it can't rely on the pendingNotifyAt backstop
       // (cleared just above), leaving this the only alert admins get.
       await announcePendingToAdmins();
-      return { ok: true, kind: "created", branch: "auto-approve", pushFailed: true, request: { ...request, status: "PENDING" } };
+      // Both rolled-back fields, like the PATCH rollback body (requests/[id]): the
+      // row's pendingNotifyAt is null now, so the body must not carry the armed one.
+      return { ok: true, kind: "created", branch: "auto-approve", pushFailed: true, request: { ...request, status: "PENDING", pendingNotifyAt: null } };
     }
 
     // Bookkeeping write kept OUT of the try above: Sonarr has already accepted the series

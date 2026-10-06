@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
-import { logAudit } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 import { applySpecs } from "@/lib/trash";
 import { isValidInstanceSlug } from "@/lib/arr-instances";
 import type { ArrVariant } from "@/lib/arr";
@@ -65,7 +65,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       const recreated = results.filter((r) => r.recreated).length;
       await logAudit({
         userId: session.user.id,
-        userName: session.user.name ?? "admin",
+        userName: session.user.name ?? session.user.email,
+        ...auditContext(req, session),
         action: "SETTINGS_CHANGE",
         target: "trash:apply",
         details: {

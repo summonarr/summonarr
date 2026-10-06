@@ -49,7 +49,6 @@
   "apiUser.discord.merge.dmFailed": "发送 Discord 私信失败。请确认你允许接收私信。",
   "apiUser.discord.merge.expired": "验证码已过期——请重新获取。",
   "apiUser.discord.merge.incorrect": "验证码错误。",
-  "apiUser.discord.merge.initiateFailed": "无法发起账户关联，请稍后重试。",
   "apiUser.discord.merge.invalidUserId": "Discord 用户 ID 无效——必须是 17–20 位数字。",
   "apiUser.discord.merge.linkFailed": "无法关联账户。",
   "apiUser.discord.merge.noPending": "没有待处理的验证——请先获取验证码。",
@@ -88,6 +87,7 @@
   "apiUser.issues.tvdbUnresolved": "无法解析此剧集的 TVDB ID——请检查 Sonarr",
   "apiUser.media.loadFailed": "无法加载此作品",
   "apiUser.media.typeInvalid": "type 必须是 movie 或 tv",
+  "apiUser.notifications.idsInvalid": "ids 必须是通知 id 的数组",
   "apiUser.notifications.selectorRequired": "请指定 ?ids= 或 ?all=1",
   "apiUser.person.invalidId": "id 无效",
   "apiUser.person.upstreamError": "上游错误",
@@ -137,6 +137,7 @@
   "apiUser.requests.bulk.itemTmdbId": "每一项都需要正整数 tmdbId",
   "apiUser.requests.bulk.itemsRequired": "items 必须是非空数组",
   "apiUser.requests.bulk.onBehalfForbidden": "你没有权限代其他用户发起请求",
+  "apiUser.requests.bulk.onBehalfIdInvalid": "onBehalfOfUserId 必须是字符串",
   "apiUser.requests.bulk.quotaMovie": "这将超出电影配额（{limit} 个/{window}，剩余 {remaining} 个）。",
   "apiUser.requests.bulk.quotaTv": "这将超出剧集配额（{limit} 个/{window}，剩余 {remaining} 个）。",
   "apiUser.requests.bulk.targetDeactivated": "目标用户已停用",
@@ -148,6 +149,7 @@
   "apiUser.requests.qualityProfileNameTooLong": "qualityProfileName 必须是少于 100 个字符的字符串",
   "apiUser.requests.retryInvalidStatus": "只有已批准（APPROVED）的请求才能重试",
   "apiUser.requests.searchInvalidStatus": "只有已批准（APPROVED）或可观看（AVAILABLE）的请求才能搜索",
+  "apiUser.requests.searchNoTvdbId": "此请求未存储 TVDB ID，请先重新推送",
   "apiUser.search.failed": "搜索失败",
   "apiUser.search.queryTooLong": "查询过长",
   "apiUser.search.rateLimited": "搜索过多——请一分钟后重试",
@@ -162,5 +164,7 @@
   "apiUser.votes.notInLibrary": "该媒体不在任何媒体库中",
   "apiUser.votes.ownRequest": "不能对你自己的请求投票删除",
   "apiUser.votes.reasonTooLong": "reason 必须是少于 200 个字符的字符串",
-  "apiUser.watchlist.alreadyAdded": "已在你的待看清单中"
+  "apiUser.watchlist.alreadyAdded": "已在你的待看清单中",
+  "apiUser.playHistory.exportTruncated": "导出已在 {max} 行处截断——请缩小 startDate/endDate 范围后重新导出",
+  "apiUser.common.tmdbIdOutOfRange": "tmdbId 超出范围"
 }

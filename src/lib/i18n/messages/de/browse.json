@@ -39,7 +39,6 @@
   "browse.popular.sort.viewersDescription": "Nach Anzahl verschiedener Zuschauer sortiert",
   "browse.popular.sort.plays": "Meistgespielt",
   "browse.popular.sort.playsDescription": "Nach Gesamtzahl der Wiedergaben aller Benutzer sortiert",
-  "browse.popular.rankRange": "{from}–{to} von {total} Titeln",
   "browse.popular.noRecentPlays.title": "Keine Wiedergaben in den letzten 30 Tagen",
   "browse.popular.noRecentPlays.description": "In diesem Zeitraum wurde nichts abgespielt.",
   "browse.popular.noRecentPlays.cta": "Zu „Meistgespielt“ wechseln",

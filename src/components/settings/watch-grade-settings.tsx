@@ -134,7 +134,7 @@ export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, str
         placeholder={String(WATCH_GRADE_DEFAULTS[field])}
         value={values[field]}
         onChange={(e) => set(field, e.target.value)}
-        className="bg-zinc-800 border-zinc-700 text-sm w-32"
+        className="bg-zinc-800 border-zinc-700 w-32"
       />
       <p className="text-xs text-zinc-500">{help}</p>
     </div>
@@ -172,7 +172,7 @@ export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, str
                 placeholder={String(WATCH_GRADE_DEFAULTS[field])}
                 value={values[field]}
                 onChange={(e) => set(field, e.target.value)}
-                className="bg-zinc-800 border-zinc-700 text-sm w-20"
+                className="bg-zinc-800 border-zinc-700 w-20"
               />
             </div>
           ))}
@@ -209,7 +209,7 @@ export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, str
         <p className="text-xs text-zinc-500">
           {t("settings.watchGrade.previewHelp")}
         </p>
-        {previewError && <p className="text-xs text-red-400">{previewError}</p>}
+        {previewError && <p role="alert" className="text-xs text-red-400">{previewError}</p>}
         {preview && !preview.result.enabled && (
           <p className="text-xs text-zinc-400">
             {preview.result.reason === "feature-off"
@@ -264,8 +264,11 @@ export function WatchGradeSettingsForm({ initial }: { initial: Record<Field, str
           {t("settings.common.save")}
         </Button>
         {status === "ok" && <CheckCircle className="w-4 h-4 text-green-500" />}
-        {status === "error" && <XCircle className="w-4 h-4 text-red-500" />}
-        {error && <span className="text-xs text-red-400">{error}</span>}
+        {/* Same shape as the Play History form two cards up: the icon is
+            decorative, the text is announced, and both leave together when an
+            edit resets `status` (set() clears status but not `error`). */}
+        {status === "error" && <XCircle className="w-4 h-4 shrink-0 text-red-500" aria-hidden="true" />}
+        {status === "error" && error && <span role="alert" className="text-xs text-red-400">{error}</span>}
       </div>
     </form>
   );

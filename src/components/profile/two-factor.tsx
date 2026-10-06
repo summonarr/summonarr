@@ -143,6 +143,11 @@ export function TwoFactorSettings({ initial, required }: Props) {
   const [passkeyName, setPasskeyName] = useState("");
   const [renaming, setRenaming] = useState<{ id: string; name: string } | null>(null);
   const [confirmDisable, setConfirmDisable] = useState(false);
+  // Removing a factor confirms first (the push-devices pattern). When it is the
+  // account's LAST factor the server also drops the recovery codes and signs out
+  // every other device (guardrail 6d), so the copy says so.
+  const [confirmingRemove, setConfirmingRemove] = useState<{ kind: "totp" } | { kind: "passkey"; id: string } | null>(null);
+  const [secretCopied, setSecretCopied] = useState(false);
   // Once 2FA is on, every change also needs a fresh second factor (the server
   // enforces it — src/lib/mfa/step-up.ts): a code typed here, or a passkey.
   const [stepUpCode, setStepUpCode] = useState("");
@@ -217,6 +222,7 @@ export function TwoFactorSettings({ initial, required }: Props) {
     if (!r.ok) return setError(r.error);
     setSetup({ secret: String(r.data.secret), otpauthUri: String(r.data.otpauthUri) });
     setSetupCode("");
+    setSecretCopied(false);
   });
 
   const confirmTotp = () => run("totp-enable", async () => {
@@ -236,6 +242,7 @@ export function TwoFactorSettings({ initial, required }: Props) {
     setStepUpCode("");
     const r = await call(t, "/api/profile/mfa/totp", "DELETE", { password, ...sf });
     if (!r.ok) return setError(r.error);
+    setConfirmingRemove(null);
     setNotice(t("profile.mfa.notice.totpRemoved"));
     await refresh();
   });
@@ -285,6 +292,7 @@ export function TwoFactorSettings({ initial, required }: Props) {
     setStepUpCode("");
     const r = await call(t, `/api/profile/mfa/passkeys/${encodeURIComponent(id)}`, "DELETE", { password, ...sf });
     if (!r.ok) return setError(r.error);
+    setConfirmingRemove(null);
     setNotice(t("profile.mfa.notice.passkeyRemoved"));
     await refresh();
   });
@@ -314,6 +322,39 @@ export function TwoFactorSettings({ initial, required }: Props) {
   });
 
   if (codes) return <RecoveryCodes codes={codes} onDone={() => setCodes(null)} />;
+
+  const factorCount = state.passkeys.length + (state.totpEnabled ? 1 : 0);
+  const isLastFactor = factorCount === 1;
+  function removeConfirmCopy(): string {
+    if (isLastFactor) return t("profile.mfa.confirmRemoveLast");
+    if (confirmingRemove?.kind === "passkey") {
+      const name = state.passkeys.find((p) => p.id === confirmingRemove.id)?.name ?? "";
+      return t("profile.mfa.confirmRemovePasskey", { name });
+    }
+    return t("profile.mfa.confirmRemoveTotp");
+  }
+  const removeConfirmPanel = (
+    <div className="flex flex-wrap items-center gap-2" role="group">
+      <span className="text-sm text-zinc-400 basis-full sm:basis-auto sm:flex-1">{removeConfirmCopy()}</span>
+      <Button
+        type="button"
+        variant="destructive"
+        disabled={busy !== null}
+        autoFocus
+        onClick={() => {
+          if (confirmingRemove?.kind === "totp") void removeTotp();
+          else if (confirmingRemove?.kind === "passkey") void removePasskey(confirmingRemove.id);
+        }}
+      >
+        {busy === "totp-remove" || (confirmingRemove?.kind === "passkey" && busy === `remove-${confirmingRemove.id}`)
+          ? <Loader2 className="w-4 h-4 animate-spin" />
+          : t("profile.common.remove")}
+      </Button>
+      <Button type="button" variant="outline" disabled={busy !== null} onClick={() => setConfirmingRemove(null)}>
+        {t("profile.common.cancel")}
+      </Button>
+    </div>
+  );
 
   return (
     <div className="space-y-5">
@@ -363,18 +404,29 @@ export function TwoFactorSettings({ initial, required }: Props) {
         </div>
       )}
 
+      {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
+      {notice && (
+        <p className="flex items-center gap-1.5 text-sm text-emerald-400">
+          <Check className="w-4 h-4" /> {notice}
+        </p>
+      )}
+
       {/* Authenticator app */}
       <section className="space-y-2">
         <h3 className="text-sm font-medium text-zinc-100 flex items-center gap-2">
           <Smartphone className="w-4 h-4 text-zinc-400" /> {t("profile.mfa.totp.title")}
         </h3>
         {state.totpEnabled ? (
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-sm text-zinc-400">{t("profile.mfa.totp.on")}</span>
-            <Button type="button" variant="outline" disabled={busy !== null} onClick={removeTotp}>
-              {busy === "totp-remove" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("profile.common.remove")}
-            </Button>
-          </div>
+          confirmingRemove?.kind === "totp" ? (
+            removeConfirmPanel
+          ) : (
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-sm text-zinc-400">{t("profile.mfa.totp.on")}</span>
+              <Button type="button" variant="outline" disabled={busy !== null} onClick={() => setConfirmingRemove({ kind: "totp" })}>
+                {busy === "totp-remove" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("profile.common.remove")}
+              </Button>
+            </div>
+          )
         ) : setup ? (
           <div className="space-y-3">
             <p className="text-sm text-zinc-400">
@@ -385,6 +437,24 @@ export function TwoFactorSettings({ initial, required }: Props) {
               <div className="min-w-0 flex-1 space-y-2">
                 <p className="text-xs text-zinc-500">{t("profile.mfa.totp.manual")}</p>
                 <p className="ds-mono break-all text-sm text-zinc-100">{setup.secret.replace(/(.{4})/g, "$1 ").trim()}</p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  aria-label={t("profile.mfa.totp.copyKey")}
+                  onClick={async () => {
+                    try {
+                      // The display adds spaces every 4 chars; copy the raw key.
+                      await navigator.clipboard.writeText(setup.secret);
+                      setSecretCopied(true);
+                    } catch {
+                      setSecretCopied(false);
+                    }
+                  }}
+                >
+                  {secretCopied ? <Check className="w-4 h-4 mr-1.5" /> : <Copy className="w-4 h-4 mr-1.5" />}
+                  {secretCopied ? t("profile.common.copied") : t("profile.common.copy")}
+                </Button>
                 <a href={setup.otpauthUri} className="text-xs underline" style={{ color: "var(--ds-accent-text)" }}>
                   {t("profile.mfa.totp.openApp")}
                 </a>
@@ -438,7 +508,9 @@ export function TwoFactorSettings({ initial, required }: Props) {
                     className="flex items-center justify-between gap-3"
                     style={{ padding: "8px 10px", background: "var(--ds-bg-3)", border: "1px solid var(--ds-border)", borderRadius: 8 }}
                   >
-                    {renaming?.id === p.id ? (
+                    {confirmingRemove?.kind === "passkey" && confirmingRemove.id === p.id ? (
+                      <div className="flex-1 min-w-0">{removeConfirmPanel}</div>
+                    ) : renaming?.id === p.id ? (
                       <form
                         className="flex flex-1 items-center gap-2"
                         onSubmit={(e) => { e.preventDefault(); void renamePasskey(p.id, renaming.name); }}
@@ -465,17 +537,18 @@ export function TwoFactorSettings({ initial, required }: Props) {
                             {p.backedUp ? ` · ${t("profile.mfa.passkey.synced")}` : ""}
                           </p>
                         </div>
-                        <div className="flex shrink-0 gap-1.5">
+                        <div className="flex shrink-0 items-center gap-1.5">
                           <Button type="button" variant="outline" size="sm" disabled={busy !== null} onClick={() => setRenaming({ id: p.id, name: p.name })}>
                             {t("profile.mfa.passkey.rename")}
                           </Button>
                           <Button
                             type="button"
-                            variant="outline"
-                            size="sm"
+                            variant="ghost"
                             aria-label={t("profile.mfa.passkey.removeNamed", { name: p.name })}
+                            title={t("profile.common.remove")}
+                            className="h-9 w-9 p-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10"
                             disabled={busy !== null}
-                            onClick={() => removePasskey(p.id)}
+                            onClick={() => setConfirmingRemove({ kind: "passkey", id: p.id })}
                           >
                             {busy === `remove-${p.id}` ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
                           </Button>
@@ -528,7 +601,7 @@ export function TwoFactorSettings({ initial, required }: Props) {
               <span className="text-sm text-zinc-400">{t("profile.mfa.confirmDisable")}</span>
               <Button
                 type="button"
-                className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]"
+                variant="destructive"
                 disabled={busy !== null}
                 onClick={disableAll}
               >
@@ -542,13 +615,6 @@ export function TwoFactorSettings({ initial, required }: Props) {
             </Button>
           )}
         </section>
-      )}
-
-      {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
-      {notice && (
-        <p className="flex items-center gap-1.5 text-sm text-emerald-400">
-          <Check className="w-4 h-4" /> {notice}
-        </p>
       )}
     </div>
   );

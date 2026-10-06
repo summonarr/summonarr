@@ -118,7 +118,7 @@ export function WatchGradeChip({
         // The pseudo-element widens the hit area to ~32px tall without
         // changing the chip's 16px visual size (it sits in dense rows).
         className={`ds-chip relative after:absolute after:-inset-2 ${letter ? LETTER_CHIP[letter] : ""}`}
-        style={{ cursor: "pointer", padding: "0 6px", fontSize: 10, lineHeight: "16px" }}
+        style={{ padding: "0 6px", fontSize: 10, lineHeight: "16px" }}
       >
         {text}
       </button>

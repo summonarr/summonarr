@@ -137,7 +137,7 @@ export function UserDetailSkeleton() {
 
 export function PlayDetailSkeleton() {
   return (
-    <div className="animate-pulse max-w-4xl">
+    <div className="animate-pulse">
       <DetailHeaderSkeleton leading="poster" childRow={16} />
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         {Array.from({ length: 3 }).map((_, i) => (

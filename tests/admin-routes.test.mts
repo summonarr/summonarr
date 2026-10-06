@@ -85,6 +85,8 @@ type DbUser = {
   mediaServer: string | null; notificationEmail: string | null;
   sessionsRevokedAt: Date | null; passwordChangedAt: Date | null; deactivatedAt: Date | null;
   purgedAt: Date | null;
+  // The delegate subset rule reads the CALLER's own grants/cap off its row.
+  maxContentRating?: string | null; instanceGrants?: unknown; mediaServerGrants?: unknown;
 };
 type AuthRow = { userId: string; deviceLabel: string | null; createdAt: Date };
 
@@ -234,6 +236,13 @@ const fakePrisma = {
     findMany: async () => [],
   },
   setting: {
+    // The arr instance registry's configured-slug probe (getArrInstances) reads
+    // the Url/ApiKey rows with one `key in` findMany.
+    findMany: async (args: { where?: { key?: { in?: string[] } } }) =>
+      (args.where?.key?.in ?? []).flatMap((key) => {
+        const value = settings.get(key);
+        return value === undefined ? [] : [{ key, value }];
+      }),
     findUnique: async (args: { where: { key: string } }) => {
       const value = settings.get(args.where.key);
       return value === undefined ? null : { key: args.where.key, value };
@@ -312,7 +321,7 @@ const { BATCH_TX_TIMEOUT } = await import("../src/lib/cron-auth.ts");
 const { DELETE: clearCache } = await import("../src/app/api/admin/clear-cache/route.ts");
 const { DELETE: playHistoryDelete } = await import("../src/app/api/play-history/[id]/route.ts");
 const { PATCH: userPatch, DELETE: userDelete } = await import("../src/app/api/admin/users/[id]/route.ts");
-const { DELETE: sessionsRevoke } = await import("../src/app/api/admin/users/[id]/sessions/route.ts");
+const { GET: sessionsList, DELETE: sessionsRevoke } = await import("../src/app/api/admin/users/[id]/sessions/route.ts");
 const { POST: userReactivate } = await import("../src/app/api/admin/users/[id]/reactivate/route.ts");
 const { POST: userPurge } = await import("../src/app/api/admin/users/[id]/purge/route.ts");
 const { PATCH: serverUserPatch } = await import("../src/app/api/admin/server-users/[id]/route.ts");
@@ -1196,6 +1205,80 @@ test("a MANAGE_USERS delegate cannot grant ITSELF instance access, quota, or a c
     ctxFor(targetId),
   );
   assert.equal(other.status, 200);
+});
+
+test("delegate SUBSET rule: a MANAGE_USERS delegate cannot hand ANOTHER account bits, grants or a cap it does not hold itself", async () => {
+  // The self gate above is defeated in two requests by a sock-puppet (POST
+  // /api/admin/users) or an accomplice — the target is not "self". So a non-ADMIN
+  // caller may grant only what it holds: permission bits inside its own effective
+  // mask, instance access / server visibility it can itself use, and a content
+  // cap no looser than its own.
+  const MANAGE_USERS = 1n << 1n;
+  const MANAGE_REQUESTS = 1n << 2n;
+  const delegate = await mintSession("USER", MANAGE_USERS);
+  usersById.get(delegate.userId)!.maxContentRating = "PG-13";
+  const targetId = seedUser("USER");
+  const patch = (body: unknown) => userPatch(
+    req(`http://localhost:3000/api/admin/users/${targetId}`, {
+      method: "PATCH",
+      headers: { ...delegate.header, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+    ctxFor(targetId),
+  );
+
+  for (const body of [
+    { permissions: (MANAGE_USERS | MANAGE_REQUESTS).toString() }, // a bit the caller lacks
+    { instanceGrants: { anime: { request: true } } },             // no REQUEST bits ⇒ can't request anywhere
+    { instanceGrants: { anime: { autoApprove: true } } },         // no AUTO_APPROVE ⇒ can't auto-approve
+    { mediaServerGrants: { plex: { remote: { view: true } } } },  // unregistered slug ⇒ judged restricted, no grant held
+    { maxContentRating: "R" },                                    // looser than the caller's PG-13
+    { maxContentRating: null },                                   // clearing the cap is the loosest value of all
+  ]) {
+    const res = await patch(body);
+    assert.equal(res.status, 403, `${JSON.stringify(body)} must be refused`);
+    assert.equal(usersById.get(targetId)!.permissions, 0n, "the row must be left untouched");
+  }
+  assert.equal(txOps.filter((o) => o.op === "user.update(top)").length, 0, "no write landed for any refused grant");
+
+  // Inside the caller's own envelope the same delegate still manages the account.
+  assert.equal((await patch({ permissions: MANAGE_USERS.toString() })).status, 200);
+  assert.equal((await patch({ maxContentRating: "PG" })).status, 200);
+  assert.equal((await patch({ instanceGrants: { anime: { request: false, autoApprove: false } } })).status, 200, "a no-op entry grants nothing");
+
+  // An ADMIN caller is never subset-bounded.
+  const admin = await mintSession("ADMIN", 1n);
+  const adminRes = await userPatch(
+    req(`http://localhost:3000/api/admin/users/${targetId}`, {
+      method: "PATCH",
+      headers: { ...admin.header, "content-type": "application/json" },
+      body: JSON.stringify({ permissions: (MANAGE_USERS | MANAGE_REQUESTS).toString() }),
+    }),
+    ctxFor(targetId),
+  );
+  assert.equal(adminRes.status, 200);
+});
+
+test("admin sessions route: MANAGE_USERS may list/revoke a USER's sessions; an ADMIN target needs the ADMIN bit", async () => {
+  // The Users page admits delegates and shows them the Sessions menu item, so
+  // the route takes the same bit as purge/reactivate/mfa — with their
+  // ADMIN-target gate, so a delegate can't read an admin's devices or sign one out.
+  const MANAGE_USERS = 1n << 1n;
+  const delegate = await mintSession("USER", MANAGE_USERS);
+  const userTarget = seedUser("USER");
+  const adminTarget = seedUser("ADMIN");
+  const list = (id: string) => sessionsList(req(`http://localhost:3000/api/admin/users/${id}/sessions`, { method: "GET", headers: delegate.header }), ctxFor(id));
+  const revokeAll = (id: string) => sessionsRevoke(req(`http://localhost:3000/api/admin/users/${id}/sessions`, { method: "DELETE", headers: { ...delegate.header, "content-type": "application/json" }, body: JSON.stringify({ all: true }) }), ctxFor(id));
+
+  assert.equal((await list(userTarget)).status, 200);
+  assert.equal((await list(adminTarget)).status, 403);
+  assert.equal((await revokeAll(adminTarget)).status, 403);
+  assert.equal(shouldForceDbCheck(adminTarget, "any"), false, "a refused revoke must not mark the admin's ledger");
+  assert.equal((await revokeAll(userTarget)).status, 200);
+
+  // A plain USER (no management bit) is still refused outright.
+  const plain = await mintSession("USER");
+  assert.equal((await sessionsList(req(`http://localhost:3000/api/admin/users/${userTarget}/sessions`, { method: "GET", headers: plain.header }), ctxFor(userTarget))).status, 403);
 });
 
 // ── mediaServerGrants: per-user VISIBILITY on a RESTRICTED media server ──────

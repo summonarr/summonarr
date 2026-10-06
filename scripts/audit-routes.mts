@@ -97,6 +97,11 @@ const PERMISSION_GUARDED_ADMIN_ROUTES: Array<{ route: string; reason: string }> 
   { route: "/api/admin/users/[id]/purge", reason: "user management delegated via withPermission(Permission.MANAGE_USERS); purging an ADMIN target additionally requires Permission.ADMIN in-handler, and the target must already be disabled" },
   { route: "/api/admin/users/[id]/mfa", reason: "two-factor reset (lost device) delegated via withPermission(Permission.MANAGE_USERS); resetting an ADMIN target additionally requires Permission.ADMIN in-handler, and the caller's own account is refused (that path must go through the profile step-up)" },
   { route: "/api/admin/users/[id]/watch-grade", reason: "read-only watch grade delegated via withPermission([MANAGE_USERS, MANAGE_REQUESTS]) — the Users page and the request queue both show it" },
+  { route: "/api/admin/users/[id]/sessions", reason: "per-device session list/revoke delegated via withPermission(Permission.MANAGE_USERS) — the Users page (MANAGE_USERS) mounts the Sessions modal; an ADMIN target additionally requires Permission.ADMIN in-handler, like mfa/reactivate/purge" },
+  { route: "/api/admin/server-users", reason: "media-server identity management (link/auto-disable) delegated via withPermission(Permission.MANAGE_USERS) — the Users page admits MANAGE_USERS and mounts the Server Users table, whose controls 403'd for delegates while these were withAdmin" },
+  { route: "/api/admin/server-users/[id]", reason: "per-identity link/downloads policy delegated via withPermission(Permission.MANAGE_USERS) — same surface as /api/admin/server-users" },
+  { route: "/api/admin/server-users/bulk", reason: "bulk downloads policy delegated via withPermission(Permission.MANAGE_USERS) — same surface as /api/admin/server-users" },
+  { route: "/api/admin/server-users/diagnose", reason: "read-only Jellyfin /Users diagnosis delegated via withPermission(Permission.MANAGE_USERS) — same surface as /api/admin/server-users; emails are masked in the response" },
 ];
 
 /** Tokens that prove an ADMIN-capable guard is present. */

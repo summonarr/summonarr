@@ -1,12 +1,15 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useId } from "react";
 import { useRouter } from "next/navigation";
 import { Check, Loader2, MessageCircle, Mail, AlertTriangle, Bell, Smartphone } from "@/components/icons";
 import { IOS_APP_STORE_URL } from "@/lib/ios-app";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 import { Switch } from "@/components/ui/switch";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Chip } from "@/components/ui/design";
 
 interface NotificationPrefsProps {
   // Worked out on the server: true only when the email feature is on, the
@@ -17,6 +20,9 @@ interface NotificationPrefsProps {
   isAdminRole: boolean;
   isJellyfin: boolean;
   notificationEmail: string | null;
+  // Jellyfin only: an address with a verification link outstanding (the page
+  // reads it from the pending VerificationToken), so a reload still shows it.
+  pendingEmail?: string | null;
   notifyOnApproved: boolean;
   notifyOnAvailable: boolean;
   notifyOnDeclined: boolean;
@@ -31,7 +37,7 @@ interface NotificationPrefsProps {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-type AllPrefs = Omit<NotificationPrefsProps, "emailEnabled" | "discordLinked" | "isAdminRole" | "isJellyfin" | "notificationEmail">;
+type AllPrefs = Omit<NotificationPrefsProps, "emailEnabled" | "discordLinked" | "isAdminRole" | "isJellyfin" | "notificationEmail" | "pendingEmail">;
 
 function ToggleRow({
   label,
@@ -46,13 +52,15 @@ function ToggleRow({
   onChange: () => void;
   disabled: boolean;
 }) {
+  // The switch has no text of its own; name it from the row label.
+  const labelId = useId();
   return (
     <div className="flex items-start justify-between gap-4 py-3 border-b border-zinc-800 last:border-0">
       <div>
-        <p className="text-sm font-medium text-zinc-200">{label}</p>
+        <p id={labelId} className="text-sm font-medium text-zinc-200">{label}</p>
         <p className="text-xs text-zinc-500 mt-0.5">{description}</p>
       </div>
-      <Switch checked={checked} disabled={disabled} onCheckedChange={onChange} />
+      <Switch aria-labelledby={labelId} checked={checked} disabled={disabled} onCheckedChange={onChange} />
     </div>
   );
 }
@@ -67,6 +75,7 @@ export function NotificationPrefs({
   isAdminRole,
   isJellyfin,
   notificationEmail,
+  pendingEmail = null,
   notifyOnApproved,
   notifyOnAvailable,
   notifyOnDeclined,
@@ -183,8 +192,9 @@ export function NotificationPrefs({
   // Jellyfin: email a one-time verification link to the entered address. The
   // server only saves the address once that link is clicked, so nobody can point
   // notifications at an address they don't control.
-  async function sendVerification() {
-    const trimmed = emailInput.trim();
+  // `address` is set by "Resend" for the pending address; otherwise the input.
+  async function sendVerification(address?: string) {
+    const trimmed = (address ?? emailInput).trim();
     if (trimmed === "" || !EMAIL_RE.test(trimmed)) {
       setEmailError(t("profile.notifications.error.invalidEmail"));
       setEmailSavingState("error");
@@ -205,6 +215,8 @@ export function NotificationPrefs({
         return;
       }
       setEmailSavingState("sent");
+      // The page re-reads the pending address so the "pending" line follows it.
+      router.refresh();
     } catch {
       setEmailError(t("profile.notifications.error.network"));
       setEmailSavingState("error");
@@ -292,21 +304,40 @@ export function NotificationPrefs({
                 {t("profile.notifications.jellyfinEmailHint")}
               </p>
               {notificationEmail && (
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-sm text-zinc-300 font-mono">{notificationEmail}</span>
-                  <span className="text-[10px] uppercase tracking-wide text-green-400 border border-green-400/40 rounded px-1 py-0.5">{t("profile.notifications.verified")}</span>
-                  <button
+                <div className="flex flex-wrap items-center gap-2 mb-2">
+                  <span className="ds-mono text-sm text-zinc-300 break-all">{notificationEmail}</span>
+                  <Chip tone="approved">{t("profile.notifications.verified")}</Chip>
+                  <Button
                     type="button"
+                    variant="link"
+                    size="xs"
                     onClick={clearNotificationEmail}
                     disabled={emailSavingState === "saving"}
-                    className="text-[11px] text-zinc-500 hover:text-zinc-300 underline disabled:opacity-50"
+                    className="px-0 text-zinc-500 hover:text-zinc-300"
                   >
                     {t("profile.common.remove")}
-                  </button>
+                  </Button>
+                </div>
+              )}
+              {pendingEmail && emailSavingState !== "sent" && (
+                <div className="flex flex-wrap items-center gap-2 mb-2">
+                  <span className="text-xs text-zinc-400">
+                    {t("profile.notifications.verificationPending", { email: pendingEmail })}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="link"
+                    size="xs"
+                    onClick={() => sendVerification(pendingEmail)}
+                    disabled={emailSavingState === "saving"}
+                    className="px-0"
+                  >
+                    {emailSavingState === "saving" ? <Loader2 className="w-3 h-3 animate-spin" /> : t("profile.notifications.resendVerification")}
+                  </Button>
                 </div>
               )}
               <div className="flex gap-2">
-                <input
+                <Input
                   id="notificationEmail"
                   type="email"
                   value={emailInput}
@@ -316,20 +347,21 @@ export function NotificationPrefs({
                     if (emailError) setEmailError(null);
                   }}
                   placeholder={notificationEmail ? t("profile.notifications.changeAddress") : t("auth.field.emailPlaceholder")}
-                  className="flex-1 rounded-md bg-zinc-950 border border-zinc-700 px-3 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                  aria-invalid={emailError ? true : undefined}
+                  className="flex-1"
                   autoComplete="email"
                   spellCheck={false}
                 />
-                <button
+                <Button
                   type="button"
-                  onClick={sendVerification}
+                  onClick={() => sendVerification()}
                   disabled={emailSavingState === "saving" || emailInput.trim() === ""}
-                  className="rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-not-allowed px-3 py-1.5 text-sm font-medium text-[var(--ds-accent-fg)] transition-colors whitespace-nowrap"
+                  className="shrink-0"
                 >
                   {emailSavingState === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("profile.notifications.sendVerification")}
-                </button>
+                </Button>
               </div>
-              {emailError && <p className="text-xs text-red-400 mt-1.5">{emailError}</p>}
+              {emailError && <p role="alert" className="text-xs text-red-400 mt-1.5">{emailError}</p>}
               {emailSavingState === "sent" && !emailError && (
                 <p className="text-xs text-green-400 mt-1.5 flex items-center gap-1">
                   <Check className="w-3 h-3" /> {t("profile.notifications.verificationSent")}
@@ -342,7 +374,7 @@ export function NotificationPrefs({
               <p className="text-xs text-zinc-500 mt-0.5">
                 {t("profile.notifications.syncedHint")}
               </p>
-              <p className="text-sm text-zinc-300 mt-2 font-mono">
+              <p className="ds-mono text-sm text-zinc-300 mt-2 break-all">
                 {notificationEmail ?? <span className="text-zinc-500 italic font-sans">{t("profile.notifications.notSet")}</span>}
               </p>
             </div>

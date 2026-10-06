@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { FixMatchButton } from "@/components/admin/fix-match-button";
 import { posterUrl } from "@/lib/tmdb-types";
-import { runFixMatch } from "@/lib/client/fix-match";
+import { runFixMatch, fixMatchErrorMessage, fixMatchWarningMessage } from "@/lib/client/fix-match";
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { rich } from "@/components/settings/forms/rich";
@@ -62,14 +62,17 @@ export interface ClientBadMatch {
 type ArrFilter     = "all" | "mismatch" | "not_in_arr" | "matches";
 type RequestFilter = "all" | "has_requests";
 
+// One identity token per brand, the same ones the page's stat tiles use —
+// the Jellyfin column/chips used to be purple while the tile beside them was
+// the cyan brand token, so one product read as two.
 const PLEX_TINT     = "var(--ds-plex)";
-const JELLYFIN_TINT = "oklch(0.72 0.16 305)";
+const JELLYFIN_TINT = "var(--ds-jellyfin)";
 // The tints above are fills and borders; as TEXT on the light theme they are
 // ~2:1. Text on a tint chip takes the per-theme text colour instead (worst
-// case 4.6:1 on a 14% chip in either theme).
+// case 4.6:1 on a 14% chip in either theme) — guardrail 42.
 const TEXT_FOR_TINT: Record<string, string> = {
   [PLEX_TINT]:     "var(--ds-plex-text)",
-  [JELLYFIN_TINT]: "var(--color-purple-400, oklch(0.714 0.203 305.504))",
+  [JELLYFIN_TINT]: "var(--ds-jellyfin-text)",
 };
 
 function statusChip(status: string) {
@@ -549,24 +552,35 @@ function FixAllArrButton({ matches }: { matches: ClientBadMatch[] }) {
   const fixable = matches.filter((m) => m.arrVerdict !== null && m.arrTmdbId !== null);
 
   const [state, setRunState] = useState<"idle" | "running" | "done">("idle");
-  const [progress, setProgress] = useState({ done: 0, failed: 0, total: 0 });
+  const [progress, setProgress] = useState({ done: 0, failed: 0, partial: 0, total: 0 });
+  // Per-title outcomes worth reading after the run: a partial remap's warning
+  // (guardrail 37 — a Jellyfin copy that failed to re-match may re-elect the
+  // unfixed id on the next sync) or the reason a title failed. The per-row
+  // FixMatchButton shows both; a bulk run that discarded them read "N/N fixed"
+  // over a title that was not.
+  const [outcomes, setOutcomes] = useState<Array<{ key: string; title: string; warning?: string; error?: string }>>([]);
 
   const handleFixAll = useCallback(async () => {
     setRunState("running");
-    setProgress({ done: 0, failed: 0, total: fixable.length });
+    setProgress({ done: 0, failed: 0, partial: 0, total: fixable.length });
+    setOutcomes([]);
 
     let done = 0;
     let failed = 0;
+    let partial = 0;
+    const collected: Array<{ key: string; title: string; warning?: string; error?: string }> = [];
 
     for (const match of fixable) {
       const { arrVerdict, arrTmdbId } = match;
       if (!arrVerdict || arrTmdbId === null) continue;
 
       const wrongItem = arrVerdict === "plex" ? match.plex : match.jellyfin;
+      const title = wrongItem.title ?? `TMDB #${wrongItem.tmdbId}`;
+      const key = `${arrVerdict}:${wrongItem.serverInstance}:${wrongItem.mediaType}:${wrongItem.tmdbId}`;
       try {
         // Background job + status poll (guardrail 37a). Titles are fixed one
         // at a time: each finishes on the server before the next starts.
-        await runFixMatch({
+        const outcome = await runFixMatch({
           server:        arrVerdict,
           tmdbId:        wrongItem.tmdbId,
           mediaType:     wrongItem.mediaType,
@@ -578,36 +592,60 @@ function FixAllArrButton({ matches }: { matches: ClientBadMatch[] }) {
           ...(wrongItem.serverInstance ? { serverInstance: wrongItem.serverInstance } : {}),
         });
         done++;
-      } catch {
+        const warning = fixMatchWarningMessage(outcome, t);
+        if (warning) {
+          partial++;
+          collected.push({ key, title, warning });
+        }
+      } catch (err) {
         failed++;
+        collected.push({ key, title, error: fixMatchErrorMessage(err, t) });
       }
-      setProgress({ done: done + failed, failed, total: fixable.length });
+      setProgress({ done: done + failed, failed, partial, total: fixable.length });
+      setOutcomes([...collected]);
     }
 
     setRunState("done");
     if (done > 0) router.refresh();
-  }, [fixable, router]);
+  }, [fixable, router, t]);
 
   if (fixable.length === 0) return null;
 
+  const fixed = progress.total - progress.failed;
+
   return (
-    <button
-      onClick={handleFixAll}
-      disabled={state === "running"}
-      className="ds-tap inline-flex items-center font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-      style={{
-        padding: "5px 12px",
-        fontSize: 12,
-        borderRadius: 6,
-        background: "color-mix(in oklab, var(--ds-success) 14%, transparent)",
-        border: "1px solid color-mix(in oklab, var(--ds-success) 35%, var(--ds-border))",
-        color: "var(--ds-success)",
-      }}
-    >
-      {state === "idle"    && t("adminManage.library.diff.fixAll", { count: fixable.length })}
-      {state === "running" && t("adminManage.library.diff.fixing", { done: progress.done, total: progress.total })}
-      {state === "done"    && t("adminManage.library.diff.fixDone", { fixed: progress.total - progress.failed, total: progress.total })}
-    </button>
+    <div className="flex flex-col items-end gap-1" style={{ maxWidth: 440 }}>
+      <button
+        onClick={handleFixAll}
+        disabled={state === "running"}
+        className="ds-tap inline-flex items-center font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        style={{
+          padding: "5px 12px",
+          fontSize: 12,
+          borderRadius: 6,
+          background: "color-mix(in oklab, var(--ds-success) 14%, transparent)",
+          border: "1px solid color-mix(in oklab, var(--ds-success) 35%, var(--ds-border))",
+          color: "var(--ds-success)",
+        }}
+      >
+        {state === "idle"    && t("adminManage.library.diff.fixAll", { count: fixable.length })}
+        {state === "running" && t("adminManage.library.diff.fixing", { done: progress.done, total: progress.total })}
+        {state === "done"    && (progress.partial > 0
+          ? t("adminManage.library.diff.fixDonePartial", { fixed, total: progress.total, partial: progress.partial })
+          : t("adminManage.library.diff.fixDone", { fixed, total: progress.total }))}
+      </button>
+      {state === "done" && outcomes.length > 0 && (
+        <ul role="status" className="m-0 list-none p-0 text-right" style={{ fontSize: 11, lineHeight: 1.35 }}>
+          {outcomes.map((o) => (
+            <li key={o.key} className={o.error ? "text-red-400" : "text-amber-400"}>
+              <span className="font-medium">{o.title}</span>
+              <span style={{ color: "var(--ds-fg-subtle)" }}> — </span>
+              {o.error ?? o.warning}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -827,7 +865,7 @@ export function LibraryDiffClient({
           aria-label={t("adminManage.library.diff.search")}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          className="focus:outline-none"
+          className="focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
           style={{
             height: 32,
             width: 260,

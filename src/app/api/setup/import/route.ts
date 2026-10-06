@@ -8,6 +8,7 @@ import {
   MAX_CIPHERTEXT_BYTES,
 } from "@/lib/backup-import";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { localizeBackupMessage } from "@/lib/backup-messages";
 
 export const dynamic = "force-dynamic";
 
@@ -69,7 +70,9 @@ export async function POST(req: NextRequest) {
         errors: result.errors,
       });
     }
-    return NextResponse.json({ error: result.error }, { status: result.status });
+    // Same translation the admin twin (db-import) applies — the first-run panel
+    // renders this string verbatim beside otherwise-localized copy.
+    return NextResponse.json({ error: localizeBackupMessage(result.error, t) }, { status: result.status });
   }
 
   // Audit row is written outside the import transaction, so it survives the

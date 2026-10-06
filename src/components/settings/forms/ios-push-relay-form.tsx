@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -23,15 +23,22 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
   const [recommendedBuild, setRecommendedBuild] = useState(initialRecommendedBuild);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [errorMessage, setErrorMessage] = useState("");
+  // Only the "Saved" tick fades. A validation error (the 8–200 printable ASCII
+  // key rule, the recommended-build range) is the only guidance the form gives,
+  // so it stays until the next edit or save. Ref'd so a second save cancels the
+  // first save's timer and unmount clears it.
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
 
   // Whether a key is SAVED on the server right now. We can't rely on the prop:
   // it is set once when the page loads and never refreshes, so after Remove +
-  // Save the hint and Remove button would still describe a deleted key until
-  // a full reload. Updated after every successful save below.
+  // Save the hint would still describe a deleted key until a full reload.
+  // Updated after every successful save below.
   const [keyIsSet, setKeyIsSet] = useState(initialRelayKey.length > 0);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    if (resetTimer.current) clearTimeout(resetTimer.current);
     setStatus("saving");
     setErrorMessage("");
     try {
@@ -55,6 +62,7 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
         // Masked placeholder = key left as is (still set); "" = key removed;
         // anything else = a new key was saved.
         setKeyIsSet(relayKey.length > 0);
+        resetTimer.current = setTimeout(() => setStatus("idle"), 3000);
       } else {
         setStatus("error");
         setErrorMessage(typeof data.error === "string" ? data.error : "");
@@ -62,7 +70,6 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
     } catch {
       setStatus("error");
     }
-    setTimeout(() => setStatus("idle"), 3000);
   }
 
   return (
@@ -75,7 +82,7 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
           value={relayUrl}
           onChange={(e) => { setRelayUrl(e.target.value); setStatus("idle"); }}
           placeholder="https://summonapns.gadgetusaf.com/push"
-          className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+          className="bg-zinc-800 border-zinc-700 font-mono"
         />
         <p className="text-xs text-zinc-500">
           {t("settings.form.iosPush.relayUrlHelp")}
@@ -90,9 +97,12 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
             value={relayKey}
             onChange={(e) => { setRelayKey(e.target.value); setStatus("idle"); }}
             placeholder="••••••••"
-            className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+            className="bg-zinc-800 border-zinc-700 font-mono"
           />
-          {(keyIsSet || relayKey.length > 0) && (
+          {/* Remove only clears the field (the delete happens on Save), so it
+              has nothing to do once the field is already empty — hide it then
+              rather than leave a button that does nothing. */}
+          {relayKey.length > 0 && (
             <Button
               type="button"
               variant="outline"
@@ -100,7 +110,7 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
               onClick={() => { setRelayKey(""); setStatus("idle"); }}
               className="border-zinc-700 text-zinc-400 hover:text-zinc-100 shrink-0 gap-1.5"
             >
-              <Trash2 className="w-3.5 h-3.5" />
+              <Trash2 className="w-3.5 h-3.5" aria-hidden />
               {t("settings.form.common.remove")}
             </Button>
           )}
@@ -120,13 +130,13 @@ export function IosPushRelayForm({ initialRelayUrl, initialRelayKey, initialReco
           value={recommendedBuild}
           onChange={(e) => { setRecommendedBuild(e.target.value); setStatus("idle"); }}
           placeholder={t("settings.form.iosPush.recommendedBuildPlaceholder")}
-          className="bg-zinc-800 border-zinc-700 text-sm"
+          className="bg-zinc-800 border-zinc-700"
         />
         <p className="text-xs text-zinc-500">
           {t("settings.form.iosPush.recommendedBuildHelp")}
         </p>
       </div>
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 flex-wrap">
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
           {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
         </Button>

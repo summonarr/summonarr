@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { Loader2, Check, X, AlertTriangle, RefreshCw, RotateCcw, Search, MessageSquare, Trash2, Users, Settings } from "@/components/icons";
+import { Loader2, Check, X, Ban, AlertTriangle, RefreshCw, RotateCcw, Search, MessageSquare, Trash2, Users, Settings } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 
@@ -54,17 +54,31 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
   const [profilesError, setProfilesError] = useState<string | null>(null);
   const [approvingProfileId, setApprovingProfileId] = useState<number | null>(null);
 
+  // The cached list belongs to ONE instance. `arrInstance` is the row's
+  // representative request's instance and is re-derived on every refresh, so
+  // when the pending default-instance request is declined elsewhere and a 4K
+  // request becomes the representative, a list loaded for the default would
+  // otherwise be offered for the 4K approve (the server only checks the id is a
+  // positive integer). Drop the cache — and the open picker, whose rows no
+  // longer apply — whenever the instance changes.
+  useEffect(() => {
+    setProfiles(null);
+    setDefaultProfileId(null);
+    setProfilesError(null);
+    setShowProfilePicker(false);
+  }, [arrInstance, mediaType]);
+
   async function openProfilePicker() {
     setShowProfilePicker(true);
     setArrError(null);
-    if (profiles) return; // already loaded for this row
+    if (profiles) return; // already loaded for this instance
     setProfilesLoading(true);
     setProfilesError(null);
     try {
       const res = await fetch(withBasePath(`/api/requests/quality-profiles?mediaType=${mediaType}&instance=${encodeURIComponent(arrInstance)}`));
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setProfilesError((data as { error?: string }).error ?? t("adminQueue.actions.profilesFailed"));
+        const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+        setProfilesError(data.message ?? data.error ?? t("adminQueue.actions.profilesFailed"));
         return;
       }
       const data: { qualityProfiles: { id: number; name: string }[]; defaultId: number | null } = await res.json();
@@ -96,8 +110,8 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
       );
       const failed = results.find((r) => !r.ok);
       if (failed) {
-        const data = await failed.json().catch(() => ({}));
-        setArrError((data as { error?: string }).error ?? t("adminQueue.actions.saveReplyFailed"));
+        const data = (await failed.json().catch(() => ({}))) as { error?: string; message?: string };
+        setArrError(data.message ?? data.error ?? t("adminQueue.actions.saveReplyFailed"));
         return;
       }
       setShowReply(false);
@@ -145,8 +159,11 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           });
       if (!res.ok) {
         setOptimisticStatus(null);
-        const data = await res.json().catch(() => ({}));
-        setArrError((data as { error?: string }).error ?? t("adminQueue.actions.updateFailed"));
+        // `message` first — the batch route answers a >25-requester permanent
+        // decline with { error: "permanent-batch-too-large", message: "<sentence>" }
+        // and the slug alone is noise (the issue components already read it so).
+        const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+        setArrError(data.message ?? data.error ?? t("adminQueue.actions.updateFailed"));
         return;
       }
       const data: { arrError?: string } = await res.json().catch(() => ({}));
@@ -183,8 +200,8 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
         body: JSON.stringify({ search: true }),
       });
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        setArrError((err as { arrError?: string; error?: string }).arrError ?? (err as { error?: string }).error ?? t("adminQueue.common.requestFailed", { status: res.status }));
+        const err = (await res.json().catch(() => ({}))) as { arrError?: string; error?: string; message?: string };
+        setArrError(err.arrError ?? err.message ?? err.error ?? t("adminQueue.common.requestFailed", { status: res.status }));
         return;
       }
       const data = (await res.json().catch(() => ({}))) as { arrError?: string };
@@ -211,8 +228,8 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
         body: JSON.stringify({ retry: true }),
       });
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        setArrError((err as { arrError?: string; error?: string }).arrError ?? (err as { error?: string }).error ?? t("adminQueue.common.requestFailed", { status: res.status }));
+        const err = (await res.json().catch(() => ({}))) as { arrError?: string; error?: string; message?: string };
+        setArrError(err.arrError ?? err.message ?? err.error ?? t("adminQueue.common.requestFailed", { status: res.status }));
         return;
       }
       const data = (await res.json().catch(() => ({}))) as { arrError?: string };
@@ -233,8 +250,8 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
     try {
       const res = await fetch(withBasePath(`/api/requests/${requestId}`), { method: "DELETE" });
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setArrError((data as { error?: string }).error ?? t("adminQueue.actions.deleteFailed"));
+        const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
+        setArrError(data.message ?? data.error ?? t("adminQueue.actions.deleteFailed"));
         return;
       }
       router.refresh();
@@ -252,8 +269,9 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
     <div className="flex flex-col items-end gap-1 mt-1">
       {!showReply ? (
         <button
+          type="button"
           onClick={() => { setShowReply(true); setReplySaved(false); }}
-          className="flex items-center gap-1 text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors"
+          className="flex items-center gap-1 rounded px-1.5 py-1 -mr-1.5 text-[11px] text-zinc-500 hover:text-zinc-300 transition-colors"
         >
           <MessageSquare className="w-3 h-3" />
           {existingAdminNote ? t("adminQueue.actions.editReply") : t("adminQueue.actions.reply")}
@@ -318,7 +336,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
               size="sm"
               onClick={deleteRequest}
               disabled={loading === "DELETE"}
-              className="h-7 px-3 text-xs bg-red-800 text-white hover:bg-red-700 gap-1"
+              className="h-7 px-3 text-xs bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
             >
               {loading === "DELETE" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
               {t("adminQueue.actions.delete")}
@@ -330,7 +348,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
 
     return (
       <div className="flex flex-col items-end gap-1">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           <Button
             size="sm"
             variant="outline"
@@ -356,7 +374,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             variant="outline"
             onClick={() => setShowDeleteConfirm(true)}
             disabled={loading !== null}
-            className="h-7 px-3 text-xs border-red-800/50 text-red-500 hover:bg-red-500/10 hover:text-red-400 gap-1"
+            className="h-7 px-3 text-xs border-red-500/50 text-red-400 hover:bg-red-500/10 hover:text-red-400 gap-1"
           >
             <Trash2 className="w-3 h-3" />
             {t("adminQueue.actions.delete")}
@@ -444,11 +462,15 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           >
             {t("shared.common.cancel")}
           </Button>
+          {/* Both denies share the one danger fill (guardrail 42 — red-800/950
+              were raw Tailwind in both themes, a near-black slab in light mode);
+              "permanent" is told apart by its label and the Ban icon, not a
+              darker shade. */}
           <Button
             size="sm"
             onClick={() => updateStatus("DECLINED", declineNote.trim() || undefined, false)}
             disabled={loading !== null}
-            className="h-7 px-3 text-xs bg-red-800 text-white hover:bg-red-700 gap-1"
+            className="h-7 px-3 text-xs bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
             title={t("adminQueue.actions.denyAllowTitle")}
           >
             {loading === "DECLINED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3" />}
@@ -458,10 +480,10 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
             size="sm"
             onClick={() => updateStatus("DECLINED", declineNote.trim() || undefined, true)}
             disabled={loading !== null}
-            className="h-7 px-3 text-xs bg-red-950 text-white hover:bg-red-900 border border-red-700 gap-1"
+            className="h-7 px-3 text-xs bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
             title={t("adminQueue.actions.denyPermanentTitle")}
           >
-            {loading === "DECLINED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <X className="w-3 h-3" />}
+            {loading === "DECLINED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Ban className="w-3 h-3" />}
             {t("adminQueue.actions.denyPermanent")}
           </Button>
         </div>
@@ -530,12 +552,15 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
 
   return (
     <div className="flex flex-col items-end gap-1.5">
-      <div className="flex items-center gap-2">
+      {/* Wraps like the decline-note row above: below sm the actions cell is
+          the card's full width (~315px at 375px), and Approve / "Approve as…" /
+          Decline run to ~340px in German. */}
+      <div className="flex flex-wrap items-center justify-end gap-2">
         <Button
           size="sm"
           onClick={() => updateStatus("APPROVED")}
           disabled={loading !== null}
-          className="h-7 px-3 text-xs bg-green-700 text-white hover:bg-green-800 gap-1"
+          className="h-7 px-3 text-xs bg-green-600 text-[var(--ds-on-status)] hover:bg-green-600/90 gap-1"
         >
           {loading === "APPROVED" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
           {t("adminQueue.actions.approve")}
@@ -558,7 +583,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           variant="outline"
           onClick={() => setShowDeclineNote(true)}
           disabled={loading !== null}
-          className="h-7 px-3 text-xs border-red-800 text-red-400 hover:bg-red-500/10 hover:text-red-400 gap-1"
+          className="h-7 px-3 text-xs border-red-500/50 text-red-400 hover:bg-red-500/10 hover:text-red-400 gap-1"
         >
           <X className="w-3 h-3" />
           {t("adminQueue.actions.decline")}
@@ -627,8 +652,9 @@ export function SyncButton() {
         );
 
       // A *arr outage is worth saying even though its count is not per-server.
-      for (const source of ["radarr", "sonarr"]) {
-        if (failed.has(source)) parts.push(t("adminQueue.sync.sourceFailed", { name: source }));
+      // Display names, not the wire slugs — "Plex 3 · radarr failed" read as a typo.
+      for (const [name, key] of [["Radarr", "radarr"], ["Sonarr", "sonarr"]] as const) {
+        if (failed.has(key)) parts.push(t("adminQueue.sync.sourceFailed", { name }));
       }
 
       setIsError(failed.size > 0);

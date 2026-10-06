@@ -7,6 +7,12 @@ import { Label } from "@/components/ui/label";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 
+// Mirrors the server's floor in /api/auth/register (`password.length < 12`) and
+// the profile change-password form. The old minLength 8 + "Min. 8 characters"
+// hint let a 9–11 character password pass the browser check and bounce off the
+// server with "at least 12".
+const MIN_PASSWORD_LENGTH = 12;
+
 // First-run admin account form; registers then auto-signs in. There is no
 // self-registration variant — /register redirects to /setup or /login.
 export function SetupForm() {
@@ -79,6 +85,7 @@ export function SetupForm() {
           value={form.name}
           onChange={(e) => set("name", e.target.value)}
           placeholder={t("auth.setup.displayNamePlaceholder")}
+          autoComplete="name"
         />
       </div>
 
@@ -90,6 +97,7 @@ export function SetupForm() {
           value={form.email}
           onChange={(e) => set("email", e.target.value)}
           placeholder={t("auth.setup.emailPlaceholder")}
+          autoComplete="email"
           required
         />
       </div>
@@ -102,7 +110,10 @@ export function SetupForm() {
           value={form.password}
           onChange={(e) => set("password", e.target.value)}
           placeholder={t("auth.setup.passwordPlaceholder")}
-          minLength={8}
+          // new-password: lets password managers offer to generate and save the
+          // one password the operator most needs saved.
+          autoComplete="new-password"
+          minLength={MIN_PASSWORD_LENGTH}
           required
         />
       </div>
@@ -115,6 +126,7 @@ export function SetupForm() {
           value={form.confirm}
           onChange={(e) => set("confirm", e.target.value)}
           placeholder={t("auth.setup.confirmPlaceholder")}
+          autoComplete="new-password"
           required
         />
       </div>

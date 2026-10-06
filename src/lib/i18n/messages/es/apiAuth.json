@@ -24,6 +24,7 @@
   "apiAuth.emailConfirm.invalidLinkTitle": "Enlace no válido",
   "apiAuth.emailConfirm.malformed": "Este enlace de verificación está mal formado.",
   "apiAuth.emailConfirm.missingToken": "A este enlace de verificación le falta el token.",
+  "apiAuth.emailConfirm.notYou": "Si no solicitaste esto, cierra esta página: no se cambiará nada.",
   "apiAuth.emailConfirm.pageTitle": "Confirmar correo de notificaciones",
   "apiAuth.emailConfirm.successBody": "Tu correo de notificaciones está confirmado. Summonarr enviará ahí las novedades de tus solicitudes. Puedes cerrar esta pestaña.",
   "apiAuth.emailConfirm.successTitle": "Correo verificado",

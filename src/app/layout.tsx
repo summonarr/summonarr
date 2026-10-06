@@ -48,7 +48,10 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: "Summonarr",
+  // A template so every page can name itself in the tab/bookmark/history
+  // ("Dune · Summonarr") — pages set `title` via generateMetadata; the (app)
+  // layout re-derives the pair from the configured siteTitle.
+  title: { default: "Summonarr", template: "%s · Summonarr" },
   description: "Media request management",
   appleWebApp: {
     capable: true,

@@ -1,6 +1,6 @@
-import { authActive } from "@/lib/auth";
+import { requireAppSession } from "@/lib/require-app-session";
 import { prisma } from "@/lib/prisma";
-import { redirect, notFound } from "next/navigation";
+import { notFound } from "next/navigation";
 import { ExternalLink, Heart } from "@/components/icons";
 import { requireFeature } from "@/lib/features";
 import { DONATION_SETTING_KEYS, hasDonationLinks } from "@/lib/donations";
@@ -22,8 +22,9 @@ function safeUrl(v: string): string | null {
 
 export default async function DonatePage() {
   await requireFeature("feature.page.donate");
-  const session = await authActive();
-  if (!session) redirect("/login");
+  // The shared per-page DB-checked login gate (guardrail 29) — every other
+  // (app) page goes through it, so a future change there covers this one too.
+  await requireAppSession();
 
   const rows = await prisma.setting.findMany({
     where: { key: { in: [...DONATION_SETTING_KEYS] } },
@@ -115,8 +116,11 @@ export default async function DonatePage() {
       <PageHeader
         title={
           <span className="flex items-center gap-2.5">
+            {/* Token, not a raw hex: this icon sits on the page surface, so it
+                has to survive both themes (guardrail 42). */}
             <Heart
-              style={{ width: 20, height: 20, color: "#f472b6", fill: "#f472b6" }}
+              aria-hidden
+              style={{ width: 20, height: 20, color: "var(--ds-danger)", fill: "var(--ds-danger)" }}
             />
             {t("personal.donate.title")}
           </span>

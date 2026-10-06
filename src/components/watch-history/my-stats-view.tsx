@@ -21,8 +21,8 @@ import {
   Poster,
   SectionHeader,
   MiniKpi,
-  fmtDuration,
 } from "@/components/admin/activity-ui";
+import { formatDurationHM } from "@/lib/format-duration";
 import { ActivityCalendar } from "@/components/admin/activity-calendar";
 import { BarChart3 } from "@/components/icons";
 import { EmptyState } from "@/components/ui/design";
@@ -107,7 +107,7 @@ export function MyStatsView({ data: s }: { data: MyStatsData }) {
         <MiniKpi label={t("personal.stats.totalPlays")} value={s.totalPlays.toLocaleString(locale)} big />
         <MiniKpi label={t("personal.stats.watchTime")} value={`${s.totalWatchTimeHours.toLocaleString(locale)}h`} big />
         <MiniKpi label={t("personal.stats.lastActive")} value={when(s.lastActiveIso)} />
-        <MiniKpi label={t("personal.stats.avgSession")} value={fmtDuration(s.avgSessionDuration)} />
+        <MiniKpi label={t("personal.stats.avgSession")} value={formatDurationHM(s.avgSessionDuration, locale)} />
       </div>
 
       {s.activityCalendar.length > 0 && (

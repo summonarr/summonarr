@@ -1,6 +1,7 @@
 import { MediaCard } from "./media-card";
 import { CollectionRequestAllButton } from "./collection-request-all";
 import type { TmdbMedia } from "@/lib/tmdb-types";
+import { SectionHeader } from "@/components/ui/design";
 
 interface CollectionRowProps {
   collectionName: string;
@@ -23,20 +24,12 @@ export function CollectionRow({
   if (others.length === 0) return null;
   return (
     <section className="ds-detail-section">
-      <div className="flex flex-wrap items-center justify-between gap-3" style={{ margin: "0 0 12px" }}>
-        <h2
-          className="font-semibold"
-          style={{
-            fontSize: 15,
-            letterSpacing: "-0.01em",
-            color: "var(--ds-fg)",
-            margin: 0,
-          }}
-        >
-          {collectionName}
-        </h2>
-        <CollectionRequestAllButton items={others} canRequest={canRequest} />
-      </div>
+      {/* The shared heading primitive (title + right slot), not a hand copy of
+          its styles — the copies drift the first time SectionHeader changes. */}
+      <SectionHeader
+        title={collectionName}
+        right={<CollectionRequestAllButton items={others} canRequest={canRequest} />}
+      />
       <div className="ds-media-grid">
         {others.map((media) => (
           <MediaCard

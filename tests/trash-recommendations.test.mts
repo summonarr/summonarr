@@ -47,6 +47,23 @@ test("every entry has a non-empty label and rationale for the admin UI", () => {
   }
 });
 
+// U17 (2026-10-06): the admin UI renders the pack through t(labelKey) /
+// t(rationaleKey) so a non-English instance sees translated cards; an entry
+// without keys falls back to its English copy and ships untranslated again.
+test("every entry carries a labelKey + rationaleKey under trash.starter.pack., unique across the pack", () => {
+  const seen = new Set<string>();
+  for (const item of STARTER_PACK) {
+    for (const key of [item.labelKey, item.rationaleKey]) {
+      assert.ok(
+        typeof key === "string" && key.startsWith("trash.starter.pack."),
+        `${item.label}: labelKey/rationaleKey must be catalog keys under trash.starter.pack.`,
+      );
+      assert.ok(!seen.has(key), `${item.label}: duplicate catalog key ${key}`);
+      seen.add(key);
+    }
+  }
+});
+
 test("labels are unique and prefixed by service (Movies: / TV:)", () => {
   const labels = new Set(STARTER_PACK.map((i) => i.label));
   assert.equal(labels.size, STARTER_PACK.length);

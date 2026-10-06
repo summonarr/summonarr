@@ -193,7 +193,6 @@ function PageBtn({
         border: "1px solid",
         borderColor: active ? "transparent" : "var(--ds-border)",
         borderRadius: 5,
-        cursor: disabled ? "default" : "pointer",
         fontVariantNumeric: "tabular-nums",
       }}
     >

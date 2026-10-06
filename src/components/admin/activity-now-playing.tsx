@@ -8,7 +8,9 @@ import { parseActiveSessionId } from "@/lib/media-instances";
 import { bitrateToKbps } from "@/lib/bitrate";
 import { IpInfo } from "@/components/admin/ip-info";
 import { Loader2, X } from "@/components/icons";
-import { useT } from "@/components/i18n/i18n-provider";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/design";
 import {
   Dialog,
   DialogBackdrop,
@@ -25,6 +27,7 @@ import {
   ProgressTrack,
   SectionHeader,
   SourceTag,
+  fmtBitrate,
   formatMs,
   methodLabel,
 } from "@/components/admin/activity-ui";
@@ -87,15 +90,18 @@ function MarkersChip({ s }: { s: ActiveSessionLive }) {
         fontVariantNumeric: "tabular-nums",
       }}
     >
+      {/* The Intro/Credits prefixes are labels, so they read in --ds-fg-subtle
+          like the rest of the chip — --ds-fg-disabled is ~1.8:1 dark / ~2.5:1
+          light and is reserved for "—" placeholders (guardrail 42). */}
       {hasIntro && (
         <span title={t("adminActivity.nowPlaying.introTitle")}>
-          <span style={{ color: "var(--ds-fg-disabled)" }}>{t("adminActivity.nowPlaying.intro")} </span>
+          <span style={{ color: "var(--ds-fg-subtle)" }}>{t("adminActivity.nowPlaying.intro")} </span>
           {fmtOffset(s.introStartMs!)}–{fmtOffset(s.introEndMs!)}
         </span>
       )}
       {hasCredits && (
         <span title={t("adminActivity.nowPlaying.creditsTitle")}>
-          <span style={{ color: "var(--ds-fg-disabled)" }}>{t("adminActivity.nowPlaying.credits")} </span>
+          <span style={{ color: "var(--ds-fg-subtle)" }}>{t("adminActivity.nowPlaying.credits")} </span>
           {creditsLabel}
         </span>
       )}
@@ -219,7 +225,6 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
           border: "1px solid var(--ds-border)",
           borderRadius: 6,
           color: "var(--ds-fg-muted)",
-          cursor: "pointer",
         }}
         title={t("adminActivity.terminate.buttonTitle", { server: serverLabel })}
       >
@@ -302,40 +307,21 @@ function TerminateButton({ session }: { session: ActiveSessionLive }) {
                 {error && <p className="text-xs text-red-400">{error}</p>}
 
                 <div className="flex justify-end gap-2 pt-1">
-                  <button
-                    type="button"
+                  {/* The shared Button primitive, like every other dialog's
+                      actions — same radius, height, focus ring and hover
+                      (the hand-rolled danger fill had none). */}
+                  <Button
+                    variant="outline"
+                    size="sm"
                     onClick={() => setOpen(false)}
                     disabled={busy}
-                    className="inline-flex items-center justify-center font-medium transition-colors disabled:opacity-50"
-                    style={{
-                      padding: "6px 12px",
-                      height: 30,
-                      borderRadius: 6,
-                      fontSize: 12,
-                      background: "transparent",
-                      color: "var(--ds-fg-muted)",
-                      border: "1px solid var(--ds-border)",
-                    }}
                   >
                     {t("adminActivity.common.cancel")}
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={busy}
-                    className="inline-flex items-center justify-center gap-1.5 font-medium transition-colors disabled:opacity-50"
-                    style={{
-                      padding: "6px 14px",
-                      height: 30,
-                      borderRadius: 6,
-                      fontSize: 12,
-                      background: "var(--ds-danger, #c44)",
-                      color: "var(--ds-on-status)",
-                      border: "1px solid transparent",
-                    }}
-                  >
-                    {busy && <Loader2 className="animate-spin" style={{ width: 12, height: 12 }} />}
+                  </Button>
+                  <Button type="submit" variant="destructive" size="sm" disabled={busy}>
+                    {busy && <Loader2 className="animate-spin" />}
                     {busy ? t("adminActivity.terminate.terminating") : t("adminActivity.terminate.button")}
-                  </button>
+                  </Button>
                 </div>
               </form>
             </DialogPopup>
@@ -369,8 +355,21 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
   // instance, and SourceTag renders nothing extra in that case.
   const serverInstance = parseActiveSessionId(s.id).serverInstance;
   const m = methodLabel(t, s.playMethod, s.videoDecision, s.audioDecision);
-  const bitrateMbps = bitrateToKbps(s.bitrate, s.source) / 1000;
+  // Same recipe as the Recent plays detail row (fmtBitrate resolves the unit
+  // from `source` — guardrail 19a), so a 650 kbps phone transcode reads
+  // "650 kbps" here and there, not "0.7 Mbps" on one and "650 kbps" on the other.
+  const bitrateLabel = fmtBitrate(s.bitrate, s.source);
   const paused = s.state === "paused";
+  // Composed exactly like recent-plays' `sub`: an unknown season/episode is
+  // dropped, never rendered as "S00 · E00".
+  const seasonEpisode = isTV
+    ? [
+        s.seasonNumber != null ? `S${String(s.seasonNumber).padStart(2, "0")}` : null,
+        s.episodeNumber != null ? `E${String(s.episodeNumber).padStart(2, "0")}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : "";
 
   const userNode = s.serverUsername ? (
     <span
@@ -512,12 +511,11 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
           >
             {isTV ? (
               <>
-                S{String(s.seasonNumber ?? 0).padStart(2, "0")} · E
-                {String(s.episodeNumber ?? 0).padStart(2, "0")}
+                {seasonEpisode}
                 {s.episodeTitle && (
                   <>
-                    {" "}
-                    · <span style={{ color: "var(--ds-fg-subtle)" }}>{s.episodeTitle}</span>
+                    {seasonEpisode ? " · " : ""}
+                    <span style={{ color: "var(--ds-fg-subtle)" }}>{s.episodeTitle}</span>
                   </>
                 )}
               </>
@@ -577,11 +575,11 @@ function SessionCard({ s }: { s: ActiveSessionLive }) {
           v={
             <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
               <span className="ds-mono">{s.resolution ?? "—"}</span>
-              {bitrateMbps > 0 && (
+              {bitrateLabel !== "—" && (
                 <>
                   <span style={{ color: "var(--ds-fg-disabled)" }}>·</span>
                   <span className="ds-mono" style={{ color: "var(--ds-fg-subtle)" }}>
-                    {bitrateMbps.toFixed(1)} Mbps
+                    {bitrateLabel}
                   </span>
                 </>
               )}
@@ -644,6 +642,7 @@ export function ActivityNowPlaying({
   plexReachability?: { instance: string; name: string; reachable: boolean | null }[];
 }) {
   const t = useT();
+  const locale = useLocale();
   const [sessions, setSessions] =
     useState<ActiveSessionLive[]>(initialSessions);
   const [connected, setConnected] = useState(false);
@@ -689,7 +688,13 @@ export function ActivityNowPlaying({
           plexCount > 0 && jellyfinCount > 0
             ? ` · ${plexCount} Plex · ${jellyfinCount} Jellyfin`
             : ""
-        }${totalMbps > 0 ? ` · ${t("adminActivity.nowPlaying.combined", { mbps: totalMbps.toFixed(1) })}` : ""}`;
+        }${
+          totalMbps > 0
+            ? ` · ${t("adminActivity.nowPlaying.combined", {
+                mbps: totalMbps.toLocaleString(locale, { maximumFractionDigits: 1 }),
+              })}`
+            : ""
+        }`;
 
   return (
     <section style={{ marginBottom: 28 }}>
@@ -754,19 +759,7 @@ export function ActivityNowPlaying({
         }
       />
       {sessions.length === 0 ? (
-        <div
-          style={{
-            padding: "28px 18px",
-            background: "var(--ds-bg-2)",
-            border: "1px solid var(--ds-border)",
-            borderRadius: 10,
-            color: "var(--ds-fg-subtle)",
-            fontSize: 13,
-            textAlign: "center",
-          }}
-        >
-          {t("adminActivity.nowPlaying.noActive")}
-        </div>
+        <EmptyState description={t("adminActivity.nowPlaying.noActive")} />
       ) : (
         <div
           className="resp-grid-3"

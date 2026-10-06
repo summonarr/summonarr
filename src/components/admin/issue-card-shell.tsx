@@ -28,7 +28,14 @@ export function IssueCardShell({ issueId, messageCount, initialOpen = false, chi
   return (
     <div className="rounded-lg bg-zinc-900 border border-zinc-800 overflow-hidden">
       <div className="flex items-start gap-4 p-4">
-        <div className="flex-1 flex items-start gap-4 min-w-0">
+        {/* flex-wrap: below xl the IssueActions column rides in this row (via
+            `div.contents xl:hidden` on the page). Its hypothetical width is the
+            SUM of its buttons (~500px for a TV-episode issue), so in a
+            non-wrapping row the `flex-1` title Link collapsed to 0 at phone
+            width and the actions were clipped by `overflow-hidden`. Wrapping
+            puts the column on its own line only when it doesn't fit beside the
+            title; narrower than one line it shrinks and wraps internally. */}
+        <div className="flex-1 flex flex-wrap items-start gap-4 min-w-0">
           {children}
         </div>
 

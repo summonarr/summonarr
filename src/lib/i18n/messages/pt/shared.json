@@ -50,5 +50,9 @@
   "shared.discordJoin.message": "Entre no nosso servidor do Discord para solicitar mídia direto pelo Discord e depois {link}.",
   "shared.discordJoin.linkAccount": "vincule sua conta",
   "shared.discordJoin.join": "Entrar no Discord",
-  "shared.skipToContent": "Pular para o conteúdo principal"
+  "shared.skipToContent": "Pular para o conteúdo principal",
+  "shared.bell.loadFailed": "Não foi possível carregar as notificações.",
+  "shared.bell.loading": "Carregando notificações…",
+  "shared.common.clearSearch": "Limpar busca",
+  "shared.thread.placeholderShortcut": "Escreva uma mensagem… ({shortcut} para enviar)"
 }

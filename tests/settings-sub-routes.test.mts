@@ -645,10 +645,10 @@ test("arr-options never echoes the arr API key", async () => {
 
 // ── library pickers ──────────────────────────────────────────────────────────
 
-test("plex/libraries is 400 when Plex is unconfigured and fetches nothing", async () => {
+test("plex/libraries is 422 when Plex is unconfigured and fetches nothing", async () => {
   const t = await mintSession();
   const res = await getPlexLibs(t);
-  assert.equal(res.status, 400);
+  assert.equal(res.status, 422);
   assert.deepEqual(fetchCalls, []);
 });
 
@@ -675,17 +675,17 @@ test("plex/libraries maps an unreachable server to 502 without leaking the body"
   assert.ok(errors.some((e) => e.includes("[settings/plex/libraries]")));
 });
 
-test("jellyfin/libraries is 400 when Jellyfin is unconfigured and fetches nothing", async () => {
+test("jellyfin/libraries is 422 when Jellyfin is unconfigured and fetches nothing", async () => {
   const t = await mintSession();
   const res = await getJfLibs(t);
-  assert.equal(res.status, 400);
+  assert.equal(res.status, 422);
   assert.deepEqual(fetchCalls, []);
 });
 
-test("jellyfin/libraries is 400 when only HALF the connection is configured", async () => {
+test("jellyfin/libraries is 422 when only HALF the connection is configured", async () => {
   settings.set("jellyfinUrl", "http://10.0.0.6:8096");
   const t = await mintSession();
-  assert.equal((await getJfLibs(t)).status, 400);
+  assert.equal((await getJfLibs(t)).status, 422);
 });
 
 test("jellyfin/libraries maps an unreachable server to 502 without leaking the body", async () => {

@@ -5,12 +5,20 @@ import { testOmdbConnection } from "@/lib/omdb";
 import { testMdblistConnection } from "@/lib/mdblist";
 import { testTraktConnection } from "@/lib/trakt";
 import { testIpinfoConnection } from "@/lib/ip-lookup";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Admin connectivity test for the ratings/lookup providers: dispatches on the
 // requested service to the matching test helper (OMDB, MDBList, Trakt, ipinfo).
-export const POST = withAdmin(async (req, _ctx, _session) => {
+export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
+  // Same 10/min per-admin budget as the settings PATCH and the notification-agent
+  // test route. Every call here is a LIVE upstream request, and OMDB's free tier
+  // is 1k/day: a stuck Test retry would burn it and trip the quota lockout that
+  // hides OMDB ratings for every user until the window rolls.
+  if (!checkRateLimit(`admin-test-ratings:${session.user.id}`, 10, 60_000)) {
+    return NextResponse.json({ error: t("apiAdmin.common.tooManyRequestsLater") }, { status: 429 });
+  }
   const parsed = await readJsonCapped<{ service?: string }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;
   const body = parsed;

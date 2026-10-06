@@ -6,6 +6,9 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { ChevronLeft, Sparkles } from "@/components/icons";
 import { EmptyState, PageHeader } from "@/components/ui/design";
 import { WrappedView, type WrappedData } from "@/components/watch-history/wrapped-view";
+import { TrackingOffState } from "@/components/watch-history/tracking-off-state";
+import { isPlayHistoryEnabled } from "@/lib/play-history";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
@@ -23,6 +26,40 @@ export default async function WrappedPage({
 }) {
   const session = await requireAppSession();
   const t = await getTranslator();
+
+  const back = (
+    <Link
+      href="/my-stats"
+      className="inline-flex items-center transition-colors text-[var(--ds-fg-muted)] hover:text-[var(--ds-fg)]"
+      style={{
+        gap: 4,
+        marginBottom: 14,
+        fontSize: 12.5,
+        textDecoration: "none",
+      }}
+    >
+      <ChevronLeft aria-hidden style={{ width: 14, height: 14 }} />
+      {t("personal.wrapped.back")}
+    </Link>
+  );
+
+  // Tracking off ⇒ nothing is recorded, so neither the year pills nor the
+  // "not enough history" copy below is honest. Say so (the /popular gate) and
+  // skip the aggregate read entirely.
+  if (!(await isPlayHistoryEnabled())) {
+    return (
+      <div className="ds-page-enter">
+        {back}
+        <PageHeader title={t("personal.wrapped.title")} subtitle={t("personal.wrapped.subtitle")} />
+        <TrackingOffState
+          icon={Sparkles}
+          t={t}
+          canOpenSettings={hasPermission(session.user.permissions, Permission.ADMIN)}
+        />
+      </div>
+    );
+  }
+
   const sp = await searchParams;
   const requested = sp.year && /^\d{4}$/.test(sp.year) ? parseInt(sp.year, 10) : undefined;
   const { linked, years, year, data } = await getMyWrapped(session.user.id, requested);
@@ -80,19 +117,7 @@ export default async function WrappedPage({
 
   return (
     <div className="ds-page-enter">
-      <Link
-        href="/my-stats"
-        className="inline-flex items-center transition-colors text-[var(--ds-fg-muted)] hover:text-[var(--ds-fg)]"
-        style={{
-          gap: 4,
-          marginBottom: 14,
-          fontSize: 12.5,
-          textDecoration: "none",
-        }}
-      >
-        <ChevronLeft aria-hidden style={{ width: 14, height: 14 }} />
-        {t("personal.wrapped.back")}
-      </Link>
+      {back}
 
       <PageHeader title={t("personal.wrapped.title")} subtitle={t("personal.wrapped.subtitle")} />
 

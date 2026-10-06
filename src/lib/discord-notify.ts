@@ -31,7 +31,10 @@ const TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w185";
 const DISCORD_FETCH_TIMEOUT_MS = 15_000;
 const DISCORD_HOSTS = ["discord.com"];
 
-function escMd(text: string): string {
+// Escapes Discord markdown in user/upstream text interpolated into message
+// CONTENT (embed titles don't render markdown). Shared with the interactions
+// route — every title, query and display name that reaches Discord goes through it.
+export function escMd(text: string): string {
   return text.replace(/([*_`~|\\>[\]()@#])/g, "\\$1");
 }
 

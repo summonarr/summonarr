@@ -222,5 +222,12 @@
   "profile.mfa.stepUp.passkeyFailed": "No se pudo usar la llave de acceso en este dispositivo.",
   "profile.mfa.stepUp.codeRequired": "Introduce un código de tu aplicación de autenticación o un código de recuperación para confirmar este cambio.",
   "profile.notifications.iosApp.prompt": "¿Usas iPhone? La app de Summonarr envía estas notificaciones de forma nativa.",
-  "profile.notifications.iosApp.link": "Descárgala en el App Store"
+  "profile.notifications.iosApp.link": "Descárgala en el App Store",
+  "profile.close.confirmWord": "CERRAR",
+  "profile.mfa.confirmRemoveTotp": "¿Quitar la app de autenticación? Se te seguirá pidiendo una llave de acceso al iniciar sesión.",
+  "profile.mfa.confirmRemovePasskey": "¿Quitar la llave de acceso {name}? Se te seguirá pidiendo un segundo factor al iniciar sesión.",
+  "profile.mfa.confirmRemoveLast": "Este es tu único segundo factor. Al quitarlo se desactiva la autenticación en dos pasos, se eliminan tus códigos de recuperación y se cierra la sesión en tus otros dispositivos.",
+  "profile.mfa.totp.copyKey": "Copiar clave de configuración",
+  "profile.notifications.verificationPending": "Verificación pendiente para {email}: revisa tu bandeja de entrada.",
+  "profile.notifications.resendVerification": "Reenviar"
 }

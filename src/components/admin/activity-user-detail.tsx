@@ -9,6 +9,8 @@ import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { IpInfo } from "@/components/admin/ip-info";
+import { Badge } from "@/components/ui/badge";
+import { Chip } from "@/components/ui/design";
 import {
   ActivityCard,
   AreaChart,
@@ -32,6 +34,12 @@ export interface UserDetailData {
   source: string;
   linkedLabel: string | null;
   email: string | null;
+  // false = soft-deleted from the media server; history is kept by design
+  // (guardrail 28), so the page still renders and says so.
+  active: boolean;
+  // An admin pinned the account binding by hand (incl. a pin to nobody), so
+  // the poller's automatic resolution skips this row (guardrail 34).
+  manualUserLink: boolean;
   totalPlays: number;
   totalWatchTimeHours: number;
   avgSessionDuration: number;
@@ -124,10 +132,27 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
           />
         }
         title={s.username}
-        meta={<SourceTag source={s.source} />}
+        meta={
+          <>
+            <SourceTag source={s.source} />
+            {!s.active && (
+              <Badge
+                className="border-zinc-700 bg-zinc-800 text-zinc-400 text-[10px] shrink-0"
+                title={t("adminManage.serverUsers.departedTitle")}
+              >
+                {t("adminManage.serverUsers.departed")}
+              </Badge>
+            )}
+          </>
+        }
         subtitle={
-          [s.email, s.linkedLabel].filter(Boolean).join(" · ") ||
-          t("adminActivity.user.sourceAccount", { source: s.source })
+          <>
+            {[s.email, s.linkedLabel].filter(Boolean).join(" · ") ||
+              t("adminActivity.user.sourceAccount", { source: s.source })}
+            {s.manualUserLink && (
+              <Chip className="ml-2 align-middle">{t("adminManage.serverUsers.pinned")}</Chip>
+            )}
+          </>
         }
       />
 
@@ -147,7 +172,9 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
         />
         <MiniKpi
           label={t("adminActivity.kpi.watchTime")}
-          value={`${s.totalWatchTimeHours.toLocaleString(locale)}h`}
+          value={t("adminActivity.common.hoursShort", {
+            n: s.totalWatchTimeHours.toLocaleString(locale, { maximumFractionDigits: 1 }),
+          })}
           big
         />
         <MiniKpi label={t("adminActivity.user.lastActive")} value={when(s.lastActiveIso)} />
@@ -416,9 +443,15 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
               {t("adminActivity.user.noIpData")}
             </div>
           ) : (
+            // Scroll container, like the history/title tables: every cell is
+            // nowrap, and at 375px the one-column grid leaves ~307px of card.
+            // `minWidth: 0` overrides .resp-table-scroll's 760px table floor,
+            // which is sized for the ten-column history table.
+            <div className="resp-table-scroll">
             <table
               style={{
                 width: "100%",
+                minWidth: 0,
                 borderCollapse: "collapse",
                 fontSize: 12.5,
               }}
@@ -464,6 +497,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </ActivityCard>
         <ActivityCard>
@@ -483,9 +517,11 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
               {t("adminActivity.title.noPlays")}
             </div>
           ) : (
+            <div className="resp-table-scroll">
             <table
               style={{
                 width: "100%",
+                minWidth: 0,
                 borderCollapse: "collapse",
                 fontSize: 12.5,
               }}
@@ -576,6 +612,7 @@ export function UserDetailView({ data: s }: { data: UserDetailData }) {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </ActivityCard>
       </div>

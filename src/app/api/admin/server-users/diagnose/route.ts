@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { withAdmin } from "@/lib/api-auth";
+import { withPermission } from "@/lib/api-auth";
+import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
@@ -33,7 +34,13 @@ function jellyfinHeaders(apiKey: string): Record<string, string> {
   };
 }
 
-export const GET = withAdmin(async (req, _ctx, _session) => {
+type SkipReason = "missing-id" | "empty-name" | "missing-name" | "no-policy";
+
+function maskEmail(email: string | null | undefined): string | null {
+  return email ? `${email.slice(0, 3)}…` : null;
+}
+
+export const GET = withPermission(Permission.MANAGE_USERS)(async (req, _ctx, _session) => {
   const t = translatorForRequest(req);
   // Which server to diagnose. The live /Users fetch and the DB count below must
   // describe the SAME server, or `gap` compares one server's users against
@@ -80,15 +87,19 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
   }
 
   // Flag every user the sync would skip, and say why, so the admin can see it.
+  // Reasons are stable machine codes (not prose, not translated): this route is
+  // curl/OpenAPI-only and the codes are what a bug report gets grepped for.
   const breakdown = items.map((u) => {
-    const issues: string[] = [];
-    if (!u.Id) issues.push("missing Id");
-    if (!u.Name) issues.push(u.Name === "" ? "empty Name" : "missing Name");
-    if (!u.Policy) issues.push("no Policy object");
+    const issues: SkipReason[] = [];
+    if (!u.Id) issues.push("missing-id");
+    if (!u.Name) issues.push(u.Name === "" ? "empty-name" : "missing-name");
+    if (!u.Policy) issues.push("no-policy");
     return {
       id: u.Id ?? null,
       name: u.Name ?? null,
-      email: u.Email ?? null,
+      // Masked for skipped AND processed rows alike — the skipped ones are
+      // exactly what gets pasted into a bug report.
+      email: maskEmail(u.Email),
       isAdmin: u.Policy?.IsAdministrator ?? null,
       isDisabled: u.Policy?.IsDisabled ?? null,
       isHidden: u.Policy?.IsHidden ?? null,
@@ -119,7 +130,7 @@ export const GET = withAdmin(async (req, _ctx, _session) => {
     processed: processed.map((u) => ({
       id: u.id,
       name: u.name,
-      email: u.email ? `${u.email.slice(0, 3)}…` : null,
+      email: u.email,
       isAdmin: u.isAdmin,
       isDisabled: u.isDisabled,
       isHidden: u.isHidden,

@@ -252,7 +252,7 @@
   "adminQueue.fixMatch.arrSays": "Arr indica TMDB #{id}",
   "adminQueue.fixMatch.arrRecommends": "Radarr/Sonarr consiglia un abbinamento diverso:",
   "adminQueue.fixMatch.arrConfirmsHighlighted": "Radarr/Sonarr conferma TMDB #{id} — i candidati corrispondenti sono evidenziati qui sotto.",
-  "adminQueue.fixMatch.reidentify": "Identifica di nuovo questo elemento Jellyfin da TMDB #{from} a TMDB #{to}",
+  "adminQueue.fixMatch.reidentify": "Reidentifica questo elemento Jellyfin da TMDB #{from} a TMDB #{to}{instance}.",
   "adminQueue.fixMatch.jellyfinNote": "Jellyfin applica esattamente questo ID TMDB ed esegue un aggiornamento completo dei metadati — non ci sono candidati alternativi tra cui scegliere. Gli elementi grandi possono richiedere qualche minuto per la conferma.",
   "adminQueue.fixMatch.plexCandidatesHeading": "Candidati Plex — seleziona l'abbinamento corretto",
   "adminQueue.fixMatch.found": "{count} trovati",
@@ -287,5 +287,17 @@
   "adminQueue.blacklist.unblockAria": "Sblocca {title}",
   "adminQueue.blacklist.unblock": "Sblocca",
   "adminQueue.blacklist.title": "Blacklist",
-  "adminQueue.blacklist.subtitle": "Escludi titoli specifici dai suggerimenti e dalle richieste"
+  "adminQueue.blacklist.subtitle": "Escludi titoli specifici dai suggerimenti e dalle richieste",
+  "adminQueue.blacklist.filterPlaceholder": "Filtra i titoli bloccati…",
+  "adminQueue.blacklist.filterAria": "Filtra i titoli bloccati per titolo o motivo",
+  "adminQueue.blacklist.filterNoMatch": "Nessun titolo bloccato corrisponde a questo filtro.",
+  "adminQueue.fixMatch.outcome.joined": "Una correzione identica era già in corso — la tua selezione del candidato potrebbe non essere stata applicata.",
+  "adminQueue.fixMatch.outcome.jobLost": "Il server ha perso traccia di questa correzione (riavviato?) — esegui una risincronizzazione della libreria per vedere se è stata applicata.",
+  "adminQueue.fixMatch.outcome.pollLost": "Contatto perso durante l'esecuzione della correzione — esegui una risincronizzazione della libreria per vedere se è stata applicata.",
+  "adminQueue.fixMatch.outcome.timedOut": "La correzione è ancora in corso dopo 20 minuti — controlla l'elemento sul media server o esegui una risincronizzazione della libreria.",
+  "adminQueue.fixMatch.outcome.failed": "Correzione della corrispondenza non riuscita",
+  "adminQueue.fixMatch.arrBadge": "Radarr/Sonarr ✓",
+  "adminQueue.fixMatch.arrShort": "Arr ✓",
+  "adminQueue.fixMatch.resolutionNote": "Corrispondenza corretta in “{title}”",
+  "adminQueue.fixMatch.autoRequestNote": "Aggiunto dalla correzione della corrispondenza — era associato in modo errato nella libreria"
 }

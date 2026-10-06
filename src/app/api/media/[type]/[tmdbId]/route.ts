@@ -12,6 +12,7 @@ import {
   type TmdbMedia,
 } from "@/lib/tmdb";
 import type { CastMember } from "@/lib/tmdb-types";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { getShow4kVisibility } from "@/lib/four-k-visibility";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -55,6 +56,11 @@ export const GET = withAuth(async (
 
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
     return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
+  }
+  // INT4 ceiling shared with tv-availability and the season route: the
+  // int-keyed Prisma reads below throw past it.
+  if (!isTmdbIdInRange(tmdbId)) {
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdOutOfRange") }, { status: 400 });
   }
   if (type !== "movie" && type !== "tv") {
     return NextResponse.json({ error: t("apiUser.media.typeInvalid") }, { status: 400 });

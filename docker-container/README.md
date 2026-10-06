@@ -144,7 +144,7 @@ The app refuses to boot in production if any of these are missing or invalid.
 
 | Variable             | Constraints                                                 | Purpose                                                                                                            |
 | -------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `OIDC_ISSUER`        | Absolute URL; must serve `.well-known/openid-configuration` | Any OIDC provider (Authelia, Authentik, Keycloak, Auth0, Okta, …). Must be set together with the client id/secret. |
+| `OIDC_ISSUER`        | Absolute **https** URL; must serve `.well-known/openid-configuration` (an `http://` issuer is refused and the SSO tab is hidden) | Any OIDC provider (Authelia, Authentik, Keycloak, Auth0, Okta, …). Must be set together with the client id/secret. |
 | `OIDC_CLIENT_ID`     | provider-defined                                            | Client ID registered with the IdP.                                                                                 |
 | `OIDC_CLIENT_SECRET` | provider-defined                                            | Client secret from the IdP.                                                                                        |
 | `OIDC_DISPLAY_NAME`  | free-form; default `SSO`                                    | Optional label shown on the login button.                                                                          |

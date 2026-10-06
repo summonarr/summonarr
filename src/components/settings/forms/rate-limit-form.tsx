@@ -73,7 +73,7 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
             value={register}
             onChange={(e) => { setRegister(e.target.value); setStatus("idle"); }}
             placeholder="5"
-            className="bg-zinc-800 border-zinc-700 text-sm"
+            className="bg-zinc-800 border-zinc-700"
           />
         </div>
         <div className="space-y-1.5">
@@ -85,7 +85,7 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
             value={requests}
             onChange={(e) => { setRequests(e.target.value); setStatus("idle"); }}
             placeholder="20"
-            className="bg-zinc-800 border-zinc-700 text-sm"
+            className="bg-zinc-800 border-zinc-700"
           />
         </div>
         <div className="space-y-1.5">
@@ -97,7 +97,7 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
             value={issues}
             onChange={(e) => { setIssues(e.target.value); setStatus("idle"); }}
             placeholder="10"
-            className="bg-zinc-800 border-zinc-700 text-sm"
+            className="bg-zinc-800 border-zinc-700"
           />
         </div>
       </div>
@@ -112,7 +112,7 @@ export function RateLimitForm({ initialRegister, initialRequests, initialIssues,
             value={maxPushSubscriptions}
             onChange={(e) => { setMaxPushSubscriptions(e.target.value); setStatus("idle"); }}
             placeholder="5"
-            className="bg-zinc-800 border-zinc-700 text-sm"
+            className="bg-zinc-800 border-zinc-700"
           />
           <p className="text-xs text-zinc-500">{t("settings.form.rateLimit.pushHelp")}</p>
         </div>

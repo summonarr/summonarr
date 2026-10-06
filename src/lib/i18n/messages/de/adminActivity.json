@@ -295,7 +295,6 @@
   "adminActivity.user.lastSeen": "Zuletzt gesehen",
   "adminActivity.user.lastN": "letzte {count}",
   "adminActivity.user.linkedTo": "Verknüpft mit {name}",
-  "adminActivity.method.directStreamRemux": "Direct Stream (Remux)",
   "adminActivity.play.backToHistory": "Zurück zum Verlauf",
   "adminActivity.play.notWatched": "Nicht gesehen",
   "adminActivity.play.pctComplete": "{pct} % abgeschlossen",
@@ -365,5 +364,11 @@
   "adminActivity.transcode.usersSub": "meiste Transkodierungen · letzte {days} Tage",
   "adminActivity.transcode.titles": "Transkodierungslast · Titel",
   "adminActivity.transcode.titlesSub": "am häufigsten transkodiert · letzte {days} Tage",
-  "adminActivity.transcode.none": "Keine Transkodierungen in diesem Zeitraum."
+  "adminActivity.transcode.none": "Keine Transkodierungen in diesem Zeitraum.",
+  "adminActivity.common.hoursSuffix": "h",
+  "adminActivity.trackingOff.title": "Die Erfassung des Wiedergabeverlaufs ist deaktiviert",
+  "adminActivity.trackingOff.description": "Es wird nichts aufgezeichnet, daher hat dieses Dashboard keine Wiedergaben, Sehzeit oder Zuschauer anzuzeigen. Aktiviere die Erfassung unter Einstellungen → Medien → Wiedergabeverlauf, um es zu füllen.",
+  "adminActivity.trackingOff.cta": "Einstellungen zum Wiedergabeverlauf öffnen",
+  "adminActivity.common.hoursShort": "{n} h",
+  "adminActivity.detail.openPlay": "Wiedergabe öffnen →"
 }

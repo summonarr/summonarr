@@ -295,7 +295,6 @@
   "adminActivity.user.lastSeen": "Ultimo rilevamento",
   "adminActivity.user.lastN": "ultimi {count}",
   "adminActivity.user.linkedTo": "Collegato a {name}",
-  "adminActivity.method.directStreamRemux": "Streaming diretto (remux)",
   "adminActivity.play.backToHistory": "Torna alla cronologia",
   "adminActivity.play.notWatched": "Non guardato",
   "adminActivity.play.pctComplete": "{pct}% completato",
@@ -365,5 +364,11 @@
   "adminActivity.transcode.usersSub": "più transcodifiche · ultimi {days} gg",
   "adminActivity.transcode.titles": "Carico di transcodifica · titoli",
   "adminActivity.transcode.titlesSub": "più transcodificati · ultimi {days} gg",
-  "adminActivity.transcode.none": "Nessuna transcodifica in questo periodo."
+  "adminActivity.transcode.none": "Nessuna transcodifica in questo periodo.",
+  "adminActivity.common.hoursSuffix": "h",
+  "adminActivity.trackingOff.title": "Il tracciamento della cronologia di riproduzione è disattivato",
+  "adminActivity.trackingOff.description": "Non viene registrato nulla, quindi questa dashboard non ha riproduzioni, tempo di visione o spettatori da mostrare. Attiva il tracciamento in Impostazioni → Media → Cronologia di riproduzione per iniziare a popolarla.",
+  "adminActivity.trackingOff.cta": "Apri le impostazioni della cronologia di riproduzione",
+  "adminActivity.common.hoursShort": "{n} h",
+  "adminActivity.detail.openPlay": "Apri riproduzione →"
 }

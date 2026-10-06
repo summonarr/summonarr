@@ -947,6 +947,10 @@ test("auto-approve creates APPROVED with the 90s pendingNotifyAt backstop; a fai
 
   const body = (await res.json()) as Record<string, unknown>;
   assert.equal(body.status, "PENDING", "the response must reflect the rolled-back state, not the stale APPROVED row");
+  // Both rolled-back fields: the DB row's pendingNotifyAt is null after the CAS
+  // rollback, so the body must not still carry the armed ~90s backstop (the
+  // PATCH rollback in requests/[id] returns the same two-field correction).
+  assert.equal(body.pendingNotifyAt, null, "a rolled-back body must not carry the armed pendingNotifyAt");
   assert.deepEqual(
     sseEvents.map((e) => e.type),
     ["request:new", "request:updated"],

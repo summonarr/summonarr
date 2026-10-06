@@ -1,4 +1,4 @@
-import { authActive, isTokenExpired } from "@/lib/auth";
+import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { requireFeature } from "@/lib/features";
@@ -12,10 +12,10 @@ export default async function ApiDocsPage() {
   // Enforce the flag on the PAGE, not just the nav — hiding the link alone would
   // leave the URL live, so the toggle would not actually disable anything.
   await requireFeature("feature.admin.apiDocs");
+  // authActive() already rejects an expired or revoked session (guardrail 29), so
+  // no separate isTokenExpired() — same gate as the sibling admin pages.
   const session = await authActive();
-  if (!session || isTokenExpired(session) || !hasPermission(session.user.permissions, Permission.ADMIN)) {
-    redirect("/");
-  }
+  if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
   const t = await getTranslator();
 
   return (

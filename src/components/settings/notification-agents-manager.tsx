@@ -6,6 +6,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { StyledSelect } from "@/components/ui/styled-select";
+import { Textarea } from "@/components/ui/textarea";
+import { Chip } from "@/components/ui/design";
 import { CheckCircle, Loader2, Trash2, XCircle } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -120,6 +122,14 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
   const [actionError, setActionError] = useState("");
   const [testing, setTesting] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ id: string; ok: boolean; text: string } | null>(null);
+  // Id of the channel whose Delete is waiting for confirmation — the same
+  // inline red panel the arr/media managers use, instead of window.confirm.
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  // The form closes on save, so without this an edit leaves the list looking
+  // exactly as before with no sign the change took.
+  const [saved, setSaved] = useState(false);
+  // Nothing has come back yet (neither the list nor a failure).
+  const loading = agents === null && !loadError;
 
   const load = useCallback(async () => {
     try {
@@ -145,6 +155,7 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
     if (!draft) return;
     setSaving(true);
     setFormError("");
+    setSaved(false);
     try {
       const res = await fetch(withBasePath(draft.id ? `/api/admin/notification-agents/${draft.id}` : "/api/admin/notification-agents"), {
         method: draft.id ? "PATCH" : "POST",
@@ -157,11 +168,19 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
       }
       setDraft(null);
       await load();
+      setSaved(true);
     } catch {
       setFormError(t("settings.form.common.saveFailed"));
     } finally {
       setSaving(false);
     }
+  }
+
+  function openDraft(d: Draft) {
+    setDraft(d);
+    setFormError("");
+    setSaved(false);
+    setConfirmDelete(null);
   }
 
   // The edit form is a snapshot taken at "Edit" and its save sends the full
@@ -187,9 +206,12 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
     }
   }
 
+  // Reached only from the confirm panel's Delete button — the row's trash
+  // button just opens that panel.
   async function remove(a: AgentView) {
-    if (!window.confirm(t("settings.form.agents.confirmDelete", { name: a.name }))) return;
+    setConfirmDelete(null);
     setActionError("");
+    setSaved(false);
     const res = await fetch(withBasePath(`/api/admin/notification-agents/${a.id}`), { method: "DELETE" }).catch(() => null);
     if (res?.ok) {
       setDraft((d) => (d && d.id === a.id ? null : d));
@@ -229,6 +251,13 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
       {loadError && <p className="text-sm text-red-400">{t("settings.form.agents.loadFailed")}</p>}
       {actionError && <p className="text-sm text-red-400">{actionError}</p>}
 
+      {/* Same loading line as the arr/media managers. Without it the card
+          showed only "Add channel" until the GET resolved, which reads as
+          "none configured", and the list then pushed the button down. */}
+      {loading && (
+        <p className="text-sm text-zinc-500 flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" />{t("settings.instances.loading")}</p>
+      )}
+
       {agents && agents.length === 0 && !draft && (
         <p className="text-sm text-zinc-500">{t("settings.form.agents.empty")}</p>
       )}
@@ -241,12 +270,14 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
                 checked={a.enabled}
                 onCheckedChange={(next) => void toggleEnabled(a, next)}
                 size="sm"
-                aria-label={t("settings.form.agents.field.enabled")}
+                // Named per row — "Enabled" ×N tells a screen reader nothing
+                // about which channel each switch belongs to.
+                aria-label={t("settings.form.agents.enabledFor", { name: a.name })}
               />
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="truncate text-sm font-medium text-zinc-100">{a.name}</span>
-                  <span className="rounded px-1.5 py-0.5 text-[11px] bg-zinc-800 text-zinc-400">{t(`settings.form.agents.kind.${a.kind}`)}</span>
+                  <Chip tone="neutral">{t(`settings.form.agents.kind.${a.kind}`)}</Chip>
                 </div>
                 <p className="text-xs text-zinc-500">
                   {t("settings.form.agents.eventsCount", { count: a.events.length })}
@@ -262,30 +293,82 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
                   </p>
                 )}
               </div>
-              <div className="flex items-center gap-2">
-                <Button type="button" variant="outline" size="sm" className="border-zinc-700" disabled={testing === a.id} onClick={() => void test(a)}>
-                  {testing === a.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : t("settings.form.agents.test")}
+              {/* Own line under ~640px: the three buttons are ~175px, and with
+                  the switch and gaps the name column was squeezed to ~45px
+                  at 375px — the flex-1 text shrank instead of the row wrapping. */}
+              <div className="flex basis-full items-center gap-2 sm:basis-auto">
+                {/* The label stays while testing (spinner in front) so the
+                    button keeps its name and width instead of collapsing to
+                    an unnamed 14px icon. */}
+                <Button type="button" variant="outline" size="sm" className="border-zinc-700" disabled={testing === a.id} aria-busy={testing === a.id} onClick={() => void test(a)}>
+                  {testing === a.id && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  {t("settings.form.agents.test")}
                 </Button>
-                <Button type="button" variant="outline" size="sm" className="border-zinc-700" onClick={() => { setDraft(draftFrom(a)); setFormError(""); }}>
+                <Button type="button" variant="outline" size="sm" className="border-zinc-700" onClick={() => openDraft(draftFrom(a))}>
                   {t("settings.form.agents.edit")}
                 </Button>
-                <Button type="button" variant="outline" size="sm" className="border-zinc-700 text-zinc-400 hover:text-zinc-100" aria-label={t("settings.form.agents.delete")} onClick={() => void remove(a)}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="border-zinc-700 text-red-400 hover:text-[var(--ds-danger-hover)]"
+                  aria-label={t("settings.form.agents.delete")}
+                  aria-expanded={confirmDelete === a.id}
+                  onClick={() => setConfirmDelete(confirmDelete === a.id ? null : a.id)}
+                >
                   <Trash2 className="w-3.5 h-3.5" />
                 </Button>
               </div>
+
+              {/* Unlike the arr/media managers' Remove (which lands on Save),
+                  this DELETE fires at once — the panel says so. */}
+              {confirmDelete === a.id && (
+                <div className="basis-full rounded-md border border-red-500/40 bg-red-500/10 p-3 space-y-2">
+                  <p className="text-xs text-red-400">
+                    {t("settings.form.agents.confirmDelete", { name: a.name })}{" "}
+                    <strong>{t("settings.form.agents.confirmDeleteNow")}</strong>
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void remove(a)}
+                      autoFocus
+                      className="inline-flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />{t("settings.form.agents.delete")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDelete(null)}
+                      className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+                    >
+                      {t("settings.form.common.cancel")}
+                    </button>
+                  </div>
+                </div>
+              )}
             </li>
           ))}
         </ul>
       )}
 
-      {!draft && (
-        <Button type="button" onClick={() => { setDraft(emptyDraft()); setFormError(""); }}>
+      {saved && !draft && (
+        <p className="text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4 shrink-0" />{t("settings.form.common.saved")}</p>
+      )}
+
+      {/* Hidden until the list is known, like the siblings — adding into an
+          unloaded list put a new draft above channels that then popped in. */}
+      {!draft && !loading && (
+        <Button type="button" onClick={() => openDraft(emptyDraft())}>
           {t("settings.form.agents.add")}
         </Button>
       )}
 
+      {/* noValidate: a malformed URL reaches the server and comes back as its
+          own message in formError, the same inline red line the arr/media
+          cards show — not the browser's unstyled "Please enter a URL" bubble. */}
       {draft && (
-        <form onSubmit={save} className="space-y-4 rounded-md border border-zinc-800 p-4">
+        <form onSubmit={save} noValidate className="space-y-4 rounded-md border border-zinc-800 p-4">
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
               <Label htmlFor="agent-kind">{t("settings.form.agents.field.kind")}</Label>
@@ -305,13 +388,13 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="agent-name">{t("settings.form.agents.field.name")}</Label>
-              <Input id="agent-name" value={draft.name} maxLength={100} onChange={(e) => patchDraft({ name: e.target.value })} className="bg-zinc-800 border-zinc-700 text-sm" />
+              <Input id="agent-name" value={draft.name} maxLength={100} onChange={(e) => patchDraft({ name: e.target.value })} className="bg-zinc-800 border-zinc-700" />
             </div>
           </div>
 
           <div className="space-y-1.5">
             <Label htmlFor="agent-url">{t("settings.form.agents.field.url")}</Label>
-            <Input id="agent-url" type="url" value={draft.url} onChange={(e) => patchDraft({ url: e.target.value })} placeholder={draft.kind === "ntfy" ? "https://ntfy.sh" : draft.kind === "gotify" ? "https://gotify.example.com" : "https://example.com/hook"} className="bg-zinc-800 border-zinc-700 font-mono text-sm" />
+            <Input id="agent-url" type="url" value={draft.url} onChange={(e) => patchDraft({ url: e.target.value })} placeholder={draft.kind === "ntfy" ? "https://ntfy.sh" : draft.kind === "gotify" ? "https://gotify.example.com" : "https://example.com/hook"} className="bg-zinc-800 border-zinc-700 font-mono" />
             <p className="text-xs text-zinc-500">{t(`settings.form.agents.urlHelp.${draft.kind}`)}</p>
           </div>
 
@@ -319,11 +402,11 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label htmlFor="agent-topic">{t("settings.form.agents.field.topic")}</Label>
-                <Input id="agent-topic" value={draft.topic} maxLength={64} onChange={(e) => patchDraft({ topic: e.target.value })} className="bg-zinc-800 border-zinc-700 font-mono text-sm" />
+                <Input id="agent-topic" value={draft.topic} maxLength={64} onChange={(e) => patchDraft({ topic: e.target.value })} className="bg-zinc-800 border-zinc-700 font-mono" />
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="agent-priority">{t("settings.form.agents.field.priority")}</Label>
-                <Input id="agent-priority" type="number" min={1} max={5} value={draft.priority} onChange={(e) => patchDraft({ priority: e.target.value })} className="bg-zinc-800 border-zinc-700 text-sm" />
+                <Input id="agent-priority" type="number" min={1} max={5} value={draft.priority} onChange={(e) => patchDraft({ priority: e.target.value })} className="bg-zinc-800 border-zinc-700" />
               </div>
               <label className="flex items-center gap-2 text-sm text-zinc-400 sm:col-span-2">
                 <input type="checkbox" checked={draft.attachPoster} onChange={(e) => patchDraft({ attachPoster: e.target.checked })} />
@@ -335,14 +418,14 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
           {draft.kind === "gotify" && (
             <div className="space-y-1.5 max-w-[220px]">
               <Label htmlFor="agent-priority">{t("settings.form.agents.field.priority")}</Label>
-              <Input id="agent-priority" type="number" min={0} max={10} value={draft.priority} onChange={(e) => patchDraft({ priority: e.target.value })} className="bg-zinc-800 border-zinc-700 text-sm" />
+              <Input id="agent-priority" type="number" min={0} max={10} value={draft.priority} onChange={(e) => patchDraft({ priority: e.target.value })} className="bg-zinc-800 border-zinc-700" />
             </div>
           )}
 
           {draft.kind === "webhook" && (
             <div className="space-y-1.5 max-w-[320px]">
               <Label htmlFor="agent-header">{t("settings.form.agents.field.headerName")}</Label>
-              <Input id="agent-header" value={draft.headerName} maxLength={64} onChange={(e) => patchDraft({ headerName: e.target.value })} className="bg-zinc-800 border-zinc-700 font-mono text-sm" />
+              <Input id="agent-header" value={draft.headerName} maxLength={64} onChange={(e) => patchDraft({ headerName: e.target.value })} className="bg-zinc-800 border-zinc-700 font-mono" />
             </div>
           )}
 
@@ -360,12 +443,14 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
                 disabled={draft.clearSecret}
                 onChange={(e) => patchDraft({ secret: e.target.value })}
                 placeholder={draft.hasSecret && !draft.clearSecret ? "••••••••" : ""}
-                className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                className="bg-zinc-800 border-zinc-700 font-mono"
               />
+              {/* "Clear token", no trash glyph: the Trash2 + "Remove" look is
+                  the row's delete-the-channel affordance; this only drops the
+                  saved token on the next Save. */}
               {draft.hasSecret && draft.kind !== "gotify" && (
-                <Button type="button" variant="outline" size="sm" className="border-zinc-700 text-zinc-400 hover:text-zinc-100 shrink-0 gap-1.5" onClick={() => patchDraft({ clearSecret: !draft.clearSecret, secret: "" })}>
-                  <Trash2 className="w-3.5 h-3.5" />
-                  {draft.clearSecret ? t("settings.form.common.cancel") : t("settings.form.common.remove")}
+                <Button type="button" variant="outline" size="sm" className="border-zinc-700 text-zinc-400 hover:text-zinc-100 shrink-0" onClick={() => patchDraft({ clearSecret: !draft.clearSecret, secret: "" })}>
+                  {draft.clearSecret ? t("settings.form.common.cancel") : t("settings.form.agents.clearSecret")}
                 </Button>
               )}
             </div>
@@ -375,25 +460,28 @@ export function NotificationAgentsManager({ featureEnabled }: { featureEnabled: 
           {draft.kind === "webhook" && (
             <div className="space-y-1.5">
               <Label htmlFor="agent-template">{t("settings.form.agents.field.template")}</Label>
-              <textarea
+              <Textarea
                 id="agent-template"
                 value={draft.template}
                 onChange={(e) => patchDraft({ template: e.target.value })}
                 rows={5}
                 spellCheck={false}
                 placeholder={'{ "content": "{{title}} — {{message}}" }'}
-                className="w-full rounded-md border border-zinc-700 bg-zinc-800 px-3 py-2 font-mono text-xs text-zinc-100"
+                className="bg-zinc-800 border-zinc-700 font-mono md:text-xs"
               />
               <p className="text-xs text-zinc-500">{t("settings.form.agents.templateHelp", { fields: TEMPLATE_FIELDS.map((f) => `{{${f}}}`).join(" ") })}</p>
             </div>
           )}
 
+          {/* <legend> must be the fieldset's FIRST child to name the checkbox
+              group for AT; nested in a div it was plain text. Select all sits
+              on its own row beneath it. */}
           <fieldset className="space-y-2">
-            <div className="flex items-center justify-between">
-              <legend className="text-sm font-medium text-zinc-100">{t("settings.form.agents.field.events")}</legend>
+            <legend className="text-sm font-medium text-zinc-100">{t("settings.form.agents.field.events")}</legend>
+            <div className="flex justify-end">
               <button
                 type="button"
-                className="text-xs text-indigo-400 hover:underline"
+                className="min-h-8 px-2 -my-2 -mr-2 text-xs text-indigo-400 hover:underline"
                 onClick={() => patchDraft({ events: draft.events.length === NOTIFY_EVENT_KEYS.length ? [] : [...NOTIFY_EVENT_KEYS] })}
               >
                 {draft.events.length === NOTIFY_EVENT_KEYS.length ? t("settings.form.agents.selectNone") : t("settings.form.agents.selectAll")}

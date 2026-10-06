@@ -8,13 +8,15 @@ export default async function TrashGuidesOverviewPage({
 }: {
   searchParams: TrashPageSearchParams;
 }) {
-  const { service, radarrConfigured, sonarrConfigured } = await loadTrashPageContext(searchParams);
+  const { service, radarrConfigured, sonarrConfigured, namedInstancesConfigured } =
+    await loadTrashPageContext(searchParams);
 
   return (
     <OverviewTab
       service={service}
       radarrConfigured={radarrConfigured}
       sonarrConfigured={sonarrConfigured}
+      namedInstancesConfigured={namedInstancesConfigured}
     />
   );
 }

@@ -590,6 +590,9 @@ test("an ADMIN cookie session (DB-checked, same-origin) authorizes and attribute
   assert.equal(auditRows[0].action, "LIBRARY_SYNC");
   assert.equal(auditRows[0].target, "sync:plex");
   assert.equal(auditRows[0].userId, admin.userId);
+  // The row records WHICH write mode ran, like the Jellyfin twin's — an admin
+  // reading the audit log can tell a full replace from an incremental add.
+  assert.equal((JSON.parse(auditRows[0].details as string) as { full?: boolean }).full, true);
 
   // A plain USER session must not drive a sync — 403, no further audit.
   const user = await mintSession("USER");
@@ -724,6 +727,50 @@ test("a named instance resyncs ITS OWN rows: config, selection and every delete 
       assert.equal(row.serverInstance, "remote", `an inserted row escaped the instance scope: ${JSON.stringify(row)}`);
     }
   }
+});
+
+// ── the orchestrator-staleness stamp means ONE thing: a FULL replace of the DEFAULT ──
+// The orchestrator's `lastPlexSyncSucceededAt` means "every configured instance
+// synced clean this run", and its 24h-stale fallback (plexStale → a Plex-pinned
+// requester may be notified off Jellyfin alone) can only fire once that stamp
+// ages. A per-source resync that stamped on ANY success broke it two ways: an
+// hourly `{instance:"remote"}` call kept the stamp fresh for as long as the
+// DEFAULT server stayed down (the fallback never fired — the starvation it exists
+// to end), and a bodiless recentOnly run stamped off an insert-only window that
+// is not a complete picture of the library.
+
+test("a bodiless recentOnly resync does NOT stamp last-success on either source — only a full replace proves the library picture", async () => {
+  configurePlex();
+  respond = plexMovieResponder([PLEX_ITEM_FULL, PLEX_ITEM_MIN]);
+  const plexRes = await postPlexSync(plexReq({ headers: AS_CRON })); // no body ⇒ recentOnly
+  assert.equal(plexRes.status, 200);
+  assert.equal((await bodyOf(plexRes)).full, false);
+  assert.ok(!settings.has("lastPlexSyncSucceededAt"), "an insert-only window must not refresh the orchestrator's staleness marker");
+  assert.equal(ledgerFor("plex-sync")?.ok, true, "the run itself still records as a success");
+
+  configureJellyfin();
+  respond = jellyfinMovieResponder([JF_ITEM_FULL, JF_ITEM_MIN]);
+  const jfRes = await postJellyfinSync(jfReq({ headers: AS_CRON })); // no body ⇒ recentOnly
+  assert.equal(jfRes.status, 200);
+  assert.equal((await bodyOf(jfRes)).full, false);
+  assert.ok(!settings.has("lastJellyfinSyncSucceededAt"));
+  await settleFireAndForget();
+});
+
+test("a NAMED instance's full resync does NOT stamp last-success — the stamp is about the default server the fallback waits on", async () => {
+  configurePlex();
+  settings.set("plexRemoteServerUrl", PLEX_BASE);
+  settings.set("plexRemoteAdminToken", "plex-admin-token-remote");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+  respond = plexMovieResponder([
+    { ratingKey: "rk700", type: "movie", title: "Seven Hundred", Guid: [{ id: "tmdb://700" }] },
+  ]);
+
+  const res = await postPlexSync(plexReq({ headers: AS_CRON, body: JSON.stringify({ full: true, instance: "remote" }) }));
+  assert.equal(res.status, 200);
+  await settleFireAndForget();
+  assert.ok(opsFor("plexLibraryItem", "createMany").length > 0, "control: the named server WAS resynced");
+  assert.ok(!settings.has("lastPlexSyncSucceededAt"), "a healthy named server says nothing about the default one");
 });
 
 test("a malformed instance slug is REJECTED, never coerced to the default", async () => {

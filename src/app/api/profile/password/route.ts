@@ -8,6 +8,7 @@ import { logAudit } from "@/lib/audit";
 import { invalidateUserSession } from "@/lib/auth";
 import { hashPassword, verifyPassword, MAX_PASSWORD_LENGTH } from "@/lib/password-hash";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { tooManyRequests } from "@/lib/http";
 
 // PATCH /api/profile/password — the signed-in user changes their own local
 // password; revokes all existing sessions on success.
@@ -16,10 +17,7 @@ export const PATCH = withAuth(async (req, _ctx, session) => {
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
   if (!checkRateLimit(`profile-password:${session.user.id}`, 5, 15 * 60 * 1000)) {
-    return NextResponse.json(
-      { error: t("apiAuth.common.tooManyAttemptsWait15") },
-      { status: 429 },
-    );
+    return tooManyRequests(15 * 60, t("apiAuth.common.tooManyAttemptsWait15"));
   }
 
   const parsed = await readJsonCapped<{ currentPassword?: string; newPassword?: string }>(req, 16384);

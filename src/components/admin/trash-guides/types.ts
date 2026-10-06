@@ -61,8 +61,13 @@ export interface StarterPackItem {
   item: {
     service: TrashService;
     kind: TrashSpecKind;
+    // English fallbacks; the row renders labelKey/rationaleKey via t() when set
+    // (see src/lib/trash-recommendations.ts).
     label: string;
     rationale: string;
+    labelKey?: string;
+    labelVars?: Record<string, string>;
+    rationaleKey?: string;
     recommended: boolean;
   };
   spec: { id: string; name: string; trashId: string } | null;

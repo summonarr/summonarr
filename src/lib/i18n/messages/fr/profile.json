@@ -135,11 +135,11 @@
   "profile.close.intro": "Fermez votre compte et déconnectez-vous partout. Vous ne pourrez plus vous reconnecter — seul un administrateur peut rétablir l'accès. Vos demandes, votes, signalements et votre historique de visionnage sont conservés. Demandez à un administrateur si vous souhaitez aussi que vos données personnelles soient effacées.",
   "profile.close.button": "Fermer le compte",
   "profile.close.confirmPrompt": "Tapez {word} pour confirmer. Cela ferme votre compte et vous déconnecte de tous vos appareils — vous ne pourrez plus vous reconnecter sauf si un administrateur le rétablit.",
-  "profile.close.confirmLabel": "Tapez {word} pour confirmer la suppression du compte",
+  "profile.close.confirmLabel": "Tapez {word} pour confirmer la fermeture du compte",
   "profile.close.confirmButton": "Fermer mon compte",
   "profile.close.closing": "Fermeture…",
-  "profile.close.error.failed": "Échec de la suppression du compte",
-  "profile.close.error.retry": "Échec de la suppression du compte. Veuillez réessayer.",
+  "profile.close.error.failed": "Échec de la fermeture du compte",
+  "profile.close.error.retry": "Échec de la fermeture du compte. Veuillez réessayer.",
   "profile.notifications.title": "Préférences de notification",
   "profile.notifications.description": "Choisissez les notifications que vous recevez sur chaque canal.",
   "profile.notifications.pushOnly": "Les notifications push du navigateur ou de l'appareil sont le seul canal disponible pour vous actuellement — activez-les depuis la cloche dans la barre supérieure. Associez votre compte Discord pour ajouter un autre canal, ou demandez à un administrateur de configurer l'envoi d'e-mails.",
@@ -222,5 +222,12 @@
   "profile.mfa.stepUp.passkeyFailed": "La clé d'accès n'a pas pu être utilisée sur cet appareil.",
   "profile.mfa.stepUp.codeRequired": "Saisissez un code de votre application d'authentification ou un code de récupération pour confirmer cette modification.",
   "profile.notifications.iosApp.prompt": "Sur iPhone ? L'app Summonarr affiche ces notifications en natif.",
-  "profile.notifications.iosApp.link": "Téléchargez-la sur l'App Store"
+  "profile.notifications.iosApp.link": "Téléchargez-la sur l'App Store",
+  "profile.close.confirmWord": "FERMER",
+  "profile.mfa.confirmRemoveTotp": "Supprimer l'application d'authentification ? Une clé d'accès vous sera toujours demandée à la connexion.",
+  "profile.mfa.confirmRemovePasskey": "Supprimer la clé d'accès {name} ? Un second facteur vous sera toujours demandé à la connexion.",
+  "profile.mfa.confirmRemoveLast": "C'est votre seul second facteur. Le supprimer désactive l'authentification à deux facteurs, supprime vos codes de récupération et déconnecte vos autres appareils.",
+  "profile.mfa.totp.copyKey": "Copier la clé de configuration",
+  "profile.notifications.verificationPending": "Vérification en attente pour {email} — consultez votre boîte de réception.",
+  "profile.notifications.resendVerification": "Renvoyer"
 }

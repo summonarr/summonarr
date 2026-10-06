@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Picks the right unit so a 16 KB cap doesn't render as "max 0MB": MB for
 // >=1 MiB, KB otherwise. Integer + unit suffix — 413 messages stay terse.
@@ -8,6 +9,24 @@ function formatByteCap(maxBytes: number): string {
     return `${Math.round(maxBytes / ONE_MB)}MB`;
   }
   return `${Math.max(1, Math.round(maxBytes / 1024))}KB`;
+}
+
+// Every consuming route localizes its own errors through translatorForRequest,
+// so these shared rejections must too — a French viewer otherwise saw an English
+// "Invalid request body" between French validation errors on the same route.
+// `req` is optional on the post-read helper for callers that hold only the
+// bytes; without it the instance default language is used.
+function tooLarge(maxBytes: number, req?: NextRequest): NextResponse {
+  const t = translatorForRequest(req ?? new Request("http://localhost/"));
+  return NextResponse.json(
+    { error: t("apiAdmin.common.bodyTooLarge", { max: formatByteCap(maxBytes) }) },
+    { status: 413 },
+  );
+}
+
+function invalidBody(req: NextRequest): NextResponse {
+  const t = translatorForRequest(req);
+  return NextResponse.json({ error: t("apiAdmin.common.invalidBody") }, { status: 400 });
 }
 
 // Header-only fast path. Rejects pre-read when the client honestly declared
@@ -24,10 +43,7 @@ export function checkBodySize(
   if (contentLength) {
     const size = parseInt(contentLength, 10);
     if (!isNaN(size) && size > maxBytes) {
-      return NextResponse.json(
-        { error: `Request body too large (max ${formatByteCap(maxBytes)})` },
-        { status: 413 },
-      );
+      return tooLarge(maxBytes, req);
     }
   }
   return null;
@@ -47,12 +63,10 @@ export function checkBodySize(
 export function assertBodyBytesUnderCap(
   bytes: { byteLength: number },
   maxBytes: number,
+  req?: NextRequest,
 ): NextResponse | null {
   if (bytes.byteLength > maxBytes) {
-    return NextResponse.json(
-      { error: `Request body too large (max ${formatByteCap(maxBytes)})` },
-      { status: 413 },
-    );
+    return tooLarge(maxBytes, req);
   }
   return null;
 }
@@ -70,13 +84,13 @@ export async function readJsonCapped<T = unknown>(
   const headerCheck = checkBodySize(req, maxBytes);
   if (headerCheck) return headerCheck;
   const raw = new Uint8Array(await req.arrayBuffer());
-  const sizeCheck = assertBodyBytesUnderCap(raw, maxBytes);
+  const sizeCheck = assertBodyBytesUnderCap(raw, maxBytes, req);
   if (sizeCheck) return sizeCheck;
   let parsed: unknown;
   try {
     parsed = JSON.parse(new TextDecoder().decode(raw));
   } catch {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+    return invalidBody(req);
   }
   // A body of `null` (or a bare number/string/boolean) is VALID JSON, so it parsed
   // cleanly and used to be handed back as if it were the expected object. Every
@@ -84,7 +98,7 @@ export async function readJsonCapped<T = unknown>(
   // unauthenticated 500 from a one-word request body. Every consumer types this as an
   // object, so anything else is a malformed request, not a body.
   if (parsed === null || typeof parsed !== "object") {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+    return invalidBody(req);
   }
   return parsed as T;
 }
@@ -101,7 +115,7 @@ export async function readJsonCappedOr<T>(
   const headerCheck = checkBodySize(req, maxBytes);
   if (headerCheck) return headerCheck;
   const raw = new Uint8Array(await req.arrayBuffer());
-  const sizeCheck = assertBodyBytesUnderCap(raw, maxBytes);
+  const sizeCheck = assertBodyBytesUnderCap(raw, maxBytes, req);
   if (sizeCheck) return sizeCheck;
   if (raw.byteLength === 0) return fallback;
   let parsed: unknown;

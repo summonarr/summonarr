@@ -84,5 +84,6 @@
   "detail.status.ended": "Terminée",
   "detail.status.pilot": "Pilote",
   "detail.seasons.numbered": "Saison {number}",
-  "detail.seasons.specials": "Épisodes spéciaux"
+  "detail.seasons.specials": "Épisodes spéciaux",
+  "detail.seasons.episodeAbbrev": "E{number}"
 }

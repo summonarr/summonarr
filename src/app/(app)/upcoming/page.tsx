@@ -1,5 +1,6 @@
 export const dynamic = "force-dynamic";
 
+import type { Metadata } from "next";
 import { getUpcomingMovies, getUpcomingTV, type TmdbMedia } from "@/lib/tmdb";
 import { MediaCard } from "@/components/media/media-card";
 import { attachAllAvailability } from "@/lib/attach-all";
@@ -43,6 +44,12 @@ async function getUpcomingFromCache(): Promise<TmdbMedia[]> {
     releaseYear: r.releaseYear,
     voteAverage: r.voteAverage,
   }));
+}
+
+// Tab / bookmark / history title — the nav label, in the viewer's language.
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getTranslator();
+  return { title: t("nav.upcoming") };
 }
 
 export default async function UpcomingPage({

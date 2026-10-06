@@ -39,7 +39,6 @@
   "browse.popular.sort.viewersDescription": "Classificados pelo número de espectadores únicos",
   "browse.popular.sort.plays": "Mais reproduzidos",
   "browse.popular.sort.playsDescription": "Classificados pelo total de reproduções de todos os usuários",
-  "browse.popular.rankRange": "{from}–{to} de {total} títulos",
   "browse.popular.noRecentPlays.title": "Nenhuma reprodução nos últimos 30 dias",
   "browse.popular.noRecentPlays.description": "Nada foi reproduzido neste período.",
   "browse.popular.noRecentPlays.cta": "Mudar para Mais reproduzidos",

@@ -19,8 +19,21 @@ export interface StarterPackItem {
    *   a slug lookup is a guaranteed-miss round-trip.
    */
   match?: { trashId?: string; name?: string; slug?: string };
+  /**
+   * English copy. `label` is still read by the starter-pack POST route (the
+   * `missing` report names unresolved items by it) and by the registry pins in
+   * tests/trash-recommendations.test.mts; the admin UI renders `labelKey` /
+   * `rationaleKey` through t() instead (pattern: KIND_LABEL_KEY in
+   * components/admin/trash-guides/types.ts) and falls back to these only when
+   * no key is set.
+   */
   label: string;
   rationale: string;
+  // Catalog keys (trash.json), translated at render time. `labelVars` carries
+  // the {name} of a derived (non-curated) row.
+  labelKey?: string;
+  labelVars?: Record<string, string>;
+  rationaleKey?: string;
   recommended: boolean;
 }
 
@@ -33,6 +46,8 @@ export const STARTER_PACK: StarterPackItem[] = [
     match: { trashId: "d1d67249d3890e49bc12e275d989a7e9", slug: "hd-bluray-web", name: "HD Bluray + WEB" },
     label: "Movies: HD Bluray + WEB (1080p)",
     rationale: "TRaSH's default for 1080p Blu-ray + WEB-DL movies. Pulls in the HQ release-group CFs, blocks low-quality sources, and sets sane scoring.",
+    labelKey: "trash.starter.pack.radarrQualityProfile.label",
+    rationaleKey: "trash.starter.pack.radarrQualityProfile.rationale",
     recommended: true,
   },
   {
@@ -41,6 +56,8 @@ export const STARTER_PACK: StarterPackItem[] = [
     match: { trashId: "default", name: "TRaSH Standard Naming" },
     label: "Movies: TRaSH standard naming",
     rationale: "TRaSH's canonical file + folder naming pattern for movies (standard format, Plex/Emby/Jellyfin variants kept as options).",
+    labelKey: "trash.starter.pack.radarrNaming.label",
+    rationaleKey: "trash.starter.pack.radarrNaming.rationale",
     recommended: true,
   },
 
@@ -50,6 +67,8 @@ export const STARTER_PACK: StarterPackItem[] = [
     match: { slug: "web-1080p", name: "WEB-1080p" },
     label: "TV: WEB-1080p",
     rationale: "TRaSH's default for 1080p WEB-DL TV. Works for everything streaming services release; add Bluray profile later if needed.",
+    labelKey: "trash.starter.pack.sonarrQualityProfile.label",
+    rationaleKey: "trash.starter.pack.sonarrQualityProfile.rationale",
     recommended: true,
   },
   {
@@ -58,6 +77,8 @@ export const STARTER_PACK: StarterPackItem[] = [
     match: { trashId: "default", name: "TRaSH Standard Naming" },
     label: "TV: TRaSH standard naming",
     rationale: "TRaSH's canonical episode + series + season folder naming pattern.",
+    labelKey: "trash.starter.pack.sonarrNaming.label",
+    rationaleKey: "trash.starter.pack.sonarrNaming.rationale",
     recommended: true,
   },
 ];
@@ -78,6 +99,27 @@ export interface StarterPackStatus {
 
 const SERVICE_PREFIX: Record<TrashService, string> = { RADARR: "Movies", SONARR: "TV" };
 
+// Derived (non-curated) rows: the label is "<Movies|TV>: <spec name>[ naming|
+// quality sizes]" — the spec name rides in as {name}, the rest is a catalog key.
+// A LITERAL map so the i18n usage scan (tests/i18n.test.mts) can see the keys.
+const DERIVED_LABEL_KEY: Record<TrashService, Partial<Record<TrashSpecKind, string>>> = {
+  RADARR: {
+    QUALITY_PROFILE: "trash.starter.derived.movies.qualityProfile",
+    NAMING: "trash.starter.derived.movies.naming",
+    QUALITY_SIZE: "trash.starter.derived.movies.qualitySize",
+  },
+  SONARR: {
+    QUALITY_PROFILE: "trash.starter.derived.tv.qualityProfile",
+    NAMING: "trash.starter.derived.tv.naming",
+    QUALITY_SIZE: "trash.starter.derived.tv.qualitySize",
+  },
+};
+const DERIVED_RATIONALE_KEY: Partial<Record<TrashSpecKind, string>> = {
+  QUALITY_PROFILE: "trash.starter.derived.rationale.qualityProfile",
+  NAMING: "trash.starter.derived.rationale.naming",
+  QUALITY_SIZE: "trash.starter.derived.rationale.qualitySize",
+};
+
 function deriveLabel(spec: { service: TrashService; kind: TrashSpecKind; name: string }): string {
   const prefix = SERVICE_PREFIX[spec.service];
   if (spec.kind === "NAMING") return `${prefix}: ${spec.name} naming`;
@@ -85,11 +127,17 @@ function deriveLabel(spec: { service: TrashService; kind: TrashSpecKind; name: s
   return `${prefix}: ${spec.name}`;
 }
 
+// A quality profile's own TRaSH description (upstream English prose) wins over
+// the generic key — it is spec-specific and has no translation.
+function trashDescription(spec: { kind: TrashSpecKind; payload: unknown }): string | null {
+  if (spec.kind !== "QUALITY_PROFILE") return null;
+  const desc = (spec.payload as { trash_description?: string } | null)?.trash_description?.trim();
+  return desc ? stripTrashHtml(desc) : null;
+}
+
 function deriveRationale(spec: { kind: TrashSpecKind; payload: unknown }): string {
   if (spec.kind === "QUALITY_PROFILE") {
-    const desc = (spec.payload as { trash_description?: string } | null)?.trash_description?.trim();
-    if (desc) return stripTrashHtml(desc);
-    return "TRaSH quality profile. Applying it cascades to every referenced custom format.";
+    return trashDescription(spec) ?? "TRaSH quality profile. Applying it cascades to every referenced custom format.";
   }
   if (spec.kind === "NAMING") return "TRaSH naming pattern — merged into Radarr/Sonarr's media-management config on apply.";
   if (spec.kind === "QUALITY_SIZE") return "TRaSH per-quality min/preferred/max MB-per-minute template — overlaid on the live quality definitions.";
@@ -178,7 +226,11 @@ export async function resolveStarterPack(): Promise<StarterPackStatus[]> {
         service: spec.service,
         kind: spec.kind,
         label: deriveLabel(spec),
+        labelKey: DERIVED_LABEL_KEY[spec.service][spec.kind],
+        labelVars: { name: spec.name },
         rationale: deriveRationale(spec),
+        // No key when the upstream description is used — that text is the rationale.
+        rationaleKey: trashDescription(spec) ? undefined : DERIVED_RATIONALE_KEY[spec.kind],
         recommended: false,
       },
       spec: { id: spec.id, name: spec.name, trashId: spec.trashId },

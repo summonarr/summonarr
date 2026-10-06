@@ -9,7 +9,6 @@ import {
   grabSeriesRelease,
   resolveTvdbIdFromTmdbId,
   isArrConfigured,
-  arrErrorMessage,
 } from "@/lib/arr";
 import { isValidInstanceSlug } from "@/lib/arr-instances";
 import { logAudit, auditContext } from "@/lib/audit";
@@ -21,8 +20,13 @@ import type { Translator } from "@/lib/i18n/translate";
 type RouteContext = { params: Promise<{ id: string }> };
 
 // Resolves + validates the target instance slug for a release browse/grab.
-// "" (default) is always allowed; a non-default slug must be a valid slug with
-// a configured connection. Returns a NextResponse on rejection.
+// The slug must be valid and name a CONFIGURED connection — the default ""
+// included. The default used to skip the check and fall through to the arr
+// helper's "Radarr is not configured" throw, which the catch answered as a 502
+// (an upstream-failure status for a local config state) in hardcoded English,
+// while the same condition on a named instance was a translated 422. The
+// default has no slug to print, so it gets the name-only message.
+// Returns a NextResponse on rejection.
 async function resolveInstanceOr(
   raw: string | null | undefined,
   service: "radarr" | "sonarr",
@@ -32,8 +36,11 @@ async function resolveInstanceOr(
   if (!isValidInstanceSlug(instance)) {
     return NextResponse.json({ error: t("apiUser.common.invalidInstance") }, { status: 400 });
   }
-  if (instance !== "" && !(await isArrConfigured(service, instance))) {
-    return NextResponse.json({ error: t("apiUser.issues.instanceNotConfigured", { service, instance }) }, { status: 422 });
+  if (!(await isArrConfigured(service, instance))) {
+    const error = instance === ""
+      ? t("apiUser.common.notConfigured", { name: service === "radarr" ? "Radarr" : "Sonarr" })
+      : t("apiUser.issues.instanceNotConfigured", { service, instance });
+    return NextResponse.json({ error }, { status: 422 });
   }
   return instance;
 }
@@ -74,10 +81,14 @@ export const GET = withIssueAdmin(async (req, { params }: RouteContext, _session
         instance,
       );
     }
+    // `releases` is already projected to the ArrRelease field list by arr.ts
+    // (toArrRelease) — the raw upstream objects carry indexer download URLs.
     return NextResponse.json(releases);
   } catch (err) {
+    // The detail (which includes raw upstream `err.message`) goes to the log;
+    // the client gets the translated generic, like the refetch path.
     console.error("[releases] Fetch failed:", err);
-    return NextResponse.json({ error: arrErrorMessage(err) }, { status: 502 });
+    return NextResponse.json({ error: t("apiUser.issues.arrFailed") }, { status: 502 });
   }
 });
 
@@ -135,11 +146,28 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
     return NextResponse.json({ error: t("apiUser.issues.resolvedBeforeGrab") }, { status: 409 });
   }
   const statusChanged = issue.status !== "IN_PROGRESS";
-  // Announce the status change now: the row already says IN_PROGRESS, and the
-  // 422/502 returns below leave it that way, so other admins' lists and the
-  // reporter's page need to hear about it here. Only broadcast a real change.
+  // Announce AND audit the status change now: the row already says IN_PROGRESS,
+  // and the 422/502 returns below leave it that way, so other admins' lists and
+  // the reporter's page need to hear about it here — and the audit log needs
+  // the row too, or a flip whose grab then failed had no entry saying who moved
+  // it (guardrail 26: the CAS has committed, so the swallowing logAudit). Only
+  // a real change is broadcast/audited; the grab itself is audited after it
+  // succeeds, below.
   if (statusChanged) {
     emitSSE({ type: "issue:updated", issueId: id, status: "IN_PROGRESS", userId: issue.reportedBy });
+    void logAudit({
+      userId: session.user.id,
+      userName: session.user.name ?? session.user.email ?? null,
+      action: "ISSUE_STATUS_CHANGE",
+      target: `issue:${id}`,
+      details: {
+        trigger: "grab",
+        scope: issue.scope,
+        before: { status: issue.status },
+        after: { status: "IN_PROGRESS" },
+      },
+      ...auditContext(req, session),
+    });
   }
 
   let resolvedTvdbId: number | null = issue.tvdbId;
@@ -164,8 +192,9 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
       );
     }
   } catch (err) {
+    // Detail to the log, translated generic to the client (see the GET catch).
     console.error("[releases] Grab failed:", err);
-    return NextResponse.json({ error: arrErrorMessage(err) }, { status: 502 });
+    return NextResponse.json({ error: t("apiUser.issues.arrFailed") }, { status: 502 });
   }
 
   // Recording the grab is kept OUTSIDE the try/catch above: Radarr/Sonarr has
@@ -194,6 +223,10 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
     console.warn("[releases] Grab succeeded but recording it failed (issue deleted mid-grab?):", err);
   }
 
+  // The grab itself. The status flip (if any) was audited right after its CAS
+  // above, so this entry records only what happened here: which release went
+  // to which instance. `grabId` is absent when the IssueGrab row could not be
+  // written (see the catch above) — the download still happened.
   void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email ?? null,
@@ -203,7 +236,8 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
       trigger: "grab",
       ...(grabId ? { grabId } : {}),
       scope: issue.scope,
-      ...(statusChanged ? { before: { status: issue.status }, after: { status: "IN_PROGRESS" } } : {}),
+      instance,
+      indexerId,
     },
     ...auditContext(req, session),
   });

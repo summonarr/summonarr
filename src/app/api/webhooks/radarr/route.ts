@@ -126,6 +126,19 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, message: "Radarr webhook connected" });
   }
 
+  // Health / HealthRestored are the same shape: a fixed per-issue payload
+  // (level/message/type/wikiUrl — nothing per delivery) that nothing below
+  // processes. An indexer flapping twice inside the 24h replay TTL would
+  // otherwise see its second identical POST answered 409, and Radarr then
+  // records Summonarr's notification as failing and raises its own health
+  // warning — for an event we ignore anyway. Acknowledge before the digest,
+  // like Test. Every OTHER unhandled eventType stays replay-recorded (the
+  // Grab pin in tests/webhook-routes.test.mts): those payloads carry
+  // per-delivery fields, so a byte-identical repeat IS a replay.
+  if (payload.eventType === "Health" || payload.eventType === "HealthRestored") {
+    return NextResponse.json({ ok: true, skipped: true });
+  }
+
   // Canonical-JSON replay digest: a replay with reordered keys still produces the same digest
   if (!await checkAndRecordWebhookJson("radarr", secret, payload)) {
     return NextResponse.json({ error: "Replayed webhook" }, { status: 409 });

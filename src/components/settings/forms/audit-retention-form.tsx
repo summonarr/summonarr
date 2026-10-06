@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -19,9 +19,17 @@ export function AuditRetentionForm({ initialDays }: { initialDays: string }) {
   const [days, setDays] = useState(initialDays);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState("");
+  // Only the "Saved" tick fades. A validation error (the 7–3650 day range) is
+  // the whole guidance this form gives, so it stays until the next edit or
+  // save. Kept in a ref so a second save cancels the first save's timer
+  // (otherwise it could reset "saving" to "idle" mid-flight) and unmount
+  // clears it.
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    if (resetTimer.current) clearTimeout(resetTimer.current);
     setStatus("saving");
     setError("");
     try {
@@ -33,6 +41,7 @@ export function AuditRetentionForm({ initialDays }: { initialDays: string }) {
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
       if (res.ok && data.ok !== false) {
         setStatus("ok");
+        resetTimer.current = setTimeout(() => setStatus("idle"), 4000);
       } else {
         setError(data.error ?? t("settings.form.common.saveFailed"));
         setStatus("error");
@@ -41,7 +50,6 @@ export function AuditRetentionForm({ initialDays }: { initialDays: string }) {
       setError(t("settings.form.common.saveFailed"));
       setStatus("error");
     }
-    setTimeout(() => setStatus("idle"), 4000);
   }
 
   return (
@@ -56,13 +64,13 @@ export function AuditRetentionForm({ initialDays }: { initialDays: string }) {
           value={days}
           onChange={(e) => { setDays(e.target.value); setStatus("idle"); }}
           placeholder="90"
-          className="bg-zinc-800 border-zinc-700 text-sm max-w-48"
+          className="bg-zinc-800 border-zinc-700 max-w-48"
         />
         <p className="text-xs text-zinc-500">
           {t("settings.form.auditRetention.help")}
         </p>
       </div>
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 flex-wrap">
         <Button type="submit" size="sm" disabled={status === "saving"}>
           {status === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("settings.form.common.save")}
         </Button>

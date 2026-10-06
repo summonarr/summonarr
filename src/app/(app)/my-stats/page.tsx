@@ -3,9 +3,12 @@ import { requireAppSession } from "@/lib/require-app-session";
 import { getMyPlayStats } from "@/lib/my-watch-history";
 import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
 import { posterUrl } from "@/lib/tmdb-types";
-import { BarChart3 } from "@/components/icons";
+import { BarChart3, ChevronRight, Sparkles } from "@/components/icons";
 import { EmptyState, PageHeader } from "@/components/ui/design";
 import { MyStatsView, type MyStatsData } from "@/components/watch-history/my-stats-view";
+import { TrackingOffState } from "@/components/watch-history/tracking-off-state";
+import { isPlayHistoryEnabled } from "@/lib/play-history";
+import { hasPermission, Permission } from "@/lib/permissions";
 import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
@@ -19,6 +22,23 @@ export const dynamic = "force-dynamic";
 export default async function MyStatsPage() {
   const session = await requireAppSession();
   const t = await getTranslator();
+
+  // Tracking off ⇒ nothing is recorded, so the "your stats will appear here"
+  // copy below would be false. Say so (the /popular gate) and skip the
+  // aggregate read entirely.
+  if (!(await isPlayHistoryEnabled())) {
+    return (
+      <div className="ds-page-enter">
+        <PageHeader title={t("personal.stats.title")} subtitle={t("personal.stats.subtitle")} />
+        <TrackingOffState
+          icon={BarChart3}
+          t={t}
+          canOpenSettings={hasPermission(session.user.permissions, Permission.ADMIN)}
+        />
+      </div>
+    );
+  }
+
   const { linked, stats } = await getMyPlayStats(session.user.id);
 
   // Plex/Jellyfin sign-ins ARE media-server identities — for them an empty
@@ -94,12 +114,12 @@ export default async function MyStatsPage() {
               }}
             >
               <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
-                <span style={{ fontSize: 18 }}>✨</span>
+                <Sparkles aria-hidden style={{ width: 18, height: 18, flexShrink: 0 }} />
                 <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: "-0.01em" }}>
                   {t("personal.stats.yearInReview")}
                 </span>
               </span>
-              <span aria-hidden style={{ fontSize: 18, opacity: 0.9 }}>→</span>
+              <ChevronRight aria-hidden style={{ width: 18, height: 18, flexShrink: 0, opacity: 0.9 }} />
             </Link>
           )}
           <MyStatsView data={data} />

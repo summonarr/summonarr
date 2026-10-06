@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { AlertTriangle, Loader2 } from "@/components/icons";
+import { buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
@@ -266,16 +268,11 @@ export default function PlexDonePage() {
       {failed && (
         <Link
           href={failedFlow === "settings" ? "/settings" : "/login"}
-          className="ds-tap ds-hover-tint inline-flex items-center justify-center font-medium mt-3"
-          style={{
-            background: "var(--ds-bg-2)",
-            color: "var(--ds-fg)",
-            border: "1px solid var(--ds-border)",
-            borderRadius: 10,
-            minHeight: 44,
-            fontSize: 14,
-            padding: "0 20px",
-          }}
+          // The design-system outline button, not a hand-rolled pill: the MFA
+          // step renders the same "Back to sign in" label one screen earlier,
+          // and borderRadius 10 was off the --ds-r-* scale. min-h-11 keeps the
+          // 44px tap target the pill had.
+          className={cn(buttonVariants({ variant: "outline" }), "mt-3 min-h-11 px-5")}
         >
           {failedFlow === "settings" ? t("auth.plexDone.backToSettings") : t("auth.mfa.backToSignIn")}
         </Link>

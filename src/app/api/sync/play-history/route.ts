@@ -388,6 +388,16 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
             data: {
               lastSeenAt: now,
               state: s.state,
+              // Re-bind the owner when this tick resolved a DIFFERENT identity than
+              // the row was created under. A server-owner session that STARTS while
+              // plex.tv is unreachable is created on a phantom sourceUserId="1" row
+              // (plexAdminId was null, so the "1" rewrite above could not fire); the
+              // next tick resolves the owner to the global-id row, but without this
+              // the create-time id stuck until finalize copied it into PlayHistory —
+              // a watch the subject resolver (guardrail 34) could never link to the
+              // owner's account. Only written on a mismatch so the CAS data stays
+              // minimal for the common case.
+              ...(existing.mediaServerUserId !== msUserId ? { mediaServerUserId: msUserId } : {}),
               progressPercent: nextProgressPercent,
               progressMs: BigInt(nextProgressMs),
               ...(playheadMoved || resumedToPlaying ? { progressUpdatedAt: now } : {}),
@@ -562,7 +572,13 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
           markPlexSessionFinalized(session.id, nowMs);
           return true;
         })
-        .catch(() => false);
+        .catch((err) => {
+          // Mirrors the Jellyfin sweep and the stall path: a failed finalize is
+          // retried next tick, but the operator needs a line to correlate a late
+          // finalize with (guardrail 7 permits warn-on-failure).
+          console.warn(`[play-history] Failed to finalize plex session ${session.id}:`, err);
+          return false;
+        });
     }),
   );
   const ended = finalized.filter(Boolean).length + stallEnded;
@@ -812,6 +828,14 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
               playMethod: s.playMethod,
               resolution: s.resolution ?? null,
               transcodeReason: s.transcodeReason ?? null,
+              // Jellyfin's bitrate is play-method dependent (TranscodingInfo.Bitrate
+              // when transcoding, the source total on DirectPlay — jellyfin.ts), and
+              // DELIVERED_KBPS_SQL (guardrail 19a) bills the stored value for every
+              // Jellyfin row. A mid-stream DirectPlay→Transcode fallback that only
+              // refreshed playMethod finalized as a transcode billed at the SOURCE
+              // bitrate (10x the bytes that left the server). undefined leaves the
+              // stored value alone when the payload carries none.
+              bitrate: s.bitrate ?? undefined,
               ...(increment > BigInt(0) ? { playtimeMs: { increment } } : {}),
               // One-shot backfill — see the Plex branch's durationMs note.
               ...(existing.durationMs === BigInt(0) && durationMs > 0 ? { durationMs: BigInt(durationMs) } : {}),

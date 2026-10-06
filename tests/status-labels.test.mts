@@ -115,10 +115,13 @@ test("every RequestStatus tone is a real ChipTone — not a string that renders 
   }
 });
 
-test("AVAILABLE reuses the approved tone — it is a terminal success state, not its own colour", () => {
-  assert.equal(REQUEST_STATUS_TONE.AVAILABLE, "approved");
+test("AVAILABLE carries its own tone — 'ready to watch' must be distinguishable from 'approved, still downloading' at a glance", () => {
+  // Both used to render `.ds-chip-approved`, so a list mixing approved and
+  // available requests was one colour and only the chip text told them apart.
   assert.equal(REQUEST_STATUS_TONE.APPROVED, "approved");
-  // …but the two are still distinguishable by their labels.
+  assert.equal(REQUEST_STATUS_TONE.AVAILABLE, "accent");
+  assert.notEqual(REQUEST_STATUS_TONE.AVAILABLE, REQUEST_STATUS_TONE.APPROVED);
+  // …and the labels stay distinct too.
   assert.notEqual(REQUEST_STATUS_LABEL.AVAILABLE, REQUEST_STATUS_LABEL.APPROVED);
 });
 

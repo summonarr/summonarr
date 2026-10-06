@@ -93,16 +93,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: t("apiAuth.oidc.failed") }, { status: 401 });
   }
 
-  let dbUser;
-  try {
-    dbUser = await findOrCreateOidcUser(claims);
-  } catch (err) {
-    console.error(
-      "[auth/sign-in/oidc] user lookup failed:",
-      err instanceof Error ? err.message : err,
-    );
-    return NextResponse.json({ error: t("apiAuth.oidc.failed") }, { status: 401 });
-  }
+  // Deliberately NOT caught: the IdP step above already succeeded, so a throw
+  // here is a server-side fault (DB unreachable), not a refusal of the
+  // credential. Every sibling provider route lets it propagate as a 500; the
+  // old 401 made the iOS app treat it as "rejected" and send the user back to
+  // the IdP to re-authenticate, which cannot help. The 401 stays ONLY on the
+  // exchange, where a bad or stale code is a genuine credential failure.
+  const dbUser = await findOrCreateOidcUser(claims);
 
   // Same refusals the web callback renders as ?error= codes on /login. Kept as
   // distinct messages so the app can tell the user what to do rather than

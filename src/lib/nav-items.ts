@@ -59,6 +59,11 @@ export const NAV_ITEM_FEATURE_KEY: Record<string, string> = {
   "/issues":             "feature.page.issues",
   "/votes":              "feature.page.votes",
   "/donate":             "feature.page.donate",
+  // Personal history pages are empty by construction while play-history
+  // tracking (default OFF) is off — nothing records, so "plays will show up
+  // here" would be false. Same gate /popular already uses.
+  "/watch-history":      "playHistoryEnabled",
+  "/my-stats":           "playHistoryEnabled",
   "/admin/issues":       "feature.page.issues",
   "/admin/stats":        "feature.admin.stats",
   "/admin/activity":     "feature.admin.activity",
@@ -91,6 +96,26 @@ export function filterNavByFeatures<T extends { href: string }>(
 
 export function navItemLabel(item: Pick<NavItem, "label" | "i18nKey">, t: Translator): string {
   return item.i18nKey ? t(item.i18nKey) : item.label;
+}
+
+/**
+ * The ONE "is this nav item the current page" rule, shared by the sidebar, the
+ * mobile drawer, the bottom tab bar and the header breadcrumb. It used to be
+ * re-derived in each renderer and the copies disagreed: the drawer knew that
+ * detail routes are singular (/movie/123) while the list is plural (/movies),
+ * the sidebar did not, so on desktop /tv/123 lit "TV Shows" while /movie/603
+ * lit nothing at all.
+ *
+ *   - `exact` items match only their own path ("/" and "/admin" would otherwise
+ *     match every route beneath them).
+ *   - "/movies" also owns the movie detail route "/movie/…".
+ *   - Everything else matches itself or a sub-path on a segment boundary
+ *     ("/tv" → "/tv/123", but not "/tvsomething").
+ */
+export function isNavItemActive(pathname: string, item: Pick<NavItem, "href" | "exact">): boolean {
+  if (item.exact) return pathname === item.href;
+  if (item.href === "/movies" && pathname.startsWith("/movie/")) return true;
+  return pathname === item.href || pathname.startsWith(`${item.href}/`);
 }
 
 export const userNavItems: NavItem[] = [

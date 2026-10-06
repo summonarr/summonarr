@@ -50,6 +50,41 @@ interface PlexSearchResult {
   Guid?:  Array<{ id: string }>;
 }
 
+// Thrown by fixPlexMatch when the unmatch PUT succeeded but no re-match was ever
+// confirmed: the item now sits in Plex with NO match at all, which is a worse
+// state than "nothing changed" and needs its own message (the DB row still
+// carries the old id, so the next sync — keyed on a tmdb guid — drops the row
+// and the title vanishes from availability until someone re-matches it in Plex).
+class PlexUnmatchedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PlexUnmatchedError";
+  }
+}
+
+// Plays recorded while the item carried the wrong id keep it forever otherwise:
+// resolveShowTmdbId / the poller read the library row at RECORD time, so a watch
+// of the mismatched item landed on the old tmdbId, and after the remap the watch
+// grade (guardrail 34a) still scores the request unwatched while activity views
+// attribute the plays to the wrong title. Scoped to THIS source + instance —
+// another server may legitimately hold the old id (guardrail 35) — and never by
+// tmdbId alone. A movie play's `sourceItemId` is the item's own ratingKey /
+// item id, so movies are pinned to the remapped ids; an EPISODE play's
+// `sourceItemId` is the episode's key, not the show's, so TV is scoped on the
+// library row's own key (tmdbId, mediaType, serverInstance): that row is the
+// only one a play on this instance could have resolved the old id through.
+function playReattributionWhere(
+  source: "plex" | "jellyfin",
+  serverInstance: string,
+  mediaType: "MOVIE" | "TV",
+  tmdbId: number,
+  itemIds: string[],
+) {
+  return mediaType === "MOVIE"
+    ? { source, serverInstance, tmdbId, mediaType: "MOVIE" as const, sourceItemId: { in: itemIds } }
+    : { source, serverInstance, tmdbId, mediaType: "TV" as const };
+}
+
 // Remaps a Plex library item to the correct TMDB id: unmatch, re-match (via a
 // GUID search across imdb/tmdb agents, else a raw tmdb:// fallback), then poll
 // until Plex confirms — throws if it never confirms. Returns conflated=true when
@@ -182,11 +217,15 @@ async function fixPlexMatch(
     }
   }
 
-  await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${safeKey}/unmatch`, {
+  // Remember whether the unmatch actually landed: from here on a failure to
+  // re-match leaves the item UNMATCHED in Plex, not merely unchanged, and the
+  // final throw below has to say so.
+  const unmatchRes = await safeFetchAdminConfigured(`${serverUrl}/library/metadata/${safeKey}/unmatch`, {
     method: "PUT",
     headers,
     timeoutMs: 30_000,
   }).catch(() => null);
+  const unmatched = unmatchRes?.ok === true;
 
   await safeFetchAdminConfigured(`${serverUrl}/library/clean/bundles`, {
     method: "PUT",
@@ -360,11 +399,12 @@ async function fixPlexMatch(
   const plexState = plexTmdbId
     ? `Plex resolved to tmdb://${plexTmdbId}${plexImdbId ? ` (imdb://${plexImdbId})` : ""}`
     : "Plex state unknown";
-  throw new Error(
+  const detail =
     `Plex did not confirm the match to tmdb://${correctTmdbId} — ${plexState}. ` +
     `Plex's metadata database may not have an entry for TMDB #${correctTmdbId}. ` +
-    `Try a different candidate from the picker, or fix the match manually in Plex.`,
-  );
+    `Try a different candidate from the picker, or fix the match manually in Plex.`;
+  if (unmatched) throw new PlexUnmatchedError(`${detail} The item is now UNMATCHED in Plex.`);
+  throw new Error(detail);
 }
 
 type JellyfinVirtualFolder = {
@@ -724,7 +764,8 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
         throw new FixMatchError(t("apiAdmin.fixMatch.plexRatingKeyNotFound"), 404);
       }
       opts.report?.({ phase: "applying", remoteApplied: false, attempt: 0, attempts: 0, readFailures: 0 });
-      const plexResult = await fixPlexMatch(item.plexRatingKey, correctTmdbId, mediaType, serverInstance, canonicalGuid);
+      const plexRatingKey = item.plexRatingKey;
+      const plexResult = await fixPlexMatch(plexRatingKey, correctTmdbId, mediaType, serverInstance, canonicalGuid);
       remoteRemapped = true;
 
       await prisma.$transaction(async (tx) => {
@@ -741,8 +782,17 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
         await tx.plexLibraryItem.upsert({
           where: { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance } },
           create: { tmdbId: correctTmdbId, mediaType, serverInstance, filePath: item.filePath, plexRatingKey: item.plexRatingKey },
-          update: { plexRatingKey: item.plexRatingKey },
+          // filePath follows the ratingKey: a pre-existing row for the corrected
+          // id (a correctly matched copy) otherwise kept ANOTHER file's path
+          // beside this item's key until the next full sync.
+          update: { plexRatingKey: item.plexRatingKey, filePath: item.filePath },
         });
+        // Re-attribute the plays recorded under the wrong id (see
+        // playReattributionWhere). Same tx as the row rewrite so the cache and
+        // the history never disagree about which title this item is.
+        const reattribute = playReattributionWhere("plex", serverInstance, mediaType, tmdbId, [plexRatingKey]);
+        await tx.playHistory.updateMany({ where: reattribute, data: { tmdbId: correctTmdbId } });
+        await tx.activeSession.updateMany({ where: reattribute, data: { tmdbId: correctTmdbId } });
         // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID.
         // TVEpisodeCache has NO serverInstance column, so this purge would also
         // erase another plex server's legitimately-matched rows for the old id.
@@ -853,11 +903,32 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
         // unique row throws P2025 and would report a landed remap as a failed
         // job (guardrail 37a).
         await tx.jellyfinLibraryItem.deleteMany({ where: { tmdbId, mediaType, serverInstance } });
+        // The target row may already exist — a correctly matched copy of the
+        // same title, or the copy a previous partial run DID move (the retry the
+        // jellyfinPartial warning itself invites). Its `jellyfinItemIds` are
+        // copies this run never touched; REPLACING the array with this run's ids
+        // dropped them, and until the next full sync rewrote the row the 5s
+        // poller's has/hasSome lookup no longer recognised their SeriesId —
+        // guardrail 37's exact failure. Write the UNION.
+        const existingTarget = await tx.jellyfinLibraryItem.findUnique({
+          where: { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance } },
+          select: { jellyfinItemIds: true },
+        });
+        const mergedItemIds = Array.from(new Set([...(existingTarget?.jellyfinItemIds ?? []), ...resolvedItemIds]));
         await tx.jellyfinLibraryItem.upsert({
           where: { tmdbId_mediaType_serverInstance: { tmdbId: correctTmdbId, mediaType, serverInstance } },
           create: { tmdbId: correctTmdbId, mediaType, serverInstance, filePath: item?.filePath ?? null, jellyfinItemId: resolvedItemId, jellyfinItemIds: resolvedItemIds },
-          update: { jellyfinItemId: resolvedItemId, jellyfinItemIds: resolvedItemIds },
+          // filePath follows the canonical item id (see the Plex twin).
+          update: { jellyfinItemId: resolvedItemId, jellyfinItemIds: mergedItemIds, filePath: item?.filePath ?? null },
         });
+        // Re-attribute the plays recorded under the wrong id (see
+        // playReattributionWhere): the ids a play could carry are the copies as
+        // they were BEFORE the remap plus whatever Jellyfin reports them as now.
+        const reattribute = playReattributionWhere(
+          "jellyfin", serverInstance, mediaType, tmdbId, Array.from(new Set([...targetItemIds, ...resolvedItemIds])),
+        );
+        await tx.playHistory.updateMany({ where: reattribute, data: { tmdbId: correctTmdbId } });
+        await tx.activeSession.updateMany({ where: reattribute, data: { tmdbId: correctTmdbId } });
         // Stale episode cache references the old tmdbId; must be cleared so re-cache picks up correct ID.
         // TVEpisodeCache has NO serverInstance column, so this purge would also
         // erase another jellyfin server's legitimately-matched rows for the old
@@ -902,6 +973,13 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
     const serverLabel = mediaInstanceLabel(server, serverInstance);
     const errClass = err instanceof Error ? err.constructor.name : "Error";
     console.error("[fix-match]", `${serverLabel} error (${errClass})`, err instanceof Error ? err.message : err);
+    // The unmatch landed but no re-match was confirmed: the item is UNMATCHED
+    // in Plex, not unchanged. The generic "operation failed" implied a no-op
+    // while the title was about to drop out of availability on the next sync;
+    // say what state the item is in and what to do about it.
+    if (err instanceof PlexUnmatchedError) {
+      throw new FixMatchError(t("apiAdmin.fixMatch.plexUnmatched", { tmdbId: correctTmdbId }), 502);
+    }
     // When the remote remap already committed, the failure is in the DB phase:
     // the library server now points at the corrected TMDB id but the local cache
     // still references the old one. Tell the operator so they can re-sync (which
@@ -912,6 +990,13 @@ async function runFixMatch(input: FixMatchInput, actor: FixMatchActor, opts: { b
       const base = server === "plex" ? "Plex" : "Jellyfin";
       const serverName = serverInstance === DEFAULT_MEDIA_INSTANCE ? base : `${base} (${serverInstance})`;
       console.warn("[fix-match]", `${serverLabel} remapped remotely but the DB update failed for tmdb:${tmdbId} → ${correctTmdbId}; cache is out of sync until a re-sync runs`);
+      // The upstream mutation DID happen — audit it (swallowing variant,
+      // guardrail 26) so a change the library server now carries is not
+      // invisible to the audit log just because the cache phase failed.
+      void logAudit({
+        userId: actor.userId, userName: actor.userName, action: "FIX_MATCH", target: `tmdb:${tmdbId}`,
+        details: { type: "fix-match", source: server, fromTmdbId: tmdbId, toTmdbId: correctTmdbId, mediaType, serverInstance, dbUpdated: false },
+      });
       throw new FixMatchError(t("apiAdmin.fixMatch.cacheUpdateFailed", { server: serverName, tmdbId: correctTmdbId }), 502);
     }
     throw new FixMatchError(t("apiAdmin.fixMatch.failed"), 502);

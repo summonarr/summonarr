@@ -67,8 +67,12 @@ export async function POST(req: NextRequest) {
   let expiresIn = DEFAULT_EXPIRES_IN;
   const body = await readJsonCappedOr<{ expiresIn?: number; userId?: string }>(req, 8192, {});
   if (body instanceof NextResponse) return body;
-  if (typeof body?.expiresIn === "number") {
-    expiresIn = Math.min(Math.max(body.expiresIn, 60), MAX_EXPIRES_IN);
+  if (typeof body?.expiresIn === "number" && Number.isFinite(body.expiresIn)) {
+    // Whole seconds only: the value is interpolated verbatim into the cookie's
+    // Max-Age, and RFC 6265 §5.2.2 makes a cookie jar IGNORE a Max-Age with a
+    // non-digit in it — a fractional request produced a cookie with NO expiry
+    // instead of a shorter one. The clamp bounds the range, the floor the type.
+    expiresIn = Math.min(Math.max(Math.floor(body.expiresIn), 60), MAX_EXPIRES_IN);
   }
 
   // Optional explicit target admin. When omitted, default to the oldest admin

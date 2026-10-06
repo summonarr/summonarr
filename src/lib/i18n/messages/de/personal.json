@@ -51,7 +51,6 @@
   "personal.votes.emptyFilteredDescription": "Keine Stimmen entsprechen diesen Filtern.",
   "personal.votes.emptyTitle": "Noch keine Löschstimmen",
   "personal.votes.emptyDescription": "Durchsuchen Sie Ihre Bibliothek und stimmen Sie für Titel, die Ihrer Meinung nach entfernt werden sollten.",
-  "personal.votes.noPoster": "Kein Poster",
   "personal.votes.count_one": "{count} Stimme",
   "personal.votes.count_other": "{count} Stimmen",
   "personal.votes.anonymous": "Anonym",
@@ -189,5 +188,10 @@
   "personal.donate.zelleHint": "Über Zelle Ihrer Bank senden an:",
   "personal.donate.amazonHint": "Meine Amazon-Wunschliste ansehen",
   "personal.donate.patreonHint": "Werden Sie Unterstützer auf Patreon",
-  "personal.donate.coffeeHint": "Spendieren Sie mir einen Kaffee"
+  "personal.donate.coffeeHint": "Spendieren Sie mir einen Kaffee",
+  "personal.common.trackingOff.title": "Die Erfassung des Wiedergabeverlaufs ist deaktiviert",
+  "personal.common.trackingOff.description": "Es wird nichts aufgezeichnet, daher kann sich diese Seite nicht füllen. Ein Administrator kann die Erfassung des Wiedergabeverlaufs unter Einstellungen → Funktionen aktivieren.",
+  "personal.common.trackingOff.cta": "Einstellungen öffnen",
+  "personal.common.showingMostRecent": "Es werden deine {n} neuesten Titel angezeigt. Ältere sind hier nicht aufgeführt.",
+  "personal.watchlist.removeError": "„{title}“ konnte nicht von der Merkliste entfernt werden. Bitte versuche es erneut."
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useTransition } from "react";
 import { X } from "@/components/icons";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { FilterBar as Segments } from "@/components/ui/design";
@@ -34,10 +34,24 @@ const SORT_OPTIONS: { value: string; label?: string; labelKey?: string }[] = [
 
 // Concise labels for the segmented sort control (SORT_OPTIONS keeps the
 // "Sort: …" prefix for the active-filter chips below).
-const SORT_SEGMENTS = [
+//
+// Five segments overflowed a 375px track: the design-system FilterBar hides its
+// scrollbar and has no edge fade, so "MDBList" (and part of "Trakt") was simply
+// cut off with nothing saying more existed. The longest brand abbreviates below
+// `sm`; the full name stays the accessible name at every width (sr-only on
+// phones, shown from sm — never two names in flow at once).
+const SORT_SEGMENTS: { value: string; label: React.ReactNode }[] = [
   { value: "", label: "IMDb" },
   { value: "letterboxd", label: "Letterboxd" },
-  { value: "rt", label: "Rotten Tomatoes" },
+  {
+    value: "rt",
+    label: (
+      <>
+        <span aria-hidden="true" className="sm:hidden">RT</span>
+        <span className="sr-only sm:not-sr-only">Rotten Tomatoes</span>
+      </>
+    ),
+  },
   { value: "trakt", label: "Trakt" },
   { value: "mdblist", label: "MDBList" },
 ];
@@ -74,6 +88,11 @@ export function TopFilterBar({
   const searchParams = useSearchParams();
   const t = useT();
   const years = useMemo(() => buildYears(maxYear), [maxYear]);
+  // /top re-fetches and re-ranks its whole pool on every change, so a push can
+  // take a moment to land. Like PillFilter, mark the bar busy and dim it until
+  // the new render arrives — the twin bar on /movies gets the same signal via
+  // BrowseGrid's spinner; here the bar is the only client surface.
+  const [isPending, startTransition] = useTransition();
 
   // Filter changes we've pushed but the URL hasn't caught up with yet.
   // `searchParams` only shows the URL as it is NOW, and router.push is async,
@@ -109,18 +128,22 @@ export function TopFilterBar({
     // narrows to two pages of results lands on an out-of-range slice.
     // filter-bar.tsx does the same on its own push.
     params.delete("page");
-    router.push(`${pathname}?${params.toString()}`);
+    startTransition(() => router.push(`${pathname}?${params.toString()}`));
   }, [router, pathname, searchParams]);
 
   const clearAll = useCallback(() => {
     pendingRef.current = {};
-    router.push(pathname);
+    startTransition(() => router.push(pathname));
   }, [router, pathname]);
 
   const hasFilters = !!(activeMediaType || activeSortBy || activeMinImdb || activeMinVotes || activeFromYear || activeToYear || activeHideAvailable);
 
   return (
-    <div className="flex flex-col gap-3 mb-6">
+    <div
+      className="flex flex-col gap-3 mb-6 transition-opacity"
+      aria-busy={isPending || undefined}
+      style={{ opacity: isPending ? 0.7 : 1 }}
+    >
       <Segments
         segments={[
           { value: "both", label: t("browse.type.all") },
@@ -141,8 +164,11 @@ export function TopFilterBar({
         className="mb-0"
       />
 
+      {/* One row, one height, one radius — see filter-bar.tsx: compact selects
+          (h-8, 8px radius) beside minHeight-32 / radius-8 pills. */}
       <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2 items-center">
         <StyledSelect
+          compact
           aria-label={t("media.filter.minImdbLabel")}
           value={activeMinImdb ?? ""}
           onChange={(e) => push({ minImdb: e.target.value || undefined })}
@@ -153,6 +179,7 @@ export function TopFilterBar({
         </StyledSelect>
 
         <StyledSelect
+          compact
           aria-label={t("media.filter.minVotesLabel")}
           value={activeMinVotes ?? ""}
           onChange={(e) => push({ minVotes: e.target.value || undefined })}
@@ -163,6 +190,7 @@ export function TopFilterBar({
         </StyledSelect>
 
         <StyledSelect
+          compact
           aria-label={t("media.filter.fromYearLabel")}
           value={activeFromYear ?? ""}
           onChange={(e) => push({ fromYear: e.target.value || undefined })}
@@ -174,6 +202,7 @@ export function TopFilterBar({
         </StyledSelect>
 
         <StyledSelect
+          compact
           aria-label={t("media.filter.toYearLabel")}
           value={activeToYear ?? ""}
           onChange={(e) => push({ toYear: e.target.value || undefined })}
@@ -192,7 +221,7 @@ export function TopFilterBar({
           style={{
             padding: "5px 12px",
             minHeight: 32,
-            borderRadius: 6,
+            borderRadius: 8,
             fontSize: 12,
             background: activeHideAvailable
               ? "var(--ds-accent-soft)"
@@ -214,7 +243,7 @@ export function TopFilterBar({
             style={{
               padding: "5px 10px",
               minHeight: 32,
-              borderRadius: 6,
+              borderRadius: 8,
               fontSize: 11,
               background: "var(--ds-bg-2)",
               color: "var(--ds-fg-muted)",

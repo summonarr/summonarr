@@ -86,7 +86,7 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 w-80 lg:w-96 xl:w-[440px] shadow-2xl outline-none"
+        className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 w-80 lg:w-96 xl:w-[440px] shadow-2xl max-h-[85vh] overflow-y-auto outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-1">
@@ -114,9 +114,9 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
             <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-1.5">
               <MessageCircle className="w-3 h-3" /> Discord
             </p>
-            <AdminToggleRow label={t("adminManage.notif.approved")} checked={prefs.notifyOnApproved} onChange={() => toggle("notifyOnApproved")} disabled={saving} />
-            <AdminToggleRow label={t("adminManage.notif.available")} checked={prefs.notifyOnAvailable} onChange={() => toggle("notifyOnAvailable")} disabled={saving} />
-            <AdminToggleRow label={t("adminManage.notif.declined")} checked={prefs.notifyOnDeclined} onChange={() => toggle("notifyOnDeclined")} disabled={saving} />
+            <AdminToggleRow label={t("adminManage.notif.approved")} checked={prefs.notifyOnApproved} onChange={() => toggle("notifyOnApproved")} busy={saving} />
+            <AdminToggleRow label={t("adminManage.notif.available")} checked={prefs.notifyOnAvailable} onChange={() => toggle("notifyOnAvailable")} busy={saving} />
+            <AdminToggleRow label={t("adminManage.notif.declined")} checked={prefs.notifyOnDeclined} onChange={() => toggle("notifyOnDeclined")} busy={saving} />
           </div>
         ) : (
           <p className="text-xs text-zinc-500 mb-3 italic">{t("adminManage.notif.discordNotLinked")}</p>
@@ -126,25 +126,25 @@ export function NotificationsModal({ u, onClose }: { u: User; onClose: () => voi
           <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-1.5">
             <Mail className="w-3 h-3" /> {t("adminManage.notif.email")}
           </p>
-          <AdminToggleRow label={t("adminManage.notif.approved")} checked={prefs.emailOnApproved} onChange={() => toggle("emailOnApproved")} disabled={saving} />
-          <AdminToggleRow label={t("adminManage.notif.available")} checked={prefs.emailOnAvailable} onChange={() => toggle("emailOnAvailable")} disabled={saving} />
-          <AdminToggleRow label={t("adminManage.notif.declined")} checked={prefs.emailOnDeclined} onChange={() => toggle("emailOnDeclined")} disabled={saving} />
+          <AdminToggleRow label={t("adminManage.notif.approved")} checked={prefs.emailOnApproved} onChange={() => toggle("emailOnApproved")} busy={saving} />
+          <AdminToggleRow label={t("adminManage.notif.available")} checked={prefs.emailOnAvailable} onChange={() => toggle("emailOnAvailable")} busy={saving} />
+          <AdminToggleRow label={t("adminManage.notif.declined")} checked={prefs.emailOnDeclined} onChange={() => toggle("emailOnDeclined")} busy={saving} />
         </div>
 
         <div className="mt-3">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-1.5">
             <Smartphone className="w-3 h-3" /> {t("adminManage.notif.push")}
           </p>
-          <AdminToggleRow label={t("adminManage.notif.approved")} checked={prefs.pushOnApproved} onChange={() => toggle("pushOnApproved")} disabled={saving} />
-          <AdminToggleRow label={t("adminManage.notif.available")} checked={prefs.pushOnAvailable} onChange={() => toggle("pushOnAvailable")} disabled={saving} />
-          <AdminToggleRow label={t("adminManage.notif.declined")} checked={prefs.pushOnDeclined} onChange={() => toggle("pushOnDeclined")} disabled={saving} />
+          <AdminToggleRow label={t("adminManage.notif.approved")} checked={prefs.pushOnApproved} onChange={() => toggle("pushOnApproved")} busy={saving} />
+          <AdminToggleRow label={t("adminManage.notif.available")} checked={prefs.pushOnAvailable} onChange={() => toggle("pushOnAvailable")} busy={saving} />
+          <AdminToggleRow label={t("adminManage.notif.declined")} checked={prefs.pushOnDeclined} onChange={() => toggle("pushOnDeclined")} busy={saving} />
         </div>
 
         <div className="mt-3">
           <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1 flex items-center gap-1.5">
             <AlertTriangle className="w-3 h-3" /> {t("adminManage.notif.issues")}
           </p>
-          <AdminToggleRow label={t("adminManage.notif.issueReplies")} checked={prefs.notifyOnIssue} onChange={() => toggle("notifyOnIssue")} disabled={saving} />
+          <AdminToggleRow label={t("adminManage.notif.issueReplies")} checked={prefs.notifyOnIssue} onChange={() => toggle("notifyOnIssue")} busy={saving} />
         </div>
 
         {saving && (

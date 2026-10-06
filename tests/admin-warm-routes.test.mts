@@ -215,7 +215,9 @@ type WarmRoute = {
   POST: (req: InstanceType<typeof NextRequest>, ctx: undefined) => Promise<Response>;
 };
 const WARMS: WarmRoute[] = [
-  { name: "activity-warm", path: "/api/admin/activity-warm", cooldownKey: "lastActivityWarmAt", lockId: null, POST: activityWarm.POST },
+  // Shares WARM_ACTIVITY_LOCK_ID (2003) with /api/cron/warm-activity so an admin
+  // click can't run the stats aggregates beside the hourly cron (guardrail 41).
+  { name: "activity-warm", path: "/api/admin/activity-warm", cooldownKey: "lastActivityWarmAt", lockId: AL.WARM_ACTIVITY_LOCK_ID, POST: activityWarm.POST },
   { name: "library-warm", path: "/api/admin/library-warm", cooldownKey: "lastLibraryWarmAt", lockId: AL.WARM_LIBRARY_LOCK_ID, POST: libraryWarm.POST },
   { name: "mdblist-warm", path: "/api/admin/mdblist-warm", cooldownKey: "lastMdblistWarmAt", lockId: AL.WARM_MDBLIST_LOCK_ID, POST: mdblistWarm.POST },
   { name: "omdb-warm", path: "/api/admin/omdb-warm", cooldownKey: "lastOmdbWarmAt", lockId: AL.WARM_OMDB_LOCK_ID, POST: omdbWarm.POST },
@@ -439,13 +441,11 @@ test("the boot-time library prewarm takes the warm-library cron's lock and obser
   assert.equal((src.match(/prewarmLibraryCache\(\)/g) ?? []).length, 0, "an unlocked, signal-less prewarmLibraryCache() call remains");
 });
 
-test("the non-locking warms take no advisory lock at all", async () => {
-  const t = await mintSession();
-  for (const w of WARMS.filter((x) => x.lockId === null)) {
-    pgLockCalls = [];
-    await callWarm(w, t);
-    assert.deepEqual(pgLockCalls, [], `${w.name} unexpectedly took a lock`);
-  }
+test("every admin warm shares its cron twin's lock id — none runs unlocked (guardrail 41)", async () => {
+  // activity-warm was the last one without a lock: an admin press mid-cron ran
+  // the five stats aggregates twice against the 5-connection pool.
+  assert.equal(WARMS.filter((x) => x.lockId === null).length, 0);
+  assert.equal(AL.WARM_ACTIVITY_LOCK_ID, 2003, "the cron route's historical literal — a renumber here must move the cron too");
 });
 
 // ── 4: mdblist force ─────────────────────────────────────────────────────────

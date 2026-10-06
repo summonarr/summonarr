@@ -69,7 +69,7 @@ function StandaloneRadioGroup<T extends string>({
             aria-checked={selected}
             lang={o.lang}
             onClick={() => onChange(o.value)}
-            className="ds-tap flex items-center gap-2 font-medium transition-colors"
+            className="ds-tap ds-hover-tint flex items-center gap-2 font-medium transition-colors"
             style={{
               padding: "7px 10px",
               borderRadius: 6,

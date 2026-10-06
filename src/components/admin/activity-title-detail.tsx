@@ -290,7 +290,7 @@ export function TitleDetailView({ data: s }: { data: TitleDetailData }) {
                     >
                       {v.count}{" "}
                       <span style={{ color: "var(--ds-fg-subtle)" }}>
-                        · {v.hours.toFixed(1)}h
+                        · {t("adminActivity.common.hoursShort", { n: v.hours.toLocaleString(locale, { maximumFractionDigits: 1 }) })}
                       </span>
                     </span>
                   </div>

@@ -49,7 +49,6 @@
   "apiUser.discord.merge.dmFailed": "Failed to send Discord DM. Make sure your DMs are open.",
   "apiUser.discord.merge.expired": "Code has expired — please request a new one.",
   "apiUser.discord.merge.incorrect": "Incorrect code.",
-  "apiUser.discord.merge.initiateFailed": "Could not initiate account linking. Please try again later.",
   "apiUser.discord.merge.invalidUserId": "Invalid Discord user ID — it must be a 17–20 digit number.",
   "apiUser.discord.merge.linkFailed": "Could not link accounts.",
   "apiUser.discord.merge.noPending": "No pending verification — please request a code first.",
@@ -88,6 +87,7 @@
   "apiUser.issues.tvdbUnresolved": "Could not resolve TVDB ID for this series — check Sonarr",
   "apiUser.media.loadFailed": "Could not load this title",
   "apiUser.media.typeInvalid": "type must be movie or tv",
+  "apiUser.notifications.idsInvalid": "ids must be an array of notification ids",
   "apiUser.notifications.selectorRequired": "specify ?ids= or ?all=1",
   "apiUser.person.invalidId": "Invalid id",
   "apiUser.person.upstreamError": "Upstream error",
@@ -137,6 +137,7 @@
   "apiUser.requests.bulk.itemTmdbId": "each item needs a positive integer tmdbId",
   "apiUser.requests.bulk.itemsRequired": "items must be a non-empty array",
   "apiUser.requests.bulk.onBehalfForbidden": "You don't have permission to request on behalf of other users",
+  "apiUser.requests.bulk.onBehalfIdInvalid": "onBehalfOfUserId must be a string",
   "apiUser.requests.bulk.quotaMovie": "This would exceed the movie quota of {limit} per {window} ({remaining} remaining).",
   "apiUser.requests.bulk.quotaTv": "This would exceed the TV quota of {limit} per {window} ({remaining} remaining).",
   "apiUser.requests.bulk.targetDeactivated": "Target user is deactivated",
@@ -148,6 +149,7 @@
   "apiUser.requests.qualityProfileNameTooLong": "qualityProfileName must be a string under 100 characters",
   "apiUser.requests.retryInvalidStatus": "Retry is only valid for APPROVED requests",
   "apiUser.requests.searchInvalidStatus": "Search is only valid for APPROVED or AVAILABLE requests",
+  "apiUser.requests.searchNoTvdbId": "No TVDB ID stored for this request — re-push it first",
   "apiUser.search.failed": "Search failed",
   "apiUser.search.queryTooLong": "Query too long",
   "apiUser.search.rateLimited": "Too many searches — try again in a minute",
@@ -162,5 +164,7 @@
   "apiUser.votes.notInLibrary": "Media is not in any library",
   "apiUser.votes.ownRequest": "Cannot vote to delete your own request",
   "apiUser.votes.reasonTooLong": "reason must be a string under 200 characters",
-  "apiUser.watchlist.alreadyAdded": "Already on your watchlist"
+  "apiUser.watchlist.alreadyAdded": "Already on your watchlist",
+  "apiUser.playHistory.exportTruncated": "Export truncated at {max} rows — narrow startDate/endDate and export again",
+  "apiUser.common.tmdbIdOutOfRange": "tmdbId is out of range"
 }

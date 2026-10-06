@@ -4,6 +4,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { getWatchedThreshold, clearActivityCache } from "@/lib/play-history";
+import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // One-shot backfill for PlayHistory rows written before ActiveSession.playtimeMs landed.
 // Pre-fix `playDuration` stored the playhead position at session end (so a scrub-to-credits
@@ -16,6 +17,7 @@ import { getWatchedThreshold, clearActivityCache } from "@/lib/play-history";
 // clause excludes rows that don't need clamping, so re-runs are a no-op.
 
 export const POST = withAdmin(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   const execute = req.nextUrl.searchParams.get("execute") === "true";
   const threshold = await getWatchedThreshold();
 
@@ -72,7 +74,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
            CASE
              WHEN duration > 0
              THEN (LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int)::float / duration::float * 100) >= $1
-             ELSE false
+             ELSE watched
            END
          ) AS watched_new
        FROM "PlayHistory"
@@ -116,7 +118,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   if (confirmAffected === null || confirmAffected !== affectedRows) {
     return NextResponse.json(
       {
-        error: "Confirmation required",
+        error: t("apiAdmin.backfillPlaytime.confirmationRequired"),
+        // Protocol text, not prose — the exact body the operator must echo.
         hint: `POST {"confirmAffectedRows": ${affectedRows}} to confirm.`,
         affectedRows,
       },
@@ -135,7 +138,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
        "watched" = CASE
          WHEN duration > 0
          THEN (LEAST("playDuration", EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int)::float / duration::float * 100) >= $1
-         ELSE false
+         -- A row with no known runtime cannot be re-judged, so its flag is left as
+         -- is: the dry-run's watched_flips FILTER requires duration > 0, and an
+         -- ELSE false here flipped rows that count never saw, so the reported
+         -- watchedFlippedToFalse under-stated what the write did.
+         ELSE "watched"
        END
      WHERE "playDuration" > EXTRACT(EPOCH FROM ("stoppedAt" - "startedAt"))::int
        AND "stoppedAt" > "startedAt"`,

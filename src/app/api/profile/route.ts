@@ -9,6 +9,7 @@ import { verifyPassword } from "@/lib/password-hash";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { deactivateUserInTx, LastAdminError } from "@/lib/account-lifecycle";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { tooManyRequests } from "@/lib/http";
 
 // DELETE /api/profile — the signed-in user deletes their OWN account.
 //
@@ -43,10 +44,7 @@ export const DELETE = withAuth(async (req, _ctx, session) => {
   // local passwordHash to verify against; the session itself is their proof.
   if (target.passwordHash !== null) {
     if (!checkRateLimit(`profile-delete:${id}`, 5, 15 * 60 * 1000)) {
-      return NextResponse.json(
-        { error: t("apiAuth.common.tooManyAttemptsWait15") },
-        { status: 429 },
-      );
+      return tooManyRequests(15 * 60, t("apiAuth.common.tooManyAttemptsWait15"));
     }
     const parsed = await readJsonCappedOr<{ password?: unknown }>(req, 16384, {});
     if (parsed instanceof NextResponse) return parsed;

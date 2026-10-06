@@ -7,7 +7,7 @@ import { posterUrl } from "@/lib/tmdb-types";
 import { X, Film, Tv2, Bookmark } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { EmptyState } from "@/components/ui/design";
-import { useT } from "@/components/i18n/i18n-provider";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 
 export interface WatchlistGridItem {
   tmdbId: number;
@@ -18,19 +18,42 @@ export interface WatchlistGridItem {
 
 // Client grid for the /watchlist page. Renders poster cards linking to the detail
 // page, each with an optimistic remove (X) control that DELETEs the entry.
-export function WatchlistGrid({ initialItems }: { initialItems: WatchlistGridItem[] }) {
+// `cap` is the server page's `take` — when the initial list is exactly that
+// long, older titles exist that this page cannot show, and a footer says so.
+export function WatchlistGrid({
+  initialItems,
+  cap,
+}: {
+  initialItems: WatchlistGridItem[];
+  cap?: number;
+}) {
   const [items, setItems] = useState(initialItems);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const t = useT();
+  const locale = useLocale();
 
   async function remove(it: WatchlistGridItem) {
     const key = `${it.tmdbId}:${it.mediaType}`;
     setRemoving(key);
+    setError(null);
     setItems((cur) => cur.filter((x) => `${x.tmdbId}:${x.mediaType}` !== key)); // optimistic
     // Roll back only THIS item — restoring a stale whole-list snapshot would
     // resurrect other items whose concurrent DELETE already succeeded.
-    const restore = () =>
-      setItems((cur) => (cur.some((x) => `${x.tmdbId}:${x.mediaType}` === key) ? cur : [...cur, it]));
+    // Re-insert at its original position (relative to the initial order) rather
+    // than appending: an appended tile lands below the fold on a full grid, so a
+    // failed remove used to look like a success. Same recipe as /hidden.
+    const order = (x: WatchlistGridItem) =>
+      initialItems.findIndex((y) => y.tmdbId === x.tmdbId && y.mediaType === x.mediaType);
+    const restore = () => {
+      setItems((cur) => {
+        if (cur.some((x) => `${x.tmdbId}:${x.mediaType}` === key)) return cur;
+        const at = order(it);
+        const idx = cur.findIndex((x) => order(x) > at);
+        return idx === -1 ? [...cur, it] : [...cur.slice(0, idx), it, ...cur.slice(idx)];
+      });
+      setError(t("personal.watchlist.removeError", { title: it.title }));
+    };
     try {
       const res = await fetch(
         withBasePath(`/api/watchlist?tmdbId=${it.tmdbId}&mediaType=${it.mediaType}`),
@@ -55,7 +78,15 @@ export function WatchlistGrid({ initialItems }: { initialItems: WatchlistGridIte
     );
   }
 
+  const capped = cap != null && initialItems.length >= cap;
+
   return (
+    <>
+    {error && (
+      <p role="alert" className="text-red-400" style={{ fontSize: 13, marginBottom: 12 }}>
+        {error}
+      </p>
+    )}
     <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))" }}>
       {items.map((it) => {
         const key = `${it.tmdbId}:${it.mediaType}`;
@@ -83,6 +114,8 @@ export function WatchlistGrid({ initialItems }: { initialItems: WatchlistGridIte
                 {it.title}
               </div>
             </Link>
+            {/* 40px hit area (the icon stays 14px): the control sits over the
+                poster link, so a near-miss navigates instead of removing. */}
             <button
               type="button"
               onClick={() => remove(it)}
@@ -93,8 +126,8 @@ export function WatchlistGrid({ initialItems }: { initialItems: WatchlistGridIte
               style={{
                 top: 6,
                 right: 6,
-                width: 32,
-                height: 32,
+                width: 40,
+                height: 40,
                 display: "inline-flex",
                 alignItems: "center",
                 justifyContent: "center",
@@ -111,5 +144,14 @@ export function WatchlistGrid({ initialItems }: { initialItems: WatchlistGridIte
         );
       })}
     </div>
+    {capped && (
+      <p
+        className="ds-mono"
+        style={{ fontSize: 11.5, color: "var(--ds-fg-subtle)", marginTop: 14, marginBottom: 0 }}
+      >
+        {t("personal.common.showingMostRecent", { n: cap.toLocaleString(locale) })}
+      </p>
+    )}
+    </>
   );
 }

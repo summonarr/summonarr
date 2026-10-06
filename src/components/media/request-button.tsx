@@ -13,12 +13,13 @@ import {
   Clock,
   MessageSquare,
   X,
-  ExternalLink,
   AlertCircle,
   Ban,
 } from "@/components/icons";
 import Link from "next/link";
 import { withBasePath } from "@/lib/base-path";
+import { StyledSelect } from "@/components/ui/styled-select";
+import { Textarea } from "@/components/ui/textarea";
 import {
   DetailActionButton,
   DetailActionStatus,
@@ -265,19 +266,12 @@ export function RequestButton({
   // only renders when the user can choose a profile and options have loaded.
   const profileSelect =
     canChooseProfile && profiles && profiles.length > 0 ? (
-      <select
+      <StyledSelect
+        compact
         value={profileId}
         onChange={(e) => setProfileId(e.target.value ? Number(e.target.value) : "")}
         aria-label={t("request.qualityProfile")}
-        className="w-full max-w-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        style={{
-          padding: "8px 12px",
-          fontSize: 13,
-          color: "var(--ds-fg)",
-          background: "var(--ds-bg-1)",
-          border: "1px solid var(--ds-border)",
-          borderRadius: 6,
-        }}
+        className="max-w-sm"
       >
         <option value="">{t("request.serverDefaultQuality")}</option>
         {profiles.map((p) => (
@@ -285,7 +279,7 @@ export function RequestButton({
             {p.name}
           </option>
         ))}
-      </select>
+      </StyledSelect>
     ) : null;
 
   return (
@@ -332,7 +326,6 @@ export function RequestButton({
         >
           <Check style={{ width: 14, height: 14 }} />
           {t("request.viewRequest")}
-          <ExternalLink style={{ width: 12, height: 12, opacity: 0.6 }} />
         </Link>
       )}
 
@@ -367,6 +360,19 @@ export function RequestButton({
                   {confirmPrompt[1]}
                 </p>
               </div>
+              {/* A note typed under "Add Note" survives a failed submit so the
+                  user can retry without retyping it — and it rides THIS submit
+                  too, so the confirm step has to show it. */}
+              {note.trim() && (
+                <p
+                  className="flex items-start"
+                  style={{ gap: 6, fontSize: 12, color: "var(--ds-fg-muted)", margin: "0 2px" }}
+                >
+                  <MessageSquare className="shrink-0" style={{ width: 12, height: 12, marginTop: 2 }} />
+                  <span className="sr-only">{t("request.noteLabel")}</span>
+                  <span className="min-w-0 line-clamp-3 whitespace-pre-wrap break-words">{note.trim()}</span>
+                </p>
+              )}
               {profileSelect}
               <div className="flex items-center gap-2">
                 <DetailActionButton variant="primary" onClick={submitRequest}>
@@ -383,22 +389,14 @@ export function RequestButton({
 
           {state === "note" && (
             <div className="flex flex-col gap-2 w-full max-w-sm">
-              <textarea
+              <Textarea
                 value={note}
                 onChange={(e) => setNote(e.target.value.slice(0, 500))}
                 placeholder={t("request.notePlaceholder")}
                 aria-label={t("request.noteLabel")}
                 rows={3}
                 autoFocus
-                className="w-full resize-none focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                style={{
-                  padding: "8px 12px",
-                  fontSize: 13,
-                  color: "var(--ds-fg)",
-                  background: "var(--ds-bg-1)",
-                  border: "1px solid var(--ds-border)",
-                  borderRadius: 6,
-                }}
+                className="resize-none"
               />
               {profileSelect}
               <div className="flex items-center gap-2">
@@ -437,19 +435,11 @@ export function RequestButton({
                   {t("request.usersLoadFailed")}
                 </p>
               ) : (
-              <select
+              <StyledSelect
+                compact
                 value={obUserId}
                 onChange={(e) => setObUserId(e.target.value)}
                 aria-label={t("request.selectUserLabel")}
-                className="focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                style={{
-                  padding: "8px 12px",
-                  fontSize: 13,
-                  color: "var(--ds-fg)",
-                  background: "var(--ds-bg-1)",
-                  border: "1px solid var(--ds-border)",
-                  borderRadius: 6,
-                }}
               >
                 <option value="">
                   {obUsersState === "loading" ? t("request.loadingUsers") : t("request.selectUser")}
@@ -459,7 +449,7 @@ export function RequestButton({
                     {u.name ?? u.email}
                   </option>
                 ))}
-              </select>
+              </StyledSelect>
               )}
               <div className="flex items-center gap-2">
                 <DetailActionButton
@@ -491,6 +481,7 @@ export function RequestButton({
               {obMsg && (
                 <p
                   className="ds-mono"
+                  role={obMsgError ? "alert" : "status"}
                   style={{
                     fontSize: 11,
                     color: obMsgError ? "var(--ds-danger)" : "var(--ds-fg-subtle)",
@@ -549,7 +540,8 @@ export function RequestButton({
 
           {state === "error" && (
             <p
-              className="ds-mono"
+              className="ds-mono max-w-sm"
+              role="alert"
               style={{ fontSize: 11, color: "var(--ds-danger)", margin: 0 }}
             >
               {errorMsg}

@@ -82,7 +82,7 @@ export default async function IssuesPage({
     ...(q ? { title: { contains: q, mode: "insensitive" } } : {}),
   };
 
-  const [issues, total, statusCountsRaw] = await Promise.all([
+  const [issues, total, statusCountsRaw, totalForUser] = await Promise.all([
     prisma.issue.findMany({
       where,
       include: { _count: { select: { messages: true } } },
@@ -100,6 +100,11 @@ export default async function IssuesPage({
       },
       _count: { status: true },
     }),
+    // UNFILTERED per-user count — gates the filter bar below. The groupBy above
+    // applies the type/search filters, so its total hits 0 the moment a filter
+    // matches nothing, and gating on it unmounted the bar (including the search
+    // box being typed into) with no way to clear the filter short of Back.
+    prisma.issue.count({ where: { reportedBy: session.user.id } }),
   ]);
 
   const statusCounts = Object.fromEntries(statusCountsRaw.map((r) => [r.status, r._count.status]));
@@ -155,7 +160,7 @@ export default async function IssuesPage({
         }
       />
 
-      {totalAllStatuses > 0 && (
+      {totalForUser > 0 && (
         <div className="flex flex-col gap-3 mb-5 sm:flex-row sm:items-center sm:justify-between">
           <FilterPills
             param="status"
@@ -213,7 +218,15 @@ export default async function IssuesPage({
                 ? t("personal.issues.emptyFilteredDescription")
                 : t("personal.issues.emptyDescription")
           }
-          cta={total > 0 ? { href: buildHref({ page: 1, selected: "" }), label: t("personal.common.backToFirst") } : undefined}
+          // A filter that matches nothing gets an in-page way out: every
+          // param (status/type/q, plus page and selection) dropped.
+          cta={
+            total > 0
+              ? { href: buildHref({ page: 1, selected: "" }), label: t("personal.common.backToFirst") }
+              : hasFilters
+                ? { href: "/issues", label: t("browse.clearFilters") }
+                : undefined
+          }
         />
       ) : (
         <div className="xl:grid xl:grid-cols-[1fr_480px] xl:gap-6 xl:items-start">
@@ -315,6 +328,9 @@ export default async function IssuesPage({
                         </div>
                         {issue.note && (
                           <p
+                            // Clamped in the list row (a 1000-char note is otherwise a
+                            // ~17-line row); keeps its line breaks like the pane/drawer.
+                            className="line-clamp-3 whitespace-pre-wrap"
                             style={{
                               marginTop: 8,
                               padding: "6px 10px",
@@ -393,7 +409,11 @@ export default async function IssuesPage({
                 }}
               >
                 <div
-                  className="flex-shrink-0 overflow-y-auto"
+                  // max-h is what lets overflow-y-auto engage: a flex-shrink-0
+                  // header with no height cap never scrolls, so a long multi-line
+                  // note grew it until the thread (and its reply box) collapsed
+                  // to 0 inside the pane's overflow-hidden.
+                  className="flex-shrink-0 max-h-[45%] overflow-y-auto"
                   style={{
                     padding: 18,
                     borderBottom: "1px solid var(--ds-border)",
