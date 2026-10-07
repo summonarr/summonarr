@@ -6,6 +6,9 @@
 //   POST   /api/profile/notification-email  — begin verifying a notify email
 //   DELETE /api/profile                     — self-delete (disable the account)
 //   PATCH  /api/profile/auto-request        — the Plex-watchlist toggle + consent
+//   GET/POST/DELETE /api/profile/calendar   — the iCal feed token (mint / revoke)
+//   GET/POST /api/profile/notification-email/confirm — the PUBLIC bind page
+//   PATCH  /api/profile/locale              — the stored UI language
 //
 // NOTE on scope: /api/profile itself exports ONLY DELETE — there is no GET/PATCH
 // profile handler. The DELETE self-delete carries its OWN password step-up (an
@@ -120,6 +123,7 @@ const { shouldForceDbCheck } = await import("../src/lib/session-revocation.ts");
 const { invalidateFeatureFlagCache } = await import("../src/lib/features.ts");
 const {
   buildVerifyIdentifier,
+  hashVerifyToken,
   verifyIdentifierPrefixFor,
   VERIFY_TTL_MS,
 } = await import("../src/lib/notification-email-verify.ts");
@@ -180,9 +184,12 @@ const userModel = {
     rec("user.update", args);
     return {};
   },
-  updateMany: async (args: unknown) => {
+  // Honours `where.id` existence: a scoped updateMany on a row that is gone
+  // matches ZERO rows, and the routes must read that count (pinned below).
+  updateMany: async (args: { where?: { id?: unknown } }) => {
     rec("user.updateMany", args);
-    return { count: 1 };
+    const id = args.where?.id;
+    return { count: typeof id === "string" && !usersById.has(id) ? 0 : 1 };
   },
 };
 shadowPrismaModel(prisma, "user", userModel);
@@ -218,8 +225,18 @@ shadowPrismaModel(prisma, "setting", {
 // promise from touching a real DB.
 shadowPrismaModel(prisma, "auditLog", { create: async (a: unknown) => { rec("auditLog.create", a); return {}; } });
 
-// notification-email verification-token writes.
+// notification-email verification-token writes + the confirm route's reads
+// (an in-memory table the confirm tests seed directly).
+type VerifyRow = { token: string; identifier: string; expires: Date };
+let verifyTokens: VerifyRow[] = [];
 const verificationTokenModel = {
+  findUnique: async (args: { where: { token: string } }) =>
+    verifyTokens.find((r) => r.token === args.where.token) ?? null,
+  delete: async (args: { where: { token: string } }) => {
+    rec("verificationToken.delete", args);
+    verifyTokens = verifyTokens.filter((r) => r.token !== args.where.token);
+    return {};
+  },
   deleteMany: async (args: unknown) => {
     rec("verificationToken.deleteMany", args);
     return { count: 0 };
@@ -373,6 +390,8 @@ const { PATCH: localePATCH } = await import("../src/app/api/profile/locale/route
 const { POST: notifEmailPOST } = await import("../src/app/api/profile/notification-email/route.ts");
 const { DELETE: profileDELETE } = await import("../src/app/api/profile/route.ts");
 const { PATCH: autoRequestPATCH } = await import("../src/app/api/profile/auto-request/route.ts");
+const { GET: calendarGET, POST: calendarPOST, DELETE: calendarDELETE } = await import("../src/app/api/profile/calendar/route.ts");
+const confirm = await import("../src/app/api/profile/notification-email/confirm/route.ts");
 
 async function changePassword(token: string | null, body: unknown, raw?: string): Promise<Response> {
   const req = makeReq("/api/profile/password", { method: "PATCH", token, body: bodyOr(body, raw) });
@@ -408,6 +427,7 @@ beforeEach(() => {
   settings.clear();
   usersById.clear();
   sessionRows.clear();
+  verifyTokens = [];
   invalidateFeatureFlagCache();
   fetchImpl = () => { throw new Error("unexpected fetch — this test's flow must be satisfied from stubs"); };
 });
@@ -522,6 +542,8 @@ test("password route rate-limits repeated attempts per user (6th within the wind
   }
   const sixth = await changePassword(token, { currentPassword: CURRENT_PW, newPassword: NEW_PW });
   assert.equal(sixth.status, 429);
+  // tooManyRequests(): the 15-minute wait is machine-readable, not only prose.
+  assert.equal(sixth.headers.get("retry-after"), "900");
   assert.deepEqual(await sixth.json(), {
     error: "Too many attempts — please wait 15 minutes before trying again.",
   });
@@ -898,4 +920,158 @@ test("auto-request PATCH refuses a non-boolean (400) or an unauthenticated calle
   assert.equal(anon.status, 401);
   assert.equal(opsOf("user.update").length, 0);
   assert.equal(opsOf("account.deleteMany").length, 0);
+});
+
+// ── maintenance mode across the preference writes ───────────────────────────
+// push/subscribe, the profile delete and the password change were 503'd during
+// maintenance while these sibling writes were not — so with maintenance on (or
+// the Settings table unreadable, which fails CLOSED) a user could still mint a
+// calendar bearer credential, fire verification mail and rewrite prefs. Every
+// mutating profile handler now runs maintenanceGuard FIRST; the one deliberate
+// exception is calendar DELETE — a revoke only removes a credential and must
+// stay reachable, exactly like push unsubscribe.
+
+const settleAudits = () => new Promise((r) => setImmediate(r));
+
+async function calendar(method: "GET" | "POST" | "DELETE", token: string | null): Promise<Response> {
+  const req = makeReq("/api/profile/calendar", { method, token });
+  const handler = method === "GET" ? calendarGET : method === "POST" ? calendarPOST : calendarDELETE;
+  return inScope(() => handler(req, undefined));
+}
+
+test("maintenance mode 503s every mutating profile write for a non-admin BEFORE any read or write — calendar revoke stays open", async () => {
+  settings.set("maintenanceEnabled", "true");
+  settings.set("maintenanceMessage", "Back soon");
+  const { token } = await mintSession({ provider: "jellyfin" });
+  const attempts: Array<[string, () => Promise<Response>]> = [
+    ["locale PATCH", () => patchLocale(token, { locale: "es" })],
+    ["notifications PATCH", () => patchNotifications(token, { notifyOnApproved: false })],
+    ["auto-request PATCH", () => patchAutoRequest(token, { plexWatchlist: false })],
+    ["notification-email POST", () => postNotifEmail(token, { email: "new@example.com" })],
+    ["calendar POST", () => calendar("POST", token)],
+  ];
+  for (const [label, run] of attempts) {
+    const res = await run();
+    assert.equal(res.status, 503, label);
+    assert.deepEqual(await res.json(), { error: "Service unavailable", message: "Back soon" }, label);
+  }
+  assert.equal(opsOf("user.update").length, 0, "no preference write slipped through");
+  assert.equal(opsOf("user.updateMany").length, 0, "no calendar token was minted");
+  assert.equal(opsOf("account.deleteMany").length, 0, "the stored plex.tv token was not deleted");
+  assert.equal(opsOf("verificationToken.create").length, 0, "no verification token was stored");
+  assert.equal(fetchCalls.length, 0, "no verification mail went out");
+
+  // The revoke is NOT behind the guard: removing a credential is always safe.
+  const revoke = await calendar("DELETE", token);
+  assert.equal(revoke.status, 200);
+  assert.equal(opsOf("user.updateMany").length, 1);
+});
+
+// ── GET / POST / DELETE /api/profile/calendar ───────────────────────────────
+
+test("calendar DELETE revokes the feed while the feature is OFF (a leaked URL must be revocable), GET/POST keep the 404 gate", async () => {
+  settings.set("feature.integration.calendar", "false");
+  const { userId, token } = await mintSession();
+  assert.equal((await calendar("GET", token)).status, 404, "GET stays gated");
+  assert.equal((await calendar("POST", token)).status, 404, "POST stays gated");
+  assert.equal(opsOf("user.updateMany").length, 0, "nothing minted while off");
+
+  const res = await calendar("DELETE", token);
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true });
+  assert.deepEqual(opsOf("user.updateMany").map((o) => o.args), [
+    { where: { id: userId }, data: { calendarTokenHash: null, calendarTokenCreatedAt: null } },
+  ]);
+});
+
+test("calendar POST mints a feed (201, no-store) and both mint and revoke leave a SETTINGS_CHANGE audit row; the 429 carries Retry-After", async () => {
+  const { userId, token } = await mintSession();
+  const minted = await calendar("POST", token);
+  assert.equal(minted.status, 201);
+  assert.equal(minted.headers.get("cache-control"), "no-store");
+  const body = (await minted.json()) as { token: string; url: string };
+  assert.match(body.token, /^[A-Za-z0-9_-]{20,}$/, "an opaque base64url credential");
+  assert.ok(body.url.includes(body.token));
+  const [mint] = opsOf("user.updateMany").map((o) => o.args as { where: Record<string, unknown> });
+  assert.deepEqual(mint.where, { id: userId, deactivatedAt: null, purgedAt: null }, "a disabled/purged row cannot mint");
+
+  assert.equal((await calendar("DELETE", token)).status, 200);
+  await settleAudits();
+  const kinds = opsOf("auditLog.create").map((o) => {
+    const d = (o.args as { data: { action: string; target: string; userId: string; details: string } }).data;
+    assert.equal(d.action, "SETTINGS_CHANGE");
+    assert.equal(d.target, `user:${userId}`);
+    assert.equal(d.userId, userId);
+    return JSON.parse(d.details).kind;
+  });
+  assert.deepEqual(kinds, ["calendar-token-minted", "calendar-token-revoked"]);
+  assert.ok(!JSON.stringify(opsOf("auditLog.create")).includes(body.token), "the credential is never written to the audit log");
+
+  // 10/hour: the eleventh mint is refused with a machine-readable wait.
+  for (let i = 0; i < 9; i++) assert.equal((await calendar("POST", token)).status, 201);
+  const eleventh = await calendar("POST", token);
+  assert.equal(eleventh.status, 429);
+  assert.equal(eleventh.headers.get("retry-after"), "3600");
+});
+
+test("auto-request opt-out (which deletes the stored plex.tv credential) leaves a SETTINGS_CHANGE audit row; opt-in does not", async () => {
+  const { userId, token } = await mintSession();
+  assert.equal((await patchAutoRequest(token, { plexWatchlist: true })).status, 200);
+  await settleAudits();
+  assert.equal(opsOf("auditLog.create").length, 0, "opting in deletes nothing, so nothing to audit");
+  assert.equal((await patchAutoRequest(token, { plexWatchlist: false })).status, 200);
+  await settleAudits();
+  const rows = opsOf("auditLog.create").map((o) => (o.args as { data: { userId: string; details: string } }).data);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].userId, userId);
+  assert.deepEqual(JSON.parse(rows[0].details), { kind: "plex-watchlist-opt-out" });
+});
+
+// ── the PUBLIC confirm page (token = credential; no session) ────────────────
+
+const confirmGet = (q: string) => confirm.GET(new Request(`http://localhost:3000/api/profile/notification-email/confirm${q}`));
+const confirmPost = (q: string) =>
+  confirm.POST(new Request(`http://localhost:3000/api/profile/notification-email/confirm${q}`, { method: "POST" }));
+
+test("confirm GET repeats the email's 'if this wasn't you' warning beside the bind line — the click target must give a bystander a reason to stop", async () => {
+  const raw = "abcdef0123456789";
+  verifyTokens = [{ token: hashVerifyToken(raw), identifier: buildVerifyIdentifier("someone", "victim@example.com"), expires: new Date(Date.now() + 60_000) }];
+  const html = await (await confirmGet(`?token=${raw}`)).text();
+  assert.ok(html.includes("victim@example.com"), "the pending address is shown");
+  assert.ok(html.includes("close this page — nothing will change."), "the not-you line is on the page");
+  assert.equal(opsOf("user.updateMany").length, 0, "GET never binds");
+});
+
+test("confirm POST renders the ERROR page, not success, when the scoped bind matched zero rows (account disabled/purged/deleted inside the TTL)", async () => {
+  const raw = "abcdef0123456789";
+  verifyTokens = [{ token: hashVerifyToken(raw), identifier: buildVerifyIdentifier("ghost-user", "new@example.com"), expires: new Date(Date.now() + 60_000) }];
+  const res = await confirmPost(`?token=${raw}`);
+  assert.equal(res.status, 400);
+  const html = await res.text();
+  assert.match(html, /Something went wrong/);
+  assert.doesNotMatch(html, /Email verified/);
+  assert.equal(opsOf("user.updateMany").length, 1, "the (refused) bind was attempted exactly once");
+  assert.equal(opsOf("verificationToken.delete").length, 1, "the token is still consumed first");
+  await settleAudits();
+  assert.equal(opsOf("auditLog.create").length, 0, "nothing was bound, so nothing is audited as bound");
+});
+
+test("confirm POST on a live account binds, says so, and audits notification-email-verified for THAT account (no session, so by id)", async () => {
+  const { userId } = await mintSession({ provider: "jellyfin" });
+  const raw = "0123456789abcdef";
+  verifyTokens = [{ token: hashVerifyToken(raw), identifier: buildVerifyIdentifier(userId, "new@example.com"), expires: new Date(Date.now() + 60_000) }];
+  const res = await confirmPost(`?token=${raw}`);
+  assert.equal(res.status, 200);
+  assert.match(await res.text(), /Email verified/);
+  assert.deepEqual(opsOf("user.updateMany").map((o) => o.args), [
+    { where: { id: userId, deactivatedAt: null, purgedAt: null }, data: { notificationEmail: "new@example.com" } },
+  ]);
+  await settleAudits();
+  const rows = opsOf("auditLog.create").map((o) => (o.args as { data: { userId: string; action: string; target: string; details: string } }).data);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].userId, userId);
+  assert.equal(rows[0].action, "SETTINGS_CHANGE");
+  assert.equal(rows[0].target, `user:${userId}`);
+  assert.deepEqual(JSON.parse(rows[0].details), { kind: "notification-email-verified" });
+  assert.ok(!JSON.stringify(rows).includes("new@example.com"), "the address is not recorded in the audit row");
 });

@@ -47,8 +47,10 @@ export function SyncTVEpisodesButton() {
       } else {
         const total = (data?.plex ?? 0) + (data?.jellyfin ?? 0);
         const parts: string[] = [];
-        if ((data?.plex ?? 0) > 0) parts.push(`Plex ${data?.plex}`);
-        if ((data?.jellyfin ?? 0) > 0) parts.push(`Jellyfin ${data?.jellyfin}`);
+        // Same locale grouping as the total — "Plex 12345 · 13,023 episodes"
+        // mixed grouped and ungrouped digits in one line.
+        if ((data?.plex ?? 0) > 0) parts.push(`Plex ${(data?.plex ?? 0).toLocaleString(locale)}`);
+        if ((data?.jellyfin ?? 0) > 0) parts.push(`Jellyfin ${(data?.jellyfin ?? 0).toLocaleString(locale)}`);
         setStatus("done");
         setResult(parts.length > 0
           ? t("adminManage.library.btn.episodesWithParts", { count: total, formatted: total.toLocaleString(locale), parts: parts.join(", ") })

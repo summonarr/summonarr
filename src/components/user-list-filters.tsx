@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Search, X } from "@/components/icons";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export function FilterPills({
   param,
@@ -115,6 +116,7 @@ export function SearchBox({
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const t = useT();
   const [value, setValue] = useState(initial);
 
   // The last value this box pushed to the URL. When our own debounced push
@@ -217,7 +219,7 @@ export function SearchBox({
           <button
             type="button"
             onClick={handleClear}
-            aria-label="Clear search"
+            aria-label={t("shared.common.clearSearch")}
             className="inline-flex items-center justify-center transition-colors"
             style={{
               width: 28,

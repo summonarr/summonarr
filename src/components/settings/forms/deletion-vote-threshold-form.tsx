@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -15,9 +15,15 @@ export function DeletionVoteThresholdForm({ initialThreshold }: { initialThresho
   const [threshold, setThreshold] = useState(initialThreshold);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [error, setError] = useState(t("settings.form.common.saveFailed"));
+  // Only the "Saved" tick fades; a server error stays until the next edit or
+  // save. Ref'd so a second save cancels the first save's timer and unmount
+  // clears it.
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    if (resetTimer.current) clearTimeout(resetTimer.current);
     setStatus("saving");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
@@ -27,12 +33,16 @@ export function DeletionVoteThresholdForm({ initialThreshold }: { initialThresho
       });
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
       setError(data.error ?? t("settings.form.common.saveFailed"));
-      setStatus(res.ok && data.ok !== false ? "ok" : "error");
+      if (res.ok && data.ok !== false) {
+        setStatus("ok");
+        resetTimer.current = setTimeout(() => setStatus("idle"), 3000);
+      } else {
+        setStatus("error");
+      }
     } catch {
       setError(t("settings.form.common.saveFailed"));
       setStatus("error");
     }
-    setTimeout(() => setStatus("idle"), 3000);
   }
 
   return (
@@ -46,13 +56,13 @@ export function DeletionVoteThresholdForm({ initialThreshold }: { initialThresho
           value={threshold}
           onChange={(e) => { setThreshold(e.target.value); setStatus("idle"); }}
           placeholder="0"
-          className="bg-zinc-800 border-zinc-700 text-sm max-w-48"
+          className="bg-zinc-800 border-zinc-700 max-w-48"
         />
         <p className="text-xs text-zinc-500">
           {t("settings.form.deletionVote.help")}
         </p>
       </div>
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 flex-wrap">
         <Button type="submit" size="sm" disabled={status === "saving"}>
           {status === "saving" ? <Loader2 className="w-4 h-4 animate-spin" /> : t("settings.form.common.save")}
         </Button>

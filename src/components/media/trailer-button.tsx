@@ -1,6 +1,6 @@
 "use client";
 
-import { Play } from "@/components/icons";
+import { ExternalLink, Play } from "@/components/icons";
 import { safeExternalHref } from "@/lib/safe-url";
 import { useT } from "@/components/i18n/i18n-provider";
 import { DETAIL_ACTION_CLASS, detailActionStyle } from "./detail-action-button";
@@ -28,6 +28,8 @@ export function TrailerButton({ trailerKey, trailerUrl }: TrailerButtonProps) {
     >
       <Play style={{ width: 14, height: 14 }} />
       {t("detail.watchTrailer")}
+      {/* Opens YouTube in a new tab — the one detail action that leaves the app. */}
+      <ExternalLink style={{ width: 12, height: 12, opacity: 0.6 }} />
     </a>
   );
 }

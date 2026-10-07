@@ -4,7 +4,8 @@ import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { CheckCircle, XCircle, Loader2, Trash2, RefreshCw, Copy, Check } from "@/components/icons";
+import { StyledSelect } from "@/components/ui/styled-select";
+import { AlertTriangle, CheckCircle, XCircle, Loader2, Trash2, RefreshCw, Copy, Check } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 
@@ -122,6 +123,16 @@ function ServiceInstances({ service }: { service: ArrService }) {
   // shift when the list changes, so anything that adds, removes or reloads
   // drafts resets this.
   const [confirmRemove, setConfirmRemove] = useState<number | null>(null);
+  // Edits since the last load/save. Refresh replaces every draft with the
+  // server copy (a pasted API key included), so while this is set it asks
+  // before discarding them — same guard as MediaInstancesManager.
+  const [dirty, setDirty] = useState(false);
+  const [confirmRefresh, setConfirmRefresh] = useState(false);
+  // Removed instances that still had PENDING/APPROVED requests pointing at
+  // them, from the last save's `removed` field (additive on the wire — an older
+  // server omits it). Those requests are stranded until re-routed or declined,
+  // so the admin is told which slugs and how many.
+  const [strandedRemoved, setStrandedRemoved] = useState<Array<{ slug: string; openRequests: number }>>([]);
   // For each slug: its live root-folder/quality-profile options, or
   // "loading"/"error" while the fetch is running or after it failed.
   const [optionsBySlug, setOptionsBySlug] = useState<Record<string, ArrOptions | "loading" | "error">>({});
@@ -168,6 +179,8 @@ function ServiceInstances({ service }: { service: ArrService }) {
       named.forEach((i) => { if (i.hasApiKey && i.url) fetchOptions(i.slug); });
       setLoadFailed(false);
       setConfirmRemove(null);
+      setDirty(false);
+      setStrandedRemoved([]);
       // Test results are keyed by slug and describe the config as it was at
       // the last Save & Test — stale once the instances are reloaded.
       setTests({});
@@ -179,6 +192,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
       // instances", so flag it: saving is disabled and a message is shown.
       setLoadFailed(true);
     } finally {
+      setConfirmRefresh(false);
       setLoaded(true);
     }
   }, [service, fetchOptions]);
@@ -189,6 +203,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
 
   const update = (idx: number, patch: Partial<Draft>) => {
     setDrafts((prev) => prev.map((d, i) => (i === idx ? { ...d, ...patch } : d)));
+    setDirty(true);
     setStatus("idle");
   };
 
@@ -205,12 +220,14 @@ function ServiceInstances({ service }: { service: ArrService }) {
       },
     ]);
     setConfirmRemove(null);
+    setDirty(true);
     setStatus("idle");
   };
 
   const removeInstance = (idx: number) => {
     setDrafts((prev) => prev.filter((_, i) => i !== idx));
     setConfirmRemove(null);
+    setDirty(true);
     setStatus("idle");
   };
 
@@ -235,6 +252,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
 
     setStatus("saving");
     setMessage("");
+    setStrandedRemoved([]);
     const instances = drafts.map((d) => ({
       slug: d.slug,
       name: d.name.trim() || d.slug,
@@ -263,6 +281,10 @@ function ServiceInstances({ service }: { service: ArrService }) {
         error?: string;
         instances?: InstanceView[];
         testResults?: Record<string, { version?: string; error?: string }>;
+        // One entry per named instance this save removed, with how many
+        // PENDING/APPROVED requests still targeted it. Absent on an older
+        // server, so it is always read with `?? []`.
+        removed?: Array<{ slug: string; openRequests: number }>;
       };
       if (res.ok && data.ok) {
         const named = (data.instances ?? []).filter((i) => isNamed(i.slug));
@@ -272,6 +294,8 @@ function ServiceInstances({ service }: { service: ArrService }) {
         // root folders + quality profiles to fill the dropdowns.
         named.forEach((i) => { if (i.hasApiKey && i.url) fetchOptions(i.slug); });
         setConfirmRemove(null);
+        setDirty(false);
+        setStrandedRemoved((data.removed ?? []).filter((r) => typeof r?.openRequests === "number" && r.openRequests > 0));
         setStatus("ok");
         setMessage(t("settings.common.saved"));
       } else {
@@ -322,7 +346,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                   disabled={!d.isNew}
                   onChange={(e) => update(idx, { slug: e.target.value.toLowerCase() })}
                   placeholder="anime"
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm disabled:opacity-60"
+                  className="bg-zinc-800 border-zinc-700 font-mono disabled:opacity-60"
                 />
                 {!d.isNew && <p className="text-xs text-zinc-500">{t("settings.instances.slugFixed")}</p>}
               </div>
@@ -333,7 +357,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                   value={d.name}
                   onChange={(e) => update(idx, { name: e.target.value })}
                   placeholder="Anime"
-                  className="bg-zinc-800 border-zinc-700 text-sm"
+                  className="bg-zinc-800 border-zinc-700"
                 />
               </div>
             </div>
@@ -347,7 +371,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                   value={d.url}
                   onChange={(e) => update(idx, { url: e.target.value })}
                   placeholder={service === "radarr" ? "http://radarr-anime:7878" : "http://sonarr-anime:8989"}
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                  className="bg-zinc-800 border-zinc-700 font-mono"
                 />
               </div>
               <div className="space-y-1.5">
@@ -358,8 +382,14 @@ function ServiceInstances({ service }: { service: ArrService }) {
                   value={d.apiKey}
                   onChange={(e) => update(idx, { apiKey: e.target.value })}
                   placeholder={d.hasApiKey ? MASKED_VALUE : t("settings.arr.apiKeyPlaceholder")}
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                  className="bg-zinc-800 border-zinc-700 font-mono"
                 />
+                {/* Same "saved, hidden" helper the notification channels show —
+                    the masked placeholder alone doesn't say whether a blank
+                    field means "nothing saved" or "saved, write-only". */}
+                {d.hasApiKey && !d.apiKey && (
+                  <p className="text-xs text-zinc-500">{t("settings.form.agents.secretKeep")}</p>
+                )}
               </div>
             </div>
 
@@ -374,11 +404,11 @@ function ServiceInstances({ service }: { service: ArrService }) {
                   )}
                 </div>
                 {optsReady ? (
-                  <select
+                  <StyledSelect
+                    compact
                     id={`${service}-${idx}-folder`}
                     value={d.rootFolder}
                     onChange={(e) => update(idx, { rootFolder: e.target.value })}
-                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">{t("settings.arr.serviceDefault", { label })}</option>
                     {/* If the saved folder is no longer on the server, the select
@@ -391,7 +421,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                     {(opts as ArrOptions).rootFolders.map((f) => (
                       <option key={f.path} value={f.path}>{f.path}</option>
                     ))}
-                  </select>
+                  </StyledSelect>
                 ) : (
                   <p className="text-xs text-zinc-500 h-8 flex items-center">{optsNote}</p>
                 )}
@@ -399,11 +429,11 @@ function ServiceInstances({ service }: { service: ArrService }) {
               <div className="space-y-1.5">
                 <Label htmlFor={`${service}-${idx}-profile`}>{t("settings.arr.qualityProfile")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
                 {optsReady ? (
-                  <select
+                  <StyledSelect
+                    compact
                     id={`${service}-${idx}-profile`}
                     value={d.qualityProfileId}
                     onChange={(e) => update(idx, { qualityProfileId: e.target.value })}
-                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">{t("settings.arr.serviceDefault", { label })}</option>
                     {d.qualityProfileId && !(opts as ArrOptions).qualityProfiles.some((p) => String(p.id) === d.qualityProfileId) && (
@@ -412,7 +442,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                     {(opts as ArrOptions).qualityProfiles.map((p) => (
                       <option key={p.id} value={String(p.id)}>{p.name}</option>
                     ))}
-                  </select>
+                  </StyledSelect>
                 ) : (
                   <p className="text-xs text-zinc-500 h-8 flex items-center">{optsNote}</p>
                 )}
@@ -426,17 +456,17 @@ function ServiceInstances({ service }: { service: ArrService }) {
               <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
                 <div className="space-y-1.5">
                   <Label htmlFor={`${service}-${idx}-min-availability`}>{t("settings.arr.minAvailability")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
-                  <select
+                  <StyledSelect
+                    compact
                     id={`${service}-${idx}-min-availability`}
                     value={d.minimumAvailability}
                     onChange={(e) => update(idx, { minimumAvailability: e.target.value })}
-                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">{t("settings.arr.serviceDefault", { label })}</option>
                     {MINIMUM_AVAILABILITY_OPTIONS.map((o) => (
                       <option key={o.value} value={o.value}>{t(o.i18nKey)}</option>
                     ))}
-                  </select>
+                  </StyledSelect>
                   <p className="text-xs text-zinc-500">{t("settings.arr.minAvailabilityHelp")}</p>
                 </div>
               </div>
@@ -446,11 +476,11 @@ function ServiceInstances({ service }: { service: ArrService }) {
               <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">
                 <div className="space-y-1.5">
                   <Label htmlFor={`${service}-${idx}-language-profile`}>{t("settings.arr.languageProfile")} <span className="text-zinc-500">{t("settings.common.optional")}</span></Label>
-                  <select
+                  <StyledSelect
+                    compact
                     id={`${service}-${idx}-language-profile`}
                     value={d.languageProfileId}
                     onChange={(e) => update(idx, { languageProfileId: e.target.value })}
-                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   >
                     <option value="">{t("settings.arr.serviceDefault", { label })}</option>
                     {d.languageProfileId && !(opts as ArrOptions).languageProfiles!.some((p) => String(p.id) === d.languageProfileId) && (
@@ -459,7 +489,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                     {(opts as ArrOptions).languageProfiles!.map((p) => (
                       <option key={p.id} value={String(p.id)}>{p.name}</option>
                     ))}
-                  </select>
+                  </StyledSelect>
                   <p className="text-xs text-zinc-500">{t("settings.arr.languageProfileHelp")}</p>
                 </div>
               </div>
@@ -474,7 +504,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
                   value={d.webhookSecret}
                   onChange={(e) => update(idx, { webhookSecret: e.target.value })}
                   placeholder={d.hasWebhookSecret ? MASKED_VALUE : t("settings.arr.webhookSecretPlaceholder")}
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                  className="bg-zinc-800 border-zinc-700 font-mono"
                 />
                 <Button
                   type="button"
@@ -577,12 +607,39 @@ function ServiceInstances({ service }: { service: ArrService }) {
         <Button type="button" onClick={save} disabled={status === "saving" || loadFailed} className="h-8 px-3 text-xs">
           {status === "saving" ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />{t("settings.common.saving")}</> : t("settings.instances.saveAndTest")}
         </Button>
-        <button type="button" onClick={load} className="flex items-center gap-1 min-h-8 px-2 text-xs text-zinc-500 hover:text-zinc-100"><RefreshCw className="w-3 h-3" />{t("settings.common.refresh")}</button>
+        {/* Refresh replaces every draft with the server copy, so with unsaved
+            edits it asks first — otherwise a pasted API key is gone with one
+            mis-click on the button beside Save. */}
+        {confirmRefresh ? (
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-400">
+            {t("settings.media.discardPrompt")}
+            <button type="button" onClick={load} className="min-h-8 px-2 text-red-400 hover:underline font-medium">{t("settings.media.discard")}</button>
+            <button type="button" onClick={() => setConfirmRefresh(false)} className="min-h-8 px-2 text-zinc-500 hover:text-zinc-100">{t("settings.common.cancel")}</button>
+          </span>
+        ) : (
+          <button type="button" onClick={() => (dirty ? setConfirmRefresh(true) : load())} className="flex items-center gap-1 min-h-8 px-2 text-xs text-zinc-500 hover:text-zinc-100"><RefreshCw className="w-3 h-3" />{t("settings.common.refresh")}</button>
+        )}
       </div>
       {/* On its own line so a long save error wraps instead of running off
           the card beside the buttons at phone width. */}
       {status === "ok" && <p className="text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4 shrink-0" />{message}</p>}
       {status === "error" && <p className="text-sm text-red-400 flex items-center gap-1.5"><XCircle className="w-4 h-4 shrink-0" />{message}</p>}
+      {/* The save went through, but requests still pointed at an instance it
+          removed: they can't be approved or pushed any more (the slug's
+          connection is gone — guardrail 32) until re-routed or declined. */}
+      {status === "ok" && strandedRemoved.length > 0 && (
+        <p className="text-sm text-amber-400 flex items-start gap-1.5">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>
+            {t("settings.arr.removedOpenRequests", {
+              label,
+              list: strandedRemoved
+                .map((r) => t("settings.arr.removedOpenRequestsItem", { slug: r.slug, count: r.openRequests }))
+                .join(", "),
+            })}
+          </span>
+        </p>
+      )}
       {loadFailed && (
         <p className="text-sm text-red-400 flex items-center gap-1.5">
           <XCircle className="w-4 h-4 shrink-0" />

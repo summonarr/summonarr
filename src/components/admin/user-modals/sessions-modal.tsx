@@ -73,15 +73,28 @@ export function SessionsModal({ u, onClose }: { u: User; onClose: () => void }) 
   useModalA11y(dialogRef, onClose, closeBtnRef);
 
   useEffect(() => {
-    fetch(withBasePath(`/api/admin/users/${u.id}/sessions`))
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((data: AdminAuthSession[]) => setSessions(Array.isArray(data) ? data : []))
-      .catch(() => {
-        // Say so: an empty list here would read as "no active sessions".
+    (async () => {
+      try {
+        const r = await fetch(withBasePath(`/api/admin/users/${u.id}/sessions`));
+        if (!r.ok) {
+          // Show the route's own sentence when it has one. The route admits
+          // MANAGE_USERS but refuses an ADMIN target to a caller without the
+          // ADMIN bit (403) — a generic "could not load" there read as a broken
+          // page rather than a rule. An empty list would read as "no sessions".
+          const data = (await r.json().catch(() => null)) as { error?: string } | null;
+          setSessions([]);
+          setError(data?.error ?? t("adminManage.sessions.loadError"));
+          return;
+        }
+        const data = (await r.json()) as unknown;
+        setSessions(Array.isArray(data) ? (data as AdminAuthSession[]) : []);
+      } catch {
         setSessions([]);
         setError(t("adminManage.sessions.loadError"));
-      })
-      .finally(() => setLoading(false));
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, [u.id, t]);
 
   async function revoke(sessionId: string) {

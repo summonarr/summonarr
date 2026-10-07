@@ -210,7 +210,12 @@ function auditMatch(r: AuditRow, where: Record<string, unknown> | undefined): bo
   return true;
 }
 
+let auditCountOverride: number | null = null;
 shadowPrismaModel(prisma, "auditLog", {
+  count: async (args: { where?: Record<string, unknown> } = {}) => {
+    rec("auditLog.count", args.where);
+    return auditCountOverride ?? auditRows.filter((r) => auditMatch(r, args.where)).length;
+  },
   findMany: async (args: { where?: Record<string, unknown>; take?: number; cursor?: { id: string }; skip?: number }) => {
     findManyCalls++;
     rec("auditLog.findMany", { where: args.where, take: args.take, cursor: args.cursor });
@@ -327,13 +332,13 @@ beforeEach(() => {
 
 test("users: anonymous is 401 on both verbs", async () => {
   assert.equal((await listUsers(null)).status, 401);
-  assert.equal((await createUser(null, { email: "a@b.com", password: "password123" })).status, 401);
+  assert.equal((await createUser(null, { email: "a@b.com", password: "password12345" })).status, 401);
 });
 
 test("users: a plain USER is 403 and reaches no query", async () => {
   const t = await mintSession({ role: "USER", permissions: 0n });
   assert.equal((await listUsers(t)).status, 403);
-  assert.equal((await createUser(t, { email: "a@b.com", password: "password123" })).status, 403);
+  assert.equal((await createUser(t, { email: "a@b.com", password: "password12345" })).status, 403);
   assert.equal(opsOf("user.findMany").length, 0);
   assert.equal(opsOf("user.create").length, 0);
 });
@@ -343,7 +348,7 @@ test("users: a MANAGE_USERS holder who is NOT an admin can list and create", asy
   // that gates the [id] PATCH/DELETE also gates listing and creating.
   const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS });
   assert.equal((await listUsers(t)).status, 200);
-  assert.equal((await createUser(t, { email: "new@example.com", password: "password123" })).status, 201);
+  assert.equal((await createUser(t, { email: "new@example.com", password: "password12345" })).status, 201);
 });
 
 // ── the self-escalation guard ────────────────────────────────────────────────
@@ -352,7 +357,7 @@ test("users: a MANAGE_USERS holder CANNOT create an ADMIN account", async () => 
   // Without this check the holder could mint a fresh ADMIN with a password they
   // control and self-escalate.
   const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS });
-  const res = await createUser(t, { email: "boss@example.com", password: "password123", role: "ADMIN" });
+  const res = await createUser(t, { email: "boss@example.com", password: "password12345", role: "ADMIN" });
   assert.equal(res.status, 403);
   assert.equal((await res.json()).error, "Only an admin can create an admin account");
   assert.equal(opsOf("user.create").length, 0);
@@ -360,21 +365,21 @@ test("users: a MANAGE_USERS holder CANNOT create an ADMIN account", async () => 
 
 test("users: a full ADMIN CAN create an ADMIN account", async () => {
   const t = await mintSession();
-  const res = await createUser(t, { email: "boss@example.com", password: "password123", role: "ADMIN" });
+  const res = await createUser(t, { email: "boss@example.com", password: "password12345", role: "ADMIN" });
   assert.equal(res.status, 201);
 });
 
 test("users: a MANAGE_USERS holder can still create USER and ISSUE_ADMIN accounts", async () => {
   const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS });
-  assert.equal((await createUser(t, { email: "u1@example.com", password: "password123", role: "USER" })).status, 201);
-  assert.equal((await createUser(t, { email: "u2@example.com", password: "password123", role: "ISSUE_ADMIN" })).status, 201);
+  assert.equal((await createUser(t, { email: "u1@example.com", password: "password12345", role: "USER" })).status, 201);
+  assert.equal((await createUser(t, { email: "u2@example.com", password: "password12345", role: "ISSUE_ADMIN" })).status, 201);
 });
 
 test("users: an unknown role is rejected before any privilege check", async () => {
   const t = await mintSession();
   for (const role of ["SUPERADMIN", "admin", "OWNER", ""]) {
     ops = [];
-    const res = await createUser(t, { email: "x@example.com", password: "password123", role });
+    const res = await createUser(t, { email: "x@example.com", password: "password12345", role });
     assert.equal(res.status, 400, `role ${role} should be rejected`);
     assert.equal(opsOf("user.create").length, 0);
   }
@@ -382,7 +387,7 @@ test("users: an unknown role is rejected before any privilege check", async () =
 
 test("users: the created row seeds its permission bitmask from the role", async () => {
   const t = await mintSession();
-  await createUser(t, { email: "ia@example.com", password: "password123", role: "ISSUE_ADMIN" });
+  await createUser(t, { email: "ia@example.com", password: "password12345", role: "ISSUE_ADMIN" });
   const data = opsOf("user.create")[0].args as { permissions: bigint; role: string };
   assert.equal(data.role, "ISSUE_ADMIN");
   assert.equal(data.permissions, defaultPermissionsForRole("ISSUE_ADMIN"));
@@ -403,7 +408,7 @@ for (const [label, email] of [
 ] as const) {
   test(`users: ${label} is 400 and creates nothing`, async () => {
     const t = await mintSession();
-    const res = await createUser(t, { email, password: "password123" });
+    const res = await createUser(t, { email, password: "password12345" });
     assert.equal(res.status, 400);
     assert.equal((await res.json()).error, "Invalid email address");
     assert.equal(opsOf("user.create").length, 0);
@@ -413,7 +418,7 @@ for (const [label, email] of [
 for (const [label, password, wantErr] of [
   ["a missing password", undefined, "Password is required"],
   ["an empty password", "", "Password is required"],
-  ["a 7-char password", "1234567", "Password must be at least 8 characters"],
+  ["an 11-char password", "12345678901", "Password must be at least 12 characters"],
 ] as const) {
   test(`users: ${label} is 400 and creates nothing`, async () => {
     const t = await mintSession();
@@ -435,14 +440,14 @@ test("users: an over-long password is rejected rather than hashed", async () => 
 
 test("users: an over-long name is rejected", async () => {
   const t = await mintSession();
-  const res = await createUser(t, { email: "a@b.com", password: "password123", name: "n".repeat(101) });
+  const res = await createUser(t, { email: "a@b.com", password: "password12345", name: "n".repeat(101) });
   assert.equal(res.status, 400);
   assert.equal(opsOf("user.create").length, 0);
 });
 
 test("users: the email is normalized (lower-cased) before storage", async () => {
   const t = await mintSession();
-  await createUser(t, { email: "Mixed.Case@Example.COM", password: "password123" });
+  await createUser(t, { email: "Mixed.Case@Example.COM", password: "password12345" });
   const data = opsOf("user.create")[0].args as { email: string };
   assert.equal(data.email, data.email.toLowerCase());
   assert.equal(data.email, data.email.trim());
@@ -452,7 +457,7 @@ test("users: a surrounding-whitespace email is REJECTED, not silently trimmed", 
   // The validator refuses any whitespace in the address rather than trimming it,
   // so two addresses differing only by padding can never both be accepted.
   const t = await mintSession();
-  const res = await createUser(t, { email: "  spaced@example.com  ", password: "password123" });
+  const res = await createUser(t, { email: "  spaced@example.com  ", password: "password12345" });
   assert.equal(res.status, 400);
   assert.equal(opsOf("user.create").length, 0);
 });
@@ -470,14 +475,14 @@ test("users: the password is HASHED, never stored in the clear", async () => {
 test("users: a duplicate email maps to 409, not a 500", async () => {
   const t = await mintSession();
   nextUserCreateThrows = "P2002";
-  const res = await createUser(t, { email: "dupe@example.com", password: "password123" });
+  const res = await createUser(t, { email: "dupe@example.com", password: "password12345" });
   assert.equal(res.status, 409);
 });
 
 test("users: a malformed body is 400 and an oversized one is capped (guardrail 30)", async () => {
   const t = await mintSession();
   assert.equal((await createUser(t, undefined, "{bad")).status, 400);
-  const huge = JSON.stringify({ email: "a@b.com", password: "password123", name: "n".repeat(30_000) });
+  const huge = JSON.stringify({ email: "a@b.com", password: "password12345", name: "n".repeat(30_000) });
   const res = await createUser(t, undefined, huge);
   assert.ok(res.status === 400 || res.status === 413);
 });
@@ -485,9 +490,9 @@ test("users: a malformed body is 400 and an oversized one is capped (guardrail 3
 test("users: creation is rate-limited per caller", async () => {
   const t = await mintSession();
   for (let i = 0; i < 10; i++) {
-    assert.equal((await createUser(t, { email: `u${i}@example.com`, password: "password123" })).status, 201, `create ${i}`);
+    assert.equal((await createUser(t, { email: `u${i}@example.com`, password: "password12345" })).status, 201, `create ${i}`);
   }
-  assert.equal((await createUser(t, { email: "over@example.com", password: "password123" })).status, 429);
+  assert.equal((await createUser(t, { email: "over@example.com", password: "password12345" })).status, 429);
 });
 
 // ── users: the list projection ───────────────────────────────────────────────
@@ -509,7 +514,7 @@ test("users: passwordHash is NEVER serialized, on either verb", async () => {
   assert.ok(!listText.includes("SUPERSECRETHASH"));
   assert.ok(!listText.includes("passwordHash"));
 
-  const created = await (await createUser(t, { email: "n@example.com", password: "password123" })).text();
+  const created = await (await createUser(t, { email: "n@example.com", password: "password12345" })).text();
   assert.ok(!created.includes("passwordHash"));
 });
 
@@ -557,7 +562,7 @@ test("users: the list is bounded", async () => {
 
 test("users: a successful create is audited", async () => {
   const t = await mintSession();
-  await createUser(t, { email: "audited@example.com", password: "password123" });
+  await createUser(t, { email: "audited@example.com", password: "password12345" });
   await drainAfter();
   const created = opsOf("auditLog.create").find((o) => (o.args as { data: { action: string } }).data.action === "USER_CREATE");
   assert.ok(created, "USER_CREATE audit row missing");
@@ -639,18 +644,30 @@ test("audit-log: the user and target search terms are wildcard-stripped", async 
   }
 });
 
-test("audit-log: an invalid date is ignored rather than producing an Invalid Date bind", async () => {
+test("audit-log: an invalid date is a 400, as on the export twin — never a silently UNFILTERED page", async () => {
+  // The table forwards the same filter state to both endpoints: dropping the
+  // bad date here returned every row for "Load more" while "Export" of the
+  // visibly identical view errored.
   const t = await mintSession();
-  await listAudit(t, "?dateFrom=not-a-date");
-  const where = (opsOf("auditLog.findMany")[0].args as { where: { createdAt?: { gte?: Date } } }).where;
-  assert.ok(!where.createdAt?.gte, "an unparseable date must not reach the query");
+  const from = await listAudit(t, "?dateFrom=not-a-date");
+  assert.equal(from.status, 400);
+  assert.equal(opsOf("auditLog.findMany").length, 0, "an unparseable date must not reach the query");
+  const to = await listAudit(t, "?dateTo=not-a-date");
+  assert.equal(to.status, 400);
+  assert.equal(opsOf("auditLog.findMany").length, 0);
 });
 
-test("audit-log: dateTo is inclusive of the requested day", async () => {
+test("audit-log: dateTo is inclusive of the requested day, advanced in UTC on both the list and the export", async () => {
   const t = await mintSession();
   await listAudit(t, "?dateTo=2026-07-01");
   const where = (opsOf("auditLog.findMany")[0].args as { where: { createdAt: { lt: Date } } }).where;
-  assert.equal(where.createdAt.lt.toISOString().slice(0, 10), "2026-07-02");
+  // A date-only string parses to UTC midnight; the bound is exactly the NEXT UTC
+  // midnight (local-time setDate would land 23/25 h later across a DST change).
+  assert.equal(where.createdAt.lt.toISOString(), "2026-07-02T00:00:00.000Z");
+  ops = [];
+  await readAll(await exportAudit(t, "?dateTo=2026-07-01"));
+  const exportWhere = (opsOf("auditLog.findMany")[0].args as { where: { createdAt: { lt: Date } } }).where;
+  assert.equal(exportWhere.createdAt.lt.toISOString(), "2026-07-02T00:00:00.000Z");
 });
 
 test("audit-log: hideCron excludes the system actor but KEEPS null-actor rows", async () => {
@@ -845,6 +862,33 @@ test("export: JSON format emits a parseable array", async () => {
   const parsed = JSON.parse(text);
   assert.ok(Array.isArray(parsed));
   assert.ok(parsed.length >= 2);
+});
+
+test("export: a capped export SAYS so — X-Export-Truncated header plus a trailing CSV marker; an uncapped one carries neither", async () => {
+  // The file used to end normally with the oldest rows missing; `truncated:true`
+  // lived only in the paper-trail row's details, which nobody downloading sees.
+  const t = await mintSession();
+  auditRows = [audit({ id: "a1" }), audit({ id: "a2" })];
+  const clean = await exportAudit(t, "");
+  assert.equal(clean.headers.get("X-Export-Truncated"), null);
+  const cleanText = await readAll(clean);
+  assert.ok(!cleanText.includes("# truncated"), "no marker on a complete export");
+
+  auditCountOverride = 100_001; // one more matching row than MAX_EXPORT_RECORDS
+  try {
+    const capped = await exportAudit(t, "");
+    assert.equal(capped.headers.get("X-Export-Truncated"), "true");
+    assert.equal(capped.headers.get("X-Export-Limit"), "100000");
+    const text = await readAll(capped);
+    const lines = text.trimEnd().split("\n");
+    assert.match(lines[lines.length - 1], /^# truncated: export capped at 100000 of 100001 matching rows$/);
+    // JSON stays a bare array (scripts parse it) — the header is its signal.
+    const json = await exportAudit(t, "?format=json");
+    assert.equal(json.headers.get("X-Export-Truncated"), "true");
+    assert.ok(Array.isArray(JSON.parse(await readAll(json))));
+  } finally {
+    auditCountOverride = null;
+  }
 });
 
 test("export: an unknown format falls back to CSV rather than erroring", async () => {

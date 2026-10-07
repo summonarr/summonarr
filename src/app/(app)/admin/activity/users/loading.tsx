@@ -2,7 +2,9 @@
 // PageHeader with subtitle, ActivityFilterBar's tab strip only (no period /
 // source / type segments on this route), the max-w-xs (320px) search input
 // (py-1.5 text-sm ≈ 34px, mb-4), then the table Card (py-4, radius 12) — a
-// 40px text-xs header row and 52px rows (py-3 around the 28px avatar).
+// 40px text-xs header row and 52px rows (py-3 around the 28px avatar). The
+// table has 7 columns at ≥sm — Fav platform and Direct % are `hidden
+// sm:table-cell` — so the last two skeleton cells follow the same breakpoint.
 import { Bar, SKELETON_CARD, SkeletonHeader } from "@/components/loading/poster-grid-skeleton";
 import { ActivityTabsSkeleton } from "@/components/loading/activity-section-skeleton";
 
@@ -22,6 +24,12 @@ export default function Loading() {
           {[48, 52, 40, 72, 72].map((w, i) => (
             <Bar key={i} w={w} h={10} />
           ))}
+          <div className="hidden sm:block">
+            <Bar w={80} h={10} />
+          </div>
+          <div className="hidden sm:block">
+            <Bar w={56} h={10} />
+          </div>
         </div>
         {Array.from({ length: 8 }).map((_, i) => (
           <div
@@ -37,6 +45,13 @@ export default function Loading() {
             <Bar w={36} h={12} />
             <Bar w={40} h={12} />
             <Bar w={64} h={10} />
+            <div className="hidden sm:block">
+              <Bar w={72} h={10} />
+            </div>
+            <div className="hidden sm:flex items-center gap-2">
+              <Bar w={64} h={6} r={999} />
+              <Bar w={28} h={10} />
+            </div>
           </div>
         ))}
       </div>

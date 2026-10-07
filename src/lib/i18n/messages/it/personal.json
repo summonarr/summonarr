@@ -51,7 +51,6 @@
   "personal.votes.emptyFilteredDescription": "Nessun voto corrisponde a questi filtri.",
   "personal.votes.emptyTitle": "Ancora nessun voto di eliminazione",
   "personal.votes.emptyDescription": "Sfoglia la tua libreria e vota i titoli che secondo te andrebbero rimossi.",
-  "personal.votes.noPoster": "Nessuna locandina",
   "personal.votes.count_one": "{count} voto",
   "personal.votes.count_other": "{count} voti",
   "personal.votes.anonymous": "Anonimo",
@@ -189,5 +188,10 @@
   "personal.donate.zelleHint": "Invia tramite Zelle della tua banca a:",
   "personal.donate.amazonHint": "Vedi la mia lista desideri Amazon",
   "personal.donate.patreonHint": "Diventa un sostenitore su Patreon",
-  "personal.donate.coffeeHint": "Offrimi un caffè"
+  "personal.donate.coffeeHint": "Offrimi un caffè",
+  "personal.common.trackingOff.title": "Il tracciamento della cronologia di riproduzione è disattivato",
+  "personal.common.trackingOff.description": "Non viene registrato nulla, quindi questa pagina non può riempirsi. Un amministratore può attivare il tracciamento della cronologia in Impostazioni → Funzionalità.",
+  "personal.common.trackingOff.cta": "Apri impostazioni",
+  "personal.common.showingMostRecent": "Vengono mostrati i tuoi {n} titoli più recenti. Quelli più vecchi non compaiono qui.",
+  "personal.watchlist.removeError": "Impossibile rimuovere “{title}” da Da guardare. Riprova."
 }

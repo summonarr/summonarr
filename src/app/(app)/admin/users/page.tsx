@@ -6,7 +6,7 @@ import { UserTable, type NamedInstance, type RestrictedMediaInstance } from "@/c
 import { ServerUserTable } from "@/components/admin/server-user-table";
 import { SyncRolesButton } from "@/components/admin/request-actions";
 import { CreateUserButton } from "@/components/admin/create-user-button";
-import { PageHeader } from "@/components/ui/design";
+import { PageHeader, SectionHeader } from "@/components/ui/design";
 import { getTranslator } from "@/lib/i18n/server";
 import { isArrConfigured } from "@/lib/arr";
 import { getArrInstances } from "@/lib/arr-instance-registry";
@@ -218,12 +218,10 @@ export default async function UsersPage() {
 
       {(hasPlex || hasJellyfin || serverUsers.length === 0) && (
         <div className="mt-10">
-          <div className="mb-4">
-            <h2 className="text-base font-semibold text-zinc-100">{t("adminManage.serverUsers.title")}</h2>
-            <p className="text-xs text-zinc-500 mt-0.5">
-              {t("adminManage.serverUsers.subtitle")}
-            </p>
-          </div>
+          <SectionHeader
+            title={t("adminManage.serverUsers.title")}
+            subtitle={t("adminManage.serverUsers.subtitle")}
+          />
           <ServerUserTable
             users={serverUsers}
             hasJellyfin={hasJellyfin}

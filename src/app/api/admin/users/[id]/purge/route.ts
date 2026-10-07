@@ -5,7 +5,7 @@ import { invalidateUserSession } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { Permission, hasPermission } from "@/lib/permissions";
-import { purgeUserDataInTx, NotDeactivatedError } from "@/lib/account-lifecycle";
+import { purgeUserDataInTx, NotDeactivatedError, isPurgedRow } from "@/lib/account-lifecycle";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 // POST /api/admin/users/[id]/purge — IRREVERSIBLY scrub a disabled account's
@@ -37,14 +37,17 @@ export const POST = withPermission(Permission.MANAGE_USERS)(async (
 
   const target = await prisma.user.findUnique({
     where: { id },
-    select: { role: true, name: true, email: true, deactivatedAt: true, purgedAt: true },
+    select: { id: true, role: true, name: true, email: true, deactivatedAt: true, purgedAt: true },
   });
   if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
 
   if (target.role === "ADMIN" && !hasPermission(session.user.permissions, Permission.ADMIN)) {
     return NextResponse.json({ error: t("apiAdmin.users.onlyAdminPurge") }, { status: 403 });
   }
-  if (target.purgedAt) return NextResponse.json({ ok: true }); // idempotent
+  // isPurgedRow, not a bare `purgedAt` test (guardrail 33): a legacy tombstone
+  // (`deleted-<id>@deleted.invalid`, null marker) is already scrubbed and must
+  // read as idempotent success rather than be re-purged and re-audited.
+  if (isPurgedRow(target)) return NextResponse.json({ ok: true }); // idempotent
   if (!target.deactivatedAt) {
     return NextResponse.json(
       { error: t("apiAdmin.users.disableBeforePurge") },

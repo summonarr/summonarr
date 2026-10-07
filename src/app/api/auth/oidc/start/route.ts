@@ -12,6 +12,28 @@ import { safeInternalPath } from "@/lib/safe-url";
 import { hasNativeClientHeader, NATIVE_CLIENT_HEADER } from "@/lib/mobile-auth";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
+// Subpath deployments: prefix in-app targets exactly like ../callback/route.ts
+// does — `new URL("/login", "https://host/request")` drops the base path.
+const basePath = process.env.BASE_PATH ?? "";
+
+// This route is reached by a TOP-LEVEL navigation (login-form sets
+// window.location.href), so a JSON error body renders raw in the browser tab
+// with no way back. A web caller's failures therefore redirect to
+// /login?error=<code> exactly like the callback's do (login-form maps the code
+// to a message); a NATIVE caller keeps the JSON status it can read. Fails
+// closed to JSON when AUTH_URL is unset rather than deriving the base from an
+// attacker-influenceable request Host — same rule as the callback.
+function loginErrorRedirect(req: NextRequest, code: string): NextResponse {
+  const base = process.env.AUTH_URL;
+  if (!base) {
+    const t = translatorForRequest(req);
+    return NextResponse.json({ error: t("apiAuth.common.authUrlMissing") }, { status: 500 });
+  }
+  const url = new URL(`${basePath}/login`, base);
+  url.searchParams.set("error", code);
+  return NextResponse.redirect(url.toString());
+}
+
 function getRedirectUri(base: string): string {
   return `${base.replace(/\/$/, "")}/api/auth/oidc/callback`;
 }
@@ -25,12 +47,24 @@ function isSecureCookieContext(): boolean {
 
 export async function GET(req: NextRequest) {
   const t = translatorForRequest(req);
+  // Native clients cannot use the redirect+cookie handshake: this call is made
+  // by the app's own HTTP client, while the IdP redirect lands in a separate
+  // web-auth view with its own cookie jar. They get the authorize URL and the
+  // signed flow state as JSON and drive the rest themselves, exactly like
+  // /api/auth/plex/start hands back its flowState. Resolved first because it
+  // also decides the SHAPE of every failure below (JSON vs /login redirect).
+  const isNative = hasNativeClientHeader(req.headers.get(NATIVE_CLIENT_HEADER));
+
   if (!checkRateLimit(`oidc-start:${getClientIpKey(req.headers)}`, 20, 5 * 60 * 1000)) {
-    return NextResponse.json({ error: t("apiAuth.common.tooManyRequestsTryLaterDot") }, { status: 429 });
+    return isNative
+      ? NextResponse.json({ error: t("apiAuth.common.tooManyRequestsTryLaterDot") }, { status: 429 })
+      : loginErrorRedirect(req, "rate_limited");
   }
 
   if (!isOidcConfigured()) {
-    return NextResponse.json({ error: t("apiAuth.oidc.notConfigured") }, { status: 503 });
+    return isNative
+      ? NextResponse.json({ error: t("apiAuth.oidc.notConfigured") }, { status: 503 })
+      : loginErrorRedirect(req, "oidc_not_configured");
   }
 
   const authUrl = process.env.AUTH_URL;
@@ -44,18 +78,14 @@ export async function GET(req: NextRequest) {
   // the login form) returns undefined for missing or unsafe input, and the
   // callback then falls back to "/".
   const returnTo = safeInternalPath(req.nextUrl.searchParams.get("callbackUrl"));
-  // Native clients cannot use the redirect+cookie handshake: this call is made
-  // by the app's own HTTP client, while the IdP redirect lands in a separate
-  // web-auth view with its own cookie jar. They get the authorize URL and the
-  // signed flow state as JSON and drive the rest themselves, exactly like
-  // /api/auth/plex/start hands back its flowState.
-  const isNative = hasNativeClientHeader(req.headers.get(NATIVE_CLIENT_HEADER));
   let auth;
   try {
     auth = await buildOidcAuthorization(redirectUri, returnTo, { native: isNative });
   } catch (err) {
     console.error("[oidc/start] discovery or URL build failed:", err);
-    return NextResponse.json({ error: t("apiAuth.oidc.unavailable") }, { status: 503 });
+    return isNative
+      ? NextResponse.json({ error: t("apiAuth.oidc.unavailable") }, { status: 503 })
+      : loginErrorRedirect(req, "oidc_unavailable");
   }
 
   const cookieValue = await signOidcStateCookie(auth.state);

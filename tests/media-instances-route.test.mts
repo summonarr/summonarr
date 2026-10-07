@@ -602,6 +602,24 @@ test("a save that removes NOTHING performs no cleanup at all (the default instan
   assert.deepEqual(libSlugs(plexLibrary), ["", "keep", "remote", "remote"]);
 });
 
+test("POST: an instance name is trimmed on storage and refused past 100 characters with ZERO writes", async () => {
+  // The name renders on the server picker, availability badges and admin chips;
+  // the registry normalizer stores it verbatim, so the bound lives here (A14b).
+  const admin = await mintSession("ADMIN");
+  settings.set("plexInstances", JSON.stringify([{ slug: "remote", name: "Remote" }]));
+
+  const long = await POST(postReq({ service: "plex", instances: [{ slug: "remote", name: "n".repeat(101) }] }, admin.header), undefined);
+  assert.equal(long.status, 400);
+  assert.deepEqual(await long.json(), { error: 'Name for "remote" must be 100 characters or fewer' });
+  assert.equal(opsFor("setting", "upsert").length, 0, "a refused body must write nothing");
+  assert.equal(JSON.parse(settings.get("plexInstances") ?? "[]")[0].name, "Remote");
+
+  const ok = await POST(postReq({ service: "plex", instances: [{ slug: "remote", name: "  Trimmed  " }] }, admin.header), undefined);
+  assert.equal(ok.status, 200);
+  assert.equal(JSON.parse(settings.get("plexInstances") ?? "[]")[0].name, "Trimmed");
+  assert.equal((await POST(postReq({ service: "plex", instances: [{ slug: "remote", name: "n".repeat(100) }] }, admin.header), undefined)).status, 200, "exactly 100 is fine");
+});
+
 // ════════════════════════════════════════════════════════════════════════════
 // Connection-field writes: the mask sentinel, and guardrail 7a
 // ════════════════════════════════════════════════════════════════════════════

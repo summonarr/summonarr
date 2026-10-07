@@ -49,7 +49,6 @@
   "apiUser.discord.merge.dmFailed": "Impossibile inviare il messaggio diretto su Discord. Assicurati che i messaggi diretti siano aperti.",
   "apiUser.discord.merge.expired": "Il codice è scaduto — richiedine uno nuovo.",
   "apiUser.discord.merge.incorrect": "Codice errato.",
-  "apiUser.discord.merge.initiateFailed": "Impossibile avviare il collegamento degli account. Riprova più tardi.",
   "apiUser.discord.merge.invalidUserId": "ID utente Discord non valido — deve essere un numero di 17–20 cifre.",
   "apiUser.discord.merge.linkFailed": "Impossibile collegare gli account.",
   "apiUser.discord.merge.noPending": "Nessuna verifica in sospeso — richiedi prima un codice.",
@@ -88,6 +87,7 @@
   "apiUser.issues.tvdbUnresolved": "Impossibile determinare l'ID TVDB di questa serie — controlla Sonarr",
   "apiUser.media.loadFailed": "Impossibile caricare questo titolo",
   "apiUser.media.typeInvalid": "type deve essere movie o tv",
+  "apiUser.notifications.idsInvalid": "ids deve essere un array di id di notifiche",
   "apiUser.notifications.selectorRequired": "specifica ?ids= o ?all=1",
   "apiUser.person.invalidId": "id non valido",
   "apiUser.person.upstreamError": "Errore del servizio upstream",
@@ -137,6 +137,7 @@
   "apiUser.requests.bulk.itemTmdbId": "ogni elemento richiede un tmdbId intero positivo",
   "apiUser.requests.bulk.itemsRequired": "items deve essere un array non vuoto",
   "apiUser.requests.bulk.onBehalfForbidden": "Non hai il permesso di fare richieste per conto di altri utenti",
+  "apiUser.requests.bulk.onBehalfIdInvalid": "onBehalfOfUserId deve essere una stringa",
   "apiUser.requests.bulk.quotaMovie": "Verrebbe superata la quota film di {limit} ogni {window} ({remaining} rimanenti).",
   "apiUser.requests.bulk.quotaTv": "Verrebbe superata la quota serie TV di {limit} ogni {window} ({remaining} rimanenti).",
   "apiUser.requests.bulk.targetDeactivated": "L'utente di destinazione è disattivato",
@@ -148,6 +149,7 @@
   "apiUser.requests.qualityProfileNameTooLong": "qualityProfileName deve essere una stringa di meno di 100 caratteri",
   "apiUser.requests.retryInvalidStatus": "Riprova è valido solo per le richieste APPROVED",
   "apiUser.requests.searchInvalidStatus": "La ricerca è valida solo per le richieste APPROVED o AVAILABLE",
+  "apiUser.requests.searchNoTvdbId": "Nessun ID TVDB salvato per questa richiesta — inviala di nuovo prima",
   "apiUser.search.failed": "Ricerca non riuscita",
   "apiUser.search.queryTooLong": "Query troppo lunga",
   "apiUser.search.rateLimited": "Troppe ricerche — riprova tra un minuto",
@@ -162,5 +164,7 @@
   "apiUser.votes.notInLibrary": "Il contenuto non è in nessuna libreria",
   "apiUser.votes.ownRequest": "Non puoi votare per eliminare una tua richiesta",
   "apiUser.votes.reasonTooLong": "reason deve essere una stringa di meno di 200 caratteri",
-  "apiUser.watchlist.alreadyAdded": "Già in Da guardare"
+  "apiUser.watchlist.alreadyAdded": "Già in Da guardare",
+  "apiUser.playHistory.exportTruncated": "Esportazione troncata a {max} righe — restringi startDate/endDate ed esporta di nuovo",
+  "apiUser.common.tmdbIdOutOfRange": "tmdbId è fuori intervallo"
 }

@@ -6,14 +6,14 @@ import { prisma } from "@/lib/prisma";
 import { posterUrl } from "@/lib/tmdb-types";
 import Image from "next/image";
 import Link from "next/link";
-import { Trash2 } from "@/components/icons";
+import { Film, Trash2, Tv2 } from "@/components/icons";
 import { VoteActions } from "@/components/votes/vote-actions";
 import { PaginationBar } from "@/components/media/pagination-bar";
 import { FilterPills, SearchBox } from "@/components/user-list-filters";
 import { requireFeature } from "@/lib/features";
 import { Prisma } from "@/generated/prisma";
 import { hasPermission, Permission } from "@/lib/permissions";
-import { Chip, EmptyState, PageHeader } from "@/components/ui/design";
+import { EmptyState, PageHeader } from "@/components/ui/design";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
 import { getTranslator } from "@/lib/i18n/server";
 
@@ -253,27 +253,37 @@ export default async function VotesPage({
                         className="w-full h-full object-cover"
                       />
                     ) : (
+                      // Same glyph fallback as /requests and /issues — the words
+                      // "No poster" don't fit a 44px tile.
                       <div
-                        className="w-full h-full flex items-center justify-center ds-mono"
-                        style={{ color: "var(--ds-fg-subtle)", fontSize: 10 }}
+                        className="absolute inset-0 flex items-center justify-center"
+                        style={{ color: "var(--ds-fg-subtle)" }}
                       >
-                        {t("personal.votes.noPoster")}
+                        {item.mediaType === "MOVIE" ? (
+                          <Film style={{ width: 16, height: 16 }} />
+                        ) : (
+                          <Tv2 style={{ width: 16, height: 16 }} />
+                        )}
                       </div>
                     )}
                   </div>
 
                   <div className="flex-1 min-w-0">
-                    <div
-                      className="flex items-center flex-wrap"
-                      style={{ gap: 6 }}
+                    {/* Row recipe shared with /requests and /issues: a <p> title (an
+                        <h3> here was an orphaned heading level) and the media type
+                        as the mono meta line, not a chip beside the title.
+                        DeletionVote stores no release year, so the line is type only. */}
+                    <p
+                      className="font-medium truncate transition-colors group-hover:text-[var(--ds-accent-text)]"
+                      style={{ fontSize: 14, margin: 0, color: "var(--ds-fg)" }}
                     >
-                      <h3
-                        className="font-medium truncate transition-colors group-hover:text-[var(--ds-accent-text)]"
-                        style={{ fontSize: 14, margin: 0, color: "var(--ds-fg)" }}
-                      >
-                        {item.title}
-                      </h3>
-                      <Chip>{item.mediaType === "MOVIE" ? t("personal.common.movie") : t("personal.common.tv")}</Chip>
+                      {item.title}
+                    </p>
+                    <div
+                      className="ds-mono"
+                      style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", marginTop: 2 }}
+                    >
+                      {item.mediaType === "MOVIE" ? t("personal.common.movie") : t("personal.common.tv")}
                     </div>
 
                     <div

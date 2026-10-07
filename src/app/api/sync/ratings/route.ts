@@ -1,14 +1,58 @@
 import { NextRequest, NextResponse } from "next/server";
 import { isCronAuthorized, withCronRunRecording } from "@/lib/cron-auth";
 import { getTrending, getPopularMovies, getPopularTV, getTopRatedMovies, getTopRatedTV } from "@/lib/tmdb";
-import { fetchUnifiedRatings, type UnifiedRatingsResult } from "@/lib/omdb-availability";
-import { fetchMdblistBatch, isMdblistQuotaLocked } from "@/lib/mdblist";
+import { fetchUnifiedRatings, hasAnyMdblistRating, type UnifiedRatingsResult } from "@/lib/omdb-availability";
+import { fetchMdblistBatch, isMdblistQuotaLocked, revalidateMdblistForTmdb, type MdblistRatings } from "@/lib/mdblist";
+import { revalidateOmdbForTmdb, type OmdbRatings } from "@/lib/omdb";
+import { getCacheStaleMany } from "@/lib/tmdb-cache";
 import { withAdvisoryLock } from "@/lib/advisory-lock";
 import { prisma } from "@/lib/prisma";
 import type { TmdbMedia } from "@/lib/tmdb-types";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const BATCH = 5;
+
+const mdblistKeyFor = (m: TmdbMedia) => `mdblist:tmdb:${m.mediaType}:${m.id}`;
+const omdbKeyFor = (m: TmdbMedia) => `omdb:tmdb:${m.mediaType}:${m.id}`;
+
+type CachedRatingsRow = { value: MdblistRatings | OmdbRatings | { _notFound: true }; isStale: boolean };
+
+// One item of the per-item pass. The unified helper applies the same MDBList-first /
+// OMDB-on-any-miss policy as the detail pages and the batch route, so this cron warms
+// whichever cache those paths will read — but its getters serve a STALE row at once
+// and DETACH the refresh (guardrail 31a), so `Promise.all` over them bounds only the
+// cache reads: every stale row's upstream call starts together, BATCH or not. On an
+// OMDB-only instance a pool whose rows expire on one cadence is ~1.7k TMDB
+// external_ids lookups at once — the 429 wall. So stale rows are refreshed FIRST,
+// through the awaited twins, and only then does the policy helper read them warm.
+async function warmItem(item: TmdbMedia, rows: Map<string, CachedRatingsRow>): Promise<UnifiedRatingsResult> {
+  const mdbKey = mdblistKeyFor(item);
+  const omdbKey = omdbKeyFor(item);
+  const mdb = rows.get(mdbKey);
+  const omdb = rows.get(omdbKey);
+  const revalidated: string[] = [];
+  if (mdb?.isStale) {
+    await revalidateMdblistForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {});
+    revalidated.push(mdbKey);
+  }
+  // The OMDB row is refreshed only when MDBList holds no USABLE value — the gate
+  // attachRatingsUnified's stale-OMDB pass applies. Behind a scored MDBList row the
+  // helper reads OMDB cache-only (an overlay, never a refresh), so refreshing it here
+  // would be OMDB spend no read path ever makes.
+  const mdbUsable = mdb !== undefined && !("_notFound" in mdb.value) && hasAnyMdblistRating(mdb.value as MdblistRatings);
+  if (omdb?.isStale && !mdbUsable) {
+    await revalidateOmdbForTmdb(item.id, item.mediaType, item.releaseDate).catch(() => {});
+    revalidated.push(omdbKey);
+  }
+  if (revalidated.length > 0) {
+    // A refresh that failed (or that another caller already owns) leaves the row
+    // stale, and the getters below would answer it by detaching a RETRY — the very
+    // fan-out this bounds. Count it skipped; the next run tries again.
+    const after = await getCacheStaleMany<CachedRatingsRow["value"]>(revalidated);
+    if (revalidated.some((k) => after.get(k)?.isStale)) return { found: false, keyConfigured: true, transient: true };
+  }
+  return fetchUnifiedRatings(item.id, item.mediaType, item.releaseDate);
+}
 
 async function warmBatch(
   items: TmdbMedia[],
@@ -27,13 +71,12 @@ async function warmBatch(
     // the batch boundary and return (never throw — the race has already settled).
     if (signal.aborted) break;
     const batch = items.slice(i, i + BATCH);
-    // The underlying MDBList/OMDB getters warm both ratings caches as a side effect;
-    // the unified helper applies the same MDBList-first / OMDB-on-any-miss policy as
-    // the detail pages and the batch route, so this cron warms whichever cache those
-    // paths will read.
+    // One findMany for the batch's rows, so warmItem's stale decision costs no
+    // point reads; the awaited twins bound the upstream work to BATCH (31a).
+    const rows = await getCacheStaleMany<CachedRatingsRow["value"]>(batch.flatMap((m) => [mdblistKeyFor(m), omdbKeyFor(m)]));
     const results = await Promise.all(
       batch.map((item) =>
-        fetchUnifiedRatings(item.id, item.mediaType, item.releaseDate)
+        warmItem(item, rows)
           .catch((): UnifiedRatingsResult => ({ found: false, keyConfigured: true })),
       ),
     );
@@ -102,7 +145,6 @@ export async function POST(request: NextRequest) {
       // pacing and burned the most quota). OMDB has no batch endpoint, so it stays
       // per-item and is only asked about titles MDBList did not have.
       if (mdblistKey?.value) {
-        const mdblistKeyFor = (m: TmdbMedia) => `mdblist:tmdb:${m.mediaType}:${m.id}`;
         // One findMany, not chunked: the pool is bounded (~1.7k) by the list
         // helpers' page constants, unlike the library-sized prewarm scans.
         const rows = await prisma.tmdbCache.findMany({

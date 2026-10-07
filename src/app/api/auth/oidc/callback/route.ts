@@ -106,6 +106,17 @@ export async function GET(req: NextRequest) {
     return nativeCallbackRedirect({ code, state: returnedState });
   }
 
+  // The IdP's own refusal arrives as `error=` with no code. A user clicking
+  // Deny/Cancel at the IdP is an expected outcome, not a fault: it gets its own
+  // code (login-form words it) and is NOT logged — the exchange below would
+  // otherwise throw on the error response and record a server error for a
+  // refusal (guardrail 7; contrast the silent AccountDeactivatedError branch).
+  // Read before the cookie so an expired state can't mask what the IdP said.
+  const idpError = req.nextUrl.searchParams.get("error");
+  if (idpError) {
+    return loginErrorRedirect(req, idpError === "access_denied" ? "oidc_access_denied" : "oidc_idp_error");
+  }
+
   const stateCookie = readStateCookie(req);
   if (!stateCookie) {
     return loginErrorRedirect(req, "oidc_no_state");

@@ -44,7 +44,10 @@ export function WarmCacheButton({ uncachedCount }: WarmCacheButtonProps) {
       setResult(t("adminManage.library.btn.requestFailed"));
     }
     clearTimeout(resetTimer.current);
-    resetTimer.current = setTimeout(() => setStatus("idle"), 8000);
+    // Clear the result WITH the status (as the sibling sync buttons do) — a
+    // "Fetched 120, skipped 4" line otherwise stayed on screen indefinitely in
+    // neutral grey once the button had returned to idle.
+    resetTimer.current = setTimeout(() => { setStatus("idle"); setResult(null); }, 8000);
   }
 
   if (uncachedCount === 0 && status === "idle") {

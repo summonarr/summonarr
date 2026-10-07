@@ -1,5 +1,6 @@
 export const dynamic = "force-dynamic";
 
+import type { Metadata } from "next";
 import { MediaCard } from "@/components/media/media-card";
 import { PaginationBar } from "@/components/media/pagination-bar";
 import { attachAllAvailability } from "@/lib/attach-all";
@@ -42,6 +43,12 @@ function updatedLabel(t: Translator, date: Date): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return t("browse.forYou.updated.hours", { count: hours });
   return t("browse.forYou.updated.days", { count: Math.floor(hours / 24) });
+}
+
+// Tab / bookmark / history title — the nav label, in the viewer's language.
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getTranslator();
+  return { title: t("nav.forYou") };
 }
 
 // Dedicated "For You" page — the full ranked recommendation set behind the
@@ -268,9 +275,9 @@ export default async function ForYouPage({
             // The card is the grid item itself, with no wrapper: the grid
             // stretches its items, and a wrapper took the stretch while the
             // card stopped at its own content height — ragged rows. The
-            // not-interested button sits in the poster's top-left corner, where
-            // the availability chips go; MediaCard moves the chips down below
-            // it whenever overlayAction is set, so nothing else is needed here.
+            // not-interested button joins the poster's top-left stack BELOW
+            // the availability chips; MediaCard places overlayAction there, so
+            // nothing else is needed here.
             <MediaCard
               key={`${media.mediaType}-${media.id}`}
               media={media}

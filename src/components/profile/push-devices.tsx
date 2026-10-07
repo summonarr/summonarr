@@ -86,7 +86,7 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
                 variant="ghost"
                 aria-label={t("profile.push.removeNamed", { name: deviceLabel })}
                 title={t("profile.push.removeDevice")}
-                className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-9 w-9 p-0"
+                className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-10 w-10 p-0"
                 disabled={removing === device.id}
                 onClick={() => setConfirmingRemove(device.id)}
               >
@@ -100,8 +100,9 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
                 <Button
                   type="button"
                   size="sm"
+                  variant="destructive"
                   aria-label={t("profile.push.confirmRemoveNamed", { name: deviceLabel })}
-                  className="h-9 px-2.5 bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
+                  className="h-9 px-2.5 gap-1"
                   onClick={() => remove(device.id)}
                   autoFocus
                 >
@@ -113,7 +114,7 @@ export function PushDevices({ devices, cap }: PushDevicesProps) {
                   size="sm"
                   variant="ghost"
                   aria-label={t("profile.common.cancelRemove")}
-                  className="h-9 w-9 p-0 text-zinc-400 hover:text-zinc-200"
+                  className="h-10 w-10 p-0 text-zinc-400 hover:text-zinc-200"
                   onClick={() => setConfirmingRemove(null)}
                 >
                   <X className="w-3.5 h-3.5" />

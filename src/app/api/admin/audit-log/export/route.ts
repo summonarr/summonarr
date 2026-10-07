@@ -76,7 +76,8 @@ export const GET = withAdmin(async (req, _ctx, session) => {
       if (isNaN(end.getTime())) {
         return NextResponse.json({ error: t("apiAdmin.auditLog.invalidDateTo") }, { status: 400 });
       }
-      end.setDate(end.getDate() + 1);
+      // UTC day arithmetic — see the list route; the two must agree on the bound.
+      end.setUTCDate(end.getUTCDate() + 1);
       where.createdAt.lt = end;
     }
   }
@@ -148,97 +149,123 @@ export const GET = withAdmin(async (req, _ctx, session) => {
     },
   });
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      const encoder = new TextEncoder();
-      let totalExported = 0;
-      let streamStatus: "completed" | "aborted" = "aborted";
-      let streamError: string | null = null;
+  // Counted up front so a capped export can SAY so: the file used to end
+  // normally with the oldest rows missing and `truncated: true` written only to
+  // the paper-trail row's details. The header is the machine signal; the CSV
+  // also carries a trailing comment line (a JSON body is a bare array, kept
+  // as-is — scripts parse it — so JSON callers read the header).
+  const total = await prisma.auditLog.count({ where });
+  const truncated = total > MAX_EXPORT_RECORDS;
 
-      try {
-        if (format === "csv") {
-          controller.enqueue(encoder.encode("id,createdAt,userId,userName,action,target,details,ipAddress,userAgent,provider\n"));
-        } else {
-          controller.enqueue(encoder.encode("[\n"));
-        }
+  // Writing through a TransformStream makes `await writer.write(...)` suspend
+  // until the consumer has drained — real backpressure. Producing inside a
+  // ReadableStream's start() cannot: enqueue never blocks, pull() is not
+  // invoked until start() settles, so up to MAX_EXPORT_RECORDS rows (details
+  // VarChar(8000), userAgent 512) piled up in the stream queue while a WAN
+  // browser drained at its own pace (the same shape db-export documents).
+  const encoder = new TextEncoder();
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+  const writer = writable.getWriter();
+  const write = (text: string) => writer.write(encoder.encode(text));
 
-        let cursor: string | undefined;
-        let first = true;
+  void (async () => {
+    let totalExported = 0;
+    let streamStatus: "completed" | "aborted" = "aborted";
+    let streamError: string | null = null;
+    let failure: unknown = null;
 
-        while (totalExported < MAX_EXPORT_RECORDS) {
-          const logs = await prisma.auditLog.findMany({
-            where,
-            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-            take: CHUNK_SIZE,
-            ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-          });
-
-          if (logs.length === 0) break;
-
-          for (const log of logs) {
-            if (format === "csv") {
-              const row = [
-                log.id,
-                log.createdAt.toISOString(),
-                log.userId,
-                escapeCSV(log.userName),
-                log.action,
-                escapeCSV(log.target),
-                escapeCSV(log.details ?? ""),
-                log.ipAddress ?? "",
-                escapeCSV(log.userAgent ?? ""),
-                log.provider ?? "",
-              ].join(",");
-              controller.enqueue(encoder.encode(row + "\n"));
-            } else {
-              const prefix = first ? "  " : ",\n  ";
-              first = false;
-              controller.enqueue(encoder.encode(prefix + JSON.stringify(log)));
-            }
-          }
-
-          totalExported += logs.length;
-          if (logs.length < CHUNK_SIZE) break;
-          cursor = logs[logs.length - 1].id;
-        }
-
-        if (format === "json") {
-          controller.enqueue(encoder.encode("\n]\n"));
-        }
-        streamStatus = "completed";
-      } catch (err) {
-        streamError = err instanceof Error ? err.message : String(err);
-        try { controller.error(err); } catch { /* already closed */ }
-      } finally {
-        // Always update the audit row with the final state so a partial / aborted export is
-        // visible in the audit trail.
-        try {
-          await prisma.auditLog.update({
-            where: { id: auditRow.id },
-            data: {
-              details: JSON.stringify({
-                kind: "audit-log",
-                filters,
-                rowCount: totalExported,
-                truncated: totalExported >= MAX_EXPORT_RECORDS,
-                status: streamStatus,
-                ...(streamError ? { error: streamError } : {}),
-              }),
-            },
-          });
-        } catch (err) {
-          console.error("[audit-log/export] failed to finalize audit row:", err);
-        }
-        try { controller.close(); } catch { /* already errored */ }
+    try {
+      if (format === "csv") {
+        await write("id,createdAt,userId,userName,action,target,details,ipAddress,userAgent,provider\n");
+      } else {
+        await write("[\n");
       }
-    },
-  });
 
-  return new NextResponse(stream, {
+      let cursor: string | undefined;
+      let first = true;
+
+      while (totalExported < MAX_EXPORT_RECORDS) {
+        const logs = await prisma.auditLog.findMany({
+          where,
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          take: CHUNK_SIZE,
+          ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        });
+
+        if (logs.length === 0) break;
+
+        for (const log of logs) {
+          if (format === "csv") {
+            const row = [
+              log.id,
+              log.createdAt.toISOString(),
+              log.userId,
+              escapeCSV(log.userName),
+              log.action,
+              escapeCSV(log.target),
+              escapeCSV(log.details ?? ""),
+              log.ipAddress ?? "",
+              escapeCSV(log.userAgent ?? ""),
+              log.provider ?? "",
+            ].join(",");
+            await write(row + "\n");
+          } else {
+            const prefix = first ? "  " : ",\n  ";
+            first = false;
+            await write(prefix + JSON.stringify(log));
+          }
+        }
+
+        totalExported += logs.length;
+        if (logs.length < CHUNK_SIZE) break;
+        cursor = logs[logs.length - 1].id;
+      }
+
+      if (format === "json") {
+        await write("\n]\n");
+      } else if (truncated) {
+        // Protocol marker, not UI copy: a `#` line a spreadsheet shows as one
+        // odd last row and a script can grep for.
+        await write(`# truncated: export capped at ${MAX_EXPORT_RECORDS} of ${total} matching rows\n`);
+      }
+      streamStatus = "completed";
+    } catch (err) {
+      failure = err;
+      streamError = err instanceof Error ? err.message : String(err);
+    }
+
+    // Finalize the paper-trail row BEFORE the consumer sees end-of-stream or the
+    // error: whoever observes the download finishing (or failing) must find the
+    // row already final — a partial / aborted export is visible in the trail.
+    try {
+      await prisma.auditLog.update({
+        where: { id: auditRow.id },
+        data: {
+          details: JSON.stringify({
+            kind: "audit-log",
+            filters,
+            rowCount: totalExported,
+            totalMatching: total,
+            truncated: truncated || totalExported >= MAX_EXPORT_RECORDS,
+            status: streamStatus,
+            ...(streamError ? { error: streamError } : {}),
+          }),
+        },
+      });
+    } catch (err) {
+      console.error("[audit-log/export] failed to finalize audit row:", err);
+    }
+
+    if (failure !== null) await writer.abort(failure).catch(() => { /* consumer already gone */ });
+    else await writer.close().catch(() => { /* consumer already gone */ });
+  })();
+
+  return new NextResponse(readable, {
     headers: {
       "Content-Type": format === "csv" ? "text/csv" : "application/json",
       "Content-Disposition": `attachment; filename="audit-log-${date}.${format}"`,
       "X-Content-Type-Options": "nosniff",
+      ...(truncated ? { "X-Export-Truncated": "true", "X-Export-Limit": String(MAX_EXPORT_RECORDS) } : {}),
     },
   });
 });

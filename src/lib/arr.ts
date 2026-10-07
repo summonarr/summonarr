@@ -399,8 +399,39 @@ async function getAllowedQualityIds(cfg: ArrCfg, profileId?: number): Promise<Se
   }
 }
 
+// Project an upstream ReleaseResource down to EXACTLY the `ArrRelease` field
+// list. `arrFetch<ArrRelease[]>` is a compile-time claim only — the JSON Radarr
+// and Sonarr actually return carries every ReleaseResource field, including
+// `downloadUrl` / `infoUrl` / `magnetUrl`, and Newznab/Torznab download URLs
+// embed the admin's indexer `apikey=…`. The releases route hands this list to
+// any MANAGE_ISSUES holder (an ISSUE_ADMIN without the ADMIN bit), so the
+// projection lives HERE, inside the one function both getReleases* helpers
+// return through, where no caller can forget it. Nested `quality` is projected
+// too so the shape is literally the interface and nothing else.
+export function toArrRelease(r: ArrRelease): ArrRelease {
+  return {
+    guid: r.guid,
+    title: r.title,
+    size: r.size,
+    indexerId: r.indexerId,
+    indexer: r.indexer,
+    quality: {
+      quality: { id: r.quality.quality.id, name: r.quality.quality.name },
+      revision: { version: r.quality.revision?.version ?? 1 },
+    },
+    qualityWeight: r.qualityWeight,
+    protocol: r.protocol,
+    seeders: r.seeders ?? null,
+    leechers: r.leechers ?? null,
+    age: r.age,
+    rejected: r.rejected,
+    rejections: r.rejections,
+    downloadAllowed: r.downloadAllowed,
+  };
+}
+
 function filterAndSortReleases(releases: ArrRelease[], allowedIds: Set<number> | null): ArrRelease[] {
-  const downloadable = releases.filter((r) => r.downloadAllowed);
+  const downloadable = releases.filter((r) => r.downloadAllowed).map(toArrRelease);
   return downloadable.sort((a, b) => {
     const aMatch = allowedIds ? (allowedIds.has(a.quality.quality.id) ? 1 : 0) : 1;
     const bMatch = allowedIds ? (allowedIds.has(b.quality.quality.id) ? 1 : 0) : 1;

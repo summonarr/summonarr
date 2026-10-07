@@ -24,6 +24,7 @@
   "apiAuth.emailConfirm.invalidLinkTitle": "Lien non valide",
   "apiAuth.emailConfirm.malformed": "Ce lien de vérification est mal formé.",
   "apiAuth.emailConfirm.missingToken": "Il manque le jeton de ce lien de vérification.",
+  "apiAuth.emailConfirm.notYou": "Si vous n'êtes pas à l'origine de cette demande, fermez cette page : rien ne changera.",
   "apiAuth.emailConfirm.pageTitle": "Confirmer l'e-mail de notification",
   "apiAuth.emailConfirm.successBody": "Votre e-mail de notification est confirmé. Summonarr y enverra désormais les mises à jour de vos demandes. Vous pouvez fermer cet onglet.",
   "apiAuth.emailConfirm.successTitle": "E-mail vérifié",

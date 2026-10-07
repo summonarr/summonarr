@@ -8,6 +8,17 @@ import { useT } from "@/components/i18n/i18n-provider";
 
 type Tab = "create" | "restore";
 
+// The login card's recipe (login/page.tsx), token for token: the restore path
+// redirects straight from /setup to /login, so the two consecutive auth cards
+// must share radius, padding, border and shadow.
+const CARD_STYLE: React.CSSProperties = {
+  background: "var(--ds-bg-1)",
+  border: "1px solid var(--ds-border)",
+  borderRadius: "var(--ds-r-xl)",
+  boxShadow: "var(--ds-shadow-md)",
+};
+const CARD_PADDING = 28;
+
 // First-run shell: create-account only, or create/restore tabs when a backup password is configured.
 export function SetupShell({ importAvailable }: { importAvailable: boolean }) {
   const t = useT();
@@ -15,7 +26,7 @@ export function SetupShell({ importAvailable }: { importAvailable: boolean }) {
 
   if (!importAvailable) {
     return (
-      <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-8">
+      <div style={{ ...CARD_STYLE, padding: CARD_PADDING }}>
         <div className="flex items-center gap-2 mb-6 px-3 py-2.5 rounded-lg bg-indigo-600/10 border border-indigo-500/20">
           <span className="text-indigo-400 text-xs font-medium">
             {t("auth.setup.firstUserAdmin")}
@@ -27,8 +38,12 @@ export function SetupShell({ importAvailable }: { importAvailable: boolean }) {
   }
 
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
-      <div role="tablist" aria-label={t("auth.setup.mode")} className="grid grid-cols-2 border-b border-zinc-800">
+    <div className="overflow-hidden" style={CARD_STYLE}>
+      {/* A segmented control (role=group + aria-pressed), the same pattern as
+          the login page's provider switcher — not an ARIA tablist, which needs
+          ids/aria-controls/aria-labelledby and arrow-key roving focus to be
+          complete and announced "tab, selected" with no associated panel. */}
+      <div role="group" aria-label={t("auth.setup.mode")} className="grid grid-cols-2 border-b border-zinc-800">
         <TabButton active={tab === "create"} onClick={() => setTab("create")}>
           <UserPlus className="w-3.5 h-3.5" />
           {t("auth.setup.tab.create")}
@@ -38,7 +53,7 @@ export function SetupShell({ importAvailable }: { importAvailable: boolean }) {
           {t("auth.setup.tab.restore")}
         </TabButton>
       </div>
-      <div role="tabpanel" className="p-8">
+      <div style={{ padding: CARD_PADDING }}>
         {tab === "create" ? (
           <>
             <div className="flex items-center gap-2 mb-6 px-3 py-2.5 rounded-lg bg-indigo-600/10 border border-indigo-500/20">
@@ -68,8 +83,7 @@ function TabButton({
   return (
     <button
       type="button"
-      role="tab"
-      aria-selected={active}
+      aria-pressed={active}
       onClick={onClick}
       className={`ds-hover-tint flex items-center justify-center gap-1.5 py-3 text-xs font-medium transition-colors ${
         active

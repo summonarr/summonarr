@@ -1,24 +1,37 @@
 import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
-import { withAdmin } from "@/lib/api-auth";
+import { withPermission } from "@/lib/api-auth";
 import { revokeSessionById, revokeAllUserSessions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
+import { Permission, hasPermission } from "@/lib/permissions";
 import { isIndefiniteDeadline } from "@/lib/session-lifetime";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
-export const GET = withAdmin(async (
+// MANAGE_USERS, like every other account-lifecycle action on the Users page
+// (purge / reactivate / mfa): the page admits delegates and shows the Sessions
+// menu item to them, so an ADMIN-only gate here just made that one control dead.
+// An ADMIN target additionally needs the ADMIN bit — a delegated user manager
+// must not be able to read an admin's device list or sign an admin out.
+function targetRequiresAdmin(targetRole: string, callerPerms: bigint): boolean {
+  return targetRole === "ADMIN" && !hasPermission(callerPerms, Permission.ADMIN);
+}
+
+export const GET = withPermission(Permission.MANAGE_USERS)(async (
   req,
   { params }: RouteParams,
-  _session
+  session
 ) => {
   const t = translatorForRequest(req);
   const { id } = await params;
 
-  const target = await prisma.user.findUnique({ where: { id }, select: { id: true } });
+  const target = await prisma.user.findUnique({ where: { id }, select: { id: true, role: true } });
   if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
+  if (targetRequiresAdmin(target.role, session.user.permissions)) {
+    return NextResponse.json({ error: t("apiAdmin.users.onlyAdminModify") }, { status: 403 });
+  }
 
   const sessions = await prisma.authSession.findMany({
     where: { userId: id },
@@ -43,7 +56,7 @@ export const GET = withAdmin(async (
   );
 });
 
-export const DELETE = withAdmin(async (
+export const DELETE = withPermission(Permission.MANAGE_USERS)(async (
   req,
   { params }: RouteParams,
   session
@@ -53,9 +66,12 @@ export const DELETE = withAdmin(async (
 
   const target = await prisma.user.findUnique({
     where: { id },
-    select: { id: true, name: true, email: true },
+    select: { id: true, role: true, name: true, email: true },
   });
   if (!target) return NextResponse.json({ error: t("apiAdmin.common.notFound") }, { status: 404 });
+  if (targetRequiresAdmin(target.role, session.user.permissions)) {
+    return NextResponse.json({ error: t("apiAdmin.users.onlyAdminModify") }, { status: 403 });
+  }
 
   const parsed = await readJsonCapped<{ sessionId?: string; all?: boolean }>(req, 16384);
   if (parsed instanceof NextResponse) return parsed;

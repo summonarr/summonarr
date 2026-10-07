@@ -24,6 +24,7 @@
   "apiAuth.emailConfirm.invalidLinkTitle": "Ungültiger Link",
   "apiAuth.emailConfirm.malformed": "Dieser Bestätigungslink ist fehlerhaft.",
   "apiAuth.emailConfirm.missingToken": "Diesem Bestätigungslink fehlt das Token.",
+  "apiAuth.emailConfirm.notYou": "Falls Sie das nicht angefordert haben, schließen Sie diese Seite – es wird nichts geändert.",
   "apiAuth.emailConfirm.pageTitle": "Benachrichtigungs-E-Mail bestätigen",
   "apiAuth.emailConfirm.successBody": "Ihre Benachrichtigungs-E-Mail ist bestätigt. Summonarr sendet Aktualisierungen zu Ihren Anfragen ab jetzt dorthin. Sie können diesen Tab schließen.",
   "apiAuth.emailConfirm.successTitle": "E-Mail bestätigt",

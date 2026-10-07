@@ -45,7 +45,9 @@ export const GET = withAuth(async () => {
     ...(recommendedIosBuild !== null && recommendedIosBuild >= 1
       ? { recommendedIosBuild }
       : {}),
-    siteTitle: cfg.siteTitle ?? null,
+    // A cleared row is "" (siteTitle is a clearable Setting); the iOS app decodes
+    // an optional string, so coalesce it to the same null an absent row yields.
+    siteTitle: cfg.siteTitle || null,
     motd: {
       enabled: cfg.motdEnabled === "true",
       title: cfg.motdTitle ?? null,

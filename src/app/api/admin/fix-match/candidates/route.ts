@@ -9,6 +9,7 @@ import { tmdbAuth, type TmdbAuth } from "@/lib/tmdb-auth";
 import { settleLimit } from "@/lib/concurrency";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { checkRateLimit } from "@/lib/rate-limit";
 
 const TMDB_HOSTS = ["api.themoviedb.org"];
 
@@ -384,8 +385,16 @@ async function resolveArrConfirmation(
   return { arrConfirmedTmdbId, arrConfirmedTitle, arrPathAgrees };
 }
 
-export const GET = withIssueAdmin(async (request, _ctx, _session) => {
+export const GET = withIssueAdmin(async (request, _ctx, session) => {
   const t = translatorForRequest(request);
+  // Every TV call pulls the whole Sonarr series table (up to the 50 MB
+  // ARR_FETCH_MAX_BYTES), fires five 30s Plex agent searches and up to N TMDB
+  // detail reads — a stuck picker (re-render loop) or a script from any
+  // MANAGE_ISSUES holder had no bound at all, where the sibling POST caps at
+  // 10/min. 30/min is generous for a human paging through candidates.
+  if (!checkRateLimit(`fix-match-candidates:${session.user.id}`, 30, 60_000)) {
+    return NextResponse.json({ error: t("apiAdmin.fixMatch.tooMany") }, { status: 429 });
+  }
   const { searchParams } = new URL(request.url);
   const server             = searchParams.get("server");
   const mediaTypeRaw       = searchParams.get("mediaType");

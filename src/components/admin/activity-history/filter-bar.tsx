@@ -8,6 +8,26 @@
 import { useId } from "react";
 import type { MediaServerUserOption } from "./types";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { mediaInstanceLabel, type MediaServerService } from "@/lib/media-instances";
+
+// `distinct=users` returns `serverInstance` (additive) so the same username on
+// two same-type servers — the owner and every shared friend exist on both Plex
+// instances (guardrail 35) — can be told apart. Only a DUPLICATED username gets
+// the `(plex:remote)` suffix; a unique one stays bare, as before. The table
+// already disambiguates its rows per server; this makes the filter match it.
+function userOptions(users: MediaServerUserOption[]): { value: string; label: string }[] {
+  const seen = new Set<string>();
+  const duplicated = new Set<string>();
+  for (const u of users) {
+    if (seen.has(u.username)) duplicated.add(u.username);
+    seen.add(u.username);
+  }
+  return users.map((u) => {
+    if (!duplicated.has(u.username)) return { value: u.id, label: u.username };
+    const instance = u.serverInstance ?? "";
+    return { value: u.id, label: `${u.username} (${mediaInstanceLabel(u.source as MediaServerService, instance)})` };
+  });
+}
 
 const inputStyle: React.CSSProperties = {
   fontFamily: "inherit",
@@ -81,7 +101,6 @@ function SegGroup<T extends string>({
                 value === o.value
                   ? "var(--ds-border-strong)"
                   : "transparent",
-              cursor: "pointer",
               whiteSpace: "nowrap",
               transition: "all 100ms var(--ds-ease)",
             }}
@@ -274,7 +293,6 @@ export function HistoryFilterBar({
                 background: "transparent",
                 border: 0,
                 color: "var(--ds-fg-subtle)",
-                cursor: "pointer",
                 padding: 4,
                 lineHeight: 0,
               }}
@@ -298,10 +316,14 @@ export function HistoryFilterBar({
             gap: 6,
           }}
         >
+          {/* Each date bounds the other so the picker can't build an inverted
+              range (startDate > endDate), which the API answers with an
+              unexplained "0 results". */}
           <input
             type="date"
             className={dateInputClass}
             value={fromDate}
+            max={toDate || undefined}
             aria-label={t("adminActivity.history.fromDate")}
             onChange={(e) => setFromDate(e.target.value)}
             style={{
@@ -319,6 +341,7 @@ export function HistoryFilterBar({
             type="date"
             className={dateInputClass}
             value={toDate}
+            min={fromDate || undefined}
             aria-label={t("adminActivity.history.toDate")}
             onChange={(e) => setToDate(e.target.value)}
             style={{
@@ -353,7 +376,6 @@ export function HistoryFilterBar({
               background: "transparent",
               border: "1px solid var(--ds-border)",
               color: "var(--ds-fg-muted)",
-              cursor: "pointer",
               whiteSpace: "nowrap",
             }}
           >
@@ -371,7 +393,6 @@ export function HistoryFilterBar({
               background: "var(--ds-bg-2)",
               border: "1px solid var(--ds-border)",
               color: "var(--ds-fg-muted)",
-              cursor: "pointer",
               whiteSpace: "nowrap",
             }}
           >
@@ -386,7 +407,6 @@ export function HistoryFilterBar({
               background: "var(--ds-bg-2)",
               border: "1px solid var(--ds-border)",
               color: "var(--ds-fg-muted)",
-              cursor: "pointer",
               whiteSpace: "nowrap",
             }}
           >
@@ -428,7 +448,7 @@ export function HistoryFilterBar({
           label={t("adminActivity.field.user")}
           value={userFilter}
           onChange={setUserFilter}
-          options={users.map((u) => ({ value: u.id, label: u.username }))}
+          options={userOptions(users)}
         />
         <SelectField
           label={t("adminActivity.field.platform")}

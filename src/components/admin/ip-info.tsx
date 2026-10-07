@@ -38,9 +38,15 @@ interface Props {
   ip: string;
   /** Render the toggle inline (next to the IP) instead of taking the full row. */
   inline?: boolean;
+  /**
+   * Trigger text size. Defaults to 12px (`xs`) to sit level with the 12px
+   * detail-panel values and the 12.5px Known-IPs table it lives in; the play
+   * detail page passes `sm` to match its 14px LabeledValue rows.
+   */
+  size?: "xs" | "sm";
 }
 
-export function IpInfo({ ip, inline = false }: Props) {
+export function IpInfo({ ip, inline = false, size = "xs" }: Props) {
   const t = useT();
   const [open, setOpen] = useState(false);
   // Initialize from cache at mount AND re-read on open: a sibling IpInfo for the
@@ -137,9 +143,9 @@ export function IpInfo({ ip, inline = false }: Props) {
   return (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
       <Popover.Trigger
-        className={`${inline ? "inline-flex" : "flex"} items-center gap-1.5 text-zinc-400 hover:text-zinc-200 transition-colors text-sm tabular-nums font-mono outline-none focus-visible:text-zinc-200`}
+        className={`${inline ? "inline-flex" : "flex"} items-center gap-1.5 text-zinc-400 hover:text-zinc-200 transition-colors ${size === "sm" ? "text-sm" : "text-xs"} tabular-nums font-mono outline-none focus-visible:text-zinc-200`}
       >
-        <Globe className="w-3.5 h-3.5 text-zinc-500" />
+        <Globe className={`${size === "sm" ? "w-3.5 h-3.5" : "w-3 h-3"} text-zinc-500`} />
         <span>{ip}</span>
         <ChevronDown className={`w-3 h-3 transition-transform ${open ? "rotate-180" : ""}`} />
       </Popover.Trigger>

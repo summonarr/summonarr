@@ -29,6 +29,8 @@ import { mfaEnforcementDisabledByEnv } from "@/lib/mfa/policy";
 import { RequireAdminMfaToggle } from "@/components/settings/forms/require-admin-mfa-toggle";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
 import type { Translator } from "@/lib/i18n/translate";
+import type { ReactNode } from "react";
+import { LocalDateTime } from "@/components/local-date-time";
 
 // Labels and groups are catalog keys, translated at render (never at module
 // load — the locale is per request).
@@ -58,6 +60,7 @@ const TAB_SECTIONS: Record<TabId, TabSection[]> = {
     { id: "radarr4k", i18nKey: "settings.nav.radarr4k", group: "settings.group.automation" },
     { id: "sonarr", i18nKey: "settings.nav.sonarr", group: "settings.group.automation" },
     { id: "sonarr4k", i18nKey: "settings.nav.sonarr4k", group: "settings.group.automation" },
+    { id: "request-4k", i18nKey: "settings.nav.request4k", group: "settings.group.automation" },
     { id: "arr-instances", i18nKey: "settings.nav.arrInstances", group: "settings.group.automation" },
   ],
   notifications: [
@@ -93,26 +96,16 @@ function formatInterval(t: Translator, seconds: string | undefined, fallback: st
   if (n === 3_600) return t("settings.cron.interval.hourly");
   if (n === 86_400) return t("settings.cron.interval.daily");
   if (n === 604_800) return t("settings.cron.interval.weekly");
-  if (n % 86_400 === 0) return `${n / 86_400}d`;
-  if (n % 3_600 === 0) return `${n / 3_600}h`;
-  if (n % 60 === 0) return `${n / 60}m`;
-  return `${n}s`;
+  if (n % 86_400 === 0) return t("settings.cron.interval.days", { n: n / 86_400 });
+  if (n % 3_600 === 0) return t("settings.cron.interval.hours", { n: n / 3_600 });
+  if (n % 60 === 0) return t("settings.cron.interval.minutes", { n: n / 60 });
+  return t("settings.cron.interval.seconds", { n });
 }
 
 function StatusBadge({ connected, t }: { connected: boolean; t: Translator }) {
   if (connected) {
     return (
-      <span className="ds-chip ds-chip-approved">
-        <span
-          style={{
-            width: 6,
-            height: 6,
-            borderRadius: 999,
-            background: "var(--ds-success)",
-          }}
-        />
-        {t("settings.common.connected")}
-      </span>
+      <span className="ds-chip ds-chip-approved">{t("settings.common.connected")}</span>
     );
   }
   return (
@@ -120,6 +113,45 @@ function StatusBadge({ connected, t }: { connected: boolean; t: Translator }) {
   );
 }
 
+// Every card on the page: one surface, one radius, one header recipe. The
+// cards used to carry this inline and had drifted — descriptions were 14px
+// subtle on some tabs and 12px muted on others, the badge row had its own
+// margin, and one card had no header at all. `id` is what the side nav's
+// `#hash` links and the scroll-spy target; `.settings-sections > [id]` in
+// globals.css gives it the scroll margin.
+function SettingsCard({
+  id,
+  title,
+  description,
+  badge,
+  children,
+}: {
+  id: string;
+  title: ReactNode;
+  description?: ReactNode;
+  badge?: ReactNode;
+  children: ReactNode;
+}) {
+  const heading = (
+    <h2 className="font-semibold" style={{ fontSize: 15, letterSpacing: "-0.01em", color: "var(--ds-fg)", margin: 0 }}>
+      {title}
+    </h2>
+  );
+  return (
+    <div
+      id={id}
+      style={{ padding: 22, background: "var(--ds-bg-2)", border: "1px solid var(--ds-border)", borderRadius: "var(--ds-r-lg)" }}
+    >
+      <div className="mb-5">
+        {badge ? <div className="flex items-center gap-3">{heading}{badge}</div> : heading}
+        {description && (
+          <p style={{ fontSize: 12, color: "var(--ds-fg-muted)", margin: "4px 0 0", lineHeight: 1.5 }}>{description}</p>
+        )}
+      </div>
+      {children}
+    </div>
+  );
+}
 
 const ALL_KEYS = [
   "radarrUrl", "radarrApiKey", "radarrRootFolder", "radarrQualityProfileId", "radarrMinimumAvailability",
@@ -160,6 +192,11 @@ const ALL_KEYS = [
   "auditPiiRetentionDays",
   "plexWatchlistServerSource", "plexWatchlistServerAutoEnroll", "plexWatchlistServerStatus",
 ] as const;
+
+// Placeholder a translated sentence is split on so a client-formatted value can
+// be rendered in its place (see the Plex watchlist status line). NUL can't occur
+// in a catalog string.
+const TIME_SLOT = "\u0000";
 
 const VALID_TABS: TabId[] = ["site", "media", "notifications", "integrations", "features", "system"];
 
@@ -525,106 +562,111 @@ export default async function SettingsPage({
 
         {tab === "site" && (
           <>
-            <div id="general" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.general.title")}</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.general.description")}</p>
-              </div>
+            <SettingsCard
+              id="general"
+              title={t("settings.section.general.title")}
+              description={t("settings.section.general.description")}
+            >
               <div className="space-y-6">
                 <SiteTitleForm initialTitle={cfg.siteTitle ?? ""} />
                 <SiteUrlForm initialUrl={cfg.siteUrl ?? ""} />
               </div>
-            </div>
+            </SettingsCard>
 
-            <div id="rate-limiting" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.rateLimiting.title")}</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.rateLimiting.description")}</p>
-              </div>
+            <SettingsCard
+              id="rate-limiting"
+              title={t("settings.section.rateLimiting.title")}
+              description={t("settings.section.rateLimiting.description")}
+            >
               <RateLimitForm
                 initialRegister={cfg.rateLimitRegister ?? ""}
                 initialRequests={cfg.rateLimitRequests ?? ""}
                 initialIssues={cfg.rateLimitIssues ?? ""}
                 initialMaxPushSubscriptions={cfg.maxPushSubscriptions ?? ""}
               />
-            </div>
+            </SettingsCard>
 
-            <div id="quotas" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.quotas.title")}</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.quotas.description")}</p>
-              </div>
+            <SettingsCard
+              id="quotas"
+              title={t("settings.section.quotas.title")}
+              description={t("settings.section.quotas.description")}
+            >
               <QuotaForm
                 initialLimit={cfg.quotaLimit ?? ""}
                 initialPeriod={cfg.quotaPeriod ?? ""}
               />
-            </div>
+            </SettingsCard>
 
-            <div id="deletion-votes" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.deletionVotes.title")}</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.deletionVotes.description")}</p>
-              </div>
+            <SettingsCard
+              id="deletion-votes"
+              title={t("settings.section.deletionVotes.title")}
+              description={t("settings.section.deletionVotes.description")}
+            >
               <DeletionVoteThresholdForm initialThreshold={cfg.deletionVoteThreshold ?? ""} />
-            </div>
+            </SettingsCard>
 
-            <div id="authentication" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.authentication.title")}</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.authentication.description")}</p>
+            <SettingsCard
+              id="authentication"
+              title={t("settings.section.authentication.title")}
+              description={t("settings.section.authentication.description")}
+            >
+              {/* The rows carry no spacing or rules of their own; this stack
+                  supplies both, so the four read as one list (the features
+                  tab's switch list uses the same recipe). */}
+              <div className="divide-y divide-[var(--ds-border)] [&>*]:py-3 [&>*:first-child]:pt-0 [&>*:last-child]:pb-0">
+                <DisableLocalLoginToggle initialDisabled={cfg.disableLocalLogin === "true"} />
+                <RequireAdminMfaToggle
+                  initialRequired={cfg.requireMfaForAdmins === "true"}
+                  envOverride={mfaEnforcementDisabledByEnv()}
+                />
+                <JellyfinRestrictSignInToggle initialRestrict={cfg.jellyfinRestrictSignIn !== "false"} />
+                <EnableMachineSessionToggle
+                  initialEnabled={cfg.enableMachineSession === "true"}
+                  initialAllowedIps={cfg.machineSessionAllowedIps ?? ""}
+                />
               </div>
-              <DisableLocalLoginToggle initialDisabled={cfg.disableLocalLogin === "true"} />
-              <RequireAdminMfaToggle
-                initialRequired={cfg.requireMfaForAdmins === "true"}
-                envOverride={mfaEnforcementDisabledByEnv()}
-              />
-              <JellyfinRestrictSignInToggle initialRestrict={cfg.jellyfinRestrictSignIn !== "false"} />
-              <EnableMachineSessionToggle
-                initialEnabled={cfg.enableMachineSession === "true"}
-                initialAllowedIps={cfg.machineSessionAllowedIps ?? ""}
-              />
-            </div>
+            </SettingsCard>
 
-            <div id="sessions" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.sessions.title")}</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.sessions.description")}</p>
-              </div>
+            <SettingsCard
+              id="sessions"
+              title={t("settings.section.sessions.title")}
+              description={t("settings.section.sessions.description")}
+            >
               <SessionForm
                 initialDefaultDuration={cfg.sessionDefaultDuration ?? ""}
                 initialMobileDuration={cfg.sessionMobileDuration ?? ""}
                 initialMaxDuration={cfg.sessionMaxDuration ?? ""}
               />
-            </div>
+            </SettingsCard>
 
-            <div id="maintenance" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.maintenance.title")}</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.maintenance.description")}</p>
-              </div>
+            <SettingsCard
+              id="maintenance"
+              title={t("settings.section.maintenance.title")}
+              description={t("settings.section.maintenance.description")}
+            >
               <MaintenanceForm
                 initialEnabled={cfg.maintenanceEnabled === "true"}
                 initialMessage={cfg.maintenanceMessage ?? ""}
               />
-            </div>
+            </SettingsCard>
 
-            <div id="motd" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.motd.title")}</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.motd.description")}</p>
-              </div>
+            <SettingsCard
+              id="motd"
+              title={t("settings.section.motd.title")}
+              description={t("settings.section.motd.description")}
+            >
               <MotdForm
                 initialEnabled={cfg.motdEnabled === "true"}
                 initialTitle={cfg.motdTitle ?? ""}
                 initialBody={cfg.motdBody ?? ""}
               />
-            </div>
+            </SettingsCard>
 
-            <div id="donations" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.donations.title")}</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.donations.description")}</p>
-              </div>
+            <SettingsCard
+              id="donations"
+              title={t("settings.section.donations.title")}
+              description={t("settings.section.donations.description")}
+            >
               <DonationForm
                 initialPaypal={cfg.donationPaypal ?? ""}
                 initialVenmo={cfg.donationVenmo ?? ""}
@@ -633,88 +675,90 @@ export default async function SettingsPage({
                 initialPatreon={cfg.donationPatreon ?? ""}
                 initialBuyMeACoffee={cfg.donationBuyMeACoffee ?? ""}
               />
-            </div>
+            </SettingsCard>
           </>
         )}
 
         {tab === "media" && (
           <>
-            <div id="plex" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Plex</h2>
-                  <StatusBadge t={t} connected={!!cfg.plexAdminEmail} />
-                </div>
-                <p className="text-sm text-zinc-500">{t("settings.section.plex.description")}</p>
-              </div>
+            <SettingsCard
+              id="plex"
+              title="Plex"
+              badge={<StatusBadge t={t} connected={!!cfg.plexAdminEmail} />}
+              description={t("settings.section.plex.description")}
+            >
               <PlexConnectForm
                 initialEmail={cfg.plexAdminEmail ?? ""}
                 initialServerUrl={cfg.plexServerUrl ?? ""}
                 initialPlexLibraries={cfg.plexLibraries ?? ""}
                 siteUrl={cfg.siteUrl ?? process.env.AUTH_URL ?? ""}
               />
-            </div>
+            </SettingsCard>
 
-            <div id="plex-watchlist" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.plexWatchlist.title")}</h2>
-                <p className="text-sm text-zinc-500 mt-1">{t("settings.section.plexWatchlist.description")}</p>
-              </div>
+            <SettingsCard
+              id="plex-watchlist"
+              title={t("settings.section.plexWatchlist.title")}
+              description={t("settings.section.plexWatchlist.description")}
+            >
               <PlexWatchlistServerToggles
                 initialServerSource={cfg.plexWatchlistServerSource === "true"}
                 initialAutoEnroll={cfg.plexWatchlistServerAutoEnroll === "true"}
               />
               {cfg.plexWatchlistServerSource === "true" && (() => {
-                // Rendered here, in the server component — no client clock (guardrail 16).
                 const st = parsePlexWatchlistServerStatus(cfg.plexWatchlistServerStatus);
                 if (!st) return <p className="text-xs text-zinc-500 mt-4">{t("settings.plexWatchlist.status.never")}</p>;
                 const counts = { ok: 0, private: 0, error: 0 };
                 for (const v of Object.values(st.users)) counts[v]++;
+                // The run time is formatted on the CLIENT (LocalDateTime, mounted-gated
+                // — guardrail 16) so it reads in the viewer's timezone, not the
+                // container's. The sentence comes from one catalog string, so it is
+                // translated with a sentinel where `{time}` goes and split there.
+                const [beforeTime, afterTime] = t("settings.plexWatchlist.status.summary", {
+                  time: TIME_SLOT,
+                  ok: counts.ok,
+                  private: counts.private,
+                  error: counts.error,
+                  unmatched: st.unmatchedFriends,
+                }).split(TIME_SLOT);
                 return (
                   <p className="text-xs text-zinc-500 mt-4">
-                    {t("settings.plexWatchlist.status.summary", {
-                      time: new Date(st.updatedAt).toLocaleString(locale),
-                      ok: counts.ok,
-                      private: counts.private,
-                      error: counts.error,
-                      unmatched: st.unmatchedFriends,
-                    })}
+                    {beforeTime}
+                    <LocalDateTime iso={st.updatedAt} />
+                    {afterTime}
                   </p>
                 );
               })()}
-            </div>
+            </SettingsCard>
 
-            <div id="jellyfin" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Jellyfin</h2>
-                  <StatusBadge t={t} connected={!!(cfg.jellyfinUrl && cfg.jellyfinApiKey)} />
-                </div>
-                <p className="text-sm text-zinc-500">{t("settings.section.jellyfin.description")}</p>
-              </div>
+            <SettingsCard
+              id="jellyfin"
+              title="Jellyfin"
+              badge={<StatusBadge t={t} connected={!!(cfg.jellyfinUrl && cfg.jellyfinApiKey)} />}
+              description={t("settings.section.jellyfin.description")}
+            >
               <JellyfinSyncForm
                 initialUrl={cfg.jellyfinUrl ?? ""}
                 initialApiKey={cfg.jellyfinApiKey ? "••••••••" : ""}
                 initialJellyfinLibraries={cfg.jellyfinLibraries ?? ""}
               />
-            </div>
+            </SettingsCard>
 
-            <div id="media-instances" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.mediaInstances.title")}</h2>
-                <p className="text-sm text-zinc-500 mt-1">{t("settings.section.mediaInstances.description")}</p>
-              </div>
+            <SettingsCard
+              id="media-instances"
+              title={t("settings.section.mediaInstances.title")}
+              description={t("settings.section.mediaInstances.description")}
+            >
               <div className="space-y-8">
                 <MediaInstancesManager service="plex" />
                 <MediaInstancesManager service="jellyfin" />
               </div>
-            </div>
+            </SettingsCard>
 
-            <div id="play-history" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.playHistory.title")}</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.playHistory.description")}</p>
-              </div>
+            <SettingsCard
+              id="play-history"
+              title={t("settings.section.playHistory.title")}
+              description={t("settings.section.playHistory.description")}
+            >
               <PlayHistorySettingsForm
                 initialEnabled={cfg.playHistoryEnabled ?? ""}
                 initialPlexEnabled={cfg.playHistoryPlexEnabled ?? ""}
@@ -725,13 +769,13 @@ export default async function SettingsPage({
                 initialPollingInterval={cfg.playHistoryPollingInterval ?? "5"}
                 initialRetentionDays={cfg.playHistoryRetentionDays ?? "0"}
               />
-            </div>
+            </SettingsCard>
 
-            <div id="watch-grades" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.watchGrades.title")}</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.watchGrades.description")}</p>
-              </div>
+            <SettingsCard
+              id="watch-grades"
+              title={t("settings.section.watchGrades.title")}
+              description={t("settings.section.watchGrades.description")}
+            >
               <WatchGradeSettingsForm
                 initial={{
                   graceDays: cfg.watchGradeGraceDays ?? "",
@@ -745,29 +789,27 @@ export default async function SettingsPage({
                   minGradedRequests: cfg.watchGradeMinRequests ?? "",
                 }}
               />
-            </div>
+            </SettingsCard>
 
-            <div id="library-matching" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.libraryMatching.title")}</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.libraryMatching.description")}</p>
-              </div>
+            <SettingsCard
+              id="library-matching"
+              title={t("settings.section.libraryMatching.title")}
+              description={t("settings.section.libraryMatching.description")}
+            >
               <LibraryMatchForm
                 initialPlexMoviePrefix={cfg.plexMoviePathStripPrefix ?? ""}
                 initialPlexTvPrefix={cfg.plexTvPathStripPrefix ?? ""}
                 initialJellyfinMoviePrefix={cfg.jellyfinMoviePathStripPrefix ?? ""}
                 initialJellyfinTvPrefix={cfg.jellyfinTvPathStripPrefix ?? ""}
               />
-            </div>
+            </SettingsCard>
 
-            <div id="radarr" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Radarr</h2>
-                  <StatusBadge t={t} connected={!!(cfg.radarrUrl && cfg.radarrApiKey)} />
-                </div>
-                <p className="text-sm text-zinc-500">{t("settings.section.radarr.description")}</p>
-              </div>
+            <SettingsCard
+              id="radarr"
+              title="Radarr"
+              badge={<StatusBadge t={t} connected={!!(cfg.radarrUrl && cfg.radarrApiKey)} />}
+              description={t("settings.section.radarr.description")}
+            >
               <ArrForm
                 service="radarr"
                 initialUrl={cfg.radarrUrl ?? ""}
@@ -776,16 +818,14 @@ export default async function SettingsPage({
                 initialQualityProfileId={cfg.radarrQualityProfileId ?? ""}
                 initialMinimumAvailability={cfg.radarrMinimumAvailability ?? ""}
               />
-            </div>
+            </SettingsCard>
 
-            <div id="radarr4k" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Radarr 4K <span style={{fontSize:12,color:"var(--ds-fg-subtle)",fontWeight:400}}>{t("settings.common.optional")}</span></h2>
-                  <StatusBadge t={t} connected={!!(cfg.radarr4kUrl && cfg.radarr4kApiKey)} />
-                </div>
-                <p className="text-sm text-zinc-500">{t("settings.section.radarr4k.description")}</p>
-              </div>
+            <SettingsCard
+              id="radarr4k"
+              title={<>Radarr 4K <span style={{fontSize:12,color:"var(--ds-fg-subtle)",fontWeight:400}}>{t("settings.common.optional")}</span></>}
+              badge={<StatusBadge t={t} connected={!!(cfg.radarr4kUrl && cfg.radarr4kApiKey)} />}
+              description={t("settings.section.radarr4k.description")}
+            >
               <ArrForm
                 service="radarr"
                 variant="4k"
@@ -795,16 +835,14 @@ export default async function SettingsPage({
                 initialQualityProfileId={cfg.radarr4kQualityProfileId ?? ""}
                 initialMinimumAvailability={cfg.radarr4kMinimumAvailability ?? ""}
               />
-            </div>
+            </SettingsCard>
 
-            <div id="sonarr" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Sonarr</h2>
-                  <StatusBadge t={t} connected={!!(cfg.sonarrUrl && cfg.sonarrApiKey)} />
-                </div>
-                <p className="text-sm text-zinc-500">{t("settings.section.sonarr.description")}</p>
-              </div>
+            <SettingsCard
+              id="sonarr"
+              title="Sonarr"
+              badge={<StatusBadge t={t} connected={!!(cfg.sonarrUrl && cfg.sonarrApiKey)} />}
+              description={t("settings.section.sonarr.description")}
+            >
               <ArrForm
                 service="sonarr"
                 initialUrl={cfg.sonarrUrl ?? ""}
@@ -813,16 +851,14 @@ export default async function SettingsPage({
                 initialQualityProfileId={cfg.sonarrQualityProfileId ?? ""}
                 initialLanguageProfileId={cfg.sonarrLanguageProfileId ?? ""}
               />
-            </div>
+            </SettingsCard>
 
-            <div id="sonarr4k" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>Sonarr 4K <span style={{fontSize:12,color:"var(--ds-fg-subtle)",fontWeight:400}}>{t("settings.common.optional")}</span></h2>
-                  <StatusBadge t={t} connected={!!(cfg.sonarr4kUrl && cfg.sonarr4kApiKey)} />
-                </div>
-                <p className="text-sm text-zinc-500">{t("settings.section.sonarr4k.description")}</p>
-              </div>
+            <SettingsCard
+              id="sonarr4k"
+              title={<>Sonarr 4K <span style={{fontSize:12,color:"var(--ds-fg-subtle)",fontWeight:400}}>{t("settings.common.optional")}</span></>}
+              badge={<StatusBadge t={t} connected={!!(cfg.sonarr4kUrl && cfg.sonarr4kApiKey)} />}
+              description={t("settings.section.sonarr4k.description")}
+            >
               <ArrForm
                 service="sonarr"
                 variant="4k"
@@ -832,32 +868,34 @@ export default async function SettingsPage({
                 initialQualityProfileId={cfg.sonarr4kQualityProfileId ?? ""}
                 initialLanguageProfileId={cfg.sonarr4kLanguageProfileId ?? ""}
               />
-            </div>
+            </SettingsCard>
 
-            <div style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
+            <SettingsCard
+              id="request-4k"
+              title={t("settings.section.request4k.title")}
+              description={t("settings.section.request4k.description")}
+            >
               <Request4kAllToggle initialEnabled={cfg.request4kAll === "true"} />
-            </div>
+            </SettingsCard>
 
-            <div id="arr-instances" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.arrInstances.title")}</h2>
-                <p className="text-sm text-zinc-500 mt-1">{t("settings.section.arrInstances.description")}</p>
-              </div>
+            <SettingsCard
+              id="arr-instances"
+              title={t("settings.section.arrInstances.title")}
+              description={t("settings.section.arrInstances.description")}
+            >
               <ArrInstancesManager />
-            </div>
+            </SettingsCard>
           </>
         )}
 
         {tab === "notifications" && (
           <>
-            <div id="email" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.email.title")}</h2>
-                  <StatusBadge t={t} connected={cfg.emailBackend === "resend" ? !!cfg.resendApiKey : !!cfg.smtpHost} />
-                </div>
-                <p className="text-sm text-zinc-500">{t("settings.section.email.description")}</p>
-              </div>
+            <SettingsCard
+              id="email"
+              title={t("settings.section.email.title")}
+              badge={<StatusBadge t={t} connected={cfg.emailBackend === "resend" ? !!cfg.resendApiKey : !!cfg.smtpHost} />}
+              description={t("settings.section.email.description")}
+            >
               <EmailForm
                 initialBackend={cfg.emailBackend === "resend" ? "resend" : "smtp"}
                 initialHost={cfg.smtpHost ?? ""}
@@ -869,16 +907,14 @@ export default async function SettingsPage({
                 initialResendFrom={cfg.resendFrom ?? ""}
               />
               <EnableUserEmailsToggle initialEnabled={cfg.enableUserEmails === "true"} />
-            </div>
+            </SettingsCard>
 
-            <div id="discord-bot" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.discordBot.title")}</h2>
-                  <StatusBadge t={t} connected={!!cfg.discordBotToken} />
-                </div>
-                <p className="text-sm text-zinc-500">{t("settings.section.discordBot.description")}</p>
-              </div>
+            <SettingsCard
+              id="discord-bot"
+              title={t("settings.section.discordBot.title")}
+              badge={<StatusBadge t={t} connected={!!cfg.discordBotToken} />}
+              description={t("settings.section.discordBot.description")}
+            >
               <DiscordBotForm
                 initialBotToken={cfg.discordBotToken ? "••••••••" : ""}
                 initialClientId={cfg.discordClientId ?? ""}
@@ -897,15 +933,13 @@ export default async function SettingsPage({
                 initialAdminRoleId={cfg.discordAdminRoleId ?? ""}
                 initialIssueAdminRoleId={cfg.discordIssueAdminRoleId ?? ""}
               />
-            </div>
+            </SettingsCard>
 
-            <div id="ios-push-relay" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.iosPushRelay.title")}</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  {t("settings.section.iosPushRelay.description")}
-                </p>
-              </div>
+            <SettingsCard
+              id="ios-push-relay"
+              title={t("settings.section.iosPushRelay.title")}
+              description={t("settings.section.iosPushRelay.description")}
+            >
               <div className="space-y-6">
                 <IosPushRelayForm
                   initialRelayUrl={cfg.apnsRelayUrl ?? ""}
@@ -916,30 +950,26 @@ export default async function SettingsPage({
                   <AnnounceUpdateButton />
                 </div>
               </div>
-            </div>
+            </SettingsCard>
 
-            <div id="notification-agents" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.notificationAgents.title")}</h2>
-                <p className="text-sm text-zinc-500 mt-1">{t("settings.section.notificationAgents.description")}</p>
-              </div>
+            <SettingsCard
+              id="notification-agents"
+              title={t("settings.section.notificationAgents.title")}
+              description={t("settings.section.notificationAgents.description")}
+            >
               <NotificationAgentsManager featureEnabled={agentsFeatureEnabled} />
-            </div>
+            </SettingsCard>
           </>
         )}
 
         {tab === "integrations" && (
           <>
-            <div id="external-ratings" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.externalRatings.title")}</h2>
-                  <StatusBadge t={t} connected={!!(cfg.mdblistApiKey || cfg.omdbApiKey || cfg.traktClientId)} />
-                </div>
-                <p className="text-sm text-zinc-500">
-                  {t("settings.section.externalRatings.description")}
-                </p>
-              </div>
+            <SettingsCard
+              id="external-ratings"
+              title={t("settings.section.externalRatings.title")}
+              badge={<StatusBadge t={t} connected={!!(cfg.mdblistApiKey || cfg.omdbApiKey || cfg.traktClientId)} />}
+              description={t("settings.section.externalRatings.description")}
+            >
               <div className="space-y-6">
                 <MdblistForm initialApiKey={cfg.mdblistApiKey ? "••••••••" : ""} />
                 <div className="border-t border-zinc-800 pt-5">
@@ -955,26 +985,22 @@ export default async function SettingsPage({
                   <CacheManagementPanel />
                 </div>
               </div>
-            </div>
+            </SettingsCard>
 
-            <div id="ip-geolocation" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <div className="flex items-center gap-3 mb-0.5">
-                  <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.ipGeolocation.title")}</h2>
-                  <StatusBadge t={t} connected={!!cfg.ipinfoToken} />
-                </div>
-                <p className="text-sm text-zinc-500">{t("settings.section.ipGeolocation.description")}</p>
-              </div>
+            <SettingsCard
+              id="ip-geolocation"
+              title={t("settings.section.ipGeolocation.title")}
+              badge={<StatusBadge t={t} connected={!!cfg.ipinfoToken} />}
+              description={t("settings.section.ipGeolocation.description")}
+            >
               <IpinfoForm initialApiKey={cfg.ipinfoToken ? "••••••••" : ""} />
-            </div>
+            </SettingsCard>
 
-            <div id="webhooks" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-              <div className="mb-5">
-                <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.webhooks.title")}</h2>
-                <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                  {t("settings.section.webhooks.description")}
-                </p>
-              </div>
+            <SettingsCard
+              id="webhooks"
+              title={t("settings.section.webhooks.title")}
+              description={t("settings.section.webhooks.description")}
+            >
               <div className="space-y-6">
                 <WebhookSecretForm
                   initialSecret={cfg.webhookSecret ? "••••••••" : ""}
@@ -996,7 +1022,7 @@ export default async function SettingsPage({
                   />
                 </div>
               </div>
-            </div>
+            </SettingsCard>
           </>
         )}
 
@@ -1017,29 +1043,27 @@ export default async function SettingsPage({
 
         {tab === "system" && metrics && (
           <>
-          <div id="scheduled-jobs" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-            <div className="mb-5">
-              <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.scheduledJobs.title")}</h2>
-              <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.scheduledJobs.description")}</p>
-            </div>
+          <SettingsCard
+            id="scheduled-jobs"
+            title={t("settings.section.scheduledJobs.title")}
+            description={t("settings.section.scheduledJobs.description")}
+          >
             <CronJobTable jobs={metrics.cronJobs} />
-          </div>
+          </SettingsCard>
 
-          <div id="audit-log-settings" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-            <div className="mb-5">
-              <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.auditLog.title")}</h2>
-              <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>
-                {t("settings.section.auditLog.description")}
-              </p>
-            </div>
+          <SettingsCard
+            id="audit-log-settings"
+            title={t("settings.section.auditLog.title")}
+            description={t("settings.section.auditLog.description")}
+          >
             <AuditRetentionForm initialDays={cfg.auditPiiRetentionDays ?? ""} />
-          </div>
+          </SettingsCard>
 
-          <div id="db-metrics" style={{padding:22,background:"var(--ds-bg-2)",border:"1px solid var(--ds-border)",borderRadius:10}}>
-            <div className="mb-5">
-              <h2 className="font-semibold" style={{fontSize:15,letterSpacing:"-0.01em",color:"var(--ds-fg)",margin:0}}>{t("settings.section.dbMetrics.title")}</h2>
-              <p style={{fontSize:12,color:"var(--ds-fg-muted)",margin:"4px 0 0",lineHeight:1.5}}>{t("settings.section.dbMetrics.description")}</p>
-            </div>
+          <SettingsCard
+            id="db-metrics"
+            title={t("settings.section.dbMetrics.title")}
+            description={t("settings.section.dbMetrics.description")}
+          >
             <div className="space-y-6">
 
               <div>
@@ -1175,7 +1199,7 @@ export default async function SettingsPage({
               </div>
 
             </div>
-          </div>
+          </SettingsCard>
           </>
         )}
 

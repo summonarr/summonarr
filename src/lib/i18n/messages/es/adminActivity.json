@@ -295,7 +295,6 @@
   "adminActivity.user.lastSeen": "Visto por última vez",
   "adminActivity.user.lastN": "últimas {count}",
   "adminActivity.user.linkedTo": "Vinculado a {name}",
-  "adminActivity.method.directStreamRemux": "Transmisión directa (remux)",
   "adminActivity.play.backToHistory": "Volver al historial",
   "adminActivity.play.notWatched": "No visto",
   "adminActivity.play.pctComplete": "{pct}% completado",
@@ -365,5 +364,11 @@
   "adminActivity.transcode.usersSub": "más transcodificaciones · últimos {days} d",
   "adminActivity.transcode.titles": "Presión de transcodificación · títulos",
   "adminActivity.transcode.titlesSub": "más transcodificados · últimos {days} d",
-  "adminActivity.transcode.none": "No hay transcodificaciones en este periodo."
+  "adminActivity.transcode.none": "No hay transcodificaciones en este periodo.",
+  "adminActivity.common.hoursSuffix": "h",
+  "adminActivity.trackingOff.title": "El seguimiento del historial de reproducción está desactivado",
+  "adminActivity.trackingOff.description": "No se está registrando nada, así que este panel no tiene reproducciones, tiempo de visionado ni espectadores que mostrar. Activa el seguimiento en Ajustes → Medios → Historial de reproducción para empezar a llenarlo.",
+  "adminActivity.trackingOff.cta": "Abrir ajustes del historial de reproducción",
+  "adminActivity.common.hoursShort": "{n} h",
+  "adminActivity.detail.openPlay": "Abrir reproducción →"
 }

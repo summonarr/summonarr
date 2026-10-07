@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { tooManyRequests } from "@/lib/http";
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -26,7 +27,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
   }
   if (!session.sessionId) return NextResponse.json({ error: t("apiAuth.common.unauthorized") }, { status: 401 });
   if (!checkRateLimit(`mfa-stepup-challenge:${session.user.id}`, 30, 15 * 60 * 1000)) {
-    return NextResponse.json({ error: t("apiAuth.common.tooManyAttempts15") }, { status: 429 });
+    return tooManyRequests(15 * 60, t("apiAuth.common.tooManyAttempts15"));
   }
   const user = await mfaEligibleUser(session, t);
   if (user instanceof NextResponse) return user;

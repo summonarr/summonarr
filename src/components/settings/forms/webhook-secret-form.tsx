@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -30,8 +31,12 @@ function WebhookSecretField({
   initialSecret: string;
 }) {
   const t = useT();
+  const router = useRouter();
   const [secret, setSecret] = useState(initialSecret);
   const [status, setStatus] = useState<SaveStatus>("idle");
+  // The route's own reason (a 429 cooldown, too long) — shown in place of the
+  // bare "Failed to save".
+  const [message, setMessage] = useState("");
   // An earlier save's idle timer must not fire into a later save (it would
   // re-enable Save mid-flight or hide the new result early).
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -43,14 +48,26 @@ function WebhookSecretField({
     e.preventDefault();
     if (idleTimer.current) clearTimeout(idleTimer.current);
     setStatus("saving");
+    setMessage("");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ [payloadKey]: secret }),
       });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
-      setStatus(res.ok && data.ok !== false ? "ok" : "error");
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (res.ok && data.ok !== false) {
+        setStatus("ok");
+        // The webhook URL list below is server-rendered from "does a secret
+        // exist" flags; re-render it so the ?token= mask, the 4K copy row and
+        // the "no secret" warning follow the save instead of waiting for a
+        // reload (the secret input is type=password, so a reload was the only
+        // way to get at the URL).
+        router.refresh();
+      } else {
+        setMessage(data.error ?? t("settings.form.common.saveFailed"));
+        setStatus("error");
+      }
     } catch {
       setStatus("error");
     }
@@ -68,7 +85,7 @@ function WebhookSecretField({
             value={secret}
             onChange={(e) => { setSecret(e.target.value); setStatus("idle"); }}
             placeholder={t("settings.form.webhookSecret.placeholder")}
-            className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+            className="bg-zinc-800 border-zinc-700 font-mono"
           />
           <Button
             type="button"
@@ -85,7 +102,7 @@ function WebhookSecretField({
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
           {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.webhookSecret.save")}
         </Button>
-        <SaveStatusMessage status={status} />
+        <SaveStatusMessage status={status} errorLabel={message || t("settings.form.common.saveFailed")} />
       </div>
     </form>
   );

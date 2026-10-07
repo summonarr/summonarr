@@ -51,7 +51,6 @@
   "personal.votes.emptyFilteredDescription": "Nenhum voto corresponde a esses filtros.",
   "personal.votes.emptyTitle": "Ainda não há votos de exclusão",
   "personal.votes.emptyDescription": "Explore sua biblioteca e vote nos itens que você acha que devem ser removidos.",
-  "personal.votes.noPoster": "Sem pôster",
   "personal.votes.count_one": "{count} voto",
   "personal.votes.count_other": "{count} votos",
   "personal.votes.anonymous": "Anônimo",
@@ -189,5 +188,10 @@
   "personal.donate.zelleHint": "Envie pelo Zelle do seu banco para:",
   "personal.donate.amazonHint": "Ver minha lista de desejos da Amazon",
   "personal.donate.patreonHint": "Torne-se um apoiador no Patreon",
-  "personal.donate.coffeeHint": "Me pague um café"
+  "personal.donate.coffeeHint": "Me pague um café",
+  "personal.common.trackingOff.title": "O rastreamento do histórico de reprodução está desativado",
+  "personal.common.trackingOff.description": "Nada está sendo registrado, então esta página não pode ser preenchida. Um administrador pode ativar o rastreamento do histórico em Configurações → Recursos.",
+  "personal.common.trackingOff.cta": "Abrir configurações",
+  "personal.common.showingMostRecent": "Mostrando seus {n} títulos mais recentes. Os mais antigos não aparecem aqui.",
+  "personal.watchlist.removeError": "Não foi possível remover “{title}” da sua lista. Tente novamente."
 }

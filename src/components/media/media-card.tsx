@@ -367,12 +367,12 @@ function MediaCardImpl({
             rank badge sits at exactly these coordinates (top-1.5/left-1.5 is
             6px, the same inset it uses) and, being z-10, covered the Plex
             glyph on every ranked card. See .ds-ranked-card in globals.css.
-            An overlayAction shares this corner too, so with one present the
-            stack starts below it (26px control + its 36px hit area + inset). */}
+            An overlayAction shares this corner too and rides at the END of
+            the stack, so the chips keep the corner and the control follows
+            whatever is above it (or takes the corner when there are none). */}
         <div
           data-media-chips
           className="absolute top-1.5 left-1.5 flex flex-col gap-1"
-          style={overlayAction ? { top: 38 } : undefined}
         >
           {showPlex && media.plexAvailable && (
             <span
@@ -426,45 +426,64 @@ function MediaCardImpl({
               {t("media.badge.queued4k")}
             </span>
           )}
+          {/* Caller-supplied action (e.g. /for-you's "not interested").
+              Fades in with hover like the request overlay, but stays visible
+              while focused so it is reachable by keyboard and always present
+              on any device without hover. Keyed on (hover: none), NOT a width:
+              an iPad in landscape is wider than any breakpoint and still has
+              no hover, so a width gate left the control transparent but
+              tappable there. mt-0.5 keeps its 5px hit-area outset clear of
+              the chip above. */}
+          {overlayAction && (
+            <div className="mt-0.5 self-start opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
+              {overlayAction}
+            </div>
+          )}
         </div>
 
-        {/* Bottom-left: requested indicator */}
-        {!isAvailable && (media.requested || reqState === "requested") && (
-          <span
-            className="ds-chip ds-chip-accent absolute bottom-1.5 left-1.5"
-            style={{ paddingLeft: 5, paddingRight: 6 }}
+        {/* Bottom-left: request state — "Requested" (a pending request, anyone's)
+            and "Blocked" (admin blacklist, which never touches the request rows,
+            so both can hold at once). One stack like the top-left chips, so they
+            no longer paint on top of each other at the same corner.
+            pointer-events-none: the chip sat over the revealed bubble's corner
+            on ordinary card widths and a click there bubbled to the card (→ the
+            detail page) instead of the bubble. It fades whenever the overlay is
+            revealed for the same reason — the two share the poster's bottom
+            edge — and stays hidden while the confirm prompt is up. */}
+        {!isAvailable &&
+          ((media.requested || reqState === "requested") || (!isRequested && blacklisted)) && (
+          <div
+            className={cn(
+              "absolute bottom-1.5 left-1.5 flex flex-col items-start gap-1 pointer-events-none transition-opacity",
+              reqState === "confirm"
+                ? "opacity-0"
+                : "group-hover:opacity-0 group-focus-within:opacity-0",
+            )}
           >
-            <CheckCircle style={{ width: 9, height: 9 }} />
-            {t("media.badge.requested")}
-          </span>
-        )}
-
-        {/* Bottom-left: admin-blacklisted indicator (shown but unrequestable) */}
-        {!isAvailable && !isRequested && blacklisted && (
-          <span
-            className="ds-chip absolute bottom-1.5 left-1.5"
-            style={{
-              paddingLeft: 5,
-              paddingRight: 6,
-              background: "color-mix(in oklab, var(--ds-bg-inset) 80%, transparent)",
-              color: "var(--ds-fg-muted)",
-              border: "1px solid var(--ds-border)",
-            }}
-          >
-            <Ban style={{ width: 9, height: 9 }} />
-            {t("media.card.blocked")}
-          </span>
-        )}
-
-        {/* Top-left: caller-supplied action (e.g. /for-you's "not interested").
-            Fades in with hover like the request overlay, but stays visible while
-            focused so it is reachable by keyboard and always present on any
-            device without hover. Keyed on (hover: none), NOT a width: an iPad in
-            landscape is wider than any breakpoint and still has no hover, so a
-            width gate left the control transparent but tappable there. */}
-        {overlayAction && (
-          <div className="absolute top-1.5 left-1.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
-            {overlayAction}
+            {(media.requested || reqState === "requested") && (
+              <span
+                className="ds-chip ds-chip-accent"
+                style={{ paddingLeft: 5, paddingRight: 6 }}
+              >
+                <CheckCircle style={{ width: 9, height: 9 }} />
+                {t("media.badge.requested")}
+              </span>
+            )}
+            {!isRequested && blacklisted && (
+              <span
+                className="ds-chip"
+                style={{
+                  paddingLeft: 5,
+                  paddingRight: 6,
+                  background: "color-mix(in oklab, var(--ds-bg-inset) 80%, transparent)",
+                  color: "var(--ds-fg-muted)",
+                  border: "1px solid var(--ds-border)",
+                }}
+              >
+                <Ban style={{ width: 9, height: 9 }} />
+                {t("media.card.blocked")}
+              </span>
+            )}
           </div>
         )}
 
@@ -494,6 +513,9 @@ function MediaCardImpl({
             >
               ★
             </span>
+            {/* Brand name, not a catalog string. Without it the badge read as a
+                bare "7.8" between the poster alt and the chips. */}
+            <span className="sr-only">TMDB </span>
             {media.voteAverage.toFixed(1)}
           </div>
         )}

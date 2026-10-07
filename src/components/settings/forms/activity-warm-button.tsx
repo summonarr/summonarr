@@ -53,12 +53,15 @@ export function ActivityWarmButton() {
         }
       </Button>
       {result && (
-        <span role={status === "error" ? "alert" : "status"} aria-live={status === "error" ? "assertive" : "polite"} className={`text-xs ${status === "error" ? "text-red-400" : "text-zinc-400"}`}>
+        <span role={status === "error" ? "alert" : "status"} aria-live={status === "error" ? "assertive" : "polite"} className={`text-xs ${status === "error" ? "text-red-400" : "text-green-400"}`}>
           {result}
         </span>
       )}
-      {status === "done" && !result?.includes("error") && (
-        <CheckCircle className="w-4 h-4 text-green-400" />
+      {/* `status` already says whether the run succeeded — never sniff the
+          translated result text for the word "error" (it is not English in
+          every locale). */}
+      {status === "done" && (
+        <CheckCircle className="w-4 h-4 text-green-400" aria-hidden />
       )}
     </div>
   );

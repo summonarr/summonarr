@@ -75,6 +75,7 @@ registerHooks({
 
 const {
   filterNavByFeatures,
+  isNavItemActive,
   NAV_ITEM_FEATURE_KEY,
   ADMIN_ITEM_PERMISSION,
   userNavItems,
@@ -173,6 +174,60 @@ test("it is generic over a bare {href} — the nav definition stays usable from 
   assert.deepEqual(out, [{ href: "/profile", label: "p" }]);
 });
 
+// ── isNavItemActive: the ONE active-item rule every nav surface shares ────────
+//
+// The sidebar, the mobile drawer, the bottom tab bar and the header breadcrumb
+// each used to re-derive "is this item the current page", and the copies
+// disagreed: only the drawer knew the movie detail route is singular
+// (/movie/123) while its list item is plural (/movies), so on desktop
+// /tv/1399 lit "TV Shows" and /movie/603 lit nothing. These pins are what
+// keep a future copy from re-appearing with a different answer.
+
+const byHref = (href: string) => {
+  const item = ALL_ITEMS.find((i) => i.href === href);
+  assert.ok(item, `${href} is not a nav item`);
+  return item;
+};
+
+test("an exact item matches only its own path — '/' must not light on every route", () => {
+  assert.equal(isNavItemActive("/", byHref("/")), true);
+  assert.equal(isNavItemActive("/movies", byHref("/")), false);
+  assert.equal(isNavItemActive("/admin", byHref("/admin")), true);
+  assert.equal(isNavItemActive("/admin/issues", byHref("/admin")), false);
+});
+
+test("the Movies item owns the singular /movie/[id] detail route", () => {
+  assert.equal(isNavItemActive("/movies", byHref("/movies")), true);
+  assert.equal(isNavItemActive("/movie/603", byHref("/movies")), true);
+  // …and nothing else does: a movie page lights exactly one item.
+  const lit = ALL_ITEMS.filter((i) => isNavItemActive("/movie/603", i)).map((i) => i.href);
+  assert.deepEqual(lit, ["/movies"]);
+});
+
+test("the TV item matches its detail route on a segment boundary, not a bare prefix", () => {
+  assert.equal(isNavItemActive("/tv", byHref("/tv")), true);
+  assert.equal(isNavItemActive("/tv/1399", byHref("/tv")), true);
+  assert.equal(isNavItemActive("/tv/1399/season/2", byHref("/tv")), true);
+  // A bare startsWith would light "TV Shows" on an unrelated /tv-… path.
+  assert.equal(isNavItemActive("/tvsomething", byHref("/tv")), false);
+  assert.equal(isNavItemActive("/topics", byHref("/top")), false);
+});
+
+test("a nested admin route lights its own item, and the longest match is unambiguous", () => {
+  assert.equal(isNavItemActive("/admin/issues/42", byHref("/admin/issues")), true);
+  const lit = ALL_ITEMS.filter((i) => isNavItemActive("/admin/issues/42", i)).map((i) => i.href);
+  assert.deepEqual(lit, ["/admin/issues"]);
+});
+
+test("a sub-page of a personal item lights that item (/my-stats/wrapped → My Stats)", () => {
+  assert.equal(isNavItemActive("/my-stats/wrapped", byHref("/my-stats")), true);
+});
+
+test("the matcher accepts a bare {href, exact} — renderers pass whatever shape they hold", () => {
+  assert.equal(isNavItemActive("/requests/abc", { href: "/requests" }), true);
+  assert.equal(isNavItemActive("/requests/abc", { href: "/requests", exact: true }), false);
+});
+
 // ── flag-wiring drift, checked against the real registry ─────────────────────
 
 const featuresSrc = readFileSync(resolve(HERE, "../src/lib/features.ts"), "utf8");
@@ -237,6 +292,15 @@ const PAGE_GUARD_EXEMPT: Record<string, string> = {
   trashGuidesEnabled: "its own re-enable toggle lives inside the gated subtree",
 };
 
+// Flags whose pages enforce them by rendering a "tracking is off" EmptyState
+// (via the named helper) rather than requireFeature's 404. The personal history
+// pages are empty BY CONSTRUCTION while play-history tracking is off — nothing
+// records — so a user who reaches the URL must learn why, not get a 404. The
+// helper spelling is what the page source must carry instead.
+const SOFT_PAGE_GUARD: Record<string, string> = {
+  playHistoryEnabled: "isPlayHistoryEnabled(",
+};
+
 test("a nav item gated by a feature flag ALSO enforces it on the page — a hidden link is not a disabled page", () => {
   // Hiding the link without a page guard leaves the URL live, so the toggle
   // would not actually disable anything.
@@ -249,11 +313,23 @@ test("a nav item gated by a feature flag ALSO enforces it on the page — a hidd
       .filter((f) => existsSync(f))
       .map((f) => readFileSync(f, "utf8"))
       .join("\n");
+    const guard = SOFT_PAGE_GUARD[key] ?? `requireFeature("${key}")`;
     assert.ok(
-      sources.includes(`requireFeature("${key}")`),
-      `${href} is hidden by ${key} in the nav but never enforces it — the page stays reachable by URL`,
+      sources.includes(guard),
+      `${href} is hidden by ${key} in the nav but never enforces it (expected ${guard}) — the page stays reachable by URL`,
     );
   }
+});
+
+test("the personal history pages are gated on play-history tracking — their empty copy is false while nothing records", () => {
+  // Fresh installs ship tracking OFF, so without this the nav advertised two
+  // pages whose "plays will show up here" could never come true. Same gate
+  // /popular uses.
+  assert.equal(NAV_ITEM_FEATURE_KEY["/watch-history"], "playHistoryEnabled");
+  assert.equal(NAV_ITEM_FEATURE_KEY["/my-stats"], "playHistoryEnabled");
+  const out = hrefs(filterNavByFeatures(userNavItems, { playHistoryEnabled: false }));
+  assert.ok(!out.includes("/watch-history") && !out.includes("/my-stats"), "tracking off left a history page in the nav");
+  assert.ok(out.includes("/watchlist"), "an unrelated personal item was hidden");
 });
 
 test("a page-guard-exempt flag is still enforced SOMEWHERE — the exemption is not a hiding place", () => {

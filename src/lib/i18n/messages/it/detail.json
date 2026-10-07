@@ -84,5 +84,6 @@
   "detail.status.ended": "Conclusa",
   "detail.status.pilot": "Pilota",
   "detail.seasons.numbered": "Stagione {number}",
-  "detail.seasons.specials": "Speciali"
+  "detail.seasons.specials": "Speciali",
+  "detail.seasons.episodeAbbrev": "E{number}"
 }

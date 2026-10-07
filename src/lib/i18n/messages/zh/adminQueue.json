@@ -252,7 +252,7 @@
   "adminQueue.fixMatch.arrSays": "Arr 显示为 TMDB #{id}",
   "adminQueue.fixMatch.arrRecommends": "Radarr/Sonarr 推荐了不同的匹配：",
   "adminQueue.fixMatch.arrConfirmsHighlighted": "Radarr/Sonarr 确认 TMDB #{id}——匹配的候选项已在下方高亮显示。",
-  "adminQueue.fixMatch.reidentify": "将此 Jellyfin 条目从 TMDB #{from} 重新识别为 TMDB #{to}",
+  "adminQueue.fixMatch.reidentify": "将此 Jellyfin 项目从 TMDB #{from} 重新识别为 TMDB #{to}{instance}。",
   "adminQueue.fixMatch.jellyfinNote": "Jellyfin 会应用这个确切的 TMDB id 并执行完整的元数据刷新——没有其他候选项可选。较大的条目可能需要几分钟才能确认。",
   "adminQueue.fixMatch.plexCandidatesHeading": "Plex 候选项——选择正确的匹配",
   "adminQueue.fixMatch.found": "找到 {count} 个",
@@ -287,5 +287,17 @@
   "adminQueue.blacklist.unblockAria": "取消屏蔽《{title}》",
   "adminQueue.blacklist.unblock": "取消屏蔽",
   "adminQueue.blacklist.title": "黑名单",
-  "adminQueue.blacklist.subtitle": "在发现和请求中屏蔽特定作品"
+  "adminQueue.blacklist.subtitle": "在发现和请求中屏蔽特定作品",
+  "adminQueue.blacklist.filterPlaceholder": "筛选已屏蔽的作品…",
+  "adminQueue.blacklist.filterAria": "按标题或原因筛选已屏蔽的作品",
+  "adminQueue.blacklist.filterNoMatch": "没有符合此筛选条件的已屏蔽作品。",
+  "adminQueue.fixMatch.outcome.joined": "相同的修复已在运行——你选择的候选项可能未被应用。",
+  "adminQueue.fixMatch.outcome.jobLost": "服务器丢失了此修复的记录（已重启？）——请重新同步媒体库以确认是否已生效。",
+  "adminQueue.fixMatch.outcome.pollLost": "修复运行期间失去联系——请重新同步媒体库以确认是否已生效。",
+  "adminQueue.fixMatch.outcome.timedOut": "修复在 20 分钟后仍在运行——请在媒体服务器上检查该项目，或重新同步媒体库。",
+  "adminQueue.fixMatch.outcome.failed": "匹配修复操作失败",
+  "adminQueue.fixMatch.arrBadge": "Radarr/Sonarr ✓",
+  "adminQueue.fixMatch.arrShort": "Arr ✓",
+  "adminQueue.fixMatch.resolutionNote": "匹配已更正为“{title}”",
+  "adminQueue.fixMatch.autoRequestNote": "来自匹配修复——此前在媒体库中匹配错误"
 }

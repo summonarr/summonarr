@@ -85,7 +85,10 @@ export function DetailRow({
       // Plex reports bandwidth in kbps; surface as Mbps for parity with the
       // rest of the panel.
       const mbps = play.bandwidth / 1000;
-      details.push([t("adminActivity.field.sessionBandwidth"), `${mbps.toFixed(1)} Mbps`]);
+      details.push([
+        t("adminActivity.field.sessionBandwidth"),
+        `${mbps.toLocaleString(locale, { maximumFractionDigits: 1 })} Mbps`,
+      ]);
     }
   }
 
@@ -178,7 +181,26 @@ export function DetailRow({
             </div>
           ))}
         </div>
-        <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+        <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
+          {/* The only product path into /admin/activity/play/<id> — the full
+              session page with the delete action. Links the row's own id: in
+              grouped mode that is the newest segment, which is what the row
+              stands for. */}
+          <Link
+            href={`/admin/activity/play/${play.id}`}
+            style={{
+              fontSize: 11.5,
+              padding: "5px 11px",
+              borderRadius: 6,
+              background: "var(--ds-bg-3)",
+              border: "1px solid var(--ds-border)",
+              color: "var(--ds-fg)",
+              textDecoration: "none",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {t("adminActivity.detail.openPlay")}
+          </Link>
           {play.tmdbId && (
             <Link
               href={`/admin/activity/media/${play.tmdbId}${play.mediaType ? `?type=${play.mediaType}` : ""}`}

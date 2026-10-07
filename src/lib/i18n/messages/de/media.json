@@ -39,7 +39,6 @@
   "media.filter.sort.newest": "Neueste",
   "media.filter.sort.oldest": "Älteste",
   "media.filter.anyRating": "Jede Bewertung",
-  "media.filter.audience": "🍿 Publikum {pct} %+",
   "media.filter.anyVotes": "Beliebig viele Stimmen",
   "media.filter.votesMin": "{n}+ Stimmen",
   "media.filter.thousandsSeparator": ".",
@@ -76,5 +75,7 @@
   "media.ratings.letterboxd": "Letterboxd-Durchschnitt",
   "media.ratings.mdblist": "MDBList-Wertung",
   "media.ratings.jellyfin": "Jellyfin-Communitybewertung",
-  "media.ratings.tmdb": "TMDB-Wertung"
+  "media.ratings.tmdb": "TMDB-Wertung",
+  "media.pager.label": "Seitennavigation",
+  "media.filter.audienceScore": "Publikum {pct} %+"
 }

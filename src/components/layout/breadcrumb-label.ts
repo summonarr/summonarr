@@ -1,4 +1,4 @@
-import { adminNavItems, navItemLabel, userNavItems, type NavItem } from "@/lib/nav-items";
+import { adminNavItems, isNavItemActive, navItemLabel, userNavItems, type NavItem } from "@/lib/nav-items";
 import type { Translator } from "@/lib/i18n/translate";
 
 export type Crumb = { label: string; href?: string };
@@ -56,10 +56,10 @@ export function breadcrumbFor(
   }
 
   const all: readonly NavItem[] = [...userNavItems, ...adminNavItems];
+  // Same matcher the sidebar/drawer/tab bar highlight with, so the crumb names
+  // the item that is lit.
   const match = all
-    .filter((i) =>
-      i.exact ? pathname === i.href : pathname.startsWith(i.href),
-    )
+    .filter((i) => isNavItemActive(pathname, i))
     // Prefer the longest href so /admin/issues wins over /admin.
     .sort((a, b) => b.href.length - a.href.length)[0];
 

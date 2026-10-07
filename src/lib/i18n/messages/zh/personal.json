@@ -51,7 +51,6 @@
   "personal.votes.emptyFilteredDescription": "没有符合这些筛选条件的投票。",
   "personal.votes.emptyTitle": "还没有删除投票",
   "personal.votes.emptyDescription": "浏览你的媒体库，对你认为应该移除的作品投票。",
-  "personal.votes.noPoster": "无海报",
   "personal.votes.count_one": "{count} 票",
   "personal.votes.count_other": "{count} 票",
   "personal.votes.anonymous": "匿名",
@@ -189,5 +188,10 @@
   "personal.donate.zelleHint": "通过你银行的 Zelle 发送至：",
   "personal.donate.amazonHint": "查看我的 Amazon 心愿单",
   "personal.donate.patreonHint": "在 Patreon 上成为赞助者",
-  "personal.donate.coffeeHint": "请我喝杯咖啡"
+  "personal.donate.coffeeHint": "请我喝杯咖啡",
+  "personal.common.trackingOff.title": "播放历史记录功能已关闭",
+  "personal.common.trackingOff.description": "目前没有记录任何内容，因此此页面无法填充。管理员可以在“设置 → 功能”中开启播放历史记录。",
+  "personal.common.trackingOff.cta": "打开设置",
+  "personal.common.showingMostRecent": "仅显示你最近的 {n} 个标题，更早的不在此列出。",
+  "personal.watchlist.removeError": "无法从待看清单移除“{title}”，请重试。"
 }

@@ -19,8 +19,15 @@ import {
   StreamTypeBars,
 } from "@/components/admin/activity-ui";
 import { KpiStrip, type Kpi } from "@/components/admin/activity-sections";
+import { EmptyState } from "@/components/ui/design";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
+
+// One decimal in the UI language, so "avg 3,5h" sits beside the
+// locale-formatted "peak 1.234" instead of a hard-coded dot decimal.
+function fmt1(n: number, locale: string): string {
+  return n.toLocaleString(locale, { maximumFractionDigits: 1 });
+}
 
 // Mon-first weekday catalog keys, translated at render.
 const DOW_LABEL_KEYS = [
@@ -112,13 +119,13 @@ export function ActivityStatsRedesign({
       label: t("adminActivity.kpi.bandwidth"),
       value:
         stats.totalBandwidthGB >= 1000
-          ? `${(stats.totalBandwidthGB / 1000).toFixed(1)} TB`
-          : `${stats.totalBandwidthGB} GB`,
+          ? `${fmt1(stats.totalBandwidthGB / 1000, locale)} TB`
+          : `${fmt1(stats.totalBandwidthGB, locale)} GB`,
       spark: stats.bandwidthByDay.map((d) => d.gb),
     },
     {
       label: t("adminActivity.stats.repeatRate"),
-      value: `${repeatRate.toFixed(1)}×`,
+      value: `${fmt1(repeatRate, locale)}×`,
       sub: t("adminActivity.stats.uniqueTitles", { count: stats.uniqueTitles, n: stats.uniqueTitles.toLocaleString(locale) }),
     },
     {
@@ -128,6 +135,10 @@ export function ActivityStatsRedesign({
     },
   ];
 
+  // Series colours are the DS chart ramp (--ds-chart-1..4, in order), never
+  // oklch literals: the old hand-picked hues duplicated three of the six accent
+  // fills (so "Plays" and "Bandwidth" were one colour under the cyan accent)
+  // and never got the light-theme darkening the tokens carry (guardrail 42).
   const trends: {
     label: string;
     data: number[];
@@ -138,28 +149,28 @@ export function ActivityStatsRedesign({
     {
       label: t("adminActivity.stats.playsPerDay"),
       data: stats.playsByDay.map((d) => d.count),
-      color: "var(--ds-accent-text)",
+      color: "var(--ds-chart-1)",
       unit: "",
       days: stats.playsByDay.map((d) => d.day),
     },
     {
       label: t("adminActivity.stats.watchHoursPerDay"),
       data: stats.watchTimeByDay.map((d) => d.hours),
-      color: "oklch(0.68 0.16 158)",
+      color: "var(--ds-chart-2)",
       unit: "h",
       days: stats.watchTimeByDay.map((d) => d.day),
     },
     {
       label: t("adminActivity.stats.bandwidthPerDay"),
       data: stats.bandwidthByDay.map((d) => d.gb),
-      color: "oklch(0.72 0.13 220)",
+      color: "var(--ds-chart-3)",
       unit: "GB",
       days: stats.bandwidthByDay.map((d) => d.day),
     },
     {
       label: t("adminActivity.stats.uniqueViewersPerDay"),
       data: stats.uniqueViewersByDay.map((d) => d.count),
-      color: "oklch(0.78 0.16 75)",
+      color: "var(--ds-chart-4)",
       unit: "",
       days: stats.uniqueViewersByDay.map((d) => d.day),
     },
@@ -223,7 +234,10 @@ export function ActivityStatsRedesign({
     { length: 24 },
     (_, h) => stats.playsByHour.find((p) => p.hour === h)?.count ?? 0,
   );
-  const peakHour = hourData.indexOf(Math.max(...hourData, 0));
+  // indexOf(0) is hour 0 when every bucket is empty, so the "peak" caption is
+  // only shown once there is a real peak — never "peak 0:00 · 0 plays".
+  const peakCount = Math.max(...hourData, 0);
+  const peakHour = hourData.indexOf(peakCount);
 
   return (
     <div>
@@ -252,7 +266,7 @@ export function ActivityStatsRedesign({
                         fontVariantNumeric: "tabular-nums",
                       }}
                     >
-                      {t("adminActivity.stats.avg", { value: `${avg.toFixed(1)}${tr.unit}` })}
+                      {t("adminActivity.stats.avg", { value: `${fmt1(avg, locale)}${tr.unit}` })}
                     </span>
                   }
                 />
@@ -374,6 +388,9 @@ export function ActivityStatsRedesign({
           label={t("adminActivity.stats.qualityInfra")}
           sub={t("adminActivity.stats.howViewersStream", { days })}
         />
+        {/* One single-series chart per card; the ramp (--ds-chart-1..4) is
+            walked in card order so neighbours differ. HorizontalBars' default
+            colour is the accent, i.e. --ds-chart-1. */}
         <div className="resp-grid-3" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
           <ActivityCard>
             <SectionHeader label={t("adminActivity.popover.resolution")} />
@@ -382,7 +399,7 @@ export function ActivityStatsRedesign({
                 label: r.bucket,
                 count: r.count,
               }))}
-              color="oklch(0.68 0.16 158)"
+              color="var(--ds-chart-2)"
               labelWidth={70}
             />
           </ActivityCard>
@@ -403,7 +420,7 @@ export function ActivityStatsRedesign({
                 label: r.codec,
                 count: r.count,
               }))}
-              color="oklch(0.62 0.14 295)"
+              color="var(--ds-chart-3)"
               labelWidth={70}
             />
           </ActivityCard>
@@ -414,7 +431,7 @@ export function ActivityStatsRedesign({
                 label: r.container,
                 count: r.count,
               }))}
-              color="oklch(0.78 0.16 75)"
+              color="var(--ds-chart-4)"
               labelWidth={70}
             />
           </ActivityCard>
@@ -425,7 +442,7 @@ export function ActivityStatsRedesign({
                 label: r.bucket,
                 count: r.count,
               }))}
-              color="oklch(0.72 0.13 220)"
+              color="var(--ds-chart-2)"
               labelWidth={92}
             />
           </ActivityCard>
@@ -435,7 +452,7 @@ export function ActivityStatsRedesign({
               items={stats.topPlayers
                 .slice(0, 8)
                 .map((r) => ({ label: r.player, count: r.count }))}
-              color="oklch(0.62 0.14 295)"
+              color="var(--ds-chart-3)"
               labelWidth={100}
             />
           </ActivityCard>
@@ -470,8 +487,10 @@ export function ActivityStatsRedesign({
                 style={{
                   marginTop: 14,
                   padding: "10px 12px",
-                  background: "oklch(0.78 0.16 75 / 0.06)",
-                  border: "1px solid oklch(0.78 0.16 75 / 0.18)",
+                  // Tinted off the same warning token the icon beside it uses,
+                  // so the callout follows the theme instead of a fixed amber.
+                  background: "color-mix(in oklab, var(--ds-warning) 6%, transparent)",
+                  border: "1px solid color-mix(in oklab, var(--ds-warning) 18%, transparent)",
                   borderRadius: 8,
                 }}
               >
@@ -578,16 +597,18 @@ export function ActivityStatsRedesign({
               label={t("adminActivity.stats.hourOfDay")}
               sub={t("adminActivity.stats.hourDistribution")}
               right={
-                <span
-                  className="ds-mono"
-                  style={{
-                    fontSize: 10.5,
-                    color: "var(--ds-fg-subtle)",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {t("adminActivity.stats.peakHour", { hour: `${peakHour}:00`, count: Math.max(...hourData, 0) })}
-                </span>
+                peakCount > 0 ? (
+                  <span
+                    className="ds-mono"
+                    style={{
+                      fontSize: 10.5,
+                      color: "var(--ds-fg-subtle)",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {t("adminActivity.stats.peakHour", { hour: `${peakHour}:00`, count: peakCount })}
+                  </span>
+                ) : undefined
               }
             />
             <BarColumn data={hourData} h={120} />
@@ -633,7 +654,7 @@ export function ActivityStatsRedesign({
               items={stats.topDevices
                 .slice(0, 8)
                 .map((d) => ({ label: d.device, count: d.count }))}
-              color="oklch(0.62 0.14 295)"
+              color="var(--ds-chart-2)"
               labelWidth={100}
             />
           </ActivityCard>
@@ -647,7 +668,7 @@ export function ActivityStatsRedesign({
                 label: d.decade,
                 count: d.count,
               }))}
-              color="oklch(0.78 0.16 75)"
+              color="var(--ds-chart-3)"
               labelWidth={56}
             />
           </ActivityCard>
@@ -657,20 +678,11 @@ export function ActivityStatsRedesign({
   );
 }
 
+// The shared DS empty block, iconless — the one "nothing here" recipe the
+// whole Activity dashboard uses (now-playing and recent-plays do the same).
 function Empty() {
   const t = useT();
-  return (
-    <div
-      style={{
-        fontSize: 12,
-        color: "var(--ds-fg-subtle)",
-        padding: "20px 0",
-        textAlign: "center",
-      }}
-    >
-      {t("adminActivity.common.noDataYet")}
-    </div>
-  );
+  return <EmptyState description={t("adminActivity.common.noDataYet")} />;
 }
 
 function LbRow({

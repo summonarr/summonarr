@@ -19,8 +19,9 @@ const SELECT = { id: true, type: true, title: true, body: true, tmdbId: true, me
 // when exhausted). The bell reads the first page (no cursor); the /notifications
 // page walks pages by passing the last item's cursor.
 export const GET = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`notifications:${session.user.id}`, 120, 60_000)) {
-    return tooManyRequests(60);
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
   // Parse an opaque `<createdAt-iso>|<id>` cursor into a keyset predicate. An
   // absent/malformed cursor fails soft to the first page.
@@ -55,7 +56,6 @@ export const GET = withAuth(async (req, _ctx, session) => {
   // SUMMONARR_DEFAULT_LOCALE says otherwise), which renders the stored copy.
   // The media title too, in the reader's language (guardrail 40a) — resolved
   // here at read time from the row's tmdbId, never written back.
-  const t = translatorForRequest(req);
   const localized = await localizeStoredTitles(rows, localeForRequest(req));
   const items = localized.map(({ data, ...row }) => ({ ...row, ...renderNotification({ ...row, data }, t) }));
   const last = items.length === PAGE_SIZE ? items[items.length - 1] : null;
@@ -64,13 +64,20 @@ export const GET = withAuth(async (req, _ctx, session) => {
 });
 
 // POST — mark notifications read. Body { ids?: string[] } marks those; an empty
-// body marks ALL of the caller's unread. Returns the new unread count.
+// body (no `ids` key) marks ALL of the caller's unread. An `ids` that is present
+// but NOT an array (`"abc"`, `null`, `{}`) is a 400, never coerced to "all": a
+// client bug sending `{ ids: "abc" }` for `{ ids: ["abc"] }` must not clear the
+// whole unread badge. Returns the new unread count.
 export const POST = withAuth(async (req, _ctx, session) => {
+  const t = translatorForRequest(req);
   if (!checkRateLimit(`notifications-read:${session.user.id}`, 60, 60_000)) {
-    return tooManyRequests(60);
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
   const parsed = await readJsonCappedOr<{ ids?: unknown }>(req, 16384, {});
   if (parsed instanceof NextResponse) return parsed;
+  if (parsed.ids !== undefined && !Array.isArray(parsed.ids)) {
+    return NextResponse.json({ error: t("apiUser.notifications.idsInvalid") }, { status: 400 });
+  }
   const ids = Array.isArray(parsed.ids)
     ? parsed.ids.filter((x): x is string => typeof x === "string").slice(0, 500)
     : null;
@@ -92,7 +99,7 @@ export const POST = withAuth(async (req, _ctx, session) => {
 export const DELETE = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   if (!checkRateLimit(`notifications-del:${session.user.id}`, 60, 60_000)) {
-    return tooManyRequests(60);
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
   const sp = req.nextUrl.searchParams;
   const all = sp.get("all") === "1";

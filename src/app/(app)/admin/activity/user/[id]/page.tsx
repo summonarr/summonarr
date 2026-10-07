@@ -127,6 +127,11 @@ export default async function UserActivityPage({
       ? t("adminActivity.user.linkedTo", { name: msUser.user.name ?? msUser.user.email ?? "" })
       : null,
     email: msUser.email,
+    // Identity state the server-users table already shows (guardrails 28/34):
+    // a departed row and a hand-pinned binding must read differently from a
+    // live auto-linked one on the page the history-link debug route lands on.
+    active: msUser.active,
+    manualUserLink: msUser.manualUserLink,
     totalPlays: stats.totalPlays,
     totalWatchTimeHours: stats.totalWatchTimeHours,
     avgSessionDuration: stats.avgSessionDuration,

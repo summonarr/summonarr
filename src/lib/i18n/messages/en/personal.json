@@ -51,7 +51,6 @@
   "personal.votes.emptyFilteredDescription": "No votes match these filters.",
   "personal.votes.emptyTitle": "No deletion votes yet",
   "personal.votes.emptyDescription": "Browse your library and vote on items you think should be removed.",
-  "personal.votes.noPoster": "No poster",
   "personal.votes.count_one": "{count} vote",
   "personal.votes.count_other": "{count} votes",
   "personal.votes.anonymous": "Anonymous",
@@ -189,5 +188,10 @@
   "personal.donate.zelleHint": "Send via your bank's Zelle to:",
   "personal.donate.amazonHint": "View my Amazon Wishlist",
   "personal.donate.patreonHint": "Become a patron on Patreon",
-  "personal.donate.coffeeHint": "Buy me a coffee"
+  "personal.donate.coffeeHint": "Buy me a coffee",
+  "personal.common.trackingOff.title": "Play history tracking is off",
+  "personal.common.trackingOff.description": "Nothing is being recorded, so this page can't fill in. An administrator can turn on play history tracking in Settings → Features.",
+  "personal.common.trackingOff.cta": "Open settings",
+  "personal.common.showingMostRecent": "Showing your {n} most recent titles. Older ones aren't listed here.",
+  "personal.watchlist.removeError": "Couldn't remove “{title}” from your watchlist. Please try again."
 }

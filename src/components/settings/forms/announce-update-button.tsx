@@ -33,8 +33,10 @@ export function AnnounceUpdateButton() {
         setPhase("done");
         const sent = data.sent ?? 0;
         const failed = data.failed ?? 0;
+        // One key carries both numbers so a translation can reorder the two
+        // clauses and pick its own joiner; the plural form follows `sent`.
         setSummary(failed > 0
-          ? `${t("settings.form.announce.sent", { count: sent })}${t("settings.form.announce.failedSuffix", { count: failed })}`
+          ? t("settings.form.announce.sentWithFailures", { count: sent, sent, failed })
           : t("settings.form.announce.sent", { count: sent }));
       } else {
         setPhase("error");

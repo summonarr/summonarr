@@ -41,7 +41,10 @@ export function PaginationBar({ currentPage, totalPages }: PaginationBarProps) {
     p < totalPages - 1;
 
   return (
-    <div
+    // A landmark, so the bar is discoverable as navigation and not just a row
+    // of numbers after the grid.
+    <nav
+      aria-label={t("media.pager.label")}
       className="flex flex-wrap items-center justify-center mt-8"
       style={{ gap: 4 }}
     >
@@ -104,7 +107,7 @@ export function PaginationBar({ currentPage, totalPages }: PaginationBarProps) {
       <PagerButton href={hasNext ? buildHref(currentPage + 1) : undefined} ariaLabel={t("media.pager.next")}>
         <ChevronRight style={{ width: 14, height: 14 }} />
       </PagerButton>
-    </div>
+    </nav>
   );
 }
 
@@ -147,22 +150,34 @@ function PagerButton({
 
   if (href) {
     // Only the navigable variant gets hover feedback — the active page and the
-    // disabled ends are inert spans.
+    // disabled ends are inert.
     return (
       <Link href={href} className={`${className} ds-hover-tint`} style={style} aria-label={ariaLabel}>
         {children}
       </Link>
     );
   }
+  if (active) {
+    return (
+      <span className={className} style={style} aria-current="page">
+        {children}
+      </span>
+    );
+  }
+  // The inert ends (no previous / no next page). A real disabled <button>, not
+  // a span: aria-label and aria-disabled are not permitted on a role-less
+  // generic element, so a screen reader skipped "Previous page" outright (the
+  // chevron SVG carries no text). padding: 0 — the box is sized by the style
+  // above, like the Link variant.
   return (
-    <span
-      className={className}
-      style={style}
+    <button
+      type="button"
+      disabled
       aria-label={ariaLabel}
-      aria-current={active ? "page" : undefined}
-      aria-disabled={disabled ? "true" : undefined}
+      className={className}
+      style={{ ...style, padding: 0 }}
     >
       {children}
-    </span>
+    </button>
   );
 }

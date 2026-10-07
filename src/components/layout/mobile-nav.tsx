@@ -19,7 +19,13 @@ import {
 } from "@/components/icons";
 import { getClientBadgeVisibility } from "@/lib/badge-visibility";
 import { cn } from "@/lib/utils";
-import { filterNavByFeatures, getVisibleAdminItems, userNavItems } from "@/lib/nav-items";
+import {
+  filterNavByFeatures,
+  getVisibleAdminItems,
+  isNavItemActive,
+  userNavItems,
+  type NavItem,
+} from "@/lib/nav-items";
 import type { FeatureFlags } from "@/lib/features";
 import { MobileNavDrawer } from "@/components/layout/mobile-nav-drawer";
 import { PushNotifications } from "@/components/layout/push-notifications";
@@ -257,7 +263,7 @@ export function MobileNav({ featureFlags }: { featureFlags?: FeatureFlags }) {
               className="font-medium"
               style={{ fontSize: 10.5, letterSpacing: "-0.005em" }}
             >
-              More
+              {tr("nav.more")}
             </span>
           </button>
         </div>
@@ -323,6 +329,24 @@ function NotificationsLink() {
   );
 }
 
+// Personal-section pages the Profile tab claims when it is present (the 4th slot
+// without admin access). They are carved out of the Requests tab's membership
+// so a page never lights two tabs; when an admin tab replaces Profile, these
+// light nothing and the "More" button takes the accent, exactly as before.
+const PROFILE_TAB_HREFS: ReadonlySet<string> = new Set(["/profile", "/donate"]);
+
+// Tab membership is derived from each NavItem's `section` through the shared
+// matcher, not a hand-kept path list: the old list lit "More" for /for-you (a
+// browse item) and for /watch-history and /my-stats while their personal-section
+// sibling /watchlist lit "Requests".
+function sectionMatcher(
+  section: NavItem["section"],
+  omit: ReadonlySet<string>,
+): (pathname: string) => boolean {
+  const members = userNavItems.filter((i) => i.section === section && !omit.has(i.href));
+  return (pathname) => members.some((i) => isNavItemActive(pathname, i));
+}
+
 // Builds the bottom tab bar list; the 4th slot is role/permission-gated (admin / issues / profile).
 function buildTabs(
   role: string | undefined,
@@ -349,21 +373,14 @@ function buildTabs(
     href: browseHref,
     label: t("nav.tab.browse"),
     icon: Film,
-    match: (p) =>
-      p === "/movies" ||
-      p === "/tv" ||
-      p === "/top" ||
-      p === "/popular" ||
-      p === "/upcoming" ||
-      p.startsWith("/movie/") ||
-      p.startsWith("/tv/"),
+    // Every browse-section page except Discover's own "/" (which has its tab).
+    match: sectionMatcher("browse", new Set(["/"])),
   };
   const requests: Tab = {
     href: "/requests",
     label: t("nav.requests"),
     icon: ClipboardList,
-    match: (p) =>
-      p === "/requests" || p === "/issues" || p === "/votes" || p === "/watchlist" || p === "/hidden",
+    match: sectionMatcher("personal", PROFILE_TAB_HREFS),
   };
 
   // Pick the 4th tab from the same admin-item list the sidebar uses, so it
@@ -401,7 +418,7 @@ function buildTabs(
     href: "/profile",
     label: t("nav.profile"),
     icon: UserCircle,
-    match: (p) => p === "/profile" || p === "/donate",
+    match: (p) => PROFILE_TAB_HREFS.has(p),
   };
   return [discover, browse, requests, profile];
 }

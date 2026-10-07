@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
+import { Film } from "@/components/icons";
 import { getTranslator } from "@/lib/i18n/server";
 
 export const dynamic = "force-dynamic";
@@ -19,20 +20,52 @@ export default async function SetupPage() {
   const importAvailable = backupPassword.length >= MIN_BACKUP_PASSWORD_LEN;
   const t = await getTranslator();
 
+  // Header + card shape mirror login/page.tsx (Playfair wordmark, accent Film
+  // tile, max-w-sm, token card): the restore path redirects straight from here
+  // to /login, so the two consecutive auth screens must read as one surface.
+  // The setup card itself is rendered by SetupShell with the same recipe.
   return (
-    <div className="min-h-screen flex items-center justify-center bg-zinc-950 px-4">
-      <div className="w-full max-w-md">
-        <div className="flex flex-col items-center mb-8">
-          <div className="w-14 h-14 rounded-2xl bg-indigo-600 flex items-center justify-center mb-4">
-            <svg className="w-7 h-7 text-[var(--ds-accent-fg)]" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden>
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 4v16M17 4v16M3 8h4m10 0h4M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z" />
-            </svg>
+    <div
+      className="min-h-screen flex items-start md:items-center justify-center px-4 pt-16 md:pt-0"
+      style={{ background: "var(--ds-bg)", color: "var(--ds-fg)" }}
+    >
+      <div className="w-full max-w-sm">
+        <div className="flex flex-col items-center" style={{ marginBottom: 24 }}>
+          <p
+            className="m-0"
+            style={{
+              fontFamily: "var(--font-playfair)",
+              fontSize: 28,
+              fontWeight: 400,
+              color: "var(--ds-fg)",
+              letterSpacing: "0.02em",
+              marginBottom: 14,
+            }}
+          >
+            Summonarr
+          </p>
+          <div
+            className="flex items-center justify-center"
+            style={{
+              width: 44,
+              height: 44,
+              borderRadius: 10,
+              background: "var(--ds-accent)",
+              color: "var(--ds-accent-fg)",
+              boxShadow:
+                "0 0 0 1px color-mix(in oklab, var(--ds-accent) 40%, transparent), inset 0 -1px 0 rgba(0,0,0,.15)",
+              marginBottom: 12,
+            }}
+          >
+            <Film style={{ width: 22, height: 22 }} />
           </div>
-          {/* 22px/600 — the same scale as PageHeader inside the app. */}
-          <h1 className="m-0 font-semibold text-center" style={{ fontSize: 22, color: "var(--ds-fg)" }}>
+          <h1
+            className="m-0 font-semibold text-center"
+            style={{ fontSize: 18, color: "var(--ds-fg)", letterSpacing: "-0.01em" }}
+          >
             {t("auth.setup.welcome", { siteTitle })}
           </h1>
-          <p className="text-zinc-400 text-sm mt-1 text-center">
+          <p className="m-0 text-sm text-center" style={{ color: "var(--ds-fg-muted)", marginTop: 4 }}>
             {t("auth.setup.subtitle")}
           </p>
         </div>

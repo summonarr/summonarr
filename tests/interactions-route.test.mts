@@ -77,7 +77,7 @@ function signBody(timestamp: string, body: string): string {
 // ── scripted upstreams ───────────────────────────────────────────────────────
 const fetchCalls: URL[] = [];
 // Bodies of the Discord webhook edits (editOriginal), for the reply-language tests.
-const discordEdits: Array<{ content?: string }> = [];
+const discordEdits: Array<{ content?: string; embeds?: Array<Record<string, unknown>>; components?: unknown[] }> = [];
 // One outbound notification agent (notify-agents.ts): a generic webhook on an
 // RFC1918 literal (admin-mode SSRF, no DNS). Its POST body is the only place the
 // emitted event's `request` block — the id the Discord buttons forward — can be
@@ -92,7 +92,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   fetchCalls.push(url);
   if (url.hostname === "discord.com" && url.pathname.includes("/webhooks/") && typeof init?.body === "string") {
-    discordEdits.push(JSON.parse(init.body) as { content?: string });
+    discordEdits.push(JSON.parse(init.body) as (typeof discordEdits)[number]);
   }
   const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), { status: s, headers: { "content-type": "application/json" } });
   if (url.href === AGENT_URL) {
@@ -146,8 +146,11 @@ shadowPrismaModel(prisma, "setting", {
 });
 
 // The replay guard writes a nonce row here; `nonces` models its unique index.
+// `pendingRows` holds /request result sets (`p:<interactionId>:<discordUserId>`)
+// for the pick-button tests.
 let nonces = new Set<string>();
 let nonceWriteThrows: Error | null = null;
+const pendingRows = new Map<string, { data: string; expiresAt: Date }>();
 shadowPrismaModel(prisma, "discordSearchCache", {
   create: async (args: { data: { queryKey: string } }) => {
     rec("discordSearchCache.create", args.data.queryKey);
@@ -158,9 +161,32 @@ shadowPrismaModel(prisma, "discordSearchCache", {
     nonces.add(args.data.queryKey);
     return { id: "n1" };
   },
-  findUnique: async () => null, findFirst: async () => null, findMany: async () => [],
+  findUnique: async (args: { where: { queryKey: string } }) => {
+    const row = pendingRows.get(args.where.queryKey);
+    return row ? { queryKey: args.where.queryKey, ...row } : null;
+  },
+  delete: async (args: { where: { queryKey: string } }) => {
+    rec("discordSearchCache.delete", args.where.queryKey);
+    pendingRows.delete(args.where.queryKey);
+    return {};
+  },
+  findFirst: async () => null, findMany: async () => [],
   upsert: async () => ({}), deleteMany: async () => ({ count: 0 }),
 });
+
+// The routed instance's *arr-available cache (RadarrAvailableItem /
+// SonarrAvailableItem), keyed `${tmdbId}:${arrInstance}`.
+const arrAvailableRows = new Set<string>();
+for (const m of ["radarrAvailableItem", "sonarrAvailableItem"]) {
+  shadowPrismaModel(prisma, m, {
+    findUnique: async (args: { where: { tmdbId_arrInstance: { tmdbId: number; arrInstance: string } } }) => {
+      const k = args.where.tmdbId_arrInstance;
+      rec(`${m}.findUnique`, k);
+      return arrAvailableRows.has(`${k.tmdbId}:${k.arrInstance}`) ? { tmdbId: k.tmdbId, arrInstance: k.arrInstance } : null;
+    },
+    findMany: async () => [], findFirst: async () => null, count: async () => 0,
+  });
+}
 
 type LinkToken = { token: string; userId: string; expiresAt: Date; discordId: string | null; user: Record<string, unknown> };
 let linkTokens: LinkToken[] = [];
@@ -254,6 +280,10 @@ shadowPrismaClientMethod(prisma, "$executeRawUnsafe", async () => 1);
 // generic no-op delegate installed above.
 type RequestRow = Record<string, unknown> & { id: string; status: string };
 let requestRows: RequestRow[] = [];
+// Another user's APPROVED/AVAILABLE request for the picked title (the pick flow's
+// "already greenlit" mirror lookup, `status: { in: [...] }`). Every other findFirst
+// (the clicker's own `existing` row, `earlierPending`) answers null.
+let greenlitPeer: { status: string } | null = null;
 shadowPrismaModel(prisma, "mediaRequest", {
   findUnique: async (args: { where: { id: string } }) => {
     const r = requestRows.find((x) => x.id === args.where.id);
@@ -271,9 +301,13 @@ shadowPrismaModel(prisma, "mediaRequest", {
     return { count };
   },
   findMany: async (args: unknown) => { rec("mediaRequest.findMany", args); return []; },
-  findFirst: async () => null, count: async () => 0,
+  findFirst: async (args: { where: { status?: { in?: string[] } } }) => {
+    rec("mediaRequest.findFirst", args.where);
+    return args.where.status?.in?.includes("AVAILABLE") ? greenlitPeer : null;
+  },
+  count: async () => 0,
   groupBy: async () => [], aggregate: async () => ({ _count: { _all: 0 }, _sum: {} }),
-  create: async (args: unknown) => { rec("mediaRequest.create", args); return { id: "x" }; },
+  create: async (args: unknown) => { rec("mediaRequest.create", args); return { id: "x", createdAt: new Date() }; },
   createMany: async () => ({ count: 0 }), update: async (args: unknown) => { rec("mediaRequest.update", args); return {}; },
   upsert: async () => ({}), deleteMany: async () => ({ count: 0 }),
 });
@@ -359,6 +393,9 @@ beforeEach(async () => {
   interactions.invalidatePublicKeyCache();
   invalidateFeatureFlagCache();
   requestRows = [];
+  greenlitPeer = null;
+  pendingRows.clear();
+  arrAvailableRows.clear();
   agentRows.length = 0;
   agentPosts.length = 0;
   invalidateAgentCache();
@@ -822,4 +859,153 @@ test("admin_approve button: the outbound request.approved carries the ROW's id, 
     agentPosts.map((p) => [p.event, p.request]),
     [["request.approved", { id: "req-1", instance: "" }]],
   );
+});
+
+// ── admin buttons: the final edit clears the timeout's `content` ────────────
+// Discord's edit-webhook-message is a PARTIAL PATCH — omitted fields keep their
+// value. withDiscordTimeout writes "This is taking longer than expected…" into
+// `content` at 25s; a slow arr push then finished with an edit carrying only
+// `embeds`/`components`, so the "try again" line stayed above the finished embed
+// forever and the next admin to obey it got "handled". Every final edit of the
+// approve/decline branches must therefore pass `content: ""`.
+async function finalEmbedEdit() {
+  await waitFor(() => discordEdits.some((e) => Array.isArray(e.embeds) && e.embeds.length > 0), 400);
+  const edit = discordEdits.find((e) => Array.isArray(e.embeds) && e.embeds.length > 0);
+  assert.ok(edit, "no embed edit was sent");
+  return edit;
+}
+
+test("admin_approve: the final embed edit passes content:\"\" so the timeout's line is cleared", async () => {
+  seedDecisionFixture("");
+  settings.set("radarrUrl", `http://${RADARR_HOST}:7878`);
+  settings.set("radarrApiKey", "radarr-key");
+  await post(button("admin_approve:req-1"));
+  const edit = await finalEmbedEdit();
+  assert.equal(requestRows[0].status, "APPROVED");
+  assert.equal(edit.content, "");
+  assert.deepEqual(edit.components, []);
+});
+
+test("admin_decline: the final embed edit passes content:\"\"", async () => {
+  seedDecisionFixture("4k");
+  await post(button("admin_decline:req-1"));
+  const edit = await finalEmbedEdit();
+  assert.equal(requestRows[0].status, "DECLINED");
+  assert.equal(edit.content, "");
+});
+
+test("admin button on an already-handled request: the \"handled\" edit passes content:\"\" too", async () => {
+  seedDecisionFixture("");
+  requestRows[0].status = "DECLINED";
+  await post(button("admin_approve:req-1"));
+  const edit = await finalEmbedEdit();
+  assert.equal(edit.content, "");
+  assert.equal(edit.embeds?.[0]?.title, "The Matrix", "the embed still names the title");
+});
+
+// ── pick button: *arr-available cache for EVERY instance + the mirror guard ──
+// Parity with src/lib/request-create.ts. The Discord fork read the routed
+// instance's RadarrAvailableItem/SonarrAvailableItem ONLY for a named slug, so a
+// default-instance title Radarr already had on disk (library sync lagging, or an
+// arr-only deployment) was re-requested by an auto-approver — a quota slot spent,
+// an "already added" push, an APPROVED row the admin list showed until the next
+// sync. And the mirror branch copied an AVAILABLE peer verbatim: a peer marked off
+// a RESTRICTED server this clicker holds no grant for (guardrail 35) became an
+// AVAILABLE row + availableAt for a title they cannot watch, which the sync's
+// grant-gated marking pass never revisits.
+const PICKER = "333333333333333333";
+function seedPick(role: "ADMIN" | "USER"): string {
+  // Linked (non-shadow) account so the flow skips the user.upsert shadow path.
+  appUsers.push({
+    id: "u-pick", email: "picker@example.com", name: "Picker", discordId: PICKER, role, permissions: 0n,
+    deactivatedAt: null, locale: null, instanceGrants: null, mediaServerGrants: null, maxContentRating: null,
+    movieQuotaLimit: null, movieQuotaDays: null, tvQuotaLimit: null, tvQuotaDays: null,
+  });
+  settings.set("discordRequireLinkedAccount", "true");
+  const searchInteractionId = nextInteractionId();
+  pendingRows.set(`p:${searchInteractionId}:${PICKER}`, {
+    data: JSON.stringify({
+      results: [{ id: 603, title: "The Matrix", mediaType: "movie", releaseYear: "1999", posterPath: null, overview: "", voteAverage: 8.7 }],
+      discordUserId: PICKER,
+      discordUsername: "picker",
+    }),
+    expiresAt: new Date(Date.now() + 5 * 60_000),
+  });
+  return searchInteractionId;
+}
+const pickReplied = () => discordEdits.some((e) => Array.isArray(e.embeds) && e.embeds.length > 0 && e.content !== undefined);
+
+test("pick: the DEFAULT instance's arr-available row is read, and an auto-approver gets 'already available' — no request", async () => {
+  const sid = seedPick("ADMIN");
+  arrAvailableRows.add("603:");
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+
+  assert.ok(
+    opsOf("radarrAvailableItem.findUnique").some((o) => (o.args as { arrInstance: string }).arrInstance === ""),
+    "the default instance's RadarrAvailableItem must be read (the old `routedSlug !== \"\"` gate skipped it)",
+  );
+  assert.deepEqual(opsOf("mediaRequest.create"), [], "a title Radarr already has is not a request");
+  const edit = discordEdits.find((e) => Array.isArray(e.embeds) && e.embeds.length > 0);
+  assert.match(String(edit?.embeds?.[0]?.description), /library|available/i);
+});
+
+test("pick: the arr row alone does NOT short-circuit a user who cannot auto-approve (parity with request-create)", async () => {
+  const sid = seedPick("USER");
+  arrAvailableRows.add("603:");
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  assert.equal(opsOf("mediaRequest.create").length, 1, "a plain requester still files a (pending) request");
+});
+
+test("pick mirror: an AVAILABLE peer with NO arr row for the instance is copied as APPROVED without availableAt", async () => {
+  const sid = seedPick("USER");
+  greenlitPeer = { status: "AVAILABLE" };
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  const creates = opsOf("mediaRequest.create");
+  assert.equal(creates.length, 1);
+  const data = (creates[0].args as { data: Record<string, unknown> }).data;
+  assert.equal(data.status, "APPROVED", "no visible library copy and no arr row ⇒ the peer's AVAILABLE is not true for THIS requester");
+  assert.ok(!("availableAt" in data), "an APPROVED copy carries no availableAt");
+  assert.ok(!("approvedAt" in data), "a copy records no approval of its own (guardrail 34a)");
+});
+
+test("pick mirror: an AVAILABLE peer WITH the instance's arr row is copied as AVAILABLE with availableAt", async () => {
+  const sid = seedPick("USER");
+  greenlitPeer = { status: "AVAILABLE" };
+  arrAvailableRows.add("603:");
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  const data = (opsOf("mediaRequest.create")[0].args as { data: Record<string, unknown> }).data;
+  assert.equal(data.status, "AVAILABLE");
+  assert.ok(data.availableAt instanceof Date);
+});
+
+test("pick: the pending search row is consumed only once a pick is actually filed — a gate rejection leaves it", async () => {
+  // Permanently-denied gate: the clicker's own row for the title blocks the pick.
+  const sid = seedPick("USER");
+  const origFindFirst = (prisma as unknown as { mediaRequest: { findFirst: (a: { where: Record<string, unknown> }) => Promise<unknown> } }).mediaRequest.findFirst;
+  shadowPrismaModel(prisma, "mediaRequest", {
+    ...(prisma as unknown as { mediaRequest: Record<string, unknown> }).mediaRequest,
+    findFirst: async (args: { where: Record<string, unknown> }) =>
+      "requestedBy" in args.where ? { id: "mine", status: "DECLINED", permanentlyDeclined: true } : origFindFirst(args),
+  });
+  try {
+    await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+    await waitFor(pickReplied, 400);
+    assert.deepEqual(opsOf("mediaRequest.create"), []);
+    assert.deepEqual(opsOf("discordSearchCache.delete"), [], "the row must survive a rejection so the other results stay clickable");
+    assert.equal(pendingRows.size, 1);
+  } finally {
+    shadowPrismaModel(prisma, "mediaRequest", { ...(prisma as unknown as { mediaRequest: Record<string, unknown> }).mediaRequest, findFirst: origFindFirst });
+  }
+});
+
+test("pick: a filed pick consumes the pending search row", async () => {
+  const sid = seedPick("USER");
+  await post(button(`pick:${sid}:${PICKER}:0`, PICKER));
+  await waitFor(pickReplied, 400);
+  assert.equal(opsOf("mediaRequest.create").length, 1);
+  assert.deepEqual(opsOf("discordSearchCache.delete").map((o) => o.args), [`p:${sid}:${PICKER}`]);
 });

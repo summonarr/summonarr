@@ -10,7 +10,8 @@ export default function Loading() {
     <div className="ds-detail-bleed animate-pulse">
       <DetailHeroSkeleton />
       <CastSectionSkeleton />
-      <section style={{ padding: "0 16px 32px" }}>
+      {/* Same class as the real TVSeasons section (see CastSectionSkeleton). */}
+      <section className="ds-detail-section">
         <Bar w={80} h={18} style={{ marginBottom: 12 }} />
         <div className="flex flex-col" style={{ gap: 8 }}>
           {Array.from({ length: 4 }).map((_, i) => (

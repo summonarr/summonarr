@@ -19,6 +19,7 @@ import {
   getVisibleAdminItems,
   filterNavByFeatures,
   navItemLabel,
+  isNavItemActive,
   type NavItem,
 } from "@/lib/nav-items";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -69,15 +70,10 @@ export function MobileNavDrawer({
     onOpenChange(false);
   }, [pathname, onOpenChange]);
 
-  function isActive(href: string, exact?: boolean) {
-    if (exact) return pathname === href;
-    // Detail routes are singular (/movie/123) while the list is plural
-    // (/movies), so a bare prefix match lit "TV Shows" on /tv/123 but nothing
-    // on a movie page. Match the movie detail route explicitly, as the bottom
-    // tab bar (mobile-nav.tsx) does.
-    if (href === "/movies" && pathname.startsWith("/movie/")) return true;
-    return pathname.startsWith(href);
-  }
+  // One matcher for every nav surface (nav-items.ts) — this drawer used to
+  // carry its own copy that knew about the singular /movie/ detail route while
+  // the sidebar's did not.
+  const isActive = (item: NavItem) => isNavItemActive(pathname, item);
 
   return (
     <Drawer open={open} onOpenChange={onOpenChange}>
@@ -96,7 +92,7 @@ export function MobileNavDrawer({
               <NavLink
                 key={item.href}
                 item={item}
-                active={isActive(item.href, item.exact)}
+                active={isActive(item)}
                 onClick={() => onOpenChange(false)}
               />
             ))}
@@ -108,7 +104,7 @@ export function MobileNavDrawer({
                   <NavLink
                     key={item.href}
                     item={item}
-                    active={isActive(item.href, item.exact)}
+                    active={isActive(item)}
                     onClick={() => onOpenChange(false)}
                   />
                 ))}
@@ -122,7 +118,7 @@ export function MobileNavDrawer({
                   <NavLink
                     key={item.href}
                     item={item}
-                    active={isActive(item.href, item.exact)}
+                    active={isActive(item)}
                     onClick={() => onOpenChange(false)}
                   />
                 ))}

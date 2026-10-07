@@ -3,7 +3,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { withAdvisoryLock, WARM_OMDB_LOCK_ID } from "@/lib/advisory-lock";
 import { prisma } from "@/lib/prisma";
 import { prewarmOmdbCache } from "@/lib/omdb-prewarm";
-import { logAudit } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 
@@ -55,10 +55,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
 
       await logAudit({
         userId: session.user.id,
-        userName: session.user.name,
+        userName: session.user.name ?? session.user.email,
         action: "CACHE_WARM",
         target: "omdb",
         details: { ...result, durationMs, trigger: "admin" },
+        ...auditContext(req, session),
       });
 
       return NextResponse.json(result);

@@ -252,7 +252,7 @@
   "adminQueue.fixMatch.arrSays": "Arr meldet TMDB #{id}",
   "adminQueue.fixMatch.arrRecommends": "Radarr/Sonarr empfiehlt eine andere Zuordnung:",
   "adminQueue.fixMatch.arrConfirmsHighlighted": "Radarr/Sonarr bestätigt TMDB #{id} – passende Kandidaten sind unten hervorgehoben.",
-  "adminQueue.fixMatch.reidentify": "Diesen Jellyfin-Eintrag von TMDB #{from} auf TMDB #{to} neu identifizieren",
+  "adminQueue.fixMatch.reidentify": "Dieses Jellyfin-Element von TMDB #{from} auf TMDB #{to} neu zuordnen{instance}.",
   "adminQueue.fixMatch.jellyfinNote": "Jellyfin übernimmt genau diese TMDB-ID und führt eine vollständige Metadatenaktualisierung durch – es gibt keine alternativen Kandidaten zur Auswahl. Bei großen Einträgen kann die Bestätigung einige Minuten dauern.",
   "adminQueue.fixMatch.plexCandidatesHeading": "Plex-Kandidaten – wählen Sie die richtige Zuordnung",
   "adminQueue.fixMatch.found": "{count} gefunden",
@@ -287,5 +287,17 @@
   "adminQueue.blacklist.unblockAria": "{title} entsperren",
   "adminQueue.blacklist.unblock": "Entsperren",
   "adminQueue.blacklist.title": "Sperrliste",
-  "adminQueue.blacklist.subtitle": "Bestimmte Titel aus Entdecken und Anfragen ausschließen"
+  "adminQueue.blacklist.subtitle": "Bestimmte Titel aus Entdecken und Anfragen ausschließen",
+  "adminQueue.blacklist.filterPlaceholder": "Blockierte Titel filtern…",
+  "adminQueue.blacklist.filterAria": "Blockierte Titel nach Titel oder Grund filtern",
+  "adminQueue.blacklist.filterNoMatch": "Kein blockierter Titel passt zu diesem Filter.",
+  "adminQueue.fixMatch.outcome.joined": "Eine identische Korrektur lief bereits — deine Kandidatenauswahl wurde möglicherweise nicht übernommen.",
+  "adminQueue.fixMatch.outcome.jobLost": "Der Server hat diese Korrektur aus den Augen verloren (Neustart?) — synchronisiere die Bibliothek erneut, um zu sehen, ob sie übernommen wurde.",
+  "adminQueue.fixMatch.outcome.pollLost": "Verbindung während der Korrektur verloren — synchronisiere die Bibliothek erneut, um zu sehen, ob sie übernommen wurde.",
+  "adminQueue.fixMatch.outcome.timedOut": "Die Korrektur läuft nach 20 Minuten noch — prüfe das Element auf dem Medienserver oder synchronisiere die Bibliothek erneut.",
+  "adminQueue.fixMatch.outcome.failed": "Korrektur der Zuordnung fehlgeschlagen",
+  "adminQueue.fixMatch.arrBadge": "Radarr/Sonarr ✓",
+  "adminQueue.fixMatch.arrShort": "Arr ✓",
+  "adminQueue.fixMatch.resolutionNote": "Zuordnung korrigiert zu „{title}“",
+  "adminQueue.fixMatch.autoRequestNote": "Aus der Zuordnungskorrektur hinzugefügt — war in der Bibliothek falsch zugeordnet"
 }

@@ -120,6 +120,9 @@ const {
   CRON_RUN_HISTORY_LIMIT,
   recordCronRun,
   withCronRunRecording,
+  cronSkippedResponse,
+  CRON_SKIPPED_HEADER,
+  parseTrustedOriginEntry,
 } = await import("../src/lib/cron-auth.ts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { extractUaFingerprint, serializeFingerprint } = await import(
@@ -354,24 +357,43 @@ test("isCronAuthorized: no Authorization header → unauthorized", async () => {
   assert.equal(await isCronAuthorized(cronRequest()), false);
 });
 
-test("isCronAuthorized: the CRON path requires the exact 'Bearer ' scheme", async () => {
+test("isCronAuthorized: the CRON path parses the scheme exactly like the session bearer (parseBearerToken)", async () => {
   process.env.CRON_SECRET = CRON_SECRET;
-  // Lowercase scheme: the session-bearer parser is case-insensitive, but the
-  // CRON_SECRET compare deliberately keys off startsWith("Bearer ") — a
-  // lowercase header must not authorize the cron path.
+  // RFC 7235: the scheme is case-insensitive and whitespace-tolerant. An external
+  // scheduler sending `bearer <secret>` used to fail the session branch (not a
+  // JWT) and then miss the case-sensitive literal here — a 401 with no hint.
   assert.equal(
     await isCronAuthorized(cronRequest({ authorization: `bearer ${CRON_SECRET}` })),
-    false,
+    true,
   );
+  assert.equal(
+    await isCronAuthorized(cronRequest({ authorization: `Bearer\t${CRON_SECRET}` })),
+    true,
+  );
+  // Extra inner whitespace is scheme separation, not part of the credential.
+  assert.equal(
+    await isCronAuthorized(cronRequest({ authorization: `Bearer  ${CRON_SECRET}` })),
+    true,
+  );
+  // A different scheme is still refused.
   assert.equal(
     await isCronAuthorized(cronRequest({ authorization: `Basic ${CRON_SECRET}` })),
     false,
   );
-  // Double space: slice(7) keeps the second space, so the compare fails.
-  assert.equal(
-    await isCronAuthorized(cronRequest({ authorization: `Bearer  ${CRON_SECRET}` })),
-    false,
-  );
+});
+
+test("parseTrustedOriginEntry: only http(s) origins count — a bare host:port parses to origin \"null\" and is SKIPPED", () => {
+  // `new URL("summonarr.local:3001")` does not throw: scheme `summonarr.local:`,
+  // path `3001`, origin "null". The old try/catch readers therefore trusted the
+  // literal "null" (what a browser sends as `Origin: null`) instead of the host.
+  assert.equal(parseTrustedOriginEntry("summonarr.local:3001"), null);
+  assert.equal(parseTrustedOriginEntry("localhost:3001"), null);
+  assert.equal(parseTrustedOriginEntry("ftp://files.example.com"), null);
+  assert.equal(parseTrustedOriginEntry("not a url"), null);
+  assert.equal(parseTrustedOriginEntry(""), null);
+  assert.equal(parseTrustedOriginEntry(undefined), null);
+  assert.equal(parseTrustedOriginEntry(" https://App.Example.com:443/path?q "), "https://app.example.com");
+  assert.equal(parseTrustedOriginEntry("http://192.168.1.9:3000"), "http://192.168.1.9:3000");
 });
 
 test("isCronAuthorized: webhook-style ?token= query param is NOT accepted here", async () => {
@@ -648,6 +670,23 @@ test("withCronRunRecording: status >= 400 records ok:false but still returns the
     assert.equal(returned, res);
     assert.equal(lastLedgerWrite().parsed?.ok, false, `status ${status} must record ok:false`);
   }
+});
+
+test("withCronRunRecording: a lock-busy skip (X-Cron-Skipped) writes NO ledger row", async () => {
+  // No run happened. An (ok, ~0 ms) entry for it over-counts runs/h on the
+  // System tab — the one place guardrail 7b says a cadence anomaly is read.
+  resetLedger();
+  const res = cronSkippedResponse();
+  const returned = await withCronRunRecording("sync", async () => res);
+  assert.equal(returned, res);
+  assert.equal(returned.status, 200, "the entrypoint fast-retries any non-2xx — a skip must stay 2xx");
+  assert.equal(returned.headers.get(CRON_SKIPPED_HEADER), "1");
+  assert.deepEqual(await returned.clone().json(), { skipped: true, reason: "already running" });
+  assert.equal(upsertCalls.length, 0, "a skipped run must not be recorded");
+  // The header is the whole signal: a plain 200 skip body IS still recorded.
+  resetLedger();
+  await withCronRunRecording("sync", async () => Response.json({ skipped: true, reason: "already running" }));
+  assert.equal(lastLedgerWrite().key, "cron:lastRun:sync");
 });
 
 test("withCronRunRecording: status 399 is below the failure boundary → ok:true", async () => {

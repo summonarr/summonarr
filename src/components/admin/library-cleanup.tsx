@@ -4,16 +4,19 @@
 // calls, so it is never part of the server render), lets the admin tune the
 // rules, protect titles, and delete a selection through the route's two-step
 // dry run → confirmed execute. Every date shown is a server-supplied ISO string
-// sliced to a day, and "idle" is a server-computed day count — nothing here
-// reads the clock while rendering (guardrail 16).
+// formatted for the viewer's locale (the report arrives after mount, so there is
+// no SSR/hydration pair to disagree), and "idle" is a server-computed day count
+// — nothing here reads the clock while rendering (guardrail 16).
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
-import { useT } from "@/components/i18n/i18n-provider";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { posterUrl } from "@/lib/tmdb-types";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { StyledSelect } from "@/components/ui/styled-select";
 import { Switch } from "@/components/ui/switch";
-import { EmptyState, StatCard } from "@/components/ui/design";
+import { EmptyState, SectionHeader, StatCard } from "@/components/ui/design";
 import { Poster } from "@/components/admin/activity-ui";
 import { FileX, Loader2, Shield, ShieldOff, Trash2 } from "@/components/icons";
 import {
@@ -69,16 +72,25 @@ type ExecResult = {
 };
 
 const keyOf = (r: { tmdbId: number; mediaType: string }) => `${r.mediaType}:${r.tmdbId}`;
-const day = (iso: string | null) => (iso ? iso.slice(0, 10) : "—");
 const instanceLabel = (service: string, instance: string) =>
   `${service === "radarr" ? "Radarr" : "Sonarr"}${instance ? ` (${instance})` : ""}`;
 
-function formatBytes(n: number | null): string {
+// Server-supplied ISO timestamp → the viewer's locale. UTC so the day the
+// server recorded is the day shown (no local-midnight shift). `new Date(iso)`
+// parses a fixed string — not a clock read (guardrail 16).
+function dayFormatter(locale: string) {
+  const fmt = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeZone: "UTC" });
+  return (iso: string | null) => (iso ? fmt.format(new Date(iso)) : "—");
+}
+
+// Binary units, locale digits/separators ("92,1 GB" for a German admin).
+function formatBytesIn(n: number | null, locale: string): string {
   if (n === null) return "—";
   if (n <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB", "PB"];
   const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
-  return `${(n / 1024 ** i).toFixed(i >= 3 ? 1 : 0)} ${units[i]}`;
+  const value = new Intl.NumberFormat(locale, { maximumFractionDigits: i >= 3 ? 1 : 0 }).format(n / 1024 ** i);
+  return `${value} ${units[i]}`;
 }
 
 const panel: React.CSSProperties = {
@@ -96,8 +108,6 @@ const inputStyle: React.CSSProperties = {
   border: "1px solid var(--ds-border)",
   borderRadius: 6,
 };
-const selectStyle: React.CSSProperties = { ...inputStyle, width: "auto" };
-
 async function readError(res: Response, fallback: string): Promise<string> {
   const d = (await res.json().catch(() => null)) as { error?: string } | null;
   return d?.error ?? fallback;
@@ -105,6 +115,9 @@ async function readError(res: Response, fallback: string): Promise<string> {
 
 export function LibraryCleanup() {
   const t = useT();
+  const locale = useLocale();
+  const day = useMemo(() => dayFormatter(locale), [locale]);
+  const formatBytes = useCallback((n: number | null) => formatBytesIn(n, locale), [locale]);
   const [report, setReport] = useState<Report | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -276,7 +289,13 @@ export function LibraryCleanup() {
         // Something changed since the dry run — show the fresh plan instead.
         const fresh = (await res.json().catch(() => null)) as (Plan & { error?: string }) | null;
         setError(t("adminManage.cleanup.error.changed"));
-        if (fresh?.items) setPlan({ targetCount: fresh.targetCount, reclaimableBytes: plan.reclaimableBytes, items: fresh.items, skipped: fresh.skipped ?? [] });
+        // The 409 body carries the fresh targets but no total, so the heading's
+        // size is recomputed from them — a title that dropped out of the plan
+        // must drop out of the number the admin confirms against too.
+        if (fresh?.items) {
+          const reclaimableBytes = fresh.items.reduce((n, it) => n + it.targets.reduce((m, tg) => m + tg.sizeOnDisk, 0), 0);
+          setPlan({ targetCount: fresh.targetCount, reclaimableBytes, items: fresh.items, skipped: fresh.skipped ?? [] });
+        }
         return;
       }
       if (!res.ok) {
@@ -334,7 +353,12 @@ export function LibraryCleanup() {
 
       {/* ── rules ───────────────────────────────────────────────────── */}
       <section className="flex flex-col gap-3" style={panel} aria-labelledby="cleanup-rules">
-        <h2 id="cleanup-rules" style={{ fontSize: 14, fontWeight: 600, color: "var(--ds-fg)", margin: 0 }}>{t("adminManage.cleanup.rules")}</h2>
+        {/* The wrapper carries the id the section's aria-labelledby points at
+            (SectionHeader exposes none) and cancels the header's own 12px
+            bottom margin — the column's gap-3 already spaces it. */}
+        <div id="cleanup-rules" className="-mb-3">
+          <SectionHeader title={t("adminManage.cleanup.rules")} />
+        </div>
         <p style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>
           {report.historyStart
             ? t("adminManage.cleanup.rulesHelpSince", { date: day(report.historyStart) })
@@ -390,28 +414,30 @@ export function LibraryCleanup() {
 
       {/* ── filters + bulk action ───────────────────────────────────── */}
       <div className="flex flex-wrap items-center gap-2" style={{ fontSize: 13 }}>
-        <select style={selectStyle} value={view} onChange={(e) => setView(e.target.value as typeof view)} aria-label={t("adminManage.cleanup.filter.show")}>
+        <StyledSelect compact className="w-auto" value={view} onChange={(e) => setView(e.target.value as typeof view)} aria-label={t("adminManage.cleanup.filter.show")}>
           <option value="candidates">{t("adminManage.cleanup.stat.candidates")}</option>
           <option value="held">{t("adminManage.cleanup.stat.held")}</option>
           <option value="all">{t("adminManage.cleanup.filter.allMatched")}</option>
-        </select>
-        <select style={selectStyle} value={typeFilter} onChange={(e) => setTypeFilter(e.target.value as typeof typeFilter)} aria-label={t("adminManage.cleanup.filter.mediaType")}>
+        </StyledSelect>
+        <StyledSelect compact className="w-auto" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value as typeof typeFilter)} aria-label={t("adminManage.cleanup.filter.mediaType")}>
           <option value="all">{t("adminManage.cleanup.filter.moviesAndTv")}</option>
           <option value="MOVIE">{t("nav.movies")}</option>
           <option value="TV">{t("adminManage.cleanup.tv")}</option>
-        </select>
-        <select style={selectStyle} value={ruleFilter} onChange={(e) => setRuleFilter(e.target.value as typeof ruleFilter)} aria-label={t("adminManage.cleanup.filter.rule")}>
+        </StyledSelect>
+        <StyledSelect compact className="w-auto" value={ruleFilter} onChange={(e) => setRuleFilter(e.target.value as typeof ruleFilter)} aria-label={t("adminManage.cleanup.filter.rule")}>
           <option value="any">{t("adminManage.cleanup.filter.anyRule")}</option>
           {(Object.keys(CLEANUP_RULE_LABELS) as CleanupRule[]).map((r) => (
             <option key={r} value={r}>{t(`adminManage.cleanup.ruleLabel.${r}`)}</option>
           ))}
-        </select>
-        <input
+        </StyledSelect>
+        {/* Input is the h-8 twin of the compact selects beside it; the old
+            hand-rolled 26px field sat visibly shorter in the same row. */}
+        <Input
           value={query}
           onChange={(e) => setQuery(e.target.value.slice(0, 200))}
           placeholder={t("adminManage.cleanup.filter.titlePlaceholder")}
           aria-label={t("adminManage.cleanup.filter.title")}
-          style={{ ...inputStyle, width: 200 }}
+          className="w-[200px]"
         />
         <div className="flex-1" />
         <Button size="sm" variant="destructive" onClick={dryRun} disabled={selectedRows.length === 0 || planning || executing}>
@@ -427,13 +453,19 @@ export function LibraryCleanup() {
       {/* ── dry run → confirm ──────────────────────────────────────── */}
       {plan && (
         <section className="flex flex-col gap-3 rounded-md bg-red-500/10" style={{ padding: 16, border: "1px solid var(--ds-border)" }} aria-labelledby="cleanup-plan">
-          <h2 id="cleanup-plan" className="text-red-400" style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>
-            {t("adminManage.cleanup.plan.title", {
-              deletions: t("adminManage.cleanup.plan.deletions", { count: plan.targetCount }),
-              titles: t("adminManage.cleanup.plan.titles", { count: plan.items.length }),
-              size: formatBytes(plan.reclaimableBytes),
-            })}
-          </h2>
+          <div id="cleanup-plan" className="-mb-3">
+            <SectionHeader
+              title={
+                <span className="text-red-400">
+                  {t("adminManage.cleanup.plan.title", {
+                    deletions: t("adminManage.cleanup.plan.deletions", { count: plan.targetCount }),
+                    titles: t("adminManage.cleanup.plan.titles", { count: plan.items.length }),
+                    size: formatBytes(plan.reclaimableBytes),
+                  })}
+                </span>
+              }
+            />
+          </div>
           <p style={{ fontSize: 12, color: "var(--ds-fg)", margin: 0 }}>
             {t("adminManage.cleanup.plan.warning")}
           </p>
@@ -481,11 +513,17 @@ export function LibraryCleanup() {
 
       {result && (
         <section className="flex flex-col gap-2" style={panel} aria-labelledby="cleanup-result">
-          <h2 id="cleanup-result" style={{ fontSize: 14, fontWeight: 600, color: "var(--ds-fg)", margin: 0 }}>
-            {t("adminManage.cleanup.result.deleted", { count: result.deletedCount })}
-            {result.partialCount > 0 ? t("adminManage.cleanup.result.partial", { count: result.partialCount }) : ""}
-            {result.failedCount > 0 ? t("adminManage.cleanup.result.failed", { count: result.failedCount }) : ""}
-          </h2>
+          <div id="cleanup-result" className="-mb-3">
+            <SectionHeader
+              title={
+                <>
+                  {t("adminManage.cleanup.result.deleted", { count: result.deletedCount })}
+                  {result.partialCount > 0 ? t("adminManage.cleanup.result.partial", { count: result.partialCount }) : ""}
+                  {result.failedCount > 0 ? t("adminManage.cleanup.result.failed", { count: result.failedCount }) : ""}
+                </>
+              }
+            />
+          </div>
           <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: "var(--ds-fg)" }}>
             {result.results.map((r) => (
               <li key={keyOf(r)}>
@@ -505,7 +543,7 @@ export function LibraryCleanup() {
           description={anyRuleOn ? t("adminManage.cleanup.empty.description") : t("adminManage.cleanup.empty.noRulesDescription")}
         />
       ) : (
-        <div style={{ overflowX: "auto", border: "1px solid var(--ds-border)", borderRadius: 10 }}>
+        <div className="resp-table-scroll" style={{ border: "1px solid var(--ds-border)", borderRadius: 10 }}>
           <table className="w-full" style={{ fontSize: 13, borderCollapse: "collapse", color: "var(--ds-fg)" }}>
             <thead>
               <tr style={{ background: "var(--ds-bg-2)", textAlign: "left", color: "var(--ds-fg-subtle)", fontSize: 11 }}>
@@ -535,7 +573,7 @@ export function LibraryCleanup() {
                 const deletable = r.candidate && r.arr.length > 0;
                 const isProtected = r.excludedBy.includes("protected");
                 return (
-                  <tr key={k} style={{ borderTop: "1px solid var(--ds-border)" }}>
+                  <tr key={k} className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
                     <td style={{ padding: "6px 10px" }}>
                       <input
                         type="checkbox"
@@ -602,9 +640,9 @@ export function LibraryCleanup() {
       {/* ── protected titles ───────────────────────────────────────── */}
       {report.protected.length > 0 && (
         <section className="flex flex-col gap-2" style={panel} aria-labelledby="cleanup-protected">
-          <h2 id="cleanup-protected" style={{ fontSize: 14, fontWeight: 600, color: "var(--ds-fg)", margin: 0 }}>
-            {t("adminManage.cleanup.protectedCount", { count: report.protected.length })}
-          </h2>
+          <div id="cleanup-protected" className="-mb-3">
+            <SectionHeader title={t("adminManage.cleanup.protectedCount", { count: report.protected.length })} />
+          </div>
           {report.protected.map((p) => (
             <div key={keyOf(p)} className="flex items-center justify-between" style={{ fontSize: 13, color: "var(--ds-fg)" }}>
               <span>

@@ -4,6 +4,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Trash2, Loader2, Monitor, Smartphone, Tablet, MapPin, Clock, Check, X } from "@/components/icons";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
@@ -123,10 +125,10 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                   {s.deviceLabel ?? deviceTypeLabel(s.deviceType)}
                 </p>
                 {s.isCurrent && (
-                  <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-indigo-600 text-[var(--ds-accent-fg)] font-semibold shrink-0">
-                    <Check className="w-3 h-3" />
+                  <Badge>
+                    <Check />
                     {t("profile.sessions.thisDevice")}
-                  </span>
+                  </Badge>
                 )}
               </div>
               <div className="flex items-center gap-3 flex-wrap">
@@ -154,13 +156,13 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
               type="button"
               size="sm"
               variant="ghost"
-              // A 36x36 tap area, plus an aria-label so screen readers say
+              // A 40x40 tap area, plus an aria-label so screen readers say
               // what this button does (sign that device out).
               aria-label={s.ipAddress
                 ? t("profile.sessions.revokeNamedFrom", { name: s.deviceLabel ?? deviceTypeLabel(s.deviceType), ip: s.ipAddress })
                 : t("profile.sessions.revokeNamed", { name: s.deviceLabel ?? deviceTypeLabel(s.deviceType) })}
               title={t("profile.sessions.revoke")}
-              className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-9 w-9 p-0 mt-0.5"
+              className="shrink-0 text-zinc-400 hover:text-red-400 hover:bg-red-400/10 h-10 w-10 p-0"
               disabled={revoking === s.sessionId}
               onClick={() => setConfirmingRevoke(s.sessionId)}
             >
@@ -174,8 +176,9 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
               <Button
                 type="button"
                 size="sm"
+                variant="destructive"
                 aria-label={t("profile.sessions.confirmRevoke")}
-                className="h-9 px-2.5 bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
+                className="h-9 px-2.5 gap-1"
                 onClick={() => revoke(s.sessionId)}
                 autoFocus
               >
@@ -187,7 +190,7 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                 size="sm"
                 variant="ghost"
                 aria-label={t("profile.sessions.cancelRevoke")}
-                className="h-9 w-9 p-0 text-zinc-400 hover:text-zinc-200"
+                className="h-10 w-10 p-0 text-zinc-400 hover:text-zinc-200"
                 onClick={() => setConfirmingRevoke(null)}
               >
                 <X className="w-3.5 h-3.5" />
@@ -198,10 +201,10 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
             <form
               // On small screens this takes a full row below the device details;
               // squeezed beside them it crushed the device name.
-              className="flex items-center gap-1.5 basis-full sm:basis-auto sm:shrink-0 mt-0.5"
+              className="flex flex-wrap items-center gap-1.5 basis-full sm:basis-auto sm:shrink-0 mt-0.5"
               onSubmit={(e) => { e.preventDefault(); if (password) revoke(s.sessionId, password); }}
             >
-              <input
+              <Input
                 type="password"
                 autoFocus
                 autoComplete="current-password"
@@ -209,13 +212,15 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                 placeholder={t("profile.sessions.passwordPlaceholder")}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="h-9 flex-1 min-w-0 sm:flex-none sm:w-40 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                aria-invalid={revokeError ? true : undefined}
+                className="h-9 flex-1 min-w-0 sm:flex-none sm:w-40"
               />
               <Button
                 type="submit"
                 size="sm"
+                variant="destructive"
                 aria-label={t("profile.sessions.confirmRevoke")}
-                className="h-9 px-2.5 bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] gap-1"
+                className="h-9 px-2.5 gap-1"
                 disabled={!password || revoking === s.sessionId}
               >
                 {revoking === s.sessionId
@@ -228,16 +233,19 @@ export function AuthSessions({ sessions }: AuthSessionsProps) {
                 size="sm"
                 variant="ghost"
                 aria-label={t("profile.sessions.cancelRevoke")}
-                className="h-9 w-9 p-0 text-zinc-400 hover:text-zinc-200"
+                className="h-10 w-10 p-0 text-zinc-400 hover:text-zinc-200"
                 onClick={() => { setPasswordFor(null); setPassword(""); setRevokeError(null); }}
               >
                 <X className="w-3.5 h-3.5" />
               </Button>
+              {/* "Incorrect password" belongs beside the field that produced it,
+                  not below the whole session list. */}
+              {revokeError && <p role="alert" className="basis-full text-xs text-red-400">{revokeError}</p>}
             </form>
           )}
         </div>
       ))}
-      {revokeError && <p className="text-xs text-red-400">{revokeError}</p>}
+      {revokeError && passwordFor === null && <p role="alert" className="text-xs text-red-400">{revokeError}</p>}
     </div>
   );
 }

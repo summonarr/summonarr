@@ -331,6 +331,10 @@ test("a successful web sign-in sets an HttpOnly session cookie and returns NO to
   assert.ok(cookies.some((c) => /HttpOnly/i.test(c)), "the session cookie must be HttpOnly");
   const body = await res.json();
   assert.ok(!("token" in body), "a web caller must not receive the raw JWT");
+  // buildSignInResponse marks every sign-in success no-store, like the MFA
+  // challenge, /me and sign-out already were — the native variant below
+  // carries the long-lived JWT in its body, so nothing may ever cache it.
+  assert.equal(res.headers.get("cache-control"), "no-store");
 });
 
 test("a NATIVE sign-in receives the token in the body as well as the cookie", async () => {
@@ -349,6 +353,7 @@ test("a NATIVE sign-in receives the token in the body as well as the cookie", as
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(typeof body.token, "string", "a native client needs the JWT for its Keychain");
+  assert.equal(res.headers.get("cache-control"), "no-store", "the token-bearing body must be no-store");
 });
 
 test("a DISABLED account is refused at the mint chokepoint, not by identity scrubbing", async () => {
@@ -699,33 +704,73 @@ test("client-id returns the stored id for a signed-in caller", async () => {
 
 // ── 2: OIDC — configuration, throttling, and the open-redirect guard ─────────
 
-test("oidc start is 503 when OIDC is not configured", async () => {
-  const res = await inScope(() => oidcStart.GET(get("/api/auth/oidc/start")));
-  assert.equal(res.status, 503);
+// /start is reached by a TOP-LEVEL navigation (login-form sets
+// window.location.href), so a WEB caller's failures must land on
+// /login?error=<code> — a JSON body there renders raw in the browser tab with
+// no way back. A NATIVE caller (X-Summonarr-Client) keeps the JSON status it
+// can read. Both shapes are pinned side by side for every failure.
+const NATIVE = { [NATIVE_CLIENT_HEADER]: "ios; build=42" };
+
+test("oidc start when OIDC is not configured: web → /login?error=oidc_not_configured, native → 503", async () => {
+  const web = await inScope(() => oidcStart.GET(get("/api/auth/oidc/start")));
+  assert.equal(web.status, 307);
+  assert.equal(redirectError(web), "oidc_not_configured");
+  const native = await inScope(() => oidcStart.GET(get("/api/auth/oidc/start", NATIVE)));
+  assert.equal(native.status, 503);
 });
 
-test("oidc start is 503 when only PART of the OIDC config is present", async () => {
+test("oidc start treats a PARTIAL OIDC config as not configured", async () => {
   process.env.OIDC_ISSUER = "https://idp.example.com";
-  const res = await inScope(() => oidcStart.GET(get("/api/auth/oidc/start")));
-  assert.equal(res.status, 503);
+  assert.equal(redirectError(await inScope(() => oidcStart.GET(get("/api/auth/oidc/start")))), "oidc_not_configured");
+  assert.equal((await inScope(() => oidcStart.GET(get("/api/auth/oidc/start", NATIVE)))).status, 503);
 });
 
-test("oidc start is IP rate-limited BEFORE the configuration check", async () => {
+test("oidc start treats a NON-HTTPS issuer as not configured — openid-client could never complete it", async () => {
+  // allowInsecureRequests is deliberately never passed, so an http:// issuer
+  // only ever produced a tab whose every click failed at discovery. Unconfigured
+  // is the honest answer, and it never reaches discovery (no [oidc/start] log).
+  process.env.OIDC_ISSUER = "http://keycloak.lan:8080/realms/home";
+  process.env.OIDC_CLIENT_ID = "cid";
+  process.env.OIDC_CLIENT_SECRET = "secret";
+  assert.equal(redirectError(await inScope(() => oidcStart.GET(get("/api/auth/oidc/start")))), "oidc_not_configured");
+  assert.equal((await inScope(() => oidcStart.GET(get("/api/auth/oidc/start", NATIVE)))).status, 503);
+  assert.ok(!errors.some((e) => e.includes("[oidc/start]")), "an unconfigured answer must not attempt discovery");
+});
+
+test("oidc start is IP rate-limited BEFORE the configuration check (web redirect, native 429)", async () => {
   const ip = "203.0.113.90";
   for (let i = 0; i < 20; i++) {
     const res = await inScope(() => oidcStart.GET(get("/api/auth/oidc/start", { "x-forwarded-for": ip })));
-    assert.notEqual(res.status, 429, `request ${i + 1} should pass`);
+    assert.notEqual(redirectError(res), "rate_limited", `request ${i + 1} should pass`);
   }
-  assert.equal((await inScope(() => oidcStart.GET(get("/api/auth/oidc/start", { "x-forwarded-for": ip })))).status, 429);
+  const web = await inScope(() => oidcStart.GET(get("/api/auth/oidc/start", { "x-forwarded-for": ip })));
+  assert.equal(web.status, 307);
+  assert.equal(redirectError(web), "rate_limited");
+  const native = await inScope(() => oidcStart.GET(get("/api/auth/oidc/start", { "x-forwarded-for": ip, ...NATIVE })));
+  assert.equal(native.status, 429);
 });
 
-test("oidc start is 503 when discovery fails, not a 500", async () => {
+test("oidc start when discovery fails: web → 307 /login?error=oidc_unavailable, native → 503, never a 500", async () => {
   process.env.OIDC_ISSUER = "https://idp.example.com";
   process.env.OIDC_CLIENT_ID = "cid";
   process.env.OIDC_CLIENT_SECRET = "secret";
-  const res = await inScope(() => oidcStart.GET(get("/api/auth/oidc/start", { "x-forwarded-for": "203.0.113.91" })));
-  assert.equal(res.status, 503);
+  const web = await inScope(() => oidcStart.GET(get("/api/auth/oidc/start", { "x-forwarded-for": "203.0.113.91" })));
+  assert.equal(web.status, 307);
+  const loc = web.headers.get("location") ?? "";
+  assert.ok(loc.startsWith("http://localhost:3000/login"), `a web failure must land on /login, got ${loc}`);
+  assert.equal(redirectError(web), "oidc_unavailable");
   assert.ok(errors.some((e) => e.includes("[oidc/start]")), "the failure should be logged for the operator");
+  const native = await inScope(() => oidcStart.GET(get("/api/auth/oidc/start", { "x-forwarded-for": "203.0.113.92", ...NATIVE })));
+  assert.equal(native.status, 503);
+  assert.equal(setCookies(native).length, 0, "a native failure sets no state cookie");
+});
+
+test("oidc start redirects a web failure to AUTH_URL, never a caller-supplied Host", async () => {
+  const res = await inScope(() =>
+    oidcStart.GET(get("/api/auth/oidc/start", { host: "evil.example.com", "x-forwarded-host": "evil.example.com" })),
+  );
+  const loc = res.headers.get("location") ?? "";
+  assert.ok(loc.startsWith("http://localhost:3000/login"), `redirect escaped AUTH_URL: ${loc}`);
 });
 
 test("the OIDC state cookie path includes BASE_PATH so the callback can read it", () => {
@@ -820,6 +865,43 @@ test("oidc callback with a VALID state but a failing exchange redirects with oid
   const res = await callbackRes({ "x-forwarded-for": "203.0.113.12", cookie: `${OIDC_STATE_COOKIE}=${state}` });
   assert.equal(redirectError(res), "oidc_exchange_failed");
   assert.equal(sessionWrites(), 0, "a failed exchange must mint nothing");
+});
+
+test("oidc callback: the IdP's access_denied comes back as oidc_access_denied with NO error log (guardrail 7)", async () => {
+  // A user clicking Deny/Cancel at the IdP is an expected refusal. Before this
+  // the web branch went straight into the exchange, which threw on the error
+  // response and logged "[oidc/callback] code exchange failed" for it.
+  process.env.OIDC_ISSUER = "https://idp.example.com";
+  process.env.OIDC_CLIENT_ID = "cid";
+  process.env.OIDC_CLIENT_SECRET = "secret";
+  const state = await signOidcStateCookie({
+    state: "s", nonce: "n", codeVerifier: "v",
+    redirectUri: "http://localhost:3000/api/auth/oidc/callback", returnTo: "/requests",
+  });
+  const res = await callbackRes(
+    { "x-forwarded-for": "203.0.113.18", cookie: `${OIDC_STATE_COOKIE}=${state}` },
+    "?error=access_denied&error_description=User+cancelled&state=s",
+  );
+  assert.equal(res.status, 307);
+  assert.equal(redirectError(res), "oidc_access_denied");
+  assert.equal(sessionWrites(), 0);
+  assert.ok(
+    !errors.some((e) => e.includes("[oidc/callback]")),
+    `a user refusal must not be logged as a server error: ${errors.join(" | ")}`,
+  );
+  // Read BEFORE the state cookie, so an expired state can't mask what the IdP said.
+  const noCookie = await callbackRes({ "x-forwarded-for": "203.0.113.19" }, "?error=access_denied&state=s");
+  assert.equal(redirectError(noCookie), "oidc_access_denied");
+});
+
+test("oidc callback: any other IdP error is oidc_idp_error, also unlogged", async () => {
+  process.env.OIDC_ISSUER = "https://idp.example.com";
+  process.env.OIDC_CLIENT_ID = "cid";
+  process.env.OIDC_CLIENT_SECRET = "secret";
+  const res = await callbackRes({ "x-forwarded-for": "203.0.113.22" }, "?error=server_error&state=s");
+  assert.equal(redirectError(res), "oidc_idp_error");
+  assert.ok(!errors.some((e) => e.includes("[oidc/callback]")));
+  assert.equal(sessionWrites(), 0);
 });
 
 test("oidc callback is unconfigured-gated", async () => {

@@ -484,9 +484,9 @@ test("PATCH: a NEW http:// donation value is rejected — https-only", async () 
     undefined,
   );
   assert.equal(res.status, 400);
-  const body = (await res.json()) as { error: string; message: string };
-  assert.equal(body.error, "invalid-url");
-  assert.match(body.message, /https/);
+  // Same { error: <translated reason> } shape as every other 400 in the route, so
+  // the Donations form can show WHY; `code` keeps a machine-readable discriminator.
+  assert.deepEqual(await res.json(), { error: "Donation URL must be https://", code: "invalid-url" });
   assert.equal(upsertFor("donationAmazon").length, 0, "a rejected value must not be persisted");
 });
 
@@ -800,6 +800,151 @@ test("PATCH: a CHANGED discordGuildId launches command re-registration exactly o
   await new Promise((r) => setImmediate(r));
   assert.equal(discordRegistrationReads().length, 1, "a changed guild id must still trigger the re-registration task, once");
   assert.equal(fetchCalls.length, 0, "with no bot token stored the task stops before any Discord call");
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// PATCH — per-key shape validation that used to be missing: a value the reader
+// would silently replace (or that would silently break a downstream consumer)
+// must be REFUSED, never stored behind a 200. Every test here asserts "no write"
+// on the bad value, then writes a good one so the accept side is pinned too.
+// Distinct keys per test (10s per-key write cooldown, see above).
+// ════════════════════════════════════════════════════════════════════════════
+
+test("PATCH: discordPublicKey must be 64 hex chars after trim — a pasted trailing newline is trimmed, a short/non-hex key is refused", async () => {
+  // /api/interactions decodes the key with Buffer.from(hex) inside a try/catch
+  // that returns "signature invalid": a bad key saved fine and then every
+  // Discord interaction answered 401 while command registration (which never
+  // reads the key) kept succeeding.
+  const admin = await mintSession("ADMIN");
+  for (const bad of ["abc", "g".repeat(64), "0123456789abcdef".repeat(4) + "0", "not hex at all but sixty-four characters long, honest, really it is!!"]) {
+    const res = await PATCH(patchReq(JSON.stringify({ discordPublicKey: bad }), admin.header), undefined);
+    assert.equal(res.status, 400, `"${bad.slice(0, 16)}…" must be refused`);
+    assert.deepEqual(await res.json(), { error: 'Setting "discordPublicKey" must be a 64-character hexadecimal Ed25519 public key' });
+  }
+  assert.equal(upsertFor("discordPublicKey").length, 0, "no malformed key may be persisted");
+
+  const hex = "0123456789abcdef".repeat(4).toUpperCase().slice(0, 32) + "0123456789abcdef".repeat(2);
+  const res = await PATCH(patchReq(JSON.stringify({ discordPublicKey: `  ${hex}\n` }), admin.header), undefined);
+  assert.equal(res.status, 200, "a valid key with pasted whitespace is accepted");
+  assert.equal(upsertFor("discordPublicKey").length, 1);
+  assert.equal(upsertFor("discordPublicKey")[0].create.value, hex, "the TRIMMED key is what reaches the DB (a leading space breaks Buffer.from(hex))");
+});
+
+test("PATCH: NUMERIC_BOUNDS — a non-digit or out-of-range integer setting → 400 (never stored for the reader to silently replace)", async () => {
+  const admin = await mintSession("ADMIN");
+  // "9O" (letter O) used to be Saved and read by the retention purge as 0 = OFF.
+  let res = await PATCH(patchReq(JSON.stringify({ playHistoryRetentionDays: "9O" }), admin.header), undefined);
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: '"playHistoryRetentionDays" must be an integer between 0 and 3650' });
+  // "150" was Saved (and audited) while play-history.ts read it back as the 80 default.
+  res = await PATCH(patchReq(JSON.stringify({ playHistoryWatchedThreshold: "150" }), admin.header), undefined);
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: '"playHistoryWatchedThreshold" must be an integer between 0 and 100' });
+  // Negative / exponent / zero-below-floor shapes, across three more bounded keys.
+  res = await PATCH(patchReq(JSON.stringify({ quotaLimit: "-5" }), admin.header), undefined);
+  assert.equal(res.status, 400);
+  res = await PATCH(patchReq(JSON.stringify({ maxPushSubscriptions: "0" }), admin.header), undefined);
+  assert.equal(res.status, 400);
+  res = await PATCH(patchReq(JSON.stringify({ deletionVoteThreshold: "1e3" }), admin.header), undefined);
+  assert.equal(res.status, 400);
+  assert.equal(upsertCalls.length, 0, "no out-of-range value may reach the DB");
+  // In-range values are stored verbatim (both edges of the retention range).
+  res = await PATCH(
+    patchReq(JSON.stringify({ playHistoryRetentionDays: "0", playHistoryWatchedThreshold: "100", quotaLimit: "25" }), admin.header),
+    undefined,
+  );
+  assert.equal(res.status, 200);
+  assert.equal(upsertFor("playHistoryRetentionDays")[0]?.create.value, "0", "0 (= keep forever) is inside the range");
+  assert.equal(upsertFor("playHistoryWatchedThreshold")[0]?.create.value, "100");
+  assert.equal(upsertFor("quotaLimit")[0]?.create.value, "25");
+});
+
+test("PATCH: a session duration outside 60..7776000 → 400 — it is REFUSED, not silently rewritten to 3600 / the cap", async () => {
+  // The old loop stored "3600" for "30"/"abc" and 7776000 for anything larger
+  // while answering 200 {ok:true}: the form said Saved, the audit `after`
+  // recorded the rewritten number, and the typed value was never saved.
+  const admin = await mintSession("ADMIN");
+  for (const [key, bad] of [["sessionDefaultDuration", "30"], ["sessionMobileDuration", "abc"], ["sessionMaxDuration", "7776001"]] as const) {
+    const res = await PATCH(patchReq(JSON.stringify({ [key]: bad }), admin.header), undefined);
+    assert.equal(res.status, 400, `${key}=${bad} must be refused`);
+    assert.deepEqual(await res.json(), { error: `"${key}" must be an integer between 60 and 7776000` });
+  }
+  assert.equal(upsertCalls.length, 0, "a rewritten substitute must never be written in place of the refused value");
+  assert.equal(auditAttempts.length, 0, "and nothing is audited for a refused save");
+  // Both edges are accepted VERBATIM — no clamp on the write side.
+  const res = await PATCH(
+    patchReq(JSON.stringify({ sessionDefaultDuration: "60", sessionMaxDuration: "7776000" }), admin.header),
+    undefined,
+  );
+  assert.equal(res.status, 200);
+  assert.equal(upsertFor("sessionDefaultDuration")[0]?.create.value, "60");
+  assert.equal(upsertFor("sessionMaxDuration")[0]?.create.value, "7776000");
+});
+
+test("PATCH: BOOLEAN_KEYS — every boolean switch stores only \"true\"/\"false\"; \"yes\" on maintenanceEnabled is refused and NOT audited as a toggle", async () => {
+  // The audit action keyed on the KEY's presence, so `maintenanceEnabled: "yes"`
+  // wrote a MAINTENANCE_TOGGLE row while maintenance.ts (=== "true") stayed off.
+  const admin = await mintSession("ADMIN");
+  for (const [key, bad] of [["maintenanceEnabled", "yes"], ["enableUserEmails", "1"], ["feature.page.top", "on"], ["trashSyncNaming", "TRUE"]] as const) {
+    const res = await PATCH(patchReq(JSON.stringify({ [key]: bad }), admin.header), undefined);
+    assert.equal(res.status, 400, `${key}=${bad} must be refused`);
+    assert.deepEqual(await res.json(), { error: `Setting "${key}" must be "true" or "false"` });
+  }
+  assert.equal(upsertCalls.length, 0);
+  assert.equal(auditAttempts.filter((a) => a.action === "MAINTENANCE_TOGGLE").length, 0, "a refused value must not be audited as a toggle");
+  // Both literals write, and "false" is the OFF direction that matters.
+  let res = await PATCH(patchReq(JSON.stringify({ maintenanceEnabled: "true", enableUserEmails: "false" }), admin.header), undefined);
+  assert.equal(res.status, 200);
+  assert.equal(upsertFor("maintenanceEnabled")[0]?.create.value, "true");
+  assert.equal(upsertFor("enableUserEmails")[0]?.create.value, "false");
+  assert.equal(auditRows.at(-1)?.action, "MAINTENANCE_TOGGLE", "a real toggle is audited as one");
+  // A rate-limit cap is digits-only too: parseInt("1e3") is 1, which passed the range.
+  res = await PATCH(patchReq(JSON.stringify({ rateLimitIssues: "1e3" }), admin.header), undefined);
+  assert.equal(res.status, 400);
+  assert.equal(upsertFor("rateLimitIssues").length, 0);
+});
+
+test("PATCH: requireMfaForAdmins is a cooldown-exempt switch — flipping on then off within 10s both land", async () => {
+  // Every other standalone toggle is exempt; this one 429'd on the undo click,
+  // so the switch snapped back to the state the admin had just tried to leave.
+  const admin = await mintSession("ADMIN");
+  const on = await PATCH(patchReq(JSON.stringify({ requireMfaForAdmins: "true" }), admin.header), undefined);
+  assert.equal(on.status, 200);
+  const off = await PATCH(patchReq(JSON.stringify({ requireMfaForAdmins: "false" }), admin.header), undefined);
+  assert.equal(off.status, 200, "the undo click must not hit the per-key cooldown");
+  assert.deepEqual(upsertFor("requireMfaForAdmins").map((u) => u.create.value), ["true", "false"]);
+});
+
+test("PATCH: an empty siteTitle is WRITTEN — clearing the site name restores the default instead of lying Saved", async () => {
+  // siteUrl was made clearable; its twin form was left behind, so emptying the
+  // name answered ok with zero upserts. Every reader falls back with || "Summonarr".
+  // siteTitle was written by an earlier test; step past the 10s per-key cooldown.
+  settings.set("siteTitle", "Old Custom Name");
+  const admin = await mintSession("ADMIN");
+  const realNow = Date.now;
+  Date.now = () => realNow() + 60_000;
+  let res: Response;
+  try {
+    res = await PATCH(patchReq(JSON.stringify({ siteTitle: "" }), admin.header), undefined);
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(res.status, 200);
+  assert.equal(upsertFor("siteTitle")[0]?.create.value, "", "the clear must reach the database");
+  assert.equal(settings.get("siteTitle"), "");
+});
+
+test("PATCH: vapidPrivateKey and the trash refresh bookkeeping rows are not admin-writable (silently ignored like any unknown key)", async () => {
+  // vapidPrivateKey is generated by push.ts as half of a pair — a lone admin-typed
+  // private half mismatched the stored public key and every web-push send failed.
+  // trashLastRefreshAt is written by trash.ts; an admin value there read as NaN.
+  const admin = await mintSession("ADMIN");
+  const res = await PATCH(
+    patchReq(JSON.stringify({ vapidPrivateKey: "attacker-private-half", trashLastRefreshAt: "yesterday", trashLastRefreshTruncatedAt: "x" }), admin.header),
+    undefined,
+  );
+  assert.equal(res.status, 200);
+  assert.equal(upsertCalls.length, 0, "none of the three may reach the DB");
 });
 
 // ── clearing the Discord app ids and the public site URL ────────────────────

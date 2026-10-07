@@ -295,7 +295,6 @@
   "adminActivity.user.lastSeen": "Last seen",
   "adminActivity.user.lastN": "last {count}",
   "adminActivity.user.linkedTo": "Linked to {name}",
-  "adminActivity.method.directStreamRemux": "Direct Stream (Remux)",
   "adminActivity.play.backToHistory": "Back to history",
   "adminActivity.play.notWatched": "Not watched",
   "adminActivity.play.pctComplete": "{pct}% complete",
@@ -365,5 +364,11 @@
   "adminActivity.transcode.usersSub": "most transcodes · last {days}d",
   "adminActivity.transcode.titles": "Transcode pressure · titles",
   "adminActivity.transcode.titlesSub": "most transcoded · last {days}d",
-  "adminActivity.transcode.none": "No transcodes in this period."
+  "adminActivity.transcode.none": "No transcodes in this period.",
+  "adminActivity.common.hoursSuffix": "h",
+  "adminActivity.trackingOff.title": "Play history tracking is off",
+  "adminActivity.trackingOff.description": "Nothing is being recorded, so this dashboard has no plays, watch time or viewers to show. Turn tracking on under Settings → Media → Play History to start populating it.",
+  "adminActivity.trackingOff.cta": "Open play history settings",
+  "adminActivity.common.hoursShort": "{n}h",
+  "adminActivity.detail.openPlay": "Open play →"
 }

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
-import { withAdmin } from "@/lib/api-auth";
+import { withPermission } from "@/lib/api-auth";
+import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
 import { enforceUserDownloadPolicy } from "@/lib/download-policy";
@@ -21,7 +22,7 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // BOTH automatic linkers (resolveMediaServerUser on every 5s poll, and the hourly
 // Jellyfin user sync) skip a pinned row. Without that pin a manual fix would be
 // overwritten within seconds.
-export const PATCH = withAdmin(async (
+export const PATCH = withPermission(Permission.MANAGE_USERS)(async (
   req,
   { params }: { params: Promise<{ id: string }> },
   session,

@@ -30,13 +30,22 @@
 // regress in JS is the op sequence and payloads, which is what's pinned.
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import dns from "node:dns/promises";
 
 process.env.TOKEN_ENCRYPTION_KEY = "ab".repeat(32); // prisma.ts pulls in token-crypto
+
+// revokeDiscordRolesOnUnlink reaches discord.com through safeFetchTrusted, which
+// resolves the host first: pin DNS and script fetch so no network is touched.
+const fakeLookup = async () => [{ address: "93.184.216.34", family: 4 }];
+(dns as { lookup: unknown }).lookup = fakeLookup;
+if ((dns as { lookup: unknown }).lookup !== fakeLookup) throw new Error("could not stub dns.lookup");
+const errors: string[] = [];
+console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
 
 // Dynamic imports so the env assignment above genuinely precedes the
 // module-graph load (static imports would hoist above it).
 const { prisma } = await import("../src/lib/prisma.ts");
-const { shadowPrismaClientMethod } = await import("./_helpers.mts");
+const { shadowPrismaClientMethod, shadowPrismaModel } = await import("./_helpers.mts");
 
 // ── recording fake tx ───────────────────────────────────────────────────────
 const WEB = "web-user-1";
@@ -51,6 +60,9 @@ type ReqRow = { id: string; tmdbId: number; mediaType: string; arrInstance: stri
 type VoteRow = { id: string; tmdbId: number; mediaType: string };
 
 let existingUser: { id: string; email: string } | null = null;
+// The web user's own row, read inside the tx for its CURRENT discordId (the
+// id a re-link supersedes). Null discordId = not linked yet.
+let webRow: { id: string; discordId: string | null } = { id: WEB, discordId: null };
 let webRequests: Array<Omit<ReqRow, "id">> = [];
 let shadowRequests: ReqRow[] = [];
 let webVotes: Array<Omit<VoteRow, "id">> = [];
@@ -69,8 +81,10 @@ const fakeTx = {
     return 0;
   },
   user: {
-    findUnique: async (args: unknown) => {
+    findUnique: async (args: { where: { id?: string; discordId?: string } }) => {
       ops.push({ op: "user.findUnique", args });
+      // By discordId → whoever holds the id; by id → the web user's own row.
+      if (args.where.id !== undefined) return args.where.id === webRow.id ? { ...webRow } : null;
       return existingUser;
     },
     update: record("user", "update"),
@@ -101,6 +115,38 @@ shadowPrismaClientMethod(prisma, "$transaction", async (fn: (tx: unknown) => Pro
   fn(fakeTx),
 );
 
+// ── the post-commit role revoke's dependencies ───────────────────────────────
+// revokeDiscordRolesOnUnlink (discord-notify.ts) reads the feature flag and the
+// bot/guild/role settings off the TOP-LEVEL prisma client, then DELETEs each
+// managed role from the superseded member. The feature flag defaults ON, so an
+// empty settings table is enough for the gate; the role calls are what's pinned.
+const GUILD = "444444444444444444";
+const LINKED_ROLE = "555555555555555555";
+const settings = new Map<string, string>();
+shadowPrismaModel(prisma, "setting", {
+  findUnique: async (args: { where: { key: string } }) => {
+    const v = settings.get(args.where.key);
+    return v === undefined ? null : { key: args.where.key, value: v };
+  },
+  findMany: async (args: { where?: { key?: { in?: string[] } } } = {}) => {
+    const keys = args.where?.key?.in;
+    const all = [...settings.entries()].map(([key, value]) => ({ key, value }));
+    return keys ? all.filter((r) => keys.includes(r.key)) : all;
+  },
+});
+// Role DELETEs land in the SAME op log as the tx writes, so their position
+// relative to the commit can be asserted.
+globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const url = new URL(String(input));
+  ops.push({ op: `fetch:${init?.method ?? "GET"}`, args: url.pathname });
+  return new Response(null, { status: 204 });
+}) as unknown as typeof fetch;
+const roleDeletes = () => ops.filter((o) => o.op === "fetch:DELETE").map((o) => o.args as string);
+// The revoke is fire-and-forget (`void`): drain the microtask/timer queue.
+async function settle(turns = 40): Promise<void> {
+  for (let i = 0; i < turns; i++) await new Promise((r) => setTimeout(r, 0));
+}
+
 const { mergeDiscordIntoWebAccount } = await import("../src/lib/discord-merge.ts");
 
 function opArgs(op: string): unknown {
@@ -114,23 +160,32 @@ function seedShadow(): void {
   existingUser = { id: SHADOW, email: `${DISCORD_ID}@discord.local` };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  await settle(5); // a previous test's detached revoke must not log into this one
   ops.length = 0;
+  errors.length = 0;
   existingUser = null;
+  webRow = { id: WEB, discordId: null };
+  settings.clear();
+  settings.set("discordBotToken", "a-bot-token");
+  settings.set("discordGuildId", GUILD);
+  settings.set("discordLinkedRoleId", LINKED_ROLE);
   webRequests = [];
   shadowRequests = [];
   webVotes = [];
   shadowVotes = [];
 });
 
-test("no account owns the discordId → plain link: lock, lookup, ONE user.update, migrated 0", async () => {
+test("no account owns the discordId → plain link: lock, lookup, the web row's current link, ONE user.update, migrated 0", async () => {
   const result = await mergeDiscordIntoWebAccount(WEB, DISCORD_ID);
   assert.deepEqual(result, { migrated: 0 });
-  assert.deepEqual(opNames(), ["$executeRawUnsafe", "user.findUnique", "user.update"]);
+  assert.deepEqual(opNames(), ["$executeRawUnsafe", "user.findUnique", "user.findUnique", "user.update"]);
   assert.deepEqual(opArgs("user.update"), {
     where: { id: WEB },
     data: { discordId: DISCORD_ID },
   });
+  await settle();
+  assert.deepEqual(roleDeletes(), [], "a first link supersedes no member — nothing to revoke");
 });
 
 test("re-linking a discordId the web user already owns is the plain link, not a merge or a refusal", async () => {
@@ -138,9 +193,50 @@ test("re-linking a discordId the web user already owns is the plain link, not a 
   // so a real (non-@discord.local) email on one's own row never trips the
   // "already linked to another user" refusal.
   existingUser = { id: WEB, email: "chris@example.com" };
+  webRow = { id: WEB, discordId: DISCORD_ID };
   const result = await mergeDiscordIntoWebAccount(WEB, DISCORD_ID);
   assert.deepEqual(result, { migrated: 0 });
-  assert.deepEqual(opNames(), ["$executeRawUnsafe", "user.findUnique", "user.update"]);
+  assert.deepEqual(opNames(), ["$executeRawUnsafe", "user.findUnique", "user.findUnique", "user.update"]);
+  await settle();
+  assert.deepEqual(roleDeletes(), [], "the same member is re-linked — its roles stay");
+});
+
+// Re-linking an ALREADY-linked account overwrites discordId (generate-link and
+// initiate-merge don't refuse a linked caller), and nothing else ever revisits
+// the replaced id — sync-roles iterates current links only — so the superseded
+// member kept every role Summonarr granted it, admin included. The merge now
+// reads the web row's current link INSIDE the tx and revokes the old member's
+// roles after the commit (guardrail 27), exactly as the unlink route does.
+test("a re-link that REPLACES a different discordId revokes the superseded member's roles — after the commit", async () => {
+  const OLD = "999999999999999999";
+  webRow = { id: WEB, discordId: OLD };
+  const result = await mergeDiscordIntoWebAccount(WEB, DISCORD_ID);
+  assert.deepEqual(result, { migrated: 0 }, "the wire result is unchanged — the revoke is a side effect");
+  await settle();
+  assert.deepEqual(roleDeletes(), [`/api/v10/guilds/${GUILD}/members/${OLD}/roles/${LINKED_ROLE}`]);
+  const names = opNames();
+  assert.ok(names.indexOf("user.update") < names.indexOf("fetch:DELETE"), "DB write first, Discord second (guardrail 27)");
+  assert.deepEqual(errors, []);
+});
+
+test("the superseded member is revoked on the MERGE path too (shadow absorbed into a re-linked account)", async () => {
+  const OLD = "999999999999999999";
+  seedShadow();
+  webRow = { id: WEB, discordId: OLD };
+  await mergeDiscordIntoWebAccount(WEB, DISCORD_ID);
+  await settle();
+  assert.deepEqual(roleDeletes(), [`/api/v10/guilds/${GUILD}/members/${OLD}/roles/${LINKED_ROLE}`]);
+  // The current link is read inside the tx, after the refusal check and before any write.
+  const names = opNames();
+  assert.ok(names.indexOf("user.findUnique", 1) < names.indexOf("mediaRequest.findMany"));
+});
+
+test("the refusal path never reaches the superseded-member revoke", async () => {
+  existingUser = { id: "other-web-user", email: "someone-else@gmail.com" };
+  webRow = { id: WEB, discordId: "999999999999999999" };
+  await assert.rejects(() => mergeDiscordIntoWebAccount(WEB, DISCORD_ID));
+  await settle();
+  assert.deepEqual(roleDeletes(), []);
 });
 
 test("a discordId owned by ANOTHER real web account refuses the merge before any write", async () => {

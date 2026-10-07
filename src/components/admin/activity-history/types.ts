@@ -74,6 +74,10 @@ export interface MediaServerUserOption {
   id: string;
   username: string;
   source: string;
+  // Media-server instance slug (guardrail 35). Additive on the wire
+  // (`distinct=users`); the filter bar reads it only to disambiguate a
+  // username that exists on two same-type servers.
+  serverInstance?: string;
 }
 
 export type SortField =

@@ -34,8 +34,11 @@ export const GET = withPermission(Permission.ADMIN)(async (request, _ctx, sessio
     return NextResponse.json(rows.map((r) => r.platform));
   }
   if (distinctMode === "users") {
+    // serverInstance is additive: the same username legitimately exists on two
+    // same-type servers (the owner and every shared friend on two Plex instances,
+    // guardrail 35), and the filter bar needs it to tell the two options apart.
     const rows = await prisma.mediaServerUser.findMany({
-      select: { id: true, username: true, source: true },
+      select: { id: true, username: true, source: true, serverInstance: true },
       orderBy: { username: "asc" },
     });
     return NextResponse.json(rows);
@@ -297,7 +300,20 @@ async function groupedQuery(
   const items = rows.map((r) => {
     // Map snake_case raw columns to the camelCase shape the rest of the app
     // consumes. The base PlayHistory columns already arrive camelCase via the
-    // SELECT b.* — only the window-function aliases need translation.
+    // SELECT b.* — only the window-function aliases need translation. The
+    // aliases are destructured OUT before the spread so the response carries
+    // each value once (the ungrouped path strips its aliases the same way);
+    // spreading `r` shipped every alias twice in two spellings.
+    const {
+      rn: _rn, chain_id: _chainId, segment_count: _segmentCount,
+      total_play_duration: _totalPlay, total_paused_duration: _totalPaused,
+      first_started_at: _firstStarted, last_stopped_at: _lastStopped,
+      chain_watched: _chainWatched, chain_completed: _chainCompleted,
+      msu_username: _msuUsername, msu_source: _msuSource, msu_thumb_url: _msuThumb,
+      ...base
+    } = r;
+    void _rn; void _chainId; void _segmentCount; void _totalPlay; void _totalPaused; void _firstStarted;
+    void _lastStopped; void _chainWatched; void _chainCompleted; void _msuUsername; void _msuSource; void _msuThumb;
     const mediaServerUser = r.msu_username != null
       ? {
           username: r.msu_username,
@@ -308,7 +324,7 @@ async function groupedQuery(
     const live =
       r.tmdbId != null ? livePaths[posterPathKey(r.tmdbId, r.mediaType)] ?? null : null;
     return {
-      ...r,
+      ...base,
       mediaServerUser,
       posterPath: live ?? r.posterPath,
       posterUrl: posterUrl(live, "w342"),

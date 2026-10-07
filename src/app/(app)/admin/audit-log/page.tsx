@@ -9,6 +9,7 @@ import { getTranslator } from "@/lib/i18n/server";
 import { PageHeader } from "@/components/ui/design";
 import { AUDIT_ACTIONS, ACTION_GROUP, type AuditGroup } from "@/lib/audit-actions";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
+import { REDACTED_USER_NAME } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
@@ -53,6 +54,11 @@ export default async function AuditLogPage({
   else if (group) where.action = { in: GROUP_ACTIONS[group] };
   if (dateFrom || dateTo) {
     where.createdAt = {};
+    // Both bounds arrive as ISO instants — the START of the viewer's LOCAL
+    // calendar day (the filter bar converts the date input's YYYY-MM-DD with
+    // `new Date(y, m - 1, d)`), so the filter cuts where the Timeline view's
+    // day headings do rather than at UTC midnight. A bare YYYY-MM-DD from an
+    // old bookmark still parses (as UTC midnight, the previous behaviour).
     // An Invalid Date reaches Prisma's DateTime filter and throws, taking the
     // whole page render down — mirrors the isNaN guard in /api/admin/audit-log.
     if (dateFrom) {
@@ -62,7 +68,10 @@ export default async function AuditLogPage({
     if (dateTo) {
       const end = new Date(dateTo);
       if (!isNaN(end.getTime())) {
-        end.setDate(end.getDate() + 1);
+        // +1 day in UTC = exactly 24h past the local-day start the client
+        // sent, i.e. the start of the viewer's next day — same arithmetic as
+        // the list API and the export, so the three pages always agree.
+        end.setUTCDate(end.getUTCDate() + 1);
         where.createdAt.lt = end;
       }
     }
@@ -124,6 +133,7 @@ export default async function AuditLogPage({
         currentUser={user ?? ""}
         currentTarget={target ?? ""}
         currentHideCron={hideCron}
+        redactedUserName={REDACTED_USER_NAME}
       />
     </div>
   );

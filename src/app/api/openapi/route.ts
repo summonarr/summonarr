@@ -1769,7 +1769,7 @@ const spec = {
                 required: ["email", "password"],
                 properties: {
                   email: { type: "string", format: "email" },
-                  password: { type: "string", minLength: 8 },
+                  password: { type: "string", minLength: 12 },
                   name: { type: "string", nullable: true, maxLength: 100 },
                   role: { $ref: "#/components/schemas/UserRole" },
                 },

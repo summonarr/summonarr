@@ -135,11 +135,11 @@
   "profile.close.intro": "Close your account and sign out everywhere. You won’t be able to sign back in — only an administrator can restore access. Your requests, votes, issues and watch history are kept. Ask an administrator if you also want your personal data erased.",
   "profile.close.button": "Close account",
   "profile.close.confirmPrompt": "Type {word} to confirm. This closes your account and signs you out of every device — you won’t be able to sign back in unless an administrator restores it.",
-  "profile.close.confirmLabel": "Type {word} to confirm account deletion",
+  "profile.close.confirmLabel": "Type {word} to confirm closing your account",
   "profile.close.confirmButton": "Close my account",
   "profile.close.closing": "Closing…",
-  "profile.close.error.failed": "Failed to delete account",
-  "profile.close.error.retry": "Failed to delete account. Please try again.",
+  "profile.close.error.failed": "Failed to close account",
+  "profile.close.error.retry": "Failed to close account. Please try again.",
   "profile.notifications.title": "Notification Preferences",
   "profile.notifications.description": "Choose which notifications you receive on each channel.",
   "profile.notifications.pushOnly": "Browser/device push is the only notification channel available to you right now — enable it from the bell in the top bar. Link your Discord account to add another channel, or ask an admin to configure email delivery.",
@@ -222,5 +222,12 @@
   "profile.mfa.stepUp.passkeyFailed": "The passkey couldn't be used on this device.",
   "profile.mfa.stepUp.codeRequired": "Enter a code from your authenticator app or a recovery code to confirm this change.",
   "profile.notifications.iosApp.prompt": "On iPhone? The Summonarr app delivers these as native notifications.",
-  "profile.notifications.iosApp.link": "Get it on the App Store"
+  "profile.notifications.iosApp.link": "Get it on the App Store",
+  "profile.close.confirmWord": "CLOSE",
+  "profile.mfa.confirmRemoveTotp": "Remove the authenticator app? You will still be asked for a passkey when you sign in.",
+  "profile.mfa.confirmRemovePasskey": "Remove passkey {name}? You will still be asked for a second factor when you sign in.",
+  "profile.mfa.confirmRemoveLast": "This is your only second factor. Removing it turns two-factor authentication off, deletes your recovery codes and signs out your other devices.",
+  "profile.mfa.totp.copyKey": "Copy setup key",
+  "profile.notifications.verificationPending": "Verification pending for {email} — check your inbox.",
+  "profile.notifications.resendVerification": "Resend"
 }

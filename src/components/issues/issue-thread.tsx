@@ -7,6 +7,8 @@ import { useHasMounted } from "@/hooks/use-has-mounted";
 import { useLiveEvents } from "@/hooks/use-live-events";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { useSummonarrSession } from "@/components/auth/summonarr-session-provider";
+import { Permission, effectivePermissions, hasPermission, parsePermissions } from "@/lib/permissions";
 
 interface IssueMessageData {
   id: string;
@@ -19,12 +21,21 @@ interface IssueMessageData {
 interface IssueThreadProps {
   issueId: string;
   variant?: "inline" | "panel";
+  // Which side of the thread the viewer sits on. Omitted, it is derived from the
+  // client session with the same MANAGE_ISSUES bit the messages route uses for
+  // `fromAdmin`, so every consumer agrees without each page threading it through.
+  viewerIsAdmin?: boolean;
 }
+
+// Server cap on a message body (api/issues/[id]/messages). The counter appears
+// once a draft is within 200 characters of it so the maxLength stop isn't silent.
+const MESSAGE_MAX = 2000;
+const MESSAGE_COUNTER_AT = 1800;
 
 // Renders an issue's message thread and reply box. Loads the thread once on
 // mount, then reloads it whenever the server's live event stream (SSE) sends
 // an issuemessage:created event for this issue.
-export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
+export function IssueThread({ issueId, variant = "inline", viewerIsAdmin: viewerIsAdminProp }: IssueThreadProps) {
   const [messages, setMessages] = useState<IssueMessageData[]>([]);
   const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [body, setBody] = useState("");
@@ -37,6 +48,26 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
   const mounted = useHasMounted();
   const t = useT();
   const locale = useLocale();
+  // Bubbles sit on the viewer's side when the message is THEIRS, not when it is
+  // an admin's. `fromAdmin` is MANAGE_ISSUES-derived server-side, so "mine" is
+  // `msg.fromAdmin === viewerIsAdmin`. The reporter used to see their own replies
+  // on the left in grey — the inverse of the chat convention — and the admin
+  // pages only read correctly because admin and viewer coincided there.
+  const { session } = useSummonarrSession();
+  const viewerIsAdmin =
+    viewerIsAdminProp ??
+    (session
+      ? hasPermission(
+          effectivePermissions(session.user.role, parsePermissions(session.user.permissions)),
+          Permission.MANAGE_ISSUES,
+        )
+      : false);
+  // The handler takes ⌘↵ AND Ctrl↵; the hint names the one this platform uses.
+  // navigator is browser-only, so it is read post-mount (guardrail 16) and the
+  // SSR placeholder keeps the generic ⌘ wording until then.
+  const shortcut = mounted
+    ? /Mac|iPhone|iPad|iPod/i.test(navigator.platform) ? "⌘↵" : "Ctrl+↵"
+    : null;
 
   const loadMessages = useCallback(
     (signal?: AbortSignal, { silent = false }: { silent?: boolean } = {}) => {
@@ -173,20 +204,23 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
           // would throw on undefined and blank the whole thread.
           const authorName = msg.author.name ?? msg.author.email ?? t("shared.thread.unknownAuthor");
           const isAdmin = msg.fromAdmin;
+          // Side = authorship relative to the viewer; the shield avatar and accent
+          // fill still mark admin authorship whichever side it lands on.
+          const isMine = msg.fromAdmin === viewerIsAdmin;
           return (
-            <div key={msg.id} className={`flex gap-2.5 ${isAdmin ? "flex-row-reverse" : "flex-row"}`}>
+            <div key={msg.id} className={`flex gap-2.5 ${isMine ? "flex-row-reverse" : "flex-row"}`}>
               <div className={`w-6 h-6 rounded-full shrink-0 flex items-center justify-center text-[10px] font-bold mt-0.5 ${
                 isAdmin ? "bg-indigo-700 text-[var(--ds-accent-fg)]" : "bg-zinc-700 text-zinc-300"
               }`}>
                 {isAdmin ? <ShieldCheck className="w-3.5 h-3.5" /> : (authorName[0] ?? "?").toUpperCase()}
               </div>
 
-              <div className={`flex flex-col gap-0.5 max-w-[75%] ${isAdmin ? "items-end" : "items-start"}`}>
+              <div className={`flex flex-col gap-0.5 max-w-[75%] ${isMine ? "items-end" : "items-start"}`}>
                 <div className={`px-3 py-2 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap break-words ${
                   isAdmin
-                    ? "bg-indigo-600 text-[var(--ds-accent-fg)] rounded-tr-sm"
-                    : "bg-zinc-800 text-zinc-200 rounded-tl-sm"
-                }`}>
+                    ? "bg-indigo-600 text-[var(--ds-accent-fg)]"
+                    : "bg-zinc-800 text-zinc-200"
+                } ${isMine ? "rounded-tr-sm" : "rounded-tl-sm"}`}>
                   {msg.body}
                 </div>
                 <p className="text-[10px] text-zinc-500 px-1">
@@ -205,13 +239,25 @@ export function IssueThread({ issueId, variant = "inline" }: IssueThreadProps) {
           value={body}
           onChange={(e) => setBody(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={t("shared.thread.placeholder")}
+          placeholder={
+            shortcut
+              ? t("shared.thread.placeholderShortcut", { shortcut })
+              : t("shared.thread.placeholder")
+          }
           aria-label={t("shared.thread.message")}
-          maxLength={2000}
+          maxLength={MESSAGE_MAX}
           rows={2}
           disabled={sending || loadState !== "ready"}
           className="flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         />
+        {body.length > MESSAGE_COUNTER_AT && (
+          <span
+            className="ds-mono shrink-0 self-end pb-2.5 text-[10px] tabular-nums text-zinc-500"
+            aria-live="polite"
+          >
+            {body.length}/{MESSAGE_MAX}
+          </span>
+        )}
         <Button
           type="submit"
           size="sm"

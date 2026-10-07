@@ -26,6 +26,21 @@ export interface IpLookup {
   bogon: boolean;
 }
 
+// Thrown by getIpLookup when the upstream could not be reached or answered
+// non-2xx AND no cached row exists to fall back on. Distinct from `null` (an
+// invalid ip, or no ipinfo token — permanent, the client negative-caches a 404)
+// so the route can answer 503, which the activity UI does NOT cache: a
+// timeout or 5xx for a NEW ip otherwise read "Not available" in every row for
+// the rest of the session even though the next lookup would have succeeded.
+export class IpLookupUnavailableError extends Error {
+  readonly reason: string;
+  constructor(reason: string) {
+    super(`ip lookup unavailable: ${reason}`);
+    this.name = "IpLookupUnavailableError";
+    this.reason = reason;
+  }
+}
+
 interface IpinfoResponse {
   ip?: string;
   hostname?: string;
@@ -173,7 +188,8 @@ export async function getIpLookup(rawIp: string): Promise<IpLookup | null> {
     const res = await safeFetchTrusted(url, { allowedHosts: ["ipinfo.io"], timeoutMs: IPINFO_TIMEOUT_MS });
     if (!res.ok) {
       console.error(`[ip-lookup] ipinfo returned HTTP ${res.status} for ${sanitizeForLog(ip)}`);
-      return cached ? rowToLookup(cached) : null;
+      if (cached) return rowToLookup(cached);
+      throw new IpLookupUnavailableError(`HTTP ${res.status}`);
     }
     const data = (await res.json()) as IpinfoResponse;
 
@@ -206,9 +222,11 @@ export async function getIpLookup(rawIp: string): Promise<IpLookup | null> {
     });
     return rowToLookup(row);
   } catch (err) {
+    if (err instanceof IpLookupUnavailableError) throw err;
     const reason = err instanceof SafeFetchError ? err.reason : err instanceof Error ? err.message : String(err);
     console.error(`[ip-lookup] fetch failed for ${sanitizeForLog(ip)}: ${sanitizeForLog(reason)}`);
-    return cached ? rowToLookup(cached) : null;
+    if (cached) return rowToLookup(cached);
+    throw new IpLookupUnavailableError(reason);
   }
 }
 

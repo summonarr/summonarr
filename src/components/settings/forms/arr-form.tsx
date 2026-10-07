@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { StyledSelect } from "@/components/ui/styled-select";
 import { CheckCircle, XCircle, Loader2, RefreshCw, Download } from "@/components/icons";
 import { SaveStatusMessage } from "./save-status";
 import { withBasePath } from "@/lib/base-path";
@@ -77,6 +78,13 @@ export function ArrForm({
   const [options,           setOptions]           = useState<ArrOptions | null>(null);
   const [optionsStatus,     setOptionsStatus]     = useState<LoadStatus>("idle");
   const [optionsSaveStatus, setOptionsSaveStatus] = useState<SaveStatus>("idle");
+  const [optionsSaveError,  setOptionsSaveError]  = useState("");
+  // Only the "Saved" tick on Save Defaults fades; an error stays until the
+  // next edit or save. Ref'd so a second save cancels the first save's timer
+  // (which could otherwise reset "saving" to "idle" mid-flight) and unmount
+  // clears it.
+  const optionsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (optionsSaveTimer.current) clearTimeout(optionsSaveTimer.current); }, []);
 
   const fetchOptions = useCallback(async () => {
     setOptionsStatus("loading");
@@ -128,7 +136,9 @@ export function ArrForm({
 
   async function handleSaveOptions(e: React.FormEvent) {
     e.preventDefault();
+    if (optionsSaveTimer.current) clearTimeout(optionsSaveTimer.current);
     setOptionsSaveStatus("saving");
+    setOptionsSaveError("");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
         method: "PATCH",
@@ -143,11 +153,16 @@ export function ArrForm({
         }),
       });
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-      setOptionsSaveStatus(res.ok && data.ok !== false ? "ok" : "error");
+      if (res.ok && data.ok !== false) {
+        setOptionsSaveStatus("ok");
+        optionsSaveTimer.current = setTimeout(() => setOptionsSaveStatus("idle"), 3000);
+      } else {
+        setOptionsSaveError(data.error ?? "");
+        setOptionsSaveStatus("error");
+      }
     } catch {
       setOptionsSaveStatus("error");
     }
-    setTimeout(() => setOptionsSaveStatus("idle"), 3000);
   }
 
   return (
@@ -161,8 +176,8 @@ export function ArrForm({
               type="url"
               value={url}
               onChange={(e) => { setUrl(e.target.value); setStatus("idle"); }}
-              placeholder="http://radarr:7878"
-              className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+              placeholder={service === "radarr" ? "http://radarr:7878" : "http://sonarr:8989"}
+              className="bg-zinc-800 border-zinc-700 font-mono"
             />
           </div>
           <div className="space-y-1.5">
@@ -173,7 +188,7 @@ export function ArrForm({
               value={apiKey}
               onChange={(e) => { setApiKey(e.target.value); setStatus("idle"); }}
               placeholder="••••••••••••••••••••••••••••••••"
-              className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+              className="bg-zinc-800 border-zinc-700 font-mono"
             />
             <p className="text-xs text-zinc-500">{t("settings.form.arr.apiKeyHelp", { service: label })}</p>
           </div>
@@ -190,15 +205,17 @@ export function ArrForm({
         <div className="border-t border-zinc-800 pt-5 space-y-4">
           <div className="flex items-center justify-between">
             <p className="text-sm font-medium text-zinc-300">{t("settings.form.arr.defaults")}</p>
-            <button
+            <Button
               type="button"
+              variant="ghost"
+              size="xs"
               onClick={fetchOptions}
               disabled={optionsStatus === "loading"}
-              className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-100 transition-colors disabled:opacity-50"
+              className="text-zinc-500 hover:text-zinc-100"
             >
-              <RefreshCw className={`w-3 h-3 ${optionsStatus === "loading" ? "animate-spin" : ""}`} />
+              <RefreshCw className={optionsStatus === "loading" ? "animate-spin" : ""} aria-hidden />
               {t("settings.form.arr.refresh")}
-            </button>
+            </Button>
           </div>
 
           {optionsStatus === "error" && (
@@ -210,11 +227,11 @@ export function ArrForm({
               <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-4 lg:space-y-0">
                 <div className="space-y-1.5">
                   <Label htmlFor={`${idPrefix}-folder`}>{t("settings.form.arr.rootFolder")}</Label>
-                  <select
+                  <StyledSelect
+                    compact
                     id={`${idPrefix}-folder`}
                     value={rootFolder}
-                    onChange={(e) => setRootFolder(e.target.value)}
-                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    onChange={(e) => { setRootFolder(e.target.value); setOptionsSaveStatus("idle"); }}
                   >
                     <option value="">{t("settings.form.arr.selectRootFolder")}</option>
                     {/* If the saved folder no longer exists on the server, the
@@ -227,15 +244,15 @@ export function ArrForm({
                     {options.rootFolders.map((f) => (
                       <option key={f.path} value={f.path}>{f.path}</option>
                     ))}
-                  </select>
+                  </StyledSelect>
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor={`${idPrefix}-profile`}>{t("settings.form.arr.qualityProfile")}</Label>
-                  <select
+                  <StyledSelect
+                    compact
                     id={`${idPrefix}-profile`}
                     value={qualityProfileId}
-                    onChange={(e) => setQualityProfileId(e.target.value)}
-                    className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    onChange={(e) => { setQualityProfileId(e.target.value); setOptionsSaveStatus("idle"); }}
                   >
                     <option value="">{t("settings.form.arr.selectQualityProfile")}</option>
                     {qualityProfileId && !options.qualityProfiles.some((p) => String(p.id) === qualityProfileId) && (
@@ -244,23 +261,23 @@ export function ArrForm({
                     {options.qualityProfiles.map((p) => (
                       <option key={p.id} value={String(p.id)}>{p.name}</option>
                     ))}
-                  </select>
+                  </StyledSelect>
                 </div>
 
                 {service === "radarr" && (
                   <div className="space-y-1.5">
                     <Label htmlFor={`${idPrefix}-min-availability`}>{t("settings.form.arr.minimumAvailability")}</Label>
-                    <select
+                    <StyledSelect
+                      compact
                       id={`${idPrefix}-min-availability`}
                       value={minimumAvailability}
-                      onChange={(e) => setMinimumAvailability(e.target.value)}
-                      className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      onChange={(e) => { setMinimumAvailability(e.target.value); setOptionsSaveStatus("idle"); }}
                     >
                       <option value="">{t("settings.form.arr.serviceDefault", { service: label })}</option>
                       {MINIMUM_AVAILABILITY_OPTIONS.map((o) => (
                         <option key={o.value} value={o.value}>{t(o.labelKey)}</option>
                       ))}
-                    </select>
+                    </StyledSelect>
                     <p className="text-xs text-zinc-500">
                       {t("settings.form.arr.minimumAvailabilityHelp")}
                     </p>
@@ -272,11 +289,11 @@ export function ArrForm({
                 {service === "sonarr" && (options.languageProfiles?.length ?? 0) > 0 && (
                   <div className="space-y-1.5">
                     <Label htmlFor={`${idPrefix}-language-profile`}>{t("settings.form.arr.languageProfile")}</Label>
-                    <select
+                    <StyledSelect
+                      compact
                       id={`${idPrefix}-language-profile`}
                       value={languageProfileId}
-                      onChange={(e) => setLanguageProfileId(e.target.value)}
-                      className="h-8 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2.5 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      onChange={(e) => { setLanguageProfileId(e.target.value); setOptionsSaveStatus("idle"); }}
                     >
                       <option value="">{t("settings.form.arr.serviceDefault", { service: label })}</option>
                       {languageProfileId && !options.languageProfiles!.some((p) => String(p.id) === languageProfileId) && (
@@ -285,7 +302,7 @@ export function ArrForm({
                       {options.languageProfiles!.map((p) => (
                         <option key={p.id} value={String(p.id)}>{p.name}</option>
                       ))}
-                    </select>
+                    </StyledSelect>
                     <p className="text-xs text-zinc-500">
                       {t("settings.form.arr.languageProfileHelp")}
                     </p>
@@ -300,7 +317,7 @@ export function ArrForm({
                 >
                   {optionsSaveStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.arr.saveDefaults")}
                 </Button>
-                <SaveStatusMessage status={optionsSaveStatus} />
+                <SaveStatusMessage status={optionsSaveStatus} errorLabel={optionsSaveError || undefined} />
               </div>
             </form>
           )}

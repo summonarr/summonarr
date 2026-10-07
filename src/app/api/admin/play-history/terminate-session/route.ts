@@ -5,7 +5,7 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { getPlexSessions, terminatePlexSession } from "@/lib/plex";
 import { getPlexConfig } from "@/lib/plex-config";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
-import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { instanceDefaultLocale, translatorFor, translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Admin terminate-playback endpoint for Plex. POSTs to Plex's
 // /status/sessions/terminate, which shows `reason` on the viewer's player and
@@ -27,9 +27,13 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const body = parsed;
 
   const sessionKey = typeof body.sessionKey === "string" ? body.sessionKey.trim() : "";
+  // The fallback reason is shown on the VIEWER's player, so it is written in the
+  // instance default language like every other message to viewers (guardrail
+  // 14c), not the admin's request language. The web UI always sends a reason;
+  // this fires for API callers without one (the native client).
   const reason = typeof body.reason === "string" && body.reason.trim().length > 0
     ? body.reason.trim().slice(0, 500)
-    : "Session terminated by an administrator.";
+    : translatorFor(instanceDefaultLocale())("adminActivity.terminate.defaultReason");
 
   if (!sessionKey) {
     return NextResponse.json({ error: t("apiAdmin.terminate.sessionKeyRequired") }, { status: 400 });
@@ -74,12 +78,21 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // the short sessionKey (passing the key 404s). Use the GUID from the snapshot;
   // fall back to the key only if Plex omitted it (shouldn't happen on a live
   // session).
-  const result = await terminatePlexSession(
-    serverUrl,
-    token,
-    match.sessionId ?? sessionKey,
-    reason,
-  );
+  // Same translated 502 as the snapshot above: Plex can answer /status/sessions
+  // and then time out on the terminate POST, and an unwrapped throw is a bodiless
+  // 500 the dialog cannot explain. Nothing happened upstream, so no audit row.
+  let result;
+  try {
+    result = await terminatePlexSession(
+      serverUrl,
+      token,
+      match.sessionId ?? sessionKey,
+      reason,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: t("apiAdmin.terminate.plexUnreachable", { detail: msg }) }, { status: 502 });
+  }
 
   // Session already terminated on Plex; a failed audit write must not 500 it.
   void logAudit({

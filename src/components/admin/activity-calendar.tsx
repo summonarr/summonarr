@@ -24,10 +24,16 @@ interface CalendarData {
 // intensity (count/max), so the heatmap follows the chosen accent. Count 0
 // renders a faint fg tint — strong enough (7%) to keep the grid visible on the
 // white light-theme card, where 2.5% was ~1.05:1 and vanished.
+//
+// The ramp has a 30% FLOOR for any activity: with the old 12% floor a 1–3-play
+// day on a server whose busiest day is 40 landed at 12–18% accent, which over
+// either theme's card is within ~0.01 L of the 7%-of-fg zero cell — so the
+// typical active day on a home server read as empty. The legend swatches call
+// the same function, so they follow the floor automatically.
 function cellBg(count: number, max: number): string {
   if (count === 0) return "color-mix(in oklab, var(--ds-fg) 7%, transparent)";
   const intensity = max > 0 ? count / max : 0;
-  return `color-mix(in oklab, var(--ds-accent) ${(12 + intensity * 76).toFixed(1)}%, transparent)`;
+  return `color-mix(in oklab, var(--ds-accent) ${(30 + intensity * 60).toFixed(1)}%, transparent)`;
 }
 
 // `today` arrives as an ISO date string from the server page so the server
@@ -81,7 +87,7 @@ export function ActivityCalendar({
       // watched=true: the cell count and the popover count only watched plays,
       // so the history table must open on the same filter or it lists more rows
       // than the number that was clicked.
-      const hp = new URLSearchParams({ tab: "history", from: date, to: date, watched: "true" });
+      const hp = new URLSearchParams({ from: date, to: date, watched: "true" });
       if (detailBase.source) hp.set("source", detailBase.source);
       if (detailBase.mediaType) hp.set("mediaType", detailBase.mediaType);
       viewPlaysHref = `${detailBase.historyPath}?${hp.toString()}`;
@@ -146,7 +152,7 @@ export function ActivityCalendar({
         className="sm:hidden ds-mono"
         style={{
           fontSize: 10.5,
-          color: "var(--ds-fg-disabled)",
+          color: "var(--ds-fg-subtle)",
           marginBottom: 6,
           userSelect: "none",
         }}
@@ -166,7 +172,9 @@ export function ActivityCalendar({
           })}
           style={{ minWidth: 700 }}
         >
-          {/* Month labels */}
+          {/* Month labels. Informational text reads in --ds-fg-subtle, never
+              --ds-fg-disabled (~1.8:1 dark / ~2.5:1 light — guardrail 42);
+              the disabled token is for "—" placeholders and chevrons only. */}
           <div style={{ display: "flex", marginLeft: 26, marginBottom: 6, gap: GAP }}>
             {weeks.map((_, wi) => {
               const ml = monthLabels.find((m) => m.weekIndex === wi);
@@ -177,7 +185,7 @@ export function ActivityCalendar({
                   style={{
                     width: CELL,
                     fontSize: 9.5,
-                    color: "var(--ds-fg-disabled)",
+                    color: "var(--ds-fg-subtle)",
                     flexShrink: 0,
                     whiteSpace: "nowrap",
                   }}
@@ -201,7 +209,7 @@ export function ActivityCalendar({
                     height: CELL,
                     lineHeight: `${CELL}px`,
                     fontSize: 9.5,
-                    color: "var(--ds-fg-disabled)",
+                    color: "var(--ds-fg-subtle)",
                     textAlign: "right",
                     width: 20,
                   }}
@@ -273,7 +281,7 @@ export function ActivityCalendar({
               marginTop: 10,
               marginLeft: 26,
               fontSize: 10,
-              color: "var(--ds-fg-disabled)",
+              color: "var(--ds-fg-subtle)",
             }}
           >
             <span>{t("adminActivity.calendar.less")}</span>
@@ -289,7 +297,7 @@ export function ActivityCalendar({
               />
             ))}
             <span>{t("adminActivity.calendar.more")}</span>
-            <span style={{ marginLeft: "auto", color: "var(--ds-fg-disabled)" }}>
+            <span style={{ marginLeft: "auto" }}>
               {t("adminActivity.calendar.daysUtc")}
             </span>
           </div>

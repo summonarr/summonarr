@@ -8,7 +8,7 @@
 //   f49  GET  /requests           sort enum == the route's VALID_SORTS (no "title")
 //   f50  POST /requests           201 → MediaRequest on create; 200 is the
 //                                 alreadyAvailable short-circuit, not a request
-//   f51  POST /admin/users        password minLength 8 (what the route enforces)
+//   f51  POST /admin/users        password minLength 12 (what the route enforces)
 //   f52  PATCH /requests/{id} and PATCH /admin/users/{id} are labeled with the
 //        MANAGE_* permission their withPermission wrapper gates on, not "(ADMIN)"
 //
@@ -154,12 +154,12 @@ test("f50: POST /requests documents 201 → MediaRequest and 200 as the alreadyA
   assert.equal(responses["409"].description, "Duplicate request");
 });
 
-test("f51: POST /admin/users password minLength matches the route's 8-char floor", async () => {
+test("f51: POST /admin/users password minLength matches the route's 12-char floor", async () => {
   const spec = await getSpec();
   const body = spec.paths["/admin/users"].post.requestBody?.content["application/json"].schema;
-  // src/app/api/admin/users/route.ts rejects only `< 8`, and the create-user
-  // form gates submit at `>= 8`; the register + profile/password routes use 12.
-  assert.equal(body?.properties.password.minLength, 8);
+  // src/app/api/admin/users/route.ts, the create-user form, register and
+  // profile/password all share the 12-char floor (the admin path was 8).
+  assert.equal(body?.properties.password.minLength, 12);
 });
 
 test("f52: the two PATCH operations are labeled with their withPermission gate, not (ADMIN)", async () => {

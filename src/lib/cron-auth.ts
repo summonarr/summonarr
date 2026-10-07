@@ -24,6 +24,26 @@ const sessionOriginCache = new Map<string, ReadonlySet<string>>();
 // proxy's trustedOriginsCache; entries are trivially recomputable.
 const SESSION_ORIGIN_CACHE_MAX = 512;
 
+// Mirrors proxy.ts's envOrigins reader. Only an http(s) URL yields a usable
+// origin: `new URL("summonarr.local:3001")` does NOT throw — it parses as scheme
+// `summonarr.local:` with path `3001` and reports `.origin === "null"` — so the
+// old try/catch silently trusted the literal string "null" (which a browser
+// sends as `Origin: null` for sandboxed-iframe and cross-origin-redirected
+// POSTs) and never trusted the host the operator meant. instrumentation.ts warns
+// once per skipped entry at boot with the same predicate.
+export function parseTrustedOriginEntry(raw: string | undefined | null): string | null {
+  const trimmed = raw?.trim();
+  if (!trimmed) return null;
+  try {
+    const u = new URL(trimmed);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    if (u.origin === "null") return null;
+    return u.origin;
+  } catch {
+    return null;
+  }
+}
+
 function buildSessionTrustedOrigins(selfOrigin: string): ReadonlySet<string> {
   const cached = sessionOriginCache.get(selfOrigin);
   if (cached) return cached;
@@ -32,9 +52,8 @@ function buildSessionTrustedOrigins(selfOrigin: string): ReadonlySet<string> {
     process.env.AUTH_URL,
     ...(process.env.AUTH_TRUSTED_ORIGIN ?? "").split(","),
   ]) {
-    const trimmed = raw?.trim();
-    if (!trimmed) continue;
-    try { trusted.add(new URL(trimmed).origin); } catch { }
+    const origin = parseTrustedOriginEntry(raw);
+    if (origin) trusted.add(origin);
   }
   if (trusted.size === 0) trusted.add(selfOrigin);
   const frozen: ReadonlySet<string> = trusted;
@@ -128,8 +147,12 @@ export async function getCronActor(request: NextRequest): Promise<CronActor | nu
 
   const cronSecret = process.env.CRON_SECRET;
   if (cronSecret) {
-    const authHeader = request.headers.get("authorization") ?? "";
-    if (authHeader.startsWith("Bearer ")) {
+    // One parser for both transports: RFC 7235 makes the scheme case-insensitive
+    // and allows tabs, and parseBearerToken is what the session reader above
+    // already accepted — a `bearer <CRON_SECRET>` scheduler must not fail the
+    // session branch and then miss a case-sensitive literal here.
+    const presented = parseBearerToken(request.headers.get("authorization"));
+    if (presented !== null) {
       // Deliberately NO failure throttle here. CRON_SECRET is enforced ≥32 chars
       // at boot and compared timing-safe, so online brute force is infeasible —
       // and any pre-compare throttle must key on getClientIp, which for the
@@ -137,7 +160,7 @@ export async function getCronActor(request: NextRequest): Promise<CronActor | nu
       // User-Agent bucket: a wrong-secret caller sharing that bucket could then
       // deny the hourly sync and the 5s play-history poller. A valid Bearer must
       // never be deniable by someone else's failures.
-      if (safeCompareStrings(authHeader.slice(7), cronSecret)) return CRON_SYSTEM_ACTOR;
+      if (safeCompareStrings(presented, cronSecret)) return CRON_SYSTEM_ACTOR;
     }
   }
 
@@ -364,22 +387,43 @@ export async function recordCronRun(
 // for the outage's duration. Degraded-but-completed runs return 200 + the header:
 // the ledger records ok:false (admin System tab shows the failure) while the cron
 // cadence stays at the normal interval. Hard failures should still throw / >=500.
+//
+// A response carrying `X-Cron-Skipped` (the lock-busy answer — see
+// cronSkippedResponse) is NOT recorded at all: no run happened, so a ledger
+// entry for it (ok, ~0 ms) would over-count runs/h on the System tab — the one
+// place guardrail 7b says a cadence anomaly is read. The warm-* routes record
+// inside their work callback and so never recorded their skips; this makes the
+// lock-based routes agree with them.
+export const CRON_SKIPPED_HEADER = "X-Cron-Skipped";
+
 export async function withCronRunRecording<T extends Response>(
   target: string,
   fn: () => Promise<T>,
 ): Promise<T> {
   const start = Date.now();
   let ok = true;
+  let skipped = false;
   try {
     const res = await fn();
-    if (res.status >= 400 || res.headers.get("x-cron-degraded") !== null) ok = false;
+    if (res.headers.get(CRON_SKIPPED_HEADER) !== null) skipped = true;
+    else if (res.status >= 400 || res.headers.get("x-cron-degraded") !== null) ok = false;
     return res;
   } catch (err) {
     ok = false;
     throw err;
   } finally {
-    await recordCronRun(target, Date.now() - start, ok);
+    if (!skipped) await recordCronRun(target, Date.now() - start, ok);
   }
+}
+
+// The lock-busy answer for a withAdvisoryLock-guarded cron route: 200 (the
+// entrypoint fast-retries any non-2xx) plus the marker withCronRunRecording
+// reads to leave the run ledger untouched.
+export function cronSkippedResponse(reason = "already running"): Response {
+  return Response.json(
+    { skipped: true, reason },
+    { headers: { [CRON_SKIPPED_HEADER]: "1" } },
+  );
 }
 
 export interface CronLastRun {

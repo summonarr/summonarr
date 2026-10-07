@@ -25,6 +25,10 @@ export interface TrashPageContext {
   instances: TrashInstanceOption[];
   // True when the currently selected (service, variant) pair has its URL + API key set in Settings.
   serviceConfigured: boolean;
+  // True when ANY named (non-default) Radarr/Sonarr instance is configured — the
+  // Overview's starter pack targets the default instance only (guardrail 32)
+  // and says so when there is another instance it could have meant.
+  namedInstancesConfigured: boolean;
 }
 
 // Shared auth + service/instance lookup for every TRaSH sub-page. The layout already checks for
@@ -58,5 +62,7 @@ export async function loadTrashPageContext(
     sonarrConfigured: sonarrInstances.some((i) => i.slug === ""),
     instances: serviceInstances.map((i) => ({ slug: i.slug, name: i.name })),
     serviceConfigured: serviceInstances.some((i) => i.slug === variant),
+    namedInstancesConfigured:
+      radarrInstances.some((i) => i.slug !== "") || sonarrInstances.some((i) => i.slug !== ""),
   };
 }

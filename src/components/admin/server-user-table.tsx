@@ -4,11 +4,14 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
-import { Download, Ban, ShieldCheck, Link, Loader2, RefreshCw } from "@/components/icons";
+import { Download, Ban, ShieldCheck, Link, Loader2, RefreshCw, Users } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { Switch } from "@/components/ui/switch";
+import { StyledSelect } from "@/components/ui/styled-select";
+import { EmptyState } from "@/components/ui/design";
 import { useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 
 interface ServerUser {
   id: string;
@@ -52,9 +55,20 @@ interface ServerUserTableProps {
 const AUTO = "__auto__";
 const NONE = "__none__";
 
+// One message for every control's failed write. Every route this table calls
+// is ADMIN-gated, while the Users page admits MANAGE_USERS delegates, so a 403
+// is "you need an administrator", translated — never the route's raw English
+// `{ error: "Forbidden" }` echoed into a French or Spanish UI.
+function failureMessage(status: number, serverError: string | undefined, t: Translator): string {
+  if (status === 403) return t("adminManage.serverUsers.requiresAdmin");
+  return serverError ?? t("adminManage.notif.failed", { status });
+}
+
+// DS brand chip recipes (solid brand fill, black text) — the same classes the
+// Users table above uses, so Plex/Jellyfin read as one family down the page.
 const sourceStyles: Record<string, string> = {
-  plex:     "border-yellow-600/30 bg-yellow-500/10 text-yellow-400",
-  jellyfin: "border-purple-600/30 bg-purple-500/10 text-purple-400",
+  plex:     "ds-chip-plex",
+  jellyfin: "ds-chip-jellyfin",
 };
 
 // Fixed (non-theme) fills, so the initials colour is fixed too: black on the
@@ -100,7 +114,7 @@ function LinkPicker({
       });
       const data = (await res.json().catch(() => null)) as { error?: string } | null;
       if (!res.ok || data?.error) {
-        setError(data?.error ?? t("adminManage.notif.failed", { status: res.status }));
+        setError(failureMessage(res.status, data?.error, t));
         return;
       }
       router.refresh();
@@ -119,12 +133,15 @@ function LinkPicker({
         ) : (
           <Link className={`w-3 h-3 shrink-0 ${row.userId ? "text-zinc-400" : "text-zinc-600"}`} />
         )}
-        <select
+        {/* The house select (compact = Input's 32px) — text-base below md so
+            iOS Safari doesn't zoom on focus; 12px on desktop keeps the row dense. */}
+        <StyledSelect
+          compact
           value={value}
           disabled={loading}
           aria-label={t("adminManage.serverUsers.linkAria", { name: row.username })}
           onChange={(e) => change(e.target.value)}
-          className="max-w-[170px] truncate rounded-md border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 text-xs text-zinc-200 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:opacity-50"
+          className="max-w-[170px] truncate md:text-xs"
         >
           <option value={AUTO}>
             {row.user
@@ -137,22 +154,24 @@ function LinkPicker({
               {a.name ?? a.email}
             </option>
           ))}
-        </select>
+        </StyledSelect>
       </div>
       {row.manualUserLink && !error && (
         <span className="text-[10px] text-amber-400">{t("adminManage.serverUsers.pinned")}</span>
       )}
-      {error && <span className="text-[10px] text-red-400">{error}</span>}
+      {error && <span role="alert" className="text-[10px] text-red-400">{error}</span>}
     </div>
   );
 }
 
 function DownloadToggle({
   userId,
+  username,
   enabled,
   disabled: isDisabled,
 }: {
   userId: string;
+  username: string;
   enabled: boolean | null;
   disabled: boolean;
 }) {
@@ -160,6 +179,13 @@ function DownloadToggle({
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [optimistic, setOptimistic] = useState(enabled);
+  // A failed write (red) or a write the route saved but could not push to the
+  // media server (amber — `pushed: false`). The hourly reconcile only re-pushes
+  // drift in the DISABLE direction, so a failed enable-push never self-heals;
+  // a green switch over a policy that is not in effect is exactly what the
+  // route's warning exists to prevent.
+  const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
 
   // Follow the server value when it changes. useState only reads `enabled`
   // on first mount, and router.refresh() keeps component state, so without
@@ -174,20 +200,30 @@ function DownloadToggle({
     const next = !(optimistic ?? false);
     setOptimistic(next);
     setLoading(true);
+    setError(null);
+    setWarning(null);
     try {
       const res = await fetch(withBasePath(`/api/admin/server-users/${userId}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ downloadsEnabled: next }),
       });
-      if (!res.ok) {
+      const data = (await res.json().catch(() => null)) as
+        | { error?: string; pushed?: boolean; warning?: string }
+        | null;
+      if (!res.ok || data?.error) {
         setOptimistic(optimistic);
-      } else {
-        router.refresh();
+        setError(failureMessage(res.status, data?.error, t));
+        return;
       }
+      if (data?.pushed === false) {
+        setWarning(data.warning ?? t("adminManage.serverUsers.savedNotPushed"));
+      }
+      router.refresh();
     } catch {
       // Network failure — roll back the optimistic state too.
       setOptimistic(optimistic);
+      setError(t("adminManage.serverUsers.networkError"));
     } finally {
       setLoading(false);
     }
@@ -211,15 +247,23 @@ function DownloadToggle({
   const on = optimistic;
 
   return (
-    <Switch
-      variant="success"
-      checked={on}
-      aria-label={t("adminManage.serverUsers.toggleDownloads")}
-      disabled={loading}
-      loading={loading}
-      onCheckedChange={toggle}
-      title={on ? t("adminManage.serverUsers.downloadsOnTitle") : t("adminManage.serverUsers.downloadsOffTitle")}
-    />
+    <div className="flex flex-col items-end gap-1">
+      <Switch
+        variant="success"
+        checked={on}
+        aria-label={t("adminManage.serverUsers.toggleDownloadsFor", { name: username })}
+        disabled={loading}
+        loading={loading}
+        onCheckedChange={toggle}
+        title={on ? t("adminManage.serverUsers.downloadsOnTitle") : t("adminManage.serverUsers.downloadsOffTitle")}
+      />
+      {error && (
+        <span role="alert" className="max-w-[180px] text-right text-[10px] text-red-400">{error}</span>
+      )}
+      {!error && warning && (
+        <span role="status" className="max-w-[180px] text-right text-[10px] text-amber-400">{warning}</span>
+      )}
+    </div>
   );
 }
 
@@ -227,20 +271,20 @@ function SyncUsersButton() {
   const t = useT();
   const router = useRouter();
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function sync() {
     setLoading(true);
-    setError(false);
+    setError(null);
     try {
       const res = await fetch(withBasePath("/api/cron/sync-download-policies"), { method: "POST" });
       if (!res.ok) {
-        setError(true);
+        setError(res.status === 403 ? t("adminManage.serverUsers.requiresAdmin") : t("adminManage.serverUsers.syncFailed"));
         return;
       }
       router.refresh();
     } catch {
-      setError(true);
+      setError(t("adminManage.serverUsers.syncFailed"));
     } finally {
       setLoading(false);
     }
@@ -256,7 +300,7 @@ function SyncUsersButton() {
         {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
         {loading ? t("adminManage.serverUsers.syncing") : t("adminManage.serverUsers.sync")}
       </button>
-      {error && <span className="text-xs text-red-400">{t("adminManage.serverUsers.syncFailed")}</span>}
+      {error && <span role="alert" className="text-xs text-red-400">{error}</span>}
     </div>
   );
 }
@@ -271,7 +315,7 @@ function BulkBar({
   const t = useT();
   const router = useRouter();
   const [loading, setLoading] = useState<"disable" | "enable" | null>(null);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   // A bulk write overwrites every per-user setting and can't be undone (the
   // opposite button restores a uniform state, not the previous mix), so each
   // one asks first — the same inline confirm as the library Resync button.
@@ -280,7 +324,7 @@ function BulkBar({
   async function bulk(downloadsEnabled: boolean) {
     setConfirming(null);
     setLoading(downloadsEnabled ? "enable" : "disable");
-    setError(false);
+    setError(null);
     try {
       const res = await fetch(withBasePath("/api/admin/server-users/bulk"), {
         method: "POST",
@@ -288,12 +332,12 @@ function BulkBar({
         body: JSON.stringify({ source, downloadsEnabled }),
       });
       if (!res.ok) {
-        setError(true);
+        setError(res.status === 403 ? t("adminManage.serverUsers.requiresAdmin") : t("adminManage.serverUsers.failed"));
         return;
       }
       router.refresh();
     } catch {
-      setError(true);
+      setError(t("adminManage.serverUsers.failed"));
     } finally {
       setLoading(null);
     }
@@ -310,8 +354,8 @@ function BulkBar({
           onClick={() => bulk(enable)}
           className={`px-2 py-0.5 text-xs rounded border transition-colors ${
             enable
-              ? "border-green-800/40 bg-green-500/10 text-green-400 hover:bg-green-500/20"
-              : "border-red-800/40 bg-red-500/10 text-red-400 hover:bg-red-500/20"
+              ? "border-[var(--ds-border)] bg-green-500/10 text-green-400 hover:bg-green-500/20"
+              : "border-[var(--ds-border)] bg-red-500/10 text-red-400 hover:bg-red-500/20"
           }`}
         >
           {enable ? t("adminManage.serverUsers.bulk.enableAll") : t("adminManage.serverUsers.bulk.disableAll")}
@@ -332,7 +376,7 @@ function BulkBar({
       <button
         onClick={() => setConfirming("disable")}
         disabled={loading !== null}
-        className="flex items-center gap-1 px-2 py-0.5 text-xs rounded border border-red-800/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
+        className="flex items-center gap-1 px-2 py-0.5 text-xs rounded border border-[var(--ds-border)] bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors disabled:opacity-50"
       >
         {loading === "disable" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Ban className="w-3 h-3" />}
         {t("adminManage.serverUsers.bulk.disableAll")}
@@ -340,12 +384,12 @@ function BulkBar({
       <button
         onClick={() => setConfirming("enable")}
         disabled={loading !== null}
-        className="flex items-center gap-1 px-2 py-0.5 text-xs rounded border border-green-800/40 bg-green-500/10 text-green-400 hover:bg-green-500/20 transition-colors disabled:opacity-50"
+        className="flex items-center gap-1 px-2 py-0.5 text-xs rounded border border-[var(--ds-border)] bg-green-500/10 text-green-400 hover:bg-green-500/20 transition-colors disabled:opacity-50"
       >
         {loading === "enable" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
         {t("adminManage.serverUsers.bulk.enableAll")}
       </button>
-      {error && <span className="text-xs text-red-400">{t("adminManage.serverUsers.failed")}</span>}
+      {error && <span role="alert" className="text-xs text-red-400">{error}</span>}
     </div>
   );
 }
@@ -355,22 +399,30 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
   const router = useRouter();
   const [on, setOn] = useState(initial);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function toggle() {
     const next = !on;
     setOn(next);
     setLoading(true);
+    setError(null);
     try {
       const res = await fetch(withBasePath("/api/admin/server-users"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ autoDisableNew: next }),
       });
-      if (!res.ok) setOn(on);
-      else router.refresh();
+      const data = (await res.json().catch(() => null)) as { error?: string } | null;
+      if (!res.ok || data?.error) {
+        setOn(on);
+        setError(failureMessage(res.status, data?.error, t));
+        return;
+      }
+      router.refresh();
     } catch {
       // Network failure — roll back the optimistic state too.
       setOn(on);
+      setError(t("adminManage.serverUsers.networkError"));
     } finally {
       setLoading(false);
     }
@@ -383,6 +435,7 @@ function AutoDisableToggle({ initial }: { initial: boolean }) {
         <p className="text-[11px] text-zinc-500 mt-0.5">
           {t("adminManage.serverUsers.autoDisableHint")}
         </p>
+        {error && <p role="alert" className="text-[11px] text-red-400 mt-0.5">{error}</p>}
       </div>
       <Switch
         checked={on}
@@ -482,11 +535,16 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
             <LinkPicker row={u} accounts={accounts} />
           </td>
 
-          {/* Downloads toggle (Jellyfin only — Plex sharing API does not support remote toggle) */}
+          {/* Downloads toggle (Jellyfin only — Plex sharing API does not support
+              remote toggle). A departed row (guardrail 28) gets the same
+              placeholder as Plex: the route 404s its policy branch because
+              there is no server-side account left to push a policy to, so a
+              live switch there could only ever snap back. */}
           <td className="py-2.5 pl-3 pr-4 text-right">
-            {source === "jellyfin" ? (
+            {source === "jellyfin" && u.active ? (
               <DownloadToggle
                 userId={u.id}
+                username={u.username}
                 enabled={u.downloadsEnabled}
                 disabled={u.isServerAdmin}
               />
@@ -501,10 +559,13 @@ export function ServerUserTable({ users, hasJellyfin, autoDisableNew, accounts }
 
   if (users.length === 0) {
     return (
-      <div className="flex flex-col items-start gap-3 py-2">
+      <div className="flex flex-col gap-3 py-2">
         {hasJellyfin && <AutoDisableToggle initial={autoDisableNew} />}
-        <p className="text-sm text-zinc-500">{t("adminManage.serverUsers.empty")}</p>
-        <SyncUsersButton />
+        <EmptyState
+          icon={Users}
+          title={t("adminManage.serverUsers.empty")}
+          action={<SyncUsersButton />}
+        />
       </div>
     );
   }

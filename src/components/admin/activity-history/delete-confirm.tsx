@@ -130,7 +130,6 @@ export function DeleteConfirm({
               background: "transparent",
               border: "1px solid var(--ds-border)",
               color: "var(--ds-fg-muted)",
-              cursor: "pointer",
             }}
           >
             {t("adminActivity.common.cancel")}
@@ -147,7 +146,6 @@ export function DeleteConfirm({
               background: "var(--ds-danger)",
               border: "1px solid transparent",
               color: "var(--ds-on-status)",
-              cursor: deleting ? "default" : "pointer",
               fontWeight: 500,
               opacity: deleting ? 0.7 : 1,
             }}

@@ -1,8 +1,11 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { AlertTriangle, CheckCircle, Loader2, X, ChevronDown } from "@/components/icons";
+import { AlertTriangle, CheckCircle, Loader2, X } from "@/components/icons";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { StyledSelect } from "@/components/ui/styled-select";
+import { Textarea } from "@/components/ui/textarea";
 import type { TVAvailabilityResponse, TVSeasonInfo } from "@/app/api/tv-availability/route";
 import { withBasePath } from "@/lib/base-path";
 import { useToast } from "@/components/ui/toast";
@@ -49,7 +52,7 @@ type DialogState = "idle" | "loading" | "open" | "submitting" | "submitted" | "e
 // so the season/episode control type must be decided on the same predicate.
 // Keying this on `dialogState === "open"` alone made a not-in-library show
 // (`/api/tv-availability` answers 200 `{ seasons: [] }`, so `availabilityFailed`
-// stays false) swap its manual NumberInputs for an empty, disabled <select>
+// stays false) swap its manual number inputs for an empty, disabled <select>
 // for the duration of every submit — and flip back on a server error. Kept as
 // a module-level pure function so tests/report-issue-manual-inputs.test.mts
 // can pin it without rendering the component.
@@ -274,7 +277,7 @@ export function ReportIssueButton({
           onClick={openDialog}
           aria-label={t("request.report.reportWith", { title })}
           title={t("request.report.reportAnIssue")}
-          className="ds-hover-tint inline-flex items-center justify-center shrink-0"
+          className="ds-hover-tint relative inline-flex items-center justify-center shrink-0"
           style={{
             width: 28,
             height: 28,
@@ -284,6 +287,10 @@ export function ReportIssueButton({
             border: "1px solid transparent",
           }}
         >
+          {/* Extends the hit area to 40×40 while the visual stays 28px — the
+              same recipe as NotInterestedButton's corner control. A tap on the
+              span targets the button. */}
+          <span aria-hidden="true" style={{ position: "absolute", inset: -6 }} />
           <AlertTriangle style={{ width: 14, height: 14 }} />
         </button>
       ) : (
@@ -433,25 +440,31 @@ export function ReportIssueButton({
 
                 <div className="space-y-1.5">
                   <label htmlFor="report-issue-type" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">{t("request.report.issueType")}</label>
-                  <SelectField
+                  <StyledSelect
                     id="report-issue-type"
                     value={issueType}
-                    onChange={(v) => setIssueType(v as IssueType)}
+                    onChange={(e) => setIssueType(e.target.value as IssueType)}
                     disabled={isSubmitting}
-                    options={Object.entries(ISSUE_TYPE_LABELS).map(([k, v]) => ({ value: k, label: t(v) }))}
-                  />
+                  >
+                    {Object.entries(ISSUE_TYPE_LABELS).map(([k, v]) => (
+                      <option key={k} value={k}>{t(v)}</option>
+                    ))}
+                  </StyledSelect>
                 </div>
 
                 {isTV && (
                   <div className="space-y-1.5">
                     <label htmlFor="report-issue-scope" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">{t("request.report.affects")}</label>
-                    <SelectField
+                    <StyledSelect
                       id="report-issue-scope"
                       value={scope}
-                      onChange={(v) => setScope(v as IssueScope)}
+                      onChange={(e) => setScope(e.target.value as IssueScope)}
                       disabled={isSubmitting}
-                      options={Object.entries(SCOPE_LABELS).map(([k, v]) => ({ value: k, label: t(v) }))}
-                    />
+                    >
+                      {Object.entries(SCOPE_LABELS).map(([k, v]) => (
+                        <option key={k} value={k}>{t(v)}</option>
+                      ))}
+                    </StyledSelect>
                   </div>
                 )}
 
@@ -460,21 +473,25 @@ export function ReportIssueButton({
                     <div className="flex-1 space-y-1.5">
                       <label htmlFor="report-issue-season" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">{t("request.report.season")}</label>
                       {!useManualInputs ? (
-                        <SelectField
+                        <StyledSelect
                           id="report-issue-season"
                           value={String(selectedSeason ?? "")}
-                          onChange={(v) => handleSeasonChange(Number(v))}
+                          onChange={(e) => handleSeasonChange(Number(e.target.value))}
                           disabled={isSubmitting}
-                          options={tvSeasons.map((s) => ({
-                            value: String(s.seasonNumber),
-                            label: t("request.report.seasonN", { number: s.seasonNumber }),
-                          }))}
-                        />
+                        >
+                          {tvSeasons.map((s) => (
+                            <option key={s.seasonNumber} value={String(s.seasonNumber)}>
+                              {t("request.report.seasonN", { number: s.seasonNumber })}
+                            </option>
+                          ))}
+                        </StyledSelect>
                       ) : (
-                        <NumberInput
+                        <Input
                           id="report-issue-season"
+                          type="number"
+                          min={1}
                           value={manualSeason}
-                          onChange={setManualSeason}
+                          onChange={(e) => setManualSeason(e.target.value)}
                           placeholder={t("request.report.examplePlaceholder", { number: 2 })}
                           required
                           disabled={isSubmitting}
@@ -486,21 +503,25 @@ export function ReportIssueButton({
                       <div className="flex-1 space-y-1.5">
                         <label htmlFor="report-issue-episode" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">{t("request.report.episode")}</label>
                         {!useManualInputs && currentSeason ? (
-                          <SelectField
+                          <StyledSelect
                             id="report-issue-episode"
                             value={String(selectedEpisode ?? "")}
-                            onChange={(v) => setSelectedEpisode(Number(v))}
+                            onChange={(e) => setSelectedEpisode(Number(e.target.value))}
                             disabled={isSubmitting}
-                            options={currentSeason.episodes.map((ep) => ({
-                              value: String(ep),
-                              label: t("request.report.episodeN", { number: ep }),
-                            }))}
-                          />
+                          >
+                            {currentSeason.episodes.map((ep) => (
+                              <option key={ep} value={String(ep)}>
+                                {t("request.report.episodeN", { number: ep })}
+                              </option>
+                            ))}
+                          </StyledSelect>
                         ) : (
-                          <NumberInput
+                          <Input
                             id="report-issue-episode"
+                            type="number"
+                            min={1}
                             value={manualEpisode}
-                            onChange={setManualEpisode}
+                            onChange={(e) => setManualEpisode(e.target.value)}
                             placeholder={t("request.report.examplePlaceholder", { number: 4 })}
                             required
                             disabled={isSubmitting}
@@ -515,7 +536,7 @@ export function ReportIssueButton({
                   <label htmlFor="report-issue-note" className="text-xs font-medium text-zinc-400 uppercase tracking-wide">
                     {t("request.report.details")} <span className="text-zinc-500 normal-case">{t("request.report.optional")}</span>
                   </label>
-                  <textarea
+                  <Textarea
                     id="report-issue-note"
                     value={note}
                     onChange={(e) => setNote(e.target.value)}
@@ -523,12 +544,20 @@ export function ReportIssueButton({
                     maxLength={1000}
                     rows={3}
                     disabled={isSubmitting}
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 resize-none"
+                    className="resize-none"
                   />
+                  {/* Same counter as the request note's n/500 — the cap used
+                      to truncate a pasted description silently. */}
+                  <p
+                    className="ds-mono"
+                    style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", margin: 0 }}
+                  >
+                    {note.length}/1000
+                  </p>
                 </div>
 
                 {errorMsg && (
-                  <p className="text-xs text-red-400">{errorMsg}</p>
+                  <p role="alert" className="text-xs text-red-400">{errorMsg}</p>
                 )}
 
                 <div className="flex justify-end gap-2 pt-1">
@@ -563,57 +592,5 @@ export function ReportIssueButton({
         </Dialog>
       )}
     </>
-  );
-}
-
-function SelectField({
-  id, value, onChange, disabled, options,
-}: {
-  id?: string;
-  value: string;
-  onChange: (v: string) => void;
-  disabled: boolean;
-  options: { value: string; label: string }[];
-}) {
-  return (
-    <div className="relative">
-      <select
-        id={id}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        className="w-full appearance-none rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 pr-8"
-      >
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>{o.label}</option>
-        ))}
-      </select>
-      <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500" />
-    </div>
-  );
-}
-
-function NumberInput({
-  id, value, onChange, placeholder, required, disabled,
-}: {
-  id?: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder: string;
-  required: boolean;
-  disabled: boolean;
-}) {
-  return (
-    <input
-      id={id}
-      type="number"
-      min={1}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      placeholder={placeholder}
-      required={required}
-      disabled={disabled}
-      className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-500 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-    />
   );
 }

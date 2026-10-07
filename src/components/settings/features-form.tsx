@@ -152,7 +152,7 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
           if (!success) message = data.error ?? t("settings.common.saveFailedStatus", { status: res.status });
         } catch {
           success = false;
-          message = t("settings.features.networkError");
+          message = t("settings.common.networkError");
         } finally {
           for (const [key] of batch) inFlightKeys.current.delete(key);
         }
@@ -237,10 +237,19 @@ export function FeaturesForm({ initialFlags, groups }: FeaturesFormProps) {
   return (
     <div className="space-y-4">
       {groups.map((group) => (
-        <div key={group.category} className="bg-zinc-900 border border-zinc-800 rounded-lg p-6">
+        // The same card recipe as every other settings tab (SettingsCard in
+        // settings/page.tsx): bg-2 surface, --ds-border, --ds-r-lg, 22px padding,
+        // 15px title, 12px muted description. Copied inline because that helper
+        // is a server component and this file is "use client".
+        <div
+          key={group.category}
+          style={{ padding: 22, background: "var(--ds-bg-2)", border: "1px solid var(--ds-border)", borderRadius: "var(--ds-r-lg)" }}
+        >
           <div className="mb-5">
-            <h2 className="font-semibold text-zinc-100 text-lg">{group.title}</h2>
-            <p className="text-sm text-zinc-500 mt-0.5">{group.description}</p>
+            <h2 className="font-semibold" style={{ fontSize: 15, letterSpacing: "-0.01em", color: "var(--ds-fg)", margin: 0 }}>
+              {group.title}
+            </h2>
+            <p style={{ fontSize: 12, color: "var(--ds-fg-muted)", margin: "4px 0 0", lineHeight: 1.5 }}>{group.description}</p>
           </div>
           <div className="divide-y divide-zinc-800">
             {group.features.map((feature, idx) => {

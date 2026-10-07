@@ -195,7 +195,11 @@ export function MasterDbFillButton({
           {phaseLabel ?? t("adminManage.library.fill.button")}
         </Button>
         {summary && (
-          <span className={`text-xs ${phase === "error" ? "text-red-400" : "text-green-400"}`}>
+          <span
+            role={phase === "error" ? "alert" : "status"}
+            aria-live={phase === "error" ? "assertive" : "polite"}
+            className={`text-xs ${phase === "error" ? "text-red-400" : "text-green-400"}`}
+          >
             {summary}
           </span>
         )}

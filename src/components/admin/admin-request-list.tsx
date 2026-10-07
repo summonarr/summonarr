@@ -268,7 +268,9 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
     fontSize: 11,
     fontWeight: 500,
     border: "1px solid transparent",
-    cursor: "pointer",
+    // No `cursor` here: globals.css restores the pointer for every ENABLED
+    // button and leaves a disabled one at the default (guardrail 42). An inline
+    // pointer kept showing a hand on the greyed batch buttons mid-flight.
     transition: "background 120ms var(--ds-ease)",
   };
 
@@ -819,7 +821,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                 color:
                   page <= 1 ? "var(--ds-fg-disabled)" : "var(--ds-fg-muted)",
                 borderColor: "var(--ds-border)",
-                cursor: page <= 1 ? "not-allowed" : "pointer",
+                cursor: page <= 1 ? "not-allowed" : undefined,
               }}
             >
               {t("adminQueue.list.previous")}
@@ -837,7 +839,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                     ? "var(--ds-fg-disabled)"
                     : "var(--ds-fg-muted)",
                 borderColor: "var(--ds-border)",
-                cursor: page >= totalPages ? "not-allowed" : "pointer",
+                cursor: page >= totalPages ? "not-allowed" : undefined,
               }}
             >
               {t("adminQueue.list.next")}

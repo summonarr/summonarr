@@ -12,6 +12,8 @@ import { withBasePath } from "@/lib/base-path";
 import { mediaInstanceLabel } from "@/lib/media-instances";
 import { CONTENT_RATING_CAPS } from "@/lib/content-rating";
 import { useModalA11y } from "@/hooks/use-modal-a11y";
+import { Input } from "@/components/ui/input";
+import { StyledSelect } from "@/components/ui/styled-select";
 import {
   AdminToggleRow,
   roleLabelKey,
@@ -118,7 +120,7 @@ function QuotaRow({
   return (
     <div className="flex items-center gap-2 py-1.5">
       <span className="text-xs text-zinc-300 w-10 shrink-0">{label}</span>
-      <input
+      <Input
         type="number"
         min={0}
         inputMode="numeric"
@@ -128,10 +130,10 @@ function QuotaRow({
         onChange={(e) => onLimit(e.target.value)}
         onBlur={onBlurLimit}
         onKeyDown={commitOnEnter(onBlurLimit)}
-        className="w-16 rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-200 disabled:opacity-50"
+        className="w-16 h-7 md:text-xs"
       />
       <span className="text-[10px] text-zinc-500">{t("adminManage.perm.quota.per")}</span>
-      <input
+      <Input
         type="number"
         min={1}
         inputMode="numeric"
@@ -141,7 +143,7 @@ function QuotaRow({
         onChange={(e) => onDays(e.target.value)}
         onBlur={onBlurDays}
         onKeyDown={commitOnEnter(onBlurDays)}
-        className="w-16 rounded-md border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-200 disabled:opacity-50"
+        className="w-16 h-7 md:text-xs"
       />
       <span className="text-[10px] text-zinc-500">{t("adminManage.perm.quota.days")}</span>
     </div>
@@ -397,7 +399,7 @@ export function PermissionsModal({
                     label={t(`adminManage.perm.bit.${b.key}`)}
                     checked={(perms & Permission[b.key]) !== 0n}
                     onChange={() => toggle(Permission[b.key])}
-                    disabled={saving}
+                    busy={saving}
                   />
                 ))}
               </div>
@@ -424,14 +426,14 @@ export function PermissionsModal({
                           label={t("adminManage.perm.instance.request", { name: inst.name })}
                           checked={grants[inst.slug]?.request === true}
                           onChange={() => toggleGrant(inst.slug, "request")}
-                          disabled={saving}
+                          busy={saving}
                         />
                       )}
                       <AdminToggleRow
                         label={t("adminManage.perm.instance.autoApprove", { name: inst.name })}
                         checked={grants[inst.slug]?.autoApprove === true}
                         onChange={() => toggleGrant(inst.slug, "autoApprove")}
-                        disabled={saving}
+                        busy={saving}
                       />
                     </div>
                   );
@@ -458,7 +460,7 @@ export function PermissionsModal({
                     label={`${inst.name} (${mediaInstanceLabel(inst.service, inst.slug)})`}
                     checked={mediaGrants[inst.service]?.[inst.slug]?.view === true}
                     onChange={() => toggleMediaGrant(inst.service, inst.slug)}
-                    disabled={saving}
+                    busy={saving}
                   />
                 ))}
               </div>
@@ -492,18 +494,22 @@ export function PermissionsModal({
             <div className="mt-3">
               <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-1">{t("adminManage.perm.parental.title")}</p>
               <p className="text-[10px] text-zinc-500 mb-2">{t("adminManage.perm.parental.description")}</p>
-              <select
+              <StyledSelect
+                compact
                 value={maxRating}
-                onChange={(e) => saveMaxRating(e.target.value)}
-                disabled={saving}
+                // Not disabled while saving: a disabled control drops keyboard
+                // focus to <body> and the modal's trap then lands on Close (the
+                // switches had the same defect). Ignore changes mid-save instead.
+                onChange={(e) => { if (!saving) saveMaxRating(e.target.value); }}
+                aria-busy={saving || undefined}
                 aria-label={t("adminManage.perm.parental.aria")}
-                className="text-xs rounded-md bg-zinc-800 border border-zinc-700 text-zinc-200 px-2 py-1.5"
+                className="w-auto"
               >
                 <option value="">{t("adminManage.perm.parental.noLimit")}</option>
                 {CONTENT_RATING_CAPS.map((r) => (
                   <option key={r} value={r}>{t("adminManage.perm.parental.andUnder", { rating: r })}</option>
                 ))}
-              </select>
+              </StyledSelect>
             </div>
           </>
         )}

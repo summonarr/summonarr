@@ -5,7 +5,7 @@ import { hasPermission, Permission } from "@/lib/permissions";
 import Link from "next/link";
 import Image from "next/image";
 import { posterUrl } from "@/lib/tmdb-types";
-import { PageHeader, EmptyState } from "@/components/ui/design";
+import { Chip, PageHeader, EmptyState } from "@/components/ui/design";
 import { ActivityFilterBar } from "@/components/admin/activity-filter-bar";
 import { Film, Tv2 } from "@/components/icons";
 import { getLocale, getTranslator } from "@/lib/i18n/server";
@@ -151,8 +151,12 @@ export default async function RecentlyAddedPage() {
             return (
               <div key={`${item.mediaType}-${item.tmdbId}-${i}`} className="group">
                 <div className="relative aspect-[2/3] bg-zinc-800 rounded-lg overflow-hidden mb-2">
-                  {item.posterPath ? (
-                    <Link href={activityHref}>
+                  {/* The whole tile is the link, poster or not: a fresh instance
+                      (or one just after a TMDB cache clear) renders every tile
+                      through the fallback branch, and those must stay clickable
+                      with the same hover as their postered neighbours. */}
+                  <Link href={activityHref} className="block w-full h-full">
+                    {item.posterPath ? (
                       <Image
                         src={item.posterPath}
                         alt={item.title}
@@ -160,28 +164,20 @@ export default async function RecentlyAddedPage() {
                         className="object-cover group-hover:scale-105 transition-transform duration-200"
                         sizes="(min-width: 1280px) 16vw, (min-width: 768px) 25vw, 50vw"
                       />
-                    </Link>
-                  ) : (
-                    <div className="w-full h-full flex flex-col items-center justify-center gap-2 p-3">
-                      {item.mediaType === "TV" ? (
-                        <Tv2 className="w-8 h-8 text-zinc-500" />
-                      ) : (
-                        <Film className="w-8 h-8 text-zinc-500" />
-                      )}
-                      <p className="text-zinc-500 text-[10px] text-center leading-tight">{item.title}</p>
-                    </div>
-                  )}
-                  <div className="absolute top-1.5 right-1.5 flex gap-1">
-                    {item.sources.plex && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-[var(--ds-plex)] text-black">
-                        Plex
-                      </span>
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center gap-2 p-3 group-hover:scale-105 transition-transform duration-200">
+                        {item.mediaType === "TV" ? (
+                          <Tv2 className="w-8 h-8 text-zinc-500" />
+                        ) : (
+                          <Film className="w-8 h-8 text-zinc-500" />
+                        )}
+                        <p className="text-zinc-500 text-[10px] text-center leading-tight">{item.title}</p>
+                      </div>
                     )}
-                    {item.sources.jellyfin && (
-                      <span className="text-[9px] px-1.5 py-0.5 rounded font-semibold bg-purple-700 text-white">
-                        JF
-                      </span>
-                    )}
+                  </Link>
+                  <div className="absolute top-1.5 right-1.5 flex gap-1 pointer-events-none">
+                    {item.sources.plex && <Chip tone="plex">Plex</Chip>}
+                    {item.sources.jellyfin && <Chip tone="jellyfin">Jellyfin</Chip>}
                   </div>
                 </div>
                 <div className="min-w-0">

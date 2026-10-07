@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
-import { logAudit } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 import { applySpecs, describeSchemaError } from "@/lib/trash";
 import { resolveStarterPack, STARTER_PACK } from "@/lib/trash-recommendations";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
@@ -66,7 +66,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
         const recreated = results.filter((r) => r.recreated).length;
         await logAudit({
           userId: session.user.id,
-          userName: session.user.name ?? "admin",
+          userName: session.user.name ?? session.user.email,
+          ...auditContext(req, session),
           action: "SETTINGS_CHANGE",
           target: "trash:starter-pack",
           details: {

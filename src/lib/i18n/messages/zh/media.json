@@ -39,7 +39,6 @@
   "media.filter.sort.newest": "最新",
   "media.filter.sort.oldest": "最早",
   "media.filter.anyRating": "任意评分",
-  "media.filter.audience": "🍿 观众评分 {pct}%+",
   "media.filter.anyVotes": "任意票数",
   "media.filter.votesMin": "{n}+ 票",
   "media.filter.thousandsSeparator": ",",
@@ -76,5 +75,7 @@
   "media.ratings.letterboxd": "Letterboxd 平均分",
   "media.ratings.mdblist": "MDBList 评分",
   "media.ratings.jellyfin": "Jellyfin 社区评分",
-  "media.ratings.tmdb": "TMDB 评分"
+  "media.ratings.tmdb": "TMDB 评分",
+  "media.pager.label": "分页",
+  "media.filter.audienceScore": "观众评分 {pct}%+"
 }

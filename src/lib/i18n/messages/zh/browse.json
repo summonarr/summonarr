@@ -39,7 +39,6 @@
   "browse.popular.sort.viewersDescription": "按独立观众数排名",
   "browse.popular.sort.plays": "播放最多",
   "browse.popular.sort.playsDescription": "按所有用户的总播放次数排名",
-  "browse.popular.rankRange": "第 {from}–{to} 部，共 {total} 部作品",
   "browse.popular.noRecentPlays.title": "最近 30 天没有播放",
   "browse.popular.noRecentPlays.description": "此时间段内没有任何播放。",
   "browse.popular.noRecentPlays.cta": "切换到“播放最多”",

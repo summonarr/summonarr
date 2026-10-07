@@ -24,7 +24,7 @@ export function DeletePlayButton({ id }: { id: string }) {
         setError(true);
         return;
       }
-      router.push("/admin/activity?tab=history");
+      router.push("/admin/activity/history");
       router.refresh();
     } catch {
       setError(true);

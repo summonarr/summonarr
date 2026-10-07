@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { normalizeEmail } from "@/lib/auth";
@@ -25,6 +26,9 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 // vector. Jellyfin-only (Plex/OIDC emails are provider-owned + synced on sign-in).
 export const POST = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
+  // Fires outbound mail — blocked during maintenance like push/subscribe.
+  const maint = await maintenanceGuard(session);
+  if (maint) return maint;
   const provider = session.user.provider;
   const isJellyfin = provider === "jellyfin" || provider === "jellyfin-quickconnect";
   if (!isJellyfin) {

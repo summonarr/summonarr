@@ -65,6 +65,12 @@ export async function GET() {
   // cleared stops receiving issue:* / issuemessage:* events. ADMIN still passes via
   // isSystemAdmin above, so this only governs the issue-event bypass.
   let isIssueAdmin = hasPermission(session.user.permissions, Permission.MANAGE_ISSUES);
+  // The admin request queue (/admin, MANAGE_REQUESTS alone admits it) refreshes
+  // ONLY from request:* frames — a delegated manager without the ADMIN bit never
+  // saw another user's request land or a second admin's approval until a manual
+  // reload. Same rule as the issue bypass; request:* frames carry only
+  // requestId/status (userId is stripped below), so nothing new is exposed.
+  let canManageRequests = hasPermission(session.user.permissions, Permission.MANAGE_REQUESTS);
 
   if (!incrementConnection(userId)) {
     return new Response("Too many SSE connections", { status: 429 });
@@ -73,8 +79,9 @@ export async function GET() {
   // Per-event-type delivery rules:
   //   activity:sessions, activity:history-updated, plex:reachability — system admin only
   //   issue:* / issuemessage:* — system admin OR ISSUE_ADMIN bypasses per-user filter
-  //   everything else (request:*, votes:*, push:*, settings:*) — only system admin bypasses;
-  //     ISSUE_ADMIN goes through the same per-user filter as a normal USER.
+  //   request:* — system admin OR MANAGE_REQUESTS bypasses per-user filter
+  //   everything else (votes:*, push:*, settings:*) — only system admin bypasses;
+  //     ISSUE_ADMIN / a request manager go through the same per-user filter as a normal USER.
   // Without this split, ISSUE_ADMIN could observe every user's request/settings/push events.
   function shouldDeliver(eventType: string, evtUserId: string | undefined): boolean {
     if (
@@ -87,7 +94,9 @@ export async function GET() {
     const bypassesUserFilter =
       eventType.startsWith("issue:") || eventType.startsWith("issuemessage:")
         ? isSystemAdmin || isIssueAdmin
-        : isSystemAdmin;
+        : eventType.startsWith("request:")
+          ? isSystemAdmin || canManageRequests
+          : isSystemAdmin;
     if (bypassesUserFilter) return true;
     return evtUserId === userId;
   }
@@ -178,6 +187,7 @@ export async function GET() {
             }
             isSystemAdmin = hasPermission(fresh.user.permissions, Permission.ADMIN);
             isIssueAdmin = hasPermission(fresh.user.permissions, Permission.MANAGE_ISSUES);
+            canManageRequests = hasPermission(fresh.user.permissions, Permission.MANAGE_REQUESTS);
           })
           .catch(() => cleanup(controller));
       }, REAUTH_INTERVAL_MS);

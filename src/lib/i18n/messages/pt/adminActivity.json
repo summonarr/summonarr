@@ -295,7 +295,6 @@
   "adminActivity.user.lastSeen": "Visto por último",
   "adminActivity.user.lastN": "últimos {count}",
   "adminActivity.user.linkedTo": "Vinculado a {name}",
-  "adminActivity.method.directStreamRemux": "Stream direto (Remux)",
   "adminActivity.play.backToHistory": "Voltar para o histórico",
   "adminActivity.play.notWatched": "Não assistido",
   "adminActivity.play.pctComplete": "{pct}% concluído",
@@ -365,5 +364,11 @@
   "adminActivity.transcode.usersSub": "mais transcodificações · últimos {days} d",
   "adminActivity.transcode.titles": "Pressão de transcodificação · títulos",
   "adminActivity.transcode.titlesSub": "mais transcodificados · últimos {days} d",
-  "adminActivity.transcode.none": "Nenhuma transcodificação neste período."
+  "adminActivity.transcode.none": "Nenhuma transcodificação neste período.",
+  "adminActivity.common.hoursSuffix": "h",
+  "adminActivity.trackingOff.title": "O registo do histórico de reprodução está desativado",
+  "adminActivity.trackingOff.description": "Nada está a ser registado, por isso este painel não tem reproduções, tempo de visualização ou espectadores para mostrar. Ative o registo em Definições → Média → Histórico de reprodução para começar a preenchê-lo.",
+  "adminActivity.trackingOff.cta": "Abrir definições do histórico de reprodução",
+  "adminActivity.common.hoursShort": "{n} h",
+  "adminActivity.detail.openPlay": "Abrir reprodução →"
 }

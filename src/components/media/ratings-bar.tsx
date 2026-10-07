@@ -149,7 +149,7 @@ export function RatingsBar({
           href={`https://www.imdb.com/title/${imdbId}`}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex items-center gap-0.5 group"
+          className="flex items-center gap-0.5 rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
           title={t("media.ratings.imdb")}
           // MediaCard is a role="button" div that navigates on click; without
           // this, opening IMDb in a new tab also pushed the card's detail page.

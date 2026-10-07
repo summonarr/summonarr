@@ -487,6 +487,51 @@ test("POST drops non-string ids and bounds the list", async () => {
   assert.deepEqual(where.id?.in, ["a"]);
 });
 
+test("POST with a PRESENT but non-array `ids` is a 400 and marks nothing — only an ABSENT key means all", async () => {
+  // `{ ids: "abc" }` (a client bug for `{ ids: ["abc"] }`) used to be coerced to
+  // null ⇒ "mark ALL read", silently clearing the whole unread badge.
+  const me = await mintSession();
+  notifs = [notif({ id: "a", userId: me.userId }), notif({ id: "b", userId: me.userId })];
+  for (const bad of ["abc", null, 1, { a: 1 }, true]) {
+    const res = await postNotifs(me.token, { ids: bad });
+    assert.equal(res.status, 400, `ids=${JSON.stringify(bad)} must be refused`);
+    assert.deepEqual(await res.json(), { error: "ids must be an array of notification ids" });
+  }
+  assert.equal(opsOf("notification.updateMany").length, 0, "nothing may be marked read");
+  assert.ok(notifs.every((n) => n.readAt === null));
+  // The absent-key contract is unchanged: `{}` still means all.
+  const all = await postNotifs(me.token, {});
+  assert.equal(all.status, 200);
+  assert.ok(notifs.every((n) => n.readAt));
+});
+
+test("the three notification rate limits answer a TRANSLATED 429 with Retry-After", async () => {
+  const withLang = (method: string, lang: string, token: string, query = "") =>
+    new NextRequest(`http://localhost:3000/api/notifications${query}`, {
+      method,
+      headers: { cookie: `${COOKIE}=${token}`, "content-type": "application/json", "accept-language": lang },
+    });
+  // GET: 120/min.
+  const g = await mintSession();
+  for (let i = 0; i < 120; i++) assert.equal((await getNotifs(g.token)).status, 200, `GET ${i + 1} is within budget`);
+  const gRes = await inScope(() => notifications.GET(withLang("GET", "fr-FR,fr;q=0.9", g.token), undefined));
+  assert.equal(gRes.status, 429);
+  assert.equal(gRes.headers.get("retry-after"), "60");
+  assert.deepEqual(await gRes.json(), { error: "Trop de requêtes — réessayez plus tard" });
+  // POST (mark read): 60/min.
+  const p = await mintSession();
+  for (let i = 0; i < 60; i++) assert.equal((await postNotifs(p.token, { ids: [] })).status, 200, `POST ${i + 1} is within budget`);
+  const pRes = await inScope(() => notifications.POST(withLang("POST", "es", p.token), undefined));
+  assert.equal(pRes.status, 429);
+  assert.deepEqual(await pRes.json(), { error: "Demasiadas solicitudes — inténtalo de nuevo más tarde" });
+  // DELETE: 60/min.
+  const d = await mintSession();
+  for (let i = 0; i < 60; i++) assert.equal((await delNotifs(d.token, "?ids=nope")).status, 200, `DELETE ${i + 1} is within budget`);
+  const dRes = await inScope(() => notifications.DELETE(withLang("DELETE", "de", d.token, "?ids=nope"), undefined));
+  assert.equal(dRes.status, 429);
+  assert.deepEqual(await dRes.json(), { error: "Zu viele Anfragen – versuchen Sie es später erneut" });
+});
+
 test("POST tolerates a malformed body rather than 500ing", async () => {
   const me = await mintSession();
   assert.notEqual((await postNotifs(me.token, undefined, "{nope")).status, 500);
@@ -747,8 +792,11 @@ test("GET does NOT consume the token — only POST binds", async () => {
 });
 
 test("POST consumes the token FIRST so a double-submit can't re-trigger the bind", async () => {
+  // The bind now checks the scoped updateMany's row count, so the token must
+  // belong to a user that actually exists in the fake DB.
+  const { userId } = await mintSession();
   const raw = "abcdef0123456789";
-  verifyTokens = [{ token: hashVerifyToken(raw), identifier: buildVerifyIdentifier("u1", "new@example.com"), expires: new Date(Date.now() + 60_000) }];
+  verifyTokens = [{ token: hashVerifyToken(raw), identifier: buildVerifyIdentifier(userId, "new@example.com"), expires: new Date(Date.now() + 60_000) }];
   assert.equal((await confirmPost(`?token=${raw}`)).status, 200);
   assert.ok(opsOf("verificationToken.delete").length > 0, "the token must be single-use");
   const second = await confirmPost(`?token=${raw}`);

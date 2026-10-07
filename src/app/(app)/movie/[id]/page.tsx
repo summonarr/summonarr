@@ -1,3 +1,5 @@
+import type { Metadata } from "next";
+import { cache } from "react";
 import { getMovieDetails, tmdbLanguageFor, getMovieCredits, getMovieSuggestions, getMovieCollection, getMovieGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
 import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
@@ -34,12 +36,13 @@ import { getLocale, getTranslator } from "@/lib/i18n/server";
 import { localizeMedia, localizedCollectionName } from "@/lib/tmdb-localize";
 import { translateTmdbStatus } from "@/components/media/detail-status";
 
-export default async function MovieDetailPage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
-  const { id } = await params;
+// The gate + the details read, ONCE per request, shared by generateMetadata and
+// the page body (React `cache`, keyed on the route id — the idiom
+// (app)/layout.tsx uses for its settings read; Next only de-duplicates fetch()
+// between the two, not Prisma reads or our coalesced TMDB helpers). A
+// redirect()/notFound() thrown here is cached as the rejection, so both callers
+// see the same outcome.
+const loadMovie = cache(async (id: string) => {
   // The login gate MUST run before the TMDB fetch. When a crafted request
   // skips both the proxy and the (app) layout, this call is the ONLY check —
   // running the fetch alongside it let a signed-out caller use up TMDB/OMDB/
@@ -66,6 +69,29 @@ export default async function MovieDetailPage({
       ? localizedCollectionName(englishMedia.collectionId, englishMedia.collectionName, locale)
       : Promise.resolve(englishMedia.collectionName ?? null),
   ]);
+  return { session, t, locale, media, collectionName };
+});
+
+// Tab / bookmark / history title: the (localized) TMDB title, under the root
+// layout's "%s · Summonarr" template. Runs the same gate-first loader as the
+// page, so a signed-out caller still burns no TMDB quota here.
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+  const { media } = await loadMovie(id);
+  return { title: media.title };
+}
+
+export default async function MovieDetailPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = await params;
+  const { session, t, locale, media, collectionName } = await loadMovie(id);
 
   // Which Plex/Jellyfin servers this viewer may see. Everything downstream keys off the two
   // library rows below — the availability badges, the ratings bar's Jellyfin score, and the
@@ -214,7 +240,9 @@ export default async function MovieDetailPage({
                 background: "var(--ds-bg-3)",
               }}
             >
-              <Image src={poster} alt={media.title} fill className="object-cover" sizes="160px" />
+              {/* Decorative: the <h1> beside it carries the title, so a named
+                  poster read the title twice. Same rule as the backdrop. */}
+              <Image src={poster} alt="" fill className="object-cover" sizes="160px" />
             </div>
           )}
 

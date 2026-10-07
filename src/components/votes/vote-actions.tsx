@@ -82,7 +82,12 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
         <button
           onClick={handleUnvote}
           disabled={loading}
-          className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-indigo-500/50 bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 transition-colors disabled:opacity-50"
+          // Clicking removes the vote with no confirm, so say so (same hint as the
+          // detail page's VoteDeleteButton). min-h matches the FilterPills' 32px
+          // target in the same row; text-xs + py-1.5 alone was 28px.
+          title={t("request.vote.removeTitle")}
+          aria-label={t("request.vote.votedLabel")}
+          className="flex items-center gap-1.5 min-h-[32px] text-xs px-3 py-1.5 rounded-lg border border-indigo-500/50 bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/30 transition-colors disabled:opacity-50"
         >
           {pending === "unvote" ? <Loader2 className="w-3 h-3 animate-spin" /> : <ThumbsUp className="w-3 h-3" />}
           {t("personal.votes.voted")}
@@ -92,7 +97,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
         <button
           onClick={() => setConfirmingDismiss(true)}
           disabled={loading}
-          className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-red-500/50 bg-red-600/10 text-red-400 hover:bg-red-600/20 transition-colors disabled:opacity-50"
+          className="flex items-center gap-1.5 min-h-[32px] text-xs px-3 py-1.5 rounded-lg border border-red-500/50 bg-red-600/10 text-red-400 hover:bg-red-600/20 transition-colors disabled:opacity-50"
         >
           {pending === "dismiss" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
           {t("personal.votes.dismiss")}
@@ -103,7 +108,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
           <button
             onClick={handleDismiss}
             disabled={loading}
-            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-50"
+            className="flex items-center gap-1.5 min-h-[32px] text-xs px-3 py-1.5 rounded-lg bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)] transition-colors disabled:opacity-50"
             autoFocus
           >
             {pending === "dismiss" ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
@@ -112,7 +117,7 @@ export function VoteActions({ tmdbId, mediaType, userVoted, isAdmin }: Props) {
           <button
             onClick={() => setConfirmingDismiss(false)}
             disabled={loading}
-            className="text-xs px-2 py-1.5 text-zinc-400 hover:text-zinc-100 transition-colors"
+            className="min-h-[32px] text-xs px-2 py-1.5 text-zinc-400 hover:text-zinc-100 transition-colors"
           >
             {t("personal.common.cancel")}
           </button>

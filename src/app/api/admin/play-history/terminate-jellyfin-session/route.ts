@@ -5,7 +5,7 @@ import { logAudit, auditContext } from "@/lib/audit";
 import { getJellyfinSessions, terminateJellyfinSession } from "@/lib/jellyfin";
 import { getJellyfinConfig } from "@/lib/jellyfin-config";
 import { DEFAULT_MEDIA_INSTANCE, isValidMediaInstanceSlug } from "@/lib/media-instances";
-import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { instanceDefaultLocale, translatorFor, translatorForRequest } from "@/lib/i18n/server-locale";
 
 // Admin terminate-playback endpoint for Jellyfin. Mirrors the Plex route: it
 // sends the "Stop" playstate command (POST /Sessions/{id}/Playing/Stop), which
@@ -28,9 +28,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const body = parsed;
 
   const sessionKey = typeof body.sessionKey === "string" ? body.sessionKey.trim() : "";
+  // Viewer-facing fallback, written in the instance default language (guardrail
+  // 14c) — see the Plex route.
   const reason = typeof body.reason === "string" && body.reason.trim().length > 0
     ? body.reason.trim().slice(0, 500)
-    : "Session terminated by an administrator.";
+    : translatorFor(instanceDefaultLocale())("adminActivity.terminate.defaultReason");
 
   if (!sessionKey) {
     return NextResponse.json({ error: t("apiAdmin.terminate.sessionKeyRequired") }, { status: 400 });
@@ -72,7 +74,16 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     );
   }
 
-  const result = await terminateJellyfinSession(serverUrl, apiKey, match.sessionId, reason);
+  // Same translated 502 as the snapshot above — Jellyfin clients can stall the
+  // Stop command after answering /Sessions, and an unwrapped throw is a bodiless
+  // 500. Nothing happened upstream, so no audit row.
+  let result;
+  try {
+    result = await terminateJellyfinSession(serverUrl, apiKey, match.sessionId, reason);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: t("apiAdmin.terminate.jellyfinUnreachable", { detail: msg }) }, { status: 502 });
+  }
 
   // Session already terminated on Jellyfin; a failed audit write must not 500 it.
   void logAudit({

@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -33,8 +33,11 @@ interface DiscordBotFormProps {
 
 export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildId, initialPublicKey, initialAutoApproveRoles, initialRequireLinkedAccount, initialRequireLinkedAccountSite, initialAdminRequestChannelId, initialWelcomeChannelId, initialNotifyChannelId, initialInviteUrl, initialLinkedRoleId, initialPlexRoleId, initialJellyfinRoleId, initialAdminRoleId, initialIssueAdminRoleId }: DiscordBotFormProps) {
   const t = useT();
-  // Highlights a Discord UI term inside a translated guide sentence.
+  // Highlights a Discord UI term inside a translated guide sentence. The terms
+  // themselves come from the catalog (settings.form.discord.portal.*): the
+  // Developer Portal is localized, so a French admin follows French menu names.
   const hl = (node: React.ReactNode) => <span className="text-zinc-300">{node}</span>;
+  const portal = (term: string) => hl(t(`settings.form.discord.portal.${term}`));
   const [botToken,          setBotToken]          = useState(initialBotToken);
   const [clientId,          setClientId]          = useState(initialClientId);
   const [guildId,           setGuildId]           = useState(initialGuildId);
@@ -67,6 +70,18 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
   // (and hit the route's 10s per-key cooldown, a 429), and changing a field
   // back to its page-load value would look like "no change" and never be saved.
   const savedRef = useRef<Record<string, string> | null>(null);
+  // Fade timers for the three result lines (save, register, sync roles). Only
+  // a success fades; an error (a bad snowflake, the 10s write cooldown) stays
+  // until the next edit or attempt. Ref'd so a new attempt cancels the previous
+  // timer instead of letting it reset "saving" mid-flight; cleared on unmount.
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const regTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    for (const timer of [saveTimer, regTimer, syncTimer]) {
+      if (timer.current) clearTimeout(timer.current);
+    }
+  }, []);
 
   // Discord sends slash-command events to /api/interactions (with BASE_PATH added).
   // Show this site's real address so admins can paste it into the Developer Portal.
@@ -78,6 +93,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    if (saveTimer.current) clearTimeout(saveTimer.current);
     setStatus("saving");
     setMessage("");
 
@@ -113,7 +129,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
     if (Object.keys(changed).length === 0) {
       setMessage(t("settings.form.discord.noChanges"));
       setStatus("ok");
-      setTimeout(() => setStatus("idle"), 5000);
+      saveTimer.current = setTimeout(() => setStatus("idle"), 5000);
       return;
     }
 
@@ -130,6 +146,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
         Object.assign(saved, changed);
         setMessage(t("settings.form.discord.savedRestart"));
         setStatus("ok");
+        saveTimer.current = setTimeout(() => setStatus("idle"), 5000);
       } else {
         setMessage(data.error ?? t("settings.form.common.saveFailed"));
         setStatus("error");
@@ -138,7 +155,6 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
       setMessage(t("settings.form.common.saveFailed"));
       setStatus("error");
     }
-    setTimeout(() => setStatus("idle"), 5000);
   }
 
   return (
@@ -173,12 +189,12 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
             <div className="space-y-1">
               <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s2.title")}</p>
               <p>
-                {rich(t("settings.form.discord.guide.s2.body"), { bot: hl("Bot"), reset: hl("Reset Token"), field: hl(t("settings.form.discord.botToken")) })}
+                {rich(t("settings.form.discord.guide.s2.body"), { bot: portal("bot"), reset: portal("resetToken"), field: hl(t("settings.form.discord.botToken")) })}
               </p>
               <p className="text-zinc-500 text-xs">
                 {rich(t("settings.form.discord.guide.s2.note"), {
-                  grant: <strong className="text-zinc-400">Requires OAuth2 Code Grant</strong>,
-                  off: <strong className="text-zinc-400">OFF</strong>,
+                  grant: <strong className="text-zinc-400">{t("settings.form.discord.portal.codeGrant")}</strong>,
+                  off: <strong className="text-zinc-400">{t("settings.form.discord.portal.off")}</strong>,
                 })}
               </p>
             </div>
@@ -186,14 +202,14 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
             <div className="space-y-1">
               <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s3.title")}</p>
               <p>
-                {rich(t("settings.form.discord.guide.s3.body"), { page: hl("General Information"), appId: hl("Application ID"), publicKey: hl("Public Key") })}
+                {rich(t("settings.form.discord.guide.s3.body"), { page: portal("generalInformation"), appId: portal("applicationId"), publicKey: portal("publicKey") })}
               </p>
             </div>
 
             <div className="space-y-1">
               <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s4.title")}</p>
               <p>
-                {rich(t("settings.form.discord.guide.s4.body"), { devMode: hl("Developer Mode"), copyId: hl("Copy Server ID"), field: hl(t("settings.form.discord.guildId")) })}
+                {rich(t("settings.form.discord.guide.s4.body"), { devMode: portal("developerMode"), copyId: portal("copyServerId"), field: hl(t("settings.form.discord.guildId")) })}
               </p>
               <p className="text-zinc-500 text-xs">
                 {t("settings.form.discord.guide.s4.note")}
@@ -208,13 +224,13 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
             <div className="space-y-1">
               <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s6.title")}</p>
               <p>
-                {rich(t("settings.form.discord.guide.s6.body"), { page: hl("General Information"), field: hl("Interactions Endpoint URL") })}
+                {rich(t("settings.form.discord.guide.s6.body"), { page: portal("generalInformation"), field: portal("interactionsEndpointUrl") })}
               </p>
               <code className="block break-all bg-zinc-900 border border-zinc-700 rounded px-3 py-2 text-xs font-mono text-zinc-300 mt-1">
                 {interactionsEndpoint}
               </code>
               <p className="text-zinc-500 text-xs mt-1">
-                {rich(t("settings.form.discord.guide.s6.note"), { save: <strong className="text-zinc-400">Save Changes</strong> })}
+                {rich(t("settings.form.discord.guide.s6.note"), { save: <strong className="text-zinc-400">{t("settings.form.discord.portal.saveChanges")}</strong> })}
               </p>
             </div>
 
@@ -222,13 +238,15 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
               <p className="font-semibold text-zinc-200">{t("settings.form.discord.guide.s7.title")}</p>
               <p>
                 {rich(t("settings.form.discord.guide.s7.body"), {
-                  generator: hl("OAuth2 → URL Generator"),
+                  generator: portal("urlGenerator"),
+                  // `bot` / `applications.commands` are OAuth2 scope identifiers,
+                  // not UI labels — they read the same in every portal language.
                   bot: hl("bot"),
                   commands: hl("applications.commands"),
-                  send: hl("Send Messages"),
-                  embed: hl("Embed Links"),
-                  view: hl("View Channels"),
-                  url: <strong className="text-zinc-400">Generated URL</strong>,
+                  send: portal("sendMessages"),
+                  embed: portal("embedLinks"),
+                  view: portal("viewChannels"),
+                  url: <strong className="text-zinc-400">{t("settings.form.discord.portal.generatedUrl")}</strong>,
                 })}
               </p>
               <p className="text-zinc-500 text-xs">
@@ -246,13 +264,13 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   {rich(t("settings.form.discord.guide.s8.step1"), { a: hl("#requests"), b: hl("#notifications") })}
                 </li>
                 <li>
-                  {rich(t("settings.form.discord.guide.s8.step2"), { edit: hl("Edit Channel"), perms: hl("Permissions"), view: hl("View Channel"), send: hl("Send Messages") })}
+                  {rich(t("settings.form.discord.guide.s8.step2"), { edit: portal("editChannel"), perms: portal("permissions"), view: portal("viewChannel"), send: portal("sendMessages") })}
                 </li>
                 <li>
-                  {rich(t("settings.form.discord.guide.s8.step3"), { devMode: hl("Developer Mode"), path: hl("App Settings → Advanced") })}
+                  {rich(t("settings.form.discord.guide.s8.step3"), { devMode: portal("developerMode"), path: portal("appSettingsAdvanced") })}
                 </li>
                 <li>
-                  {rich(t("settings.form.discord.guide.s8.step4"), { copy: hl("Copy Channel ID") })}
+                  {rich(t("settings.form.discord.guide.s8.step4"), { copy: portal("copyChannelId") })}
                 </li>
                 <li>
                   {rich(t("settings.form.discord.guide.s8.step5"), { field: hl(t("settings.form.discord.notifyChannel")) })}
@@ -298,6 +316,8 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
             key={id}
             type="button"
             role="tab"
+            id={`discord-tab-${id}`}
+            aria-controls={`discord-panel-${id}`}
             data-tab={id}
             aria-selected={tab === id}
             tabIndex={tab === id ? 0 : -1}
@@ -313,7 +333,9 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
         ))}
       </div>
 
-      {}
+      {/* One panel element whose id follows the selected tab: the form (and its
+          shared Save row) is the content every tab controls. */}
+      <div role="tabpanel" id={`discord-panel-${tab}`} aria-labelledby={`discord-tab-${tab}`}>
       <form onSubmit={handleSave} className="space-y-4">
         {tab === "core" && (
           <>
@@ -325,7 +347,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                 value={botToken}
                 onChange={(e) => { setBotToken(e.target.value); setStatus("idle"); }}
                 placeholder="••••••••••••••••"
-                className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                className="bg-zinc-800 border-zinc-700 font-mono"
               />
               <p className="text-xs text-zinc-500">{t("settings.form.discord.botTokenHelp")}</p>
             </div>
@@ -337,7 +359,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   value={clientId}
                   onChange={(e) => { setClientId(e.target.value); setStatus("idle"); }}
                   placeholder="123456789012345678"
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                  className="bg-zinc-800 border-zinc-700 font-mono"
                 />
                 <p className="text-xs text-zinc-500">{t("settings.form.discord.clientIdHelp")}</p>
               </div>
@@ -348,7 +370,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   value={guildId}
                   onChange={(e) => { setGuildId(e.target.value); setStatus("idle"); }}
                   placeholder="123456789012345678"
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                  className="bg-zinc-800 border-zinc-700 font-mono"
                 />
                 <p className="text-xs text-zinc-500">{t("settings.form.discord.guildIdHelp")}</p>
               </div>
@@ -360,7 +382,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                 value={publicKey}
                 onChange={(e) => { setPublicKey(e.target.value); setStatus("idle"); }}
                 placeholder="f8cf3a985f811b4e…"
-                className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                className="bg-zinc-800 border-zinc-700 font-mono"
               />
               <p className="text-xs text-zinc-500">{t("settings.form.discord.publicKeyHelp")}</p>
             </div>
@@ -371,7 +393,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                 value={autoApproveRoles}
                 onChange={(e) => { setAutoApproveRoles(e.target.value); setStatus("idle"); }}
                 placeholder="123456789012345678, 987654321098765432"
-                className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                className="bg-zinc-800 border-zinc-700 font-mono"
               />
               <p className="text-xs text-zinc-500">
                 {t("settings.form.discord.autoApproveRolesHelp")}
@@ -424,7 +446,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   value={adminRequestChannelId}
                   onChange={(e) => { setAdminRequestChannelId(e.target.value); setStatus("idle"); }}
                   placeholder="123456789012345678"
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                  className="bg-zinc-800 border-zinc-700 font-mono"
                 />
                 <p className="text-xs text-zinc-500">
                   {rich(t("settings.form.discord.adminChannelHelp"), {
@@ -440,7 +462,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   value={welcomeChannelId}
                   onChange={(e) => { setWelcomeChannelId(e.target.value); setStatus("idle"); }}
                   placeholder="123456789012345678"
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                  className="bg-zinc-800 border-zinc-700 font-mono"
                 />
                 <p className="text-xs text-zinc-500">
                   {rich(t("settings.form.discord.welcomeChannelHelp"), {
@@ -459,7 +481,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   value={notifyChannelId}
                   onChange={(e) => { setNotifyChannelId(e.target.value); setStatus("idle"); }}
                   placeholder="123456789012345678"
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                  className="bg-zinc-800 border-zinc-700 font-mono"
                 />
                 <p className="text-xs text-zinc-500">
                   {rich(t("settings.form.discord.notifyChannelHelp"), { mention: <code className="text-zinc-400">@mention</code> })}
@@ -472,7 +494,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   value={inviteUrl}
                   onChange={(e) => { setInviteUrl(e.target.value); setStatus("idle"); }}
                   placeholder="https://discord.gg/xxxxxxxxx"
-                  className="bg-zinc-800 border-zinc-700 text-sm"
+                  className="bg-zinc-800 border-zinc-700"
                 />
                 <p className="text-xs text-zinc-500">
                   {t("settings.form.discord.inviteUrlHelp")}
@@ -492,7 +514,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   value={linkedRoleId}
                   onChange={(e) => { setLinkedRoleId(e.target.value); setStatus("idle"); }}
                   placeholder="123456789012345678"
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                  className="bg-zinc-800 border-zinc-700 font-mono"
                 />
                 <p className="text-xs text-zinc-500">
                   {t("settings.form.discord.linkedRoleHelp")}
@@ -505,7 +527,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   value={plexRoleId}
                   onChange={(e) => { setPlexRoleId(e.target.value); setStatus("idle"); }}
                   placeholder="123456789012345678"
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                  className="bg-zinc-800 border-zinc-700 font-mono"
                 />
                 <p className="text-xs text-zinc-500">{t("settings.form.discord.plexRoleHelp")}</p>
               </div>
@@ -518,7 +540,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   value={jellyfinRoleId}
                   onChange={(e) => { setJellyfinRoleId(e.target.value); setStatus("idle"); }}
                   placeholder="123456789012345678"
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                  className="bg-zinc-800 border-zinc-700 font-mono"
                 />
                 <p className="text-xs text-zinc-500">{t("settings.form.discord.jellyfinRoleHelp")}</p>
               </div>
@@ -529,7 +551,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                   value={adminRoleId}
                   onChange={(e) => { setAdminRoleId(e.target.value); setStatus("idle"); }}
                   placeholder="123456789012345678"
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                  className="bg-zinc-800 border-zinc-700 font-mono"
                 />
                 <p className="text-xs text-zinc-500">{t("settings.form.discord.adminRoleHelp")}</p>
               </div>
@@ -541,7 +563,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                 value={issueAdminRoleId}
                 onChange={(e) => { setIssueAdminRoleId(e.target.value); setStatus("idle"); }}
                 placeholder="123456789012345678"
-                className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                className="bg-zinc-800 border-zinc-700 font-mono"
               />
               <p className="text-xs text-zinc-500">
                 {t("settings.form.discord.issueAdminRoleHelp")}
@@ -557,6 +579,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
           <SaveStatusMessage status={status} okLabel={message} errorLabel={message} />
         </div>
       </form>
+      </div>
 
       <div className="border-t border-zinc-800 pt-4">
         <div className="flex items-center gap-3">
@@ -566,6 +589,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
             className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
             disabled={regStatus === "loading"}
             onClick={async () => {
+              if (regTimer.current) clearTimeout(regTimer.current);
               setRegStatus("loading");
               setRegMessage("");
               try {
@@ -574,6 +598,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                 if (data.ok) {
                   setRegStatus("ok");
                   setRegMessage(data.message ?? t("settings.form.discord.registered"));
+                  regTimer.current = setTimeout(() => setRegStatus("idle"), 6000);
                 } else {
                   setRegStatus("error");
                   setRegMessage(data.error ?? t("settings.form.common.failed"));
@@ -582,7 +607,6 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                 setRegStatus("error");
                 setRegMessage(t("settings.form.common.requestFailed"));
               }
-              setTimeout(() => setRegStatus("idle"), 6000);
             }}
           >
             {regStatus === "loading" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.discord.registering")}</> : t("settings.form.discord.register")}
@@ -601,6 +625,7 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
             className="border-zinc-700 text-zinc-300 hover:bg-zinc-800"
             disabled={syncRolesStatus === "loading"}
             onClick={async () => {
+              if (syncTimer.current) clearTimeout(syncTimer.current);
               setSyncRolesStatus("loading");
               setSyncRolesMessage("");
               try {
@@ -612,12 +637,12 @@ export function DiscordBotForm({ initialBotToken, initialClientId, initialGuildI
                 } else {
                   setSyncRolesStatus("ok");
                   setSyncRolesMessage(t("settings.form.discord.syncedUsers", { count: data.synced ?? 0 }));
+                  syncTimer.current = setTimeout(() => setSyncRolesStatus("idle"), 6000);
                 }
               } catch {
                 setSyncRolesStatus("error");
                 setSyncRolesMessage(t("settings.form.common.requestFailed"));
               }
-              setTimeout(() => setSyncRolesStatus("idle"), 6000);
             }}
           >
             {syncRolesStatus === "loading" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.syncing")}</> : t("settings.form.discord.syncRoles")}

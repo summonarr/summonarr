@@ -112,7 +112,7 @@ export function PlayHistorySettingsForm({
               max={100}
               value={watchedThreshold}
               onChange={(e) => { setWatchedThreshold(e.target.value); setStatus("idle"); }}
-              className="bg-zinc-800 border-zinc-700 text-sm w-32"
+              className="bg-zinc-800 border-zinc-700 w-32"
             />
             <p className="text-xs text-zinc-500">{t("settings.playHistory.watchedThresholdHelp")}</p>
           </div>
@@ -126,7 +126,7 @@ export function PlayHistorySettingsForm({
               max={100}
               value={completionThreshold}
               onChange={(e) => { setCompletionThreshold(e.target.value); setStatus("idle"); }}
-              className="bg-zinc-800 border-zinc-700 text-sm w-32"
+              className="bg-zinc-800 border-zinc-700 w-32"
             />
             <p className="text-xs text-zinc-500">{t("settings.playHistory.completionThresholdHelp")}</p>
           </div>
@@ -140,7 +140,7 @@ export function PlayHistorySettingsForm({
               max={365}
               value={arcGapDays}
               onChange={(e) => { setArcGapDays(e.target.value); setStatus("idle"); }}
-              className="bg-zinc-800 border-zinc-700 text-sm w-32"
+              className="bg-zinc-800 border-zinc-700 w-32"
             />
             <p className="text-xs text-zinc-500">{t("settings.playHistory.arcGapHelp")}</p>
           </div>
@@ -157,7 +157,7 @@ export function PlayHistorySettingsForm({
               max={600}
               value={pollingInterval}
               onChange={(e) => { setPollingInterval(e.target.value); setStatus("idle"); }}
-              className="bg-zinc-800 border-zinc-700 text-sm w-32"
+              className="bg-zinc-800 border-zinc-700 w-32"
             />
             <p className="text-xs text-zinc-500">{t("settings.playHistory.pollingIntervalHelp")}</p>
           </div>
@@ -170,7 +170,7 @@ export function PlayHistorySettingsForm({
               min={0}
               value={retentionDays}
               onChange={(e) => { setRetentionDays(e.target.value); setStatus("idle"); }}
-              className="bg-zinc-800 border-zinc-700 text-sm w-32"
+              className="bg-zinc-800 border-zinc-700 w-32"
             />
             <p className="text-xs text-zinc-500">{t("settings.playHistory.retentionHelp")}</p>
           </div>

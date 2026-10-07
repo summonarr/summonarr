@@ -46,7 +46,7 @@ export function KpiStrip({ kpis }: { kpis: Kpi[] }) {
           gap: 0,
           background: "var(--ds-bg-2)",
           border: "1px solid var(--ds-border)",
-          borderRadius: 10,
+          borderRadius: "var(--ds-r-lg)",
           overflow: "hidden",
         }}
       >
@@ -282,6 +282,25 @@ export interface RewatchedTitle {
   posterSrc?: string | null;
 }
 
+// The same centred 12px block HorizontalBars shows for an empty list, so an
+// empty leaderboard reads like every neighbouring empty card instead of a
+// header over 300px of blank space.
+function NoData() {
+  const t = useT();
+  return (
+    <div
+      style={{
+        fontSize: 12,
+        color: "var(--ds-fg-subtle)",
+        padding: "20px 0",
+        textAlign: "center",
+      }}
+    >
+      {t("adminActivity.common.noDataYet")}
+    </div>
+  );
+}
+
 const POSTER_ACCENTS = [
   "oklch(0.42 0.08 60)",
   "oklch(0.32 0.06 230)",
@@ -303,6 +322,11 @@ export function Leaderboards({
   days: number;
 }) {
   const t = useT();
+  const locale = useLocale();
+  // One decimal, locale-separated — beside the Intl-formatted play counts, a
+  // bare toFixed(1) mixed "1.234 plays" with "12.3h" for a de/fr/pt/it admin.
+  const dec1 = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
+  const hoursSuffix = t("adminActivity.common.hoursSuffix");
   const maxHours = Math.max(...users.map((u) => u.hours), 1);
   const maxPlays = Math.max(...rewatched.map((m) => m.plays), 1);
   return (
@@ -316,6 +340,7 @@ export function Leaderboards({
             label={t("adminActivity.overview.topViewers")}
             sub={t("adminActivity.overview.usersDays", { count: users.length, days })}
           />
+          {users.length === 0 && <NoData />}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {users.map((u, i) => (
               <Link
@@ -393,7 +418,7 @@ export function Leaderboards({
                         whiteSpace: "nowrap",
                       }}
                     >
-                      {u.hours.toFixed(1)}h{" "}
+                      {dec1.format(u.hours)}{hoursSuffix}{" "}
                       <span style={{ color: "var(--ds-fg-subtle)" }}>
                         · {t("adminActivity.common.plays", { count: u.plays })}
                       </span>
@@ -426,6 +451,7 @@ export function Leaderboards({
             label={t("adminActivity.overview.mostRewatched")}
             sub={t("adminActivity.overview.libraryChampions", { days })}
           />
+          {rewatched.length === 0 && <NoData />}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {rewatched.map((m, i) => (
               <Link

@@ -135,16 +135,20 @@ export async function register() {
     // so a typo'd origin fails open as "not trusted" with no signal — warn here so
     // a misconfigured CSRF allowlist surfaces at boot instead of as mystery 403s.
     if (process.env.AUTH_TRUSTED_ORIGIN) {
+      const { parseTrustedOriginEntry } = await import("@/lib/cron-auth");
       for (const raw of process.env.AUTH_TRUSTED_ORIGIN.split(",")) {
         const trimmed = raw.trim();
         if (!trimmed) continue;
-        try {
-          // Mirror the readers: they key off URL.origin. A bare host or a path-only
-          // value parses to a different origin (or throws) and won't match.
-          new URL(trimmed);
-        } catch {
+        // Mirror the readers EXACTLY (parseTrustedOriginEntry in cron-auth.ts, the
+        // inline twin in proxy.ts): they accept only an http(s) URL whose origin is
+        // not "null". A bare `host:port` does NOT throw out of `new URL` — it
+        // parses as scheme `host:` with path `port` and origin "null" — so the old
+        // try/catch here never fired for the one mistake the docker README's
+        // "internal hostname, LAN IP" wording invites, while the readers silently
+        // trusted the literal "null" origin instead of the intended host.
+        if (parseTrustedOriginEntry(trimmed) === null) {
           console.warn(
-            `[startup] AUTH_TRUSTED_ORIGIN entry "${trimmed}" is not a valid absolute URL and will be ignored. ` +
+            `[startup] AUTH_TRUSTED_ORIGIN entry "${trimmed}" has no http(s) scheme or is not a valid absolute URL and will be ignored. ` +
               "Use full origins, e.g. https://app.example.com."
           );
         }
@@ -182,6 +186,18 @@ export async function register() {
           `[startup] OIDC_ISSUER is set but ${oidcMissing.join(" and ")} ${oidcMissing.length === 1 ? "is" : "are"} missing. ` +
             "OIDC sign-in will not work until all of OIDC_ISSUER, OIDC_CLIENT_ID, and OIDC_CLIENT_SECRET are set."
         );
+      } else {
+        // openid-client refuses non-https requests (allowInsecureRequests is
+        // deliberately never passed), so an http:// issuer can never complete a
+        // sign-in. isOidcConfigured() reads it as unconfigured — the login tab
+        // hides — and this once-per-boot line is the only place that says why.
+        const { isOidcIssuerSecure } = await import("@/lib/oidc");
+        if (!isOidcIssuerSecure(process.env.OIDC_ISSUER)) {
+          console.warn(
+            `[startup] OIDC_ISSUER=${process.env.OIDC_ISSUER} is not an https:// URL, so OIDC sign-in is disabled. ` +
+              "The identity provider must be reachable over TLS (a LAN IdP is fine, but it needs a certificate)."
+          );
+        }
       }
     }
 

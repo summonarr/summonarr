@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.32.0 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.32.1 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
 
 ## Install
 
@@ -169,6 +169,47 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.32.1
+
+A review pass over every API route and page. One high, about 75 medium and about 200 low findings fixed; no database schema change.
+
+**Added**
+
+- **Admin → Activity → History** is its own page with a loading state, so switching to it no longer flashes the overview skeleton. Old `?tab=history` links redirect.
+- Every page now has a document title.
+- A pending notification-email verification is shown on the profile with a Resend link.
+- The blacklist can be filtered and shows when each title was blocked.
+- The sync response reports `skippedSources` (never attempted) alongside `failedSources`, per Radarr/Sonarr instance.
+
+**Changed**
+
+- One radius scale and one form-control recipe across the app: inputs, selects and the new textarea share the same height, border and focus ring, and text fields are 16px on phones so iOS no longer zooms into them.
+- Charts, chips and status fills use the design-system tokens in both themes; Plex and Jellyfin identity is one colour each.
+- Settings forms now show the server's reason when a save is refused, and errors stay until the next edit instead of vanishing after a few seconds.
+- Settings values are validated on save: numeric keys have bounds, switches accept only true/false, the Discord public key must be 64 hex characters, and out-of-range session lengths are refused instead of silently rewritten. The site title and the ratings API keys can be cleared.
+- Admin-created passwords must be 12 characters, matching sign-up and the setup wizard.
+- A MANAGE_USERS delegate may list and revoke a user's sessions and manage media-server users, but can only grant permissions and instance access they hold themselves.
+- Removing the last second factor asks for confirmation. Closing an account requires a translated confirm word.
+- Watch history and My Stats are hidden while play-history tracking is off, and the admin dashboard shows a prompt instead of an all-zero page.
+- The play-history export emits bitrate in kbps for both Plex and Jellyfin, with a CSV header that says so.
+
+**Fixed**
+
+- **OIDC sign-in errors** (account disabled, access denied, expired flow, and seven more) bounced silently back to an empty login form. They are now shown.
+- The TRaSH Guides sync answered an error while the feature was off, so the container retried it every five minutes forever and wrote an audit row each time.
+- A bulk request, or a Discord request, could report a title as available on a server the user cannot see. Mirrored requests now follow the single-request rule.
+- The issue release search returned raw Radarr/Sonarr release data, including indexer download links, to anyone who can manage issues.
+- A named or 4K Radarr/Sonarr instance that failed to refresh was not reported.
+- A Sonarr download for any episode claimed episode- and season-scoped replacement grabs for that series.
+- Removing a Radarr instance also deleted the same-named Sonarr instance's TRaSH applications.
+- Deleting a play from the admin history left statistics stale for up to 30 minutes.
+- Request events did not reach MANAGE_REQUESTS delegates, so their queue did not live-refresh.
+- The notifications badge lagged up to a minute after reading or clearing items.
+- A trailing newline in the Discord public key made every interaction fail with 401.
+- Modal switches dropped keyboard focus while saving; chips on media cards intercepted clicks meant for the hover bubble; the issues filter bar unmounted while being typed into; the admin queue showed a blank page past the last page; dates on the Requests page and the audit-log filter used the server's time zone.
+- `/.well-known/security.txt` redirected to the login page, and a scheme-less `AUTH_TRUSTED_ORIGIN` entry trusted an `Origin: null` header.
+- Many smaller fixes: translated error messages where English was hard-coded, rate limits that answer with Retry-After, 40px touch targets, phone-width layouts, loading skeletons, and hydration-safe timestamps.
 
 ### v0.32.0
 
@@ -843,7 +884,7 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 
 ## Beta testing
 
-Summonarr v0.32.0 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
+Summonarr v0.32.1 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
 
 1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
 2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.

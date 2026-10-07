@@ -11,6 +11,7 @@ import {
   getVisibleAdminItems,
   filterNavByFeatures,
   navItemLabel,
+  isNavItemActive,
   type NavItem,
 } from "@/lib/nav-items";
 import type { FeatureFlags } from "@/lib/features";
@@ -40,8 +41,9 @@ export function Sidebar({
     (i) => i.section === "personal",
   );
 
-  const isActive = (item: NavItem) =>
-    item.exact ? pathname === item.href : pathname.startsWith(item.href);
+  // Shared with the drawer, bottom tabs and breadcrumb (nav-items.ts) so every
+  // surface agrees on which item /movie/603 belongs to.
+  const isActive = (item: NavItem) => isNavItemActive(pathname, item);
 
   return (
     <aside

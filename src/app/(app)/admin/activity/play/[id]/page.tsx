@@ -4,22 +4,27 @@ import { redirect, notFound } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
 import Link from "next/link";
 import { posterUrl } from "@/lib/tmdb-types";
-import { bitrateToKbps } from "@/lib/bitrate";
 import { User, CheckCircle2, Circle } from "@/components/icons";
-// Same card + section-title + detail-header primitives the user/title detail
-// views use, so the three Activity detail pages share one composition.
+// Same card + section-title + detail-header + method-pill primitives the
+// user/title detail views and the history table use, so the three Activity
+// detail pages share one composition and one vocabulary ("Remux", not
+// "Direct Stream (Remux)").
 import {
   ActivityCard,
   DetailHeader,
+  MethodPill,
   Poster,
   SectionHeader,
   SourceTag,
+  fmtBitrate,
+  methodLabel,
 } from "@/components/admin/activity-ui";
 import { DeletePlayButton } from "@/components/admin/delete-play-button";
 import { IpInfo } from "@/components/admin/ip-info";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
-import { getLocale, getTranslator } from "@/lib/i18n/server";
+import { getTranslator } from "@/lib/i18n/server";
 import type { Translator } from "@/lib/i18n/translate";
+import { PlayTimestamp } from "./play-timestamp";
 
 export const dynamic = "force-dynamic";
 
@@ -33,27 +38,6 @@ function formatDuration(seconds: number | null): string {
   return `${s}s`;
 }
 
-// `source` is required: Plex reports kbps, Jellyfin bps, and the row is the
-// only thing that can tell them apart (lib/bitrate.ts).
-function formatBitrate(raw: number | null, source: string | null): string {
-  const kbps = bitrateToKbps(raw, source);
-  if (kbps <= 0) return "—";
-  if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mbps`;
-  return `${Math.round(kbps)} kbps`;
-}
-
-// Server component: formatting here uses the Node process's zone, so pin it to
-// UTC and say so (matching the calendar's "days in UTC" label) rather than
-// render an unlabelled time in whatever zone the container happens to run.
-function formatTs(d: Date | null, locale: string): string {
-  if (!d) return "—";
-  return `${d.toLocaleString(locale, {
-    month: "short", day: "numeric", year: "numeric",
-    hour: "numeric", minute: "2-digit", hour12: true,
-    timeZone: "UTC",
-  })} UTC`;
-}
-
 function LabeledValue({ label, value, mono = false }: { label: string; value: React.ReactNode; mono?: boolean }) {
   return (
     <div>
@@ -63,34 +47,32 @@ function LabeledValue({ label, value, mono = false }: { label: string; value: Re
   );
 }
 
-function PlayMethodBadge({ method, t }: { method: string | null; t: Translator }) {
+// The same pill + label rule as the history table and the title page, so one
+// play method never has two names across the Activity surfaces.
+function PlayMethodBadge({
+  method,
+  videoDecision,
+  audioDecision,
+  t,
+}: {
+  method: string | null;
+  videoDecision: string | null;
+  audioDecision: string | null;
+  t: Translator;
+}) {
   if (!method) return <span className="text-zinc-500">—</span>;
-  const colors: Record<string, string> = {
-    DirectPlay: "bg-green-500/15 text-green-400",
-    DirectStream: "bg-sky-500/15 text-sky-400",
-    Transcode: "bg-orange-500/15 text-orange-400",
-  };
-  const labels: Record<string, string> = {
-    DirectPlay: t("adminActivity.method.directPlay"),
-    DirectStream: t("adminActivity.method.directStreamRemux"),
-    Transcode: t("adminActivity.method.transcode"),
-  };
-  return (
-    <span className={`px-2 py-0.5 rounded text-xs font-medium ${colors[method] ?? "bg-zinc-700 text-zinc-300"}`}>
-      {labels[method] ?? method}
-    </span>
-  );
+  const ml = methodLabel(t, method, videoDecision, audioDecision);
+  return <MethodPill method={ml.label} methodClass={ml.cls} />;
 }
 
 function DecisionBadge({ decision, t }: { decision: string | null; t: Translator }) {
   if (!decision) return <span className="text-zinc-500">—</span>;
   const isTranscode = decision === "transcode";
   return (
-    <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-      isTranscode ? "bg-orange-500/15 text-orange-400" : "bg-green-500/15 text-green-400"
-    }`}>
-      {isTranscode ? t("adminActivity.method.transcode") : t("adminActivity.method.direct")}
-    </span>
+    <MethodPill
+      method={isTranscode ? t("adminActivity.method.transcode") : t("adminActivity.method.direct")}
+      methodClass={isTranscode ? "warn" : "ok"}
+    />
   );
 }
 
@@ -103,7 +85,7 @@ export default async function PlayDetailPage({
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
   const { id } = await params;
-  const [t, locale] = await Promise.all([getTranslator(), getLocale()]);
+  const t = await getTranslator();
 
   const play = await prisma.playHistory.findUnique({
     where: { id },
@@ -172,9 +154,9 @@ export default async function PlayDetailPage({
   );
 
   return (
-    <div className="ds-page-enter max-w-4xl">
+    <div className="ds-page-enter">
       <DetailHeader
-        back={{ href: "/admin/activity?tab=history", label: t("adminActivity.play.backToHistory") }}
+        back={{ href: "/admin/activity/history", label: t("adminActivity.play.backToHistory") }}
         leading={
           mediaHref ? (
             <Link href={mediaHref} className="block" aria-label={play.title}>
@@ -214,15 +196,30 @@ export default async function PlayDetailPage({
         <ActivityCard>
           <SectionHeader label={t("adminActivity.play.playback")} />
           <div className="space-y-3">
-            <LabeledValue label={t("adminActivity.field.started")} value={formatTs(play.startedAt, locale)} />
-            <LabeledValue label={t("adminActivity.field.stopped")} value={formatTs(play.stoppedAt, locale)} />
+            <LabeledValue
+              label={t("adminActivity.field.started")}
+              value={<PlayTimestamp iso={play.startedAt.toISOString()} />}
+            />
+            <LabeledValue
+              label={t("adminActivity.field.stopped")}
+              value={<PlayTimestamp iso={play.stoppedAt?.toISOString() ?? null} />}
+            />
             <div>
               <p className="text-xs text-zinc-500 uppercase tracking-wide mb-1">{t("adminActivity.field.progress")}</p>
               <div className="flex items-center gap-2">
-                <div className="flex-1 h-2 bg-zinc-800 rounded-full overflow-hidden">
+                {/* Same fill rule as the history table's bar: success once the
+                    play counts as watched, otherwise the accent (guardrail 42 —
+                    a fixed blue-* is not remapped and ignores the accent). */}
+                <div
+                  className="flex-1 h-2 rounded-full overflow-hidden"
+                  style={{ background: "color-mix(in oklab, var(--ds-fg) 6%, transparent)" }}
+                >
                   <div
-                    className={`h-full rounded-full ${pct >= 80 ? "bg-green-500" : pct >= 50 ? "bg-blue-500" : "bg-zinc-500"}`}
-                    style={{ width: `${pct}%` }}
+                    className="h-full rounded-full"
+                    style={{
+                      width: `${pct}%`,
+                      background: play.watched ? "var(--ds-success)" : "var(--ds-accent)",
+                    }}
                   />
                 </div>
                 <span className="text-xs text-zinc-400 tabular-nums w-8 text-right">{pct}%</span>
@@ -241,7 +238,12 @@ export default async function PlayDetailPage({
           <div className="space-y-3">
             <div>
               <p className="text-xs text-zinc-500 uppercase tracking-wide mb-0.5">{t("adminActivity.play.playMethod")}</p>
-              <PlayMethodBadge method={play.playMethod} t={t} />
+              <PlayMethodBadge
+                method={play.playMethod}
+                videoDecision={play.videoDecision}
+                audioDecision={play.audioDecision}
+                t={t}
+              />
             </div>
             <LabeledValue label={t("adminActivity.popover.resolution")} value={play.resolution ?? "—"} />
             <div>
@@ -259,7 +261,7 @@ export default async function PlayDetailPage({
               )}
             </div>
             <LabeledValue label={t("adminActivity.field.container")} value={play.container?.toUpperCase() ?? "—"} />
-            <LabeledValue label={t("adminActivity.field.bitrate")} value={formatBitrate(play.bitrate, play.source)} />
+            <LabeledValue label={t("adminActivity.field.bitrate")} value={fmtBitrate(play.bitrate, play.source)} />
           </div>
         </ActivityCard>
 
@@ -293,7 +295,7 @@ export default async function PlayDetailPage({
             <div>
               <p className="text-xs text-zinc-500 uppercase tracking-wide mb-0.5">{t("adminActivity.field.ipAddress")}</p>
               {play.ipAddress
-                ? <IpInfo ip={play.ipAddress} />
+                ? <IpInfo ip={play.ipAddress} size="sm" />
                 : <p className="text-sm text-zinc-200">—</p>}
             </div>
           </div>

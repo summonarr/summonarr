@@ -842,9 +842,9 @@ test("grouped: the window aliases map through as totalPausedDuration / firstStar
   assert.equal(it.totalPausedDuration, 120);
   assert.equal(it.firstStartedAt, it.startedAt);
   assert.equal(it.lastStoppedAt, it.stoppedAt);
-  // The raw aliases the mirror emitted are what the route read — the mapped
-  // values must equal them, not the representative row's columns by accident.
-  assert.equal(it.totalPausedDuration, it.total_paused_duration);
-  assert.equal(it.firstStartedAt, it.first_started_at);
-  assert.equal(it.lastStoppedAt, it.last_stopped_at);
+  // The raw window-function aliases are stripped before the spread: the wire
+  // shape carries each value once, in camelCase only.
+  for (const alias of ["rn", "chain_id", "segment_count", "total_play_duration", "total_paused_duration", "first_started_at", "last_stopped_at", "chain_watched", "chain_completed", "msu_username", "msu_source", "msu_thumb_url"]) {
+    assert.equal(alias in it, false, `raw alias ${alias} must not reach the client`);
+  }
 });

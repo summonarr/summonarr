@@ -50,5 +50,9 @@
   "shared.discordJoin.message": "Unisciti al nostro server Discord per richiedere contenuti direttamente da Discord, poi {link}.",
   "shared.discordJoin.linkAccount": "collega il tuo account",
   "shared.discordJoin.join": "Unisciti a Discord",
-  "shared.skipToContent": "Vai al contenuto principale"
+  "shared.skipToContent": "Vai al contenuto principale",
+  "shared.bell.loadFailed": "Impossibile caricare le notifiche.",
+  "shared.bell.loading": "Caricamento delle notifiche…",
+  "shared.common.clearSearch": "Cancella ricerca",
+  "shared.thread.placeholderShortcut": "Scrivi un messaggio… ({shortcut} per inviare)"
 }

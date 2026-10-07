@@ -255,11 +255,20 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
   // Stamp last-success so the orchestrator's 24h-stale fallback (sync/route.ts
   // pendingAvailableNotify gate) doesn't fire falsely on deployments where the
   // admin runs the per-source resync more recently than the orchestrator.
-  await prisma.setting.upsert({
-    where: { key: "lastPlexSyncSucceededAt" },
-    update: { value: String(Date.now()) },
-    create: { key: "lastPlexSyncSucceededAt", value: String(Date.now()) },
-  }).catch((err) => console.error("[sync/plex] failed to stamp lastPlexSyncSucceededAt:", err));
+  // ONLY for the shape whose success the orchestrator's own stamp means — a FULL
+  // replace of the DEFAULT instance. A named instance's resync says nothing about
+  // the default server the fallback is waiting on (an hourly `{instance:"remote"}`
+  // call would keep the stamp fresh for as long as the default stayed down, so
+  // `plexStale` could never fire and a Plex-pinned requester whose title landed
+  // on Jellyfin alone was never notified), and a recentOnly insert-only run is
+  // not a complete picture of the library.
+  if (instance === DEFAULT_MEDIA_INSTANCE && !recentOnly) {
+    await prisma.setting.upsert({
+      where: { key: "lastPlexSyncSucceededAt" },
+      update: { value: String(Date.now()) },
+      create: { key: "lastPlexSyncSucceededAt", value: String(Date.now()) },
+    }).catch((err) => console.error("[sync/plex] failed to stamp lastPlexSyncSucceededAt:", err));
+  }
 
   const requests = await prisma.mediaRequest.findMany({
     where: { status: { in: ["PENDING", "APPROVED"] } },
@@ -394,7 +403,9 @@ async function syncPlex(request: NextRequest, actor: CronActor) {
       userName: actor.userName,
       action: "LIBRARY_SYNC",
       target: "sync:plex",
-      details: { movies: movieIds.size, tv: tvIds.size, marked: toMark.length },
+      // `full` mirrors the Jellyfin twin's row, so the audit log can tell a full
+      // replace from an incremental add for BOTH sources.
+      details: { movies: movieIds.size, tv: tvIds.size, marked: toMark.length, full: !recentOnly },
     });
   }
 

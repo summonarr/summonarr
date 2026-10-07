@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -60,7 +60,7 @@ function LibraryMatchMediaBlock({
           value={prefix}
           onChange={(e) => onChangePrefix(e.target.value)}
           placeholder={placeholder}
-          className="bg-zinc-800 border-zinc-700 font-mono text-sm h-8"
+          className="bg-zinc-800 border-zinc-700 font-mono h-8"
         />
       </div>
 
@@ -149,6 +149,15 @@ export function LibraryMatchForm({
   const [plex,                setPlex]                = useState<ServerSamples | null>(null);
   const [jellyfin,            setJellyfin]            = useState<ServerSamples | null>(null);
   const [loadError,           setLoadError]           = useState("");
+  // The route's own reason (a 429 cooldown, too long) — shown in place of the
+  // bare "Failed to save".
+  const [saveMessage,         setSaveMessage]         = useState("");
+  // An earlier save's idle timer must not fire into a later save (it would
+  // re-enable Save mid-flight or hide the new result early).
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+  }, []);
 
   async function loadSamples() {
     setLoading(true);
@@ -174,7 +183,9 @@ export function LibraryMatchForm({
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    if (idleTimer.current) clearTimeout(idleTimer.current);
     setSaveStatus("saving");
+    setSaveMessage("");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
         method:  "PATCH",
@@ -186,12 +197,18 @@ export function LibraryMatchForm({
           jellyfinTvPathStripPrefix:    jellyfinTvPrefix,
         }),
       });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
-      setSaveStatus(res.ok && data.ok !== false ? "ok" : "error");
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (res.ok && data.ok !== false) {
+        setSaveStatus("ok");
+      } else {
+        setSaveMessage(data.error ?? t("settings.form.common.saveFailed"));
+        setSaveStatus("error");
+      }
     } catch {
       setSaveStatus("error");
     }
-    setTimeout(() => setSaveStatus("idle"), 3000);
+    // Only an "ok" fades; an error stays until the next edit or save.
+    idleTimer.current = setTimeout(() => setSaveStatus((s) => (s === "ok" ? "idle" : s)), 3000);
   }
 
   const onChangePlexMoviePrefix     = (v: string) => { setPlexMoviePrefix(v);     setSaveStatus("idle"); };
@@ -199,8 +216,11 @@ export function LibraryMatchForm({
   const onChangeJellyfinMoviePrefix = (v: string) => { setJellyfinMoviePrefix(v); setSaveStatus("idle"); };
   const onChangeJellyfinTvPrefix    = (v: string) => { setJellyfinTvPrefix(v);    setSaveStatus("idle"); };
 
+  // The <form> wraps the whole block so Enter inside any prefix field saves,
+  // like every other form in this folder. "Load examples" is a Button, which
+  // defaults to type="button", so it never submits.
   return (
-    <div className="space-y-6">
+    <form onSubmit={handleSave} className="space-y-6">
       <div className="flex items-start justify-between gap-4">
         <p className="text-sm text-zinc-400">
           {t("settings.form.libraryMatch.intro")}
@@ -236,12 +256,12 @@ export function LibraryMatchForm({
         />
       </div>
 
-      <form onSubmit={handleSave} className="flex items-center gap-3 flex-wrap">
+      <div className="flex items-center gap-3 flex-wrap">
         <Button type="submit" disabled={saveStatus === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
           {saveStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
         </Button>
-        <SaveStatusMessage status={saveStatus} />
-      </form>
-    </div>
+        <SaveStatusMessage status={saveStatus} errorLabel={saveMessage || t("settings.form.common.saveFailed")} />
+      </div>
+    </form>
   );
 }

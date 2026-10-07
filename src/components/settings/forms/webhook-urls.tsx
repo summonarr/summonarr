@@ -64,7 +64,7 @@ function CopyRow({
           onClick={copy}
           disabled={pending}
           aria-busy={pending || undefined}
-          className="shrink-0 p-2 -m-2 text-zinc-500 hover:text-zinc-100 transition-colors disabled:opacity-50"
+          className="shrink-0 p-3 -m-3 text-zinc-500 hover:text-zinc-100 transition-colors disabled:opacity-50"
           aria-label={t("settings.form.webhookUrls.copyLabel", { label })}
         >
           {pending
@@ -128,9 +128,10 @@ export function WebhookUrls({
   // Fetch the actual tokens on every copy click. Admin-only endpoint; responses
   // are `private, no-store`. Returns { radarr, sonarr, radarr4k, sonarr4k }
   // where radarr/sonarr already fold in the legacy shared secret server-side.
-  // Do NOT cache these across clicks: the secret form above saves without
-  // re-rendering this component, so a cached token survives a rotation and the
-  // copied URL carries a value the webhook handler now rejects.
+  // Do NOT cache these across clicks: the secret form above router.refresh()es
+  // after a save so the flags here follow it, but a rotation from another tab
+  // or admin never reaches this component, and a cached token would survive it
+  // — the copied URL would carry a value the webhook handler now rejects.
   const loadTokens = useCallback(async (): Promise<Record<string, string | null>> => {
     const res = await fetch(withBasePath("/api/settings/webhook-urls"));
     if (!res.ok) throw new Error("failed to load webhook tokens");

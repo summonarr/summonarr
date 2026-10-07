@@ -1,10 +1,12 @@
 export const dynamic = "force-dynamic";
 
+import type { Metadata } from "next";
 import { getTopRatedMovies, getTopRatedTV, type TmdbMedia } from "@/lib/tmdb";
 import { getTraktPopularMovies, getTraktPopularTV } from "@/lib/trakt";
 import { getMdblistTopRated } from "@/lib/mdblist";
 import { MediaCard } from "@/components/media/media-card";
 import { PaginationBar } from "@/components/media/pagination-bar";
+import { RangeLabel } from "@/components/media/range-label";
 import { attachAllAvailability } from "@/lib/attach-all";
 import { Suspense } from "react";
 import { TopFilterBar } from "@/components/media/top-filter-bar";
@@ -144,6 +146,12 @@ function applyFilters(
   return result;
 }
 
+// Tab / bookmark / history title — the nav label, in the viewer's language.
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getTranslator();
+  return { title: t("nav.topRated") };
+}
+
 export default async function TopRatedPage({
   searchParams,
 }: {
@@ -258,10 +266,13 @@ export default async function TopRatedPage({
 
   const sourceCount = [rawTmdbMovies.length || rawTmdbTV.length, rawTraktMovies.length || rawTraktTV.length, rawMdbMovies.length || rawMdbTV.length].filter(Boolean).length;
 
+  // The FILTERED totals — the same numbers the section range labels report.
+  // The unfiltered pool read "1,180 titles" over a Movies section saying
+  // "1–36 of 92" the moment any filter was on. Unfiltered, the two agree.
   const subtitleBits = [
     t("browse.top.sortedBy", { label: t(SORT_LABEL_KEYS[sortBy]) }),
     sourceCount > 1 ? t("browse.top.sources", { count: sourceCount }) : null,
-    t("browse.top.titles", { count: allMovies.length + allTV.length }),
+    t("browse.top.titles", { count: totalMovieCount + totalTvCount }),
   ].filter(Boolean) as string[];
 
   // When nothing survived in EITHER visible section, one empty state for the
@@ -290,73 +301,67 @@ export default async function TopRatedPage({
       {bothEmpty ? (
         sectionEmptyState(t, showMovies ? Film : Tv, page, hasFilters, retryHref)
       ) : (
-        <>
-          {showMovies && (
-            // The LAST rendered section carries no bottom margin: the pager's
-            // own mt-8 puts it 32px below the grid, like every other page.
-            <section style={{ marginBottom: showTV ? 40 : 0 }}>
+        // A section with nothing on this page is OMITTED, the way /popular
+        // does it — not a heading over a "No titles match" card while the
+        // other half of the page carries on. The page-level empty state above
+        // covers "nothing anywhere". The gap replaces the per-section bottom
+        // margin, so whichever section renders last sits 40px above nothing
+        // extra and the pager's own mt-8 still applies.
+        <div style={{ display: "flex", flexDirection: "column", gap: 40 }}>
+          {showMovies && movies.length > 0 && (
+            <section>
               <SectionHeader
                 title={t("nav.movies")}
                 right={
-                  // Gated on this page's slice too: past the shorter
-                  // section's last page it would read "37–20 of 20".
-                  totalMovieCount > 0 && movies.length > 0 ? (
-                    <RangeLabel>
-                      {t("browse.rangeOf", { from: offset + 1, to: Math.min(offset + movies.length, totalMovieCount), total: totalMovieCount })}
-                    </RangeLabel>
-                  ) : undefined
+                  <RangeLabel
+                    t={t}
+                    from={offset + 1}
+                    to={Math.min(offset + movies.length, totalMovieCount)}
+                    total={totalMovieCount}
+                  />
                 }
               />
-              {movies.length === 0 ? (
-                sectionEmptyState(t, Film, page, hasFilters, retryHref)
-              ) : (
-                <div className="ds-media-grid">
-                  {movies.map((media) => (
-                    <MediaCard
-                      key={`movie-${media.id}`}
-                      media={media}
-                      showPlex={showPlex}
-                      showJellyfin={showJellyfin}
-                      size="md"
-                    />
-                  ))}
-                </div>
-              )}
+              <div className="ds-media-grid">
+                {movies.map((media) => (
+                  <MediaCard
+                    key={`movie-${media.id}`}
+                    media={media}
+                    showPlex={showPlex}
+                    showJellyfin={showJellyfin}
+                    size="md"
+                  />
+                ))}
+              </div>
             </section>
           )}
 
-          {showTV && (
+          {showTV && tv.length > 0 && (
             <section>
               <SectionHeader
                 title={t("nav.tvShows")}
                 right={
-                  // Gated on this page's slice too: past the shorter
-                  // section's last page it would read "37–20 of 20".
-                  totalTvCount > 0 && tv.length > 0 ? (
-                    <RangeLabel>
-                      {t("browse.rangeOf", { from: offset + 1, to: Math.min(offset + tv.length, totalTvCount), total: totalTvCount })}
-                    </RangeLabel>
-                  ) : undefined
+                  <RangeLabel
+                    t={t}
+                    from={offset + 1}
+                    to={Math.min(offset + tv.length, totalTvCount)}
+                    total={totalTvCount}
+                  />
                 }
               />
-              {tv.length === 0 ? (
-                sectionEmptyState(t, Tv, page, hasFilters, retryHref)
-              ) : (
-                <div className="ds-media-grid">
-                  {tv.map((media) => (
-                    <MediaCard
-                      key={`tv-${media.id}`}
-                      media={media}
-                      showPlex={showPlex}
-                      showJellyfin={showJellyfin}
-                      size="md"
-                    />
-                  ))}
-                </div>
-              )}
+              <div className="ds-media-grid">
+                {tv.map((media) => (
+                  <MediaCard
+                    key={`tv-${media.id}`}
+                    media={media}
+                    showPlex={showPlex}
+                    showJellyfin={showJellyfin}
+                    size="md"
+                  />
+                ))}
+              </div>
             </section>
           )}
-        </>
+        </div>
       )}
 
       <Suspense>
@@ -366,20 +371,8 @@ export default async function TopRatedPage({
   );
 }
 
-// "1–36 of 200" beside a section title. Same label /popular uses.
-function RangeLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <span
-      className="ds-mono uppercase"
-      style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", letterSpacing: "0.06em" }}
-    >
-      {children}
-    </span>
-  );
-}
-
-// The per-section (and, when both are empty, per-page) empty state. `icon`
-// only matters past page 1 — the filters case always shows the filter glyph.
+// The page-level empty state (both visible sections empty). `icon` only
+// matters past page 1 — the filters case always shows the filter glyph.
 // With no filter set, an empty page 1 means the sources came back empty (each
 // fetch swallows its outage into []), so it must not blame filters the user
 // never applied.

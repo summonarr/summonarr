@@ -6,6 +6,7 @@ import { IOS_APP_STORE_URL } from "@/lib/ios-app";
 import { LoginForm } from "./login-form";
 import { getMaintenanceStatus } from "@/lib/maintenance";
 import { getTranslator } from "@/lib/i18n/server";
+import { isOidcConfigured } from "@/lib/oidc";
 
 export const dynamic = "force-dynamic";
 
@@ -35,7 +36,10 @@ export default async function LoginPage() {
   // instance — getSyncableMediaInstances already requires both per instance, so
   // this is byte-for-byte the same gate a single-server deployment had before.
   const jellyfinEnabled = jellyfinInstances.length > 0;
-  const oidcEnabled = !!(process.env.OIDC_ISSUER && process.env.OIDC_CLIENT_ID && process.env.OIDC_CLIENT_SECRET);
+  // The same predicate the three OIDC routes gate on — it also refuses a
+  // non-https issuer, which openid-client can never complete a sign-in against,
+  // so the tab hides instead of failing on every click.
+  const oidcEnabled = isOidcConfigured();
   const oidcName = process.env.OIDC_DISPLAY_NAME || "SSO";
   const localLoginDisabled = disableLocalRow?.value === "true";
   const siteTitle = siteTitleRow?.value || "Summonarr";

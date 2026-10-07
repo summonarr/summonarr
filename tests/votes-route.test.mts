@@ -741,6 +741,23 @@ test("DELETE validates its params: non-numeric tmdbId → 400, missing/junk medi
   assert.deepEqual(await missing.json(), { error: "Vote not found" });
 });
 
+test("DELETE is rate-limited per user like every sibling mutation: the 61st un-vote in a minute is a 429 with Retry-After", async () => {
+  const { token } = await mintSession();
+  voteDeleteCount = 0;
+  for (let i = 0; i < 60; i++) {
+    assert.equal((await del(token, "603", "MOVIE")).status, 404, `call ${i + 1} is under the cap`);
+  }
+  const txBefore = opsOf("deletionVote.deleteMany").length;
+  const limited = await del(token, "603", "MOVIE");
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get("Retry-After"), "60");
+  assert.equal(typeof (await limited.json()).error, "string");
+  assert.equal(opsOf("deletionVote.deleteMany").length, txBefore, "a limited call never reaches the tx");
+  // Another user's budget is untouched.
+  const other = await mintSession();
+  assert.equal((await del(other.token, "603", "MOVIE")).status, 404);
+});
+
 test("DELETE re-arms the one-shot notify gate INSIDE its tx when the tally drops below threshold", async () => {
   settings.set("deletionVoteThreshold", "2");
   voteDeleteCount = 1;

@@ -15,7 +15,7 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 export const GET = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   if (!checkRateLimit(`ratings:${session.user.id}`, 60, 60_000)) {
-    return tooManyRequests(60);
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
 
   const { searchParams } = req.nextUrl;

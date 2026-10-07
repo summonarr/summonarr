@@ -295,7 +295,6 @@
   "adminActivity.user.lastSeen": "最后出现",
   "adminActivity.user.lastN": "最近 {count} 个",
   "adminActivity.user.linkedTo": "已关联到 {name}",
-  "adminActivity.method.directStreamRemux": "直接串流（Remux）",
   "adminActivity.play.backToHistory": "返回历史",
   "adminActivity.play.notWatched": "未观看",
   "adminActivity.play.pctComplete": "已完成 {pct}%",
@@ -365,5 +364,11 @@
   "adminActivity.transcode.usersSub": "转码最多 · 最近 {days} 天",
   "adminActivity.transcode.titles": "转码压力 · 作品",
   "adminActivity.transcode.titlesSub": "转码最多 · 最近 {days} 天",
-  "adminActivity.transcode.none": "此时间段内没有转码。"
+  "adminActivity.transcode.none": "此时间段内没有转码。",
+  "adminActivity.common.hoursSuffix": "小时",
+  "adminActivity.trackingOff.title": "播放历史跟踪已关闭",
+  "adminActivity.trackingOff.description": "当前没有记录任何内容，因此此仪表板没有可显示的播放、观看时长或观众。请在 设置 → 媒体 → 播放历史 中开启跟踪以开始填充数据。",
+  "adminActivity.trackingOff.cta": "打开播放历史设置",
+  "adminActivity.common.hoursShort": "{n} 小时",
+  "adminActivity.detail.openPlay": "打开播放 →"
 }

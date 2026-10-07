@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { getVisibleServerInstances, visibleEpisodeSourcesFor } from "@/lib/media-visibility";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { isTmdbIdInRange } from "@/lib/tmdb-id";
 
 export interface TVSeasonInfo {
   seasonNumber: number;
@@ -26,6 +27,11 @@ export const GET = withAuth(async (req, _ctx, session) => {
   const tmdbId = parseInt(raw, 10);
   if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
     return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
+  }
+  // INT4 ceiling: a larger id clears the check above and throws out of the
+  // PlexLibraryItem read below — an unhandled 500 for a malformed query string.
+  if (!isTmdbIdInRange(tmdbId)) {
+    return NextResponse.json({ error: t("apiUser.common.tmdbIdOutOfRange") }, { status: 400 });
   }
 
   const provider = session.user.provider;

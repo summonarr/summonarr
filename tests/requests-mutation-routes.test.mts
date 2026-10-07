@@ -900,7 +900,11 @@ test("PERMANENT declines are capped at 25, well below the general 100", async ()
   const ids = Array.from({ length: 26 }, (_, i) => `r${i}`);
   const res = await doBatch(token, { ids, status: "DECLINED", permanent: true });
   assert.equal(res.status, 400);
-  assert.equal((await res.json()).error, "permanent-batch-too-large");
+  // Human text in `error` (both web callers render data.error verbatim); the
+  // machine token rides under `code`, like every sibling 400 in the handler.
+  const body = await res.json();
+  assert.equal(body.error, "Permanent declines are limited to 25 at a time.");
+  assert.equal(body.code, "permanent-batch-too-large");
 });
 
 test("a NON-permanent decline of 26 is fine — the tighter cap is permanent-only", async () => {
@@ -943,6 +947,61 @@ test("a normal approve transitions the row and stamps pendingNotifyAt", async ()
   assert.equal(res.status, 200);
   assert.equal(reqRows[0].status, "APPROVED");
   assert.ok(reqRows[0].pendingNotifyAt instanceof Date);
+});
+
+// The one-time profile override is validated against the request's OWN instance
+// BEFORE the CAS, mirroring the create path (request-create.ts): a stale picker id
+// must not approve + audit + roll back behind a generic "Arr request failed (400)".
+test("approve with a qualityProfileId the instance does not list is a 400 BEFORE the CAS — no write, no push", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId })];
+  const res = await doPatch(token, "r1", { status: "APPROVED", qualityProfileId: 99 });
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "Invalid quality profile for this request" });
+  assert.equal(reqRows[0].status, "PENDING", "the row must not be claimed");
+  assert.equal(opsOf("mediaRequest.updateMany").length, 0, "the membership check runs before any write");
+  assert.deepEqual(fetchCalls.filter((c) => c.method === "POST"), [], "nothing is pushed to the arr");
+});
+
+test("approve with a qualityProfileId while the profile list is unreachable is a 502, not an approve-then-rollback", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId })];
+  profilesOk = false;
+  const res = await doPatch(token, "r1", { status: "APPROVED", qualityProfileId: 1 });
+  assert.equal(res.status, 502);
+  assert.deepEqual(await res.json(), { error: "Could not connect to radarr" });
+  assert.equal(reqRows[0].status, "PENDING");
+  assert.equal(opsOf("mediaRequest.updateMany").length, 0);
+});
+
+test("approve with a LISTED qualityProfileId claims the row and forwards that id to the arr", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId })];
+  const res = await doPatch(token, "r1", { status: "APPROVED", qualityProfileId: 2 });
+  assert.equal(res.status, 200);
+  assert.equal(reqRows[0].status, "APPROVED");
+  const adds = fetchCalls.filter((c) => c.method === "POST" && c.url.pathname.includes("/api/v3/movie"));
+  assert.equal(adds.length, 1);
+  assert.equal((JSON.parse(adds[0].body!) as { qualityProfileId?: number }).qualityProfileId, 2);
+});
+
+// A TV request with no stored tvdbId has nothing to search: the route answers
+// with a TRANSLATED arrError instead of throwing an English Error into the
+// generic arr catch (which arrErrorMessage passes through verbatim).
+test("search on a TV request with no tvdbId returns a translated arrError and never calls Sonarr", async () => {
+  const { token } = await manager();
+  const owner = await mintSession();
+  reqRows = [reqRow({ id: "r1", requestedBy: owner.userId, mediaType: "TV", status: "APPROVED", tvdbId: null })];
+  const res = await doPatch(token, "r1", { search: true });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.arrError, "No TVDB ID stored for this request — re-push it first");
+  assert.equal(body.status, "APPROVED");
+  assert.deepEqual(fetchCalls.filter((c) => c.url.pathname.includes("/api/v3/command")), [], "no Sonarr search command");
+  assert.deepEqual(errors.filter((e) => e.includes("Search failed")), [], "not routed through the generic arr catch");
 });
 
 test("the approve write carries a CAS predicate on the CURRENT status", async () => {

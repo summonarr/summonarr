@@ -6,6 +6,8 @@ import { CheckCircle, Loader2, ExternalLink, Copy, Check } from "@/components/ic
 import { withBasePath } from "@/lib/base-path";
 import { safeExternalHref } from "@/lib/safe-url";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 // Renders a translated template whose {name} placeholders are React nodes
 // (inline <code>/<strong>), so word order stays with the translation.
@@ -67,34 +69,32 @@ function TokenLinkFlow() {
         </li>
       </ol>
 
-      <button
-        onClick={generateToken}
-        disabled={loading}
-        className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-[var(--ds-accent-fg)] rounded-md transition-colors"
-      >
+      <Button type="button" onClick={generateToken} disabled={loading}>
+        {loading && <Loader2 className="w-4 h-4 animate-spin" />}
         {loading ? t("profile.discord.generating") : t("profile.discord.generate")}
-      </button>
+      </Button>
 
-      {error && <p className="text-sm text-red-400">{error}</p>}
+      {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
 
       {token && expiresAt && (
         <div className="rounded-md bg-zinc-800 border border-zinc-700 p-4 space-y-3">
           <p className="text-xs text-zinc-500 uppercase tracking-wide font-semibold">{t("profile.discord.yourToken")}</p>
           <div className="flex items-center gap-2">
-            <p className="font-mono text-sm font-bold text-zinc-100 break-all flex-1">{token}</p>
-            <button
+            <p className="ds-mono text-sm font-bold text-zinc-100 break-all flex-1">{token}</p>
+            <Button
               type="button"
+              variant="ghost"
               onClick={copyToken}
-              className="shrink-0 p-1.5 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-700 transition-colors"
+              className="h-10 w-10 shrink-0 p-0 text-zinc-400 hover:text-zinc-100"
               title={t("profile.discord.copyToken")}
               aria-label={t("profile.discord.copyToken")}
             >
               {copied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
-            </button>
+            </Button>
           </div>
           <p className="text-xs text-zinc-500">
             {rich(t("profile.discord.expiresRun", { time: expiresAt.toLocaleTimeString(locale) }), {
-              command: <code className="bg-zinc-700 px-1 rounded">/link token:{token}</code>,
+              command: <code className="ds-mono bg-zinc-700 px-1 rounded">/link token:{token}</code>,
             })}
           </p>
         </div>
@@ -183,7 +183,7 @@ function WebMergeFlow() {
             </span>
           </p>
           <div className="flex gap-2">
-            <input
+            <Input
               type="text"
               inputMode="numeric"
               pattern="[0-9]*"
@@ -191,16 +191,17 @@ function WebMergeFlow() {
               onChange={(e) => { setDiscordId(e.target.value.replace(/\D/g, "")); setError(null); }}
               placeholder="123456789012345678"
               aria-label={t("profile.discord.userIdLabel")}
-              className="flex-1 min-w-0 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm font-mono text-zinc-100 placeholder-zinc-600 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              className="ds-mono flex-1"
             />
-            <button
+            <Button
+              type="button"
               onClick={sendCode}
               disabled={loading || !/^\d{17,20}$/.test(discordId.trim())}
-              className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-[var(--ds-accent-fg)] rounded-md transition-colors whitespace-nowrap flex items-center gap-2"
+              className="shrink-0"
             >
-              {loading && <Loader2 className="w-3 h-3 animate-spin" />}
+              {loading && <Loader2 className="w-4 h-4 animate-spin" />}
               {t("profile.discord.sendCode")}
-            </button>
+            </Button>
           </div>
         </>
       )}
@@ -211,36 +212,35 @@ function WebMergeFlow() {
             <p>{t("profile.discord.codeSent")}</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <input
+            <Input
               type="text"
               value={code}
               onChange={(e) => { setCode(e.target.value.replace(/[^a-fA-F0-9]/g, "").toUpperCase().slice(0, 12)); setError(null); }}
               placeholder="A1B2C3D4E5F6"
               aria-label={t("profile.discord.codeLabel")}
               maxLength={12}
-              className="w-48 rounded-md bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm font-mono text-zinc-100 placeholder-zinc-600 text-center tracking-widest focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              autoComplete="one-time-code"
+              className="ds-mono w-48 text-center tracking-widest"
             />
-            <button
-              onClick={confirmCode}
-              disabled={loading || code.length !== 12}
-              className="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-[var(--ds-accent-fg)] rounded-md transition-colors flex items-center gap-2"
-            >
-              {loading && <Loader2 className="w-3 h-3 animate-spin" />}
+            <Button type="button" onClick={confirmCode} disabled={loading || code.length !== 12}>
+              {loading && <Loader2 className="w-4 h-4 animate-spin" />}
               {t("profile.discord.verifyLink")}
-            </button>
-            <button
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
               onClick={() => { setStep("idle"); setCode(""); setError(null); }}
               disabled={loading}
-              className="px-3 py-2 text-sm text-zinc-400 hover:text-zinc-100 transition-colors"
+              className="text-zinc-400 hover:text-zinc-100"
             >
               {t("profile.common.back")}
-            </button>
+            </Button>
           </div>
           <p className="text-xs text-zinc-500">{t("profile.discord.codeExpires")}</p>
         </>
       )}
 
-      {error && <p className="text-sm text-red-400">{error}</p>}
+      {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
     </div>
   );
 }

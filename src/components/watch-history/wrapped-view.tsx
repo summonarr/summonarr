@@ -10,8 +10,9 @@
 
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { Poster, fmtDuration } from "@/components/admin/activity-ui";
+import { Poster } from "@/components/admin/activity-ui";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { formatDurationHM } from "@/lib/format-duration";
 import type { Translator } from "@/lib/i18n/translate";
 
 export interface WrappedData {
@@ -132,7 +133,7 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
   const cards: { kicker: string; value: ReactNode; sub?: ReactNode }[] = [];
   cards.push({
     kicker: t("personal.wrapped.moviesVsTv"),
-    value: `${w.movies.titles} · ${w.tv.episodes}`,
+    value: `${w.movies.titles.toLocaleString(locale)} · ${w.tv.episodes.toLocaleString(locale)}`,
     sub: t("personal.wrapped.moviesVsTvSub", {
       movies: w.movies.titles,
       episodes: w.tv.episodes,
@@ -156,7 +157,7 @@ export function WrappedView({ data: w }: { data: WrappedData }) {
   if (w.longestSitting) {
     cards.push({
       kicker: t("personal.wrapped.longestSitting"),
-      value: fmtDuration(w.longestSitting.seconds),
+      value: formatDurationHM(w.longestSitting.seconds, locale),
       sub: w.longestSitting.title,
     });
   }

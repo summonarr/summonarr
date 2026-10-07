@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { Loader2, Play, CheckCircle, XCircle, Clock } from "@/components/icons";
 import { Button } from "@/components/ui/button";
-import { formatDurationMs } from "@/lib/format-duration";
+import { formatDurationMsLocalized } from "@/lib/format-duration";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
@@ -85,7 +85,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
         ),
       );
     } catch {
-      setRunError(t("settings.cron.networkError"));
+      setRunError(t("settings.common.networkError"));
       setJobs((prev) =>
         prev.map((j) =>
           j.name === name
@@ -155,7 +155,7 @@ export function CronJobTable({ jobs: initialJobs }: { jobs: CronJobInfo[] }) {
                   )}
                 </td>
                 <td className="hidden sm:table-cell py-3 pr-4 text-zinc-400 text-xs tabular-nums whitespace-nowrap">
-                  {job.lastDuration != null ? formatDurationMs(job.lastDuration) : "—"}
+                  {job.lastDuration != null ? formatDurationMsLocalized(job.lastDuration, locale) : "—"}
                 </td>
                 <td className="py-3 pr-4">
                   {job.lastStatus === "ok" && (

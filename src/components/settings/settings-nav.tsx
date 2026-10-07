@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useT } from "@/components/i18n/i18n-provider";
 
 export interface NavItem {
   id: string;
@@ -19,6 +20,7 @@ export interface NavItem {
 // The scroll listener below only moves the highlighted pill. It listens on
 // <main> because the (app) layout makes <main> the scrolling element.
 export function SettingsNav({ items }: { items: NavItem[] }) {
+  const t = useT();
   const [activeId, setActiveId] = useState<string>(items[0]?.id ?? "");
 
   useEffect(() => {
@@ -49,7 +51,9 @@ export function SettingsNav({ items }: { items: NavItem[] }) {
   }, {});
 
   return (
-    <nav className="space-y-5">
+    // Named so the landmark list can tell this in-page section list from the
+    // tab bar's `nav` (settings-tab-nav.tsx), which is also a navigation.
+    <nav aria-label={t("settings.nav.ariaLabel")} className="space-y-5">
       {Object.entries(groups).map(([group, groupItems]) => (
         <div key={group}>
           <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-1.5 px-3">

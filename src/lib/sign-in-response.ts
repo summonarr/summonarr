@@ -39,7 +39,10 @@ export function buildSignInResponse(
     body.expiresInSeconds = result.expiresInSeconds;
   }
 
-  const res = NextResponse.json(body);
+  // no-store: for a native caller this body carries the long-lived session JWT
+  // itself, so no intermediary or service worker may ever store it — the same
+  // directive the less-sensitive MFA challenge, /me and sign-out already set.
+  const res = NextResponse.json(body, { headers: { "Cache-Control": "no-store" } });
   res.headers.append(
     "Set-Cookie",
     serializeSessionCookie(result.token, { maxAgeSeconds: result.expiresInSeconds }),

@@ -135,11 +135,11 @@
   "profile.close.intro": "Encerre sua conta e saia de todos os dispositivos. Você não poderá entrar novamente — só um administrador pode restaurar o acesso. Suas solicitações, votos, problemas e histórico são mantidos. Peça a um administrador se você também quiser que seus dados pessoais sejam apagados.",
   "profile.close.button": "Encerrar conta",
   "profile.close.confirmPrompt": "Digite {word} para confirmar. Isso encerra sua conta e desconecta você de todos os dispositivos — você não poderá entrar novamente a menos que um administrador a restaure.",
-  "profile.close.confirmLabel": "Digite {word} para confirmar a exclusão da conta",
+  "profile.close.confirmLabel": "Digite {word} para confirmar o encerramento da conta",
   "profile.close.confirmButton": "Encerrar minha conta",
   "profile.close.closing": "Encerrando…",
-  "profile.close.error.failed": "Falha ao excluir a conta",
-  "profile.close.error.retry": "Falha ao excluir a conta. Tente novamente.",
+  "profile.close.error.failed": "Falha ao encerrar a conta",
+  "profile.close.error.retry": "Falha ao encerrar a conta. Tente novamente.",
   "profile.notifications.title": "Preferências de notificação",
   "profile.notifications.description": "Escolha quais notificações você recebe em cada canal.",
   "profile.notifications.pushOnly": "As notificações push do navegador/dispositivo são o único canal disponível para você agora — ative-as pelo sino na barra superior. Vincule sua conta do Discord para adicionar outro canal ou peça a um administrador para configurar o envio de e-mails.",
@@ -222,5 +222,12 @@
   "profile.mfa.stepUp.passkeyFailed": "Não foi possível usar a chave de acesso neste dispositivo.",
   "profile.mfa.stepUp.codeRequired": "Digite um código do seu app autenticador ou um código de recuperação para confirmar esta alteração.",
   "profile.notifications.iosApp.prompt": "No iPhone? O app do Summonarr entrega estas notificações de forma nativa.",
-  "profile.notifications.iosApp.link": "Baixe na App Store"
+  "profile.notifications.iosApp.link": "Baixe na App Store",
+  "profile.close.confirmWord": "ENCERRAR",
+  "profile.mfa.confirmRemoveTotp": "Remover o app autenticador? Uma chave de acesso ainda será pedida ao entrar.",
+  "profile.mfa.confirmRemovePasskey": "Remover a chave de acesso {name}? Um segundo fator ainda será pedido ao entrar.",
+  "profile.mfa.confirmRemoveLast": "Este é o seu único segundo fator. Removê-lo desativa a autenticação em dois fatores, apaga seus códigos de recuperação e desconecta seus outros dispositivos.",
+  "profile.mfa.totp.copyKey": "Copiar chave de configuração",
+  "profile.notifications.verificationPending": "Verificação pendente para {email} — confira sua caixa de entrada.",
+  "profile.notifications.resendVerification": "Reenviar"
 }

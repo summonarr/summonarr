@@ -28,15 +28,35 @@ import {
 
 const trustProxy = process.env.TRUST_PROXY === "true";
 
+// Only an http(s) URL yields a usable origin. `new URL("summonarr.local:3001")`
+// does NOT throw — it parses as scheme `summonarr.local:` with path `3001` and
+// reports `.origin === "null"` — so a try/catch alone silently trusted the
+// literal string "null" (which a browser sends as `Origin: null` for
+// sandboxed-iframe and cross-origin-redirected POSTs) and never trusted the
+// host the operator meant. Same predicate as cron-auth.ts's
+// parseTrustedOriginEntry (kept inline: proxy.ts must stay import-light) and
+// as the boot warning in instrumentation.ts.
+function parseTrustedOrigin(raw: string | undefined): string | null {
+  const trimmed = raw?.trim();
+  if (!trimmed) return null;
+  try {
+    const u = new URL(trimmed);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    if (u.origin === "null") return null;
+    return u.origin;
+  } catch {
+    return null;
+  }
+}
+
 const envOrigins: ReadonlySet<string> = (() => {
   const trusted = new Set<string>();
   for (const raw of [
     process.env.AUTH_URL,
     ...(process.env.AUTH_TRUSTED_ORIGIN ?? "").split(","),
   ]) {
-    const trimmed = raw?.trim();
-    if (!trimmed) continue;
-    try { trusted.add(new URL(trimmed).origin); } catch { }
+    const origin = parseTrustedOrigin(raw);
+    if (origin) trusted.add(origin);
   }
   if (trusted.size === 0 && process.env.NODE_ENV === "production") {
     console.error(
@@ -67,6 +87,11 @@ function buildTrustedOrigins(selfOrigin: string): ReadonlySet<string> {
 
 function isPublicPath(pathname: string): boolean {
   return (
+    // RFC 9116 security.txt (public/.well-known/) and any other well-known
+    // resource: their only audience is anonymous, so a login redirect makes
+    // them unreachable everywhere they were meant to be read. Kept here rather
+    // than in the matcher so the Host gate and CSP still apply.
+    pathname.startsWith("/.well-known/") ||
     pathname.startsWith("/login") ||
     pathname.startsWith("/register") ||
     pathname.startsWith("/setup") ||
@@ -96,7 +121,10 @@ function buildLoginRedirect(req: NextRequest): URL {
     process.env.AUTH_URL ?? req.nextUrl.origin;
   const basePath = process.env.BASE_PATH ?? "";
   const url = new URL(`${basePath}/login`, baseUrl);
-  url.searchParams.set("callbackUrl", req.nextUrl.pathname);
+  // Path AND query: a shared `/movies?genre=28` link must land on the filtered
+  // page after sign-in, not on bare `/movies`. The login form validates the
+  // value with safeInternalPath, which preserves a query it is given.
+  url.searchParams.set("callbackUrl", req.nextUrl.pathname + req.nextUrl.search);
   return url;
 }
 

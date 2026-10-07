@@ -202,6 +202,16 @@ interface ActiveWhere {
   lastSeenAt?: Date | { lt: Date };
   OR?: unknown[];
 }
+// The Jellyfin existing-row prefetch: `OR: [{ id: { in } }, { sessionKey: { in } }]`
+// under a (source, serverInstance) filter. Served so the Jellyfin UPDATE branch is
+// reachable; the (msUserId, itemId) fallback query has a different OR shape and
+// still gets no rows.
+type JfPrefetchOr = [{ id: { in: string[] } }, { sessionKey: { in: string[] } }];
+function isJfPrefetchOr(or: unknown[]): or is JfPrefetchOr {
+  const first = or[0] as { id?: { in?: unknown } } | undefined;
+  const second = or[1] as { sessionKey?: { in?: unknown } } | undefined;
+  return or.length === 2 && Array.isArray(first?.id?.in) && Array.isArray(second?.sessionKey?.in);
+}
 interface FindManyArgs { where?: ActiveWhere; select?: unknown; orderBy?: unknown }
 interface UpdateManyArgs { where?: ActiveWhere; data: Record<string, unknown> }
 interface DeleteManyArgs { where: ActiveWhere }
@@ -209,7 +219,12 @@ interface CreateManyArgs { data: Array<Record<string, unknown>>; skipDuplicates?
 
 function matchesFindMany(row: ActiveRow, where?: ActiveWhere): boolean {
   if (!where) return true;
-  if (where.OR) return false; // jellyfin (msUser,itemId) fallback — no rows seeded for it
+  if (where.OR) {
+    if (!isJfPrefetchOr(where.OR)) return false; // jellyfin (msUser,itemId) fallback — no rows seeded for it
+    if (where.source !== undefined && row.source !== where.source) return false;
+    if (where.serverInstance !== undefined && row.serverInstance !== where.serverInstance) return false;
+    return where.OR[0].id.in.includes(row.id) || where.OR[1].sessionKey.in.includes(row.sessionKey);
+  }
   if (typeof where.id === "object" && "in" in where.id) return where.id.in.includes(row.id);
   if (typeof where.id === "string") return row.id === where.id;
   if (where.source !== undefined && row.source !== where.source) return false;
@@ -1328,6 +1343,95 @@ test("the poller threads the probed INSTANCE into both reachability reports", ()
 // `errors` is never reset in beforeEach: every path above must have completed
 // without a single console.error (the route only console.errors from the 500
 // catch, which no test triggers; warns are the sanctioned diagnostics).
+
+// ═══ Identity re-bind, Jellyfin bitrate refresh, absence-sweep warn ══════════
+
+test("GUARDRAIL 34: a continuing session whose owner RE-RESOLVED to a different MediaServerUser is re-bound in the CAS update", async () => {
+  // A server-owner session that STARTS while plex.tv is unreachable is created
+  // on a phantom sourceUserId="1" row (plexAdminId null → no rewrite). Every
+  // later tick resolves the owner to the global-id row (plex.tv stub: id 9), so
+  // the update must carry the re-resolved id or finalize copies the phantom into
+  // PlayHistory, where the subject resolver can never link it to the owner.
+  seed(makeRow("own-upd", {
+    mediaServerUserId: "msu:plex:1", // the phantom local-id row
+    state: "playing", progressMs: 60_000n, progressUpdatedAt: agoReal(10_000), lastSeenAt: agoReal(10_000),
+  }));
+  const snap = plexSnap("own-upd", { viewOffset: 70_000 });
+  (snap.User as { id: string }).id = "1";
+  plexSnapshot = [snap];
+
+  const res = await POST(phReq({ headers: AS_CRON }));
+  assert.deepEqual((await bodyOf(res)).plex, { started: 0, updated: 1, ended: 0 });
+  await settle();
+
+  const upd = activeUpdatesFor("plex:own-upd");
+  assert.equal(upd.length, 1);
+  assert.equal(
+    upd[0].data.mediaServerUserId,
+    "msu:plex:9",
+    "the update must re-bind the row to the identity THIS tick resolved (the plex.tv global id), not leave the create-time phantom",
+  );
+});
+
+test("a continuing session whose owner resolved to the SAME MediaServerUser does not carry mediaServerUserId in the CAS data", async () => {
+  // The re-bind is written only on a mismatch, so the common case keeps the
+  // update payload minimal.
+  seed(makeRow("same-1", {
+    mediaServerUserId: "msu:plex:acct-same-1", // == what the resolve stub returns for User.id acct-same-1
+    state: "playing", progressMs: 60_000n, progressUpdatedAt: agoReal(10_000), lastSeenAt: agoReal(10_000),
+  }));
+  plexSnapshot = [plexSnap("same-1", { viewOffset: 70_000 })];
+
+  const res = await POST(phReq({ headers: AS_CRON }));
+  assert.deepEqual((await bodyOf(res)).plex, { started: 0, updated: 1, ended: 0 });
+  await settle();
+
+  const upd = activeUpdatesFor("plex:same-1");
+  assert.equal(upd.length, 1);
+  assert.equal("mediaServerUserId" in upd[0].data, false, "no identity change → no mediaServerUserId in the update");
+});
+
+test("GUARDRAIL 19a: a continuing Jellyfin session refreshes `bitrate` with `playMethod` (a mid-stream DirectPlay→Transcode switch is billed at the OUTPUT rate)", async () => {
+  // DELIVERED_KBPS_SQL reads the stored bitrate for every Jellyfin row. The
+  // create wrote the 40 Mbps source total; once the client falls back to a 4 Mbps
+  // transcode the update must rewrite it, or finalize bills 10x the bytes sent.
+  seed(makeRow("jf-upd", {
+    id: "jellyfin:jf-upd", source: "jellyfin", sessionKey: "jf-upd",
+    playMethod: "DirectPlay", bitrate: 40_000_000,
+    state: "playing", progressMs: 30_000n, progressUpdatedAt: agoReal(10_000), lastSeenAt: agoReal(10_000),
+  }));
+  const snap = jfSnap("jf-upd", { positionTicks: 400_000_000 });
+  snap.TranscodingInfo = { Bitrate: 4_000_000, IsVideoDirect: false, IsAudioDirect: true, VideoCodec: "h264", AudioCodec: "aac" };
+  jfSnapshot = [snap];
+
+  const res = await POST(phReq({ headers: AS_CRON }));
+  assert.deepEqual((await bodyOf(res)).jellyfin, { started: 0, updated: 1, ended: 0 }, "the seeded row is found by id and UPDATED, not re-created");
+  await settle();
+
+  const upd = activeUpdatesFor("jellyfin:jf-upd");
+  assert.equal(upd.length, 1);
+  assert.equal(upd[0].data.playMethod, "Transcode", "TranscodingInfo is authoritative for the play method");
+  assert.equal(upd[0].data.bitrate, 4_000_000, "the update must carry TranscodingInfo.Bitrate (bps) alongside the play method it belongs to");
+  assert.equal(activeCreatesFor("jellyfin:jf-upd").length, 0);
+});
+
+test("a failed Plex ABSENCE-sweep finalize warns with the [play-history] scope, like the Jellyfin sweep and the stall path", async () => {
+  seed(makeRow("abs-fail", { lastSeenAt: agoReal(SESSION_ABSENCE_GRACE_MS + 5_000) }));
+  plexSnapshot = []; // absent past the grace → the sweep finalizes…
+  playHistoryCreateError = new Error("db down"); // …and the PlayHistory write throws
+
+  const res = await POST(phReq({ headers: AS_CRON }));
+  assert.deepEqual((await bodyOf(res)).plex, { started: 0, updated: 0, ended: 0 }, "a failed finalize is not counted as ended");
+  await settle();
+
+  assert.equal(historyRows().length, 0);
+  assert.equal(isPlexSessionRecentlyFinalized("plex:abs-fail"), false, "guardrail 27: no ledger mark without a row");
+  assert.ok(activeStore.has("plex:abs-fail"), "the row survives for the next tick's retry");
+  assert.ok(
+    warns.some((w) => w.includes("[play-history] Failed to finalize plex session plex:abs-fail")),
+    `a silently swallowed sweep failure leaves the operator nothing to correlate a late finalize with; warns=${JSON.stringify(warns)}`,
+  );
+});
 
 test("the route never console.errors across every path exercised in this file (guardrail 7)", () => {
   assert.deepEqual(errors, []);

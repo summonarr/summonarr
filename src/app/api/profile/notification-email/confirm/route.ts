@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { logAudit, auditContext } from "@/lib/audit";
 import { hashVerifyToken, parseVerifyIdentifier } from "@/lib/notification-email-verify";
 import { localeForRequest, translatorFor } from "@/lib/i18n/server-locale";
 import type { Locale } from "@/lib/i18n/locales";
@@ -89,7 +90,8 @@ export async function GET(req: Request) {
 ${BODY_OPEN}
 <div style="font-size:34px;line-height:1;margin-bottom:12px">✉</div>
 <h1 style="font-size:18px;font-weight:600;margin:0 0 8px">${escapeHtml(t("apiAuth.emailConfirm.heading"))}</h1>
-<p style="font-size:13px;color:#a1a1aa;line-height:1.55;margin:0 0 20px">${bindLine}</p>
+<p style="font-size:13px;color:#a1a1aa;line-height:1.55;margin:0 0 12px">${bindLine}</p>
+<p style="font-size:13px;color:#a1a1aa;line-height:1.55;margin:0 0 20px">${escapeHtml(t("apiAuth.emailConfirm.notYou"))}</p>
 <form method="post" action="${escapeHtml(action)}">
 <button type="submit" style="display:inline-block;width:100%;padding:11px 16px;font-size:14px;font-weight:600;color:#09090b;background:#e4e4e7;border:none;border-radius:8px;cursor:pointer">${escapeHtml(t("apiAuth.emailConfirm.button"))}</button>
 </form>
@@ -132,14 +134,38 @@ export async function POST(req: Request) {
     // Scoped to a still-active, never-purged row: a link clicked after the account
     // was disabled or purged must not write a personal address back onto it
     // (guardrail 33 — a purge's scrub would otherwise be partly undone).
-    await prisma.user.updateMany({
+    const { count } = await prisma.user.updateMany({
       where: { id: parsed.userId, deactivatedAt: null, purgedAt: null },
       data: { notificationEmail: parsed.email },
     });
+    // Zero rows means the scoped write was REFUSED (account disabled/purged/
+    // deleted inside the token's TTL): nothing was stored, so never say it was.
+    if (count !== 1) {
+      return resultPage(locale, t("apiAuth.emailConfirm.errorTitle"), t("apiAuth.emailConfirm.errorBody"), false);
+    }
   } catch (err) {
     console.error("[notif-email] confirm update failed:", err instanceof Error ? err.message : err);
     return resultPage(locale, t("apiAuth.emailConfirm.errorTitle"), t("apiAuth.emailConfirm.errorBody"), false);
   }
+
+  // Where the server's outbound mail is delivered just changed: leave a trail
+  // beside the password-change audit. No session here (the token was the
+  // credential), so the row carries the bound account's id plus the clicker's
+  // ip/UA from the request; the address itself is deliberately not recorded.
+  // After the commit, swallowing (guardrail 26).
+  void (async () => {
+    const owner = await prisma.user
+      .findUnique({ where: { id: parsed.userId }, select: { name: true, email: true } })
+      .catch(() => null);
+    await logAudit({
+      userId: parsed.userId,
+      userName: owner?.name ?? owner?.email ?? "unknown",
+      action: "SETTINGS_CHANGE",
+      target: `user:${parsed.userId}`,
+      details: { kind: "notification-email-verified" },
+      ...auditContext(req),
+    });
+  })();
 
   return resultPage(locale, t("apiAuth.emailConfirm.successTitle"), t("apiAuth.emailConfirm.successBody"), true);
 }

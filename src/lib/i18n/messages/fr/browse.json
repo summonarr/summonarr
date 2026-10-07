@@ -39,7 +39,6 @@
   "browse.popular.sort.viewersDescription": "Classés par nombre de spectateurs uniques",
   "browse.popular.sort.plays": "Les plus regardés",
   "browse.popular.sort.playsDescription": "Classés par nombre total de lectures, tous utilisateurs confondus",
-  "browse.popular.rankRange": "{from}–{to} sur {total} titres",
   "browse.popular.noRecentPlays.title": "Aucune lecture ces 30 derniers jours",
   "browse.popular.noRecentPlays.description": "Rien n'a été regardé sur cette période.",
   "browse.popular.noRecentPlays.cta": "Passer à « Les plus regardés »",

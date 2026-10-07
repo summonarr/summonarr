@@ -37,9 +37,18 @@ export interface NotificationItem {
   createdAt: string;
 }
 
+// "loading" until the first fetch answers; "ready" once any fetch has
+// succeeded; "error" when nothing has ever loaded and the last attempt failed.
+// A failure AFTER a success leaves "ready" alone — the last-known list is
+// still the best thing to show, and the poll will reconcile. The bell reads
+// this so an in-flight or failed first load is not painted as "No
+// notifications yet." (a user with unread items saw an empty list).
+export type NotificationStoreStatus = "loading" | "ready" | "error";
+
 interface NotificationStore {
   items: NotificationItem[];
   unread: number;
+  status: NotificationStoreStatus;
   reload: () => Promise<void>;
   markAllRead: () => Promise<void>;
 }
@@ -47,6 +56,9 @@ interface NotificationStore {
 const NotificationContext = createContext<NotificationStore>({
   items: [],
   unread: 0,
+  // No provider mounted ⇒ nothing will ever load; "ready" keeps a stray
+  // consumer from showing a spinner forever.
+  status: "ready",
   reload: async () => {},
   markAllRead: async () => {},
 });
@@ -56,22 +68,31 @@ const POLL_MS = 60_000;
 export function NotificationStoreProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [unread, setUnread] = useState(0);
+  const [status, setStatus] = useState<NotificationStoreStatus>("loading");
   const reloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const reload = useCallback(async () => {
+    // Only a store that has never loaded flips to "error"; once "ready" it
+    // stays "ready" through transient failures (see NotificationStoreStatus).
+    const failed = () => setStatus((s) => (s === "ready" ? s : "error"));
     try {
       const res = await fetch(withBasePath("/api/notifications"), {
         credentials: "include",
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        failed();
+        return;
+      }
       const data = (await res.json()) as {
         items?: NotificationItem[];
         unreadCount?: number;
       };
       setItems(data.items ?? []);
       setUnread(data.unreadCount ?? 0);
+      setStatus("ready");
     } catch {
       // best-effort — a transient failure just leaves the last-known state
+      failed();
     }
   }, []);
 
@@ -161,8 +182,8 @@ export function NotificationStoreProvider({ children }: { children: ReactNode })
   }, [items, unread]);
 
   const value = useMemo(
-    () => ({ items, unread, reload, markAllRead }),
-    [items, unread, reload, markAllRead],
+    () => ({ items, unread, status, reload, markAllRead }),
+    [items, unread, status, reload, markAllRead],
   );
 
   return (

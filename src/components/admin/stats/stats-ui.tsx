@@ -302,7 +302,10 @@ export function MonthChart({
             .join(", ")}`;
           return (
             <div key={m} className="flex-1 flex flex-col items-center min-w-0" style={{ gap: 3 }} title={tip}>
-              <span className="ds-mono" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", fontVariantNumeric: "tabular-nums" }}>
+              {/* Twelve ~20px columns on a phone can't hold a 4-digit count without
+                  smearing into the neighbours; below sm the title tooltip and the
+                  sr-only table below carry the numbers. */}
+              <span className="ds-mono hidden sm:inline" style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)", fontVariantNumeric: "tabular-nums" }}>
                 {formatNumber(totals[i])}
               </span>
               <div className="w-full flex items-end justify-center" style={{ height }}>

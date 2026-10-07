@@ -39,8 +39,10 @@ export default async function AdminPage({
   if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_REQUESTS)) redirect("/");
 
   const { page: pageParam, status: statusParam, sort: sortParam, type: typeParam } = await searchParams;
-  const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
-  const skip = (page - 1) * PAGE_SIZE;
+  // The page the URL asks for. It is clamped to the last real page once the
+  // group count is known (below) — approving the last items on page 2 fires an
+  // SSE-driven refresh that otherwise re-rendered a blank list with no pager.
+  const requestedPage = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
 
   const statusFilter = VALID_STATUSES.includes(statusParam ?? "") ? (statusParam as RequestStatus) : undefined;
   const typeFilter = typeParam === "MOVIE" || typeParam === "TV" ? (typeParam as MediaType) : undefined;
@@ -75,7 +77,16 @@ export default async function AdminPage({
     ? Prisma.sql`AND "mediaType" = ${typeFilter}::"MediaType"`
     : Prisma.empty;
 
-  const [statusCounts, userCount, distinctGroups, pagedGroups, userRequestCounts] = await Promise.all([
+  const pageOfGroups = (p: number) =>
+    prisma.mediaRequest.groupBy({
+      by: ["tmdbId", "mediaType"],
+      where,
+      orderBy: groupOrderBy,
+      skip: (p - 1) * PAGE_SIZE,
+      take: PAGE_SIZE,
+    });
+
+  const [statusCounts, userCount, distinctGroups, requestedGroups, userRequestCounts] = await Promise.all([
     prisma.mediaRequest.groupBy({ by: ["status"], _count: { status: true } }),
     // Accounts that can sign in — the same figure /admin/stats reports.
     prisma.user.count({ where: { deactivatedAt: null } }),
@@ -84,17 +95,20 @@ export default async function AdminPage({
       FROM "MediaRequest"
       WHERE TRUE ${statusCond} ${typeCond}
     `),
-    prisma.mediaRequest.groupBy({
-      by: ["tmdbId", "mediaType"],
-      where,
-      orderBy: groupOrderBy,
-      skip,
-      take: PAGE_SIZE,
-    }),
+    pageOfGroups(requestedPage),
     prisma.mediaRequest.groupBy({ by: ["requestedBy"], _count: { id: true } }),
   ]);
 
   const total = Number(distinctGroups[0]?.count ?? 0);
+
+  // Clamp to the last page that exists. A past-the-end page (the items on it
+  // were just approved/deleted, or a stale ?page= link) shows the last page
+  // instead of an empty area with no pager and a "page 3 of 2" label. Only this
+  // rare case pays for a second page query; the common path reuses the one
+  // already fetched above.
+  const lastPage = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const page = Math.min(requestedPage, lastPage);
+  const pagedGroups = page === requestedPage ? requestedGroups : await pageOfGroups(page);
 
   const pairs = pagedGroups.map((g) => ({ tmdbId: g.tmdbId, mediaType: g.mediaType }));
   const cacheKey = (p: { tmdbId: number; mediaType: string }) =>
@@ -275,7 +289,10 @@ export default async function AdminPage({
         currentSort={sort}
       />
 
-      {total === 0 ? (
+      {/* On the ROWS, not `total`: the count and the page query are separate
+          reads, so a request landing or leaving between them can still hand
+          this render a non-zero total with nothing to show. */}
+      {rows.length === 0 ? (
         <EmptyState
           icon={ClipboardList}
           title={

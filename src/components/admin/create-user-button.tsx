@@ -26,7 +26,8 @@ export function CreateUserButton() {
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<string | null>(null);
 
-  const canSubmit = email.trim().length > 0 && password.length >= 8 && !loading;
+  // 12 mirrors POST /api/admin/users (and register + profile/password).
+  const canSubmit = email.trim().length > 0 && password.length >= 12 && !loading;
 
   function resetForm() {
     setName("");
@@ -140,9 +141,10 @@ export function CreateUserButton() {
                   id="cu-password"
                   type="password"
                   autoComplete="new-password"
+                  minLength={12}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
+                  placeholder="••••••••••••"
                 />
               </div>
               <div className="flex flex-col gap-1.5">
@@ -154,7 +156,7 @@ export function CreateUserButton() {
                 </StyledSelect>
               </div>
               {error && (
-                <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-amber-400">
+                <span role="alert" aria-live="assertive" className="flex items-center gap-1.5 text-sm text-red-400">
                   <AlertTriangle className="w-4 h-4 shrink-0" />
                   {error}
                 </span>

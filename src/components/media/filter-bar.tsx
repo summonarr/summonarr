@@ -51,15 +51,18 @@ const RATING_OPTIONS: { value: string; label?: string; labelKey?: string; pct?: 
   { value: "imdb:8",    label: "IMDb 8+" },
   { value: "imdb:8.5",  label: "IMDb 8.5+" },
   { value: "imdb:9",    label: "IMDb 9+" },
-  { value: "rt:50",     label: "🍅 RT 50%+" },
-  { value: "rt:60",     label: "🍅 RT 60%+" },
-  { value: "rt:70",     label: "🍅 RT 70%+" },
-  { value: "rt:80",     label: "🍅 RT 80%+" },
-  { value: "rt:90",     label: "🍅 RT 90%+" },
-  { value: "rta:60",   labelKey: "media.filter.audience", pct: 60 },
-  { value: "rta:70",   labelKey: "media.filter.audience", pct: 70 },
-  { value: "rta:80",   labelKey: "media.filter.audience", pct: 80 },
-  { value: "rta:90",   labelKey: "media.filter.audience", pct: 90 },
+  // No glyphs: the IMDb and TMDB rows of this one <select> carry none, so a
+  // tomato/popcorn prefix on the RT rows alone read as two styles in one list
+  // (and leaked into the active-filter chip).
+  { value: "rt:50",     label: "RT 50%+" },
+  { value: "rt:60",     label: "RT 60%+" },
+  { value: "rt:70",     label: "RT 70%+" },
+  { value: "rt:80",     label: "RT 80%+" },
+  { value: "rt:90",     label: "RT 90%+" },
+  { value: "rta:60",   labelKey: "media.filter.audienceScore", pct: 60 },
+  { value: "rta:70",   labelKey: "media.filter.audienceScore", pct: 70 },
+  { value: "rta:80",   labelKey: "media.filter.audienceScore", pct: 80 },
+  { value: "rta:90",   labelKey: "media.filter.audienceScore", pct: 90 },
   { value: "tmdb:6",    label: "TMDB 6+" },
   { value: "tmdb:7",    label: "TMDB 7+" },
   { value: "tmdb:7.5",  label: "TMDB 7.5+" },
@@ -240,8 +243,13 @@ export function FilterBar({
         className="mb-0"
       />
 
+      {/* One row, one height, one radius: every select is `compact` (h-8,
+          rounded-lg = 8px) and every pill beside them is minHeight 32 /
+          borderRadius 8. The default 44px select left the pills sitting in a
+          6px band above and below, two radii apart. */}
       <div className="grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-2 items-center">
         <StyledSelect
+          compact
           aria-label={t("media.filter.genreLabel")}
           value={activeGenreId ?? ""}
           onChange={(e) => push({ genreId: e.target.value || undefined })}
@@ -254,6 +262,7 @@ export function FilterBar({
 
         {sortedProviders.length > 0 && (
           <StyledSelect
+            compact
             aria-label={t("media.filter.serviceLabel")}
             value={activeWatchProvider ?? ""}
             onChange={(e) => push({ watchProvider: e.target.value || undefined })}
@@ -266,6 +275,7 @@ export function FilterBar({
         )}
 
         <StyledSelect
+          compact
           aria-label={t("media.filter.minRatingLabel")}
           value={activeRatingValue}
           onChange={(e) => handleRatingChange(e.target.value)}
@@ -276,6 +286,7 @@ export function FilterBar({
         </StyledSelect>
 
         <StyledSelect
+          compact
           aria-label={t("media.filter.minVotesLabel")}
           value={activeMinVoteCount ?? ""}
           onChange={(e) => push({ minVoteCount: e.target.value || undefined })}
@@ -286,6 +297,7 @@ export function FilterBar({
         </StyledSelect>
 
         <StyledSelect
+          compact
           aria-label={t("media.filter.fromYearLabel")}
           value={activeFromYear ?? ""}
           onChange={(e) => push({ fromYear: e.target.value || undefined })}
@@ -297,6 +309,7 @@ export function FilterBar({
         </StyledSelect>
 
         <StyledSelect
+          compact
           aria-label={t("media.filter.toYearLabel")}
           value={activeToYear ?? ""}
           onChange={(e) => push({ toYear: e.target.value || undefined })}
@@ -315,7 +328,7 @@ export function FilterBar({
           style={{
             padding: "5px 12px",
             minHeight: 32,
-            borderRadius: 6,
+            borderRadius: 8,
             fontSize: 12,
             background: activeHideAvailable
               ? "var(--ds-accent-soft)"
@@ -337,7 +350,7 @@ export function FilterBar({
             style={{
               padding: "5px 10px",
               minHeight: 32,
-              borderRadius: 6,
+              borderRadius: 8,
               fontSize: 11,
               background: "var(--ds-bg-2)",
               color: "var(--ds-fg-muted)",

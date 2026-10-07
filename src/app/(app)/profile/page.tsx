@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { parseRateLimit } from "@/lib/rate-limit";
 import { isNotificationEmailEnabled } from "@/lib/email";
 import { resolveUserNotificationEmail } from "@/lib/notification-email";
+import { parseVerifyIdentifier, verifyIdentifierPrefixFor } from "@/lib/notification-email-verify";
 import { redirect } from "next/navigation";
 import { DiscordLinkSection } from "@/components/discord-link-ui";
 import { NotificationPrefs } from "@/components/profile/notification-prefs";
@@ -96,6 +97,24 @@ export default async function ProfilePage() {
       )
     : null;
   const discordInviteUrl = discordInviteSetting?.value || null;
+
+  // Jellyfin users verify a notification address by emailed link; the pending
+  // address lives only in the VerificationToken row (/api/profile/notification-email
+  // keeps one per user under `verifyIdentifierPrefixFor`). Surface it so a reload
+  // shows "verification pending" with a resend instead of a blank field.
+  const isJellyfinUser =
+    session.user.provider === "jellyfin" || session.user.provider === "jellyfin-quickconnect";
+  const pendingVerification =
+    isJellyfinUser && emailEnabled
+      ? await prisma.verificationToken.findFirst({
+          where: {
+            identifier: { startsWith: verifyIdentifierPrefixFor(session.user.id) },
+            expires: { gt: new Date() },
+          },
+          select: { identifier: true },
+        })
+      : null;
+  const pendingEmail = pendingVerification ? (parseVerifyIdentifier(pendingVerification.identifier)?.email ?? null) : null;
 
   // Two-factor is offered only to local-credentials accounts (guardrail 6d).
   const mfaAvailable = session.user.provider === "credentials" && hasPassword;
@@ -241,10 +260,8 @@ export default async function ProfilePage() {
               isAdminRole={
                 user?.role === "ADMIN" || user?.role === "ISSUE_ADMIN"
               }
-              isJellyfin={
-                session.user.provider === "jellyfin" ||
-                session.user.provider === "jellyfin-quickconnect"
-              }
+              isJellyfin={isJellyfinUser}
+              pendingEmail={pendingEmail}
               notificationEmail={
                 user
                   ? resolveUserNotificationEmail({

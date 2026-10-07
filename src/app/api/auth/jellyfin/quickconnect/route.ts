@@ -167,6 +167,23 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: t("apiAuth.quickConnect.busy") }, { status: 503 });
     }
   }
+  // Concurrent-long-poll cap (per-IP + global). Reject 503 if exceeded so the
+  // client can fall back to short-polling instead of stalling. Checked BEFORE
+  // the attempt is charged below: a 503 here means Jellyfin was never asked, and
+  // charging a MAX_POLLS attempt anyway let a few tabs behind one NAT address
+  // (per-IP cap 3) walk a legitimate secret to the 410 "session expired" state
+  // on retries. Nothing awaits between this check and the slot increment inside
+  // the try, so the check/increment pair stays race-free.
+  const ipKey = getClientIpKey(req.headers);
+  if (wait) {
+    if (globalInflight >= LONG_POLL_GLOBAL_CAP) {
+      return NextResponse.json({ error: t("apiAuth.quickConnect.serverBusy") }, { status: 503 });
+    }
+    if ((inflightByIp.get(ipKey) ?? 0) >= LONG_POLL_PER_IP_CAP) {
+      return NextResponse.json({ error: t("apiAuth.quickConnect.tooManyPolls") }, { status: 503 });
+    }
+  }
+
   pollCounts.set(countKey, { count: attempts, expiresAt: existing?.expiresAt ?? now + QC_TTL });
 
   try {
@@ -176,17 +193,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ authenticated });
     }
 
-    // Concurrent-long-poll cap (per-IP + global). Reject 503 if exceeded so the
-    // client can fall back to short-polling instead of stalling.
-    const ipKey = getClientIpKey(req.headers);
-    if (globalInflight >= LONG_POLL_GLOBAL_CAP) {
-      return NextResponse.json({ error: t("apiAuth.quickConnect.serverBusy") }, { status: 503 });
-    }
-    const ipCount = inflightByIp.get(ipKey) ?? 0;
-    if (ipCount >= LONG_POLL_PER_IP_CAP) {
-      return NextResponse.json({ error: t("apiAuth.quickConnect.tooManyPolls") }, { status: 503 });
-    }
-    inflightByIp.set(ipKey, ipCount + 1);
+    inflightByIp.set(ipKey, (inflightByIp.get(ipKey) ?? 0) + 1);
     globalInflight += 1;
 
     try {

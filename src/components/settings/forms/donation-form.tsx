@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,10 +28,17 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
   const [patreon,       setPatreon]       = useState(initialPatreon);
   const [buyMeACoffee,  setBuyMeACoffee]  = useState(initialBuyMeACoffee);
   const [status,        setStatus]        = useState<SaveStatus>("idle");
+  const [message,       setMessage]       = useState("");
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+  }, []);
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
+    if (idleTimer.current) clearTimeout(idleTimer.current);
     setStatus("saving");
+    setMessage("");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
         method: "PATCH",
@@ -45,12 +52,21 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
           donationBuyMeACoffee: buyMeACoffee,
         }),
       });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
-      setStatus(res.ok && data.ok !== false ? "ok" : "error");
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (res.ok && data.ok !== false) {
+        setStatus("ok");
+      } else {
+        // The route says WHY (https-only link, cooldown, too long) — show it
+        // instead of a bare "Failed to save".
+        setMessage(data.error ?? t("settings.form.common.saveFailed"));
+        setStatus("error");
+      }
     } catch {
       setStatus("error");
     }
-    setTimeout(() => setStatus("idle"), 3000);
+    // Only the success state auto-dismisses; an error stays until the admin
+    // edits a field (every onChange resets to idle) or saves again.
+    idleTimer.current = setTimeout(() => setStatus((s) => (s === "ok" ? "idle" : s)), 3000);
   }
 
   return (
@@ -119,7 +135,7 @@ export function DonationForm({ initialPaypal, initialVenmo, initialZelle, initia
         <Button type="submit" disabled={status === "saving"} className="bg-indigo-600 hover:bg-indigo-500">
           {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
         </Button>
-        <SaveStatusMessage status={status} />
+        <SaveStatusMessage status={status} errorLabel={message || t("settings.form.common.saveFailed")} />
       </div>
     </form>
   );

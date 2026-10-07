@@ -1,3 +1,5 @@
+import type { Metadata } from "next";
+import { cache } from "react";
 import { getTVDetails, tmdbLanguageFor, getTVCredits, getTVSuggestions, getTVGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
 import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
@@ -34,12 +36,13 @@ import { localizeMedia } from "@/lib/tmdb-localize";
 import { translateTmdbStatus } from "@/components/media/detail-status";
 import { isFeatureEnabled } from "@/lib/features";
 
-export default async function TVDetailPage({
-  params,
-}: {
-  params: Promise<{ id: string }>;
-}) {
-  const { id } = await params;
+// The gate + the details read, ONCE per request, shared by generateMetadata and
+// the page body (React `cache`, keyed on the route id — the idiom
+// (app)/layout.tsx uses for its settings read; Next only de-duplicates fetch()
+// between the two, not Prisma reads or our coalesced TMDB helpers). A
+// redirect()/notFound() thrown here is cached as the rejection, so both callers
+// see the same outcome.
+const loadShow = cache(async (id: string) => {
   // The gate MUST precede the TMDB fetch. On the RSC layout-skip path (proxy
   // skipped by a prefetch header, (app)/layout render skipped by a matching
   // Next-Router-State-Tree) this page's own requireAppSession() is the ONLY
@@ -63,6 +66,29 @@ export default async function TVDetailPage({
   // no-op). The genre list below is fetched in the SAME language so the chips'
   // name → id links keep resolving.
   const [media] = await localizeMedia([englishMedia], locale);
+  return { session, t, locale, media };
+});
+
+// Tab / bookmark / history title: the (localized) TMDB title, under the root
+// layout's "%s · Summonarr" template. Runs the same gate-first loader as the
+// page, so a signed-out caller still burns no TMDB quota here.
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+  const { media } = await loadShow(id);
+  return { title: media.title };
+}
+
+export default async function TVDetailPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = await params;
+  const { session, t, locale, media } = await loadShow(id);
 
   const provider = session.user.provider;
   const providerSources =
@@ -240,7 +266,9 @@ export default async function TVDetailPage({
                 background: "var(--ds-bg-3)",
               }}
             >
-              <Image src={poster} alt={media.title} fill className="object-cover" sizes="160px" />
+              {/* Decorative: the <h1> beside it carries the title, so a named
+                  poster read the title twice. Same rule as the backdrop. */}
+              <Image src={poster} alt="" fill className="object-cover" sizes="160px" />
             </div>
           )}
 

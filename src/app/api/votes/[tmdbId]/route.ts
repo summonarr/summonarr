@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withAuth, withAdmin } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
 import { logAudit, auditContext } from "@/lib/audit";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { isFeatureEnabled } from "@/lib/features";
@@ -19,6 +20,12 @@ export const DELETE = withAuth(async (
 
   const maint = await maintenanceGuard(session);
   if (maint) return maint;
+
+  // Per-user bound like every sibling mutation (votes POST, hidden/watchlist
+  // DELETE): un-vote is a three-statement transaction with no other cap.
+  if (!checkRateLimit(`votes-del:${session.user.id}`, 60, 60_000)) {
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
+  }
 
   const { tmdbId: rawId } = await params;
   const tmdbId = parseInt(rawId, 10);

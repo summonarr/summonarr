@@ -3,10 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Chip } from "@/components/ui/design";
 import {
   AlertTriangle,
   CheckCircle,
   CircleDashed,
+  Clock,
   Loader2,
   Play,
   RefreshCw,
@@ -35,6 +37,9 @@ function rich(template: string, nodes: Record<string, React.ReactNode>): React.R
 interface StarterPackCardProps {
   radarrConfigured: boolean;
   sonarrConfigured: boolean;
+  // The card applies to the DEFAULT instance only (guardrail 32); when a named
+  // instance exists it says so, pointing at the Instance picker on the spec tabs.
+  namedInstancesConfigured?: boolean;
   // Notify parent when the starter pack catalog/apply state changed, so KPIs can refresh.
   onChanged?: () => void;
 }
@@ -42,6 +47,7 @@ interface StarterPackCardProps {
 export function StarterPackCard({
   radarrConfigured,
   sonarrConfigured,
+  namedInstancesConfigured = false,
   onChanged,
 }: StarterPackCardProps) {
   const t = useT();
@@ -49,6 +55,11 @@ export function StarterPackCard({
   const [loaded, setLoaded] = useState(false);
   const [applyState, setApplyState] = useState<ActionState>("idle");
   const [refreshState, setRefreshState] = useState<ActionState>("idle");
+  // 409 = the trash lock is held: nothing ran, so (like the Settings tab's
+  // sync-settings card) it is neither a success nor a failure — an amber
+  // "already running" that clears itself, not a red banner.
+  const [refreshSkipped, setRefreshSkipped] = useState(false);
+  const [applySkipped, setApplySkipped] = useState(false);
   const [applyLog, setApplyLog] = useState<ApplyResult[]>([]);
   const [refreshError, setRefreshError] = useState<{ errors: string[]; schemaDiagnostic?: string } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -124,6 +135,7 @@ export function StarterPackCard({
 
   async function handleRefresh() {
     setRefreshState("running");
+    setRefreshSkipped(false);
     setApplyLog([]);
     setRefreshError(null);
     try {
@@ -133,10 +145,9 @@ export function StarterPackCard({
         body: JSON.stringify({}),
       });
       if (res.status === 409) {
-        setRefreshState("error");
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setRefreshError({ errors: [data.error ?? t("trash.starter.alreadyRunning")] });
-        setTimeout(() => setRefreshState((s) => (s === "error" ? s : "idle")), 3000);
+        setRefreshState("idle");
+        setRefreshSkipped(true);
+        setTimeout(() => setRefreshSkipped(false), 3000);
         return;
       }
       const data = (await res.json().catch(() => ({}))) as {
@@ -166,6 +177,7 @@ export function StarterPackCard({
   async function handleApply() {
     if (selected.size === 0) return;
     setApplyState("running");
+    setApplySkipped(false);
     setApplyLog([]);
     setRefreshError(null);
     try {
@@ -175,10 +187,9 @@ export function StarterPackCard({
         body: JSON.stringify({ specIds: [...selected] }),
       });
       if (res.status === 409) {
-        setApplyState("error");
-        const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setRefreshError({ errors: [data.error ?? t("trash.starter.alreadyRunning")] });
-        setTimeout(() => setApplyState("idle"), 3000);
+        setApplyState("idle");
+        setApplySkipped(true);
+        setTimeout(() => setApplySkipped(false), 3000);
         return;
       }
       const data = (await res.json().catch(() => ({}))) as {
@@ -229,6 +240,9 @@ export function StarterPackCard({
                   recommended: <span className="text-indigo-300">{t("trash.starter.recommended")}</span>,
                 })}
               </p>
+              {namedInstancesConfigured && (
+                <p className="text-xs text-zinc-500 mt-1 max-w-2xl">{t("trash.starter.defaultInstanceNote")}</p>
+              )}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -348,8 +362,10 @@ export function StarterPackCard({
           )}
           {refreshState === "ok"    && <span className="text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />{t("trash.sync.catalogRefreshed")}</span>}
           {refreshState === "error" && <span className="text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />{t("trash.starter.refreshFailedSee")}</span>}
+          {refreshSkipped && <span className="text-amber-400 flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" />{t("trash.sync.refreshAlreadyRunning")}</span>}
           {applyState === "ok"    && <span className="text-green-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" />{t("trash.starter.selectionApplied")}</span>}
           {applyState === "error" && <span className="text-red-400 flex items-center gap-1.5"><XCircle className="w-3.5 h-3.5" />{t("trash.starter.someFailed")}</span>}
+          {applySkipped && <span className="text-amber-400 flex items-center gap-1.5"><Clock className="w-3.5 h-3.5" />{t("trash.sync.alreadyRunning")}</span>}
         </div>
       </Card>
 
@@ -406,15 +422,11 @@ function StarterPackRow({
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 flex-wrap">
-                <p className="text-sm text-zinc-100 font-medium">{item.label}</p>
-                <span className="text-[10px] uppercase tracking-wider text-zinc-500 px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800">
-                  {t(KIND_LABEL_KEY[item.kind])}
-                </span>
-                {item.recommended && (
-                  <span className="text-[10px] uppercase tracking-wider text-indigo-300 px-1.5 py-0.5 rounded bg-indigo-500/20 border border-indigo-500/40">
-                    {t("trash.starter.recommended")}
-                  </span>
-                )}
+                <p className="text-sm text-zinc-100 font-medium">
+                  {item.labelKey ? t(item.labelKey, item.labelVars) : item.label}
+                </p>
+                <Chip tone="neutral">{t(KIND_LABEL_KEY[item.kind])}</Chip>
+                {item.recommended && <Chip tone="accent">{t("trash.starter.recommended")}</Chip>}
               </div>
             </div>
             <span className={`text-xs inline-flex items-center gap-1 whitespace-nowrap ${status.tone}`}>
@@ -422,7 +434,9 @@ function StarterPackRow({
               {status.label}
             </span>
           </div>
-          <p className="text-xs text-zinc-500 mt-1 whitespace-pre-line">{item.rationale}</p>
+          <p className="text-xs text-zinc-500 mt-1 whitespace-pre-line">
+            {item.rationaleKey ? t(item.rationaleKey) : item.rationale}
+          </p>
           {spec && (
             <p className="text-[11px] text-zinc-500 mt-2 font-mono truncate" title={spec.trashId}>
               {spec.name} · {spec.trashId.slice(0, 14)}…

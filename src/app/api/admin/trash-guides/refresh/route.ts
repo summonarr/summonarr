@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readJsonCapped } from "@/lib/body-size";
 import { withAdmin } from "@/lib/api-auth";
-import { logAudit } from "@/lib/audit";
+import { logAudit, auditContext } from "@/lib/audit";
 import { refreshCatalog, fetchTrashTree, describeSchemaError, type RefreshResult, type TrashTree } from "@/lib/trash";
 import { withAdvisoryLock, TRASH_SYNC_LOCK_ID } from "@/lib/advisory-lock";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -87,7 +87,8 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       const durationMs = Date.now() - startTime;
       await logAudit({
         userId: session.user.id,
-        userName: session.user.name ?? "admin",
+        userName: session.user.name ?? session.user.email,
+        ...auditContext(req, session),
         action: "SETTINGS_CHANGE",
         target: "trash:refresh",
         details: { results, errors, durationMs, trigger: "admin" },

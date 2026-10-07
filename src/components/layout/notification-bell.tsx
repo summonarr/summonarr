@@ -17,7 +17,7 @@ export function NotificationBell() {
   // NotificationStoreProvider ((app)/layout.tsx). This bell and the mobile
   // nav's badge are both on every page, so sharing one store avoids fetching
   // /api/notifications twice.
-  const { items, unread, markAllRead } = useNotifications();
+  const { items, unread, status, markAllRead } = useNotifications();
   const [open, setOpen] = useState(false);
   // Opening marks everything read (optimistically, before the panel paints),
   // so the unread tint keys off the ids that were unread AT OPEN, not readAt.
@@ -67,9 +67,14 @@ export function NotificationBell() {
         type="button"
         onClick={toggle}
         aria-label={unread > 0 ? t("nav.notificationsUnread", { count: unread }) : t("personal.notifications.title")}
-        aria-haspopup="menu"
+        // The panel is a dialog of plain links, not an ARIA menu — it has no
+        // arrow-key roving, so announcing "menu" promised keyboard behaviour it
+        // never had.
+        aria-haspopup="dialog"
         aria-expanded={open}
-        className="relative inline-flex items-center justify-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+        // ds-hover-tint: the same hover/focus recipe as the push bell beside it
+        // (guardrail 42 — the background is inline, so a hover class can't win).
+        className="ds-hover-tint relative inline-flex items-center justify-center rounded-md outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
         style={{ width: 32, height: 32, color: "var(--ds-fg-muted)" }}
       >
         <Bell style={{ width: 18, height: 18 }} />
@@ -102,7 +107,8 @@ export function NotificationBell() {
       {open && (
         <div
           ref={panelRef}
-          role="menu"
+          role="dialog"
+          aria-label={t("personal.notifications.title")}
           tabIndex={-1}
           className="absolute right-0 mt-2 overflow-hidden outline-none"
           style={{
@@ -123,7 +129,20 @@ export function NotificationBell() {
           </div>
 
           <div style={{ maxHeight: 380, overflowY: "auto" }}>
-            {items.length === 0 ? (
+            {/* An empty list is only "No notifications yet" once the store has
+                actually loaded; before that it is in flight, and after a failed
+                first load it is unknown. Both used to render as empty. */}
+            {items.length === 0 && status === "loading" ? (
+              <div className="ds-mono" style={{ padding: "28px 16px", textAlign: "center", fontSize: 12, color: "var(--ds-fg-subtle)" }}>
+                {t("shared.bell.loading")}
+              </div>
+            ) : items.length === 0 && status === "error" ? (
+              // text-red-400 is remapped to --ds-danger, tuned for text on this
+              // bg-1 surface (guardrail 42).
+              <div role="alert" className="ds-mono text-red-400" style={{ padding: "28px 16px", textAlign: "center", fontSize: 12 }}>
+                {t("shared.bell.loadFailed")}
+              </div>
+            ) : items.length === 0 ? (
               <div className="ds-mono" style={{ padding: "28px 16px", textAlign: "center", fontSize: 12, color: "var(--ds-fg-subtle)" }}>
                 {t("shared.bell.empty")}
               </div>
@@ -134,7 +153,6 @@ export function NotificationBell() {
                   <Link
                     key={n.id}
                     href={notificationHref(n)}
-                    role="menuitem"
                     onClick={() => setOpen(false)}
                     // The unread tint is a class, not an inline style, so the
                     // hover class can win over it. accent-soft, not bg-2: bg-2
@@ -176,7 +194,6 @@ export function NotificationBell() {
           <Link
             href="/notifications"
             onClick={() => setOpen(false)}
-            role="menuitem"
             className="block text-center transition-colors hover:bg-[var(--ds-bg-3)]"
             style={{ padding: "9px 12px", borderTop: "1px solid var(--ds-border)", fontSize: 12, fontWeight: 500, color: "var(--ds-accent-text)" }}
           >

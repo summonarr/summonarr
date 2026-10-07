@@ -19,6 +19,8 @@ import { createPortal } from "react-dom";
 import Image from "next/image";
 import Link from "next/link";
 import { bitrateToKbps } from "@/lib/bitrate";
+import { formatDurationHM } from "@/lib/format-duration";
+import { Chip, SectionHeader as DsSectionHeader } from "@/components/ui/design";
 import {
   HeatmapCellPopover,
   type HeatmapCellAnchor,
@@ -47,26 +49,16 @@ export function sourceDotColor(source: string): string {
 // is non-empty the tag reads "PLEX:remote", matching mediaInstanceLabel. The
 // default server's slug is "" (also what every older row holds), so it shows
 // just "PLEX" — single-server setups look exactly as they did before.
-// The colour depends only on `source`.
+// The colour depends only on `source`. Renders the design-system Chip
+// (`.ds-chip-plex` / `.ds-chip-jellyfin`) so the badge is the same pill as
+// every other Plex/Jellyfin chip in the app, not a second squared rendering.
 export function SourceTag({ source, instance }: { source: string; instance?: string }) {
   const isPlex = source === "plex";
   return (
-    <span
-      className="ds-mono"
-      style={{
-        fontSize: 9.5,
-        padding: "1px 5px",
-        borderRadius: 3,
-        background: isPlex ? "var(--ds-plex)" : "var(--ds-jellyfin)",
-        color: "#000",
-        fontWeight: 700,
-        letterSpacing: "0.04em",
-        textTransform: "uppercase",
-      }}
-    >
+    <Chip tone={isPlex ? "plex" : "jellyfin"} className="ds-mono uppercase">
       {isPlex ? "Plex" : "Jellyfin"}
       {instance ? `:${instance}` : ""}
-    </span>
+    </Chip>
   );
 }
 
@@ -102,10 +94,12 @@ export function MethodPill({
   methodClass: MethodClass;
 }) {
   const colors: Record<MethodClass, { bg: string; fg: string }> = {
-    ok: { bg: "oklch(0.72 0.18 150 / 0.12)", fg: "var(--ds-success)" },
-    info: { bg: "oklch(0.70 0.14 225 / 0.13)", fg: "var(--ds-info)" },
-    warn: { bg: "oklch(0.78 0.16 75 / 0.14)", fg: "var(--ds-warning)" },
-    err: { bg: "oklch(0.65 0.22 25 / 0.14)", fg: "var(--ds-danger)" },
+    // Tints are the status TOKENS at 12–14% (guardrail 42: the text tokens are
+    // tuned against their own 5–20% tints), so a token retune carries here.
+    ok: { bg: "color-mix(in oklab, var(--ds-success) 12%, transparent)", fg: "var(--ds-success)" },
+    info: { bg: "color-mix(in oklab, var(--ds-info) 13%, transparent)", fg: "var(--ds-info)" },
+    warn: { bg: "color-mix(in oklab, var(--ds-warning) 14%, transparent)", fg: "var(--ds-warning)" },
+    err: { bg: "color-mix(in oklab, var(--ds-danger) 14%, transparent)", fg: "var(--ds-danger)" },
     muted: { bg: "var(--ds-bg-3)", fg: "var(--ds-fg-muted)" },
   };
   const c = colors[methodClass] ?? colors.muted;
@@ -1007,7 +1001,7 @@ export function ActivityCard({
         padding: 18,
         background: "var(--ds-bg-2)",
         border: "1px solid var(--ds-border)",
-        borderRadius: 10,
+        borderRadius: "var(--ds-r-lg)",
         ...style,
       }}
     >
@@ -1016,6 +1010,13 @@ export function ActivityCard({
   );
 }
 
+// Thin wrapper over the design-system SectionHeader, so an Activity card
+// heading is the same 15px title / 11px mono subtitle as every other in-page
+// section (/popular, /top, the discover rails). The legacy `label` / `sub`
+// prop names stay for the activity-* call sites and forward to the DS
+// `title` / `subtitle`. The DS header keeps the right slot `shrink-0` beside a
+// `min-w-0` text block, so a long heading wraps instead of running under the
+// Live dot ("Now playingive").
 export function SectionHeader({
   label,
   sub,
@@ -1025,60 +1026,7 @@ export function SectionHeader({
   sub?: ReactNode;
   right?: ReactNode;
 }) {
-  return (
-    // `flexWrap` on the row plus `flexShrink: 0` on the right slot is what
-    // stops the heading and the right-hand element overlapping. The left group
-    // carries `minWidth: 0` so it can shrink, but its <h2> is `nowrap` — so
-    // without a floor on the right slot the heading simply overflowed under it
-    // and "Now playing" + the Live dot rendered as "Now playingive".
-    <div
-      style={{
-        display: "flex",
-        alignItems: "baseline",
-        justifyContent: "space-between",
-        marginBottom: 12,
-        gap: 10,
-        flexWrap: "wrap",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "baseline",
-          gap: 10,
-          minWidth: 0,
-          flexWrap: "wrap",
-        }}
-      >
-        <h2
-          style={{
-            margin: 0,
-            fontSize: 13,
-            fontWeight: 600,
-            letterSpacing: "-0.01em",
-            color: "var(--ds-fg)",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {label}
-        </h2>
-        {sub && (
-          <span
-            className="ds-mono"
-            style={{
-              fontSize: 11,
-              color: "var(--ds-fg-subtle)",
-              fontVariantNumeric: "tabular-nums",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {sub}
-          </span>
-        )}
-      </div>
-      {right && <div style={{ flexShrink: 0 }}>{right}</div>}
-    </div>
-  );
+  return <DsSectionHeader title={label} subtitle={sub} right={right} />;
 }
 
 // The one header composition every Activity DETAIL view uses (user, title,
@@ -1202,6 +1150,9 @@ export function KeyVal({ k, v }: { k: string; v: ReactNode }) {
         {k}
       </span>
       <div
+        // The value is clipped with an ellipsis; a string value gets a native
+        // tooltip so the rest of a long device/IP string is still readable.
+        title={typeof v === "string" ? v : undefined}
         style={{
           fontSize: 11.5,
           color: "var(--ds-fg-muted)",
@@ -1232,24 +1183,32 @@ export function formatMs(ms: number): string {
   return `${m}:${String(sec).padStart(2, "0")}`;
 }
 
-export function fmtDuration(seconds: number): string {
-  if (!seconds || seconds <= 0) return "—";
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m`;
-  return `${Math.round(seconds)}s`;
+// Seconds → "2h 15m" / "15m" / "45s", em-dash for non-positive. Delegates to
+// the shared Intl-backed formatter (lib/format-duration.ts) so a non-English UI
+// gets localized unit abbreviations. Without a `locale` it renders English —
+// byte-identical to the old hand-rolled output — for the one-arg callers.
+export function fmtDuration(seconds: number, locale = "en"): string {
+  return formatDurationHM(seconds, locale);
 }
 
 // `source` is required, not optional: Plex reports kbps and Jellyfin bps, and
 // the row is the only thing that can tell them apart (see lib/bitrate.ts). An
 // optional param would silently default Jellyfin rows to the Plex reading and
 // render them 1000x too high.
-export function fmtBitrate(raw: number | null, source: string | null): string {
+// `locale` localizes the decimal separator ("12,3 Mbps" for de/fr/pt/it); the
+// unit stays "Mbps"/"kbps". Omitted, the legacy English output is unchanged.
+export function fmtBitrate(raw: number | null, source: string | null, locale?: string): string {
   const kbps = bitrateToKbps(raw, source);
   if (kbps <= 0) return "—";
-  if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mbps`;
-  return `${Math.round(kbps)} kbps`;
+  if (kbps >= 1000) {
+    const mbps = kbps / 1000;
+    const text = locale
+      ? new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(mbps)
+      : mbps.toFixed(1);
+    return `${text} Mbps`;
+  }
+  const whole = Math.round(kbps);
+  return `${locale ? whole.toLocaleString(locale) : whole} kbps`;
 }
 
 // Renders a timestamp in the UI language and the viewer's timezone. TZ depends on the client, so the
@@ -1473,15 +1432,18 @@ export function BarColumn({
 
 /* ── KPI / stat tiles ─────────────────────────────────────────── */
 
+// KPI tile. Label / value sizes and radius match the design-system StatCard
+// (10.5px mono label, 26px value, var(--ds-r-lg)) so a tile on the Activity
+// Users/Stats tabs is the same size as one on /admin/stats.
 export function MiniKpi({
   label,
   value,
   sub,
-  big,
 }: {
   label: string;
   value: ReactNode;
   sub?: ReactNode;
+  /** Legacy — every tile is StatCard-sized now; accepted so callers needn't change. */
   big?: boolean;
 }) {
   return (
@@ -1490,27 +1452,27 @@ export function MiniKpi({
         padding: "14px 16px",
         background: "var(--ds-bg-2)",
         border: "1px solid var(--ds-border)",
-        borderRadius: 10,
+        borderRadius: "var(--ds-r-lg)",
         display: "flex",
         flexDirection: "column",
-        gap: 4,
+        gap: 6,
       }}
     >
       <div
         className="ds-mono uppercase"
         style={{
-          fontSize: 9.5,
+          fontSize: 10.5,
           color: "var(--ds-fg-subtle)",
-          letterSpacing: "0.1em",
+          letterSpacing: "0.08em",
         }}
       >
         {label}
       </div>
       <div
         style={{
-          fontSize: big ? 22 : 19,
+          fontSize: 26,
           fontWeight: 600,
-          letterSpacing: "-0.025em",
+          letterSpacing: "-0.02em",
           color: "var(--ds-fg)",
           fontVariantNumeric: "tabular-nums",
           whiteSpace: "nowrap",

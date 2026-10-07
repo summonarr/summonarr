@@ -43,6 +43,9 @@ function navByTab(): Map<string, string[]> {
 }
 
 // The card ids each `{tab === "<id>" … && (` block renders, in page order.
+// Every card is a `<SettingsCard id="…">` (the helper defined in page.tsx), so a
+// card that bypasses the helper is invisible here and fails the membership
+// check below — which is the point: the helper is what gives it an anchor.
 function cardsByTab(): Map<string, string[]> {
   const out = new Map<string, string[]>();
   const openers = [...source.matchAll(/\{tab === "([a-z]+)"[^(]*&& \(/g)];
@@ -50,11 +53,18 @@ function cardsByTab(): Map<string, string[]> {
   openers.forEach((m, i) => {
     const from = m.index! + m[0].length;
     const to = i + 1 < openers.length ? openers[i + 1].index! : source.length;
-    const ids = [...source.slice(from, to).matchAll(/<div id="([a-z0-9-]+)" style=\{\{padding:22/g)].map((c) => c[1]);
+    const ids = [...source.slice(from, to).matchAll(/<SettingsCard\s+id="([a-z0-9-]+)"/g)].map((c) => c[1]);
     out.set(m[1], ids);
   });
   return out;
 }
+
+test("no card bypasses the SettingsCard helper", () => {
+  // The old inline recipe — a bare <div> carrying the card style — is what let
+  // descriptions drift between 14px subtle and 12px muted on one tab.
+  assert.doesNotMatch(source, /<div id="[a-z0-9-]+" style=\{\{\s*padding:\s*22/);
+  assert.doesNotMatch(source, /<div style=\{\{\s*padding:\s*22/);
+});
 
 test("every settings card is listed in its tab's side nav, in page order", () => {
   const nav = navByTab();
@@ -67,6 +77,6 @@ test("every settings card is listed in its tab's side nav, in page order", () =>
 
 test("the cards that shipped without a nav entry are listed now", () => {
   const nav = navByTab();
-  for (const id of ["watch-grades", "radarr4k", "sonarr4k"]) assert.ok(nav.get("media")!.includes(id), id);
+  for (const id of ["watch-grades", "radarr4k", "sonarr4k", "request-4k"]) assert.ok(nav.get("media")!.includes(id), id);
   assert.ok(nav.get("integrations")!.includes("ip-geolocation"));
 });

@@ -75,10 +75,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: t("apiAuth.common.invalidPassword") }, { status: 400 });
   }
 
+  // Normalize FIRST, then validate the normalized value: NFKC folds a fullwidth
+  // "＠" (neither whitespace nor "@") into a real "@", so validating the raw
+  // string let `a＠b@c.com` pass the single-@ rule and be stored as `a@b@c.com`.
+  // Whitespace is still refused on the RAW value (padding is rejected, not trimmed).
   if (typeof email !== "string" || email.length > 254 || /\s/.test(email)) {
     return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
   }
-  const emailParts = email.split("@");
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail || normalizedEmail.length > 254 || /\s/.test(normalizedEmail)) {
+    return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
+  }
+  const emailParts = normalizedEmail.split("@");
   if (emailParts.length !== 2 || !emailParts[0] || !emailParts[1]) {
     return NextResponse.json({ error: t("apiAuth.common.invalidEmail") }, { status: 400 });
   }
@@ -133,7 +141,7 @@ export async function POST(req: NextRequest) {
       const created = await tx.user.create({
         data: {
           name: sanitizedName,
-          email: normalizeEmail(email),
+          email: normalizedEmail,
           passwordHash,
           role: "ADMIN",
           permissions: defaultPermissionsForRole("ADMIN"),

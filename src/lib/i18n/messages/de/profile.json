@@ -222,5 +222,12 @@
   "profile.mfa.stepUp.passkeyFailed": "Der Passkey konnte auf diesem Gerät nicht verwendet werden.",
   "profile.mfa.stepUp.codeRequired": "Geben Sie einen Code aus Ihrer Authenticator-App oder einen Wiederherstellungscode ein, um diese Änderung zu bestätigen.",
   "profile.notifications.iosApp.prompt": "Auf dem iPhone? Die Summonarr-App stellt diese als native Mitteilungen zu.",
-  "profile.notifications.iosApp.link": "Im App Store laden"
+  "profile.notifications.iosApp.link": "Im App Store laden",
+  "profile.close.confirmWord": "SCHLIESSEN",
+  "profile.mfa.confirmRemoveTotp": "Authenticator-App entfernen? Beim Anmelden wird weiterhin ein Passkey verlangt.",
+  "profile.mfa.confirmRemovePasskey": "Passkey {name} entfernen? Beim Anmelden wird weiterhin ein zweiter Faktor verlangt.",
+  "profile.mfa.confirmRemoveLast": "Dies ist Ihr einziger zweiter Faktor. Wird er entfernt, wird die Zwei-Faktor-Authentifizierung ausgeschaltet, Ihre Wiederherstellungscodes werden gelöscht und Ihre anderen Geräte abgemeldet.",
+  "profile.mfa.totp.copyKey": "Einrichtungsschlüssel kopieren",
+  "profile.notifications.verificationPending": "Bestätigung für {email} ausstehend – prüfen Sie Ihren Posteingang.",
+  "profile.notifications.resendVerification": "Erneut senden"
 }

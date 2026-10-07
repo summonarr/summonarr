@@ -321,10 +321,19 @@ test("a plain USER is refused 403 and reaches no query", async () => {
   assert.equal(opsOf("mediaServerUser.updateMany").length, 0);
 });
 
-test("an ISSUE_ADMIN is refused — these are withAdmin, not withIssueAdmin", async () => {
+test("an ISSUE_ADMIN is refused — these take MANAGE_USERS, not MANAGE_ISSUES", async () => {
   const t = await mintSession({ role: "ISSUE_ADMIN", permissions: Permission.MANAGE_ISSUES });
   assert.equal((await getList(t)).status, 403);
   assert.equal((await postBulk(t, { source: "jellyfin", downloadsEnabled: false })).status, 403);
+});
+
+test("a MANAGE_USERS delegate (role USER) is admitted to every server-users route — the Users page mounts these controls for them", async () => {
+  // withAdmin here left the delegate a page full of controls that all answered 403.
+  const t = await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS });
+  assert.equal((await getList(t)).status, 200);
+  assert.equal((await patchList(t, { autoDisableNew: true })).status, 200);
+  assert.notEqual((await postBulk(t, { source: "jellyfin", downloadsEnabled: false })).status, 403);
+  assert.notEqual((await getDiagnose(t)).status, 403);
 });
 
 // ── 1 + 2: guardrail 28 — never delete, and the active/history split ─────────
@@ -668,9 +677,23 @@ test("diagnose explains WHY a user would be skipped rather than silently droppin
   const body = await (await getDiagnose(t)).json();
   assert.equal(body.skippedCount, 3);
   const reasons = body.skipped.flatMap((s: { skipReasons: string[] }) => s.skipReasons);
-  assert.ok(reasons.some((r: string) => r.includes("missing Id")));
-  assert.ok(reasons.some((r: string) => r.includes("empty Name")));
-  assert.ok(reasons.some((r: string) => r.includes("no Policy object")));
+  // Stable machine codes, not prose — this is a curl/OpenAPI-only route and the
+  // codes are what a bug report gets grepped for.
+  assert.ok(reasons.includes("missing-id"));
+  assert.ok(reasons.includes("empty-name"));
+  assert.ok(reasons.includes("no-policy"));
+});
+
+test("diagnose masks the emails of SKIPPED users exactly like processed ones", async () => {
+  // The skipped rows are precisely what gets pasted into a bug report, so an
+  // unmasked address there defeated the masking on the processed list.
+  const t = await mintSession();
+  jellyfinUsersPayload = [{ Id: null, Name: "ghost", Email: "ghost@example.com", Policy: {} }];
+  const body = await (await getDiagnose(t)).json();
+  assert.equal(body.skippedCount, 1);
+  const email = body.skipped[0].email;
+  assert.ok(!email.includes("@example.com"), `full address leaked: ${email}`);
+  assert.ok(email.startsWith("gho"));
 });
 
 test("diagnose reports the gap between what Jellyfin returns and what the DB holds", async () => {

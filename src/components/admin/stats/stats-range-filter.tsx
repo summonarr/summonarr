@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useTransition } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { FilterBar } from "@/components/ui/design";
+import { cn } from "@/lib/utils";
 import { useT } from "@/components/i18n/i18n-provider";
 import { DEFAULT_STATS_RANGE, STATS_RANGES, type StatsRange } from "@/lib/admin-stats";
 
@@ -13,6 +14,9 @@ export function StatsRangeFilter({ active }: { active: StatsRange }) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  // The new range re-runs a dozen aggregates; keep the pressed control in place
+  // and dimmed while they stream rather than swapping it for the skeleton.
+  const [pending, start] = useTransition();
 
   const labels: Record<StatsRange, string> = {
     "30": t("adminManage.stats.range.30"),
@@ -28,16 +32,18 @@ export function StatsRangeFilter({ active }: { active: StatsRange }) {
       else params.set("range", value);
       const qs = params.toString();
       // The page is force-dynamic, so the push alone re-renders it.
-      router.push(qs ? `${pathname}?${qs}` : pathname);
+      start(() => router.push(qs ? `${pathname}?${qs}` : pathname));
     },
-    [router, pathname, searchParams],
+    [router, pathname, searchParams, start],
   );
 
   return (
-    <FilterBar
-      segments={STATS_RANGES.map((r) => ({ value: r, label: labels[r] }))}
-      active={active}
-      onChange={onChange}
-    />
+    <div aria-busy={pending} className={cn("transition-opacity", pending && "opacity-60")}>
+      <FilterBar
+        segments={STATS_RANGES.map((r) => ({ value: r, label: labels[r] }))}
+        active={active}
+        onChange={onChange}
+      />
+    </div>
   );
 }

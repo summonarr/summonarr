@@ -1,6 +1,14 @@
 "use client";
 
+import { StatCard } from "@/components/ui/design";
 import { useT } from "@/components/i18n/i18n-provider";
+
+interface Kpi {
+  label: string;
+  value: string;
+  hint: string;
+  tint: string;
+}
 
 export function KpiStrip({
   profilesAvailable,
@@ -22,8 +30,9 @@ export function KpiStrip({
   failed?: boolean;
 }) {
   const t = useT();
+  let kpis: Kpi[];
   if (failed && !loading) {
-    const kpis = [
+    kpis = [
       t("trash.kpi.profilesAvailable"),
       t("trash.kpi.appliedToInstance"),
       t("trash.kpi.customFormats"),
@@ -34,77 +43,47 @@ export function KpiStrip({
       hint: t("trash.kpi.statusUnavailable"),
       tint: "var(--ds-fg-muted)",
     }));
-    return <KpiGrid kpis={kpis} />;
+  } else {
+    // While loading the counts are the initial zeros, so a hint or tint derived
+    // from them ("In sync with upstream", "of 0", green) would be a false
+    // all-clear that flashes before the fetch lands — keep both neutral.
+    kpis = [
+      {
+        label: t("trash.kpi.profilesAvailable"),
+        value: loading ? "…" : String(profilesAvailable),
+        hint: loading ? "" : t("trash.kpi.fromTrash"),
+        tint: "var(--ds-fg)",
+      },
+      {
+        label: t("trash.kpi.appliedToInstance"),
+        value: loading ? "…" : String(profilesApplied),
+        hint: loading ? "" : t("trash.kpi.ofTotal", { total: profilesAvailable }),
+        tint: !loading && profilesApplied > 0 ? "var(--ds-accent-text)" : "var(--ds-fg)",
+      },
+      {
+        label: t("trash.kpi.customFormats"),
+        value: loading ? "…" : String(customFormatsTotal),
+        hint: loading ? "" : t("trash.kpi.appliedCount", { count: customFormatsApplied }),
+        tint: "var(--ds-fg)",
+      },
+      {
+        label: t("trash.kpi.drift"),
+        value: loading ? "…" : t("trash.kpi.diffs", { count: drift }),
+        hint: loading ? "" : drift === 0 ? t("trash.kpi.inSync") : t("trash.kpi.reviewErrors"),
+        tint: loading ? "var(--ds-fg)" : drift === 0 ? "var(--ds-success)" : "var(--ds-warning)",
+      },
+    ];
   }
-  const kpis = [
-    {
-      label: t("trash.kpi.profilesAvailable"),
-      value: loading ? "…" : String(profilesAvailable),
-      hint: t("trash.kpi.fromTrash"),
-      tint: "var(--ds-fg)",
-    },
-    {
-      label: t("trash.kpi.appliedToInstance"),
-      value: loading ? "…" : String(profilesApplied),
-      hint: t("trash.kpi.ofTotal", { total: profilesAvailable }),
-      tint: profilesApplied > 0 ? "var(--ds-accent-text)" : "var(--ds-fg)",
-    },
-    {
-      label: t("trash.kpi.customFormats"),
-      value: loading ? "…" : String(customFormatsTotal),
-      hint: t("trash.kpi.appliedCount", { count: customFormatsApplied }),
-      tint: "var(--ds-fg)",
-    },
-    {
-      label: t("trash.kpi.drift"),
-      value: loading ? "…" : t("trash.kpi.diffs", { count: drift }),
-      hint: drift === 0 ? t("trash.kpi.inSync") : t("trash.kpi.reviewErrors"),
-      tint: drift === 0 ? "var(--ds-success)" : "var(--ds-warning)",
-    },
-  ];
 
-  return <KpiGrid kpis={kpis} />;
-}
-
-function KpiGrid({ kpis }: { kpis: { label: string; value: string; hint: string; tint: string }[] }) {
   return (
     <div className="grid grid-cols-2 sm:grid-cols-4" style={{ gap: 10 }}>
       {kpis.map((k) => (
-        <div
+        <StatCard
           key={k.label}
-          style={{
-            padding: "14px 16px",
-            background: "var(--ds-bg-2)",
-            border: "1px solid var(--ds-border)",
-            borderRadius: 8,
-          }}
-        >
-          <p
-            className="ds-mono uppercase"
-            style={{
-              fontSize: 10.5,
-              color: "var(--ds-fg-subtle)",
-              letterSpacing: "0.08em",
-              margin: "0 0 6px",
-            }}
-          >
-            {k.label}
-          </p>
-          <p
-            className="font-semibold"
-            style={{ fontSize: 22, color: k.tint, margin: 0, letterSpacing: "-0.02em" }}
-          >
-            {k.value}
-          </p>
-          {k.hint && (
-            <p
-              className="ds-mono"
-              style={{ margin: "4px 0 0", fontSize: 10, color: "var(--ds-fg-subtle)" }}
-            >
-              {k.hint}
-            </p>
-          )}
-        </div>
+          label={k.label}
+          value={<span style={{ color: k.tint }}>{k.value}</span>}
+          hint={k.hint || undefined}
+        />
       ))}
     </div>
   );

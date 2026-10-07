@@ -30,6 +30,9 @@ function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage
     () => new Set(initialSelected.split(",").map((k) => k.trim()).filter(Boolean))
   );
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
+  // The route's own reason (a 429 cooldown) — shown in place of the bare
+  // "Failed to save".
+  const [saveMessage, setSaveMessage] = useState("");
   // An earlier save's idle timer must not fire into a later save (it would
   // re-enable Save mid-flight or hide the new result early).
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -49,14 +52,20 @@ function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage
   async function handleSave() {
     if (idleTimer.current) clearTimeout(idleTimer.current);
     setSaveStatus("saving");
+    setSaveMessage("");
     try {
       const res = await fetch(withBasePath("/api/settings"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ plexLibraries: Array.from(selected).join(",") }),
       });
-      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
-      setSaveStatus(res.ok && data.ok !== false ? "ok" : "error");
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (res.ok && data.ok !== false) {
+        setSaveStatus("ok");
+      } else {
+        setSaveMessage(data.error ?? t("settings.form.common.saveFailed"));
+        setSaveStatus("error");
+      }
     } catch {
       setSaveStatus("error");
     }
@@ -113,7 +122,7 @@ function PlexLibraryPicker({ initialSelected, sections, loadStatus, errorMessage
             >
               {saveStatus === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.library.saveSelection")}
             </Button>
-            <SaveStatusMessage status={saveStatus} />
+            <SaveStatusMessage status={saveStatus} errorLabel={saveMessage || t("settings.form.common.saveFailed")} />
           </div>
         </>
       )}
@@ -135,6 +144,10 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
   const [connectedEmail, setConnectedEmail] = useState(initialEmail);
   const [status, setStatus] = useState<"idle" | "waiting" | "saving" | "error">("idle");
   const [error, setError] = useState("");
+  // Disconnect is a two-step inline confirm: one accidental tap used to remove
+  // the admin token outright, and getting it back is the full plex.tv PIN
+  // round-trip.
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
 
   const [serverUrl, setServerUrl] = useState(initialServerUrl);
   const [serverStatus, setServerStatus] = useState<"idle" | "saving" | "testing" | "ok" | "error">("idle");
@@ -221,6 +234,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
   }
 
   async function handleDisconnect() {
+    setConfirmDisconnect(false);
     setStatus("saving");
     setError("");
     try {
@@ -297,19 +311,48 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
   return (
     <div className="space-y-4">
       {connectedEmail ? (
-        <div className="flex items-center justify-between gap-3 rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-3">
           <div className="flex items-center gap-2 text-sm min-w-0">
             <CheckCircle className="w-4 h-4 text-green-400 shrink-0" />
             <span className="text-zinc-300 min-w-0 truncate" title={connectedEmail}>{rich(t("settings.form.plex.connectedAs"), { email: <span className="text-zinc-100 font-medium">{connectedEmail}</span> })}</span>
           </div>
-          <button
-            onClick={handleDisconnect}
-            disabled={status === "saving"}
-            className="shrink-0 flex items-center gap-1 text-xs text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-50"
-          >
-            <Unlink className="w-3 h-3" />
-            {t("settings.form.plex.disconnect")}
-          </button>
+          {!confirmDisconnect && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setConfirmDisconnect(true)}
+              disabled={status === "saving"}
+              className="shrink-0 text-zinc-400 hover:text-red-400"
+            >
+              <Unlink aria-hidden />
+              {t("settings.form.plex.disconnect")}
+            </Button>
+          )}
+          {confirmDisconnect && (
+            <div className="basis-full flex flex-wrap items-center justify-between gap-x-3 gap-y-2 pt-2 border-t border-zinc-700">
+              <p className="text-xs text-zinc-400">{t("settings.form.plex.disconnectConfirm")}</p>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setConfirmDisconnect(false)}
+                  className="text-zinc-400 hover:text-zinc-100"
+                >
+                  {t("settings.form.common.cancel")}
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={handleDisconnect}
+                  disabled={status === "saving"}
+                  autoFocus
+                >
+                  <Unlink aria-hidden />
+                  {t("settings.form.plex.disconnectConfirmAction")}
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <p className="text-sm text-zinc-400">
@@ -321,7 +364,9 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
         <Button
           onClick={handleConnect}
           disabled={status === "waiting" || status === "saving"}
-          className="bg-[#e5a00d] hover:bg-[#f0ac14] text-black font-semibold"
+          // Plex brand fill is a fixed (non-remapped) colour in both themes, so
+          // black text is the right fixed pairing (guardrail 42).
+          className="bg-[var(--ds-plex)] hover:bg-[var(--ds-plex)] hover:brightness-110 text-black font-semibold"
         >
           {status === "waiting" ? (
             <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.plex.waiting")}</>
@@ -350,7 +395,7 @@ export function PlexConnectForm({ initialEmail, initialServerUrl, initialPlexLib
                 value={serverUrl}
                 onChange={(e) => { setServerUrl(e.target.value); setServerStatus("idle"); }}
                 placeholder="http://192.168.1.100:32400"
-                className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                className="bg-zinc-800 border-zinc-700 font-mono"
               />
               <p className="text-xs text-zinc-500">
                 {t("settings.form.plex.serverUrlHelp")}

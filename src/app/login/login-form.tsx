@@ -12,8 +12,36 @@ import { withBasePath } from "@/lib/base-path";
 import { safeInternalPath } from "@/lib/safe-url";
 import { getPasskeyAssertion, isWebAuthnCancel, isWebAuthnSupported, type RequestOptionsJSON } from "@/lib/client/webauthn";
 import { useT } from "@/components/i18n/i18n-provider";
+import type { Translator } from "@/lib/i18n/translate";
 
 type Provider = "credentials" | "plex" | "jellyfin" | "oidc";
+
+// Every `?error=<code>` on /login is produced by the OIDC routes —
+// /api/auth/oidc/start and /callback redirect here on failure — and until this
+// map nothing on the page read it, so a denied consent, a disabled account or
+// an expired state cookie all landed on a silent login page. A LITERAL map,
+// never a key built from the code: the i18n dead-string scan can't see a built
+// key, and an unknown code must fall back rather than render a raw key.
+const LOGIN_ERROR_CODE_KEYS: Record<string, string> = {
+  rate_limited: "auth.login.error.oidc.rate_limited",
+  oidc_not_configured: "auth.login.error.oidc.oidc_not_configured",
+  oidc_unavailable: "auth.login.error.oidc.oidc_unavailable",
+  oidc_no_state: "auth.login.error.oidc.oidc_no_state",
+  oidc_state_invalid: "auth.login.error.oidc.oidc_state_invalid",
+  oidc_exchange_failed: "auth.login.error.oidc.oidc_exchange_failed",
+  oidc_access_denied: "auth.login.error.oidc.oidc_access_denied",
+  oidc_idp_error: "auth.login.error.oidc.oidc_idp_error",
+  oidc_user_rejected: "auth.login.error.oidc.oidc_user_rejected",
+  oidc_rebind_required: "auth.login.error.oidc.oidc_rebind_required",
+  oidc_setup_required: "auth.login.error.oidc.oidc_setup_required",
+  account_disabled: "auth.login.error.oidc.account_disabled",
+  oidc_session_error: "auth.login.error.oidc.oidc_session_error",
+};
+
+function describeLoginErrorCode(code: string | null, t: Translator): string {
+  if (!code) return "";
+  return t(LOGIN_ERROR_CODE_KEYS[code] ?? "auth.login.error.oidc.generic");
+}
 type JellyfinMode = "password" | "quickconnect";
 
 interface JellyfinInstance {
@@ -100,14 +128,21 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
   // decodes to `/\t/evil.com`, which passes "starts with / and not //" but which
   // router.push resolves to https://evil.com/. See src/lib/safe-url.ts.
   const callbackUrl = safeInternalPath(searchParams.get("callbackUrl")) ?? "/";
+  // Read ONCE, as initial state (never re-read on later renders, so a retry
+  // that fails client-side replaces it instead of fighting it). The page is
+  // force-dynamic, so useSearchParams is populated during SSR too and the
+  // server and client initial states agree.
+  const initialErrorCode = searchParams.get("error");
 
   const defaultProvider: Provider = localLoginDisabled
     ? (oidcEnabled ? "oidc" : plexEnabled ? "plex" : jellyfinEnabled ? "jellyfin" : "credentials")
     : "credentials";
-  const [provider, setProvider] = useState<Provider>(defaultProvider);
+  // A redirected-back OIDC failure lands on the tab it came from, so the
+  // message sits beside the button that retries it.
+  const [provider, setProvider] = useState<Provider>(initialErrorCode && oidcEnabled ? "oidc" : defaultProvider);
   const [fields, setFields] = useState({ email: "", password: "", username: "" });
   const [rememberMe, setRememberMe] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState(() => describeLoginErrorCode(initialErrorCode, t));
   const [loading, setLoading] = useState(false);
   const [jellyfinMode, setJellyfinMode] = useState<JellyfinMode>("password");
   // Defaults to the FIRST syncable instance, not a bare "" — an admin can
@@ -445,6 +480,24 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
 
   return (
     <div className="space-y-5">
+      {localLoginDisabled && !hasExternalProviders && (
+        // Password sign-in is off and no provider is wired up: without this the
+        // card rendered its heading above an empty box with nothing to say why.
+        <div
+          role="alert"
+          className="text-sm"
+          style={{
+            background: "color-mix(in oklab, var(--ds-warning) 12%, transparent)",
+            border: "1px solid color-mix(in oklab, var(--ds-warning) 28%, transparent)",
+            borderRadius: "var(--ds-r-md)",
+            padding: "10px 12px",
+            color: "var(--ds-fg)",
+          }}
+        >
+          {t("auth.login.noMethods")}
+        </div>
+      )}
+
       {hasExternalProviders && (
         <div
           role="group"
@@ -642,8 +695,6 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
             </>
           )}
 
-          {error && <p role="alert" aria-live="assertive" className="text-sm text-red-400">{error}</p>}
-
           <RememberMeCheckbox checked={rememberMe} onChange={setRememberMe} />
 
           <Button
@@ -651,8 +702,16 @@ export function LoginForm({ plexEnabled, jellyfinEnabled, jellyfinInstances, oid
             className="w-full min-h-11"
             disabled={loading}
           >
-            {loading ? t("auth.login.signingIn") : t("auth.login.signIn")}
+            {loading ? (
+              <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("auth.login.signingIn")}</>
+            ) : (
+              t("auth.login.signIn")
+            )}
           </Button>
+
+          {/* Below the submit, like the OIDC / Plex / QuickConnect / MFA paths,
+              so switching tabs doesn't move the error above the button. */}
+          {error && <p role="alert" aria-live="assertive" className="text-sm text-red-400">{error}</p>}
 
           {provider === "jellyfin" && (
             <button
@@ -868,7 +927,9 @@ function ProviderTab({
       // min-w-0 + truncate: with all four providers on a 375px phone a long
       // single-word OIDC_DISPLAY_NAME ("Authentik") otherwise pushes the strip
       // past the card's border, since flex items default to min-width:auto.
-      className="flex-1 min-w-0 truncate font-medium transition-colors"
+      // ds-hover-tint: the background is set inline, so only the inset-shadow
+      // tint can give hover feedback and the DS focus ring (guardrail 42).
+      className="ds-hover-tint flex-1 min-w-0 truncate font-medium transition-colors"
       style={{
         // Padding alone landed at ~43.5px (just under 44), so an explicit
         // minHeight guarantees Apple HIG tap-target compliance.

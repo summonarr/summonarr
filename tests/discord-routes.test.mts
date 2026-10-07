@@ -534,22 +534,41 @@ test("initiate-merge does NOT return a pendingCount — that would be an enumera
   assert.ok(!("migrated" in body));
 });
 
-test("initiate-merge refuses a snowflake already linked to a REAL other account", async () => {
+// A snowflake already linked to ANOTHER real account is NOT refused here. The
+// old pre-DM 409 was itself the oracle the pendingCount removal closed: a free
+// id answered 200/502, a taken one 409, so any signed-in caller could map which
+// guild members hold a real Summonarr account. The collision now surfaces only
+// from confirm-merge (mergeDiscordIntoWebAccount refuses it), i.e. after the
+// caller has proven control of the Discord account by reading the code.
+test("initiate-merge answers a snowflake linked to a REAL other account exactly like a free one — no oracle", async () => {
   const { token } = await mintSession();
+  const free = await doInitiate(token, { discordId: VALID_SNOWFLAKE });
+  const freeBody = await free.json();
+  const freeDms = fetchCalls.filter((c) => /\/channels\/[^/]+\/messages$/.test(c.url.pathname)).length;
+
+  fetchCalls.length = 0;
+  ops = [];
+  const { token: token2 } = await mintSession();
   appUsers.push({
     id: "other", email: "other@example.com", role: "USER", discordId: VALID_SNOWFLAKE,
     permissions: 0n, deactivatedAt: null,
   });
-  const res = await doInitiate(token, { discordId: VALID_SNOWFLAKE });
-  assert.equal(res.status, 409);
-  assert.deepEqual(fetchCalls, [], "no DM for a taken id");
+  const taken = await doInitiate(token2, { discordId: VALID_SNOWFLAKE });
+  assert.equal(taken.status, free.status);
+  assert.deepEqual(await taken.json(), freeBody);
+  assert.equal(
+    fetchCalls.filter((c) => /\/channels\/[^/]+\/messages$/.test(c.url.pathname)).length,
+    freeDms,
+    "the DM is sent either way — the status code must not discriminate",
+  );
 });
 
-test("the taken-snowflake refusal is deliberately vague — it must not confirm the link", async () => {
+test("initiate-merge does not read the target snowflake's owner at all", async () => {
   const { token } = await mintSession();
   appUsers.push({ id: "other", email: "other@example.com", role: "USER", discordId: VALID_SNOWFLAKE, permissions: 0n, deactivatedAt: null });
-  const body = await (await doInitiate(token, { discordId: VALID_SNOWFLAKE })).json();
-  assert.ok(!/already|linked|taken/i.test(body.error), `the error confirms the binding: ${body.error}`);
+  await doInitiate(token, { discordId: VALID_SNOWFLAKE });
+  const ownerLookups = opsOf("user.findUnique").filter((o) => (o.args as { discordId?: string }).discordId === VALID_SNOWFLAKE);
+  assert.deepEqual(ownerLookups, [], "a pre-DM owner lookup is the first half of the enumeration oracle");
 });
 
 test("a @discord.local SHADOW account does not block the merge — that is the whole point", async () => {

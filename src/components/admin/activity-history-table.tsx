@@ -388,8 +388,16 @@ export function ActivityHistoryTable({
                 <Th width={48} align="right" />
               </tr>
             </thead>
-            <tbody>
-              {loading ? (
+            {/* A refetch (sort, page, filter, keystroke) keeps the previous
+                rows on screen, dimmed and inert, so the table doesn't collapse
+                to a 60px text cell and bounce the pagination footer. The text
+                cell is for the FIRST load only, when there is nothing to keep. */}
+            <tbody
+              aria-busy={loading || undefined}
+              className={loading && rows.length > 0 ? "opacity-50 pointer-events-none" : undefined}
+              style={{ transition: "opacity 120ms var(--ds-ease)" }}
+            >
+              {loading && rows.length === 0 ? (
                 <tr>
                   <td
                     colSpan={colSpan}
@@ -773,15 +781,17 @@ export function ActivityHistoryTable({
                             onClick={() => setDeleteRow(r)}
                             className="history-delete"
                             aria-label={t("adminActivity.history.deleteAria")}
+                            // Muted, not disabled: the only destructive control
+                            // in the table must read as live. Hover/focus turn
+                            // it danger via the .history-delete rule in
+                            // globals.css (guardrail 42 — no inline cursor).
                             style={{
                               background: "transparent",
                               border: "1px solid transparent",
-                              color: "var(--ds-fg-disabled)",
-                              cursor: "pointer",
+                              color: "var(--ds-fg-muted)",
                               borderRadius: 4,
                               padding: "4px 6px",
                               lineHeight: 0,
-                              transition: "all 120ms var(--ds-ease)",
                             }}
                           >
                             <svg

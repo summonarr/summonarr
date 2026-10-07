@@ -5,7 +5,7 @@
 // segment row (a text-xs label beside a 34px bordered group) ONLY on the
 // overview and stats routes (`showFilters` in activity-filter-bar.tsx).
 // KpiStripSkeleton mirrors KpiStrip in activity-sections.tsx — one bordered
-// `resp-kpi` strip (radius 10, mb 22) whose cells are padding 14 around a
+// `resp-kpi` strip (radius var(--ds-r-lg), mb 22) whose cells are padding 14 around a
 // 14px label line box, gap 6, the 22px value's 33px line box, gap 6 and the
 // 22px sparkline (~109px). The strip keeps `resp-kpi`, so it reflows to 3 and
 // then 2 columns at the same 1180 / 899 breakpoints as the real one.
@@ -56,7 +56,7 @@ export function KpiStripSkeleton({ count = 6 }: { count?: number }) {
           ...SKELETON_CARD,
           display: "grid",
           gridTemplateColumns: `repeat(${count}, minmax(0, 1fr))`,
-          borderRadius: 10,
+          borderRadius: "var(--ds-r-lg)",
           overflow: "hidden",
         }}
       >
@@ -84,14 +84,57 @@ export function KpiStripSkeleton({ count = 6 }: { count?: number }) {
   );
 }
 
-// ActivityCard stand-in (radius 10, hairline) with a SectionHeader line.
+// ActivityCard stand-in (radius var(--ds-r-lg), hairline) with a SectionHeader line.
 export function ActivityCardSkeleton({ h }: { h: number }) {
   return (
-    <div style={{ ...SKELETON_CARD, borderRadius: 10, padding: 18, height: h }}>
+    <div style={{ ...SKELETON_CARD, borderRadius: "var(--ds-r-lg)", padding: 18, height: h }}>
       <div className="flex items-center" style={{ height: 20, marginBottom: 12 }}>
         <Bar w={140} h={12} />
       </div>
       <Bar w="100%" h={Math.max(0, h - 20 - 12 - 36 - 2)} r={6} />
+    </div>
+  );
+}
+
+// Stand-in for the TABLE cards — "Recent plays" on the overview and the
+// History tab's table: one ActivityCard (padding 0, radius var(--ds-r-lg))
+// with a header row, a hairline, then `rows` 44px table rows. `toolbar` draws
+// the History table's taller search + date + export row (32px controls)
+// instead of the one-line section header the recent-plays card has.
+export function ActivityTableCardSkeleton({
+  rows = 6,
+  toolbar = false,
+}: {
+  rows?: number;
+  toolbar?: boolean;
+}) {
+  return (
+    <div style={{ ...SKELETON_CARD, borderRadius: "var(--ds-r-lg)", overflow: "hidden" }}>
+      <div
+        className="flex items-center justify-between gap-3"
+        style={{ padding: toolbar ? "14px 18px" : "16px 18px 12px" }}
+      >
+        <Bar w={toolbar ? 220 : 140} h={toolbar ? 32 : 12} r={toolbar ? 8 : 4} />
+        <Bar w={toolbar ? 180 : 64} h={toolbar ? 32 : 10} r={toolbar ? 8 : 4} />
+      </div>
+      <div style={{ borderTop: "1px solid var(--ds-border)" }} />
+      {Array.from({ length: rows }).map((_, i) => (
+        <div
+          key={i}
+          className="flex items-center gap-4"
+          style={{
+            padding: "0 18px",
+            height: 44,
+            borderTop: i === 0 ? "none" : "1px solid var(--ds-border)",
+          }}
+        >
+          <Bar w={26} h={26} r={999} />
+          <Bar w="30%" h={11} />
+          <Bar w="18%" h={10} />
+          <Bar w="14%" h={10} />
+          <Bar w="10%" h={10} />
+        </div>
+      ))}
     </div>
   );
 }

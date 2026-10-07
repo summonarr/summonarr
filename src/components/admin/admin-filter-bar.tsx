@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useT } from "@/components/i18n/i18n-provider";
+import { StyledSelect } from "@/components/ui/styled-select";
 
 // Labels are i18n keys, translated at render.
 const STATUS_TABS = [
@@ -78,7 +79,6 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentT
                 fontSize: 12,
                 background: active ? "var(--ds-bg-3)" : "transparent",
                 color: active ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-                cursor: "pointer",
               }}
             >
               {t(tab.labelKey)}
@@ -127,7 +127,6 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentT
                   fontSize: 12,
                   background: active ? "var(--ds-bg-3)" : "transparent",
                   color: active ? "var(--ds-fg)" : "var(--ds-fg-muted)",
-                  cursor: "pointer",
                 }}
               >
                 {t(tab.labelKey)}
@@ -136,27 +135,19 @@ export function AdminFilterBar({ statusCounts, totalAll, currentStatus, currentT
           })}
         </div>
 
-        <select
+        <StyledSelect
+          compact
           value={currentSort}
           onChange={(e) => navigate(currentStatus, e.target.value, currentType)}
           aria-label={t("adminQueue.sort.label")}
-          className="focus:outline-none focus:ring-1"
-          style={{
-            padding: "5px 10px",
-            height: 30,
-            borderRadius: 6,
-            fontSize: 12,
-            background: "var(--ds-bg-2)",
-            color: "var(--ds-fg-muted)",
-            border: "1px solid var(--ds-border)",
-          }}
+          className="w-auto md:text-xs"
         >
           {SORT_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
               {t(opt.labelKey)}
             </option>
           ))}
-        </select>
+        </StyledSelect>
       </div>
     </div>
   );

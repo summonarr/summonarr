@@ -9,12 +9,14 @@ interface OverviewTabProps {
   service: TrashService;
   radarrConfigured: boolean;
   sonarrConfigured: boolean;
+  namedInstancesConfigured: boolean;
 }
 
 export function OverviewTab({
   service,
   radarrConfigured,
   sonarrConfigured,
+  namedInstancesConfigured,
 }: OverviewTabProps) {
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -23,6 +25,7 @@ export function OverviewTab({
       <StarterPackCard
         radarrConfigured={radarrConfigured}
         sonarrConfigured={sonarrConfigured}
+        namedInstancesConfigured={namedInstancesConfigured}
         onChanged={() => setRefreshKey((n) => n + 1)}
       />
       <OverviewKpis service={service} refreshKey={refreshKey} />

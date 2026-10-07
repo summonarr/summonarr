@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { XCircle, Loader2, RefreshCw, RefreshCcw, Trash2, Database } from "@/components/icons";
+import { AlertTriangle, Loader2, RefreshCw, RefreshCcw, Trash2, Database } from "@/components/icons";
 import { withBasePath } from "@/lib/base-path";
 import type { Translator } from "@/lib/i18n/translate";
 import { useT } from "@/components/i18n/i18n-provider";
@@ -173,7 +173,10 @@ export function CacheManagementPanel() {
   const t = useT();
   const [status, setStatus] = useState<"idle" | "running" | "done" | "error">("idle");
   const [confirmAll, setConfirmAll] = useState(false);
-  const [lines, setLines] = useState<string[]>([]);
+  // Each line remembers whether its step succeeded so a failed source can be
+  // coloured on its own; the panel-level status alone made a failed line look
+  // identical to a successful one.
+  const [lines, setLines] = useState<{ text: string; ok: boolean }[]>([]);
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
 
@@ -182,7 +185,7 @@ export function CacheManagementPanel() {
     setStatus("running");
     setConfirmAll(false);
     setLines([]);
-    const out: string[] = [];
+    const out: { text: string; ok: boolean }[] = [];
     let anyError = false;
 
     // Clear every source with one request, then refetch each source in turn.
@@ -191,11 +194,11 @@ export function CacheManagementPanel() {
     try {
       const clearRes = await fetch(withBasePath("/api/admin/clear-cache?source=all"), { method: "DELETE" });
       const clearData: ClearResult = await clearRes.json().catch(() => ({}));
-      if (clearRes.ok) out.push(summarizeClear(t, clearData));
-      else { anyError = true; out.push(t("settings.form.cache.clearFailedDetail", { detail: clearData.error ?? clearRes.status })); }
+      if (clearRes.ok) out.push({ text: summarizeClear(t, clearData), ok: true });
+      else { anyError = true; out.push({ text: t("settings.form.cache.clearFailedDetail", { detail: clearData.error ?? clearRes.status }), ok: false }); }
     } catch {
       anyError = true;
-      out.push(t("settings.form.cache.clearFailedRequest"));
+      out.push({ text: t("settings.form.cache.clearFailedRequest"), ok: false });
     }
     setLines([...out]);
 
@@ -207,11 +210,11 @@ export function CacheManagementPanel() {
           body: JSON.stringify(source.warmBody ?? {}),
         });
         const data: WarmResult = await res.json().catch(() => ({}));
-        if (res.ok && !data.error) out.push(`${source.label}: ${summarizeWarm(t, data)}`);
-        else { anyError = true; out.push(`${source.label}: ${data.error ?? t("settings.form.cache.refetchFailedLower")}`); }
+        if (res.ok && !data.error) out.push({ text: `${source.label}: ${summarizeWarm(t, data)}`, ok: true });
+        else { anyError = true; out.push({ text: `${source.label}: ${data.error ?? t("settings.form.cache.refetchFailedLower")}`, ok: false }); }
       } catch {
         anyError = true;
-        out.push(`${source.label}: ${t("settings.form.cache.requestFailedLower")}`);
+        out.push({ text: `${source.label}: ${t("settings.form.cache.requestFailedLower")}`, ok: false });
       }
       setLines([...out]);
     }
@@ -239,7 +242,7 @@ export function CacheManagementPanel() {
       <div className="pt-3 border-t border-zinc-800 space-y-2">
         {confirmAll ? (
           <div className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/60 px-3 py-2.5 w-fit">
-            <XCircle className="w-4 h-4 text-amber-400 shrink-0" />
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" aria-hidden />
             <p className="text-sm text-zinc-200">{t("settings.form.cache.confirmAll")}</p>
             <Button type="button" size="sm" onClick={runAll} className="bg-amber-600 text-black hover:bg-amber-600/90 h-8 px-3 text-xs">{t("settings.form.cache.run")}</Button>
             <Button type="button" size="sm" variant="outline" onClick={() => setConfirmAll(false)} className="border-zinc-600 text-zinc-400 hover:text-zinc-100 h-8 px-3 text-xs">{t("settings.form.common.cancel")}</Button>
@@ -258,9 +261,9 @@ export function CacheManagementPanel() {
         )}
 
         {lines.length > 0 && (
-          <div className="flex flex-col gap-0.5 text-xs">
+          <div role={status === "error" ? "alert" : "status"} aria-live={status === "error" ? "assertive" : "polite"} className="flex flex-col gap-0.5 text-xs">
             {lines.map((l, i) => (
-              <span key={i} className={status === "error" ? "text-zinc-300" : "text-zinc-400"}>{l}</span>
+              <span key={i} className={l.ok ? "text-zinc-400" : "text-red-400"}>{l.text}</span>
             ))}
           </div>
         )}

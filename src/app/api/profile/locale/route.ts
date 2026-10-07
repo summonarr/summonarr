@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withAuth } from "@/lib/api-auth";
+import { maintenanceGuard } from "@/lib/maintenance";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { isLocale } from "@/lib/i18n/locales";
@@ -11,6 +12,9 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // one-time sync in LocaleSync for an account that has never stored one.
 export const PATCH = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
+  // Personal mutation — blocked during maintenance like push/subscribe.
+  const maint = await maintenanceGuard(session);
+  if (maint) return maint;
   const parsed = await readJsonCapped<{ locale?: unknown }>(req, 1024);
   if (parsed instanceof NextResponse) return parsed;
   if (!isLocale(parsed.locale)) {

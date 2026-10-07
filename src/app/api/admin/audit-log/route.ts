@@ -53,17 +53,26 @@ export const GET = withAdmin(async (req, _ctx, session) => {
 
   if (dateFrom || dateTo) {
     where.createdAt = {};
+    // An invalid date is a 400, as on the export twin: the table forwards the
+    // same filter state to both, so silently dropping it here returned
+    // UNFILTERED rows for "Load more" while "Export" of the identical view erred.
     if (dateFrom) {
       const d = new Date(dateFrom);
-      if (!isNaN(d.getTime())) where.createdAt.gte = d;
+      if (isNaN(d.getTime())) {
+        return NextResponse.json({ error: t("apiAdmin.auditLog.invalidDateFrom") }, { status: 400 });
+      }
+      where.createdAt.gte = d;
     }
     if (dateTo) {
       const end = new Date(dateTo);
-      if (!isNaN(end.getTime())) {
-        // Advance by one day to make the date range inclusive of the requested end date
-        end.setDate(end.getDate() + 1);
-        where.createdAt.lt = end;
+      if (isNaN(end.getTime())) {
+        return NextResponse.json({ error: t("apiAdmin.auditLog.invalidDateTo") }, { status: 400 });
       }
+      // Advance by one UTC day to make the range inclusive of the requested end
+      // date. UTC, because a date-only string parses to UTC midnight: local-time
+      // setDate lands 23/25 h later across a DST change in a non-UTC TZ.
+      end.setUTCDate(end.getUTCDate() + 1);
+      where.createdAt.lt = end;
     }
   }
 

@@ -130,7 +130,7 @@ function InstanceLibraryPicker({
             type="button"
             onClick={load}
             disabled={state === "loading"}
-            className="text-xs text-zinc-400 underline disabled:opacity-50"
+            className="min-h-8 px-2 -my-2 text-xs text-zinc-400 underline disabled:opacity-50"
           >
             {state === "loading" ? t("settings.media.loading") : items ? t("settings.media.reload") : t("settings.media.chooseLibraries")}
           </button>
@@ -381,7 +381,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                   disabled={!d.isNew}
                   onChange={(e) => update(idx, { slug: e.target.value.toLowerCase() })}
                   placeholder="remote"
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm disabled:opacity-60"
+                  className="bg-zinc-800 border-zinc-700 font-mono disabled:opacity-60"
                 />
                 {!d.isNew && <p className="text-xs text-zinc-500">{t("settings.instances.slugFixed")}</p>}
               </div>
@@ -392,7 +392,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                   value={d.name}
                   onChange={(e) => update(idx, { name: e.target.value })}
                   placeholder={t("settings.media.namePlaceholder")}
-                  className="bg-zinc-800 border-zinc-700 text-sm"
+                  className="bg-zinc-800 border-zinc-700"
                 />
               </div>
             </div>
@@ -406,7 +406,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                   value={d.url}
                   onChange={(e) => update(idx, { url: e.target.value })}
                   placeholder={service === "plex" ? "http://plex-remote:32400" : "http://jellyfin-remote:8096"}
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                  className="bg-zinc-800 border-zinc-700 font-mono"
                 />
               </div>
               <div className="space-y-1.5">
@@ -416,9 +416,15 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                   type="password"
                   value={d.token}
                   onChange={(e) => update(idx, { token: e.target.value })}
-                  placeholder={d.hasToken ? MASKED_VALUE : tokenLabel}
-                  className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                  placeholder={d.hasToken ? MASKED_VALUE : t(service === "plex" ? "settings.media.tokenPlaceholder.plex" : "settings.media.tokenPlaceholder.jellyfin")}
+                  className="bg-zinc-800 border-zinc-700 font-mono"
                 />
+                {/* Same "saved, hidden" helper the notification channels and
+                    the arr manager show — the masked placeholder alone doesn't
+                    say whether blank means "nothing saved" or "write-only". */}
+                {d.hasToken && !d.token && (
+                  <p className="text-xs text-zinc-500">{t("settings.form.agents.secretKeep")}</p>
+                )}
               </div>
             </div>
 
@@ -431,7 +437,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                   value={d.adminEmail}
                   onChange={(e) => update(idx, { adminEmail: e.target.value })}
                   placeholder="you@example.com"
-                  className="bg-zinc-800 border-zinc-700 text-sm"
+                  className="bg-zinc-800 border-zinc-700"
                 />
               </div>
             )}
@@ -499,7 +505,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                     value={d.moviePathStripPrefix}
                     onChange={(e) => update(idx, { moviePathStripPrefix: e.target.value })}
                     placeholder="movies"
-                    className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                    className="bg-zinc-800 border-zinc-700 font-mono"
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -509,7 +515,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                     value={d.tvPathStripPrefix}
                     onChange={(e) => update(idx, { tvPathStripPrefix: e.target.value })}
                     placeholder="tv"
-                    className="bg-zinc-800 border-zinc-700 font-mono text-sm"
+                    className="bg-zinc-800 border-zinc-700 font-mono"
                   />
                 </div>
               </div>
@@ -553,7 +559,7 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
                   // server-side to destroy — discard it straight away and only
                   // ask for confirmation on a persisted instance.
                   onClick={() => (d.isNew ? removeInstance(idx) : setConfirmRemove(idx))}
-                  className="flex items-center gap-1 text-xs text-red-400 hover:text-[var(--ds-danger-hover)]"
+                  className="flex items-center gap-1 min-h-8 px-2 -my-2 -mr-2 text-xs text-red-400 hover:text-[var(--ds-danger-hover)]"
                 >
                   <Trash2 className="w-3.5 h-3.5" />{t("settings.common.remove")}
                 </button>
@@ -600,21 +606,23 @@ export function MediaInstancesManager({ service }: { service: MediaServerService
         <Button type="button" variant="outline" onClick={addInstance} className="border-zinc-600 text-zinc-300 hover:text-zinc-100 h-8 px-3 text-xs">
           {t("settings.media.add", { label })}
         </Button>
-        <Button type="button" onClick={save} disabled={status === "saving" || loadFailed} className="bg-indigo-600 hover:bg-indigo-500 h-8 px-3 text-xs">
+        <Button type="button" onClick={save} disabled={status === "saving" || loadFailed} className="h-8 px-3 text-xs">
           {status === "saving" ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />{t("settings.common.saving")}</> : t("settings.instances.saveAndTest")}
         </Button>
         {confirmRefresh ? (
-          <span className="flex items-center gap-2 text-xs text-zinc-400">
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-400">
             {t("settings.media.discardPrompt")}
-            <button type="button" onClick={load} className="text-red-400 hover:underline font-medium">{t("settings.media.discard")}</button>
-            <button type="button" onClick={() => setConfirmRefresh(false)} className="text-zinc-500 hover:text-zinc-100">{t("settings.common.cancel")}</button>
+            <button type="button" onClick={load} className="min-h-8 px-2 text-red-400 hover:underline font-medium">{t("settings.media.discard")}</button>
+            <button type="button" onClick={() => setConfirmRefresh(false)} className="min-h-8 px-2 text-zinc-500 hover:text-zinc-100">{t("settings.common.cancel")}</button>
           </span>
         ) : (
-          <button type="button" onClick={() => (dirty ? setConfirmRefresh(true) : load())} className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-100"><RefreshCw className="w-3 h-3" />{t("settings.common.refresh")}</button>
+          <button type="button" onClick={() => (dirty ? setConfirmRefresh(true) : load())} className="flex items-center gap-1 min-h-8 px-2 text-xs text-zinc-500 hover:text-zinc-100"><RefreshCw className="w-3 h-3" />{t("settings.common.refresh")}</button>
         )}
-        {status === "ok" && <span className="min-w-0 text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4 shrink-0" />{message}</span>}
-        {status === "error" && <span className="min-w-0 break-words text-sm text-red-400 flex items-center gap-1.5"><XCircle className="w-4 h-4 shrink-0" />{message}</span>}
       </div>
+      {/* On its own line so a long save error wraps instead of running off
+          the card beside the buttons at phone width (same as the arr manager). */}
+      {status === "ok" && <p className="text-sm text-green-400 flex items-center gap-1.5"><CheckCircle className="w-4 h-4 shrink-0" />{message}</p>}
+      {status === "error" && <p className="text-sm text-red-400 flex items-center gap-1.5"><XCircle className="w-4 h-4 shrink-0" />{message}</p>}
       {loadFailed && (
         <p className="text-sm text-red-400 flex items-center gap-1.5">
           <XCircle className="w-4 h-4 shrink-0" />

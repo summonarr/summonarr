@@ -24,6 +24,7 @@
   "apiAuth.emailConfirm.invalidLinkTitle": "链接无效",
   "apiAuth.emailConfirm.malformed": "此验证链接格式错误。",
   "apiAuth.emailConfirm.missingToken": "此验证链接缺少令牌。",
+  "apiAuth.emailConfirm.notYou": "如果这不是你发起的，请关闭此页面——不会有任何更改。",
   "apiAuth.emailConfirm.pageTitle": "确认通知邮箱",
   "apiAuth.emailConfirm.successBody": "你的通知邮箱已确认。Summonarr 现在会将你的请求动态发送到该邮箱。你可以关闭此标签页。",
   "apiAuth.emailConfirm.successTitle": "邮箱已验证",

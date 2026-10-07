@@ -186,7 +186,9 @@ export const PATCH = withPermission(Permission.MANAGE_REQUESTS)(async (req, _ctx
   // so an admin can't blast 100 users' requests into the permanent state in a single click.
   if (typedPermanent && typedIds.length > 25) {
     return NextResponse.json(
-      { error: "permanent-batch-too-large", message: t("apiUser.requests.batch.permanentTooMany") },
+      // Human text in `error` like every sibling 400 (both web callers render
+      // `data.error` verbatim); the machine token rides under `code`.
+      { error: t("apiUser.requests.batch.permanentTooMany"), code: "permanent-batch-too-large" },
       { status: 400 },
     );
   }

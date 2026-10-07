@@ -1,11 +1,15 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Download, Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText } from "@/components/icons";
+import { Download, Upload, Loader2, CheckCircle, XCircle, FileCheck, FileX, FileText, AlertTriangle } from "@/components/icons";
 import { useHasMounted } from "@/hooks/use-has-mounted";
 import { uploadInChunks, type ChunkedUploadProgress } from "@/lib/chunked-upload";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+
+const MB = 1024 * 1024;
 
 // Magic bytes at the start of every encrypted backup file; used to reject plain-SQL uploads
 const ENCRYPTED_MAGIC = "RBKBKP01";
@@ -20,67 +24,22 @@ async function isEncryptedFile(file: File): Promise<boolean> {
   return true;
 }
 
-export function BackupUI({ mode }: { mode: "db-export" | "db-import" }) {
-  if (mode === "db-export") return <DbExportSection />;
+// `exportReady` is the server page's read of BACKUP_DB_PASSWORD (set, ≥12
+// chars — the db-export route's own 503 gate); false swaps the Download button
+// for a warning so the admin learns it here instead of from a tab of raw JSON.
+export function BackupUI({
+  mode,
+  exportReady = true,
+}: {
+  mode: "db-export" | "db-import";
+  exportReady?: boolean;
+}) {
+  if (mode === "db-export") return <DbExportSection ready={exportReady} />;
   return <DbImportSection />;
 }
 
-function PrimaryButton({
-  onClick,
-  disabled,
-  children,
-}: {
-  onClick: () => void;
-  disabled?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      className="ds-tap inline-flex items-center justify-center gap-2 font-medium transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
-      style={{
-        padding: "8px 14px",
-        fontSize: 13,
-        borderRadius: 8,
-        background: "var(--ds-accent)",
-        color: "var(--ds-accent-fg)",
-        border: "1px solid var(--ds-accent)",
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function SecondaryButton({
-  onClick,
-  children,
-}: {
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className="ds-tap inline-flex items-center gap-1.5 font-medium transition-colors"
-      style={{
-        padding: "5px 12px",
-        fontSize: 12,
-        borderRadius: 6,
-        background: "var(--ds-bg-2)",
-        color: "var(--ds-fg-muted)",
-        border: "1px solid var(--ds-border)",
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function DbExportSection() {
+function DbExportSection({ ready }: { ready: boolean }) {
   const t = useT();
-  const [lastFilename, setLastFilename] = useState<string | null>(null);
   // Default-filename preview includes today's date; gate to avoid SSR/CSR
   // drift across midnight UTC. See CLAUDE.md guardrail 16.
   const mounted = useHasMounted();
@@ -91,11 +50,12 @@ function DbExportSection() {
     // direct navigation the browser saves it straight to disk (the server's
     // `Content-Disposition: attachment` header names the file) and shows its
     // normal download progress. Errors (429, 500) show up as JSON in the new
-    // tab. There is no "done" signal, so there is no spinner here.
+    // tab. There is no "done" signal, so there is no spinner here — and no
+    // "served" claim either: the Filename row is only a PREVIEW of the name the
+    // route will use (same date formula). A HEAD probe is not a cheap check:
+    // the route defines only GET and Next auto-implements HEAD by running it,
+    // i.e. a full dump, a rate-limit slot and a BACKUP_EXPORT audit row.
     window.open(withBasePath("/api/admin/backup/db-export"), "_blank");
-    // Same date formula as the route so the preview matches the served name.
-    const date = new Date().toISOString().slice(0, 10);
-    setLastFilename(`summonarr-full-backup-${date}.sql.enc`);
   }
 
   return (
@@ -124,13 +84,32 @@ function DbExportSection() {
           className="ds-mono break-all"
           style={{ fontSize: 11.5, color: "var(--ds-fg)", flex: 1 }}
         >
-          {lastFilename ?? (mounted ? `summonarr-full-backup-${new Date().toISOString().slice(0, 10)}.sql.enc` : "")}
+          {mounted ? `summonarr-full-backup-${new Date().toISOString().slice(0, 10)}.sql.enc` : ""}
         </span>
       </div>
 
-      <PrimaryButton onClick={handleExport}>
-        <Download className="w-4 h-4" /> {t("adminManage.backup.download")}
-      </PrimaryButton>
+      {ready ? (
+        <Button onClick={handleExport}>
+          <Download /> {t("adminManage.backup.download")}
+        </Button>
+      ) : (
+        <div
+          role="status"
+          className="flex items-start gap-2"
+          style={{
+            padding: "10px 12px",
+            borderRadius: 6,
+            background: "color-mix(in oklab, var(--ds-warning) 12%, transparent)",
+            border: "1px solid color-mix(in oklab, var(--ds-warning) 30%, var(--ds-border))",
+            color: "var(--ds-warning)",
+            fontSize: 12.5,
+            lineHeight: 1.5,
+          }}
+        >
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>{t("adminManage.backup.exportNotConfigured")}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -140,9 +119,15 @@ function DbImportSection() {
   const locale = useLocale();
   const [file, setFile] = useState<File | null>(null);
   const [encrypted, setEncrypted] = useState<boolean | null>(null);
-  const [size, setSize] = useState<string | null>(null);
+  // Raw bytes; formatted at render so the size follows the viewer's locale
+  // (decimal separator) like the result KPIs below it.
+  const [sizeBytes, setSizeBytes] = useState<number | null>(null);
+  const [dragging, setDragging] = useState(false);
   const [importing, setImporting] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const sizeFmt = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 });
+  const formatSize = (bytes: number) =>
+    bytes > MB ? `${sizeFmt.format(bytes / MB)} MB` : `${sizeFmt.format(bytes / 1024)} KB`;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [progress, setProgress] = useState<ChunkedUploadProgress | null>(null);
   const [result, setResult] = useState<
@@ -160,15 +145,13 @@ function DbImportSection() {
     setFile(f);
     setResult(null);
     setProgress(null);
-    setSize(null);
+    setSizeBytes(null);
     setEncrypted(null);
     if (!f) return;
     try {
       const isEnc = await isEncryptedFile(f);
       setEncrypted(isEnc);
-      const kb = (f.size / 1024).toFixed(1);
-      const mb = (f.size / (1024 * 1024)).toFixed(1);
-      setSize(f.size > 1024 * 1024 ? `${mb} MB` : `${kb} KB`);
+      setSizeBytes(f.size);
     } catch {
       setResult({ ok: false, error: t("adminManage.backup.error.read") });
     }
@@ -223,7 +206,7 @@ function DbImportSection() {
     if (fileInputRef.current) fileInputRef.current.value = "";
     setFile(null);
     setEncrypted(null);
-    setSize(null);
+    setSizeBytes(null);
     setResult(null);
     setProgress(null);
     setConfirming(false);
@@ -239,19 +222,31 @@ function DbImportSection() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div
+        onDragEnter={(e) => {
+          e.preventDefault();
+          setDragging(true);
+        }}
         onDragOver={(e) => {
           // Without preventDefault the browser's own drop runs and navigates
           // away to (or downloads) the dropped file.
           e.preventDefault();
           e.dataTransfer.dropEffect = "copy";
+          setDragging(true);
+        }}
+        onDragLeave={(e) => {
+          // dragleave fires when the pointer crosses onto a CHILD of the zone
+          // too; only clear once it has actually left the zone.
+          if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+          setDragging(false);
         }}
         onDrop={(e) => {
           e.preventDefault();
+          setDragging(false);
           const dropped = e.dataTransfer.files[0];
           if (dropped) void handleFileChange(dropped);
         }}
         style={{
-          border: `1px dashed ${dropBorder}`,
+          border: `1px dashed ${dragging ? "var(--ds-accent-ring)" : dropBorder}`,
           borderRadius: 8,
           padding: 18,
           display: "flex",
@@ -260,7 +255,11 @@ function DbImportSection() {
           gap: 10,
           minHeight: 110,
           textAlign: "center",
-          background: file ? "var(--ds-bg-inset, var(--ds-bg))" : "transparent",
+          background: dragging
+            ? "var(--ds-accent-soft)"
+            : file
+              ? "var(--ds-bg-inset, var(--ds-bg))"
+              : "transparent",
           transition: "background 120ms, border-color 120ms",
         }}
       >
@@ -277,12 +276,12 @@ function DbImportSection() {
               <span className="ds-mono font-medium break-all" style={{ fontSize: 12 }}>
                 {file.name}
               </span>
-              {size && (
+              {sizeBytes !== null && (
                 <span
                   className="ds-mono"
                   style={{ fontSize: 10.5, color: "var(--ds-fg-subtle)" }}
                 >
-                  · {size}
+                  · {formatSize(sizeBytes)}
                 </span>
               )}
             </div>
@@ -325,15 +324,14 @@ function DbImportSection() {
 
       <div className="flex items-center gap-2 flex-wrap">
         <label
-          className="ds-tap inline-flex items-center gap-1.5 font-medium transition-colors cursor-pointer focus-within:ring-2 focus-within:ring-ring"
-          style={{
-            padding: "5px 12px",
-            fontSize: 12,
-            borderRadius: 6,
-            background: "var(--ds-bg-2)",
-            color: "var(--ds-fg-muted)",
-            border: "1px solid var(--ds-border)",
-          }}
+          // Styled as the secondary Button beside it (same recipe, so the pair
+          // reads as one control row); a <label> is not a <button>, so the
+          // pointer and the focus ring (from the sr-only input inside) are
+          // restated here rather than coming from the base rule / focus-visible.
+          className={cn(
+            buttonVariants({ variant: "secondary", size: "sm" }),
+            "cursor-pointer focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50",
+          )}
         >
           {t("adminManage.backup.chooseFile")}
           <input
@@ -353,17 +351,21 @@ function DbImportSection() {
             className="sr-only"
           />
         </label>
-        {file && <SecondaryButton onClick={clearFile}>{t("adminManage.backup.clear")}</SecondaryButton>}
+        {file && (
+          <Button variant="secondary" size="sm" onClick={clearFile}>
+            {t("adminManage.backup.clear")}
+          </Button>
+        )}
       </div>
 
       {!result?.summary && !confirming && (
-        <PrimaryButton
+        <Button
           onClick={() => setConfirming(true)}
           disabled={!file || !encrypted || importing}
         >
           {importing ? (
             <>
-              <Loader2 className="w-4 h-4 animate-spin" />
+              <Loader2 className="animate-spin" />
               {progress?.phase === "import"
                 ? t("adminManage.backup.importing")
                 : progress
@@ -372,10 +374,10 @@ function DbImportSection() {
             </>
           ) : (
             <>
-              <Upload className="w-4 h-4" /> {t("adminManage.backup.restoreFromFile")}
+              <Upload /> {t("adminManage.backup.restoreFromFile")}
             </>
           )}
-        </PrimaryButton>
+        </Button>
       )}
 
       {!result?.summary && confirming && (
@@ -394,12 +396,12 @@ function DbImportSection() {
             {t("adminManage.backup.confirm")}
           </span>
           <div className="flex items-center gap-2 flex-wrap">
-            <SecondaryButton onClick={() => setConfirming(false)}>
+            <Button variant="secondary" size="sm" onClick={() => setConfirming(false)}>
               {t("adminManage.common.cancel")}
-            </SecondaryButton>
-            <PrimaryButton onClick={handleImport} disabled={importing}>
-              <Upload className="w-4 h-4" /> {t("adminManage.backup.confirmYes")}
-            </PrimaryButton>
+            </Button>
+            <Button onClick={handleImport} disabled={importing}>
+              <Upload /> {t("adminManage.backup.confirmYes")}
+            </Button>
           </div>
         </div>
       )}
@@ -433,8 +435,8 @@ function DbImportSection() {
             }}
           >
             <span>
-              {(progress.uploaded / (1024 * 1024)).toFixed(1)} MB /{" "}
-              {(progress.total / (1024 * 1024)).toFixed(1)} MB
+              {sizeFmt.format(progress.uploaded / MB)} MB /{" "}
+              {sizeFmt.format(progress.total / MB)} MB
             </span>
             <span>
               {progress.phase === "import" ? t("adminManage.backup.restoringOnServer") : t("adminManage.backup.uploading")}

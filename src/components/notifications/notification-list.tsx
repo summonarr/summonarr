@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { Film, Tv2, Check, X, Bell, Trash2 } from "@/components/icons";
+import { Button } from "@/components/ui/button";
 import { posterUrl } from "@/lib/tmdb-types";
 import { withBasePath } from "@/lib/base-path";
 import { useHasMounted } from "@/hooks/use-has-mounted";
@@ -13,6 +14,7 @@ import { formatRelativeTimeLocalized } from "@/lib/relative-time";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
 import { EmptyState } from "@/components/ui/design";
+import { useNotifications } from "@/components/notifications/notification-store";
 
 export interface NotificationListItem {
   id: string;
@@ -57,6 +59,11 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
   // resurrect a row that a successful clear-all already removed on the server.
   // (Same pattern as watch-history-list's filterGen.)
   const listGen = useRef(0);
+  // The header bell and the mobile badge read the shared store, which only
+  // re-fetches on its 60s poll / SSE request+issue events — none of which fire
+  // for a read or a delete. Without this nudge, "Mark all read" here left the
+  // bell showing the old unread count on the same screen for up to a minute.
+  const { reload: reloadStore } = useNotifications();
 
   const anyUnread = items.some((n) => !n.readAt);
 
@@ -72,13 +79,21 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     const res = await fetch(withBasePath("/api/notifications"), POST("{}")).catch(() => null);
     // Roll back on a clean 4xx/5xx too (not just a thrown/network error) so the
     // list can't show read locally while the server still has them unread.
-    if (!res || !res.ok) setItems((cur) => cur.map((n) => (flipped.has(n.id) ? { ...n, readAt: null } : n)));
+    if (!res || !res.ok) {
+      setItems((cur) => cur.map((n) => (flipped.has(n.id) ? { ...n, readAt: null } : n)));
+      return;
+    }
+    void reloadStore();
   }
   async function markOneRead(id: string) {
     const flipped = items.some((n) => n.id === id && !n.readAt);
     if (flipped) setItems((cur) => cur.map((n) => (n.id === id ? { ...n, readAt: new Date().toISOString() } : n)));
     const res = await fetch(withBasePath("/api/notifications"), POST(JSON.stringify({ ids: [id] }))).catch(() => null);
-    if ((!res || !res.ok) && flipped) setItems((cur) => cur.map((n) => (n.id === id ? { ...n, readAt: null } : n)));
+    if (!res || !res.ok) {
+      if (flipped) setItems((cur) => cur.map((n) => (n.id === id ? { ...n, readAt: null } : n)));
+      return;
+    }
+    void reloadStore();
   }
   async function removeOne(id: string) {
     const gen = listGen.current;
@@ -93,7 +108,11 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     // Selection via query param — DELETE bodies are stripped by some proxies.
     const res = await fetch(withBasePath(`/api/notifications?ids=${encodeURIComponent(id)}`), { method: "DELETE" }).catch(() => null);
     // If gen changed, a clear-all happened meanwhile — don't bring the row back.
-    if ((!res || !res.ok) && gen === listGen.current) {
+    if (res && res.ok) {
+      void reloadStore();
+      return;
+    }
+    if (gen === listGen.current) {
       setItems((cur) => {
         if (cur.some((n) => n.id === id)) return cur;
         const next = [...cur];
@@ -117,7 +136,9 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
       setItems(prevItems);
       setTotal(prevTotal);
       setHasMore(prevItems.length < prevTotal);
+      return;
     }
+    void reloadStore();
   }
   async function loadMore() {
     setLoading(true);
@@ -166,9 +187,9 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
     <div>
       <div className="flex items-center justify-end gap-3 flex-wrap" style={{ marginBottom: 10 }}>
         {anyUnread && (
-          <button type="button" onClick={markAllRead} className="text-xs text-zinc-400 hover:text-zinc-200 underline">
+          <Button type="button" variant="link" size="xs" onClick={markAllRead}>
             {t("personal.notifications.markAllRead")}
-          </button>
+          </Button>
         )}
         {confirmingClear ? (
           <div className="flex items-center gap-1.5">
@@ -190,9 +211,9 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
             </button>
           </div>
         ) : (
-          <button type="button" onClick={() => setConfirmingClear(true)} className="text-xs text-zinc-500 hover:text-zinc-300 underline">
+          <Button type="button" variant="link" size="xs" onClick={() => setConfirmingClear(true)}>
             {t("personal.notifications.clearAll")}
-          </button>
+          </Button>
         )}
       </div>
 
@@ -239,7 +260,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
                     aria-label={t("personal.notifications.markRead")}
                     title={t("personal.notifications.markRead")}
                     className="ds-hover-tint inline-flex items-center justify-center"
-                    style={{ width: 32, height: 32, borderRadius: 6, color: "var(--ds-accent-text)" }}
+                    style={{ width: 40, height: 40, borderRadius: 6, color: "var(--ds-accent-text)" }}
                   >
                     <Check style={{ width: 15, height: 15 }} />
                   </button>
@@ -250,7 +271,7 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
                   aria-label={t("personal.notifications.removeAria")}
                   title={t("personal.notifications.remove")}
                   className="ds-hover-tint inline-flex items-center justify-center"
-                  style={{ width: 32, height: 32, borderRadius: 6, color: "var(--ds-fg-subtle)" }}
+                  style={{ width: 40, height: 40, borderRadius: 6, color: "var(--ds-fg-subtle)" }}
                 >
                   <X style={{ width: 15, height: 15 }} />
                 </button>
@@ -262,14 +283,9 @@ export function NotificationList({ initialItems, initialTotal }: { initialItems:
 
       {hasMore && (
         <div className="flex flex-col items-center gap-1.5" style={{ marginTop: 12 }}>
-          <button
-            type="button"
-            onClick={loadMore}
-            disabled={loading}
-            className="rounded-md border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 px-4 py-1.5 text-xs text-zinc-200 transition-colors"
-          >
+          <Button type="button" variant="outline" size="sm" onClick={loadMore} disabled={loading}>
             {loading ? t("personal.common.loading") : t("personal.common.loadMore", { count: total - items.length })}
-          </button>
+          </Button>
           {error && (
             <span role="alert" aria-live="assertive" className="text-xs text-red-400">{error}</span>
           )}

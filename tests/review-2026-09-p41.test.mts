@@ -48,8 +48,9 @@ function assertCopy(key: string, text: RegExp): void {
 test("requests page: a past-the-end page offers a link back to page 1", () => {
   assertCopy("requests.empty.pageDescription", /No more requests on this page\./);
   // The CTA is built from the same href helper the pager uses so status/sort/q
-  // filters survive the jump back.
-  assert.match(src, /href=\{pageHref\(1\)\}/);
+  // filters survive the jump back — now through EmptyState's cta slot, like
+  // /votes and /issues, instead of an inline link in the description.
+  assert.match(src, /href: pageHref\(1\)/);
   assertCopy("requests.empty.backToFirst", /Back to page 1/);
 });
 

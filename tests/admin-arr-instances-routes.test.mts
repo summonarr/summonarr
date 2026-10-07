@@ -195,6 +195,12 @@ for (const m of ["radarrWantedItem", "radarrAvailableItem", "sonarrWantedItem", 
     deleteMany: async (args: { where?: unknown }) => { rec(`${m}.deleteMany`, args?.where); return { count: 0 }; },
   });
 }
+// Removing a slug counts the PENDING/APPROVED requests it strands (A14b) — the
+// count is reported, never a reason to refuse. Configurable per test.
+let openRequestCount = 0;
+shadowPrismaModel(prisma, "mediaRequest", {
+  count: async (args: { where?: unknown }) => { rec("mediaRequest.count", args?.where); return openRequestCount; },
+});
 // The POST handler commits the registry write, the per-instance connection rows
 // and the removal cleanup in ONE transaction, so a mid-sequence failure cannot
 // leave an instance de-registered while its rows survive (the cleanup is
@@ -277,6 +283,7 @@ beforeEach(() => {
   errors.length = 0;
   arrTestOk = true;
   ipinfoOk = true;
+  openRequestCount = 0;
 });
 
 // ── gating ───────────────────────────────────────────────────────────────────
@@ -401,9 +408,11 @@ test("removing a NAMED instance DOES clean up its setting rows AND its slug-scop
   // report its remoteId as applied to a different server, and buildProfileBody
   // would skip re-creating the custom format and push a remoteId that does not
   // exist there into a live quality profile.
+  // …and scoped to THIS service through the TrashSpec relation (the table has
+  // no service column; the same slug on the other service is the normal shape).
   assert.deepEqual(
     ops.filter((c) => c.op === "trashApplication.deleteMany").map((c) => c.args),
-    [{ arrInstance: "anime" }],
+    [{ arrInstance: "anime", trashSpec: { service: "RADARR" } }],
   );
 });
 
@@ -683,6 +692,127 @@ test("an oversized save body is capped (guardrail 30)", async () => {
   const res = await saveInstances(t, undefined, huge);
   assert.ok(res.status === 400 || res.status === 413);
   assert.equal(opsOf("setting.upsert").length, 0);
+});
+
+// ── A14b: service-scoped TRaSH cleanup, stranded requests, URL/name/profile guards ──
+
+test("PIN: removing a Sonarr slug deletes only SONARR TrashApplication rows for it", async () => {
+  // TrashApplication has no service column and the Radarr/Sonarr registries are
+  // independent, so Radarr "anime" + Sonarr "anime" coexist. An unscoped
+  // `{ arrInstance: slug }` delete wiped the OTHER service's applications on
+  // every removal — listSpecs then reported every CF "not applied" and the next
+  // apply re-created them upstream as duplicates.
+  const t = await mintSession();
+  registry("sonarr", [{ slug: "anime", name: "Anime" }]);
+  await saveInstances(t, { service: "sonarr", instances: [] });
+  assert.deepEqual(
+    ops.filter((c) => c.op === "trashApplication.deleteMany").map((c) => c.args),
+    [{ arrInstance: "anime", trashSpec: { service: "SONARR" } }],
+  );
+});
+
+test("removing a slug that still has open requests is NOT refused — the stranded count rides in the response and the audit", async () => {
+  // Every later approve/retry resolves the instance through getCfg, which returns
+  // null once the slug's rows are gone, and the [id] PATCH has no re-point path.
+  // The admin may be decommissioning on purpose, so this is a warning, not a 409.
+  const t = await mintSession();
+  registry("radarr", [{ slug: "anime", name: "Anime" }]);
+  openRequestCount = 3;
+  const res = await saveInstances(t, { service: "radarr", instances: [] });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.deepEqual(body.removed, [{ slug: "anime", openRequests: 3 }]);
+  // Scoped to the removed slug, to THIS service's media type (a TV request on
+  // "anime" belongs to Sonarr's "anime") and to the statuses an approve/retry
+  // can still act on.
+  assert.deepEqual(opsOf("mediaRequest.count").map((c) => c.args), [
+    { arrInstance: "anime", mediaType: "MOVIE", status: { in: ["PENDING", "APPROVED"] } },
+  ]);
+  // The slug's rows are still cleaned up — the count never blocks the removal.
+  assert.deepEqual(opsOf("radarrWantedItem.deleteMany").map((c) => c.args), [{ arrInstance: "anime" }]);
+
+  for (const task of afterTasks.splice(0)) await task();
+  const created = opsOf("auditLog.create");
+  assert.equal(created.length, 1);
+  const details = JSON.parse((created[0].args as { data: { details: string } }).data.details);
+  assert.deepEqual(details.removed, [{ slug: "anime", openRequests: 3 }]);
+  assert.deepEqual(details.removedCounts, { anime: { wantedItems: 0, availableItems: 0, trashApplications: 0 } });
+});
+
+test("a Sonarr removal counts TV requests; a save that removes nothing counts none and reports an empty list", async () => {
+  const t = await mintSession();
+  registry("sonarr", [{ slug: "anime", name: "Anime" }]);
+  await saveInstances(t, { service: "sonarr", instances: [] });
+  assert.deepEqual(opsOf("mediaRequest.count").map((c) => c.args), [
+    { arrInstance: "anime", mediaType: "TV", status: { in: ["PENDING", "APPROVED"] } },
+  ]);
+
+  ops = [];
+  registry("radarr", [{ slug: "anime", name: "Anime" }]);
+  const body = await (await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", name: "Anime" }] })).json();
+  assert.deepEqual(body.removed, []);
+  assert.equal(opsOf("mediaRequest.count").length, 0, "nothing removed → nothing counted");
+});
+
+test("an instance url with embedded credentials or a non-http(s) scheme is 400 BEFORE any write", async () => {
+  // Same contract as the media-instances and /api/settings siblings: the value
+  // ships out verbatim on every safeFetchAdminConfigured call.
+  const t = await mintSession();
+  for (const url of ["http://admin:pw@10.0.0.8:7878", "ftp://10.0.0.8", "not a url", "https://" + "h".repeat(2001)]) {
+    ops = [];
+    const res = await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", url }] });
+    assert.equal(res.status, 400, `url ${url.slice(0, 40)} should be rejected`);
+    assert.equal(opsOf("setting.upsert").length, 0, "nothing may be written");
+    assert.equal(opsOf("$transaction").length, 0, "the transaction must not even open");
+  }
+  const body = await (await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", url: "http://admin:pw@10.0.0.8:7878" }] })).json();
+  assert.equal(body.error, 'URL for "anime" must not contain embedded credentials');
+  // A valid one (with surrounding whitespace) still saves.
+  assert.equal((await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", url: " http://10.0.0.8:7878 " }] })).status, 200);
+});
+
+test("GET redacts an embedded credential from a stored url", async () => {
+  // Older rows predate the write-time check; the view must still never echo
+  // userinfo into browser history / devtools.
+  const t = await mintSession();
+  registry("radarr", [{ slug: "anime", name: "Anime" }]);
+  settings.set(arrSettingKey("radarr", "anime", "Url"), "http://admin:pw@10.0.0.8:7878/");
+  const text = await (await getInstances(t)).text();
+  assert.ok(!text.includes("admin:pw"), "the credential leaked on GET");
+  const anime = JSON.parse(text).radarr.find((i: { slug: string }) => i.slug === "anime");
+  assert.equal(anime.url, "http://10.0.0.8:7878/");
+});
+
+test("an instance name is trimmed on storage and refused past 100 characters", async () => {
+  const t = await mintSession();
+  await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", name: "  Anime  " }] });
+  assert.equal(JSON.parse(settings.get("arrRadarrInstances") ?? "[]").find((e: { slug: string }) => e.slug === "anime").name, "Anime");
+
+  ops = [];
+  const res = await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", name: "n".repeat(101) }] });
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error, 'Name for "anime" must be 100 characters or fewer');
+  assert.equal(opsOf("setting.upsert").length, 0);
+  assert.equal(JSON.parse(settings.get("arrRadarrInstances") ?? "[]")[0].name, "Anime", "the refused save changed nothing");
+
+  assert.equal((await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", name: "n".repeat(100) }] })).status, 200, "exactly 100 is fine");
+});
+
+test("qualityProfileId must be a positive integer when provided — mirrors languageProfileId", async () => {
+  const t = await mintSession();
+  for (const qualityProfileId of ["abc", 0, -1, 1.5, "7.5", "NaN"]) {
+    ops = [];
+    const res = await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", qualityProfileId }] });
+    assert.equal(res.status, 400, `qualityProfileId ${JSON.stringify(qualityProfileId)} should be rejected`);
+    assert.equal((await res.json()).error, "invalid qualityProfileId for anime");
+    assert.equal(opsOf("setting.upsert").length, 0);
+  }
+  // "" and null clear; a numeric string and a number store.
+  for (const [v, stored] of [["", ""], [null, ""], ["7", "7"], [9, "9"]] as const) {
+    settings.set(arrSettingKey("radarr", "anime", "QualityProfileId"), "1");
+    assert.equal((await saveInstances(t, { service: "radarr", instances: [{ slug: "anime", qualityProfileId: v }] })).status, 200);
+    assert.equal(settings.get(arrSettingKey("radarr", "anime", "QualityProfileId")), stored);
+  }
 });
 
 // ── /api/admin/ip-lookup ─────────────────────────────────────────────────────

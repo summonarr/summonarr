@@ -5,6 +5,7 @@ import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { logAudit, auditContext } from "@/lib/audit";
+import { clearActivityCache } from "@/lib/play-history";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 export const dynamic = "force-dynamic";
@@ -99,6 +100,12 @@ export const DELETE = withPermission(Permission.ADMIN)(async (
           if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2025") return { count: 0 };
           throw err;
         });
+
+  // The stats/calendar/heatmap/popular aggregates are cached for 5–30 minutes and
+  // the write path flushes them on every finalize (recordCompletedSession); a delete
+  // must flush them too, or the panels beside the table keep counting the play the
+  // audit row just recorded as permanently removed. Same call backfill-playtime makes.
+  clearActivityCache();
 
   // Rows already deleted; a failed audit write must not 500 a successful delete.
   void logAudit({
