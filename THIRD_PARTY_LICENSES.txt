@@ -9108,7 +9108,7 @@ ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ------------------------------------------------------------------------------
 
-source-map-js@1.2.1
+source-map-js@1.2.2
 License: BSD-3-Clause
 
 Copyright (c) 2009-2011, Mozilla Foundation and contributors
