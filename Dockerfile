@@ -143,10 +143,16 @@ WORKDIR /app
 # (a) changes this RUN string to force the layer to rebuild and pull current
 # patches and (b) fails the build loudly if Alpine can't satisfy the patched
 # version. Bump the floor when the next libssl3/libcrypto3 CVE lands.
+# zlib is floored for the same reason plus one more: on 2026-10-07 the amd64
+# release build's `apk upgrade` hit a stale dl-cdn edge and installed zlib
+# 1.3.2-r0 (CVE-2026-85091, HIGH) minutes after the arm64 leg and the gate's
+# own amd64 build had received 1.3.2-r1 — the post-push Trivy scan caught it
+# and the release failed to publish. With the floor a stale mirror fails the
+# build at `apk add` instead of producing a vulnerable image.
 # Remove npm and npx — the entrypoint uses node directly; no npm needed at runtime.
 # This eliminates the entire class of npm-bundled CVEs (picomatch, brace-expansion, etc).
 RUN apk upgrade --no-cache && \
-    apk add --no-cache 'libssl3>=3.5.8-r0' 'libcrypto3>=3.5.8-r0' && \
+    apk add --no-cache 'libssl3>=3.5.8-r0' 'libcrypto3>=3.5.8-r0' 'zlib>=1.3.2-r1' && \
     rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 ENV NODE_ENV=production
