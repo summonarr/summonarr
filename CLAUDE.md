@@ -138,7 +138,7 @@ The release flow is **PR-then-tag**: bump versions on `build`, PR to `main`, mer
 
 1. [package.json](package.json) — `"version": "<X.Y.Z>"` (root field).
 2. [package-lock.json](package-lock.json) — `"version": "<X.Y.Z>"` in **two** places only: the top-level field and `packages.""` (lockfile v3 keeps both; `npm install` will rewrite either if they disagree). **Do not** global-find-replace the old version across this file — common SemVers like `0.1.0` appear inside transitive-dep entries (e.g. `node_modules/yocto-queue`, `node_modules/powershell-utils`) where the `version` field must match the `resolved` URL and `integrity` hash. Edit the two project entries individually.
-3. [README.md](README.md) — `Status: v<X.Y.Z> beta` line and the `Summonarr v<X.Y.Z> is a beta release` line under Beta testing.
+3. [README.md](README.md) — the `Status: v<X.Y.Z>` line at the top. The project is stable, not beta (since v0.33.0) — don't reintroduce a beta label.
 4. [docker-container/README.md](docker-container/README.md) — both `SUMMONARR_VERSION=<X.Y.Z>` examples (env table row and the "Pin to a specific version" code block). **Bare semver, no `v`** — see above.
 5. [README.md](README.md) `## Changelog` — **prepend** a new `### v<X.Y.Z>` block above the previous release. Group bullets under `**Added**` / `**Changed**` / `**Fixed**`. Source entries from `git log v<previous>..HEAD --oneline`, surfacing user-visible changes only (skip `chore`, `refactor`, `deps`). Conventional-commit scopes translate cleanly.
 
