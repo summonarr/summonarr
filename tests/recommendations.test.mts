@@ -110,7 +110,7 @@ if ((dns as { lookup: unknown }).lookup !== fakeLookup) {
 
 const { prisma } = await import("../src/lib/prisma.ts");
 const { shadowPrismaModel, shadowPrismaClientMethod } = await import("./_helpers.mts");
-const { computeRecommendationsForUser, selectSeedPlan, warmRecommendationsCache, getUserRecommendations, getRecommendationsComputedAt, summarizeRecommendationSeeds, qualityScoreOf, orderReasonSeeds, parseReasonSeeds, storedReasonSeeds, MAX_REASON_SEEDS, SEED_RECENCY_HALF_LIFE_MS, SEED_RECENCY_FLOOR, SEED_COUNT_WEIGHT, MAX_WATCH_HISTORY_SEEDS } =
+const { computeRecommendationsForUser, selectSeedPlan, warmRecommendationsCache, getUserRecommendations, getRecommendationsComputedAt, summarizeRecommendationSeeds, qualityScoreOf, orderReasonSeeds, parseReasonSeeds, storedReasonSeeds, MAX_REASON_SEEDS, SEED_RECENCY_HALF_LIFE_MS, SEED_RECENCY_FLOOR, SEED_COUNT_WEIGHT, MAX_WATCH_HISTORY_SEEDS, mergeHistorySeedRows } =
   await import("../src/lib/recommendations.ts");
 const { invalidateBlacklistCache } = await import("../src/lib/blacklist.ts");
 const { refreshRecommendationGraph, prewarmSuggestionEdges } = await import("../src/lib/recommendation-graph.ts");
@@ -473,6 +473,28 @@ shadowPrismaModel(prisma, "deletionVote", {
     deletionVotes
       .filter((r) => r.userId === args.where.userId)
       .map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType })),
+});
+// ── prisma.traktWatchedItem (a connected user's imported Trakt history) ──────
+type TraktWatchedRow = { userId: string; tmdbId: number; mediaType: MT; title: string; plays: number; lastWatchedAt: Date };
+let traktWatchedRows: TraktWatchedRow[] = [];
+// Users whose "use my Trakt history" toggle is OFF. The seed and exclusion reads
+// must carry the toggle IN their where clause: a reader that drops it is served
+// an opted-out user's rows here and fails the opt-out test.
+let traktHistoryOff = new Set<string>();
+let traktReadTakes: Array<number | undefined> = [];
+shadowPrismaModel(prisma, "traktWatchedItem", {
+  findMany: async (args: {
+    where: { userId: string; user?: { traktConnection?: { is?: { historySeeds?: boolean } } } };
+    orderBy?: { lastWatchedAt: "desc" };
+    take?: number;
+  }) => {
+    traktReadTakes.push(args.take);
+    const gated = args.where.user?.traktConnection?.is?.historySeeds === true;
+    let rows = traktWatchedRows.filter((r) => r.userId === args.where.userId && !(gated && traktHistoryOff.has(r.userId)));
+    if (args.orderBy?.lastWatchedAt === "desc") rows = [...rows].sort((a, b) => b.lastWatchedAt.getTime() - a.lastWatchedAt.getTime());
+    if (args.take != null) rows = rows.slice(0, args.take);
+    return rows.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title, lastWatchedAt: r.lastWatchedAt, plays: r.plays }));
+  },
 });
 shadowPrismaModel(prisma, "blacklistItem", {
   findMany: async () => blacklistItems.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType })),
@@ -973,6 +995,9 @@ beforeEach(() => {
   mediaRequests = [];
   deletionVotes = [];
   blacklistItems = [];
+  traktWatchedRows = [];
+  traktHistoryOff = new Set();
+  traktReadTakes = [];
   // blacklist.ts caches its resolved set module-globally for 30s — without this
   // a test's blacklist rows leak into every later test in the file.
   invalidateBlacklistCache();
@@ -1915,6 +1940,98 @@ test("request seeds: a serverless account's requests build the shelf, worded as 
   // Weight: 1.5 (request) × recency(1d) × count(1) × pos(0) × 0.9 damp.
   assert.ok(Math.abs(byId.get(111)!.score - 1.5 * recency(1) * countF(1) * OBSCURITY) < 1e-9, `got ${byId.get(111)!.score}`);
   assert.ok(byId.get(111)!.score > byId.get(222)!.score, "the fresher request weighs more");
+});
+
+// ── Trakt history (src/lib/trakt-user.ts, guardrail 34c) ───────────────────
+// A connected user's imported Trakt history is WATCH HISTORY: it seeds under the
+// same weight and cap as the server's, and its titles are "already watched".
+
+test("trakt history: a serverless account's Trakt history seeds the shelf as watch history", async () => {
+  users = [{ id: "u1", plexUserId: null, jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = []; // no server identity — before Trakt, history seeded nothing
+  traktWatchedRows = [{ userId: "u1", tmdbId: 10, mediaType: "MOVIE", title: "Watched On Trakt", plays: 1, lastWatchedAt: daysAgo(1) }];
+  suggestionsFor.set("movie:10", [movieItem(111)]);
+
+  const { candidates, conclusive } = await computeSeeded("u1");
+  assert.equal(conclusive, true);
+  const c = candidates.find((x) => x.tmdbId === 111)!;
+  assert.ok(c, "the Trakt seed's suggestion is on the shelf");
+  assert.equal(c.reasonSource, "WATCH_HISTORY");
+  assert.equal(c.reasonTitle, "Watched On Trakt");
+  // History weight (1) × recency(1d) × count(1) × pos(0) × the obscurity damp.
+  assert.ok(Math.abs(c.score - recency(1) * countF(1) * OBSCURITY) < 1e-9, `got ${c.score}`);
+  // The seed read never asks for more than the history cap can keep.
+  assert.ok(traktReadTakes.includes(MAX_WATCH_HISTORY_SEEDS), `seed read take: ${JSON.stringify(traktReadTakes)}`);
+});
+
+test("trakt history: a title in BOTH histories seeds once — the later watch and the larger count, never the sum", async () => {
+  users = [{ id: "u1", plexUserId: "p1", jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [{ id: "msu1", source: "plex", sourceUserId: "p1", userId: "u1" }];
+  // Three server plays ten days ago; a Trakt scrobbler recorded five, the latest two days ago.
+  playHistoryRows = [1, 2, 3].map((n) => ({
+    mediaServerUserId: "msu1", tmdbId: 10, mediaType: "MOVIE" as MT, watched: true, startedAt: daysAgo(10 + n / 10), title: "Both Places",
+  }));
+  traktWatchedRows = [{ userId: "u1", tmdbId: 10, mediaType: "MOVIE", title: "Both Places", plays: 5, lastWatchedAt: daysAgo(2) }];
+  suggestionsFor.set("movie:10", [movieItem(111)]);
+
+  const { candidates } = await computeSeeded("u1");
+  const c = candidates.find((x) => x.tmdbId === 111)!;
+  assert.equal(c.seedCount, 1, "one title, one seed");
+  // max(3, 5) plays at the later watch — summing (8) would double-count scrobbled plays.
+  assert.ok(Math.abs(c.score - recency(2) * countF(5) * OBSCURITY) < 1e-9, `got ${c.score}`);
+});
+
+test("trakt history: watched-on-Trakt titles are never recommended, and an opted-out history is neither seed nor exclusion", async () => {
+  users = [{ id: "u1", plexUserId: null, jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [];
+  watchlistRows = [{ userId: "u1", tmdbId: 20, mediaType: "MOVIE", createdAt: daysAgo(1), title: "Listed" }];
+  suggestionsFor.set("movie:20", [movieItem(222), movieItem(333)]);
+  traktWatchedRows = [
+    // Already watched on Trakt — must not come back as a recommendation.
+    { userId: "u1", tmdbId: 222, mediaType: "MOVIE", title: "Seen On Trakt", plays: 1, lastWatchedAt: daysAgo(30) },
+    { userId: "u1", tmdbId: 10, mediaType: "MOVIE", title: "Trakt Seed", plays: 1, lastWatchedAt: daysAgo(3) },
+  ];
+  suggestionsFor.set("movie:10", [movieItem(444)]);
+  suggestionsFor.set("movie:222", [movieItem(555)]);
+
+  const on = new Set((await computeSeeded("u1")).candidates.map((c) => c.tmdbId));
+  assert.ok(!on.has(222), "a title watched on Trakt is excluded");
+  assert.ok(on.has(333) && on.has(444), "the watchlist and Trakt seeds both contribute");
+
+  traktHistoryOff = new Set(["u1"]);
+  const off = new Set((await computeSeeded("u1")).candidates.map((c) => c.tmdbId));
+  assert.ok(off.has(222), "with the toggle off the Trakt history excludes nothing");
+  assert.ok(!off.has(444) && !off.has(555), "and seeds nothing");
+});
+
+test("trakt history: a title watched on Trakt SINCE the last cron leaves the stored shelf at read time (drift filter) — unless the toggle is off", async () => {
+  // The read-time filter reads ONLY the exclusion set (collectKnownTitleKeys),
+  // never the seeds — so this is the pin on the Trakt rows being in it.
+  users = [{ id: "u1", plexUserId: null, jellyfinUserId: null, deactivatedAt: null, purgedAt: null }];
+  mediaServerUsers = [];
+  userRecRows = [storedRec("u1", 600), { ...storedRec("u1", 700), rank: 1 }];
+  traktWatchedRows = [{ userId: "u1", tmdbId: 600, mediaType: "MOVIE", title: "Watched On Trakt", plays: 1, lastWatchedAt: daysAgo(0) }];
+
+  assert.deepEqual((await getUserRecommendations("u1")).map((m) => m.id), [700]);
+  traktHistoryOff = new Set(["u1"]);
+  assert.deepEqual((await getUserRecommendations("u1")).map((m) => m.id), [600, 700]);
+});
+
+test("mergeHistorySeedRows: at most the cap, newest first across both sources; no Trakt rows ⇒ the server rows untouched", () => {
+  const cap = MAX_WATCH_HISTORY_SEEDS;
+  const server = Array.from({ length: cap }, (_, i) => ({
+    tmdbId: 1 + i, mediaType: "MOVIE" as MT, title: `S${i}`, lastAt: daysAgo(100 + i), count: 1,
+  }));
+  // Identity without Trakt: same rows, same order — an instance without Trakt sees no change.
+  assert.deepEqual(mergeHistorySeedRows(server, [], cap), server);
+
+  const trakt = Array.from({ length: 10 }, (_, i) => ({
+    tmdbId: 50_000 + i, mediaType: "TV" as MT, title: `T${i}`, lastAt: daysAgo(1 + i), count: 7,
+  }));
+  const merged = mergeHistorySeedRows(server, trakt, cap);
+  assert.equal(merged.length, cap, "the per-user history ceiling (and the graph budget it sets) does not grow");
+  assert.deepEqual(merged.slice(0, 10).map((r) => r.tmdbId), trakt.map((r) => r.tmdbId), "the fresher Trakt titles take the top slots");
+  assert.ok(!merged.some((r) => r.tmdbId > cap - 10 && r.tmdbId <= cap), "the ten oldest server titles fell off the end");
 });
 
 test("request seeds: one title in all three pools seeds ONCE — history > watchlist > request", async () => {

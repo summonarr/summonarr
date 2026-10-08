@@ -248,7 +248,8 @@ test("descriptions and choice labels are localized for every UI language; names 
   const { DISCORD_COMMAND_I18N } = await import("../src/lib/discord-register.ts");
   const { CATALOGS } = await import("../src/lib/i18n/catalogs.ts");
   const { LOCALES } = await import("../src/lib/i18n/locales.ts");
-  type Opt = { name: string; description: string; description_localizations?: Record<string, string>; name_localizations?: unknown; choices?: Array<{ name: string; value: string; name_localizations?: Record<string, string> }> };
+  type Opt = { name: string; description: string; description_localizations?: Record<string, string>; name_localizations?: unknown; choices?: Array<{ name: string; value: string; name_localizations?: Record<string, string> }>; options?: Opt[] };
+  type OptMeta = { description: string; choices?: Record<string, string>; options?: Record<string, OptMeta> };
   type Cmd = { name: string; description: string; description_localizations?: Record<string, string>; name_localizations?: unknown; options?: Opt[] };
   const published = JSON.parse(manualPut.body) as Cmd[];
   const en = CATALOGS.en;
@@ -266,15 +267,21 @@ test("descriptions and choice labels are localized for every UI language; names 
     assert.ok(meta, `/${cmd.name} has no localization entry`);
     assert.equal(cmd.name_localizations, undefined, `/${cmd.name}: command names must stay what users type`);
     check(cmd.description_localizations, cmd.description, meta.description, `/${cmd.name}`);
-    for (const opt of cmd.options ?? []) {
-      const om = meta.options?.[opt.name];
-      assert.ok(om, `/${cmd.name} ${opt.name} has no localization entry`);
-      assert.equal(opt.name_localizations, undefined, `/${cmd.name} ${opt.name}: option names stay English`);
-      check(opt.description_localizations, opt.description, om.description, `/${cmd.name} ${opt.name}`);
-      for (const c of opt.choices ?? []) {
-        check(c.name_localizations, c.name, om.choices![c.value], `/${cmd.name} ${opt.name}=${c.value}`);
+    // Recurses into a SUB_COMMAND's own options (/watchlist add …), so a nested
+    // option missing its localization fails exactly like a top-level one.
+    const checkOptions = (opts: Opt[], metas: Record<string, OptMeta> | undefined, path: string) => {
+      for (const opt of opts) {
+        const om = metas?.[opt.name];
+        assert.ok(om, `${path} ${opt.name} has no localization entry`);
+        assert.equal(opt.name_localizations, undefined, `${path} ${opt.name}: option names stay English`);
+        check(opt.description_localizations, opt.description, om.description, `${path} ${opt.name}`);
+        for (const c of opt.choices ?? []) {
+          check(c.name_localizations, c.name, om.choices![c.value], `${path} ${opt.name}=${c.value}`);
+        }
+        checkOptions(opt.options ?? [], om.options, `${path} ${opt.name}`);
       }
-    }
+    };
+    checkOptions(cmd.options ?? [], meta.options, `/${cmd.name}`);
   }
 });
 
@@ -345,6 +352,82 @@ test("the published command set preserves every name, description and option", (
       description: "Link your Discord account to your Summonarr account",
       options: [
         { name: "token", description: "Link token from your Profile page", type: 3, required: true, min_length: 1, max_length: 32 },
+      ],
+    },
+    {
+      name: "watchlist",
+      description: "Add to or manage your watchlist",
+      options: [
+        {
+          name: "add",
+          description: "Add a movie or TV show to your watchlist",
+          type: 1,
+          options: [
+            {
+              name: "type",
+              description: "Movie or TV show",
+              type: 3,
+              required: true,
+              choices: [
+                { name: "Movie", value: "movie" },
+                { name: "TV Show", value: "tv" },
+              ],
+            },
+            { name: "query", description: "Title to search for", type: 3, required: true, min_length: 1, max_length: 200 },
+          ],
+        },
+        { name: "list", description: "Show your watchlist and remove titles from it", type: 1 },
+      ],
+    },
+    {
+      name: "issue",
+      description: "Report a problem with a movie or TV show in the library",
+      options: [
+        {
+          name: "type",
+          description: "Movie or TV show",
+          type: 3,
+          required: true,
+          choices: [
+            { name: "Movie", value: "movie" },
+            { name: "TV Show", value: "tv" },
+          ],
+        },
+        { name: "query", description: "Title to search for", type: 3, required: true, min_length: 1, max_length: 200 },
+        {
+          name: "problem",
+          description: "What is wrong",
+          type: 3,
+          required: true,
+          choices: [
+            { name: "Bad video", value: "BAD_VIDEO" },
+            { name: "Wrong audio", value: "WRONG_AUDIO" },
+            { name: "Missing subtitles", value: "MISSING_SUBTITLES" },
+            { name: "Wrong match", value: "WRONG_MATCH" },
+            { name: "Other", value: "OTHER" },
+          ],
+        },
+        // Issue.note's cap (issue-create.ts MAX_ISSUE_NOTE_LENGTH).
+        { name: "note", description: "Details for the admins", type: 3, required: false, min_length: 1, max_length: 1000 },
+        // Issue's INT4 season/episode ceiling (issue-create.ts MAX_SEASON_EPISODE).
+        { name: "season", description: "Season number (TV only)", type: 4, required: false, min_value: 1, max_value: 10000 },
+        { name: "episode", description: "Episode number (TV only, needs a season)", type: 4, required: false, min_value: 1, max_value: 10000 },
+      ],
+    },
+    {
+      name: "recent",
+      description: "See what was recently added to the library",
+      options: [
+        {
+          name: "type",
+          description: "Only movies or only TV shows",
+          type: 3,
+          required: false,
+          choices: [
+            { name: "Movie", value: "movie" },
+            { name: "TV Show", value: "tv" },
+          ],
+        },
       ],
     },
   ];

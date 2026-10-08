@@ -153,5 +153,10 @@
   "apiAuth.setup.sessionMismatch": "Upload-id 与活跃会话不匹配。",
   "apiAuth.setup.stateLost": "在最后一个分块和导入之间上传状态丢失。",
   "apiAuth.setup.tooManyAttempts": "设置导入尝试次数过多，请稍后重试。",
-  "apiAuth.signIn.accountDisabled": "此账户已被禁用。请联系管理员。"
+  "apiAuth.signIn.accountDisabled": "此账户已被禁用。请联系管理员。",
+  "apiAuth.profile.trakt.toggleBoolean": "请以布尔值发送 watchlistAutoRequest 和/或 historySeeds",
+  "apiAuth.profile.trakt.notConnected": "尚未连接 Trakt",
+  "apiAuth.profile.trakt.unavailable": "此服务器不可使用 Trakt",
+  "apiAuth.profile.trakt.busy": "Trakt 当前繁忙，请几分钟后重试。",
+  "apiAuth.profile.trakt.unreachable": "无法连接 Trakt，请重试。"
 }

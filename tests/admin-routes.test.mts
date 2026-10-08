@@ -143,6 +143,8 @@ function makeTx() {
     hiddenItem: { deleteMany: rec("hiddenItem.deleteMany") },
     notification: { deleteMany: rec("notification.deleteMany") },
     userRecommendation: { deleteMany: rec("userRecommendation.deleteMany") },
+    traktWatchedItem: { deleteMany: rec("traktWatchedItem.deleteMany") },
+    traktConnection: { deleteMany: rec("traktConnection.deleteMany") },
     verificationToken: { deleteMany: rec("verificationToken.deleteMany") },
     // Two-factor credentials — purge and the admin 2FA reset share this write set.
     userTotp: { deleteMany: rec("userTotp.deleteMany") },

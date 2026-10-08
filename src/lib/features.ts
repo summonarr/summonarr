@@ -124,7 +124,7 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
   {
     key: "feature.behavior.watchlistAutoRequest",
     label: "Watchlist auto-request",
-    description: "File a request automatically when a user adds a title to their watchlist — in Summonarr, and on their Plex watchlist (polled by the sync-plex-watchlists cron). Only for users granted an Auto-request permission; each request still goes through quota, blacklist and approval. A Plex watchlist is read with the user's own Plex sign-in (once after this is enabled) or, when Settings → Media → Plex Watchlist allows it, through your Plex server owner's account for Plex friends who opt in.",
+    description: "File a request automatically when a user adds a title to their watchlist — in Summonarr, and on their Plex watchlist (polled by the sync-plex-watchlists cron). Only for users granted an Auto-request permission; each request still goes through quota, blacklist and approval. A Plex watchlist is read with the user's own Plex sign-in (once after this is enabled) or, when Settings → Media → Plex Watchlist allows it, through your Plex server owner's account for Plex friends who opt in. Users can also connect Trakt on their profile to auto-request from their Trakt watchlist (polled by the sync-trakt cron).",
     category: "behaviors",
     defaultEnabled: false,
   },

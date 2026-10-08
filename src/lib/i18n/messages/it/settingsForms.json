@@ -398,5 +398,7 @@
   "settings.form.maintenance.enableHelp": "Finché è attiva, solo gli amministratori possono usare il sito; tutti gli altri vedono la pagina di manutenzione con il messaggio qui sotto.",
   "settings.form.maintenance.enableTitle": "Modalità manutenzione",
   "settings.form.plex.disconnectConfirm": "Disconnettere Plex? Per ricollegarlo servirà un nuovo accesso a plex.tv.",
-  "settings.form.plex.disconnectConfirmAction": "Sì, disconnetti"
+  "settings.form.plex.disconnectConfirmAction": "Sì, disconnetti",
+  "settings.form.apiKey.traktSecret.label": "Client Secret di Trakt",
+  "settings.form.apiKey.traktSecret.help": "Permette agli utenti di collegare il proprio account Trakt dal profilo, per richiedere automaticamente dalla watchlist Trakt e usare la cronologia Trakt nei consigli. Copia il Client Secret della stessa app su {link}."
 }

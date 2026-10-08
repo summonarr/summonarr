@@ -214,6 +214,12 @@ export async function purgeUserDataInTx(
   // and this is not in it. Leaving it behind meant an irreversible "delete my data"
   // purge kept a per-user profile of exactly the kind erasure is meant to remove.
   await tx.userRecommendation.deleteMany({ where: { userId: id } });
+  // The Trakt connection and the watch history imported from it (guardrail 34c)
+  // are the same class of private data. The grant itself went with the Account
+  // rows above; the User row is anonymized in place, never deleted, so the
+  // schema's onDelete cascade would never reach these.
+  await tx.traktWatchedItem.deleteMany({ where: { userId: id } });
+  await tx.traktConnection.deleteMany({ where: { userId: id } });
   // A pending notification-email verification carries the candidate address in its
   // identifier, and the confirm link stays redeemable for its TTL — left behind, a
   // click after the purge would write that address back onto the scrubbed row.

@@ -77,7 +77,7 @@
   "settings.featureLabel.behavior_watchGrades": "Voti di visione delle richieste",
   "settings.featureDesc.behavior_watchGrades": "Assegna a ogni utente un voto da A a F in base a quanto guarda ciò che richiede, mostrato agli amministratori nella pagina Utenti e nella coda delle richieste. Solo visualizzazione — non blocca mai una richiesta. Richiede il tracciamento della cronologia riproduzioni; regolalo in Media → Voti di visione.",
   "settings.featureLabel.behavior_watchlistAutoRequest": "Richiesta automatica da Da guardare",
-  "settings.featureDesc.behavior_watchlistAutoRequest": "Invia automaticamente una richiesta quando un utente aggiunge un titolo alla sua lista Da guardare — in Summonarr e nella sua watchlist Plex (interrogata dal cron sync-plex-watchlists). Solo per gli utenti con un permesso di richiesta automatica; ogni richiesta passa comunque per quota, blacklist e approvazione. La watchlist Plex viene letta con l'accesso Plex dell'utente (una volta dopo l'attivazione) oppure, se Impostazioni → Media → Watchlist Plex lo consente, tramite l'account del proprietario del server Plex per gli amici Plex che acconsentono.",
+  "settings.featureDesc.behavior_watchlistAutoRequest": "Invia automaticamente una richiesta quando un utente aggiunge un titolo alla sua lista Da guardare — in Summonarr e nella sua watchlist Plex (interrogata dal cron sync-plex-watchlists). Solo per gli utenti con un permesso di richiesta automatica; ogni richiesta passa comunque per quota, blacklist e approvazione. La watchlist Plex viene letta con l'accesso Plex dell'utente (una volta dopo l'attivazione) oppure, se Impostazioni → Media → Watchlist Plex lo consente, tramite l'account del proprietario del server Plex per gli amici Plex che acconsentono. Gli utenti possono anche collegare Trakt dal profilo per richiedere automaticamente dalla watchlist Trakt (letta dal cron sync-trakt).",
   "settings.featureLabel.integration_plex": "Plex",
   "settings.featureDesc.integration_plex": "Attiva l'accesso con Plex, la sincronizzazione della libreria e i badge di disponibilità.",
   "settings.featureLabel.integration_jellyfin": "Jellyfin",
@@ -414,5 +414,7 @@
   "settings.arr.removedOpenRequestsItem_one": "{slug} ({count} richiesta aperta)",
   "settings.arr.removedOpenRequestsItem_other": "{slug} ({count} richieste aperte)",
   "settings.media.tokenPlaceholder.plex": "Incolla il token amministratore di questo server",
-  "settings.media.tokenPlaceholder.jellyfin": "Incolla una chiave API di questo server"
+  "settings.media.tokenPlaceholder.jellyfin": "Incolla una chiave API di questo server",
+  "settings.cron.job.trakt.name": "Sincronizzazione Trakt",
+  "settings.cron.job.trakt.description": "Richiede i nuovi titoli dalle watchlist Trakt degli utenti collegati e importa la loro cronologia Trakt per Per te (richiede un Client Secret di Trakt)"
 }

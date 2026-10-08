@@ -190,6 +190,8 @@ model User {
   notifications     Notification[]
   recommendations   UserRecommendation[]
   autoRequests      AutoRequestLedger[]
+  traktConnection   TraktConnection?
+  traktWatched      TraktWatchedItem[]
   // Two-factor authentication for LOCAL-CREDENTIALS sign-in (src/lib/mfa/).
   // The factor rows ARE the source of truth for "has 2FA" — there is no
   // denormalized flag on this row that could drift and silently fail open.
@@ -1342,6 +1344,57 @@ model AutoRequestLedger {
 
   @@unique([userId, tmdbId, mediaType])
   @@index([userId, updatedAt])
+}
+
+// A user's own Trakt connection (src/lib/trakt-user.ts, guardrail 34c). The
+// OAuth tokens are NOT here: they live in an Account row { provider: "trakt",
+// providerAccountId: <Trakt user uuid> }, whose token columns the Prisma
+// extension encrypts at rest (guardrail 7a). This row holds what the user chose
+// and the sync bookkeeping. Connecting is the user's explicit action (a device
+// code they approve on trakt.tv), so both uses default on. Deleted, with the
+// Account row and the TraktWatchedItem rows, on disconnect.
+model TraktConnection {
+  userId    String   @id
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  // Display only — the Account row's providerAccountId (the Trakt uuid) is the identity.
+  username  String   @db.VarChar(100)
+  // File new titles on the user's Trakt watchlist as requests (the
+  // "trakt-watchlist" auto-request source).
+  watchlistAutoRequest Boolean @default(true)
+  // Seed "For You" from the user's Trakt watch history (TraktWatchedItem).
+  historySeeds         Boolean @default(true)
+  // Trakt's /sync/last_activities watch stamp as of the last history import: a
+  // run skips the (large) history read while it has not moved. Null ⇒ never
+  // imported (or reset by a reconnect / revoked grant).
+  historyActivityAt    DateTime?
+  // When the history was last imported. Imports are spaced at least
+  // TRAKT_HISTORY_MIN_INTERVAL_MS apart: only the 12-hourly For You run reads
+  // them, so re-importing on every watch would churn rows nobody reads.
+  historyImportedAt    DateTime?
+  syncedAt             DateTime?
+  // "ok" | "error" | "reauth" (Trakt revoked the token — reconnect). Null ⇒ not
+  // synced yet.
+  status               String?  @db.VarChar(16)
+}
+
+// A connected user's Trakt watch history, one row per title (src/lib/trakt-user.ts).
+// Replaced per user on each changed read; read by the "For You" seed selection
+// as watch history (guardrail 40 — the engine makes no upstream call, so the
+// history must be local). Personal data: deleted on disconnect and on purge.
+model TraktWatchedItem {
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tmdbId        Int
+  mediaType     MediaType
+  title         String    @db.VarChar(500)
+  // Movie rewatches, or episode plays for a show — PlayHistory's per-episode grain.
+  plays         Int
+  lastWatchedAt DateTime
+
+  @@id([userId, tmdbId, mediaType])
+  @@index([userId, lastWatchedAt])
 }
 
 // Per-user "not interested" / hide list. Distinct from the admin-global

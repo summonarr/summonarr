@@ -3,9 +3,8 @@ import { safeFetchTrusted } from "@/lib/safe-fetch";
 import { PLEX_CLIENT_ID } from "@/lib/plex";
 import { isFeatureEnabled } from "@/lib/features";
 import { mapLimit } from "@/lib/concurrency";
-import { canAutoRequest, Permission, AUTO_REQUEST_MASK, effectivePermissions } from "@/lib/permissions";
+import { Permission, AUTO_REQUEST_MASK, effectivePermissions } from "@/lib/permissions";
 import { sanitizeForLog } from "@/lib/sanitize";
-import { loadRequestContext } from "@/lib/request-create";
 import { getMediaInstances } from "@/lib/media-instance-registry";
 import { getPlexConfig } from "@/lib/plex-config";
 import { mediaInstanceLabel } from "@/lib/media-instances";
@@ -22,9 +21,9 @@ import {
 } from "@/lib/plex-friends-watchlist";
 import {
   WATCHLIST_AUTO_REQUEST_FEATURE_KEY,
-  autoRequestTitle,
-  sessionForUser,
-  shouldAttemptAutoRequest,
+  fileAutoRequestTitles,
+  hasAutoRequestBit,
+  type AutoRequestCronUser,
   type AutoRequestOutcome,
 } from "@/lib/auto-request";
 
@@ -79,9 +78,9 @@ export const MAX_WATCHLIST_ITEMS = 500;
 const FETCH_TIMEOUT_MS = 15_000;
 // Detail lookups for items without an inline guid — bounded (guardrail 31).
 const METADATA_CONCURRENCY = 4;
-// New titles filed per user per run. A first sync of a long watchlist would
-// otherwise file hundreds of requests at once; the rest follow on later runs.
-export const MAX_AUTO_REQUESTS_PER_USER_PER_RUN = 20;
+// The per-user-per-run filing cap lives with the shared filing body in
+// auto-request.ts; re-exported here for the callers and tests that read it.
+export { MAX_AUTO_REQUESTS_PER_USER_PER_RUN } from "@/lib/auto-request";
 
 // ── metadata lookup cache ────────────────────────────────────────────────────
 //
@@ -461,12 +460,7 @@ export function plexWatchlistRunProblems(result: PlexWatchlistSyncResult): numbe
   return result.errors + (result.server ? result.server.adminTokensRejected + result.server.instanceErrors : 0);
 }
 
-type CronUser = { id: string; role: string; permissions: bigint; name: string | null; email: string };
-
-function hasAutoRequestBit(u: { role: string; permissions: bigint }): boolean {
-  const perms = effectivePermissions(u.role, u.permissions);
-  return (perms & (AUTO_REQUEST_MASK | Permission.ADMIN)) !== 0n;
-}
+type CronUser = AutoRequestCronUser;
 
 export async function syncPlexWatchlists(opts: { signal?: AbortSignal } = {}): Promise<PlexWatchlistSyncResult> {
   const result: PlexWatchlistSyncResult = {
@@ -696,50 +690,13 @@ async function syncOneUser(user: CronUser, result: PlexWatchlistSyncResult, sign
 }
 
 // Shared by both paths: same ledger, same source string, same per-run cap — so
-// switching a user between paths never re-files a title.
+// switching a user between paths never re-files a title. The body is the one
+// every polled source uses (auto-request.ts).
 async function fileWatchlistTitles(
   user: CronUser,
   watchlist: PlexWatchlistItem[],
   result: PlexWatchlistSyncResult,
   signal: AbortSignal | undefined,
 ): Promise<void> {
-  const session = sessionForUser(user);
-  // One entry per title (a watchlist cannot hold duplicates, but a degraded page
-  // overlap could), requestable types the user may auto-request only.
-  const seen = new Set<string>();
-  const titles: Array<{ tmdbId: number; mediaType: "MOVIE" | "TV" }> = [];
-  for (const item of watchlist) {
-    if (item.tmdbId === null) continue;
-    if (!canAutoRequest(session.user.permissions, item.mediaType)) continue;
-    const key = `${item.mediaType}:${item.tmdbId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    titles.push({ tmdbId: item.tmdbId, mediaType: item.mediaType });
-  }
-  if (titles.length === 0) return;
-
-  const ledger = await prisma.autoRequestLedger.findMany({
-    where: { userId: user.id, tmdbId: { in: [...new Set(titles.map((t) => t.tmdbId))] } },
-    select: { tmdbId: true, mediaType: true, outcome: true, updatedAt: true },
-  });
-  const byKey = new Map(ledger.map((r) => [`${r.mediaType}:${r.tmdbId}`, r]));
-  const now = Date.now();
-  const due = titles.filter((t) => {
-    const attempt = shouldAttemptAutoRequest(byKey.get(`${t.mediaType}:${t.tmdbId}`), now);
-    if (!attempt) result.alreadyHandled++;
-    return attempt;
-  });
-  if (due.length === 0) return;
-
-  // One context read per user, reused across titles (quota/grants/settings).
-  const ctx = await loadRequestContext(user.id);
-  // Sequential: each filing is several queries and, for an auto-approver, a
-  // Radarr/Sonarr push. The per-run cap bounds the first sync of a long list.
-  for (const t of due.slice(0, MAX_AUTO_REQUESTS_PER_USER_PER_RUN)) {
-    if (signal?.aborted) return;
-    const attempt = await autoRequestTitle({ session, tmdbId: t.tmdbId, mediaType: t.mediaType, source: "plex-watchlist", ctx });
-    result.outcomes[attempt.outcome] = (result.outcomes[attempt.outcome] ?? 0) + 1;
-    if (attempt.outcome === "requested") result.requested++;
-    else result.refused++;
-  }
+  await fileAutoRequestTitles(user, watchlist, "plex-watchlist", result, signal);
 }

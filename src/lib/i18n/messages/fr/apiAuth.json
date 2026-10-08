@@ -153,5 +153,10 @@
   "apiAuth.setup.sessionMismatch": "L'identifiant de téléversement ne correspond pas à la session active.",
   "apiAuth.setup.stateLost": "État du téléversement perdu entre le dernier fragment et l'importation.",
   "apiAuth.setup.tooManyAttempts": "Trop de tentatives d'importation de configuration. Réessayez plus tard.",
-  "apiAuth.signIn.accountDisabled": "Ce compte a été désactivé. Contactez un administrateur."
+  "apiAuth.signIn.accountDisabled": "Ce compte a été désactivé. Contactez un administrateur.",
+  "apiAuth.profile.trakt.toggleBoolean": "Envoyez watchlistAutoRequest et/ou historySeeds sous forme de booléens",
+  "apiAuth.profile.trakt.notConnected": "Trakt n'est pas connecté",
+  "apiAuth.profile.trakt.unavailable": "Trakt n'est pas disponible sur ce serveur",
+  "apiAuth.profile.trakt.busy": "Trakt est occupé pour le moment. Réessayez dans quelques minutes.",
+  "apiAuth.profile.trakt.unreachable": "Impossible de joindre Trakt. Veuillez réessayer."
 }

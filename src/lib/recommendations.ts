@@ -485,6 +485,69 @@ function weightSeeds(
   }));
 }
 
+// One history seed candidate, before weighting.
+export interface HistorySeedRow {
+  tmdbId: number;
+  mediaType: MediaType;
+  title: string;
+  lastAt: Date | null;
+  count: number;
+}
+
+// Fold a user's imported Trakt history into their server watch history — still
+// AT MOST `max` titles (MAX_WATCH_HISTORY_SEEDS), so the per-user seed ceiling,
+// and with it the graph's required-set budget, is unchanged (guardrail 40: a
+// seed cap is a build-budget knob, and this one did not move). Trakt titles
+// compete for the same slots by recency.
+//
+// A title in both is ONE seed: the later watch and the LARGER play count win.
+// Never the sum — a Trakt scrobbler records the very plays the server did, so
+// summing would double every title a household both streams and scrobbles.
+//
+// No Trakt rows ⇒ the server rows come back exactly as given (already
+// recency-ordered by the query), so an instance without Trakt is untouched.
+// Pure.
+export function mergeHistorySeedRows(
+  serverRows: readonly HistorySeedRow[],
+  traktRows: readonly HistorySeedRow[],
+  max: number,
+): HistorySeedRow[] {
+  if (traktRows.length === 0) return serverRows.slice(0, max);
+  const byKey = new Map<string, HistorySeedRow>();
+  for (const r of serverRows) byKey.set(candidateKey(r.tmdbId, r.mediaType), { ...r });
+  for (const r of traktRows) {
+    const key = candidateKey(r.tmdbId, r.mediaType);
+    const prior = byKey.get(key);
+    if (!prior) {
+      byKey.set(key, { ...r });
+      continue;
+    }
+    const priorAt = prior.lastAt?.getTime() ?? -Infinity;
+    const traktAt = r.lastAt?.getTime() ?? -Infinity;
+    byKey.set(key, {
+      ...prior,
+      lastAt: traktAt > priorAt ? r.lastAt : prior.lastAt,
+      count: Math.max(prior.count, r.count),
+    });
+  }
+  // Newest first; ties keep the server-first insertion order (stable sort).
+  return [...byKey.values()]
+    .sort((a, b) => (b.lastAt?.getTime() ?? -Infinity) - (a.lastAt?.getTime() ?? -Infinity))
+    .slice(0, max);
+}
+
+// A connected user's imported Trakt history (src/lib/trakt-user.ts), newest
+// first — only while they keep "use my Trakt history" on. Local rows, so the
+// engine still makes no upstream call (guardrail 40).
+function readTraktHistory(userId: string, take?: number) {
+  return prisma.traktWatchedItem.findMany({
+    where: { userId, user: { traktConnection: { is: { historySeeds: true } } } },
+    orderBy: { lastWatchedAt: "desc" },
+    ...(take !== undefined ? { take } : {}),
+    select: { tmdbId: true, mediaType: true, title: true, lastWatchedAt: true, plays: true },
+  });
+}
+
 async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promise<Seed[]> {
   // History seeds track CURRENT taste. With the recency-first ordering above,
   // the windowed query and the all-time top-up together yield exactly "the most
@@ -526,7 +589,7 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       take,
     });
 
-  const [windowedRows, watchlistRows, requestRows] = await Promise.all([
+  const [windowedRows, watchlistRows, requestRows, traktRows] = await Promise.all([
     linkedServerUserIds.length === 0
       ? Promise.resolve([])
       : groupHistory(true, MAX_WATCH_HISTORY_SEEDS),
@@ -546,6 +609,8 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       take: MAX_REQUEST_SEEDS * REQUEST_SEED_OVERFETCH,
       select: { tmdbId: true, mediaType: true, title: true, createdAt: true },
     }),
+    // The newest MAX_WATCH_HISTORY_SEEDS are all the merge below can ever keep.
+    readTraktHistory(userId, MAX_WATCH_HISTORY_SEEDS),
   ]);
 
   // Collapse the per-arrInstance duplicates (one user may hold an HD and a 4K
@@ -576,7 +641,7 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
 
   // groupBy's TS types don't narrow tmdbId/mediaType past their nullable
   // column types even though the where clause already excludes nulls.
-  const historySeeds = historyRows
+  const serverHistory: HistorySeedRow[] = historyRows
     .filter((r) => r.tmdbId != null && r.mediaType != null)
     .map((r) => ({
       tmdbId: r.tmdbId as number,
@@ -588,6 +653,11 @@ async function selectSeeds(userId: string, linkedServerUserIds: string[]): Promi
       lastAt: r._max.startedAt,
       count: r._count.tmdbId,
     }));
+  const historySeeds = mergeHistorySeedRows(
+    serverHistory,
+    traktRows.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title, lastAt: r.lastWatchedAt, count: r.plays })),
+    MAX_WATCH_HISTORY_SEEDS,
+  );
 
   // One `now` for the whole selection: reading the clock per seed would let a
   // slow query change the weights partway down the list.
@@ -639,7 +709,8 @@ const MAX_EXCLUSION_HIDDEN = 10_000;
 // something the user acted on. It is wider than the chosen seeds on purpose:
 // a watchlist entry or old watch that didn't make the seed list must still
 // never come back as a "new" recommendation. Covers:
-//   - the full watchlist and all watched history;
+//   - the full watchlist and all watched history — the server's AND the
+//     user's imported Trakt history (while they keep it on);
 //   - HiddenItem — "not interested" clicks, so a hidden title never takes up
 //     a stored slot. Read DIRECTLY rather than via getUserHiddenSet: that helper lowercases
 //     its keys to match attach-all's TMDB casing, while candidateKey uses the
@@ -657,7 +728,7 @@ const MAX_EXCLUSION_HIDDEN = 10_000;
 //     titles visible in general discovery: a browse grid states facts about the
 //     catalog, a recommendation is advice to act.
 async function collectKnownTitleKeys(userId: string, linkedServerUserIds: string[]): Promise<Set<string>> {
-  const [watchlistRows, watchedRows, hiddenRows, requestRows, voteRows, blacklistSet] = await Promise.all([
+  const [watchlistRows, watchedRows, hiddenRows, requestRows, voteRows, blacklistSet, traktWatchedRows] = await Promise.all([
     prisma.watchlistItem.findMany({ where: { userId }, select: { tmdbId: true, mediaType: true } }),
     linkedServerUserIds.length === 0
       ? Promise.resolve([])
@@ -690,6 +761,8 @@ async function collectKnownTitleKeys(userId: string, linkedServerUserIds: string
     }),
     prisma.deletionVote.findMany({ where: { userId }, select: { tmdbId: true, mediaType: true } }),
     getBlacklistSet(),
+    // Bounded by MAX_TRAKT_HISTORY_ITEMS at import.
+    readTraktHistory(userId),
   ]);
 
   // blacklistKey (blacklist.ts) emits the same "{tmdbId}:{MOVIE|TV}" shape as
@@ -702,6 +775,7 @@ async function collectKnownTitleKeys(userId: string, linkedServerUserIds: string
   for (const r of hiddenRows) known.add(candidateKey(r.tmdbId, r.mediaType));
   for (const r of requestRows) known.add(candidateKey(r.tmdbId, r.mediaType));
   for (const r of voteRows) known.add(candidateKey(r.tmdbId, r.mediaType));
+  for (const r of traktWatchedRows) known.add(candidateKey(r.tmdbId, r.mediaType));
   return known;
 }
 

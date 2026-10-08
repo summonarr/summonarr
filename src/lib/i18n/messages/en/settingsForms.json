@@ -398,5 +398,7 @@
   "settings.form.maintenance.enableHelp": "While on, only administrators can use the site; everyone else sees the maintenance page with the message below.",
   "settings.form.maintenance.enableTitle": "Maintenance mode",
   "settings.form.plex.disconnectConfirm": "Disconnect Plex? Reconnecting takes a fresh plex.tv sign-in.",
-  "settings.form.plex.disconnectConfirmAction": "Yes, disconnect"
+  "settings.form.plex.disconnectConfirmAction": "Yes, disconnect",
+  "settings.form.apiKey.traktSecret.label": "Trakt Client Secret",
+  "settings.form.apiKey.traktSecret.help": "Lets users connect their own Trakt accounts on their profile, to auto-request from their Trakt watchlist and use their Trakt history for recommendations. Copy the Client Secret from the same app at {link}."
 }

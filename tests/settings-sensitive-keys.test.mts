@@ -62,6 +62,7 @@ test("every currently-known sensitive key stays in the list (removal = plaintext
     "omdbApiKey",
     "mdblistApiKey",
     "traktClientId",
+    "traktClientSecret",
     "ipinfoToken",
     "resendApiKey",
     "smtpPassword",

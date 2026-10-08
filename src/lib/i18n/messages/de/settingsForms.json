@@ -398,5 +398,7 @@
   "settings.form.maintenance.enableHelp": "Solange er aktiv ist, können nur Administratoren die Seite nutzen; alle anderen sehen die Wartungsseite mit der Nachricht unten.",
   "settings.form.maintenance.enableTitle": "Wartungsmodus",
   "settings.form.plex.disconnectConfirm": "Plex trennen? Zum erneuten Verbinden ist eine neue Anmeldung bei plex.tv nötig.",
-  "settings.form.plex.disconnectConfirmAction": "Ja, trennen"
+  "settings.form.plex.disconnectConfirmAction": "Ja, trennen",
+  "settings.form.apiKey.traktSecret.label": "Trakt-Client-Secret",
+  "settings.form.apiKey.traktSecret.help": "Ermöglicht Benutzern, ihr eigenes Trakt-Konto in ihrem Profil zu verbinden, um automatisch aus ihrer Trakt-Merkliste anzufragen und ihren Trakt-Verlauf für Empfehlungen zu nutzen. Kopieren Sie das Client-Secret derselben App unter {link}."
 }

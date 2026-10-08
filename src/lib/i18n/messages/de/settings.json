@@ -77,7 +77,7 @@
   "settings.featureLabel.behavior_watchGrades": "Sehnoten für Anfragen",
   "settings.featureDesc.behavior_watchGrades": "Jeden Benutzer von A–F danach bewerten, ob er sich ansieht, was er anfragt – sichtbar für Admins auf der Benutzerseite und in der Anfragewarteschlange. Nur zur Anzeige – blockiert nie eine Anfrage. Erfordert die Erfassung des Wiedergabeverlaufs; Feineinstellung unter Medien → Sehnoten.",
   "settings.featureLabel.behavior_watchlistAutoRequest": "Automatische Anfragen über die Merkliste",
-  "settings.featureDesc.behavior_watchlistAutoRequest": "Automatisch eine Anfrage stellen, wenn ein Benutzer einen Titel zu seiner Merkliste hinzufügt – in Summonarr und auf seiner Plex-Merkliste (abgefragt durch den Cronjob sync-plex-watchlists). Nur für Benutzer mit einer Berechtigung für automatische Anfragen; jede Anfrage durchläuft weiterhin Kontingent, Sperrliste und Genehmigung. Eine Plex-Merkliste wird mit der eigenen Plex-Anmeldung des Benutzers gelesen (einmal nach dem Aktivieren) oder, wenn Einstellungen → Medien → Plex-Merkliste es erlaubt, über das Konto des Plex-Serverbesitzers für Plex-Freunde, die zustimmen.",
+  "settings.featureDesc.behavior_watchlistAutoRequest": "Automatisch eine Anfrage stellen, wenn ein Benutzer einen Titel zu seiner Merkliste hinzufügt – in Summonarr und auf seiner Plex-Merkliste (abgefragt durch den Cronjob sync-plex-watchlists). Nur für Benutzer mit einer Berechtigung für automatische Anfragen; jede Anfrage durchläuft weiterhin Kontingent, Sperrliste und Genehmigung. Eine Plex-Merkliste wird mit der eigenen Plex-Anmeldung des Benutzers gelesen (einmal nach dem Aktivieren) oder, wenn Einstellungen → Medien → Plex-Merkliste es erlaubt, über das Konto des Plex-Serverbesitzers für Plex-Freunde, die zustimmen. Benutzer können außerdem Trakt in ihrem Profil verbinden, um automatisch aus ihrer Trakt-Merkliste anzufragen (abgefragt vom Cronjob sync-trakt).",
   "settings.featureLabel.integration_plex": "Plex",
   "settings.featureDesc.integration_plex": "Plex-Anmeldung, Bibliothekssynchronisierung und Verfügbarkeitsabzeichen aktivieren.",
   "settings.featureLabel.integration_jellyfin": "Jellyfin",
@@ -414,5 +414,7 @@
   "settings.arr.removedOpenRequestsItem_one": "{slug} ({count} offene Anfrage)",
   "settings.arr.removedOpenRequestsItem_other": "{slug} ({count} offene Anfragen)",
   "settings.media.tokenPlaceholder.plex": "Admin-Token dieses Servers einfügen",
-  "settings.media.tokenPlaceholder.jellyfin": "API-Schlüssel dieses Servers einfügen"
+  "settings.media.tokenPlaceholder.jellyfin": "API-Schlüssel dieses Servers einfügen",
+  "settings.cron.job.trakt.name": "Trakt-Synchronisierung",
+  "settings.cron.job.trakt.description": "Neue Titel aus den Trakt-Merklisten verbundener Benutzer anfragen und deren Trakt-Verlauf für „Für Sie“ importieren (erfordert ein Trakt-Client-Secret)"
 }

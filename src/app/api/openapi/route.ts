@@ -1430,6 +1430,116 @@ const spec = {
       },
     },
 
+    // Per-user Trakt (src/lib/trakt-user.ts, guardrail 34c).
+    "/profile/trakt": {
+      get: {
+        tags: ["Profile"],
+        summary: "Read the caller's Trakt connection",
+        responses: {
+          "200": {
+            description: "Connection state and the two uses",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    available: { type: "boolean", description: "The admin saved a Trakt client id AND secret, and the caller has a use for a connection" },
+                    uses: {
+                      type: "object",
+                      properties: {
+                        watchlist: { type: "boolean", description: "feature.behavior.watchlistAutoRequest is on and the caller holds an AUTO_REQUEST* bit" },
+                        history: { type: "boolean", description: "feature.page.forYou is on" },
+                      },
+                    },
+                    connected: { type: "boolean", description: "A Trakt grant is stored for the caller" },
+                    username: { type: "string", nullable: true },
+                    watchlistAutoRequest: { type: "boolean", description: "File new Trakt watchlist titles as requests" },
+                    historySeeds: { type: "boolean", description: "Seed For You from the Trakt watch history" },
+                    status: { type: "string", nullable: true, enum: ["ok", "error", "reauth"], description: "The last sync's verdict; \"reauth\" means Trakt refused the grant — reconnect" },
+                    syncedAt: { type: "string", format: "date-time", nullable: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      patch: {
+        tags: ["Profile"],
+        summary: "Turn either Trakt use on or off",
+        description: "Turning historySeeds off deletes the imported Trakt history at once; turning it back on re-imports it on the next sync. Returns the same body as GET.",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", properties: { watchlistAutoRequest: { type: "boolean" }, historySeeds: { type: "boolean" } } } } },
+        },
+        responses: {
+          "200": { description: "Saved — the connection state" },
+          "400": { description: "Neither field sent, or one is not a boolean" },
+          "404": { description: "Trakt is not connected" },
+        },
+      },
+      delete: {
+        tags: ["Profile"],
+        summary: "Disconnect Trakt",
+        description: "Deletes the stored grant, the connection and the imported watch history, then revokes the token at Trakt (best-effort). Idempotent.",
+        responses: { "200": { description: "Disconnected" } },
+      },
+    },
+    "/profile/trakt/device": {
+      post: {
+        tags: ["Profile"],
+        summary: "Start connecting Trakt (device-code flow)",
+        description: "Answers the short code the user enters at the verification URL. The device code itself stays on the server. Poll POST /profile/trakt/device/poll every `interval` seconds until it answers connected, expired, denied or conflict.",
+        responses: {
+          "200": {
+            description: "The code to show",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    userCode: { type: "string" },
+                    verificationUrl: { type: "string", description: "Always a trakt.tv https URL" },
+                    expiresIn: { type: "integer", description: "Seconds until the code expires" },
+                    interval: { type: "integer", description: "Seconds between polls" },
+                  },
+                },
+              },
+            },
+          },
+          "400": { description: "Trakt is not available on this server (no client id/secret, or nothing to use it for)" },
+          "429": { description: "Too many starts, or Trakt is rate limiting" },
+          "502": { description: "Trakt could not be reached" },
+        },
+      },
+    },
+    "/profile/trakt/device/poll": {
+      post: {
+        tags: ["Profile"],
+        summary: "Poll a pending Trakt connection",
+        description: "The server paces the real Trakt calls itself, so polling faster than the interval only gets \"pending\".",
+        responses: {
+          "200": {
+            description: "The connection's state",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    state: { type: "string", enum: ["pending", "connected", "expired", "denied", "conflict"], description: "conflict: that Trakt account is connected to another account here" },
+                    username: { type: "string", description: "Present when connected" },
+                  },
+                },
+              },
+            },
+          },
+          "400": { description: "Trakt is not available on this server" },
+          "429": { description: "Polling too fast, or Trakt is rate limiting" },
+          "502": { description: "Trakt could not be reached" },
+        },
+      },
+    },
+
     "/push/vapid-key": {
       get: {
         tags: ["Push"],

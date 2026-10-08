@@ -153,5 +153,10 @@
   "apiAuth.setup.sessionMismatch": "Upload-id does not match the active session.",
   "apiAuth.setup.stateLost": "Upload state lost between final chunk and import.",
   "apiAuth.setup.tooManyAttempts": "Too many setup-import attempts. Try again later.",
-  "apiAuth.signIn.accountDisabled": "This account has been disabled. Contact an administrator."
+  "apiAuth.signIn.accountDisabled": "This account has been disabled. Contact an administrator.",
+  "apiAuth.profile.trakt.toggleBoolean": "Send watchlistAutoRequest and/or historySeeds as booleans",
+  "apiAuth.profile.trakt.notConnected": "Trakt is not connected",
+  "apiAuth.profile.trakt.unavailable": "Trakt isn't available on this server",
+  "apiAuth.profile.trakt.busy": "Trakt is busy right now. Please try again in a few minutes.",
+  "apiAuth.profile.trakt.unreachable": "Couldn't reach Trakt. Please try again."
 }

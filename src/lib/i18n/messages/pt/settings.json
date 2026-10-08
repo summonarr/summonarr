@@ -77,7 +77,7 @@
   "settings.featureLabel.behavior_watchGrades": "Notas de visualização das solicitações",
   "settings.featureDesc.behavior_watchGrades": "Dá a cada usuário uma nota de A a F conforme ele assiste ao que solicita, exibida aos administradores na página Usuários e na fila de solicitações. Apenas exibição — nunca bloqueia uma solicitação. Requer o registro do histórico de reprodução; ajuste em Mídia → Notas de visualização.",
   "settings.featureLabel.behavior_watchlistAutoRequest": "Solicitação automática da Minha lista",
-  "settings.featureDesc.behavior_watchlistAutoRequest": "Cria uma solicitação automaticamente quando um usuário adiciona um título à Minha lista — no Summonarr e na lista do Plex dele (consultada pelo cron sync-plex-watchlists). Apenas para usuários com uma permissão de Solicitação automática; cada solicitação ainda passa por cota, lista de bloqueio e aprovação. A lista do Plex é lida com o login no Plex do próprio usuário (uma vez depois de ativar) ou, quando Configurações → Mídia → Lista do Plex permitir, pela conta do proprietário do seu servidor Plex para amigos do Plex que aceitarem.",
+  "settings.featureDesc.behavior_watchlistAutoRequest": "Cria uma solicitação automaticamente quando um usuário adiciona um título à Minha lista — no Summonarr e na lista do Plex dele (consultada pelo cron sync-plex-watchlists). Apenas para usuários com uma permissão de Solicitação automática; cada solicitação ainda passa por cota, lista de bloqueio e aprovação. A lista do Plex é lida com o login no Plex do próprio usuário (uma vez depois de ativar) ou, quando Configurações → Mídia → Lista do Plex permitir, pela conta do proprietário do seu servidor Plex para amigos do Plex que aceitarem. Os usuários também podem conectar o Trakt no perfil para solicitar automaticamente da lista do Trakt (consultada pela tarefa sync-trakt).",
   "settings.featureLabel.integration_plex": "Plex",
   "settings.featureDesc.integration_plex": "Ativa o login com Plex, a sincronização da biblioteca e os selos de disponibilidade.",
   "settings.featureLabel.integration_jellyfin": "Jellyfin",
@@ -414,5 +414,7 @@
   "settings.arr.removedOpenRequestsItem_one": "{slug} ({count} pedido em aberto)",
   "settings.arr.removedOpenRequestsItem_other": "{slug} ({count} pedidos em aberto)",
   "settings.media.tokenPlaceholder.plex": "Cole o token de administrador deste servidor",
-  "settings.media.tokenPlaceholder.jellyfin": "Cole uma chave de API deste servidor"
+  "settings.media.tokenPlaceholder.jellyfin": "Cole uma chave de API deste servidor",
+  "settings.cron.job.trakt.name": "Sincronização do Trakt",
+  "settings.cron.job.trakt.description": "Solicita novos títulos das listas do Trakt dos usuários conectados e importa o histórico do Trakt para Para você (exige um Client Secret do Trakt)"
 }

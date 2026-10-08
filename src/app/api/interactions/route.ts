@@ -29,6 +29,11 @@ import { runWithSerializableRetry } from "@/lib/serializable-retry";
 import { emitSSE } from "@/lib/sse-emitter";
 import { isFeatureEnabled } from "@/lib/features";
 import { isLocale, type Locale } from "@/lib/i18n/locales";
+import { getRecentlyAdded } from "@/lib/recently-added";
+import { addToWatchlist, takeWatchlistAddToken } from "@/lib/watchlist-add";
+import { createIssue, VALID_ISSUE_TYPES, type IssueTypeValue } from "@/lib/issue-create";
+import { sessionForUser } from "@/lib/auto-request";
+import { maintenanceGuard } from "@/lib/maintenance";
 import { instanceDefaultLocale, localeForUser, translatorFor } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 
@@ -265,7 +270,17 @@ async function editOriginal(appId: string, token: string, payload: Record<string
   }
 }
 
-function buildResultsPayload(t: Translator, query: string, results: TmdbResult[], interactionId: string, discordUserId: string) {
+// `buttons` picks what a result button does: "pick" files a request (/request),
+// "wladd" adds to the watchlist, "issuepick" reports an issue. The custom_id is
+// `<prefix>:<interactionId>:<discordUserId>:<index>` for every kind.
+function buildResultsPayload(
+  t: Translator,
+  query: string,
+  results: TmdbResult[],
+  interactionId: string,
+  discordUserId: string,
+  buttons: { prefix: string; labelKey: string } = { prefix: "pick", labelKey: "notify.bot.results.select" },
+) {
   const embeds = results.map((r, i) => {
     const embed: Record<string, unknown> = {
       title: `${i + 1}. ${r.title} (${r.releaseYear})`,
@@ -297,8 +312,8 @@ function buildResultsPayload(t: Translator, query: string, results: TmdbResult[]
     components: results.map((_, i) => ({
       type: 2,
       style: 1,
-      label: t("notify.bot.results.select", { n: i + 1 }),
-      custom_id: `pick:${interactionId}:${discordUserId}:${i}`,
+      label: t(buttons.labelKey, { n: i + 1 }),
+      custom_id: `${buttons.prefix}:${interactionId}:${discordUserId}:${i}`,
     })),
   }];
 
@@ -307,6 +322,335 @@ function buildResultsPayload(t: Translator, query: string, results: TmdbResult[]
     embeds,
     components,
   };
+}
+
+// ── /watchlist, /issue, /recent ─────────────────────────────────────────────
+//
+// /watchlist and /issue act on a personal list and the issue tracker, both of
+// which belong to a SITE account — so they need a linked one. A shadow row
+// (`@discord.local`, which /request creates for an unlinked Discord user) is not
+// one, and neither is a deactivated account (guardrail 33: deactivation leaves
+// the discordId, role and permissions intact, and Discord is not session-backed,
+// so this is the only place that refuses it). Both go through the same
+// chokepoints as the web — addToWatchlist (src/lib/watchlist-add.ts) and
+// createIssue (src/lib/issue-create.ts) — acting as that account via
+// sessionForUser, so neither can do anything the user couldn't do on the site.
+
+type LinkedSiteAccount =
+  | { kind: "none" }
+  | { kind: "deactivated" }
+  | { kind: "ok"; user: { id: string; role: string; permissions: bigint; name: string | null; email: string } };
+
+async function linkedSiteAccount(discordUserId: string): Promise<LinkedSiteAccount> {
+  const user = await prisma.user.findUnique({
+    where: { discordId: discordUserId },
+    select: { id: true, role: true, permissions: true, name: true, email: true, deactivatedAt: true },
+  });
+  if (!user || user.email.endsWith("@discord.local")) return { kind: "none" };
+  if (user.deactivatedAt) return { kind: "deactivated" };
+  const { deactivatedAt: _deactivatedAt, ...rest } = user;
+  return { kind: "ok", user: rest };
+}
+
+function linkedAccountRefusal(t: Translator, linked: LinkedSiteAccount): string | null {
+  if (linked.kind === "none") return t("notify.bot.linkRequired");
+  if (linked.kind === "deactivated") return t("notify.bot.pick.deactivated");
+  return null;
+}
+
+// One option's value out of an interaction's (or a subcommand's) options.
+function optionValue(options: unknown, name: string): unknown {
+  if (!Array.isArray(options)) return undefined;
+  return (options as Array<{ name?: unknown; value?: unknown }>).find((o) => o?.name === name)?.value;
+}
+
+const PENDING_TTL_MS = 5 * 60_000;
+
+async function savePending(key: string, payload: unknown): Promise<void> {
+  const data = JSON.stringify(payload);
+  const expiresAt = new Date(Date.now() + PENDING_TTL_MS);
+  await prisma.discordSearchCache.upsert({
+    where: { queryKey: key },
+    create: { queryKey: key, data, expiresAt },
+    update: { data, expiresAt },
+  });
+}
+
+async function loadPending<T>(key: string): Promise<T | null> {
+  const row = await prisma.discordSearchCache.findUnique({ where: { queryKey: key } }).catch(() => null);
+  if (!row || new Date() >= row.expiresAt) return null;
+  try {
+    return JSON.parse(row.data) as T;
+  } catch {
+    return null;
+  }
+}
+
+function mediaTypeOption(value: unknown): "movie" | "tv" | null {
+  return value === "movie" || value === "tv" ? value : null;
+}
+
+function truncateText(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+// Searches back the same five results /request shows.
+async function searchForDiscord(query: string, type: "movie" | "tv", discordUserId: string): Promise<TmdbResult[]> {
+  const raw = await cachedSearchTmdb(query, type, discordUserId);
+  return attachAvailability(raw, await discordVisibleInstances(discordUserId));
+}
+
+// The /watchlist list view: the newest WATCHLIST_LIST_SIZE titles, a count of
+// the rest, and a menu that removes one. Short enough that the message stays
+// inside Discord's 2000-character content cap whatever the titles are.
+const WATCHLIST_LIST_SIZE = 10;
+
+async function watchlistListPayload(t: Translator, userId: string, discordUserId: string, notice: string | null) {
+  const [items, total] = await Promise.all([
+    prisma.watchlistItem.findMany({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+      take: WATCHLIST_LIST_SIZE,
+      select: { tmdbId: true, mediaType: true, title: true, createdAt: true },
+    }),
+    prisma.watchlistItem.count({ where: { userId } }),
+  ]);
+  if (total === 0) {
+    return { content: [notice, t("notify.bot.watchlist.empty")].filter(Boolean).join("\n"), embeds: [], components: [] };
+  }
+  const lines = items.map(
+    (i) => `${i.mediaType === "MOVIE" ? "🎬" : "📺"} **${escMd(truncateText(i.title, 80))}** — <t:${Math.floor(i.createdAt.getTime() / 1000)}:R>`,
+  );
+  const more = total > items.length ? t("notify.bot.watchlist.more", { count: total - items.length }) : null;
+  return {
+    content: [notice, t("notify.bot.watchlist.header", { count: total }), ...lines, more].filter(Boolean).join("\n"),
+    embeds: [],
+    components: [{
+      type: 1,
+      components: [{
+        type: 3,
+        custom_id: `wlrm:${discordUserId}`,
+        placeholder: t("notify.bot.watchlist.removePlaceholder"),
+        min_values: 1,
+        max_values: 1,
+        options: items.map((i) => ({
+          label: truncateText(i.title, 100),
+          value: `${i.mediaType}:${i.tmdbId}`,
+          description: i.mediaType === "MOVIE" ? t("notify.bot.status.movie") : t("notify.bot.status.tv"),
+        })),
+      }],
+    }],
+  };
+}
+
+interface PendingWatchlistAdd {
+  results: TmdbResult[];
+}
+
+interface PendingIssue {
+  results: TmdbResult[];
+  issueType: IssueTypeValue;
+  note: string | null;
+  season: number | null;
+  episode: number | null;
+}
+
+async function handleWatchlistCommand(
+  t: Translator,
+  appId: string,
+  token: string,
+  interactionId: string,
+  discordUserId: string,
+  data: { options?: unknown },
+): Promise<void> {
+  const sub = Array.isArray(data.options) ? (data.options[0] as { name?: unknown; options?: unknown } | undefined) : undefined;
+  const linked = await linkedSiteAccount(discordUserId);
+  const refusal = linkedAccountRefusal(t, linked);
+  if (refusal || linked.kind !== "ok") {
+    await editOriginal(appId, token, { content: refusal ?? t("notify.bot.linkRequired") });
+    return;
+  }
+  if (!checkRateLimit(`discord-read:${discordUserId}`, 20, 60_000)) {
+    await editOriginal(appId, token, { content: t("notify.bot.tooFast") });
+    return;
+  }
+
+  if (sub?.name === "list") {
+    await editOriginal(appId, token, await watchlistListPayload(t, linked.user.id, discordUserId, null));
+    return;
+  }
+  if (sub?.name !== "add") {
+    await editOriginal(appId, token, { content: t("notify.bot.inactiveButton") });
+    return;
+  }
+
+  const type = mediaTypeOption(optionValue(sub.options, "type"));
+  const query = optionValue(sub.options, "query");
+  if (!type || typeof query !== "string" || query.trim().length === 0) {
+    await editOriginal(appId, token, { content: t("notify.bot.searchFailed") });
+    return;
+  }
+  let results: TmdbResult[];
+  try {
+    results = await searchForDiscord(query, type, discordUserId);
+  } catch (err) {
+    console.error("[interactions] TMDB search error:", err);
+    await editOriginal(appId, token, { content: t("notify.bot.searchFailed") });
+    return;
+  }
+  if (results.length === 0) {
+    await editOriginal(appId, token, {
+      content: type === "movie" ? t("notify.bot.noResults.movie", { query }) : t("notify.bot.noResults.tv", { query }),
+    });
+    return;
+  }
+  await savePending(`pw:${interactionId}:${discordUserId}`, { results } satisfies PendingWatchlistAdd);
+  await editOriginal(
+    appId,
+    token,
+    buildResultsPayload(t, query, results, interactionId, discordUserId, { prefix: "wladd", labelKey: "notify.bot.watchlist.select" }),
+  );
+}
+
+async function handleIssueCommand(
+  t: Translator,
+  appId: string,
+  token: string,
+  interactionId: string,
+  discordUserId: string,
+  data: { options?: unknown },
+): Promise<void> {
+  if (!(await isFeatureEnabled("feature.page.issues"))) {
+    await editOriginal(appId, token, { content: t("notify.bot.issue.disabled") });
+    return;
+  }
+  const linked = await linkedSiteAccount(discordUserId);
+  const refusal = linkedAccountRefusal(t, linked);
+  if (refusal || linked.kind !== "ok") {
+    await editOriginal(appId, token, { content: refusal ?? t("notify.bot.linkRequired") });
+    return;
+  }
+  if (await maintenanceGuard(sessionForUser(linked.user))) {
+    await editOriginal(appId, token, { content: t("notify.bot.maintenance") });
+    return;
+  }
+  if (!checkRateLimit(`discord-read:${discordUserId}`, 20, 60_000)) {
+    await editOriginal(appId, token, { content: t("notify.bot.tooFast") });
+    return;
+  }
+
+  const type = mediaTypeOption(optionValue(data.options, "type"));
+  const query = optionValue(data.options, "query");
+  const problem = optionValue(data.options, "problem");
+  const rawNote = optionValue(data.options, "note");
+  const rawSeason = optionValue(data.options, "season");
+  const rawEpisode = optionValue(data.options, "episode");
+  if (!type || typeof query !== "string" || query.trim().length === 0 || !VALID_ISSUE_TYPES.includes(problem as IssueTypeValue)) {
+    await editOriginal(appId, token, { content: t("notify.bot.searchFailed") });
+    return;
+  }
+  const note = typeof rawNote === "string" && rawNote.trim().length > 0 ? rawNote : null;
+  // Seasons and episodes describe TV only; a movie report is always the whole title.
+  const season = type === "tv" && typeof rawSeason === "number" ? rawSeason : null;
+  const episode = type === "tv" && typeof rawEpisode === "number" ? rawEpisode : null;
+  // Refused here, before a search, rather than after the user has picked a title.
+  if (episode !== null && season === null) {
+    await editOriginal(appId, token, { content: t("apiUser.issues.seasonRequired") });
+    return;
+  }
+
+  let results: TmdbResult[];
+  try {
+    results = await searchForDiscord(query, type, discordUserId);
+  } catch (err) {
+    console.error("[interactions] TMDB search error:", err);
+    await editOriginal(appId, token, { content: t("notify.bot.searchFailed") });
+    return;
+  }
+  // Issues are about media you HAVE: offer only what this user can see in a
+  // library (createIssue enforces the same gate on the pick).
+  const inLibrary = results.filter((r) => r.plexAvailable || r.jellyfinAvailable);
+  if (inLibrary.length === 0) {
+    await editOriginal(appId, token, { content: t("notify.bot.issue.noLibraryResults", { query: escMd(query) }) });
+    return;
+  }
+  await savePending(`pi:${interactionId}:${discordUserId}`, {
+    results: inLibrary,
+    issueType: problem as IssueTypeValue,
+    note,
+    season,
+    episode,
+  } satisfies PendingIssue);
+  await editOriginal(
+    appId,
+    token,
+    buildResultsPayload(t, query, inLibrary, interactionId, discordUserId, { prefix: "issuepick", labelKey: "notify.bot.issue.select" }),
+  );
+}
+
+const RECENT_LIST_SIZE = 10;
+
+// No site account is needed to browse what arrived — unless the admin requires a
+// linked account for the bot (the /status rule). A deactivated account is refused
+// outright: its restricted-server grants are still on the row (guardrail 33), so
+// reading through them would keep showing a banned user what lands there.
+async function handleRecentCommand(
+  t: Translator,
+  appId: string,
+  token: string,
+  discordUserId: string,
+  data: { options?: unknown },
+  requireLinked: boolean,
+): Promise<void> {
+  if (!(await isFeatureEnabled("feature.page.recentlyAdded"))) {
+    await editOriginal(appId, token, { content: t("notify.bot.recent.disabled") });
+    return;
+  }
+  const viewer = await prisma.user.findUnique({
+    where: { discordId: discordUserId },
+    select: { id: true, email: true, deactivatedAt: true },
+  });
+  if (viewer?.deactivatedAt) {
+    await editOriginal(appId, token, { content: t("notify.bot.pick.deactivated") });
+    return;
+  }
+  if (requireLinked && (!viewer || viewer.email.endsWith("@discord.local"))) {
+    await editOriginal(appId, token, { content: t("notify.bot.linkRequired") });
+    return;
+  }
+  if (!checkRateLimit(`discord-read:${discordUserId}`, 20, 60_000)) {
+    await editOriginal(appId, token, { content: t("notify.bot.tooFast") });
+    return;
+  }
+  const type = mediaTypeOption(optionValue(data.options, "type"));
+  const [plexOn, jellyfinOn, visible] = await Promise.all([
+    isFeatureEnabled("feature.integration.plex"),
+    isFeatureEnabled("feature.integration.jellyfin"),
+    // The library rows are scoped to the servers this Discord user may see, in
+    // the query (guardrail 35) — never masked afterwards.
+    discordVisibleInstances(discordUserId),
+  ]);
+  const recent = await getRecentlyAdded({ plex: plexOn ? visible.plex : [], jellyfin: jellyfinOn ? visible.jellyfin : [] });
+  // A title the user hid ("not interested") stays out of their list, as on the site.
+  const hidden = viewer && recent.length > 0
+    ? new Set(
+        (await prisma.hiddenItem.findMany({
+          where: { userId: viewer.id, tmdbId: { in: recent.map((r) => r.id) } },
+          select: { tmdbId: true, mediaType: true },
+        })).map((h) => `${h.mediaType === "MOVIE" ? "movie" : "tv"}:${h.tmdbId}`),
+      )
+    : new Set<string>();
+  const items = recent
+    .filter((r) => (type ? r.mediaType === type : true) && !hidden.has(`${r.mediaType}:${r.id}`))
+    .slice(0, RECENT_LIST_SIZE);
+  if (items.length === 0) {
+    await editOriginal(appId, token, { content: t("notify.bot.recent.none") });
+    return;
+  }
+  const lines = items.map(
+    (r) => `${r.mediaType === "movie" ? "🎬" : "📺"} **${escMd(truncateText(r.title, 80))}**${r.releaseYear ? ` (${r.releaseYear})` : ""}`,
+  );
+  await editOriginal(appId, token, { content: `${t("notify.bot.recent.header")}\n${lines.join("\n")}` });
 }
 
 function withDiscordTimeout(
@@ -368,7 +712,8 @@ async function handleCommand(interaction: any): Promise<void> {
       await editOriginal(appId, token, { content: t("notify.bot.linkWelcomeOnly") });
       return;
     }
-    if ((commandName === "request" || commandName === "status") && inWelcome) {
+    // The welcome channel is for /link alone; every other command is refused there.
+    if (commandName !== "link" && inWelcome) {
       await editOriginal(appId, token, { content: t("notify.bot.commandNotHere", { command: commandName }) });
       return;
     }
@@ -558,6 +903,18 @@ async function handleCommand(interaction: any): Promise<void> {
       void assignDiscordRolesOnLink(discordUserId, row.user.email, row.user.role);
       const userName = row.user.name ?? row.user.email;
       await editOriginal(appId, token, { content: t("notify.bot.link.success", { name: escMd(userName), transfer: transferNote }) });
+    }
+
+    else if (commandName === "watchlist") {
+      await handleWatchlistCommand(t, appId, token, interactionId, discordUserId, data);
+    }
+
+    else if (commandName === "issue") {
+      await handleIssueCommand(t, appId, token, interactionId, discordUserId, data);
+    }
+
+    else if (commandName === "recent") {
+      await handleRecentCommand(t, appId, token, discordUserId, data, requireLinked && !isExemptByRole);
     }
   } catch (err) {
     console.error("[interactions] handleCommand error:", err);
@@ -1121,6 +1478,156 @@ async function handleComponent(interaction: any): Promise<void> {
 
       confirmEmbed.description = `(${selected.releaseYear}) — ${note}`;
       await editOriginal(appId, token, { content: t("notify.bot.pick.submitted"), embeds: [confirmEmbed], components: [] });
+    }
+
+    else if (customId.startsWith("wladd:")) {
+      const [, pendingInteractionId, ownerId, idxStr] = customId.split(":");
+      if (discordUserId !== ownerId) return;
+      const pending = await loadPending<PendingWatchlistAdd>(`pw:${pendingInteractionId}:${discordUserId}`);
+      if (!pending) {
+        await editOriginal(appId, token, { content: t("notify.bot.watchlist.expired"), embeds: [], components: [] });
+        return;
+      }
+      const selected = pending.results[parseInt(idxStr, 10)];
+      if (!selected) {
+        await editOriginal(appId, token, { content: t("notify.bot.pick.invalid"), embeds: [], components: [] });
+        return;
+      }
+      const linked = await linkedSiteAccount(discordUserId);
+      const refusal = linkedAccountRefusal(t, linked);
+      if (refusal || linked.kind !== "ok") {
+        await editOriginal(appId, token, { content: refusal ?? t("notify.bot.linkRequired"), embeds: [], components: [] });
+        return;
+      }
+      if (!takeWatchlistAddToken(linked.user.id)) {
+        await editOriginal(appId, token, { content: t("notify.bot.tooFast"), embeds: [], components: [] });
+        return;
+      }
+      const added = await addToWatchlist(
+        sessionForUser(linked.user),
+        selected.id,
+        selected.mediaType === "movie" ? "MOVIE" : "TV",
+        t,
+      );
+      const embed: Record<string, unknown> = { title: `${selected.title} (${selected.releaseYear})` };
+      if (selected.posterPath) embed.thumbnail = { url: `${TMDB_POSTER_BASE}${selected.posterPath}` };
+      if (!added.ok) {
+        embed.color = added.reason === "already-added" ? 0x5865f2 : 0xed4245;
+        embed.description = added.error;
+      } else {
+        embed.color = 0x57f287;
+        // The auto-request outcome rides along exactly as the web add reports it.
+        embed.description = [t("notify.bot.watchlist.added"), added.autoRequest?.message].filter(Boolean).join("\n");
+      }
+      await editOriginal(appId, token, { content: "", embeds: [embed], components: [] });
+    }
+
+    else if (customId.startsWith("wlrm:")) {
+      const [, ownerId] = customId.split(":");
+      if (discordUserId !== ownerId) return;
+      const linked = await linkedSiteAccount(discordUserId);
+      const refusal = linkedAccountRefusal(t, linked);
+      if (refusal || linked.kind !== "ok") {
+        await editOriginal(appId, token, { content: refusal ?? t("notify.bot.linkRequired"), embeds: [], components: [] });
+        return;
+      }
+      // The web DELETE's per-user budget.
+      if (!checkRateLimit(`watchlist-del:${linked.user.id}`, 60, 60_000)) {
+        await editOriginal(appId, token, { content: t("notify.bot.tooFast"), embeds: [], components: [] });
+        return;
+      }
+      const value = Array.isArray(interaction.data.values) ? interaction.data.values[0] : undefined;
+      const match = typeof value === "string" ? /^(MOVIE|TV):(\d{1,10})$/.exec(value) : null;
+      if (!match) {
+        await editOriginal(appId, token, { content: t("notify.bot.pick.invalid"), embeds: [], components: [] });
+        return;
+      }
+      const where = { userId: linked.user.id, tmdbId: Number(match[2]), mediaType: match[1] as "MOVIE" | "TV" };
+      const row = await prisma.watchlistItem.findFirst({ where, select: { title: true } });
+      // deleteMany: a title already removed elsewhere is a no-op, not an error.
+      await prisma.watchlistItem.deleteMany({ where });
+      const notice = row ? t("notify.bot.watchlist.removed", { title: escMd(row.title) }) : null;
+      await editOriginal(appId, token, await watchlistListPayload(t, linked.user.id, discordUserId, notice));
+    }
+
+    else if (customId.startsWith("issuepick:")) {
+      const [, pendingInteractionId, ownerId, idxStr] = customId.split(":");
+      if (discordUserId !== ownerId) return;
+      const key = `pi:${pendingInteractionId}:${discordUserId}`;
+      const pending = await loadPending<PendingIssue>(key);
+      if (!pending) {
+        await editOriginal(appId, token, { content: t("notify.bot.issue.expired"), embeds: [], components: [] });
+        return;
+      }
+      const selected = pending.results[parseInt(idxStr, 10)];
+      if (!selected) {
+        await editOriginal(appId, token, { content: t("notify.bot.pick.invalid"), embeds: [], components: [] });
+        return;
+      }
+      if (!(await isFeatureEnabled("feature.page.issues"))) {
+        await editOriginal(appId, token, { content: t("notify.bot.issue.disabled"), embeds: [], components: [] });
+        return;
+      }
+      const linked = await linkedSiteAccount(discordUserId);
+      const refusal = linkedAccountRefusal(t, linked);
+      if (refusal || linked.kind !== "ok") {
+        await editOriginal(appId, token, { content: refusal ?? t("notify.bot.linkRequired"), embeds: [], components: [] });
+        return;
+      }
+      const session = sessionForUser(linked.user);
+      if (await maintenanceGuard(session)) {
+        await editOriginal(appId, token, { content: t("notify.bot.maintenance"), embeds: [], components: [] });
+        return;
+      }
+      // The web POST's per-user issue budget.
+      const rlRow = await prisma.setting.findUnique({ where: { key: "rateLimitIssues" } });
+      if (!checkRateLimit(`issues:${linked.user.id}`, parseRateLimit(rlRow?.value, 10), 60 * 1000)) {
+        await editOriginal(appId, token, { content: t("notify.bot.tooFast"), embeds: [], components: [] });
+        return;
+      }
+      // Claim the search: one report per search, so a double click can't file two.
+      const claimed = await prisma.discordSearchCache.deleteMany({ where: { queryKey: key } });
+      if (claimed.count === 0) {
+        await editOriginal(appId, token, { content: t("notify.bot.issue.expired"), embeds: [], components: [] });
+        return;
+      }
+      const isTv = selected.mediaType === "tv";
+      const scope = isTv && pending.season !== null ? (pending.episode !== null ? "EPISODE" : "SEASON") : "FULL";
+      const created = await createIssue(
+        session,
+        {
+          mediaType: isTv ? "TV" : "MOVIE",
+          tmdbId: selected.id,
+          issueType: pending.issueType,
+          scope,
+          seasonNumber: scope === "FULL" ? undefined : (pending.season ?? undefined),
+          episodeNumber: scope === "EPISODE" ? (pending.episode ?? undefined) : undefined,
+          note: pending.note ?? undefined,
+        },
+        t,
+      );
+      const embed: Record<string, unknown> = { title: `${selected.title} (${selected.releaseYear})` };
+      if (selected.posterPath) embed.thumbnail = { url: `${TMDB_POSTER_BASE}${selected.posterPath}` };
+      if (!created.ok) {
+        // Nothing was filed: give the search back so another result (or this
+        // one, once fixed) can still be picked instead of "search expired".
+        await savePending(key, pending).catch(() => {});
+        embed.color = 0xed4245;
+        embed.description = created.error;
+      } else {
+        // This handler is already detached from the interaction's request (the
+        // route answered Discord before it ran), so the admin fan-out runs here
+        // rather than through after(). It never throws.
+        void created.notify();
+        embed.color = 0x57f287;
+        const where = scope === "EPISODE"
+          ? t("notify.bot.issue.whereEpisode", { season: pending.season ?? 0, episode: pending.episode ?? 0 })
+          : scope === "SEASON"
+            ? t("notify.bot.issue.whereSeason", { season: pending.season ?? 0 })
+            : null;
+        embed.description = [t("notify.bot.issue.reported"), where].filter(Boolean).join("\n");
+      }
+      await editOriginal(appId, token, { content: "", embeds: [embed], components: [] });
     }
 
     else if (customId.startsWith("admin_approve:") || customId.startsWith("admin_decline:")) {

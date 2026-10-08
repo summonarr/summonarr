@@ -112,6 +112,9 @@ const SETTINGS_SCHEMA = [
   ["omdbApiKey",                    true ],
   ["mdblistApiKey",                 true ],
   ["traktClientId",                 true ],
+  // The Trakt app's secret — with the client id, what lets users connect their
+  // own Trakt accounts (src/lib/trakt-user.ts).
+  ["traktClientSecret",             true ],
   ["ratingsHiddenSources",          false],
   ["ipinfoToken",                   true ],
   // vapidPrivateKey is deliberately NOT here: push.ts generates the VAPID pair
@@ -745,6 +748,9 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     "ipinfoToken",
     "omdbApiKey",
     "mdblistApiKey",
+    // Removing it switches per-user Trakt connections off (the cron and the
+    // profile card both need it); readers treat "" as unset.
+    "traktClientSecret",
     // Webhook secrets must be clearable or the admin form silently lies: it
     // offers a blank field to remove the secret, the write is skipped as an
     // empty value, and the UI still reports Saved while the OLD secret stays

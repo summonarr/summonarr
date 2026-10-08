@@ -11,6 +11,8 @@ export const WARM_LIBRARY_LOCK_ID = 2012;
 // Deliberately not the next free id (2013): ids are claimed by parallel branches,
 // and a clash makes two unrelated crons serialize against each other.
 export const PLEX_WATCHLIST_LOCK_ID = 2021;
+// Same reasoning: a parallel-branch-safe id, not the next free one.
+export const TRAKT_SYNC_LOCK_ID = 2031;
 
 // 30 minutes — generous enough for legitimate full-library syncs but bounds the worst-case lock hold.
 const DEFAULT_WORK_TIMEOUT_MS = 30 * 60 * 1000;

@@ -2,7 +2,7 @@ import "server-only";
 import { createHash } from "node:crypto";
 import { prisma } from "@/lib/prisma";
 import { safeFetchTrusted } from "@/lib/safe-fetch";
-import { DISCORD_SLASH_COMMANDS, type DiscordSlashCommand } from "@/lib/discord-commands";
+import { DISCORD_SLASH_COMMANDS, type DiscordCommandOption, type DiscordSlashCommand } from "@/lib/discord-commands";
 import { LOCALES, type Locale } from "@/lib/i18n/locales";
 import { CATALOGS } from "@/lib/i18n/catalogs";
 
@@ -42,9 +42,16 @@ const DISCORD_LOCALES: Record<Exclude<Locale, "en">, readonly string[]> = {
 };
 
 // command → its description key, plus per-option description and choice keys.
+// A SUB_COMMAND option nests its own options the same way.
+export type DiscordOptionI18n = {
+  description: string;
+  choices?: Record<string, string>;
+  options?: Record<string, DiscordOptionI18n>;
+};
+
 export const DISCORD_COMMAND_I18N: Record<string, {
   description: string;
-  options?: Record<string, { description: string; choices?: Record<string, string> }>;
+  options?: Record<string, DiscordOptionI18n>;
 }> = {
   request: {
     description: "notify.discordCommand.request.description",
@@ -61,6 +68,55 @@ export const DISCORD_COMMAND_I18N: Record<string, {
     description: "notify.discordCommand.link.description",
     options: { token: { description: "notify.discordCommand.link.token.description" } },
   },
+  watchlist: {
+    description: "notify.discordCommand.watchlist.description",
+    options: {
+      add: {
+        description: "notify.discordCommand.watchlist.add.description",
+        options: {
+          type: {
+            description: "notify.discordCommand.request.type.description",
+            choices: { movie: "notify.discordCommand.request.type.movie", tv: "notify.discordCommand.request.type.tv" },
+          },
+          query: { description: "notify.discordCommand.request.query.description" },
+        },
+      },
+      list: { description: "notify.discordCommand.watchlist.list.description" },
+    },
+  },
+  issue: {
+    description: "notify.discordCommand.issue.description",
+    options: {
+      type: {
+        description: "notify.discordCommand.request.type.description",
+        choices: { movie: "notify.discordCommand.request.type.movie", tv: "notify.discordCommand.request.type.tv" },
+      },
+      query: { description: "notify.discordCommand.request.query.description" },
+      problem: {
+        description: "notify.discordCommand.issue.problem.description",
+        // The labels the admin-channel issue embed already uses.
+        choices: {
+          BAD_VIDEO: "notify.discord.issueType.BAD_VIDEO",
+          WRONG_AUDIO: "notify.discord.issueType.WRONG_AUDIO",
+          MISSING_SUBTITLES: "notify.discord.issueType.MISSING_SUBTITLES",
+          WRONG_MATCH: "notify.discord.issueType.WRONG_MATCH",
+          OTHER: "notify.discord.issueType.OTHER",
+        },
+      },
+      note: { description: "notify.discordCommand.issue.note.description" },
+      season: { description: "notify.discordCommand.issue.season.description" },
+      episode: { description: "notify.discordCommand.issue.episode.description" },
+    },
+  },
+  recent: {
+    description: "notify.discordCommand.recent.description",
+    options: {
+      type: {
+        description: "notify.discordCommand.recent.type.description",
+        choices: { movie: "notify.discordCommand.request.type.movie", tv: "notify.discordCommand.request.type.tv" },
+      },
+    },
+  },
 };
 
 function localizationsFor(key: string | undefined): Record<string, string> | undefined {
@@ -75,32 +131,37 @@ function localizationsFor(key: string | undefined): Record<string, string> | und
   return Object.keys(out).length ? out : undefined;
 }
 
+function localizeOptions(
+  options: readonly DiscordCommandOption[],
+  meta: Record<string, DiscordOptionI18n> | undefined,
+): unknown[] {
+  return options.map((opt) => {
+    const om = meta?.[opt.name];
+    const desc = localizationsFor(om?.description);
+    return {
+      ...opt,
+      ...(desc ? { description_localizations: desc } : {}),
+      ...(opt.choices
+        ? {
+            choices: opt.choices.map((c) => {
+              const names = localizationsFor(om?.choices?.[c.value]);
+              return names ? { ...c, name_localizations: names } : c;
+            }),
+          }
+        : {}),
+      // A SUB_COMMAND's own options, localized the same way.
+      ...(opt.options ? { options: localizeOptions(opt.options, om?.options) } : {}),
+    };
+  });
+}
+
 export function localizeDiscordCommands(commands: readonly DiscordSlashCommand[]): unknown[] {
   return commands.map((cmd) => {
     const meta = DISCORD_COMMAND_I18N[cmd.name];
     return {
       ...cmd,
       ...(localizationsFor(meta?.description) ? { description_localizations: localizationsFor(meta?.description) } : {}),
-      ...(cmd.options
-        ? {
-            options: cmd.options.map((opt) => {
-              const om = meta?.options?.[opt.name];
-              const desc = localizationsFor(om?.description);
-              return {
-                ...opt,
-                ...(desc ? { description_localizations: desc } : {}),
-                ...(opt.choices
-                  ? {
-                      choices: opt.choices.map((c) => {
-                        const names = localizationsFor(om?.choices?.[c.value]);
-                        return names ? { ...c, name_localizations: names } : c;
-                      }),
-                    }
-                  : {}),
-              };
-            }),
-          }
-        : {}),
+      ...(cmd.options ? { options: localizeOptions(cmd.options, meta?.options) } : {}),
     };
   });
 }

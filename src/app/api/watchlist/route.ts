@@ -5,13 +5,12 @@ import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/generated/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { resolveMediaMeta } from "@/lib/request-meta";
 import { sanitizeContainsSearch } from "@/lib/sanitize";
-import { maybeAutoRequestWatchlistAdd } from "@/lib/auto-request";
+import { addToWatchlist, takeWatchlistAddToken, WATCHLIST_ITEM_SELECT } from "@/lib/watchlist-add";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const PAGE_SIZE = 60;
-const SELECT = { tmdbId: true, mediaType: true, title: true, posterPath: true, createdAt: true } as const;
+const SELECT = WATCHLIST_ITEM_SELECT;
 
 // GET — the caller's own watchlist (newest first), optionally filtered by type/query.
 export const GET = withAuth(async (req, _ctx, session) => {
@@ -60,7 +59,7 @@ export const GET = withAuth(async (req, _ctx, session) => {
 // (the iOS app decodes it).
 export const POST = withAuth(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
-  if (!checkRateLimit(`watchlist:${session.user.id}`, 60, 60_000)) {
+  if (!takeWatchlistAddToken(session.user.id)) {
     return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
 
@@ -78,28 +77,11 @@ export const POST = withAuth(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiUser.common.mediaTypeInvalid") }, { status: 400 });
   }
 
-  // Three-tier cached resolver — see votes/route.ts for the rationale.
-  const verified = await resolveMediaMeta(tmdbId, mediaType);
-  if (!verified) {
-    return NextResponse.json({ error: t("apiUser.common.tmdbUnverified") }, { status: 422 });
-  }
-
-  let item: Prisma.WatchlistItemGetPayload<{ select: typeof SELECT }>;
-  try {
-    item = await prisma.watchlistItem.create({
-      data: { tmdbId, mediaType, title: verified.title, posterPath: verified.posterPath, userId: session.user.id },
-      select: SELECT,
-    });
-  } catch (err) {
-    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
-      return NextResponse.json({ error: t("apiUser.watchlist.alreadyAdded") }, { status: 409 });
-    }
-    throw err;
-  }
-
-  // Never throws (auto-request.ts), and runs outside the try above so nothing it
-  // does can be mistaken for the watchlist insert's own P2002.
-  const autoRequest = await maybeAutoRequestWatchlistAdd(session, tmdbId, mediaType, t);
+  // TMDB verification, the insert and auto-request are the shared
+  // chokepoint Discord's /watchlist add goes through too (src/lib/watchlist-add.ts).
+  const added = await addToWatchlist(session, tmdbId, mediaType, t);
+  if (!added.ok) return NextResponse.json({ error: added.error }, { status: added.status });
+  const { item, autoRequest } = added;
   if (!autoRequest) return NextResponse.json(item, { status: 201 });
   return NextResponse.json(
     {

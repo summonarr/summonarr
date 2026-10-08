@@ -1,28 +1,13 @@
 import { NextResponse, after } from "next/server";
-import { emitNotificationEvent } from "@/lib/notify-agents";
 import { withAuth } from "@/lib/api-auth";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
-import { notifyAdminsNewIssue } from "@/lib/email";
-import { notifyAdminsNewIssuePush } from "@/lib/push";
-import { notifyAdminsNewIssueDiscord } from "@/lib/discord-notify";
-import { emitSSE } from "@/lib/sse-emitter";
 import { maintenanceGuard } from "@/lib/maintenance";
-import { resolveTvdbIdFromTmdbId } from "@/lib/arr";
-import { resolveMediaMeta } from "@/lib/request-meta";
-import { sanitizeOptional } from "@/lib/sanitize";
 import { isFeatureEnabled } from "@/lib/features";
 import { hasPermission, Permission } from "@/lib/permissions";
-import { getVisibleServerInstances } from "@/lib/media-visibility";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
-
-const VALID_ISSUE_TYPES = ["BAD_VIDEO", "WRONG_AUDIO", "MISSING_SUBTITLES", "WRONG_MATCH", "OTHER"] as const;
-const VALID_SCOPES = ["FULL", "SEASON", "EPISODE"] as const;
-// Issue.seasonNumber/episodeNumber are INT4. Without a ceiling an out-of-range
-// value clears Number.isInteger and then throws out of prisma.issue.create —
-// there is no try/catch on this route, so malformed input answered 500.
-const MAX_SEASON_EPISODE = 10_000;
+import { createIssue } from "@/lib/issue-create";
 
 export const GET = withAuth(async (req, _ctx, session) => {
   // Issue visibility is bitmask-authoritative: a demoted ISSUE_ADMIN (role kept but
@@ -76,125 +61,13 @@ export const POST = withAuth(async (req, _ctx, session) => {
     note?: string;
   }>(req, 65536);
   if (parsed instanceof NextResponse) return parsed;
-  const body = parsed;
 
-  // tvdbId is intentionally NOT destructured from the body: a client could pair a
-  // library title's tmdbId with a DIFFERENT show's tvdbId, so the admin Sonarr
-  // grab/search downloads the wrong series. We resolve it from the verified tmdbId below.
-  const { mediaType, tmdbId, issueType, scope, seasonNumber, episodeNumber, note } = body;
-
-  if (!mediaType || !tmdbId || !issueType) {
-    return NextResponse.json({ error: t("apiUser.issues.fieldsRequired") }, { status: 400 });
-  }
-
-  if (mediaType !== "MOVIE" && mediaType !== "TV") {
-    return NextResponse.json({ error: t("apiUser.common.mediaTypeInvalid") }, { status: 400 });
-  }
-
-  if (!Number.isInteger(tmdbId) || tmdbId <= 0) {
-    return NextResponse.json({ error: t("apiUser.common.tmdbIdPositive") }, { status: 400 });
-  }
-
-  if (!VALID_ISSUE_TYPES.includes(issueType as (typeof VALID_ISSUE_TYPES)[number])) {
-    return NextResponse.json({ error: t("apiUser.issues.issueTypeOneOf", { values: VALID_ISSUE_TYPES.join(", ") }) }, { status: 400 });
-  }
-
-  const resolvedScope = (scope ?? "FULL") as (typeof VALID_SCOPES)[number];
-  if (!VALID_SCOPES.includes(resolvedScope)) {
-    return NextResponse.json({ error: t("apiUser.issues.scopeOneOf", { values: VALID_SCOPES.join(", ") }) }, { status: 400 });
-  }
-
-  if (note !== undefined && (typeof note !== "string" || note.length > 1000)) {
-    return NextResponse.json({ error: t("apiUser.issues.noteTooLong") }, { status: 400 });
-  }
-  const sanitizedNote = sanitizeOptional(note);
-
-  if (resolvedScope === "SEASON" || resolvedScope === "EPISODE") {
-    if (!Number.isInteger(seasonNumber) || (seasonNumber as number) < 1) {
-      return NextResponse.json({ error: t("apiUser.issues.seasonRequired") }, { status: 400 });
-    }
-    if ((seasonNumber as number) > MAX_SEASON_EPISODE) {
-      return NextResponse.json({ error: t("apiUser.issues.seasonTooLarge", { max: MAX_SEASON_EPISODE }) }, { status: 400 });
-    }
-  }
-
-  if (resolvedScope === "EPISODE") {
-    if (!Number.isInteger(episodeNumber) || (episodeNumber as number) < 1) {
-      return NextResponse.json({ error: t("apiUser.issues.episodeRequired") }, { status: 400 });
-    }
-    if ((episodeNumber as number) > MAX_SEASON_EPISODE) {
-      return NextResponse.json({ error: t("apiUser.issues.episodeTooLarge", { max: MAX_SEASON_EPISODE }) }, { status: 400 });
-    }
-  }
-
-  // Look the title up via TMDB (cached) so the stored title/poster come from TMDB,
-  // not from the client. See votes/route.ts for how the cache tiers work.
-  const verified = await resolveMediaMeta(tmdbId, mediaType as "MOVIE" | "TV");
-  if (!verified) {
-    return NextResponse.json({ error: t("apiUser.common.tmdbUnverified") }, { status: 422 });
-  }
-
-  // Resolve tvdbId server-side from the verified tmdbId for TV. May be null if
-  // resolution fails — the admin grab/search paths resolve on demand and fall back
-  // gracefully, so a null here is safe (never a client-chosen id).
-  const resolvedTvdbId = mediaType === "TV" ? await resolveTvdbIdFromTmdbId(tmdbId) : null;
-
-  // Issues presuppose the title is in the library — every type (bad video, wrong
-  // audio, missing subs, wrong match) is about media you HAVE. Gate on a Plex or
-  // Jellyfin library hit so the API can't be scripted into issue records for titles
-  // that aren't available (the UI only surfaces "report issue" on available media).
-  //
-  // Scoped to the servers THIS reporter can see: a copy on a restricted server they hold
-  // no grant for isn't media they HAVE, so it must not open the gate. The converse is what
-  // makes the check consistent with the button — the detail page renders "report issue" off
-  // the same per-user availability.
-  const mt = mediaType as "MOVIE" | "TV";
-  const visible = await getVisibleServerInstances(session);
-  const [plexHit, jellyfinHit] = await Promise.all([
-    prisma.plexLibraryItem.findFirst({
-      where: { tmdbId, mediaType: mt, serverInstance: { in: visible.plex } },
-      select: { tmdbId: true },
-    }),
-    prisma.jellyfinLibraryItem.findFirst({
-      where: { tmdbId, mediaType: mt, serverInstance: { in: visible.jellyfin } },
-      select: { tmdbId: true },
-    }),
-  ]);
-  if (!plexHit && !jellyfinHit) {
-    return NextResponse.json({ error: t("apiUser.issues.notInLibrary") }, { status: 422 });
-  }
-
-  const issue = await prisma.issue.create({
-    data: {
-      reportedBy: session.user.id,
-      mediaType: mediaType as "MOVIE" | "TV",
-      tmdbId,
-      tvdbId: resolvedTvdbId,
-      title: verified.title,
-      posterPath: verified.posterPath,
-      issueType: issueType as (typeof VALID_ISSUE_TYPES)[number],
-      scope: resolvedScope,
-      seasonNumber: resolvedScope !== "FULL" ? (seasonNumber ?? null) : null,
-      episodeNumber: resolvedScope === "EPISODE" ? (episodeNumber ?? null) : null,
-      note: sanitizedNote ?? null,
-    },
-  });
-
-  emitSSE({ type: "issue:new", issueId: issue.id, userId: session.user.id });
-  const reportedBy = session.user.name ?? session.user.email ?? session.user.id;
-  after(async () => {
-    emitNotificationEvent({
-      event: "issue.created",
-      media: { type: mediaType === "MOVIE" ? "MOVIE" : "TV", tmdbId, title: verified.title, posterPath: verified.posterPath ?? null },
-      issue: { id: issue.id, type: issueType },
-      actor: { name: reportedBy },
-      text: sanitizedNote ?? null,
-    });
-    await Promise.allSettled([
-      notifyAdminsNewIssue({ title: verified.title, mediaType, tmdbId, issueType, reportedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath, issueId: issue.id, excludeUserId: session.user.id }),
-      notifyAdminsNewIssuePush({ title: verified.title, tmdbId, mediaType, issueType, reportedBy, issueId: issue.id, excludeUserId: session.user.id }),
-      notifyAdminsNewIssueDiscord({ issueId: issue.id, title: verified.title, mediaType, tmdbId, issueType, reportedBy, note: sanitizedNote ?? null, posterPath: verified.posterPath }),
-    ]);
-  });
+  // Validation, the library gate, the create and the admin fan-out are the
+  // shared chokepoint Discord's /issue files through too (src/lib/issue-create.ts).
+  // A body tvdbId is ignored there on purpose.
+  const created = await createIssue(session, parsed, t);
+  if (!created.ok) return NextResponse.json({ error: created.error }, { status: created.status });
+  const { issue } = created;
+  after(created.notify);
   return NextResponse.json(issue, { status: 201 });
 });
