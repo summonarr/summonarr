@@ -219,7 +219,9 @@ export function apnsAlertsFor(t: Translator): Record<ApnsCategory, { title: stri
 export const APNS_ALERTS: Record<ApnsCategory, { title: string; body: string }> = apnsAlertsFor(translatorFor("en"));
 
 // Default relay operated by the app publisher. Overridable per-server via the
-// `apnsRelayUrl` Setting (e.g. to point at a self-hosted relay).
+// `apnsRelayUrl` Setting, but only a relay holding the App Store app's APNs key
+// can deliver to it — so for every deployment but the publisher's own, this is
+// the only working value.
 const DEFAULT_APNS_RELAY_URL = "https://summonapns.gadgetusaf.com/push";
 
 // The relay config is two Setting rows that rarely change, but sendApns runs

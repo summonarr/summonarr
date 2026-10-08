@@ -256,5 +256,15 @@
   "apiAdmin.warm.activityRunning": "活动缓存预热已在运行",
   "apiAdmin.cleanup.blacklistReason": "已由媒体库清理移除",
   "apiAdmin.ipLookup.ipInvalid": "ip 必须是有效的 IPv4 或 IPv6 地址",
-  "apiAdmin.ipLookup.unavailable": "查询服务不可用，请稍后重试"
+  "apiAdmin.ipLookup.unavailable": "查询服务不可用，请稍后重试",
+  "apiAdmin.missing.serviceInvalid": "service 必须是 \"radarr\" 或 \"sonarr\"",
+  "apiAdmin.missing.seriesIdInvalid": "seriesId 必须是正整数",
+  "apiAdmin.missing.seriesNotFound": "Sonarr 中没有该 id 的剧集",
+  "apiAdmin.missing.sonarrUnreachable": "无法从 Sonarr 读取剧集",
+  "apiAdmin.missing.integrationDisabled": "{service} 集成已停用",
+  "apiAdmin.missing.instanceUnknown": "没有已配置的 {service} 实例使用该标识",
+  "apiAdmin.missing.searchBodyInvalid": "请求体必须是 { service: \"radarr\" | \"sonarr\", instance: string, arrId: 正整数 }",
+  "apiAdmin.missing.nothingMissing": "该作品已不再缺失任何内容——请刷新列表",
+  "apiAdmin.missing.movieNotFound": "Radarr 中没有该 id 的电影",
+  "apiAdmin.missing.searchFailed": "无法在 {service} 中启动搜索"
 }

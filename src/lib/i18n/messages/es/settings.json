@@ -335,7 +335,7 @@
   "settings.section.discordBot.title": "Bot de Discord",
   "settings.section.discordBot.description": "Permite que los usuarios de Discord soliciten contenido con comandos de barra a través del endpoint HTTP Interactions de Discord. No hace falta ningún proceso ni variable de entorno adicional.",
   "settings.section.iosPushRelay.title": "Relé de push de iOS",
-  "settings.section.iosPushRelay.description": "Las notificaciones push de iOS se entregan a través de un relé de APNs. Indica un relé autoalojado, añade su clave bearer si requiere autenticación y, si quieres, recomienda una compilación mínima de la app.",
+  "settings.section.iosPushRelay.description": "Las notificaciones push de iOS llegan a la app de la App Store a través del relé de APNs del editor de la app. Ese relé tiene la clave push de Apple de la app y no se puede autoalojar, así que deja la URL del relé en blanco. El relé nunca ve títulos ni nombres de usuario. Añade una clave del relé si te dieron una y, si quieres, recomienda una compilación mínima de la app.",
   "settings.section.externalRatings.title": "Valoraciones externas",
   "settings.section.externalRatings.description": "Añade valoraciones de IMDb, Rotten Tomatoes, RT Audience, Metacritic y Trakt a las páginas de contenido. Se recomienda MDBList: cubre las series y añade las puntuaciones del público.",
   "settings.section.ipGeolocation.title": "Geolocalización por IP",

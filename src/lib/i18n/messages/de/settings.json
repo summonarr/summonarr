@@ -335,7 +335,7 @@
   "settings.section.discordBot.title": "Discord-Bot",
   "settings.section.discordBot.description": "Discord-Benutzern erlauben, Medien per Slash-Befehl über den HTTP-Interactions-Endpunkt von Discord anzufragen. Kein zusätzlicher Prozess und keine Umgebungsvariablen nötig.",
   "settings.section.iosPushRelay.title": "iOS-Push-Relay",
-  "settings.section.iosPushRelay.description": "iOS-Push-Benachrichtigungen werden über ein APNs-Relay zugestellt. Geben Sie ein selbst gehostetes Relay an, fügen Sie dessen Bearer-Schlüssel hinzu, falls es Authentifizierung verlangt, und empfehlen Sie optional einen Mindest-Build der App.",
+  "settings.section.iosPushRelay.description": "iOS-Push-Benachrichtigungen erreichen die App-Store-App über das APNs-Relay des App-Herausgebers. Es besitzt den Apple-Push-Schlüssel der App und lässt sich nicht selbst hosten, lassen Sie die Relay-URL daher leer. Das Relay sieht nie Titel oder Benutzernamen. Fügen Sie einen Relay-Schlüssel hinzu, falls Sie einen erhalten haben, und empfehlen Sie optional einen Mindest-Build der App.",
   "settings.section.externalRatings.title": "Externe Bewertungen",
   "settings.section.externalRatings.description": "Fügt Medienseiten Bewertungen von IMDb, Rotten Tomatoes, RT Audience, Metacritic und Trakt hinzu. MDBList wird empfohlen – es deckt Serien ab und ergänzt Publikumswertungen.",
   "settings.section.ipGeolocation.title": "IP-Geolokalisierung",

@@ -335,7 +335,7 @@
   "settings.section.discordBot.title": "Bot do Discord",
   "settings.section.discordBot.description": "Permite que usuários do Discord solicitem mídia por comandos de barra usando o endpoint HTTP Interactions do Discord. Nenhum processo extra ou variável de ambiente é necessário.",
   "settings.section.iosPushRelay.title": "Relay de push do iOS",
-  "settings.section.iosPushRelay.description": "As notificações push do iOS são entregues por um relay de APNs. Aponte para um relay auto-hospedado, adicione a chave bearer dele se exigir autenticação e, se quiser, recomende um build mínimo do app.",
+  "settings.section.iosPushRelay.description": "As notificações push do iOS chegam ao app da App Store pelo relay de APNs do publicador do app. Esse relay guarda a chave de push da Apple do app e não pode ser auto-hospedado, então deixe a URL do relay em branco. O relay nunca vê títulos nem nomes de usuário. Adicione uma chave do relay se você recebeu uma e, se quiser, recomende um build mínimo do app.",
   "settings.section.externalRatings.title": "Notas externas",
   "settings.section.externalRatings.description": "Adiciona notas do IMDb, Rotten Tomatoes, RT Audience, Metacritic e Trakt às páginas de mídia. O MDBList é recomendado — ele cobre séries e adiciona as notas do público.",
   "settings.section.ipGeolocation.title": "Geolocalização de IP",

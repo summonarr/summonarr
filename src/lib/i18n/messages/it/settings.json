@@ -335,7 +335,7 @@
   "settings.section.discordBot.title": "Bot Discord",
   "settings.section.discordBot.description": "Consenti agli utenti Discord di richiedere contenuti tramite comandi slash usando l'endpoint HTTP Interactions di Discord. Non servono processi aggiuntivi né variabili d'ambiente.",
   "settings.section.iosPushRelay.title": "Relay push iOS",
-  "settings.section.iosPushRelay.description": "Le notifiche push iOS vengono recapitate tramite un relay APNs. Indica un relay self-hosted, aggiungi la sua chiave bearer se richiede l'autenticazione e, facoltativamente, consiglia una build minima dell'app.",
+  "settings.section.iosPushRelay.description": "Le notifiche push iOS arrivano all'app dell'App Store tramite il relay APNs dell'editore dell'app. Il relay custodisce la chiave push Apple dell'app e non può essere self-hosted, quindi lascia vuoto l'URL del relay. Il relay non vede mai titoli né nomi utente. Aggiungi una chiave del relay se te ne è stata fornita una e, facoltativamente, consiglia una build minima dell'app.",
   "settings.section.externalRatings.title": "Voti esterni",
   "settings.section.externalRatings.description": "Aggiunge i voti IMDb, Rotten Tomatoes, RT Audience, Metacritic e Trakt alle pagine dei contenuti. MDBList è consigliato — copre le serie TV e aggiunge i punteggi del pubblico.",
   "settings.section.ipGeolocation.title": "Geolocalizzazione IP",

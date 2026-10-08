@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.32.2 beta — feature-complete for the initial release. **Beta testers wanted** — see [Beta testing](#beta-testing).
+> **Status:** v0.33.0 — stable and running in production. Found a problem? See [Feedback](#feedback).
 
 ## Install
 
@@ -166,9 +166,23 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 
 ## Privacy
 
-Summonarr is self-hosted: the developer operates no servers and collects no data. The iOS app talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
+Summonarr is self-hosted and the developer collects no data. The one server the developer runs is the push relay for iOS notifications, which can't be self-hosted and never sees media titles or usernames (see [APNs relay trust](./docker-container/README.md#apns-relay-trust-ios-push)). The iOS app itself talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.33.0
+
+Summonarr is no longer labeled beta. This is the stable line.
+
+**Added**
+
+- **Missing** (Admin → Missing): Radarr and Sonarr tabs listing titles that should already have a file, read live from every configured instance. A movie is listed once its digital or physical release date has passed (cinema-only and undated movies never are); a series is listed when an aired, monitored, regular-season episode has no file, and its row expands to the missing episodes. Unmonitored titles are hidden by default, and an instance that can't be reached is named instead of reading as "nothing missing".
+- Each row has a **Search** button that queues exactly what is missing: a movie search, or for a series a season search for each season with no files at all and an episode search for the rest. It never runs a full series search, which would also hunt for upgrades, and a title that gained a file since the page loaded is not searched.
+
+**Changed**
+
+- **The privacy policy** (effective October 8, 2026) now describes the push relay that delivers iOS notifications: what it receives, what it keeps, and that it never sees media titles or usernames. It previously said the developer operates no servers.
+- The deployment guide and the iOS Push Relay settings no longer suggest self-hosting the relay. Apple delivers pushes to the App Store app only when they are signed with the app's own key, so a relay you run yourself can't reach it. Leave the relay URL blank.
 
 ### v0.32.2
 
@@ -890,13 +904,9 @@ A large reliability pass across the Radarr/Sonarr and Plex/Jellyfin integrations
 - API: rate-limited responses now include a `Retry-After` header so clients back off correctly.
 - Hardening: bounded async fan-outs and added request-size caps, input validation, and admin-account guards across the admin, requests, and sync paths.
 
-## Beta testing
+## Feedback
 
-Summonarr v0.32.2 is a beta release and real-world feedback is needed before a stable 1.0. If you run Plex or Jellyfin at home and want to help:
-
-1. **Deploy** using [`docker-container/README.md`](./docker-container/README.md).
-2. **Exercise the app** — browse, request movies and TV, approve them through Radarr/Sonarr, trigger webhooks, and use the admin pages.
-3. **Report what breaks** — open a GitHub issue with the details listed in [Contributing](#contributing) below.
+If something breaks, open a GitHub issue with the details listed in [Contributing](#contributing) below.
 
 Particularly useful feedback:
 
