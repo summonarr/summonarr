@@ -256,5 +256,15 @@
   "apiAdmin.warm.activityRunning": "Le préchauffage de l'activité est déjà en cours",
   "apiAdmin.cleanup.blacklistReason": "Supprimé par le nettoyage de la bibliothèque",
   "apiAdmin.ipLookup.ipInvalid": "ip doit être une adresse IPv4 ou IPv6 valide",
-  "apiAdmin.ipLookup.unavailable": "Service de recherche indisponible — réessayez dans un instant"
+  "apiAdmin.ipLookup.unavailable": "Service de recherche indisponible — réessayez dans un instant",
+  "apiAdmin.missing.serviceInvalid": "service doit valoir « radarr » ou « sonarr »",
+  "apiAdmin.missing.seriesIdInvalid": "seriesId doit être un entier positif",
+  "apiAdmin.missing.seriesNotFound": "Sonarr n'a aucune série avec cet id",
+  "apiAdmin.missing.sonarrUnreachable": "Impossible de lire les épisodes depuis Sonarr",
+  "apiAdmin.missing.integrationDisabled": "L'intégration {service} est désactivée",
+  "apiAdmin.missing.instanceUnknown": "Aucune instance {service} configurée ne porte cet identifiant",
+  "apiAdmin.missing.searchBodyInvalid": "Le corps doit être { service: \"radarr\" | \"sonarr\", instance: string, arrId: entier positif }",
+  "apiAdmin.missing.nothingMissing": "Il ne manque plus rien pour ce titre — actualisez la liste",
+  "apiAdmin.missing.movieNotFound": "Radarr n'a aucun film avec cet id",
+  "apiAdmin.missing.searchFailed": "Impossible de lancer la recherche dans {service}"
 }

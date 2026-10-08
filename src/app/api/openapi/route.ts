@@ -192,6 +192,7 @@ const spec = {
     { name: "Admin – Debug", description: "Pipeline inspection" },
     { name: "Admin – Fix Match", description: "Manual metadata correction" },
     { name: "Admin – Cleanup", description: "Library cleanup: rule-based candidates and admin-confirmed deletion (ADMIN only)" },
+    { name: "Admin – Missing", description: "Radarr/Sonarr titles that should already have a file: released movies and aired episodes (ADMIN only)" },
     { name: "Discord", description: "Discord OAuth / role sync" },
     { name: "Settings", description: "Application settings (ADMIN only)" },
     { name: "Webhooks", description: "Inbound webhooks from media servers / ARR" },
@@ -2264,6 +2265,191 @@ const spec = {
           "403": { description: "Not ADMIN" },
           "404": { description: "Library cleanup is disabled" },
           "409": { description: "confirmTargets missing or not equal to the live count (the fresh plan is returned)" },
+        },
+      },
+    },
+
+    "/admin/missing": {
+      get: {
+        tags: ["Admin – Missing"],
+        summary: "What Radarr or Sonarr should already have but doesn't (ADMIN)",
+        description:
+          "One live listing per configured instance of the requested service. `radarr`: movies with no file whose " +
+          "physical OR digital release date has passed (a cinema-only or undated movie is never listed). `sonarr`: " +
+          "series with at least one aired, monitored, regular-season episode that has no file — Sonarr's own per-season " +
+          "statistics, specials excluded, the same completion rule the sync uses. `monitored` is reported, not filtered " +
+          "on. An instance whose listing failed is named in `errors` and contributes no items. Nothing is cached or written.",
+        parameters: [{ name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } }],
+        responses: {
+          "200": {
+            description: "The report. `items` are movies for radarr, series for sonarr.",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    service: { type: "string", enum: ["radarr", "sonarr"] },
+                    enabled: { type: "boolean", description: "feature.integration.<service>; false ⇒ no instance was read" },
+                    instances: { type: "array", items: { type: "object", properties: { slug: { type: "string" }, name: { type: "string" } } } },
+                    errors: { type: "array", items: { type: "object", properties: { instance: { type: "string" }, error: { type: "string" } } } },
+                    items: {
+                      type: "array",
+                      items: {
+                        oneOf: [
+                          {
+                            type: "object",
+                            description: "Radarr movie",
+                            properties: {
+                              instance: { type: "string" },
+                              arrId: { type: "integer" },
+                              tmdbId: { type: "integer", nullable: true },
+                              title: { type: "string" },
+                              year: { type: "integer", nullable: true },
+                              monitored: { type: "boolean" },
+                              posterPath: { type: "string", nullable: true },
+                              inCinemas: { type: "string", format: "date-time", nullable: true },
+                              physicalRelease: { type: "string", format: "date-time", nullable: true },
+                              digitalRelease: { type: "string", format: "date-time", nullable: true },
+                              releasedAt: { type: "string", format: "date-time", description: "The earlier past home release" },
+                              daysMissing: { type: "integer" },
+                            },
+                          },
+                          {
+                            type: "object",
+                            description: "Sonarr series",
+                            properties: {
+                              instance: { type: "string" },
+                              arrId: { type: "integer" },
+                              tmdbId: { type: "integer", nullable: true },
+                              tvdbId: { type: "integer", nullable: true },
+                              title: { type: "string" },
+                              year: { type: "integer", nullable: true },
+                              monitored: { type: "boolean" },
+                              status: { type: "string", nullable: true },
+                              posterPath: { type: "string", nullable: true },
+                              missing: { type: "integer" },
+                              aired: { type: "integer" },
+                              lastAired: { type: "string", format: "date-time", nullable: true },
+                              seasons: {
+                                type: "array",
+                                items: {
+                                  type: "object",
+                                  properties: {
+                                    seasonNumber: { type: "integer" },
+                                    missing: { type: "integer" },
+                                    aired: { type: "integer" },
+                                    lastAired: { type: "string", format: "date-time", nullable: true },
+                                  },
+                                },
+                              },
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "400": { description: "service is not radarr or sonarr" },
+          "403": { description: "Not ADMIN" },
+        },
+      },
+    },
+
+    "/admin/missing/episodes": {
+      get: {
+        tags: ["Admin – Missing"],
+        summary: "One series' missing episodes (ADMIN)",
+        description:
+          "Sonarr's aired, monitored, regular-season episodes of one series that have no file, oldest first. " +
+          "`instance` is a Sonarr instance slug (absent or empty = the default) and must name a configured instance; " +
+          "`seriesId` is Sonarr's own id from the /admin/missing report.",
+        parameters: [
+          { name: "seriesId", in: "query", required: true, schema: { type: "integer", minimum: 1 } },
+          { name: "instance", in: "query", schema: { type: "string" } },
+        ],
+        responses: {
+          "200": {
+            description: "The episodes",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    episodes: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          seasonNumber: { type: "integer" },
+                          episodeNumber: { type: "integer" },
+                          title: { type: "string" },
+                          airDateUtc: { type: "string", format: "date-time" },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "400": { description: "seriesId is not a positive integer" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Sonarr integration disabled, unknown instance, or no such series" },
+          "502": { description: "Sonarr could not be read" },
+        },
+      },
+    },
+
+    "/admin/missing/search": {
+      post: {
+        tags: ["Admin – Missing"],
+        summary: "Search Radarr/Sonarr for one missing title (ADMIN)",
+        description:
+          "Re-judges the title live with the report's rules, then queues a search on that instance for exactly what is " +
+          "missing: Radarr `MoviesSearch` for the movie; for a series, Sonarr `SeasonSearch` per season with two or more " +
+          "missing episodes and no file at all, plus one `EpisodeSearch` for every other missing episode — never " +
+          "`SeriesSearch`, which would also hunt upgrades. Returns once the commands are queued; Radarr/Sonarr run them " +
+          "in the background. Nothing in Summonarr is written.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["service", "arrId"],
+                properties: {
+                  service: { type: "string", enum: ["radarr", "sonarr"] },
+                  instance: { type: "string", description: "Instance slug; absent or empty = the default" },
+                  arrId: { type: "integer", minimum: 1, description: "Radarr movie id / Sonarr series id from the report" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "202": {
+            description: "Search queued",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    commands: { type: "integer" },
+                    seasons: { type: "array", items: { type: "integer" }, description: "Sonarr: seasons searched whole" },
+                    episodes: { type: "integer", description: "Sonarr: episodes searched individually" },
+                  },
+                },
+              },
+            },
+          },
+          "400": { description: "Invalid body" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled, unknown instance, or no such movie/series" },
+          "409": { description: "Nothing is missing for this title any more" },
+          "502": { description: "The search could not be queued" },
         },
       },
     },

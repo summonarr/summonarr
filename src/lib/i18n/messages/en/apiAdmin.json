@@ -256,5 +256,15 @@
   "apiAdmin.warm.activityRunning": "Activity warm already running",
   "apiAdmin.cleanup.blacklistReason": "Removed by library cleanup",
   "apiAdmin.ipLookup.ipInvalid": "ip must be a valid IPv4 or IPv6 address",
-  "apiAdmin.ipLookup.unavailable": "Lookup service unavailable — try again shortly"
+  "apiAdmin.ipLookup.unavailable": "Lookup service unavailable — try again shortly",
+  "apiAdmin.missing.serviceInvalid": "service must be \"radarr\" or \"sonarr\"",
+  "apiAdmin.missing.seriesIdInvalid": "seriesId must be a positive integer",
+  "apiAdmin.missing.seriesNotFound": "Sonarr has no series with that id",
+  "apiAdmin.missing.sonarrUnreachable": "Could not read episodes from Sonarr",
+  "apiAdmin.missing.integrationDisabled": "{service} integration is disabled",
+  "apiAdmin.missing.instanceUnknown": "No configured {service} instance has that slug",
+  "apiAdmin.missing.searchBodyInvalid": "Body must be { service: \"radarr\" | \"sonarr\", instance: string, arrId: positive integer }",
+  "apiAdmin.missing.nothingMissing": "Nothing is missing for this title any more — refresh the list",
+  "apiAdmin.missing.movieNotFound": "Radarr has no movie with that id",
+  "apiAdmin.missing.searchFailed": "Could not start the search in {service}"
 }
