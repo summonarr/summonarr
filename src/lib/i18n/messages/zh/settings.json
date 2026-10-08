@@ -335,7 +335,7 @@
   "settings.section.discordBot.title": "Discord 机器人",
   "settings.section.discordBot.description": "允许 Discord 用户通过 Discord 的 HTTP Interactions 端点使用斜杠命令请求媒体。无需额外进程或环境变量。",
   "settings.section.iosPushRelay.title": "iOS 推送中继",
-  "settings.section.iosPushRelay.description": "iOS 推送通知通过 APNs 中继发送。可指向自托管的中继，如需认证则添加其 Bearer 密钥，还可选择推荐最低应用版本。",
+  "settings.section.iosPushRelay.description": "iOS 推送通知通过应用发布者的 APNs 中继送达 App Store 版应用。该中继持有应用的 Apple 推送密钥，无法自托管，因此请将中继 URL 留空。中继永远看不到标题或用户名。如果你获得了中继密钥请添加，还可选择推荐最低应用版本。",
   "settings.section.externalRatings.title": "外部评分",
   "settings.section.externalRatings.description": "在媒体页面添加 IMDb、烂番茄、烂番茄观众评分、Metacritic 和 Trakt 评分。推荐使用 MDBList——它覆盖剧集并增加观众评分。",
   "settings.section.ipGeolocation.title": "IP 地理定位",

@@ -335,7 +335,7 @@
   "settings.section.discordBot.title": "Discord Bot",
   "settings.section.discordBot.description": "Allow Discord users to request media via slash commands using Discord's HTTP Interactions endpoint. No extra process or environment variables needed.",
   "settings.section.iosPushRelay.title": "iOS Push Relay",
-  "settings.section.iosPushRelay.description": "iOS push notifications are delivered through an APNs relay. Point at a self-hosted relay, add its bearer key if it requires auth, and optionally recommend a minimum app build.",
+  "settings.section.iosPushRelay.description": "iOS push notifications reach the App Store app through the app publisher's APNs relay. It holds the app's Apple push key and can't be self-hosted, so leave the relay URL blank. The relay never sees titles or usernames. Add a relay key if you were issued one, and optionally recommend a minimum app build.",
   "settings.section.externalRatings.title": "External Ratings",
   "settings.section.externalRatings.description": "Adds IMDb, Rotten Tomatoes, RT Audience, Metacritic, and Trakt ratings to media pages. MDBList is recommended — it covers TV shows and adds Audience scores.",
   "settings.section.ipGeolocation.title": "IP Geolocation",

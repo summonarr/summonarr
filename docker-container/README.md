@@ -327,11 +327,20 @@ On an internet-facing deployment (`TRUST_PROXY=true`) the pre-auth restore is th
 
 ### APNs relay trust (iOS push)
 
-iOS notifications are delivered through an APNs relay (default `summonapns.gadgetusaf.com`). Notification **content** is end-to-end encrypted once a device registers its public key, but the relay always receives the device's **APNs token** in clear.
+iOS notifications reach the App Store app through one APNs relay, `summonapns.gadgetusaf.com`, run by the app's publisher. Apple delivers a push to an app only when it is authenticated with a key from that app's developer account, and that key can't ship inside a self-hosted server, so every Summonarr server sends its iOS pushes through this relay. **The relay can't be self-hosted**: a relay without the publisher's key cannot deliver to the App Store app. Leave `apnsRelayUrl` (Admin → Settings → iOS Push Relay) blank — pointing it anywhere else stops iOS push.
 
-- For privacy-sensitive deployments, **self-host the relay** and point `apnsRelayUrl` (Admin → Settings) at it. It must be **HTTPS** (the setting now validates this).
-- Set `apnsRelayKey` (Admin → Settings) if the relay issues you one. Beyond authenticating this server, a key gives it **its own per-device rate-limit budget** on the relay, so another server pushing to the same device can't exhaust yours. Give **each server a distinct key** — servers sharing a key share one budget.
-- Or leave iOS push disabled if you don't use the iOS app.
+What the relay receives with each push:
+
+- the device's **APNs token**, in clear (it needs it to address the push);
+- a **generic alert** for the notification's category, such as "Request approved", in the recipient's language — never a media title or a username;
+- the notification's **in-app link**: a tab path, or an issue's opaque id;
+- once the device has registered its public key, the real title, text and media link as an **end-to-end-encrypted blob** only that device can read. Without the key, the device shows the generic alert;
+- the sending server's IP address, and its relay key if one is set.
+
+The relay has no database. In memory it keeps short-lived rate-limit counters and each token's APNs environment, both lost on restart. Its only output is its log: per-minute delivery counts and error messages, which can include the first eight characters of a device token.
+
+- Set `apnsRelayKey` (Admin → Settings) if the relay operator issues you one. Beyond authenticating this server, a key gives it **its own per-device rate-limit budget** on the relay, so another server pushing to the same device can't exhaust yours. Give **each server a distinct key** — servers sharing a key share one budget.
+- Nothing reaches the relay until an iOS device registers for push. If you don't want the relay involved at all, turn off the **Web push notifications** feature switch (`feature.integration.push`) — despite its name, it gates iOS push too, so it also turns off browser push. Two buttons still send when pressed: **Send a test notification** (any user, to their own devices) and the admin's **Send update notice to all iOS devices**.
 
 ### Move secrets to file mounts
 
@@ -391,7 +400,7 @@ All three are **optional**, configured in **Admin → Settings** (not via enviro
 
 - **Discord** — uses a **Discord bot** (not a webhook URL). Set the bot token, and optionally a client ID + public key (for slash commands / interaction verification), a guild ID, and channel IDs. New requests/issues post to the configured admin channel (with Approve/Decline buttons on requests); per-user approved/declined/available notifications go to a notify channel or DM. Role-sync on account link is also supported.
 - **Email** — two backends selectable via `emailBackend`: **SMTP** (set `smtpHost`, optional `smtpPort` [default 587 STARTTLS; 465 = implicit TLS], `smtpUser`/`smtpPassword`, `smtpFrom`) or **Resend** (`resendApiKey`, `resendFrom`). Admin notifications send whenever email is configured; user-facing emails require toggling `enableUserEmails`.
-- **Web Push** — VAPID keypairs are **auto-generated** and stored on first use; no admin action and no env var is required. iOS push is relayed via a central/`apnsRelayUrl` APNs relay with end-to-end-encrypted payloads.
+- **Web Push** — VAPID keypairs are **auto-generated** and stored on first use; no admin action and no env var is required. iOS push goes through the app publisher's APNs relay, which can't be self-hosted; notification text is end-to-end encrypted (see [APNs relay trust](#apns-relay-trust-ios-push)).
 
 ### Ratings & metadata enrichment (optional)
 

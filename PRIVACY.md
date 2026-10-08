@@ -1,6 +1,6 @@
 # Privacy Policy
 
-**Effective date:** June 15, 2026
+**Effective date:** October 8, 2026
 
 This policy covers **Summonarr** — the self-hosted server software and the official
 **Summonarr for iOS** client app.
@@ -10,8 +10,10 @@ This policy covers **Summonarr** — the self-hosted server software and the off
 ## The short version
 
 Summonarr is free, open-source, **self-hosted** software. There is no Summonarr
-company, cloud, or central server. The developer **operates no servers, runs no
-analytics, and never receives any of your data.**
+company or cloud. The developer **runs no analytics and never receives your
+account, requests or watch history.** The one server the developer operates is
+the push relay that delivers iOS notifications, and it never sees media titles
+or usernames — see [Push notifications on iOS](#push-notifications-on-ios).
 
 The iOS app is a client for a server that **you** (or whoever administers your
 instance) run yourself. Your account, requests, watch history, and everything
@@ -40,6 +42,9 @@ device except requests you make to your own server:
   iOS **Keychain** (encrypted by the system). It is sent only to your server, only
   to prove you're signed in.
 - **Display preferences** — e.g. light/dark appearance, stored locally.
+- **Notification key** — if you allow notifications, the app sends your server
+  Apple's push token for this device and a public key. The matching private key
+  stays in the iOS **Keychain** and decrypts notification text on your device.
 
 Signing out removes the session token from the Keychain.
 
@@ -71,6 +76,39 @@ The app makes only two kinds of outbound connection:
 
 The app contacts no other services.
 
+## Push notifications on iOS
+
+If you allow notifications, your server sends each iOS notification through the
+push relay the developer operates at `summonapns.gadgetusaf.com`, which hands it
+to Apple's Push Notification service. The relay is needed because Apple only
+delivers a push to this app when it is signed with the developer's key, and that
+key can't be shipped inside self-hosted servers.
+
+For each notification, the relay receives:
+
+- your device's **push token**, which Apple issues so notifications for this app
+  can reach this device;
+- a **generic alert** such as "Request approved", with no media title or
+  username;
+- the **screen the notification opens**: an app tab, or an issue's opaque id;
+- the real notification text and link, **end-to-end encrypted** so only your
+  device can read them;
+- the network address of the server that sent it.
+
+The relay has no database. In memory it keeps short-lived rate-limit counters
+and which Apple delivery environment each token belongs to; both are lost when
+it restarts. Its only output is its log: per-minute delivery counts and error
+messages, which can include the first eight characters of a push token. None of
+this is used for anything but delivering notifications.
+
+Your notifications stop passing through the relay when you sign out of the app,
+which removes this device's registration from your server, or when the server's
+administrator turns push off (apart from an app-update notice the administrator
+sends by hand). Turning notifications off in iOS Settings only hides them: your
+server keeps sending them until you sign out. If you delete the app, Apple
+reports the device as gone on the next notification, and your server removes
+it.
+
 ## No tracking, analytics, or ads
 
 - **No tracking.** The app does not track you across apps or websites, and contains
@@ -78,8 +116,10 @@ The app contacts no other services.
 - **No analytics.** There is no crash reporting, telemetry, or usage analytics of
   any kind.
 - **No third-party SDKs** that collect data, and **no data brokers**.
-- **No data is collected by the developer** — the app's privacy manifest declares
-  **no collected data types**.
+- **No data is collected by the developer.** The push relay handles push tokens
+  only to deliver notifications and keeps nothing beyond the memory and log
+  described above. The app's privacy manifest declares **no collected data
+  types**.
 
 ## Security
 
