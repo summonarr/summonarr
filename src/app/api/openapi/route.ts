@@ -544,8 +544,53 @@ const spec = {
           { name: "season", in: "query", schema: { type: "integer", minimum: 0 } },
         ],
         responses: {
-          "200": { description: "Releases, or for TV without a season the season list" },
-          "400": { description: "Invalid season" },
+          "200": {
+            description: "Releases, or for TV without a season the season list",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    releases: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          guid: { type: "string", pattern: "^[0-9a-f]{32}$", description: "Opaque handle — POST it back to grab" },
+                          title: { type: "string" },
+                          size: { type: "number" },
+                          indexerId: { type: "integer" },
+                          indexer: { type: "string" },
+                          quality: { type: "object", properties: { quality: { type: "object", properties: { id: { type: "integer" }, name: { type: "string" } } }, revision: { type: "object", properties: { version: { type: "integer" } } } } },
+                          qualityWeight: { type: "integer" },
+                          protocol: { type: "string", enum: ["torrent", "usenet"] },
+                          seeders: { type: "integer", nullable: true },
+                          leechers: { type: "integer", nullable: true },
+                          age: { type: "integer", description: "Days" },
+                          rejected: { type: "boolean" },
+                          rejections: { type: "array", items: { type: "string" } },
+                          downloadAllowed: { type: "boolean" },
+                        },
+                      },
+                    },
+                    seasons: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          seasonNumber: { type: "integer" },
+                          aired: { type: "integer", description: "Aired monitored episodes (plus any with a file) — Sonarr's own count" },
+                          missing: { type: "integer" },
+                          monitored: { type: "boolean" },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "400": { description: "Invalid season, or the request names an instance that no longer exists" },
           "403": { description: "Missing MANAGE_REQUESTS" },
           "404": { description: "No such request" },
           "409": { description: "Request not approved/available, or the title is not in the arr" },
@@ -579,11 +624,12 @@ const spec = {
         },
         responses: {
           "200": { description: "Grabbed" },
-          "400": { description: "Invalid body" },
+          "400": { description: "Invalid body, or the request names an instance that no longer exists" },
           "403": { description: "Missing MANAGE_REQUESTS" },
           "404": { description: "No such request" },
           "409": { description: "Request not approved/available, or the title is not in the arr" },
           "410": { description: "Unknown or expired handle, or one from a different search — search again" },
+          "422": { description: "Instance not configured, or the series' TVDB id can't be resolved" },
           "502": { description: "The arr could not be reached or refused the grab" },
         },
       },
@@ -2068,7 +2114,14 @@ const spec = {
       get: {
         tags: ["Admin – Settings"],
         summary: "List all Radarr/Sonarr instances with connection state (ADMIN)",
-        responses: { "200": { description: "Instance lists keyed by service (secrets masked as has* flags)" } },
+        responses: {
+          "200": {
+            description:
+              "Instance lists keyed by service. Each carries its registry entry plus url, externalUrl, rootFolder, " +
+              "qualityProfileId, minimumAvailability, languageProfileId (stored strings, \"\" when unset); secrets only as " +
+              "hasApiKey / hasWebhookSecret.",
+          },
+        },
       },
       post: {
         tags: ["Admin – Settings"],
@@ -2095,10 +2148,17 @@ const spec = {
                         skipLibraryCheck: { type: "boolean" },
                         autoRoute: { type: "object", nullable: true, properties: { animeOnly: { type: "boolean" }, genreIds: { type: "array", items: { type: "integer" } }, originalLanguages: { type: "array", items: { type: "string" } } } },
                         url: { type: "string" },
+                        externalUrl: {
+                          type: "string",
+                          nullable: true,
+                          description: "The address a BROWSER uses for the instance (Open in Radarr/Sonarr links) — never fetched by the server; blank or null falls back to url",
+                        },
                         apiKey: { type: "string", description: "Write-only; send the mask sentinel to keep unchanged" },
                         rootFolder: { type: "string" },
                         qualityProfileId: { type: "integer", nullable: true },
                         webhookSecret: { type: "string", description: "Write-only; send the mask sentinel to keep unchanged" },
+                        minimumAvailability: { type: "string", nullable: true, enum: ["", "announced", "inCinemas", "released", null], description: "Radarr only; \"\" or null clears (Radarr's default)" },
+                        languageProfileId: { type: "integer", nullable: true, description: "Sonarr v3 only; null clears" },
                       },
                     },
                   },
@@ -2539,6 +2599,49 @@ const spec = {
                                     missing: { type: "integer" },
                                     aired: { type: "integer" },
                                     lastAired: { type: "string", format: "date-time", nullable: true },
+                                  },
+                                },
+                              },
+                            },
+                          },
+                          {
+                            type: "object",
+                            description: "Radarr movie, mode=cutoff",
+                            properties: {
+                              instance: { type: "string" },
+                              arrId: { type: "integer" },
+                              tmdbId: { type: "integer", nullable: true },
+                              title: { type: "string" },
+                              year: { type: "integer", nullable: true },
+                              posterPath: { type: "string", nullable: true },
+                              quality: { type: "string", nullable: true, description: "The quality of the file on disk" },
+                              profile: { type: "string", nullable: true, description: "The movie's quality profile" },
+                              cutoff: { type: "string", nullable: true, description: "That profile's cutoff (a quality or a quality group)" },
+                            },
+                          },
+                          {
+                            type: "object",
+                            description: "Sonarr series, mode=cutoff",
+                            properties: {
+                              instance: { type: "string" },
+                              arrId: { type: "integer" },
+                              tmdbId: { type: "integer", nullable: true },
+                              tvdbId: { type: "integer", nullable: true },
+                              title: { type: "string" },
+                              year: { type: "integer", nullable: true },
+                              posterPath: { type: "string", nullable: true },
+                              profile: { type: "string", nullable: true },
+                              cutoff: { type: "string", nullable: true },
+                              episodes: {
+                                type: "array",
+                                description: "Monitored episodes whose file is below cutoff, in order",
+                                items: {
+                                  type: "object",
+                                  properties: {
+                                    seasonNumber: { type: "integer" },
+                                    episodeNumber: { type: "integer" },
+                                    title: { type: "string" },
+                                    quality: { type: "string", nullable: true },
                                   },
                                 },
                               },
@@ -3938,23 +4041,31 @@ const spec = {
     "/webhooks/radarr": {
       post: {
         tags: ["Webhooks"],
-        summary: "Radarr webhook (movie grabbed / imported / deleted)",
+        summary: "Radarr webhook (movie grabbed / imported / deleted, health)",
+        description:
+          "Authenticated by the instance's webhook secret, as `?token=` or a Bearer header. `Health` / `HealthRestored` " +
+          "deliveries are forwarded to the outbound notification channels as `arr.health` / `arr.health_restored` and answer " +
+          "{ ok: true, health: true, forwarded } — `forwarded` is false when held back (a repeat of the same state for the same check within 10 minutes, or a delivery with no message). " +
+          "`ManualInteractionRequired` alerts admins. A byte-identical repeat of any other delivery is refused as a replay.",
         security: [],
         parameters: [{ name: "token", in: "query", schema: { type: "string" } }],
         requestBody: { content: { "application/json": { schema: { type: "object" } } } },
-        responses: { "200": { description: "Processed" }, "401": { description: "Invalid token" } },
+        responses: { "200": { description: "Processed" }, "401": { description: "Invalid token" }, "409": { description: "Replayed delivery" } },
       },
     },
     "/webhooks/sonarr": {
       post: {
         tags: ["Webhooks"],
-        summary: "Sonarr webhook (episode grabbed / imported / deleted)",
+        summary: "Sonarr webhook (episode grabbed / imported / deleted, health)",
         description:
+          "Authenticated by the instance's webhook secret, as `?token=` or a Bearer header. `Health` / `HealthRestored` " +
+          "deliveries are forwarded to the outbound notification channels as `arr.health` / `arr.health_restored` and answer " +
+          "{ ok: true, health: true, forwarded }; a byte-identical repeat of any other delivery is refused as a replay. " +
           "A Download event flips the series' APPROVED requests to AVAILABLE only once Sonarr confirms the series COMPLETE (every aired regular-season episode on disk). Mid-import deliveries answer { skipped: true, reason: \"incomplete\", episodeFileCount, episodeCount }; an unverifiable delivery (Sonarr unreachable) answers { deferred: true } and is re-checked after the library scan settles.",
         security: [],
         parameters: [{ name: "token", in: "query", schema: { type: "string" } }],
         requestBody: { content: { "application/json": { schema: { type: "object" } } } },
-        responses: { "200": { description: "Processed" }, "401": { description: "Invalid token" } },
+        responses: { "200": { description: "Processed" }, "401": { description: "Invalid token" }, "409": { description: "Replayed delivery" } },
       },
     },
 
