@@ -23,6 +23,8 @@ export function queueFormatters(locale: string) {
   const minute = new Intl.NumberFormat(locale, { style: "unit", unit: "minute", unitDisplay: "narrow" });
   const day = new Intl.NumberFormat(locale, { style: "unit", unit: "day", unitDisplay: "narrow" });
   const pct = new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 });
+  const signed = new Intl.NumberFormat(locale, { signDisplay: "exceptZero" });
+  const when = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" });
   return {
     size: (bytes: number) => (bytes >= 1e9 ? gb.format(bytes / 1e9) : mb.format(Math.max(0, Math.round(bytes / 1e6)))),
     duration: (seconds: number | null) => {
@@ -32,5 +34,12 @@ export function queueFormatters(locale: string) {
       return minute.format(Math.max(0, Math.ceil(seconds / 60)));
     },
     percent: (p: number) => pct.format(p),
+    /** A custom-format score as the arr shows it: +1500, -10000, 0. */
+    score: (n: number) => signed.format(n),
+    /** An ISO timestamp the server sent, in the viewer's locale and zone. */
+    dateTime: (iso: string | null) => {
+      const ms = iso === null ? Number.NaN : Date.parse(iso);
+      return Number.isFinite(ms) ? when.format(ms) : "—";
+    },
   };
 }

@@ -142,6 +142,30 @@ test("one bad episode record flags the whole pack, and a record without a downlo
   assert.deepEqual(rows[1].ids, [3]);
 });
 
+test("a row carries everything the arr's queue shows: quality + revision, languages, custom formats and score, client, indexer, output path", () => {
+  const [movie] = foldQueueRecords("radarr", "", [{
+    id: 1, movieId: 5, movie: { title: "M", tmdbId: 50 }, size: 6e10, sizeleft: 0, status: "completed",
+    quality: { quality: { id: 31, name: "Remux-2160p" }, revision: { version: 2, real: 1, isRepack: false } },
+    languages: [{ id: 1, name: "English" }, { id: 8, name: "Japanese" }, { id: 1, name: "English" }, null],
+    customFormats: [{ id: 3, name: "DV HDR10", specifications: [{ huge: true }] }, { id: 4, name: "TrueHD Atmos" }],
+    customFormatScore: 3250,
+    protocol: "torrent", downloadClient: "qBittorrent", indexer: "TorrentLeech",
+    outputPath: "/downloads/complete/M.2024.2160p",
+  }]);
+  assert.deepEqual(
+    [movie.quality, movie.qualityTags, movie.languages, movie.customFormats, movie.customFormatScore, movie.downloadClient, movie.indexer, movie.outputPath],
+    ["Remux-2160p", ["proper", "real"], ["English", "Japanese"], ["DV HDR10", "TrueHD Atmos"], 3250, "qBittorrent", "TorrentLeech", "/downloads/complete/M.2024.2160p"],
+  );
+  const [bare] = foldQueueRecords("radarr", "", [{ id: 2, quality: { quality: { name: "SDTV" }, revision: { version: 1, real: 0, isRepack: true } }, customFormatScore: 1.5 }]);
+  assert.deepEqual([bare.qualityTags, bare.languages, bare.customFormats, bare.customFormatScore, bare.outputPath], [["repack"], [], [], null, null]);
+  // A pack whose first record lacks the release details still shows them.
+  const [pack] = foldQueueRecords("sonarr", "", [
+    packRecord(1, 1, { languages: [], customFormats: [], outputPath: undefined }),
+    packRecord(2, 2, { languages: [{ name: "English" }], customFormats: [{ name: "x265" }], customFormatScore: -1000, outputPath: "/dl/Show.S01" }),
+  ]);
+  assert.deepEqual([pack.languages, pack.customFormats, pack.customFormatScore, pack.outputPath], [["English"], ["x265"], -1000, "/dl/Show.S01"]);
+});
+
 test("Radarr records are never folded — two downloads for one movie are two rows", () => {
   const rec = (id: number) => ({ id, downloadId: "same", movieId: 5, movie: { title: "M", tmdbId: 50 }, size: 1, sizeleft: 0, status: "completed" });
   assert.equal(foldQueueRecords("radarr", "", [rec(1), rec(2)]).length, 2);

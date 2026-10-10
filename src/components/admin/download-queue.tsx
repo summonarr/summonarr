@@ -14,25 +14,44 @@
 //                       removal method (from the client / change category / ignore).
 // "Re-check downloads" asks every instance to re-check its downloads now.
 //
+// Everything the arr's own queue shows is here: quality (with its PROPER/REPACK
+// tag), languages, custom formats and score, size, progress, time left and ETA,
+// added, protocol, download client, indexer, output path and download id —
+// as columns the admin picks (remembered in this browser) and, per row, in an
+// expandable details panel that always shows all of it.
+//
 // Every time and size is server-supplied and formatted for the viewer's
 // locale; nothing reads the clock while rendering (guardrail 16).
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import { Chip, EmptyState, FilterBar, StatCard, type ChipTone } from "@/components/ui/design";
-import { AlertTriangle, Ban, CheckCircle2, CircleDashed, Download, FileCheck, Loader2, Magnet, Radio, RefreshCcw, RefreshCw, RotateCcw, Trash2, X } from "@/components/icons";
+import {
+  AlertTriangle, Ban, CheckCircle2, ChevronDown, ChevronRight, CircleDashed, Download, FileCheck, List, Loader2, Magnet, Radio,
+  RefreshCcw, RefreshCw, RotateCcw, Trash2, X,
+} from "@/components/icons";
 import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { ArrHealthPanel } from "@/components/admin/arr-health-panel";
 import { QueueImportDialog } from "@/components/admin/queue-import-dialog";
-import { episodeSummary, queueFormatters } from "@/components/admin/queue-format";
+import { episodeCode, episodeSummary, queueFormatters } from "@/components/admin/queue-format";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
-import type { QueueItem, QueuePhase, QueueRemoveAction, QueueRemoveMethod } from "@/lib/arr-queue";
+import type { QualityTag, QueueItem, QueuePhase, QueueRemoveAction, QueueRemoveMethod } from "@/lib/arr-queue";
 
 type Service = "radarr" | "sonarr";
 type Filter = "all" | "attention" | Service;
@@ -60,6 +79,43 @@ const PHASE_TONE: Record<QueuePhase, ChipTone> = {
 };
 
 const rowKey = (r: QueueItem) => `${r.service}:${r.instance}:${r.ids[0]}`;
+
+// The table's optional columns, in the arr's own order. Title and the row
+// actions are always shown; everything is also in each row's details panel.
+type ColumnId =
+  | "instance" | "status" | "quality" | "languages" | "customFormats" | "size" | "progress"
+  | "timeLeft" | "eta" | "added" | "downloadClient" | "indexer" | "requestedBy";
+const COLUMNS: ReadonlyArray<{ id: ColumnId; label: string }> = [
+  { id: "instance", label: "adminManage.queue.col.instance" },
+  { id: "status", label: "adminManage.queue.col.status" },
+  { id: "quality", label: "adminManage.queue.col.quality" },
+  { id: "languages", label: "adminManage.queue.col.languages" },
+  { id: "customFormats", label: "adminManage.queue.col.customFormats" },
+  { id: "size", label: "adminManage.queue.col.size" },
+  { id: "progress", label: "adminManage.queue.col.progress" },
+  { id: "timeLeft", label: "adminManage.queue.col.timeLeft" },
+  { id: "eta", label: "adminManage.queue.col.eta" },
+  { id: "added", label: "adminManage.queue.col.added" },
+  { id: "downloadClient", label: "adminManage.queue.col.downloadClient" },
+  { id: "indexer", label: "adminManage.queue.col.indexer" },
+  { id: "requestedBy", label: "adminManage.queue.col.requestedBy" },
+];
+const DEFAULT_HIDDEN: ReadonlySet<ColumnId> = new Set<ColumnId>(["languages", "customFormats", "eta", "added"]);
+const COLUMN_IDS = new Set<string>(COLUMNS.map((c) => c.id));
+const isColumnId = (v: unknown): v is ColumnId => typeof v === "string" && COLUMN_IDS.has(v);
+// Per-viewer convenience only: a blocked or empty store just means the defaults.
+const HIDDEN_COLUMNS_KEY = "admin-queue-hidden-columns";
+
+const QUALITY_TAG_LABEL: Record<QualityTag, string> = {
+  proper: "adminManage.queue.qualityTag.proper",
+  repack: "adminManage.queue.qualityTag.repack",
+  real: "adminManage.queue.qualityTag.real",
+};
+const PROTOCOL_LABEL: Record<QueueItem["protocol"], string> = {
+  torrent: "adminManage.queue.protocol.torrent",
+  usenet: "adminManage.queue.protocol.usenet",
+  unknown: "adminManage.queue.protocol.unknown",
+};
 
 // Only a finished download the arr is holding back can be imported: blocked,
 // or waiting on an import that needs a hand. A tracked download id is required.
@@ -92,6 +148,21 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState("");
   const [notice, setNotice] = useState("");
+  const [hidden, setHidden] = useState<ReadonlySet<ColumnId>>(DEFAULT_HIDDEN);
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  // The table scrolls sideways inside its frame; an expanded row's details are
+  // sized to the frame's VISIBLE width and stick to its left edge, so a phone
+  // (or a table with every column on) never cuts them off.
+  const [frameWidth, setFrameWidth] = useState<number | null>(null);
+  const frameObserver = useRef<ResizeObserver | null>(null);
+  const frameRef = useCallback((el: HTMLDivElement | null) => {
+    frameObserver.current?.disconnect();
+    frameObserver.current = null;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => setFrameWidth(el.clientWidth));
+    ro.observe(el);
+    frameObserver.current = ro;
+  }, []);
   // Only the newest load may write state — a slow poll must not overwrite the
   // result of a refresh the admin clicked after it started.
   const loadSeq = useRef(0);
@@ -121,6 +192,38 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
   useEffect(() => {
     if (configured) void load();
   }, [configured, load]);
+
+  // Read after mount so the first render matches the server's (defaults).
+  // Storage can throw (blocked site data, some private windows) — then the
+  // defaults simply stay.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(HIDDEN_COLUMNS_KEY);
+      const ids: unknown = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(ids)) setHidden(new Set(ids.filter(isColumnId)));
+    } catch {}
+  }, []);
+
+  function saveHidden(next: ReadonlySet<ColumnId>) {
+    setHidden(next);
+    try {
+      localStorage.setItem(HIDDEN_COLUMNS_KEY, JSON.stringify([...next]));
+    } catch {}
+  }
+  function toggleColumn(id: ColumnId, on: boolean) {
+    const next = new Set(hidden);
+    if (on) next.delete(id);
+    else next.add(id);
+    saveHidden(next);
+  }
+  function toggleExpanded(key: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
 
   // Poll while live, visible, and no dialog is open (a refresh would
   // reshuffle the row being confirmed).
@@ -229,6 +332,152 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
     [report],
   );
   const multiInstance = (report?.instances.length ?? 0) > 1;
+  const shownColumns = COLUMNS.filter((c) => !hidden.has(c.id) && (c.id !== "instance" || multiInstance));
+
+  const protocolIcon = (r: QueueItem) =>
+    r.protocol === "torrent" ? (
+      <Magnet style={{ width: 12, height: 12, flexShrink: 0 }} aria-label={t("adminManage.queue.protocol.torrent")} />
+    ) : r.protocol === "usenet" ? (
+      <Radio style={{ width: 12, height: 12, flexShrink: 0 }} aria-label={t("adminManage.queue.protocol.usenet")} />
+    ) : null;
+  const qualityOf = (r: QueueItem) => (
+    <span className="inline-flex flex-wrap items-center gap-1">
+      <span className="ds-mono" style={{ whiteSpace: "nowrap" }}>{r.quality ?? "—"}</span>
+      {r.qualityTags.map((q) => <Chip key={q}>{t(QUALITY_TAG_LABEL[q])}</Chip>)}
+    </span>
+  );
+  // No custom format matched means a score of 0 — nothing worth a cell; the details panel still shows it.
+  const customFormatsOf = (r: QueueItem) =>
+    r.customFormats.length === 0 ? (
+      "—"
+    ) : (
+      <span className="inline-flex flex-wrap items-center gap-1" style={{ minWidth: 140 }}>
+        {r.customFormats.map((f) => <Chip key={f}>{f}</Chip>)}
+        {r.customFormatScore !== null && (
+          <span className="ds-mono" style={{ color: "var(--ds-fg-muted)" }}>{fmt.score(r.customFormatScore)}</span>
+        )}
+      </span>
+    );
+  const timeLeftOf = (r: QueueItem) => (r.phase === "downloading" ? fmt.duration(r.timeLeftSeconds) : "—");
+  const etaOf = (r: QueueItem) => (r.phase === "downloading" ? fmt.dateTime(r.estimatedCompletion) : "—");
+
+  function cell(c: ColumnId, r: QueueItem, arrLabel: string): React.ReactNode {
+    const small: React.CSSProperties = { ...td, fontSize: 12 };
+    switch (c) {
+      case "instance":
+        return <td style={{ ...small, color: "var(--ds-fg-muted)" }}>{arrLabel}</td>;
+      case "status":
+        return (
+          <td style={{ ...td, maxWidth: 280 }}>
+            <div className="flex flex-wrap items-center gap-1" style={{ minWidth: 150 }}>
+              <Chip tone={PHASE_TONE[r.phase]}>{t(`adminManage.queue.phase.${r.phase}`)}</Chip>
+              {r.attention && (
+                <Chip tone="pending">
+                  <AlertTriangle style={{ width: 11, height: 11 }} aria-hidden /> {t("adminManage.queue.attention")}
+                </Chip>
+              )}
+            </div>
+            {r.messages.length > 0 && (
+              <ul className="m-0 p-0" style={{ listStyle: "none", marginTop: 4, fontSize: 11, color: r.attention ? "var(--ds-warning)" : "var(--ds-fg-subtle)" }}>
+                {r.messages.map((m, i) => <li key={i} style={{ overflowWrap: "anywhere" }}>{m}</li>)}
+              </ul>
+            )}
+          </td>
+        );
+      case "quality":
+        return <td style={small}>{qualityOf(r)}</td>;
+      case "languages":
+        return <td style={{ ...small, color: "var(--ds-fg-muted)" }}>{r.languages.length > 0 ? r.languages.join(", ") : "—"}</td>;
+      case "customFormats":
+        return <td style={{ ...small, maxWidth: 260 }}>{customFormatsOf(r)}</td>;
+      case "size":
+        return (
+          <td className="ds-mono" style={{ ...small, whiteSpace: "nowrap" }}>
+            {r.size > 0 ? fmt.size(r.size) : "—"}
+            {r.sizeLeft > 0 && (
+              <div style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>{t("adminManage.queue.sizeLeft", { size: fmt.size(r.sizeLeft) })}</div>
+            )}
+          </td>
+        );
+      case "progress":
+        return (
+          <td style={td}>
+            <div
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(r.progress * 100)}
+              aria-label={t("adminManage.queue.progressLabel", { title: r.mediaTitle || r.title })}
+              style={{ height: 6, borderRadius: 3, background: "var(--ds-bg-3)", overflow: "hidden" }}
+            >
+              <div style={{ width: `${Math.round(r.progress * 100)}%`, height: "100%", background: r.attention ? "var(--ds-warning)" : "var(--ds-accent)" }} />
+            </div>
+            <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-muted)", marginTop: 3, whiteSpace: "nowrap" }}>
+              {fmt.percent(r.progress)} · {fmt.size(r.size - r.sizeLeft)}
+            </div>
+          </td>
+        );
+      case "timeLeft":
+        return <td className="ds-mono" style={{ ...small, whiteSpace: "nowrap" }}>{timeLeftOf(r)}</td>;
+      case "eta":
+        return <td style={{ ...small, color: "var(--ds-fg-muted)", whiteSpace: "nowrap" }}>{etaOf(r)}</td>;
+      case "added":
+        return <td style={{ ...small, color: "var(--ds-fg-muted)", whiteSpace: "nowrap" }}>{fmt.dateTime(r.added)}</td>;
+      case "downloadClient":
+        return (
+          <td style={small}>
+            <span className="inline-flex items-center gap-1">
+              {protocolIcon(r)}
+              {r.downloadClient ?? "—"}
+            </span>
+          </td>
+        );
+      case "indexer":
+        return <td style={{ ...small, color: "var(--ds-fg-muted)" }}>{r.indexer ?? "—"}</td>;
+      case "requestedBy":
+        return <td style={{ ...small, color: "var(--ds-fg-muted)" }}>{r.requesters.length > 0 ? r.requesters.join(", ") : "—"}</td>;
+    }
+  }
+
+  // Everything Radarr/Sonarr report for the download, whatever columns are shown.
+  function details(r: QueueItem, arrLabel: string): React.ReactNode {
+    const item = (label: string, value: React.ReactNode, opts: { wide?: boolean; mono?: boolean } = {}) => (
+      <div key={label} style={opts.wide ? { gridColumn: "1 / -1" } : undefined}>
+        <dt style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>{label}</dt>
+        <dd className={opts.mono ? "ds-mono" : undefined} style={{ margin: 0, overflowWrap: "anywhere" }}>{value}</dd>
+      </div>
+    );
+    // Capped so it stays in view while a wide table is scrolled to its left edge.
+    return (
+      <dl className="grid gap-x-6 gap-y-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", fontSize: 12, margin: 0, maxWidth: 1100 }}>
+        {item(t("adminManage.queue.details.release"), r.title || "—", { wide: true, mono: true })}
+        {r.episodes.length > 0 && item(t("adminManage.queue.details.episodes"), r.episodes.map(episodeCode).join(", "), { wide: true, mono: true })}
+        {item(t("adminManage.queue.col.status"), t(`adminManage.queue.phase.${r.phase}`))}
+        {item(t("adminManage.queue.col.quality"), qualityOf(r))}
+        {item(t("adminManage.queue.col.languages"), r.languages.length > 0 ? r.languages.join(", ") : "—")}
+        {item(t("adminManage.queue.col.customFormats"), r.customFormats.length > 0 ? r.customFormats.join(", ") : "—")}
+        {item(t("adminManage.queue.details.score"), r.customFormatScore !== null ? fmt.score(r.customFormatScore) : "—", { mono: true })}
+        {item(t("adminManage.queue.col.size"), r.size > 0 ? fmt.size(r.size) : "—", { mono: true })}
+        {item(t("adminManage.queue.details.downloaded"), `${fmt.size(r.size - r.sizeLeft)} (${fmt.percent(r.progress)})`, { mono: true })}
+        {item(t("adminManage.queue.details.left"), fmt.size(r.sizeLeft), { mono: true })}
+        {item(t("adminManage.queue.col.timeLeft"), timeLeftOf(r), { mono: true })}
+        {item(t("adminManage.queue.col.eta"), etaOf(r))}
+        {item(t("adminManage.queue.col.added"), fmt.dateTime(r.added))}
+        {item(t("adminManage.queue.details.protocol"), t(PROTOCOL_LABEL[r.protocol]))}
+        {item(t("adminManage.queue.col.downloadClient"), r.downloadClient ?? "—")}
+        {item(t("adminManage.queue.col.indexer"), r.indexer ?? "—")}
+        {item(t("adminManage.queue.col.instance"), arrLabel)}
+        {item(t("adminManage.queue.col.requestedBy"), r.requesters.length > 0 ? r.requesters.join(", ") : "—")}
+        {item(t("adminManage.queue.details.downloadId"), r.downloadId ?? "—", { mono: true })}
+        {item(t("adminManage.queue.details.outputPath"), r.outputPath ?? "—", { wide: true, mono: true })}
+        {r.messages.length > 0 && item(t("adminManage.queue.details.messages"), (
+          <ul className="m-0 p-0" style={{ listStyle: "none" }}>
+            {r.messages.map((m, i) => <li key={i}>{m}</li>)}
+          </ul>
+        ), { wide: true })}
+      </dl>
+    );
+  }
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     return (items ?? []).filter(
@@ -300,6 +549,27 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
             <Switch checked={live} onCheckedChange={setLive} aria-label={t("adminManage.queue.filter.live")} />
             {t("adminManage.queue.filter.live")}
           </label>
+          <DropdownMenu>
+            <DropdownMenuTrigger className={buttonVariants({ variant: "outline", size: "sm" })}>
+              <List aria-hidden />
+              {t("adminManage.queue.columns.button")}
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-56">
+              <DropdownMenuGroup>
+                <DropdownMenuLabel className="px-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                  {t("adminManage.queue.columns.menuLabel")}
+                </DropdownMenuLabel>
+                {COLUMNS.filter((c) => c.id !== "instance" || multiInstance).map((c) => (
+                  <DropdownMenuCheckboxItem key={c.id} checked={!hidden.has(c.id)} onCheckedChange={(on) => toggleColumn(c.id, on)}>
+                    {t(c.label)}
+                  </DropdownMenuCheckboxItem>
+                ))}
+              </DropdownMenuGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => saveHidden(new Set())}>{t("adminManage.queue.columns.showAll")}</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => saveHidden(DEFAULT_HIDDEN)}>{t("adminManage.queue.columns.reset")}</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
 
         {visible.length === 0 ? (
@@ -309,17 +579,14 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
             <EmptyState icon={CheckCircle2} title={t("adminManage.queue.empty.title")} description={t("adminManage.queue.empty.description")} />
           )
         ) : (
-          <div className="resp-table-scroll" style={{ border: "1px solid var(--ds-border)", borderRadius: 10 }}>
+          <div ref={frameRef} className="resp-table-scroll" style={{ border: "1px solid var(--ds-border)", borderRadius: 10 }}>
             <table className="w-full" style={{ fontSize: 13, borderCollapse: "collapse", color: "var(--ds-fg)" }}>
               <thead>
                 <tr style={{ background: "var(--ds-bg-2)", textAlign: "left", color: "var(--ds-fg-subtle)", fontSize: 11 }}>
                   <th style={th}>{t("adminManage.queue.col.title")}</th>
-                  {multiInstance && <th style={th}>{t("adminManage.queue.col.instance")}</th>}
-                  <th style={th}>{t("adminManage.queue.col.status")}</th>
-                  <th style={{ ...th, minWidth: 150 }}>{t("adminManage.queue.col.progress")}</th>
-                  <th style={th}>{t("adminManage.queue.col.timeLeft")}</th>
-                  <th style={th}>{t("adminManage.queue.col.source")}</th>
-                  <th style={th}>{t("adminManage.queue.col.requestedBy")}</th>
+                  {shownColumns.map((c) => (
+                    <th key={c.id} style={{ ...th, whiteSpace: "nowrap", ...(c.id === "progress" ? { minWidth: 150 } : {}) }}>{t(c.label)}</th>
+                  ))}
                   <th style={th} />
                 </tr>
               </thead>
@@ -328,136 +595,127 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
                   const detailHref = r.tmdbId !== null ? `/${r.service === "radarr" ? "movie" : "tv"}/${r.tmdbId}` : null;
                   const name = instanceName(r.service, r.instance);
                   const arrLabel = arrInstanceLabel(r.service, name, r.instance);
+                  const key = rowKey(r);
+                  const open = expanded.has(key);
+                  const title = r.mediaTitle || r.title;
                   return (
-                    <tr key={rowKey(r)} className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
-                      <td style={{ ...td, maxWidth: 380 }}>
-                        <div className="flex items-center gap-1" style={{ fontWeight: 500 }}>
-                          <span className="min-w-0" style={{ overflowWrap: "anywhere" }}>
-                            {detailHref ? <Link href={detailHref} className="hover:underline">{r.mediaTitle || r.title}</Link> : r.mediaTitle || r.title}
-                            {r.year ? <span style={{ color: "var(--ds-fg-subtle)", fontWeight: 400 }}> ({r.year})</span> : null}
-                          </span>
-                          {r.arrMediaId !== null && (
-                            <OpenInArrLink
-                              service={r.service}
-                              instance={r.instance}
-                              target={{ arrId: r.arrMediaId }}
-                              label={t("adminManage.openIn", { name: arrLabel })}
-                              iconOnly
-                            />
-                          )}
-                        </div>
-                        {r.episodes.length > 0 && (
-                          <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-muted)" }}>{episodeSummary(r.episodes)}</div>
-                        )}
-                        <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", overflowWrap: "anywhere" }} title={r.title}>
-                          {r.title}
-                        </div>
-                      </td>
-                      {multiInstance && <td style={{ ...td, fontSize: 12, color: "var(--ds-fg-muted)" }}>{arrLabel}</td>}
-                      <td style={{ ...td, maxWidth: 280 }}>
-                        <div className="flex flex-wrap items-center gap-1">
-                          <Chip tone={PHASE_TONE[r.phase]}>{t(`adminManage.queue.phase.${r.phase}`)}</Chip>
-                          {r.attention && (
-                            <Chip tone="pending">
-                              <AlertTriangle style={{ width: 11, height: 11 }} aria-hidden /> {t("adminManage.queue.attention")}
-                            </Chip>
-                          )}
-                        </div>
-                        {r.messages.length > 0 && (
-                          <ul className="m-0 p-0" style={{ listStyle: "none", marginTop: 4, fontSize: 11, color: r.attention ? "var(--ds-warning)" : "var(--ds-fg-subtle)" }}>
-                            {r.messages.map((m, i) => <li key={i} style={{ overflowWrap: "anywhere" }}>{m}</li>)}
-                          </ul>
-                        )}
-                      </td>
-                      <td style={td}>
-                        <div
-                          role="progressbar"
-                          aria-valuemin={0}
-                          aria-valuemax={100}
-                          aria-valuenow={Math.round(r.progress * 100)}
-                          aria-label={t("adminManage.queue.progressLabel", { title: r.mediaTitle || r.title })}
-                          style={{ height: 6, borderRadius: 3, background: "var(--ds-bg-3)", overflow: "hidden" }}
-                        >
-                          <div style={{ width: `${Math.round(r.progress * 100)}%`, height: "100%", background: r.attention ? "var(--ds-warning)" : "var(--ds-accent)" }} />
-                        </div>
-                        <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-muted)", marginTop: 3 }}>
-                          {fmt.percent(r.progress)} · {fmt.size(r.size - r.sizeLeft)} / {fmt.size(r.size)}
-                        </div>
-                      </td>
-                      <td className="ds-mono" style={{ ...td, fontSize: 12 }}>{r.phase === "downloading" ? fmt.duration(r.timeLeftSeconds) : "—"}</td>
-                      <td style={{ ...td, fontSize: 12 }}>
-                        <div className="flex items-center gap-1" style={{ color: "var(--ds-fg-muted)" }}>
-                          {r.protocol === "torrent" ? (
-                            <Magnet style={{ width: 12, height: 12 }} aria-label={t("adminManage.queue.protocol.torrent")} />
-                          ) : r.protocol === "usenet" ? (
-                            <Radio style={{ width: 12, height: 12 }} aria-label={t("adminManage.queue.protocol.usenet")} />
-                          ) : null}
-                          {r.downloadClient ?? "—"}
-                        </div>
-                        {r.indexer && <div style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>{r.indexer}</div>}
-                        {r.quality && <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>{r.quality}</div>}
-                      </td>
-                      <td style={{ ...td, fontSize: 12, color: "var(--ds-fg-muted)" }}>
-                        {r.requesters.length > 0 ? r.requesters.join(", ") : "—"}
-                      </td>
-                      <td style={{ ...td, textAlign: "right" }}>
-                        <div className="flex flex-wrap justify-end gap-1" style={{ minWidth: 150, maxWidth: 240, marginLeft: "auto" }}>
-                          {canImport(r) && (
+                    <Fragment key={key}>
+                      <tr className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
+                        <td style={{ ...td, maxWidth: 380 }}>
+                          <div className="flex items-start gap-1.5" style={{ minWidth: 220 }}>
+                            <button
+                              type="button"
+                              onClick={() => toggleExpanded(key)}
+                              aria-expanded={open}
+                              aria-controls={`queue-details-${key}`}
+                              aria-label={t(open ? "adminManage.queue.details.hide" : "adminManage.queue.details.show", { title })}
+                              className="ds-hover-tint inline-flex shrink-0 items-center justify-center rounded-md text-zinc-400 hover:text-zinc-100 outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+                              style={{ width: 22, height: 22, marginTop: -1 }}
+                            >
+                              {open ? <ChevronDown style={{ width: 14, height: 14 }} aria-hidden /> : <ChevronRight style={{ width: 14, height: 14 }} aria-hidden />}
+                            </button>
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1" style={{ fontWeight: 500 }}>
+                                <span className="min-w-0" style={{ overflowWrap: "anywhere" }}>
+                                  {detailHref ? <Link href={detailHref} className="hover:underline">{title}</Link> : title}
+                                  {r.year ? <span style={{ color: "var(--ds-fg-subtle)", fontWeight: 400 }}> ({r.year})</span> : null}
+                                </span>
+                                {r.arrMediaId !== null && (
+                                  <OpenInArrLink
+                                    service={r.service}
+                                    instance={r.instance}
+                                    target={{ arrId: r.arrMediaId }}
+                                    label={t("adminManage.openIn", { name: arrLabel })}
+                                    iconOnly
+                                  />
+                                )}
+                              </div>
+                              {r.episodes.length > 0 && (
+                                <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-muted)" }}>{episodeSummary(r.episodes)}</div>
+                              )}
+                              <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", overflowWrap: "anywhere" }} title={r.title}>
+                                {r.title}
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+                        {shownColumns.map((c) => <Fragment key={c.id}>{cell(c.id, r, arrLabel)}</Fragment>)}
+                        <td style={{ ...td, textAlign: "right" }}>
+                          <div className="flex flex-wrap justify-end gap-1" style={{ minWidth: 150, maxWidth: 240, marginLeft: "auto" }}>
+                            {canImport(r) && (
+                              <Button
+                                size="xs"
+                                variant="outline"
+                                onClick={() => setImporting(r)}
+                                aria-label={t("adminManage.queue.action.importAria", { title: r.mediaTitle || r.title })}
+                              >
+                                <FileCheck />
+                                {t("adminManage.queue.action.import")}
+                              </Button>
+                            )}
+                            {r.pending && (
+                              <Button
+                                size="xs"
+                                variant="outline"
+                                onClick={() => void grabNow(r)}
+                                disabled={acting === rowKey(r)}
+                                aria-label={t("adminManage.queue.action.grabAria", { title: r.mediaTitle || r.title })}
+                              >
+                                {acting === rowKey(r) ? <Loader2 className="animate-spin" /> : <Download />}
+                                {t("adminManage.queue.action.grab")}
+                              </Button>
+                            )}
+                            {/* A held release was never downloaded — there is nothing to search a replacement FOR yet. */}
+                            {!r.pending && (
+                              <Button
+                                size="xs"
+                                variant="outline"
+                                onClick={() => openRemove(r, "blocklistSearch")}
+                                aria-label={t("adminManage.queue.action.blocklistSearchAria", { title: r.mediaTitle || r.title })}
+                              >
+                                <RotateCcw />
+                                {t("adminManage.queue.action.blocklistSearch")}
+                              </Button>
+                            )}
                             <Button
                               size="xs"
                               variant="outline"
-                              onClick={() => setImporting(r)}
-                              aria-label={t("adminManage.queue.action.importAria", { title: r.mediaTitle || r.title })}
+                              onClick={() => openRemove(r, "blocklist")}
+                              aria-label={t("adminManage.queue.action.blocklistAria", { title: r.mediaTitle || r.title })}
                             >
-                              <FileCheck />
-                              {t("adminManage.queue.action.import")}
+                              <Ban />
+                              {t("adminManage.queue.action.blocklist")}
                             </Button>
-                          )}
-                          {r.pending && (
                             <Button
                               size="xs"
-                              variant="outline"
-                              onClick={() => void grabNow(r)}
-                              disabled={acting === rowKey(r)}
-                              aria-label={t("adminManage.queue.action.grabAria", { title: r.mediaTitle || r.title })}
+                              variant="ghost"
+                              onClick={() => openRemove(r, "remove")}
+                              aria-label={t("adminManage.queue.remove.aria", { title: r.mediaTitle || r.title })}
                             >
-                              {acting === rowKey(r) ? <Loader2 className="animate-spin" /> : <Download />}
-                              {t("adminManage.queue.action.grab")}
+                              <Trash2 />
+                              {t("adminManage.queue.remove.button")}
                             </Button>
-                          )}
-                          {/* A held release was never downloaded — there is nothing to search a replacement FOR yet. */}
-                          {!r.pending && (
-                            <Button
-                              size="xs"
-                              variant="outline"
-                              onClick={() => openRemove(r, "blocklistSearch")}
-                              aria-label={t("adminManage.queue.action.blocklistSearchAria", { title: r.mediaTitle || r.title })}
+                          </div>
+                        </td>
+                      </tr>
+                      {open && (
+                        <tr id={`queue-details-${key}`} style={{ background: "var(--ds-bg-1)" }}>
+                          <td colSpan={shownColumns.length + 2} style={{ padding: 0 }}>
+                            <div
+                              style={{
+                                position: "sticky",
+                                left: 0,
+                                boxSizing: "border-box",
+                                width: frameWidth ?? undefined,
+                                padding: `6px 10px 14px ${frameWidth !== null && frameWidth < 640 ? 10 : 40}px`,
+                              }}
                             >
-                              <RotateCcw />
-                              {t("adminManage.queue.action.blocklistSearch")}
-                            </Button>
-                          )}
-                          <Button
-                            size="xs"
-                            variant="outline"
-                            onClick={() => openRemove(r, "blocklist")}
-                            aria-label={t("adminManage.queue.action.blocklistAria", { title: r.mediaTitle || r.title })}
-                          >
-                            <Ban />
-                            {t("adminManage.queue.action.blocklist")}
-                          </Button>
-                          <Button
-                            size="xs"
-                            variant="ghost"
-                            onClick={() => openRemove(r, "remove")}
-                            aria-label={t("adminManage.queue.remove.aria", { title: r.mediaTitle || r.title })}
-                          >
-                            <Trash2 />
-                            {t("adminManage.queue.remove.button")}
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
+                              {details(r, arrLabel)}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   );
                 })}
               </tbody>

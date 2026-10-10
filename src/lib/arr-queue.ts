@@ -31,6 +31,8 @@ export const QUEUE_PHASES: readonly QueuePhase[] = [
   "downloading", "queued", "paused", "delay", "importPending", "importing", "importBlocked", "failed", "clientUnavailable", "unknown",
 ];
 
+export type QualityTag = "proper" | "repack" | "real";
+
 export interface QueueEpisode {
   seasonNumber: number;
   episodeNumber: number;
@@ -53,6 +55,12 @@ export interface QueueItem {
   arrMediaId: number | null;
   episodes: QueueEpisode[];
   quality: string | null;
+  /** The release's revision as Radarr/Sonarr tag it next to the quality: a PROPER (version > 1), a REPACK, or REAL. */
+  qualityTags: QualityTag[];
+  languages: string[];
+  /** Custom formats the release matched, and their summed score in the title's quality profile. */
+  customFormats: string[];
+  customFormatScore: number | null;
   size: number;
   sizeLeft: number;
   /** 0..1, from size and sizeLeft. */
@@ -75,6 +83,8 @@ export interface QueueItem {
   protocol: "torrent" | "usenet" | "unknown";
   downloadClient: string | null;
   indexer: string | null;
+  /** Where the download client put the files, as the arr sees that path. */
+  outputPath: string | null;
   attention: boolean;
   /** Summonarr users with a non-declined request for the title on this instance. Filled by the data layer. */
   requesters: string[];
@@ -85,6 +95,8 @@ export interface QueueItem {
 const MAX_MESSAGES = 6;
 const MAX_MESSAGE_LEN = 300;
 const MAX_TEXT = 500;
+const MAX_LABELS = 20;
+const MAX_LABEL_LEN = 100;
 
 const posInt = (v: unknown): number | null => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null);
 const nonNegInt = (v: unknown): number | null => (typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null);
@@ -120,7 +132,11 @@ export type QueueRecord = {
   series?: { tmdbId?: unknown; tvdbId?: unknown; title?: unknown; year?: unknown } | null;
   episode?: { seasonNumber?: unknown; episodeNumber?: unknown } | null;
   seasonNumber?: unknown;
-  quality?: { quality?: { name?: unknown } | null } | null;
+  quality?: { quality?: { name?: unknown } | null; revision?: { version?: unknown; real?: unknown; isRepack?: unknown } | null } | null;
+  languages?: unknown;
+  customFormats?: unknown;
+  customFormatScore?: unknown;
+  outputPath?: unknown;
   size?: unknown;
   sizeleft?: unknown;
   timeleft?: unknown;
@@ -203,6 +219,30 @@ function messagesOf(r: QueueRecord): string[] {
   return out.slice(0, MAX_MESSAGES);
 }
 
+/** The `name`s of a list of {id, name} objects (languages, custom formats) — deduplicated, bounded. */
+function namesOf(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const x of v as Array<{ name?: unknown } | null>) {
+    const n = typeof x?.name === "string" ? x.name.trim().slice(0, MAX_LABEL_LEN) : "";
+    if (n && !out.includes(n)) out.push(n);
+    if (out.length >= MAX_LABELS) break;
+  }
+  return out;
+}
+
+function qualityTagsOf(revision: unknown): QualityTag[] {
+  if (!revision || typeof revision !== "object") return [];
+  const r = revision as { version?: unknown; real?: unknown; isRepack?: unknown };
+  const tags: QualityTag[] = [];
+  if (r.isRepack === true) tags.push("repack");
+  else if (typeof r.version === "number" && r.version > 1) tags.push("proper");
+  if (typeof r.real === "number" && r.real > 0) tags.push("real");
+  return tags;
+}
+
+const scoreOf = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) ? v : null);
+
 function protocolOf(v: unknown): QueueItem["protocol"] {
   const s = lc(v);
   return s === "torrent" || s === "usenet" ? s : "unknown";
@@ -232,6 +272,10 @@ function toItem(service: QueueService, instance: string, r: QueueRecord, id: num
     arrMediaId: posInt(service === "radarr" ? r.movieId : r.seriesId),
     episodes,
     quality: textOrNull(r.quality?.quality?.name, 100),
+    qualityTags: qualityTagsOf(r.quality?.revision),
+    languages: namesOf(r.languages),
+    customFormats: namesOf(r.customFormats),
+    customFormatScore: scoreOf(r.customFormatScore),
     size,
     sizeLeft,
     progress: size > 0 ? Math.max(0, Math.min(1, (size - sizeLeft) / size)) : 0,
@@ -244,6 +288,7 @@ function toItem(service: QueueService, instance: string, r: QueueRecord, id: num
     protocol: protocolOf(r.protocol),
     downloadClient: textOrNull(r.downloadClient, 200),
     indexer: textOrNull(r.indexer, 200),
+    outputPath: textOrNull(r.outputPath, 1_000),
     attention: needsAttention(r),
     pending: isPendingStatus(r.status),
     canChangeCategory: r.downloadClientHasPostImportCategory === true,
@@ -260,6 +305,15 @@ function mergeInto(row: QueueItem, next: QueueItem): void {
   for (const m of next.messages) if (row.messages.length < MAX_MESSAGES && !row.messages.includes(m)) row.messages.push(m);
   row.attention ||= next.attention;
   row.canChangeCategory ||= next.canChangeCategory;
+  // One release, so these normally repeat; a record that lacked them must not blank the row.
+  for (const l of next.languages) if (row.languages.length < MAX_LABELS && !row.languages.includes(l)) row.languages.push(l);
+  for (const f of next.customFormats) if (row.customFormats.length < MAX_LABELS && !row.customFormats.includes(f)) row.customFormats.push(f);
+  row.customFormatScore ??= next.customFormatScore;
+  row.outputPath ??= next.outputPath;
+  row.quality ??= next.quality;
+  if (row.qualityTags.length === 0) row.qualityTags = next.qualityTags;
+  row.downloadClient ??= next.downloadClient;
+  row.indexer ??= next.indexer;
   // The release's own numbers repeat on every record; keep the largest view.
   if (next.size > row.size) {
     row.size = next.size;
