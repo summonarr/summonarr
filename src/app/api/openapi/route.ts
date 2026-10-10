@@ -65,6 +65,21 @@ const spec = {
         enum: ["PENDING", "APPROVED", "DECLINED", "AVAILABLE"],
       },
       UserRole: { type: "string", enum: ["USER", "ADMIN", "ISSUE_ADMIN"] },
+      QueueImportFile: {
+        type: "object",
+        description: "One file of a queued download, chosen by the path Radarr/Sonarr reported, with optional corrections (ids only — the objects are read from the instance)",
+        required: ["path"],
+        properties: {
+          path: { type: "string", maxLength: 4096 },
+          movieId: { type: "integer", minimum: 1, description: "Radarr: re-match to this movie" },
+          seriesId: { type: "integer", minimum: 1, description: "Sonarr: re-match to this series (requires episodeIds)" },
+          episodeIds: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, maxItems: 500, description: "Sonarr: the episodes the file holds" },
+          qualityId: { type: "integer", minimum: 0 },
+          languageIds: { type: "array", items: { type: "integer", minimum: -2 }, maxItems: 50 },
+          releaseGroup: { type: "string", maxLength: 100 },
+          releaseType: { type: "string", enum: ["unknown", "singleEpisode", "multiEpisode", "seasonPack"], description: "Sonarr only" },
+        },
+      },
       WatchGradeSpread: {
         type: "object",
         nullable: true,
@@ -2699,6 +2714,8 @@ const spec = {
                           downloadClient: { type: "string", nullable: true },
                           indexer: { type: "string", nullable: true },
                           attention: { type: "boolean" },
+                          pending: { type: "boolean", description: "Held by Radarr/Sonarr (delay profile, client unavailable, fallback) — Grab now applies; not yet in a download client" },
+                          canChangeCategory: { type: "boolean", description: "The download client has a post-import category, so the `changeCategory` removal method is available" },
                           requesters: { type: "array", items: { type: "string" } },
                         },
                       },
@@ -2721,8 +2738,12 @@ const spec = {
           "One bulk `DELETE /api/v3/queue/bulk` on that instance carrying every record id of the download, with every flag " +
           "explicit (the arr defaults removeFromClient to true). `remove`: off the queue, no blocklist. `blocklist`: remove " +
           "and blocklist the release, no new search. `blocklistSearch`: remove, blocklist, and let Radarr/Sonarr search for a " +
-          "replacement (their own \"redownload failed\" behaviour, which honours that arr setting). Audited ARR_QUEUE_REMOVE " +
-          "after the arr accepted it.",
+          "replacement (their own \"redownload failed\" behaviour, which honours that arr setting). `method` is the arr " +
+          "dialog's removal method: `removeFromClient` deletes the download (and its files) from the client, `changeCategory` " +
+          "leaves it in the client under its post-import category (only when the client has one — the row's " +
+          "`canChangeCategory`), `ignore` leaves it in the client untouched while the arr stops tracking it. With no `method`, " +
+          "the older `removeFromClient` boolean is read (true/absent → removeFromClient, false → ignore). Audited " +
+          "ARR_QUEUE_REMOVE after the arr accepted it.",
         requestBody: {
           required: true,
           content: {
@@ -2735,7 +2756,8 @@ const spec = {
                   instance: { type: "string", description: "Instance slug; absent or empty = the default" },
                   ids: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, maxItems: 5000 },
                   action: { type: "string", enum: ["remove", "blocklist", "blocklistSearch"] },
-                  removeFromClient: { type: "boolean", default: true },
+                  method: { type: "string", enum: ["removeFromClient", "changeCategory", "ignore"], default: "removeFromClient" },
+                  removeFromClient: { type: "boolean", deprecated: true, description: "Read only when `method` is absent" },
                 },
               },
             },
@@ -2759,7 +2781,9 @@ const spec = {
         description:
           "Radarr/Sonarr's `/api/v3/manualimport?downloadId=` for one queue download: each file's path, what the arr matched " +
           "it to (movie, or series + episodes), quality, languages, release group, and the reasons it refused to import it. " +
-          "`importable` is false for a file the arr could not match to a title — that has to be matched in the arr's own queue.",
+          "`importable` is false for a file the arr could not match to a title — correct it (POST with `movieId` / `seriesId` + " +
+          "`episodeIds`) first. Also returns the instance's own qualities (in its weight order) and languages for the " +
+          "per-file editor; those two are empty when the arr would not list them.",
         parameters: [
           { name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } },
           { name: "instance", in: "query", schema: { type: "string" }, description: "Instance slug; empty = the default" },
@@ -2781,8 +2805,17 @@ const spec = {
                 episodes: { type: "array", items: { type: "object", properties: { seasonNumber: { type: "integer" }, episodeNumber: { type: "integer" } } } },
                 rejections: { type: "array", items: { type: "string" } },
                 importable: { type: "boolean" },
+                movieId: { type: "integer", nullable: true, description: "Radarr's movie id the file is matched to" },
+                seriesId: { type: "integer", nullable: true, description: "Sonarr's series id the file is matched to" },
+                episodeIds: { type: "array", items: { type: "integer" } },
+                qualityId: { type: "integer", nullable: true },
+                languageIds: { type: "array", items: { type: "integer" } },
+                releaseType: { type: "string", nullable: true, description: "Sonarr only" },
               },
-            } } } } } },
+            } },
+              qualities: { type: "array", items: { type: "object", properties: { id: { type: "integer" }, name: { type: "string" } } } },
+              languages: { type: "array", items: { type: "object", properties: { id: { type: "integer" }, name: { type: "string" } } } },
+            } } } },
           },
           "400": { description: "Invalid parameters" },
           "403": { description: "Not ADMIN" },
@@ -2796,21 +2829,26 @@ const spec = {
         summary: "Import a download Radarr/Sonarr refused (ADMIN)",
         description:
           "Queues the arr's `ManualImport` command for the chosen files, overriding its refusal. The file list is RE-READ " +
-          "from the arr and only its own matched rows whose path is in `paths` are sent — `paths` selects, it is never " +
-          "passed upstream itself. 409 when none of them is importable any more. Audited ARR_QUEUE_IMPORT (count and mode, " +
-          "no paths). Returns once the command is queued; the queue row moves to importing/imported.",
+          "from the arr and only its own rows whose path is chosen are sent — a path selects, it is never passed upstream " +
+          "itself. Each file may carry corrections, the arr's own Manual Import fields: `movieId` (Radarr), `seriesId` + " +
+          "`episodeIds` (Sonarr; `episodeIds` alone keeps the matched series), `qualityId`, `languageIds`, `releaseGroup`, " +
+          "`releaseType` (Sonarr). They are IDS: every movie, series, episode, quality and language object in the command is " +
+          "read from the instance itself, and an id it doesn't have is 400 with nothing sent. The older `paths: string[]` " +
+          "body (no corrections) still works. 409 when none of the chosen files is importable. Audited ARR_QUEUE_IMPORT " +
+          "(count, mode and how many were corrected — no paths). Returns once the command is queued.",
         requestBody: {
           required: true,
           content: {
             "application/json": {
               schema: {
                 type: "object",
-                required: ["service", "downloadId", "paths"],
+                required: ["service", "downloadId"],
                 properties: {
                   service: { type: "string", enum: ["radarr", "sonarr"] },
                   instance: { type: "string" },
                   downloadId: { type: "string", maxLength: 200 },
-                  paths: { type: "array", items: { type: "string", maxLength: 4096 }, minItems: 1, maxItems: 2000 },
+                  files: { type: "array", minItems: 1, maxItems: 2000, items: { $ref: "#/components/schemas/QueueImportFile" } },
+                  paths: { type: "array", deprecated: true, items: { type: "string", maxLength: 4096 }, minItems: 1, maxItems: 2000, description: "Read only when `files` is absent" },
                   importMode: { type: "string", enum: ["auto", "move", "copy"], default: "auto" },
                 },
               },
@@ -2824,6 +2862,163 @@ const spec = {
           "404": { description: "Integration disabled or unknown instance" },
           "409": { description: "Nothing chosen is importable any more, or the download is gone" },
           "502": { description: "The arr could not be reached or refused the command" },
+        },
+      },
+    },
+
+    "/admin/queue/import/preview": {
+      post: {
+        tags: ["Admin – Downloads"],
+        summary: "Re-check a file's import corrections with Radarr/Sonarr (ADMIN)",
+        description:
+          "The chosen files with their corrections applied (each checked against the instance's own catalogs, as for the " +
+          "import itself) and RE-JUDGED by the arr's manual-import reprocess (`POST /api/v3/manualimport`): fresh refusal " +
+          "reasons and, for Sonarr, the episodes it resolves. `rechecked` is false when the arr could not reprocess (an older " +
+          "version without the endpoint, or a file with no title to look up) — the corrections still show, with the arr's " +
+          "earlier verdict. Imports nothing and writes nothing.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["service", "downloadId", "files"],
+                properties: {
+                  service: { type: "string", enum: ["radarr", "sonarr"] },
+                  instance: { type: "string" },
+                  downloadId: { type: "string", maxLength: 200 },
+                  files: { type: "array", minItems: 1, maxItems: 2000, items: { $ref: "#/components/schemas/QueueImportFile" } },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "The corrected files, as the import dialog lists them",
+            content: { "application/json": { schema: { type: "object", properties: {
+              files: { type: "array", items: { type: "object", description: "Same shape as GET /admin/queue/import's files" } },
+              rechecked: { type: "boolean" },
+            } } } },
+          },
+          "400": { description: "Invalid body, or a correction names something the instance doesn't have" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled or unknown instance" },
+          "409": { description: "The download is no longer in the queue" },
+          "502": { description: "The arr could not be reached" },
+        },
+      },
+    },
+
+    "/admin/queue/import/targets": {
+      get: {
+        tags: ["Admin – Downloads"],
+        summary: "Titles a queued file can be re-matched to (ADMIN)",
+        description:
+          "The arr's own lookup (`/api/v3/movie/lookup` or `/api/v3/series/lookup`) for `term`, keeping only titles the " +
+          "instance already has — a manual import needs the movie/series in the arr. At most 25.",
+        parameters: [
+          { name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } },
+          { name: "instance", in: "query", schema: { type: "string" } },
+          { name: "term", in: "query", required: true, schema: { type: "string", minLength: 1, maxLength: 100 } },
+        ],
+        responses: {
+          "200": {
+            description: "Matching library titles",
+            content: { "application/json": { schema: { type: "object", properties: { results: { type: "array", items: { type: "object", properties: {
+              id: { type: "integer", description: "Radarr movie id / Sonarr series id" },
+              title: { type: "string" },
+              year: { type: "integer", nullable: true },
+            } } } } } } },
+          },
+          "400": { description: "Invalid parameters" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled or unknown instance" },
+          "502": { description: "The arr could not be reached" },
+        },
+      },
+    },
+
+    "/admin/queue/import/episodes": {
+      get: {
+        tags: ["Admin – Downloads"],
+        summary: "A Sonarr series' episodes, for re-matching a queued file (ADMIN)",
+        parameters: [
+          { name: "instance", in: "query", schema: { type: "string" }, description: "Sonarr instance slug; empty = the default" },
+          { name: "seriesId", in: "query", required: true, schema: { type: "integer", minimum: 1 }, description: "Sonarr's own series id" },
+        ],
+        responses: {
+          "200": {
+            description: "Episodes in season/episode order",
+            content: { "application/json": { schema: { type: "object", properties: { episodes: { type: "array", items: { type: "object", properties: {
+              id: { type: "integer" },
+              seasonNumber: { type: "integer" },
+              episodeNumber: { type: "integer" },
+              title: { type: "string" },
+              hasFile: { type: "boolean" },
+            } } } } } } },
+          },
+          "400": { description: "Invalid series id" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Sonarr disabled, unknown instance, or the series is not in Sonarr" },
+          "502": { description: "Sonarr could not be reached" },
+        },
+      },
+    },
+
+    "/admin/queue/grab": {
+      post: {
+        tags: ["Admin – Downloads"],
+        summary: "Grab a release Radarr/Sonarr are holding (ADMIN)",
+        description:
+          "Sends a PENDING queue item (held by a delay profile, an unavailable download client, or a fallback) to the " +
+          "download client now — the arr's own `POST /api/v3/queue/grab/bulk`, one call for every id. 409 when it is no " +
+          "longer pending. Audited ARR_RELEASE_GRAB (`source: \"queue\"`) after the arr accepted it.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["service", "ids"],
+                properties: {
+                  service: { type: "string", enum: ["radarr", "sonarr"] },
+                  instance: { type: "string" },
+                  ids: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, maxItems: 500 },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Sent to the download client" },
+          "400": { description: "Invalid body" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled or unknown instance" },
+          "409": { description: "The release is no longer pending" },
+          "502": { description: "The arr could not be reached" },
+        },
+      },
+    },
+
+    "/admin/queue/recheck": {
+      post: {
+        tags: ["Admin – Downloads"],
+        summary: "Ask every Radarr/Sonarr to re-check its downloads now (ADMIN)",
+        description:
+          "Queues `RefreshMonitoredDownloads` (what the arr runs every minute on its own) on every configured, enabled " +
+          "instance — how to retry a blocked import after fixing its cause without waiting. Not awaited; an instance that " +
+          "refused is named in `errors`. No body. Not audited (it changes nothing the arr wasn't about to do); 6 per minute per admin.",
+        responses: {
+          "202": {
+            description: "Queued",
+            content: { "application/json": { schema: { type: "object", properties: {
+              instances: { type: "integer" },
+              errors: { type: "array", items: { type: "object", properties: { service: { type: "string" }, instance: { type: "string" }, error: { type: "string" } } } },
+            } } } },
+          },
+          "403": { description: "Not ADMIN" },
+          "429": { description: "Too many re-checks" },
         },
       },
     },

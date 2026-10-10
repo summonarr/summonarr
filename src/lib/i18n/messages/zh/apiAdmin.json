@@ -282,5 +282,15 @@
   "apiAdmin.queue.importParamsInvalid": "需要 service（radarr 或 sonarr）、instance 和 downloadId",
   "apiAdmin.queue.importBodyInvalid": "请求体必须是 { service, instance, downloadId, paths：导入列表中的 1–2000 个文件路径，importMode?：\"auto\" | \"move\" | \"copy\" }",
   "apiAdmin.queue.nothingToImport": "这些文件都已无法导入，请刷新",
-  "apiAdmin.queue.importFailed": "无法在 {service} 中导入"
+  "apiAdmin.queue.importFailed": "无法在 {service} 中导入",
+  "apiAdmin.queue.serviceParamsInvalid": "需要 service（radarr 或 sonarr）和 instance",
+  "apiAdmin.queue.grabBodyInvalid": "请求体必须是 { service, instance, ids：正整数（1–500）}",
+  "apiAdmin.queue.notPending": "该发布已不在等待中，请刷新",
+  "apiAdmin.queue.grabFailed": "无法在 {service} 中抓取该发布",
+  "apiAdmin.queue.termInvalid": "term 必须为 1–100 个字符",
+  "apiAdmin.queue.override.movie": "{service} 中没有该电影",
+  "apiAdmin.queue.override.series": "{service} 中没有该剧集",
+  "apiAdmin.queue.override.episodes": "这些集不属于 {service} 中的该剧集",
+  "apiAdmin.queue.override.quality": "{service} 中没有该质量",
+  "apiAdmin.queue.override.languages": "{service} 中没有该语言"
 }

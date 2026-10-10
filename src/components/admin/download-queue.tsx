@@ -5,10 +5,14 @@
 // flag first. Refreshes itself every POLL_MS while the tab is visible and no
 // dialog is open. Per row:
 //   Import            — a download the arr would not import on its own: its
-//                       Manual Import, in QueueImportDialog.
+//                       Manual Import, with every correction, in QueueImportDialog.
+//   Grab now          — a release the arr is HOLDING (delay profile, …).
 //   Blocklist & search, Blocklist, Remove — Radarr/Sonarr's own bulk queue
 //                       DELETE (POST /api/admin/queue/remove), confirmed in a
-//                       dialog that opens on the action clicked.
+//                       dialog that opens on the action clicked and offers both
+//                       halves of the arr's own: the blocklist choice and the
+//                       removal method (from the client / change category / ignore).
+// "Re-check downloads" asks every instance to re-check its downloads now.
 //
 // Every time and size is server-supplied and formatted for the viewer's
 // locale; nothing reads the clock while rendering (guardrail 16).
@@ -21,14 +25,14 @@ import { StyledSelect } from "@/components/ui/styled-select";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import { Chip, EmptyState, FilterBar, StatCard, type ChipTone } from "@/components/ui/design";
-import { AlertTriangle, Ban, CheckCircle2, CircleDashed, FileCheck, Loader2, Magnet, Radio, RefreshCw, RotateCcw, Trash2, X } from "@/components/icons";
+import { AlertTriangle, Ban, CheckCircle2, CircleDashed, Download, FileCheck, Loader2, Magnet, Radio, RefreshCcw, RefreshCw, RotateCcw, Trash2, X } from "@/components/icons";
 import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { ArrHealthPanel } from "@/components/admin/arr-health-panel";
 import { QueueImportDialog } from "@/components/admin/queue-import-dialog";
 import { episodeSummary, queueFormatters } from "@/components/admin/queue-format";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
-import type { QueueItem, QueuePhase, QueueRemoveAction } from "@/lib/arr-queue";
+import type { QueueItem, QueuePhase, QueueRemoveAction, QueueRemoveMethod } from "@/lib/arr-queue";
 
 type Service = "radarr" | "sonarr";
 type Filter = "all" | "attention" | Service;
@@ -82,7 +86,9 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
   const [removing, setRemoving] = useState<QueueItem | null>(null);
   const [importing, setImporting] = useState<QueueItem | null>(null);
   const [removeAction, setRemoveAction] = useState<QueueRemoveAction>("blocklistSearch");
-  const [removeFromClient, setRemoveFromClient] = useState(true);
+  const [removeMethod, setRemoveMethod] = useState<QueueRemoveMethod>("removeFromClient");
+  // Grab now / Re-check: which row (or "recheck") is in flight.
+  const [acting, setActing] = useState<string | null>(null);
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState("");
   const [notice, setNotice] = useState("");
@@ -130,8 +136,49 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
   function openRemove(row: QueueItem, action: QueueRemoveAction) {
     setRemoving(row);
     setRemoveAction(action);
-    setRemoveFromClient(true);
+    setRemoveMethod("removeFromClient");
     setRemoveError("");
+  }
+
+  async function grabNow(row: QueueItem) {
+    setActing(rowKey(row));
+    setNotice("");
+    try {
+      const res = await fetch(withBasePath("/api/admin/queue/grab"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ service: row.service, instance: row.instance, ids: row.ids }),
+      });
+      if (!res.ok) {
+        setError(await readError(res, t("adminManage.queue.grab.failed")));
+        return;
+      }
+      setNotice(t("adminManage.queue.grab.done", { title: row.mediaTitle || row.title }));
+      window.setTimeout(() => void load(), 2_000);
+    } catch {
+      setError(t("adminManage.queue.grab.failed"));
+    } finally {
+      setActing(null);
+    }
+  }
+
+  async function recheck() {
+    setActing("recheck");
+    setNotice("");
+    try {
+      const res = await fetch(withBasePath("/api/admin/queue/recheck"), { method: "POST" });
+      const data = (await res.json().catch(() => null)) as { instances?: number; errors?: unknown[]; error?: string } | null;
+      if (!res.ok) {
+        setError(data?.error ?? t("adminManage.queue.recheck.failed"));
+        return;
+      }
+      setNotice(t("adminManage.queue.recheck.done", { count: (data?.instances ?? 0) - (data?.errors?.length ?? 0) }));
+      window.setTimeout(() => void load(), 5_000);
+    } catch {
+      setError(t("adminManage.queue.recheck.failed"));
+    } finally {
+      setActing(null);
+    }
   }
 
   function imported(row: QueueItem, files: number) {
@@ -154,7 +201,7 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
           instance: removing.instance,
           ids: removing.ids,
           action: removeAction,
-          removeFromClient,
+          method: removing.pending ? "removeFromClient" : removeMethod,
         }),
       });
       if (!res.ok) {
@@ -366,15 +413,30 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
                               {t("adminManage.queue.action.import")}
                             </Button>
                           )}
-                          <Button
-                            size="xs"
-                            variant="outline"
-                            onClick={() => openRemove(r, "blocklistSearch")}
-                            aria-label={t("adminManage.queue.action.blocklistSearchAria", { title: r.mediaTitle || r.title })}
-                          >
-                            <RotateCcw />
-                            {t("adminManage.queue.action.blocklistSearch")}
-                          </Button>
+                          {r.pending && (
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              onClick={() => void grabNow(r)}
+                              disabled={acting === rowKey(r)}
+                              aria-label={t("adminManage.queue.action.grabAria", { title: r.mediaTitle || r.title })}
+                            >
+                              {acting === rowKey(r) ? <Loader2 className="animate-spin" /> : <Download />}
+                              {t("adminManage.queue.action.grab")}
+                            </Button>
+                          )}
+                          {/* A held release was never downloaded — there is nothing to search a replacement FOR yet. */}
+                          {!r.pending && (
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              onClick={() => openRemove(r, "blocklistSearch")}
+                              aria-label={t("adminManage.queue.action.blocklistSearchAria", { title: r.mediaTitle || r.title })}
+                            >
+                              <RotateCcw />
+                              {t("adminManage.queue.action.blocklistSearch")}
+                            </Button>
+                          )}
                           <Button
                             size="xs"
                             variant="outline"
@@ -413,11 +475,24 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
     ...(services.has("radarr") ? [{ value: "radarr" as const, label: SERVICE_LABEL.radarr, count: count("radarr") }] : []),
   ];
 
+  // Both halves of the arr's own "Remove from queue" dialog.
   const REMOVE_OPTIONS: Array<{ value: QueueRemoveAction; label: string; help: string }> = [
-    { value: "blocklistSearch", label: t("adminManage.queue.remove.blocklistSearch"), help: t("adminManage.queue.remove.blocklistSearchHelp") },
+    ...(removing?.pending ? [] : [{ value: "blocklistSearch" as const, label: t("adminManage.queue.remove.blocklistSearch"), help: t("adminManage.queue.remove.blocklistSearchHelp") }]),
     { value: "blocklist", label: t("adminManage.queue.remove.blocklist"), help: t("adminManage.queue.remove.blocklistHelp") },
     { value: "remove", label: t("adminManage.queue.remove.remove"), help: t("adminManage.queue.remove.removeHelp") },
   ];
+  const METHOD_OPTIONS: Array<{ value: QueueRemoveMethod; label: string; help: string }> = [
+    { value: "removeFromClient", label: t("adminManage.queue.remove.method.removeFromClient"), help: t("adminManage.queue.remove.method.removeFromClientHelp") },
+    ...(removing?.canChangeCategory
+      ? [{ value: "changeCategory" as const, label: t("adminManage.queue.remove.method.changeCategory"), help: t("adminManage.queue.remove.method.changeCategoryHelp") }]
+      : []),
+    { value: "ignore", label: t("adminManage.queue.remove.method.ignore"), help: t("adminManage.queue.remove.method.ignoreHelp") },
+  ];
+  const radioBox = (on: boolean): React.CSSProperties => ({
+    padding: "8px 10px",
+    border: `1px solid ${on ? "var(--ds-border-strong)" : "var(--ds-border)"}`,
+    background: on ? "var(--ds-bg-2)" : "transparent",
+  });
 
   return (
     <div className="flex flex-col gap-6">
@@ -437,10 +512,22 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
           onChange={setFilter}
           right={
             configured ? (
-              <Button size="sm" variant="outline" onClick={() => void load()} disabled={loading}>
-                {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                {t("adminManage.queue.refresh")}
-              </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void recheck()}
+                  disabled={acting === "recheck"}
+                  title={t("adminManage.queue.recheck.hint")}
+                >
+                  {acting === "recheck" ? <Loader2 className="animate-spin" /> : <RefreshCcw />}
+                  {t("adminManage.queue.recheck.button")}
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => void load()} disabled={loading}>
+                  {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                  {t("adminManage.queue.refresh")}
+                </Button>
+              </div>
             ) : null
           }
         />
@@ -475,17 +562,9 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
                   <p className="m-0 ds-mono text-zinc-500" style={{ fontSize: 11, overflowWrap: "anywhere" }}>{removing.title}</p>
                 </div>
                 <fieldset className="flex flex-col gap-2 m-0 p-0 border-0">
-                  <legend className="sr-only">{t("adminManage.queue.remove.title")}</legend>
+                  <legend className="text-xs font-medium text-zinc-400 mb-1">{t("adminManage.queue.remove.blocklistLegend")}</legend>
                   {REMOVE_OPTIONS.map((o) => (
-                    <label
-                      key={o.value}
-                      className="flex items-start gap-2.5 rounded-md"
-                      style={{
-                        padding: "8px 10px",
-                        border: `1px solid ${removeAction === o.value ? "var(--ds-border-strong)" : "var(--ds-border)"}`,
-                        background: removeAction === o.value ? "var(--ds-bg-2)" : "transparent",
-                      }}
-                    >
+                    <label key={o.value} className="flex items-start gap-2.5 rounded-md" style={radioBox(removeAction === o.value)}>
                       <input
                         type="radio"
                         name="queue-remove-action"
@@ -501,12 +580,27 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
                     </label>
                   ))}
                 </fieldset>
-                <label className="flex items-center gap-2 text-sm text-zinc-100">
-                  <Switch checked={removeFromClient} onCheckedChange={setRemoveFromClient} aria-label={t("adminManage.queue.remove.fromClient")} />
-                  {t("adminManage.queue.remove.fromClient")}
-                </label>
-                {!removeFromClient && removeAction === "remove" && (
-                  <p className="m-0 text-xs text-zinc-500">{t("adminManage.queue.remove.ignoreHelp")}</p>
+                {/* A held release is in no download client — there is no removal method to pick. */}
+                {!removing.pending && (
+                  <fieldset className="flex flex-col gap-2 m-0 p-0 border-0">
+                    <legend className="text-xs font-medium text-zinc-400 mb-1">{t("adminManage.queue.remove.methodLegend")}</legend>
+                    {METHOD_OPTIONS.map((o) => (
+                      <label key={o.value} className="flex items-start gap-2.5 rounded-md" style={radioBox(removeMethod === o.value)}>
+                        <input
+                          type="radio"
+                          name="queue-remove-method"
+                          value={o.value}
+                          checked={removeMethod === o.value}
+                          onChange={() => setRemoveMethod(o.value)}
+                          style={{ marginTop: 3 }}
+                        />
+                        <span className="flex flex-col">
+                          <span className="text-sm text-zinc-100">{o.label}</span>
+                          <span className="text-xs text-zinc-500">{o.help}</span>
+                        </span>
+                      </label>
+                    ))}
+                  </fieldset>
                 )}
                 {removeError && (
                   <p role="alert" className="m-0 text-xs flex items-center gap-1" style={{ color: "var(--ds-danger)" }}>

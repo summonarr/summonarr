@@ -282,5 +282,15 @@
   "apiAdmin.queue.importParamsInvalid": "Esperado: service (radarr ou sonarr), instance e downloadId",
   "apiAdmin.queue.importBodyInvalid": "O corpo deve ser { service, instance, downloadId, paths: 1–2000 caminhos de arquivo da listagem de importação, importMode?: \"auto\" | \"move\" | \"copy\" }",
   "apiAdmin.queue.nothingToImport": "Nenhum desses arquivos pode mais ser importado — atualize",
-  "apiAdmin.queue.importFailed": "Não foi possível importar no {service}"
+  "apiAdmin.queue.importFailed": "Não foi possível importar no {service}",
+  "apiAdmin.queue.serviceParamsInvalid": "Esperado: service (radarr ou sonarr) e instance",
+  "apiAdmin.queue.grabBodyInvalid": "O corpo deve ser { service, instance, ids: inteiros positivos (1–500) }",
+  "apiAdmin.queue.notPending": "Esse release não está mais em espera — atualize",
+  "apiAdmin.queue.grabFailed": "Não foi possível capturar o release no {service}",
+  "apiAdmin.queue.termInvalid": "term deve ter de 1 a 100 caracteres",
+  "apiAdmin.queue.override.movie": "O {service} não tem esse filme",
+  "apiAdmin.queue.override.series": "O {service} não tem essa série",
+  "apiAdmin.queue.override.episodes": "Esses episódios não pertencem a essa série no {service}",
+  "apiAdmin.queue.override.quality": "O {service} não tem essa qualidade",
+  "apiAdmin.queue.override.languages": "O {service} não tem esse idioma"
 }

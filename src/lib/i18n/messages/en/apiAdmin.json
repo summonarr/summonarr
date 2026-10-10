@@ -282,5 +282,15 @@
   "apiAdmin.queue.importParamsInvalid": "Expected service (radarr or sonarr), instance and downloadId",
   "apiAdmin.queue.importBodyInvalid": "Body must be { service, instance, downloadId, paths: 1–2000 file paths from the import listing, importMode?: \"auto\" | \"move\" | \"copy\" }",
   "apiAdmin.queue.nothingToImport": "None of those files can be imported any more — refresh",
-  "apiAdmin.queue.importFailed": "Could not import in {service}"
+  "apiAdmin.queue.importFailed": "Could not import in {service}",
+  "apiAdmin.queue.serviceParamsInvalid": "Expected service (radarr or sonarr) and instance",
+  "apiAdmin.queue.grabBodyInvalid": "Body must be { service, instance, ids: positive integers (1–500) }",
+  "apiAdmin.queue.notPending": "That release is no longer waiting — refresh",
+  "apiAdmin.queue.grabFailed": "Could not grab the release in {service}",
+  "apiAdmin.queue.termInvalid": "term must be 1–100 characters",
+  "apiAdmin.queue.override.movie": "{service} has no such movie",
+  "apiAdmin.queue.override.series": "{service} has no such series",
+  "apiAdmin.queue.override.episodes": "Those episodes don't belong to that series in {service}",
+  "apiAdmin.queue.override.quality": "{service} has no such quality",
+  "apiAdmin.queue.override.languages": "{service} has no such language"
 }

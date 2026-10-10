@@ -1,5 +1,6 @@
 // Route-level tests for the Radarr/Sonarr operations surfaces:
 //   /api/admin/queue, /api/admin/queue/remove           (Admin → Download Queue)
+//   /api/admin/queue/{grab,recheck,import,import/preview,import/targets,import/episodes}
 //   /api/admin/arr-health, /api/admin/arr-health/webhook (health + one-click webhook)
 //   /api/admin/arr/open                                 ("Open in Radarr/Sonarr")
 //   /api/admin/missing?mode=cutoff + search mode=cutoff  (Missing → Cutoff unmet)
@@ -13,6 +14,9 @@
 //      configured instance is refused BEFORE any upstream call.
 //   3. Removal is ONE bulk DELETE on the row's own instance carrying every id
 //      and every flag explicitly; it is audited only after the arr accepted it.
+//   3b. Import corrections name IDS only: every movie, series, episode,
+//      quality and language object in the command comes from the instance's
+//      own catalogs, and an id it lacks is 400 with nothing sent (guardrail 5d).
 //   4. Webhook setup: the token rides in ?token= (guardrail 2) and never leaves
 //      the server — not in the health report, not in the audit row, not in an
 //      error the arr echoes back; an existing hook is repaired in place.
@@ -176,6 +180,11 @@ shadowPrismaModel(prisma, "auditLog", {
 const queueRoute = await import("../src/app/api/admin/queue/route.ts");
 const removeRoute = await import("../src/app/api/admin/queue/remove/route.ts");
 const importRoute = await import("../src/app/api/admin/queue/import/route.ts");
+const grabRoute = await import("../src/app/api/admin/queue/grab/route.ts");
+const recheckRoute = await import("../src/app/api/admin/queue/recheck/route.ts");
+const previewRoute = await import("../src/app/api/admin/queue/import/preview/route.ts");
+const targetsRoute = await import("../src/app/api/admin/queue/import/targets/route.ts");
+const episodesRoute = await import("../src/app/api/admin/queue/import/episodes/route.ts");
 const healthRoute = await import("../src/app/api/admin/arr-health/route.ts");
 const webhookRoute = await import("../src/app/api/admin/arr-health/webhook/route.ts");
 const openRoute = await import("../src/app/api/admin/arr/open/route.ts");
@@ -246,6 +255,11 @@ test("anonymous is 401 and a delegated manager 403 on every admin route — noth
     assert.equal((await call(openRoute.GET, token, "/admin/arr/open?service=radarr&instance=&tmdbId=1")).status, expected);
     assert.equal((await call(importRoute.GET, token, "/admin/queue/import?service=radarr&instance=&downloadId=x")).status, expected);
     assert.equal((await call(importRoute.POST, token, "/admin/queue/import", { method: "POST", body: { service: "radarr", downloadId: "x", paths: ["/a"] } })).status, expected);
+    assert.equal((await call(grabRoute.POST, token, "/admin/queue/grab", { method: "POST", body: { service: "radarr", ids: [1] } })).status, expected);
+    assert.equal((await call(recheckRoute.POST, token, "/admin/queue/recheck", { method: "POST" })).status, expected);
+    assert.equal((await call(previewRoute.POST, token, "/admin/queue/import/preview", { method: "POST", body: { service: "radarr", downloadId: "x", files: [{ path: "/a" }] } })).status, expected);
+    assert.equal((await call(targetsRoute.GET, token, "/admin/queue/import/targets?service=radarr&term=x")).status, expected);
+    assert.equal((await call(episodesRoute.GET, token, "/admin/queue/import/episodes?seriesId=3")).status, expected);
   }
   assert.deepEqual(arrCalls(), []);
 });
@@ -338,8 +352,24 @@ test("remove: ONE bulk DELETE on the row's own instance with every id and every 
   assert.deepEqual(audits.map((a) => ({ ...a, details: typeof a.details === "string" ? JSON.parse(a.details) : a.details })), [{
     action: "ARR_QUEUE_REMOVE",
     target: "radarr:4k",
-    details: { service: "radarr", instance: "4k", ids: [7, 8], action: "blocklistSearch", removeFromClient: false },
-  }]);
+    details: { service: "radarr", instance: "4k", ids: [7, 8], action: "blocklistSearch", method: "ignore" },
+  }], "the older removeFromClient:false body reads as the arr's 'ignore'");
+});
+
+test("remove: the removal METHOD — change category and ignore leave the download in the client; an older body without one removes it", async () => {
+  responder = (c) => (c.method === "DELETE" && c.path === "/api/v3/queue/bulk" ? json({}) : undefined);
+  const token = await mintSession();
+  const sent = async (body: Record<string, unknown>) => {
+    calls = [];
+    assert.equal((await call(removeRoute.POST, token, "/admin/queue/remove", { method: "POST", body: { service: "sonarr", ids: [4], ...body } })).status, 200, JSON.stringify(body));
+    return Object.fromEntries(arrCalls()[0].query);
+  };
+  assert.deepEqual(await sent({ action: "blocklist", method: "changeCategory" }), { removeFromClient: "false", blocklist: "true", skipRedownload: "true", changeCategory: "true" });
+  assert.deepEqual(await sent({ action: "remove", method: "ignore" }), { removeFromClient: "false", blocklist: "false", skipRedownload: "true", changeCategory: "false" });
+  assert.deepEqual(await sent({ action: "remove" }), { removeFromClient: "true", blocklist: "false", skipRedownload: "true", changeCategory: "false" });
+  assert.deepEqual(await sent({ action: "remove", removeFromClient: true, method: "ignore" }), { removeFromClient: "false", blocklist: "false", skipRedownload: "true", changeCategory: "false" }, "method wins over the older flag");
+  await drain();
+  assert.deepEqual(audits.map((a) => JSON.parse(String(a.details)).method), ["changeCategory", "ignore", "removeFromClient", "ignore"]);
 });
 
 test("a complete-series pack (thousands of per-episode records) is removed in ONE call", async () => {
@@ -359,6 +389,7 @@ test("remove refuses a bad body or an unconfigured slug before any upstream call
     { service: "radarr", ids: [1], action: "nuke" },
     { service: "lidarr", ids: [1], action: "remove" },
     { service: "radarr", ids: [1], action: "remove", removeFromClient: "yes" },
+    { service: "radarr", ids: [1], action: "remove", method: "delete" },
   ]) {
     assert.equal((await call(removeRoute.POST, token, "/admin/queue/remove", { method: "POST", body })).status, 400, JSON.stringify(body));
   }
@@ -378,18 +409,41 @@ const manualRows = [
     movie: { id: 12, title: "Movie", year: 2024 }, rejections: [{ reason: "Not an upgrade for existing movie file" }] },
   { path: "/downloads/Movie/sample.mkv", relativePath: "sample.mkv", size: 5e7, quality: q, movie: null, rejections: [{ reason: "Sample" }] },
 ];
+const uhd = { id: 19, name: "Bluray-2160p", source: "bluray", resolution: 2160 };
+const qualityDefs = [
+  { id: 2, quality: uhd, title: "Bluray-2160p", weight: 30 },
+  { id: 1, quality: { id: 7, name: "Bluray-1080p", source: "bluray", resolution: 1080 }, title: "Bluray-1080p", weight: 20 },
+];
+const languageList = [{ id: 1, name: "English" }, { id: 8, name: "Japanese" }];
+const freshRevision = { version: 1, real: 0, isRepack: false };
 
-test("import listing: the instance's own manualimport for that download id, shaped for the dialog", async () => {
-  responder = (c) => (c.path === "/api/v3/manualimport" ? json(manualRows) : undefined);
+test("import listing: the instance's own manualimport for that download id, shaped for the dialog, with its own qualities and languages", async () => {
+  responder = (c) => {
+    if (c.origin !== RADARR_4K) return undefined;
+    if (c.path === "/api/v3/manualimport") return json(manualRows);
+    if (c.path === "/api/v3/qualitydefinition") return json(qualityDefs);
+    if (c.path === "/api/v3/language") return json(languageList);
+    return undefined;
+  };
   const res = await call(importRoute.GET, await mintSession(), "/admin/queue/import?service=radarr&instance=4k&downloadId=SABnzbd_nzo_1%2B2");
   assert.equal(res.status, 200);
-  const body = await res.json() as { files: Array<{ name: string; importable: boolean; rejections: string[] }> };
-  assert.deepEqual(body.files.map((f) => [f.name, f.importable, f.rejections]), [
-    ["Movie.mkv", true, ["Not an upgrade for existing movie file"]],
-    ["sample.mkv", false, ["Sample"]],
+  const body = await res.json() as { files: Array<{ name: string; importable: boolean; rejections: string[]; movieId: number | null; qualityId: number | null }>; qualities: unknown[]; languages: unknown[] };
+  assert.deepEqual(body.files.map((f) => [f.name, f.importable, f.rejections, f.movieId, f.qualityId]), [
+    ["Movie.mkv", true, ["Not an upgrade for existing movie file"], 12, 7],
+    ["sample.mkv", false, ["Sample"], null, 7],
   ]);
-  assert.equal(arrCalls()[0].origin, RADARR_4K);
-  assert.equal(arrCalls()[0].query.get("downloadId"), "SABnzbd_nzo_1+2");
+  assert.deepEqual(body.qualities, [{ id: 7, name: "Bluray-1080p" }, { id: 19, name: "Bluray-2160p" }], "in the instance's own weight order");
+  assert.deepEqual(body.languages, [{ id: 1, name: "English" }, { id: 8, name: "Japanese" }]);
+  const listing = arrCalls().find((c) => c.path === "/api/v3/manualimport")!;
+  assert.equal(listing.query.get("downloadId"), "SABnzbd_nzo_1+2");
+});
+
+test("import listing: qualities/languages are conveniences — failing to read them still lists the files", async () => {
+  responder = (c) => (c.path === "/api/v3/manualimport" ? json(manualRows) : c.path === "/api/v3/qualitydefinition" ? new Response("x", { status: 500 }) : undefined);
+  const res = await call(importRoute.GET, await mintSession(), "/admin/queue/import?service=radarr&downloadId=SAB_1");
+  assert.equal(res.status, 200);
+  const body = await res.json() as { files: unknown[]; qualities: unknown[]; languages: unknown[] };
+  assert.deepEqual([body.files.length, body.qualities, body.languages], [2, [], []]);
 });
 
 test("import: the command carries ONLY the arr's own matched rows — an injected path never reaches it (guardrail 5d) — and is audited without paths", async () => {
@@ -440,6 +494,202 @@ test("import: nothing importable among the chosen paths is 409 and sends no comm
   assert.deepEqual(arrCalls(), []);
   await drain();
   assert.deepEqual(audits, []);
+});
+
+// ── 2c: corrections, grab now, re-check ─────────────────────────────────────
+
+const sonarrManualRows = [
+  { path: "/dl/Show.S01/Show.S01E01.mkv", relativePath: "Show.S01E01.mkv", size: 1e9, quality: q, languages: [],
+    series: { id: 3, title: "Show" }, episodes: [{ id: 101, seasonNumber: 1, episodeNumber: 1 }], rejections: [{ reason: "Episode was unexpected" }] },
+];
+const sonarrCatalog = (c: Call): Response | undefined => {
+  if (c.path === "/api/v3/manualimport" && c.method === "GET") return json(sonarrManualRows);
+  if (c.path === "/api/v3/series/7") return json({ id: 7, title: "Other Show" });
+  if (c.path === "/api/v3/series/99") return new Response("nope", { status: 404 });
+  if (c.path === "/api/v3/episode" && c.query.get("seriesId") === "7") return json([{ id: 701, seasonNumber: 2, episodeNumber: 5 }, { id: 702, seasonNumber: 2, episodeNumber: 6 }]);
+  if (c.path === "/api/v3/qualitydefinition") return json(qualityDefs);
+  if (c.path === "/api/v3/language") return json(languageList);
+  if (c.path === "/api/v3/command" && c.method === "POST") return json({ id: 1 }, 201);
+  return undefined;
+};
+
+test("import with corrections: the command's series, episodes, quality and languages are the INSTANCE's objects — the browser only names ids", async () => {
+  responder = sonarrCatalog;
+  const res = await call(importRoute.POST, await mintSession(), "/admin/queue/import", {
+    method: "POST",
+    body: {
+      service: "sonarr", downloadId: "qb_1",
+      files: [
+        { path: "/dl/Show.S01/Show.S01E01.mkv", seriesId: 7, episodeIds: [701], qualityId: 19, languageIds: [8], releaseGroup: "FIX", releaseType: "singleEpisode",
+          // Not a correction field: ignored, never forwarded.
+          quality: { quality: { id: 999, name: "Injected" } }, seriesTitle: "Injected" },
+        { path: "/etc/shadow", seriesId: 7, episodeIds: [702] },
+      ],
+    },
+  });
+  assert.equal(res.status, 202);
+  const command = arrCalls().find((c) => c.path === "/api/v3/command")!;
+  assert.equal(command.origin, SONARR);
+  assert.deepEqual(command.body, {
+    name: "ManualImport",
+    importMode: "auto",
+    files: [{
+      path: "/dl/Show.S01/Show.S01E01.mkv",
+      quality: { quality: uhd, revision: freshRevision },
+      languages: [{ id: 8, name: "Japanese" }],
+      releaseGroup: "FIX",
+      indexerFlags: 0,
+      downloadId: "qb_1",
+      seriesId: 7,
+      episodeIds: [701],
+      releaseType: "singleEpisode",
+    }],
+  });
+  assert.ok(!JSON.stringify(command.body).includes("Injected") && !JSON.stringify(command.body).includes("/etc/shadow"));
+  await drain();
+  assert.deepEqual(JSON.parse(String(audits[0].details)), { service: "sonarr", instance: "", downloadId: "qb_1", files: 1, importMode: "auto", corrected: 2 });
+});
+
+test("import with corrections: an id the instance doesn't have is 400 and NO command is sent", async () => {
+  const token = await mintSession();
+  const tries: Array<[Record<string, unknown>, (c: Call) => Response | undefined]> = [
+    [{ service: "sonarr", files: [{ path: "/dl/Show.S01/Show.S01E01.mkv", seriesId: 7, episodeIds: [101] }] }, sonarrCatalog], // another series' episode
+    [{ service: "sonarr", files: [{ path: "/dl/Show.S01/Show.S01E01.mkv", seriesId: 99, episodeIds: [1] }] }, sonarrCatalog], // series not in Sonarr
+    [{ service: "sonarr", files: [{ path: "/dl/Show.S01/Show.S01E01.mkv", qualityId: 55 }] }, sonarrCatalog],
+    [{ service: "sonarr", files: [{ path: "/dl/Show.S01/Show.S01E01.mkv", languageIds: [1, 77] }] }, sonarrCatalog],
+    [{ service: "radarr", files: [{ path: "/downloads/Movie/sample.mkv", movieId: 41 }] },
+      (c) => (c.path === "/api/v3/manualimport" ? json(manualRows) : c.path === "/api/v3/movie/41" ? new Response("no", { status: 404 }) : undefined)],
+  ];
+  for (const [body, r] of tries) {
+    responder = r;
+    calls = [];
+    const res = await call(importRoute.POST, token, "/admin/queue/import", { method: "POST", body: { downloadId: "qb_1", ...body } });
+    assert.equal(res.status, 400, JSON.stringify(body));
+    assert.equal(arrCalls().filter((c) => c.path === "/api/v3/command").length, 0, JSON.stringify(body));
+  }
+  await drain();
+  assert.deepEqual(audits, []);
+});
+
+test("preview: the corrected file is RE-JUDGED by the arr's reprocess and its fresh verdict shown; nothing is imported", async () => {
+  let reprocessed: unknown = null;
+  responder = (c) => {
+    if (c.path === "/api/v3/manualimport" && c.method === "GET") return json(manualRows);
+    if (c.path === "/api/v3/movie/40") return json({ id: 40, title: "Right Movie", year: 2023 });
+    if (c.path === "/api/v3/qualitydefinition") return json(qualityDefs);
+    if (c.path === "/api/v3/manualimport" && c.method === "POST") {
+      reprocessed = c.body;
+      return json([{ path: "/downloads/Movie/sample.mkv", movie: { id: 40, title: "Right Movie", year: 2023 }, rejections: [] }]);
+    }
+    return undefined;
+  };
+  const res = await call(previewRoute.POST, await mintSession(), "/admin/queue/import/preview", {
+    method: "POST",
+    body: { service: "radarr", downloadId: "SAB_1", files: [{ path: "/downloads/Movie/sample.mkv", movieId: 40, qualityId: 19 }] },
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(reprocessed, [{
+    path: "/downloads/Movie/sample.mkv", quality: { quality: uhd, revision: freshRevision }, languages: [], indexerFlags: 0, downloadId: "SAB_1", movieId: 40,
+  }]);
+  const body = await res.json() as { rechecked: boolean; files: Array<{ target: string; quality: string; importable: boolean; rejections: string[]; movieId: number }> };
+  assert.equal(body.rechecked, true);
+  assert.deepEqual(body.files.map((f) => [f.target, f.quality, f.importable, f.rejections, f.movieId]), [["Right Movie (2023)", "Bluray-2160p", true, [], 40]]);
+  assert.equal(arrCalls().filter((c) => c.path === "/api/v3/command").length, 0);
+  await drain();
+  assert.deepEqual(audits, []);
+});
+
+test("preview on an arr without the reprocess endpoint: the correction still shows, with the arr's EARLIER verdict and rechecked:false", async () => {
+  responder = (c) => {
+    if (c.path === "/api/v3/manualimport" && c.method === "GET") return json(manualRows);
+    if (c.path === "/api/v3/movie/40") return json({ id: 40, title: "Right Movie", year: 2023 });
+    if (c.path === "/api/v3/manualimport" && c.method === "POST") return new Response("Method Not Allowed", { status: 405 });
+    return undefined;
+  };
+  const res = await call(previewRoute.POST, await mintSession(), "/admin/queue/import/preview", {
+    method: "POST",
+    body: { service: "radarr", downloadId: "SAB_1", files: [{ path: "/downloads/Movie/sample.mkv", movieId: 40 }] },
+  });
+  assert.equal(res.status, 200);
+  const body = await res.json() as { rechecked: boolean; files: Array<{ target: string; rejections: string[] }> };
+  assert.deepEqual([body.rechecked, body.files.map((f) => [f.target, f.rejections])], [false, [["Right Movie (2023)", ["Sample"]]]]);
+});
+
+test("match search: the instance's own lookup, library titles only (positive id), bounded; a bad term is 400 before any call", async () => {
+  responder = (c) => (c.path === "/api/v3/series/lookup"
+    ? json([{ id: 0, title: "Not added" }, { id: 7, title: "Other Show", year: 2019 }, { title: "No id" }, ...Array.from({ length: 30 }, (_, i) => ({ id: 100 + i, title: `S${i}` }))])
+    : undefined);
+  const token = await mintSession();
+  const res = await call(targetsRoute.GET, token, "/admin/queue/import/targets?service=sonarr&term=%20other%20");
+  assert.equal(res.status, 200);
+  const { results } = await res.json() as { results: Array<{ id: number; title: string; year: number | null }> };
+  assert.deepEqual(results[0], { id: 7, title: "Other Show", year: 2019 });
+  assert.equal(results.length, 25);
+  assert.ok(results.every((r) => r.id > 0));
+  assert.equal(arrCalls()[0].query.get("term"), "other");
+  calls = [];
+  for (const qs of ["service=sonarr&term=", "service=sonarr&term=" + "x".repeat(101), "service=lidarr&term=x"]) {
+    assert.equal((await call(targetsRoute.GET, token, `/admin/queue/import/targets?${qs}`)).status, 400, qs);
+  }
+  assert.equal((await call(targetsRoute.GET, token, "/admin/queue/import/targets?service=sonarr&instance=anime&term=x")).status, 404);
+  assert.deepEqual(arrCalls(), []);
+});
+
+test("episode picker: one Sonarr series' episodes in order; a bad id is 400 and a series Sonarr doesn't have 404", async () => {
+  responder = (c) => {
+    if (c.path !== "/api/v3/episode") return undefined;
+    if (c.query.get("seriesId") === "7") return json([{ id: 702, seasonNumber: 2, episodeNumber: 6, title: "B", hasFile: true }, { id: 701, seasonNumber: 2, episodeNumber: 5, title: "A" }, { id: "x" }]);
+    return new Response("gone", { status: 404 });
+  };
+  const token = await mintSession();
+  const res = await call(episodesRoute.GET, token, "/admin/queue/import/episodes?seriesId=7");
+  assert.equal(res.status, 200);
+  assert.deepEqual((await res.json() as { episodes: unknown[] }).episodes, [
+    { id: 701, seasonNumber: 2, episodeNumber: 5, title: "A", hasFile: false },
+    { id: 702, seasonNumber: 2, episodeNumber: 6, title: "B", hasFile: true },
+  ]);
+  assert.equal((await call(episodesRoute.GET, token, "/admin/queue/import/episodes?seriesId=8")).status, 404);
+  calls = [];
+  for (const id of ["0", "-1", "abc", ""]) assert.equal((await call(episodesRoute.GET, token, `/admin/queue/import/episodes?seriesId=${id}`)).status, 400, id);
+  assert.deepEqual(arrCalls(), []);
+});
+
+test("grab now: ONE bulk grab on the row's own instance, audited after; a release no longer held is 409 and not audited", async () => {
+  responder = (c) => (c.method === "POST" && c.path === "/api/v3/queue/grab/bulk" ? json({}) : undefined);
+  const token = await mintSession();
+  const res = await call(grabRoute.POST, token, "/admin/queue/grab", { method: "POST", body: { service: "radarr", instance: "4k", ids: [5, 5, 6] } });
+  assert.equal(res.status, 200);
+  assert.deepEqual(arrCalls().map((c) => [c.origin, c.body]), [[RADARR_4K, { ids: [5, 6] }]]);
+  await drain();
+  assert.deepEqual(audits.map((a) => [a.action, a.target, JSON.parse(String(a.details))]), [
+    ["ARR_RELEASE_GRAB", "radarr:4k", { service: "radarr", instance: "4k", ids: [5, 6], source: "queue" }],
+  ]);
+  audits = [];
+  responder = (c) => (c.path === "/api/v3/queue/grab/bulk" ? new Response("not pending", { status: 404 }) : undefined);
+  assert.equal((await call(grabRoute.POST, token, "/admin/queue/grab", { method: "POST", body: { service: "radarr", ids: [5] } })).status, 409);
+  calls = [];
+  for (const body of [{ service: "radarr", ids: [] }, { service: "radarr", ids: [0] }, { service: "radarr" }, { service: "lidarr", ids: [1] }]) {
+    assert.equal((await call(grabRoute.POST, token, "/admin/queue/grab", { method: "POST", body })).status, 400, JSON.stringify(body));
+  }
+  assert.equal((await call(grabRoute.POST, token, "/admin/queue/grab", { method: "POST", body: { service: "radarr", instance: "anime", ids: [1] } })).status, 404);
+  assert.deepEqual(arrCalls(), []);
+  await drain();
+  assert.deepEqual(audits, []);
+});
+
+test("re-check: RefreshMonitoredDownloads on EVERY enabled instance, a refusing one named; rate-limited per admin", async () => {
+  settings.set("feature.integration.sonarr", "false");
+  invalidateFeatureFlagCache();
+  responder = (c) => (c.path !== "/api/v3/command" ? undefined : c.origin === RADARR_4K ? new Response("down", { status: 503 }) : json({ id: 1 }, 201));
+  const token = await mintSession();
+  const res = await call(recheckRoute.POST, token, "/admin/queue/recheck", { method: "POST" });
+  assert.equal(res.status, 202);
+  const body = await res.json() as { instances: number; errors: Array<{ service: string; instance: string }> };
+  assert.equal(body.instances, 2);
+  assert.deepEqual(body.errors.map((e) => `${e.service}:${e.instance}`), ["radarr:4k"]);
+  assert.deepEqual(arrCalls().map((c) => [c.origin, c.body]).sort(), [[RADARR, { name: "RefreshMonitoredDownloads" }], [RADARR_4K, { name: "RefreshMonitoredDownloads" }]]);
+  for (let i = 0; i < 5; i++) await call(recheckRoute.POST, token, "/admin/queue/recheck", { method: "POST" });
+  assert.equal((await call(recheckRoute.POST, token, "/admin/queue/recheck", { method: "POST" })).status, 429);
 });
 
 // ── 3: health + webhook ──────────────────────────────────────────────────────

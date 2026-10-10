@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { ArrResponseError, arrErrorMessage } from "@/lib/arr";
-import { isQueueRemoveAction } from "@/lib/arr-queue";
+import { isQueueRemoveAction, isQueueRemoveMethod, type QueueRemoveMethod } from "@/lib/arr-queue";
 import { parseQueueService, QueueInstanceError, removeFromQueue } from "@/lib/arr-queue-data";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
@@ -17,12 +17,16 @@ const MAX_IDS = 5_000;
 const SERVICE_LABEL = { radarr: "Radarr", sonarr: "Sonarr" } as const;
 
 // Admin → Download Queue, one row's Remove (ADMIN). Sends Radarr/Sonarr's own
-// bulk queue DELETE for every record id of the download, on that instance:
+// bulk queue DELETE for every record id of the download, on that instance —
+// both halves of the arr's own "Remove from queue" dialog:
 //   action "remove"          — drop it from the queue (no blocklist)
 //   action "blocklist"       — remove and blocklist the release
 //   action "blocklistSearch" — remove, blocklist, and let the arr search for a
 //                              replacement (its "redownload failed" behaviour)
-// `removeFromClient` (default true) also deletes it from the download client.
+//   method "removeFromClient" (default) — delete it from the download client
+//   method "changeCategory"  — move it to the client's post-import category
+//   method "ignore"          — leave it in the client; the arr stops tracking it
+// The older `removeFromClient: boolean` body is still read when `method` is absent.
 // The instance must be a configured one. Audited after the arr accepted it
 // (guardrail 26 — the swallowing logAudit, the DELETE has already happened).
 export const POST = withAdmin(async (req, _ctx, session) => {
@@ -34,14 +38,17 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const instance = body.instance === undefined ? "" : body.instance;
   const ids = body.ids;
   const action = body.action;
-  const removeFromClient = body.removeFromClient === undefined ? true : body.removeFromClient;
+  const legacy = body.removeFromClient;
+  const method: unknown = body.method !== undefined
+    ? body.method
+    : legacy === undefined || legacy === true ? "removeFromClient" : legacy === false ? "ignore" : null;
   if (
     !service ||
     typeof instance !== "string" || instance.length > 100 ||
     !Array.isArray(ids) || ids.length === 0 || ids.length > MAX_IDS ||
     !ids.every((id) => typeof id === "number" && Number.isSafeInteger(id) && id > 0) ||
     !isQueueRemoveAction(action) ||
-    typeof removeFromClient !== "boolean"
+    !isQueueRemoveMethod(method)
   ) {
     return NextResponse.json({ error: t("apiAdmin.queue.removeBodyInvalid") }, { status: 400 });
   }
@@ -51,7 +58,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
   const uniqueIds = [...new Set(ids as number[])];
   try {
-    await removeFromQueue(service, instance, uniqueIds, action, removeFromClient);
+    await removeFromQueue(service, instance, uniqueIds, action, method as QueueRemoveMethod);
   } catch (err) {
     if (err instanceof QueueInstanceError) {
       return NextResponse.json({ error: t("apiAdmin.missing.instanceUnknown", { service: label }) }, { status: 404 });
@@ -67,7 +74,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     userName: session.user.name ?? session.user.email ?? null,
     action: "ARR_QUEUE_REMOVE",
     target: `${service}:${instance}`,
-    details: { service, instance, ids: uniqueIds, action, removeFromClient },
+    details: { service, instance, ids: uniqueIds, action, method },
     ...auditContext(req, session),
   });
   return NextResponse.json({ ok: true });

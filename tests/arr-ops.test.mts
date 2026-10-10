@@ -26,8 +26,18 @@ const {
   queueRemoveQuery,
   sortQueueItems,
   isQueueRemoveAction,
+  isQueueRemoveMethod,
+  isPendingStatus,
   importCandidates,
   manualImportFiles,
+  effectiveImportRows,
+  applyImportOverride,
+  parseImportSelection,
+  overrideNeeds,
+  reprocessItems,
+  mergeReprocessed,
+  ImportOverrideError,
+  EMPTY_IMPORT_CATALOG,
   defaultImportSelection,
   isDownloadId,
   isImportMode,
@@ -164,13 +174,32 @@ test("sortQueueItems: attention first, then pipeline stage, then soonest to fini
 });
 
 test("the removal query sends EVERY flag explicitly — the arr defaults removeFromClient to true", () => {
-  const q = (a: Parameters<typeof queueRemoveQuery>[0], c: boolean) => Object.fromEntries(new URLSearchParams(queueRemoveQuery(a, c)));
-  assert.deepEqual(q("remove", true), { removeFromClient: "true", blocklist: "false", skipRedownload: "true", changeCategory: "false" });
-  assert.deepEqual(q("remove", false), { removeFromClient: "false", blocklist: "false", skipRedownload: "true", changeCategory: "false" });
-  assert.deepEqual(q("blocklist", true), { removeFromClient: "true", blocklist: "true", skipRedownload: "true", changeCategory: "false" });
-  assert.deepEqual(q("blocklistSearch", true), { removeFromClient: "true", blocklist: "true", skipRedownload: "false", changeCategory: "false" });
+  const q = (a: Parameters<typeof queueRemoveQuery>[0], m: Parameters<typeof queueRemoveQuery>[1]) =>
+    Object.fromEntries(new URLSearchParams(queueRemoveQuery(a, m)));
+  assert.deepEqual(q("remove", "removeFromClient"), { removeFromClient: "true", blocklist: "false", skipRedownload: "true", changeCategory: "false" });
+  assert.deepEqual(q("remove", "ignore"), { removeFromClient: "false", blocklist: "false", skipRedownload: "true", changeCategory: "false" });
+  assert.deepEqual(q("remove", "changeCategory"), { removeFromClient: "false", blocklist: "false", skipRedownload: "true", changeCategory: "true" });
+  assert.deepEqual(q("blocklist", "removeFromClient"), { removeFromClient: "true", blocklist: "true", skipRedownload: "true", changeCategory: "false" });
+  assert.deepEqual(q("blocklist", "ignore"), { removeFromClient: "false", blocklist: "true", skipRedownload: "true", changeCategory: "false" });
+  assert.deepEqual(q("blocklistSearch", "removeFromClient"), { removeFromClient: "true", blocklist: "true", skipRedownload: "false", changeCategory: "false" });
+  assert.deepEqual(q("blocklistSearch", "changeCategory"), { removeFromClient: "false", blocklist: "true", skipRedownload: "false", changeCategory: "true" });
   assert.equal(isQueueRemoveAction("blocklistSearch"), true);
   assert.equal(isQueueRemoveAction("delete"), false);
+  assert.equal(isQueueRemoveMethod("changeCategory"), true);
+  assert.equal(isQueueRemoveMethod("delete"), false);
+  assert.equal(isQueueRemoveMethod(true), false);
+});
+
+test("pending releases (held by a delay profile, client down, fallback) are the ones Grab now applies to", () => {
+  for (const s of ["delay", "downloadClientUnavailable", "fallback"]) assert.equal(isPendingStatus(s), true, s);
+  for (const s of ["downloading", "queued", "completed", "paused", "warning", undefined]) assert.equal(isPendingStatus(s), false, String(s));
+  const [held] = foldQueueRecords("radarr", "", [{ id: 9, movie: { title: "Held" }, status: "delay" }]);
+  assert.equal(held.pending, true);
+  assert.equal(held.phase, "delay");
+  const [fb] = foldQueueRecords("radarr", "", [{ id: 10, movie: { title: "Fb" }, status: "fallback" }]);
+  assert.equal(fb.phase, "delay");
+  const [live] = foldQueueRecords("radarr", "", [{ id: 11, movie: { title: "Live" }, status: "downloading", downloadClientHasPostImportCategory: true }]);
+  assert.deepEqual([live.pending, live.canChangeCategory], [false, true]);
 });
 
 // ── import (Manual Import of a blocked download) ─────────────────────────────
@@ -205,9 +234,13 @@ test("importCandidates: what the dialog shows — matched target, quality, rejec
   assert.deepEqual(importCandidates("radarr", "not a list"), []);
 });
 
+const pick = (paths: string[]) => new Map(paths.map((p) => [p, {}]));
+
 test("manualImportFiles: ONLY the arr's own matched rows whose path was chosen, carrying back what the arr detected", () => {
-  const chosen = new Set(["/downloads/Movie.2024/Movie.2024.mkv", "/downloads/Movie.2024/sample.mkv", "/etc/passwd"]);
-  assert.deepEqual(manualImportFiles("radarr", radarrRows, chosen, "SAB_1"), [{
+  const chosen = pick(["/downloads/Movie.2024/Movie.2024.mkv", "/downloads/Movie.2024/sample.mkv", "/etc/passwd"]);
+  const rows = effectiveImportRows("radarr", radarrRows, chosen, EMPTY_IMPORT_CATALOG);
+  assert.deepEqual(rows.map((r) => r.path), ["/downloads/Movie.2024/Movie.2024.mkv", "/downloads/Movie.2024/sample.mkv"], "a path the arr never reported is dropped");
+  assert.deepEqual(manualImportFiles("radarr", rows, "SAB_1"), [{
     path: "/downloads/Movie.2024/Movie.2024.mkv",
     folderName: "Movie.2024",
     quality,
@@ -217,11 +250,116 @@ test("manualImportFiles: ONLY the arr's own matched rows whose path was chosen, 
     downloadId: "SAB_1",
     movieId: 12,
   }], "the unmatched sample and the injected path are never sent");
-  const files = manualImportFiles("sonarr", sonarrRows, new Set(sonarrRows.map((r) => r.path)), "qb_hash");
+  const files = manualImportFiles("sonarr", effectiveImportRows("sonarr", sonarrRows, pick(sonarrRows.map((r) => r.path)), EMPTY_IMPORT_CATALOG), "qb_hash");
   assert.deepEqual(files.map((f) => [f.path, f.seriesId, f.episodeIds, f.releaseType ?? null]), [
     ["/dl/Show.S01/Show.S01E02.mkv", 3, [102], "seasonPack"],
     ["/dl/Show.S01/Show.S01E01.mkv", 3, [101], null],
   ]);
+});
+
+// ── per-file corrections ─────────────────────────────────────────────────────
+
+const bluray2160 = { id: 19, name: "Bluray-2160p", source: "bluray", resolution: 2160 };
+const catalog = {
+  qualities: new Map<number, unknown>([[19, bluray2160]]),
+  languages: new Map([[1, { id: 1, name: "English" }], [8, { id: 8, name: "Japanese" }], [-2, { id: -2, name: "Original" }]]),
+  movies: new Map([[40, { id: 40, title: "Right Movie", year: 2023 }]]),
+  series: new Map([
+    [3, { id: 3, title: "Show", episodes: new Map([[101, { seasonNumber: 1, episodeNumber: 1 }], [103, { seasonNumber: 1, episodeNumber: 3 }]]) }],
+    [7, { id: 7, title: "Other Show", episodes: new Map([[701, { seasonNumber: 2, episodeNumber: 5 }]]) }],
+  ]),
+};
+
+test("parseImportSelection: shape only — the right service's fields, a series always with its episodes, bounded strings", () => {
+  assert.deepEqual(parseImportSelection("radarr", { path: "/a.mkv" }), { path: "/a.mkv", override: {} });
+  assert.deepEqual(parseImportSelection("radarr", { path: "/a.mkv", movieId: 40, qualityId: 19, languageIds: [1, 1, -2], releaseGroup: " GRP\u0007 " }), {
+    path: "/a.mkv",
+    override: { movieId: 40, qualityId: 19, languageIds: [1, -2], releaseGroup: "GRP" },
+  });
+  assert.deepEqual(parseImportSelection("sonarr", { path: "/s.mkv", seriesId: 7, episodeIds: [701], releaseType: "seasonPack" }), {
+    path: "/s.mkv",
+    override: { seriesId: 7, episodeIds: [701], releaseType: "seasonPack" },
+  });
+  assert.deepEqual(parseImportSelection("sonarr", { path: "/s.mkv", episodeIds: [103] })?.override, { episodeIds: [103] }, "episodes alone keep the matched series");
+  for (const bad of [
+    ["radarr", { path: "/a.mkv", seriesId: 3, episodeIds: [1] }],
+    ["sonarr", { path: "/s.mkv", movieId: 40 }],
+    ["sonarr", { path: "/s.mkv", seriesId: 7 }],
+    ["sonarr", { path: "/s.mkv", episodeIds: [] }],
+    ["sonarr", { path: "/s.mkv", episodeIds: [0] }],
+    ["radarr", { path: "/a.mkv", releaseType: "seasonPack" }],
+    ["sonarr", { path: "/s.mkv", releaseType: "bogus" }],
+    ["radarr", { path: "/a.mkv", qualityId: -1 }],
+    ["radarr", { path: "/a.mkv", qualityId: "19" }],
+    ["radarr", { path: "/a.mkv", languageIds: [-3] }],
+    ["radarr", { path: "/a.mkv", releaseGroup: "x".repeat(101) }],
+    ["radarr", { path: "", movieId: 40 }],
+    ["radarr", "/a.mkv"],
+  ] as const) {
+    assert.equal(parseImportSelection(bad[0], bad[1]), null, JSON.stringify(bad));
+  }
+});
+
+test("applyImportOverride: every object comes from the instance's catalog; an id it lacks is refused, not sent", () => {
+  const row = radarrRows[1];
+  const out = applyImportOverride("radarr", row, { movieId: 40, qualityId: 19, languageIds: [8], releaseGroup: "NEW" }, catalog);
+  assert.deepEqual(out.movie, { id: 40, title: "Right Movie", year: 2023 });
+  assert.deepEqual(out.quality, { quality: bluray2160, revision: { version: 1, real: 0, isRepack: false } });
+  assert.deepEqual(out.languages, [{ id: 8, name: "Japanese" }]);
+  assert.equal(out.releaseGroup, "NEW");
+  assert.equal(out.path, row.path, "the path is the arr's own");
+  assert.deepEqual(row.movie, null, "the arr's row is not mutated");
+  const expectRefusal = (fn: () => unknown, field: string) =>
+    assert.throws(fn, (e: unknown) => e instanceof ImportOverrideError && e.field === field, field);
+  expectRefusal(() => applyImportOverride("radarr", row, { movieId: 41 }, catalog), "movie");
+  expectRefusal(() => applyImportOverride("radarr", row, { qualityId: 7 }, catalog), "quality");
+  expectRefusal(() => applyImportOverride("radarr", row, { languageIds: [1, 99] }, catalog), "languages");
+
+  const s = applyImportOverride("sonarr", sonarrRows[2], { episodeIds: [103], releaseType: "singleEpisode" }, catalog);
+  assert.deepEqual(s.series, { id: 3, title: "Show" });
+  assert.deepEqual(s.episodes, [{ id: 103, seasonNumber: 1, episodeNumber: 3 }]);
+  assert.equal(s.releaseType, "singleEpisode");
+  const moved = applyImportOverride("sonarr", sonarrRows[2], { seriesId: 7, episodeIds: [701] }, catalog);
+  assert.deepEqual([moved.series, moved.episodes], [{ id: 7, title: "Other Show" }, [{ id: 701, seasonNumber: 2, episodeNumber: 5 }]]);
+  expectRefusal(() => applyImportOverride("sonarr", sonarrRows[2], { seriesId: 7, episodeIds: [101] }, catalog), "episodes");
+  expectRefusal(() => applyImportOverride("sonarr", sonarrRows[2], { seriesId: 99, episodeIds: [1] }, catalog), "series");
+  expectRefusal(() => applyImportOverride("sonarr", { path: "/x.mkv", series: null }, { episodeIds: [101] }, catalog), "series");
+});
+
+test("a corrected file is importable with exactly the corrected values; overrideNeeds asks for exactly that catalog", () => {
+  const selections = new Map([["/downloads/Movie.2024/sample.mkv", { movieId: 40, qualityId: 19 }]]);
+  const [file] = manualImportFiles("radarr", effectiveImportRows("radarr", radarrRows, selections, catalog), "SAB_1");
+  assert.equal(file.movieId, 40, "an unmatched file becomes importable once re-matched");
+  assert.deepEqual(file.quality, { quality: bluray2160, revision: { version: 1, real: 0, isRepack: false } });
+  assert.deepEqual(
+    overrideNeeds([{ row: radarrRows[1], override: { movieId: 40, qualityId: 19 } }, { row: radarrRows[0], override: { movieId: 40 } }]),
+    { movieIds: [40], seriesIds: [], qualities: true, languages: false },
+  );
+  assert.deepEqual(
+    overrideNeeds([{ row: sonarrRows[2], override: { episodeIds: [103] } }, { row: sonarrRows[0], override: { seriesId: 7, episodeIds: [701], languageIds: [1] } }]),
+    { movieIds: [], seriesIds: [3, 7], qualities: false, languages: true },
+    "episodes alone need the row's own series",
+  );
+});
+
+test("reprocess: only rows the arr can look up are sent; its fresh verdict is folded back for display", () => {
+  const rows = effectiveImportRows("radarr", radarrRows, pick(radarrRows.map((r) => r.path)), EMPTY_IMPORT_CATALOG);
+  const items = reprocessItems("radarr", rows, "SAB_1");
+  assert.deepEqual(items.map((i) => [i.path, i.movieId]), [["/downloads/Movie.2024/Movie.2024.mkv", 12]], "an unmatched movie can't be reprocessed");
+  const srows = effectiveImportRows("sonarr", sonarrRows, pick(sonarrRows.map((r) => r.path)), EMPTY_IMPORT_CATALOG);
+  const sitems = reprocessItems("sonarr", srows, "qb");
+  assert.deepEqual(sitems.map((i) => [i.path, i.seriesId, i.seasonNumber, i.episodeIds]), [
+    ["/dl/Show.S01/Show.S01E02.mkv", 3, 1, [102]],
+    ["/dl/Show.S01/Show.S01E01.mkv", 3, 1, [101]],
+    ["/dl/Show.S01/Extras.mkv", 3, null, []],
+  ]);
+  const merged = mergeReprocessed(rows, [
+    { path: "/downloads/Movie.2024/Movie.2024.mkv", rejections: [], movie: { id: 12, title: "Movie", year: 2024 } },
+    { path: "/somewhere/else.mkv", rejections: [{ reason: "x" }] },
+  ]);
+  assert.deepEqual(merged[0].rejections, [], "the fresh verdict replaces the old refusal");
+  assert.deepEqual(merged[1].rejections, [{ reason: "Sample" }], "a row the arr didn't answer for keeps its own");
+  assert.equal(merged.length, 2, "an answer for a path we didn't send adds nothing");
 });
 
 test("defaultImportSelection: the clean matched files; when every matched file was refused, all of them; never an unmatched one", () => {
