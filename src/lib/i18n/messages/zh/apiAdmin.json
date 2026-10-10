@@ -278,5 +278,9 @@
   "apiAdmin.arrHealth.webhookSchema": "{service} 未提供 Summonarr 可识别的 Webhook 连接",
   "apiAdmin.arrHealth.webhookFailed": "无法连接 {service} 来配置 Webhook",
   "apiAdmin.arrOpen.paramsInvalid": "需要 service（radarr 或 sonarr）、instance，以及 tmdbId 或 arrId 之一",
-  "apiAdmin.arrOpen.noAddress": "该实例没有可用地址，请在设置中填写其 URL"
+  "apiAdmin.arrOpen.noAddress": "该实例没有可用地址，请在设置中填写其 URL",
+  "apiAdmin.queue.importParamsInvalid": "需要 service（radarr 或 sonarr）、instance 和 downloadId",
+  "apiAdmin.queue.importBodyInvalid": "请求体必须是 { service, instance, downloadId, paths：导入列表中的 1–2000 个文件路径，importMode?：\"auto\" | \"move\" | \"copy\" }",
+  "apiAdmin.queue.nothingToImport": "这些文件都已无法导入，请刷新",
+  "apiAdmin.queue.importFailed": "无法在 {service} 中导入"
 }

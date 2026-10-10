@@ -2752,6 +2752,82 @@ const spec = {
       },
     },
 
+    "/admin/queue/import": {
+      get: {
+        tags: ["Admin – Downloads"],
+        summary: "The files of a download Radarr/Sonarr would not import on their own (ADMIN)",
+        description:
+          "Radarr/Sonarr's `/api/v3/manualimport?downloadId=` for one queue download: each file's path, what the arr matched " +
+          "it to (movie, or series + episodes), quality, languages, release group, and the reasons it refused to import it. " +
+          "`importable` is false for a file the arr could not match to a title — that has to be matched in the arr's own queue.",
+        parameters: [
+          { name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } },
+          { name: "instance", in: "query", schema: { type: "string" }, description: "Instance slug; empty = the default" },
+          { name: "downloadId", in: "query", required: true, schema: { type: "string", maxLength: 200 } },
+        ],
+        responses: {
+          "200": {
+            description: "The files",
+            content: { "application/json": { schema: { type: "object", properties: { files: { type: "array", items: {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+                name: { type: "string" },
+                size: { type: "number" },
+                quality: { type: "string", nullable: true },
+                languages: { type: "array", items: { type: "string" } },
+                releaseGroup: { type: "string", nullable: true },
+                target: { type: "string", nullable: true },
+                episodes: { type: "array", items: { type: "object", properties: { seasonNumber: { type: "integer" }, episodeNumber: { type: "integer" } } } },
+                rejections: { type: "array", items: { type: "string" } },
+                importable: { type: "boolean" },
+              },
+            } } } } } },
+          },
+          "400": { description: "Invalid parameters" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled or unknown instance" },
+          "409": { description: "The download is no longer in the queue" },
+          "502": { description: "The arr could not be reached" },
+        },
+      },
+      post: {
+        tags: ["Admin – Downloads"],
+        summary: "Import a download Radarr/Sonarr refused (ADMIN)",
+        description:
+          "Queues the arr's `ManualImport` command for the chosen files, overriding its refusal. The file list is RE-READ " +
+          "from the arr and only its own matched rows whose path is in `paths` are sent — `paths` selects, it is never " +
+          "passed upstream itself. 409 when none of them is importable any more. Audited ARR_QUEUE_IMPORT (count and mode, " +
+          "no paths). Returns once the command is queued; the queue row moves to importing/imported.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["service", "downloadId", "paths"],
+                properties: {
+                  service: { type: "string", enum: ["radarr", "sonarr"] },
+                  instance: { type: "string" },
+                  downloadId: { type: "string", maxLength: 200 },
+                  paths: { type: "array", items: { type: "string", maxLength: 4096 }, minItems: 1, maxItems: 2000 },
+                  importMode: { type: "string", enum: ["auto", "move", "copy"], default: "auto" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "202": { description: "Import queued", content: { "application/json": { schema: { type: "object", properties: { files: { type: "integer" } } } } } },
+          "400": { description: "Invalid body" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled or unknown instance" },
+          "409": { description: "Nothing chosen is importable any more, or the download is gone" },
+          "502": { description: "The arr could not be reached or refused the command" },
+        },
+      },
+    },
+
     "/admin/arr-health": {
       get: {
         tags: ["Admin – Downloads"],

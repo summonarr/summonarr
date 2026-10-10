@@ -56,6 +56,7 @@ export const ACTION_GROUP: Record<AuditAction, AuditGroup> = {
   LIBRARY_CLEANUP_PROTECT: "admin",
   ARR_QUEUE_REMOVE: "admin",
   ARR_RELEASE_GRAB: "admin",
+  ARR_QUEUE_IMPORT: "admin",
   LIBRARY_SYNC: "system",
   CACHE_WARM: "system",
   RATINGS_CACHE_CLEAR: "system",
@@ -120,4 +121,5 @@ export const ACTION_LABELS: Record<AuditAction, ActionLabel> = {
   LIBRARY_CLEANUP_PROTECT: { label: "Cleanup Protection Changed", color: "bg-sky-500/15 text-sky-400",         icon: "role" },
   ARR_QUEUE_REMOVE:      { label: "Download Removed",          color: "bg-red-500/15 text-red-400",             icon: "delete" },
   ARR_RELEASE_GRAB:      { label: "Release Grabbed",           color: "bg-sky-500/15 text-sky-400",             icon: "sync" },
+  ARR_QUEUE_IMPORT:      { label: "Download Imported",         color: "bg-green-500/15 text-green-400",         icon: "approve" },
 };

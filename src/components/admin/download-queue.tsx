@@ -3,9 +3,12 @@
 // Admin → Download Queue. Every configured Radarr and Sonarr instance's queue
 // in one table (GET /api/admin/queue), one row per download, rows Radarr/Sonarr
 // flag first. Refreshes itself every POLL_MS while the tab is visible and no
-// removal is being confirmed. Remove sends Radarr/Sonarr's own bulk queue
-// DELETE (POST /api/admin/queue/remove) with the arr's three choices: just
-// remove, remove + blocklist, or blocklist + search for a replacement.
+// dialog is open. Per row:
+//   Import            — a download the arr would not import on its own: its
+//                       Manual Import, in QueueImportDialog.
+//   Blocklist & search, Blocklist, Remove — Radarr/Sonarr's own bulk queue
+//                       DELETE (POST /api/admin/queue/remove), confirmed in a
+//                       dialog that opens on the action clicked.
 //
 // Every time and size is server-supplied and formatted for the viewer's
 // locale; nothing reads the clock while rendering (guardrail 16).
@@ -18,9 +21,11 @@ import { StyledSelect } from "@/components/ui/styled-select";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import { Chip, EmptyState, FilterBar, StatCard, type ChipTone } from "@/components/ui/design";
-import { AlertTriangle, CheckCircle2, CircleDashed, Loader2, Magnet, Radio, RefreshCw, Trash2, X } from "@/components/icons";
+import { AlertTriangle, Ban, CheckCircle2, CircleDashed, FileCheck, Loader2, Magnet, Radio, RefreshCw, RotateCcw, Trash2, X } from "@/components/icons";
 import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { ArrHealthPanel } from "@/components/admin/arr-health-panel";
+import { QueueImportDialog } from "@/components/admin/queue-import-dialog";
+import { episodeSummary, queueFormatters } from "@/components/admin/queue-format";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { QueueItem, QueuePhase, QueueRemoveAction } from "@/lib/arr-queue";
@@ -51,38 +56,10 @@ const PHASE_TONE: Record<QueuePhase, ChipTone> = {
 };
 
 const rowKey = (r: QueueItem) => `${r.service}:${r.instance}:${r.ids[0]}`;
-const episodeCode = (e: { seasonNumber: number; episodeNumber: number }) =>
-  `S${String(e.seasonNumber).padStart(2, "0")}E${String(e.episodeNumber).padStart(2, "0")}`;
 
-// "S01E01–E08" for a run in one season, otherwise the first few codes.
-function episodeSummary(eps: QueueItem["episodes"]): string {
-  if (eps.length === 0) return "";
-  if (eps.length === 1) return episodeCode(eps[0]);
-  const sameSeason = eps.every((e) => e.seasonNumber === eps[0].seasonNumber);
-  if (sameSeason) return `${episodeCode(eps[0])}–E${String(eps[eps.length - 1].episodeNumber).padStart(2, "0")}`;
-  return `${eps.slice(0, 3).map(episodeCode).join(", ")}${eps.length > 3 ? ` +${eps.length - 3}` : ""}`;
-}
-
-function formatters(locale: string) {
-  const unit = (u: string) => new Intl.NumberFormat(locale, { style: "unit", unit: u, unitDisplay: "narrow", maximumFractionDigits: 1 });
-  const gb = unit("gigabyte");
-  const mb = unit("megabyte");
-  const hour = new Intl.NumberFormat(locale, { style: "unit", unit: "hour", unitDisplay: "narrow" });
-  const minute = new Intl.NumberFormat(locale, { style: "unit", unit: "minute", unitDisplay: "narrow" });
-  const day = new Intl.NumberFormat(locale, { style: "unit", unit: "day", unitDisplay: "narrow" });
-  const pct = new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 });
-  return {
-    size: (bytes: number) => (bytes >= 1e9 ? gb.format(bytes / 1e9) : mb.format(Math.max(0, Math.round(bytes / 1e6)))),
-    duration: (seconds: number | null) => {
-      if (seconds === null) return "—";
-      if (seconds >= 86_400) return `${day.format(Math.floor(seconds / 86_400))} ${hour.format(Math.floor((seconds % 86_400) / 3_600))}`;
-      if (seconds >= 3_600) return `${hour.format(Math.floor(seconds / 3_600))} ${minute.format(Math.floor((seconds % 3_600) / 60))}`;
-      return minute.format(Math.max(0, Math.ceil(seconds / 60)));
-    },
-    percent: (p: number) => pct.format(p),
-  };
-}
-
+// Only a finished download the arr is holding back can be imported: blocked,
+// or waiting on an import that needs a hand. A tracked download id is required.
+const canImport = (r: QueueItem) => r.downloadId !== null && (r.phase === "importBlocked" || r.phase === "importPending");
 async function readError(res: Response, fallback: string): Promise<string> {
   const d = (await res.json().catch(() => null)) as { error?: string } | null;
   return d?.error ?? fallback;
@@ -94,7 +71,7 @@ const td: React.CSSProperties = { padding: "8px 10px", verticalAlign: "top" };
 export function DownloadQueue({ configured }: { configured: boolean }) {
   const t = useT();
   const locale = useLocale();
-  const fmt = useMemo(() => formatters(locale), [locale]);
+  const fmt = useMemo(() => queueFormatters(locale), [locale]);
   const [report, setReport] = useState<QueueReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -103,6 +80,7 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
   const [query, setQuery] = useState("");
   const [live, setLive] = useState(true);
   const [removing, setRemoving] = useState<QueueItem | null>(null);
+  const [importing, setImporting] = useState<QueueItem | null>(null);
   const [removeAction, setRemoveAction] = useState<QueueRemoveAction>("blocklistSearch");
   const [removeFromClient, setRemoveFromClient] = useState(true);
   const [removeBusy, setRemoveBusy] = useState(false);
@@ -138,21 +116,29 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
     if (configured) void load();
   }, [configured, load]);
 
-  // Poll while live, visible, and not mid-removal (a refresh would reshuffle
-  // the row being confirmed).
+  // Poll while live, visible, and no dialog is open (a refresh would
+  // reshuffle the row being confirmed).
   useEffect(() => {
-    if (!configured || !live || removing) return;
+    if (!configured || !live || removing || importing) return;
     const id = window.setInterval(() => {
       if (document.visibilityState === "visible") void load();
     }, POLL_MS);
     return () => window.clearInterval(id);
-  }, [configured, live, removing, load]);
+  }, [configured, live, removing, importing, load]);
 
-  function openRemove(row: QueueItem) {
+  // The dialog opens on the action the admin clicked; they can still change it there.
+  function openRemove(row: QueueItem, action: QueueRemoveAction) {
     setRemoving(row);
-    setRemoveAction("blocklistSearch");
+    setRemoveAction(action);
     setRemoveFromClient(true);
     setRemoveError("");
+  }
+
+  function imported(row: QueueItem, files: number) {
+    setImporting(null);
+    setNotice(t("adminManage.queue.import.done", { title: row.mediaTitle || row.title, count: files }));
+    // The arr imports in the background; give it a moment before re-reading.
+    window.setTimeout(() => void load(), 3_000);
   }
 
   async function confirmRemove() {
@@ -367,16 +353,47 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
                       <td style={{ ...td, fontSize: 12, color: "var(--ds-fg-muted)" }}>
                         {r.requesters.length > 0 ? r.requesters.join(", ") : "—"}
                       </td>
-                      <td style={{ ...td, textAlign: "right", whiteSpace: "nowrap" }}>
-                        <Button
-                          size="xs"
-                          variant="outline"
-                          onClick={() => openRemove(r)}
-                          aria-label={t("adminManage.queue.remove.aria", { title: r.mediaTitle || r.title })}
-                        >
-                          <Trash2 />
-                          {t("adminManage.queue.remove.button")}
-                        </Button>
+                      <td style={{ ...td, textAlign: "right" }}>
+                        <div className="flex flex-wrap justify-end gap-1" style={{ minWidth: 150, maxWidth: 240, marginLeft: "auto" }}>
+                          {canImport(r) && (
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              onClick={() => setImporting(r)}
+                              aria-label={t("adminManage.queue.action.importAria", { title: r.mediaTitle || r.title })}
+                            >
+                              <FileCheck />
+                              {t("adminManage.queue.action.import")}
+                            </Button>
+                          )}
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            onClick={() => openRemove(r, "blocklistSearch")}
+                            aria-label={t("adminManage.queue.action.blocklistSearchAria", { title: r.mediaTitle || r.title })}
+                          >
+                            <RotateCcw />
+                            {t("adminManage.queue.action.blocklistSearch")}
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            onClick={() => openRemove(r, "blocklist")}
+                            aria-label={t("adminManage.queue.action.blocklistAria", { title: r.mediaTitle || r.title })}
+                          >
+                            <Ban />
+                            {t("adminManage.queue.action.blocklist")}
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="ghost"
+                            onClick={() => openRemove(r, "remove")}
+                            aria-label={t("adminManage.queue.remove.aria", { title: r.mediaTitle || r.title })}
+                          >
+                            <Trash2 />
+                            {t("adminManage.queue.remove.button")}
+                          </Button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -436,7 +453,9 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
           <DialogBackdrop />
           <DialogPopup className="max-w-lg">
             <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-700">
-              <DialogTitle className="text-base font-semibold text-zinc-100">{t("adminManage.queue.remove.title")}</DialogTitle>
+              <DialogTitle className="text-base font-semibold text-zinc-100">
+                {removeAction === "remove" ? t("adminManage.queue.remove.title") : t("adminManage.queue.remove.titleBlocklist")}
+              </DialogTitle>
               <DialogClose
                 disabled={removeBusy}
                 aria-label={t("adminQueue.common.close")}
@@ -506,13 +525,19 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
                 disabled={removeBusy}
                 className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]"
               >
-                {removeBusy ? <Loader2 className="animate-spin" /> : <Trash2 />}
-                {t("adminManage.queue.remove.confirm")}
+                {removeBusy ? <Loader2 className="animate-spin" /> : removeAction === "remove" ? <Trash2 /> : removeAction === "blocklist" ? <Ban /> : <RotateCcw />}
+                {removeAction === "blocklistSearch"
+                  ? t("adminManage.queue.remove.confirmBlocklistSearch")
+                  : removeAction === "blocklist"
+                    ? t("adminManage.queue.remove.confirmBlocklist")
+                    : t("adminManage.queue.remove.confirm")}
               </Button>
             </div>
           </DialogPopup>
         </DialogPortal>
       </Dialog>
+
+      <QueueImportDialog row={importing} onClose={() => setImporting(null)} onImported={imported} />
     </div>
   );
 }

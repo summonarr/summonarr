@@ -175,6 +175,7 @@ shadowPrismaModel(prisma, "auditLog", {
 
 const queueRoute = await import("../src/app/api/admin/queue/route.ts");
 const removeRoute = await import("../src/app/api/admin/queue/remove/route.ts");
+const importRoute = await import("../src/app/api/admin/queue/import/route.ts");
 const healthRoute = await import("../src/app/api/admin/arr-health/route.ts");
 const webhookRoute = await import("../src/app/api/admin/arr-health/webhook/route.ts");
 const openRoute = await import("../src/app/api/admin/arr/open/route.ts");
@@ -243,6 +244,8 @@ test("anonymous is 401 and a delegated manager 403 on every admin route — noth
     assert.equal((await call(healthRoute.GET, token, "/admin/arr-health")).status, expected);
     assert.equal((await call(webhookRoute.POST, token, "/admin/arr-health/webhook", { method: "POST", body: { service: "radarr" } })).status, expected);
     assert.equal((await call(openRoute.GET, token, "/admin/arr/open?service=radarr&instance=&tmdbId=1")).status, expected);
+    assert.equal((await call(importRoute.GET, token, "/admin/queue/import?service=radarr&instance=&downloadId=x")).status, expected);
+    assert.equal((await call(importRoute.POST, token, "/admin/queue/import", { method: "POST", body: { service: "radarr", downloadId: "x", paths: ["/a"] } })).status, expected);
   }
   assert.deepEqual(arrCalls(), []);
 });
@@ -363,6 +366,78 @@ test("remove refuses a bad body or an unconfigured slug before any upstream call
   assert.deepEqual(arrCalls(), []);
   responder = (c) => (c.path === "/api/v3/queue/bulk" ? new Response("gone", { status: 404 }) : undefined);
   assert.equal((await call(removeRoute.POST, token, "/admin/queue/remove", { method: "POST", body: { service: "radarr", ids: [1], action: "remove" } })).status, 409);
+  await drain();
+  assert.deepEqual(audits, []);
+});
+
+// ── 2b: import a blocked download ────────────────────────────────────────────
+
+const q = { quality: { id: 7, name: "Bluray-1080p" }, revision: { version: 1 } };
+const manualRows = [
+  { path: "/downloads/Movie/Movie.mkv", relativePath: "Movie.mkv", folderName: "Movie", size: 8e9, quality: q, languages: [{ id: 1, name: "English" }],
+    movie: { id: 12, title: "Movie", year: 2024 }, rejections: [{ reason: "Not an upgrade for existing movie file" }] },
+  { path: "/downloads/Movie/sample.mkv", relativePath: "sample.mkv", size: 5e7, quality: q, movie: null, rejections: [{ reason: "Sample" }] },
+];
+
+test("import listing: the instance's own manualimport for that download id, shaped for the dialog", async () => {
+  responder = (c) => (c.path === "/api/v3/manualimport" ? json(manualRows) : undefined);
+  const res = await call(importRoute.GET, await mintSession(), "/admin/queue/import?service=radarr&instance=4k&downloadId=SABnzbd_nzo_1%2B2");
+  assert.equal(res.status, 200);
+  const body = await res.json() as { files: Array<{ name: string; importable: boolean; rejections: string[] }> };
+  assert.deepEqual(body.files.map((f) => [f.name, f.importable, f.rejections]), [
+    ["Movie.mkv", true, ["Not an upgrade for existing movie file"]],
+    ["sample.mkv", false, ["Sample"]],
+  ]);
+  assert.equal(arrCalls()[0].origin, RADARR_4K);
+  assert.equal(arrCalls()[0].query.get("downloadId"), "SABnzbd_nzo_1+2");
+});
+
+test("import: the command carries ONLY the arr's own matched rows — an injected path never reaches it (guardrail 5d) — and is audited without paths", async () => {
+  responder = (c) => {
+    if (c.path === "/api/v3/manualimport") return json(manualRows);
+    if (c.method === "POST" && c.path === "/api/v3/command") return json({ id: 1, name: "ManualImport" }, 201);
+    return undefined;
+  };
+  const res = await call(importRoute.POST, await mintSession(), "/admin/queue/import", {
+    method: "POST",
+    body: { service: "radarr", instance: "", downloadId: "SAB_1", paths: ["/downloads/Movie/Movie.mkv", "/downloads/Movie/sample.mkv", "/etc/shadow"], importMode: "copy" },
+  });
+  assert.equal(res.status, 202);
+  assert.deepEqual(await res.json(), { files: 1 });
+  const command = arrCalls().find((c) => c.method === "POST")!;
+  assert.equal(command.origin, RADARR);
+  assert.deepEqual(command.body, {
+    name: "ManualImport",
+    importMode: "copy",
+    files: [{ path: "/downloads/Movie/Movie.mkv", folderName: "Movie", quality: q, languages: [{ id: 1, name: "English" }], indexerFlags: 0, downloadId: "SAB_1", movieId: 12 }],
+  });
+  assert.ok(!JSON.stringify(command.body).includes("/etc/shadow"));
+  await drain();
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].action, "ARR_QUEUE_IMPORT");
+  assert.deepEqual(JSON.parse(String(audits[0].details)), { service: "radarr", instance: "", downloadId: "SAB_1", files: 1, importMode: "copy" });
+});
+
+test("import: nothing importable among the chosen paths is 409 and sends no command; bad input is 400 before any upstream call", async () => {
+  responder = (c) => (c.path === "/api/v3/manualimport" ? json(manualRows) : undefined);
+  const token = await mintSession();
+  const res = await call(importRoute.POST, token, "/admin/queue/import", {
+    method: "POST",
+    body: { service: "radarr", downloadId: "SAB_1", paths: ["/downloads/Movie/sample.mkv", "/etc/shadow"] },
+  });
+  assert.equal(res.status, 409);
+  assert.equal(arrCalls().filter((c) => c.method === "POST").length, 0);
+  calls = [];
+  for (const body of [
+    { service: "radarr", downloadId: "has space", paths: ["/a"] },
+    { service: "radarr", downloadId: "SAB_1", paths: [] },
+    { service: "radarr", downloadId: "SAB_1", paths: ["/a"], importMode: "hardlink" },
+    { service: "radarr", downloadId: "SAB_1", paths: [5] },
+  ]) {
+    assert.equal((await call(importRoute.POST, token, "/admin/queue/import", { method: "POST", body })).status, 400, JSON.stringify(body));
+  }
+  assert.equal((await call(importRoute.GET, token, "/admin/queue/import?service=radarr&instance=anime&downloadId=x")).status, 404);
+  assert.deepEqual(arrCalls(), []);
   await drain();
   assert.deepEqual(audits, []);
 });

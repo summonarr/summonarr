@@ -26,6 +26,11 @@ const {
   queueRemoveQuery,
   sortQueueItems,
   isQueueRemoveAction,
+  importCandidates,
+  manualImportFiles,
+  defaultImportSelection,
+  isDownloadId,
+  isImportMode,
 } = await import("../src/lib/arr-queue.ts");
 const {
   arrValidationMessage,
@@ -166,6 +171,74 @@ test("the removal query sends EVERY flag explicitly — the arr defaults removeF
   assert.deepEqual(q("blocklistSearch", true), { removeFromClient: "true", blocklist: "true", skipRedownload: "false", changeCategory: "false" });
   assert.equal(isQueueRemoveAction("blocklistSearch"), true);
   assert.equal(isQueueRemoveAction("delete"), false);
+});
+
+// ── import (Manual Import of a blocked download) ─────────────────────────────
+
+const quality = { quality: { id: 7, name: "Bluray-1080p", source: "bluray", resolution: 1080 }, revision: { version: 1, real: 0, isRepack: false } };
+const radarrRows = [
+  { path: "/downloads/Movie.2024/Movie.2024.mkv", relativePath: "Movie.2024.mkv", folderName: "Movie.2024", size: 8e9, quality,
+    languages: [{ id: 1, name: "English" }], releaseGroup: "GRP", indexerFlags: 4,
+    movie: { id: 12, title: "Movie", year: 2024 }, rejections: [{ reason: "Not an upgrade for existing movie file", type: "permanent" }] },
+  { path: "/downloads/Movie.2024/sample.mkv", relativePath: "sample.mkv", size: 5e7, quality, movie: null, rejections: [{ reason: "Sample" }] },
+];
+const sonarrRows = [
+  { path: "/dl/Show.S01/Show.S01E02.mkv", relativePath: "Show.S01E02.mkv", folderName: "Show.S01", size: 1e9, quality, languages: [], releaseType: "seasonPack",
+    series: { id: 3, title: "Show" }, episodes: [{ id: 102, seasonNumber: 1, episodeNumber: 2 }], rejections: [] },
+  { path: "/dl/Show.S01/Show.S01E01.mkv", relativePath: "Show.S01E01.mkv", size: 1e9, quality,
+    series: { id: 3, title: "Show" }, episodes: [{ id: 101, seasonNumber: 1, episodeNumber: 1 }], rejections: [{ reason: "Episode was unexpected" }] },
+  { path: "/dl/Show.S01/Extras.mkv", relativePath: "Extras.mkv", size: 2e8, quality, series: { id: 3, title: "Show" }, episodes: [], rejections: [{ reason: "Unable to parse" }] },
+];
+
+test("importCandidates: what the dialog shows — matched target, quality, rejections; unmatched files are not importable", () => {
+  const r = importCandidates("radarr", radarrRows);
+  assert.deepEqual(r.map((c) => [c.name, c.target, c.quality, c.importable, c.rejections]), [
+    ["Movie.2024.mkv", "Movie (2024)", "Bluray-1080p", true, ["Not an upgrade for existing movie file"]],
+    ["sample.mkv", null, "Bluray-1080p", false, ["Sample"]],
+  ]);
+  const s = importCandidates("sonarr", sonarrRows);
+  assert.deepEqual(s.map((c) => [c.name, c.importable, c.episodes.map((e) => e.episodeNumber)]), [
+    ["Extras.mkv", false, []],
+    ["Show.S01E01.mkv", true, [1]],
+    ["Show.S01E02.mkv", true, [2]],
+  ]);
+  assert.deepEqual(importCandidates("radarr", "not a list"), []);
+});
+
+test("manualImportFiles: ONLY the arr's own matched rows whose path was chosen, carrying back what the arr detected", () => {
+  const chosen = new Set(["/downloads/Movie.2024/Movie.2024.mkv", "/downloads/Movie.2024/sample.mkv", "/etc/passwd"]);
+  assert.deepEqual(manualImportFiles("radarr", radarrRows, chosen, "SAB_1"), [{
+    path: "/downloads/Movie.2024/Movie.2024.mkv",
+    folderName: "Movie.2024",
+    quality,
+    languages: [{ id: 1, name: "English" }],
+    releaseGroup: "GRP",
+    indexerFlags: 4,
+    downloadId: "SAB_1",
+    movieId: 12,
+  }], "the unmatched sample and the injected path are never sent");
+  const files = manualImportFiles("sonarr", sonarrRows, new Set(sonarrRows.map((r) => r.path)), "qb_hash");
+  assert.deepEqual(files.map((f) => [f.path, f.seriesId, f.episodeIds, f.releaseType ?? null]), [
+    ["/dl/Show.S01/Show.S01E02.mkv", 3, [102], "seasonPack"],
+    ["/dl/Show.S01/Show.S01E01.mkv", 3, [101], null],
+  ]);
+});
+
+test("defaultImportSelection: the clean matched files; when every matched file was refused, all of them; never an unmatched one", () => {
+  const s = importCandidates("sonarr", sonarrRows);
+  assert.deepEqual([...defaultImportSelection(s)], ["/dl/Show.S01/Show.S01E02.mkv"]);
+  const r = importCandidates("radarr", radarrRows);
+  assert.deepEqual([...defaultImportSelection(r)], ["/downloads/Movie.2024/Movie.2024.mkv"], "the blocked import the admin came to override");
+});
+
+test("download ids and import modes", () => {
+  assert.equal(isDownloadId("SABnzbd_nzo_abc123"), true);
+  assert.equal(isDownloadId("A1B2C3D4E5F6"), true);
+  assert.equal(isDownloadId("has space"), false);
+  assert.equal(isDownloadId("x".repeat(201)), false);
+  assert.equal(isDownloadId("line\nbreak"), false);
+  assert.equal(isImportMode("copy"), true);
+  assert.equal(isImportMode("hardlink"), false);
 });
 
 // ── health ───────────────────────────────────────────────────────────────────

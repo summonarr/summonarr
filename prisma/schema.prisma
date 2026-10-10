@@ -959,6 +959,8 @@ enum AuditAction {
   ARR_QUEUE_REMOVE
   // An admin grabbed a specific release for a request (the request queue's "Pick release").
   ARR_RELEASE_GRAB
+  // An admin imported a download Radarr/Sonarr had refused (Admin → Download Queue → Import).
+  ARR_QUEUE_IMPORT
 }
 
 // ─── Play History ────────────────────────────────────────────────────────────

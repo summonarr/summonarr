@@ -12,8 +12,12 @@ import { forgetWarnOnChange, warnOnChange } from "./log-dedup";
 import { prisma } from "./prisma";
 import {
   foldQueueRecords,
+  importCandidates,
+  manualImportFiles,
   queueRemoveQuery,
   sortQueueItems,
+  type ImportCandidate,
+  type ImportMode,
   type QueueItem,
   type QueueRemoveAction,
   type QueueService,
@@ -153,6 +157,14 @@ export class QueueInstanceError extends Error {}
  * CONFIGURED one: a slug is never turned into a Setting-key read for an
  * instance the registry doesn't list.
  */
+async function configuredCfg(service: QueueService, instance: string) {
+  const configured = await getSyncableArrInstances(service);
+  if (!configured.some((i) => i.slug === instance)) throw new QueueInstanceError(instance);
+  const cfg = await getArrCfg(service, instance);
+  if (!cfg) throw new QueueInstanceError(instance);
+  return cfg;
+}
+
 export async function removeFromQueue(
   service: QueueService,
   instance: string,
@@ -160,12 +172,48 @@ export async function removeFromQueue(
   action: QueueRemoveAction,
   removeFromClient: boolean,
 ): Promise<void> {
-  const configured = await getSyncableArrInstances(service);
-  if (!configured.some((i) => i.slug === instance)) throw new QueueInstanceError(instance);
-  const cfg = await getArrCfg(service, instance);
-  if (!cfg) throw new QueueInstanceError(instance);
+  const cfg = await configuredCfg(service, instance);
   await arrFetchNoContent(cfg, `/api/v3/queue/bulk?${queueRemoveQuery(action, removeFromClient)}`, {
     method: "DELETE",
     body: JSON.stringify({ ids: [...ids] }),
   });
+}
+
+// ── importing a blocked download ─────────────────────────────────────────────
+
+const manualImportPath = (downloadId: string) => `/api/v3/manualimport?${new URLSearchParams({ downloadId }).toString()}`;
+
+/** The files Radarr/Sonarr found in one download, what each matched to, and why it was refused. */
+export async function loadImportCandidates(service: QueueService, instance: string, downloadId: string): Promise<ImportCandidate[]> {
+  const cfg = await configuredCfg(service, instance);
+  return importCandidates(service, await arrFetch<unknown>(cfg, manualImportPath(downloadId)));
+}
+
+/** Nothing the admin chose is (still) importable — imported meanwhile, gone, or never matched. */
+export class NothingToImportError extends Error {}
+
+/**
+ * Import the chosen files of one download (the arr's ManualImport command),
+ * overriding the arr's own refusal. The list is RE-READ from the arr here, and
+ * only its own mapped rows whose path the admin chose are sent — a path from
+ * the browser never reaches the command (guardrail 5d). Returns once the
+ * command is queued; the arr imports in the background and the queue row
+ * moves to importing/imported.
+ */
+export async function importFromQueue(
+  service: QueueService,
+  instance: string,
+  downloadId: string,
+  paths: readonly string[],
+  importMode: ImportMode,
+): Promise<{ files: number }> {
+  const cfg = await configuredCfg(service, instance);
+  const raw = await arrFetch<unknown>(cfg, manualImportPath(downloadId));
+  const files = manualImportFiles(service, raw, new Set(paths), downloadId);
+  if (files.length === 0) throw new NothingToImportError();
+  await arrFetch<unknown>(cfg, "/api/v3/command", {
+    method: "POST",
+    body: JSON.stringify({ name: "ManualImport", importMode, files }),
+  });
+  return { files: files.length };
 }

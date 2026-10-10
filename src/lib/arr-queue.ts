@@ -330,3 +330,182 @@ export function queueRemoveQuery(action: QueueRemoveAction, removeFromClient: bo
     changeCategory: "false",
   }).toString();
 }
+
+// ── importing a blocked download ("Manual Import") ─────────────────────────
+//
+// A download Radarr/Sonarr refused to import on their own (import blocked:
+// sample, not an upgrade, unexpected episode, …) can be imported anyway — the
+// arr UI's Manual Import. /api/v3/manualimport?downloadId= lists the files the
+// arr found in that download with what it matched each to and why it refused;
+// the ManualImport command imports the chosen ones regardless of those
+// rejections (that is the point: the admin is overriding them).
+//
+// SECURITY: the command's file list is built ONLY from the arr's own
+// manualimport response, re-read when the admin confirms — a path coming from
+// the browser just SELECTS among those files and is never sent upstream itself
+// (guardrail 5d).
+
+export type ImportMode = "auto" | "move" | "copy";
+
+export function isImportMode(v: unknown): v is ImportMode {
+  return v === "auto" || v === "move" || v === "copy";
+}
+
+export interface ImportCandidate {
+  /** The file's path as Radarr/Sonarr reported it — the key the browser selects by. */
+  path: string;
+  /** What to show: the path relative to the download folder, else the file name. */
+  name: string;
+  size: number;
+  quality: string | null;
+  languages: string[];
+  releaseGroup: string | null;
+  /** The movie/series the arr matched the file to; null = not matched (can't be imported from here). */
+  target: string | null;
+  episodes: QueueEpisode[];
+  /** Why the arr would not import it on its own. */
+  rejections: string[];
+  importable: boolean;
+}
+
+type ManualImportRow = {
+  path?: unknown;
+  relativePath?: unknown;
+  name?: unknown;
+  folderName?: unknown;
+  size?: unknown;
+  quality?: unknown;
+  languages?: unknown;
+  releaseGroup?: unknown;
+  indexerFlags?: unknown;
+  releaseType?: unknown;
+  downloadId?: unknown;
+  movie?: { id?: unknown; title?: unknown; year?: unknown } | null;
+  series?: { id?: unknown; title?: unknown } | null;
+  episodes?: unknown;
+  rejections?: unknown;
+};
+
+const MAX_PATH = 4_096;
+
+function rowEpisodes(row: ManualImportRow): Array<QueueEpisode & { id: number | null }> {
+  if (!Array.isArray(row.episodes)) return [];
+  const out: Array<QueueEpisode & { id: number | null }> = [];
+  for (const e of row.episodes as Array<{ id?: unknown; seasonNumber?: unknown; episodeNumber?: unknown } | null>) {
+    const s = nonNegInt(e?.seasonNumber);
+    const n = nonNegInt(e?.episodeNumber);
+    if (s !== null && n !== null) out.push({ seasonNumber: s, episodeNumber: n, id: posInt(e?.id) });
+  }
+  return out.sort((a, b) => a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber);
+}
+
+/** Whether the arr matched the file far enough for the ManualImport command to accept it. */
+function isMapped(service: QueueService, row: ManualImportRow): boolean {
+  if (service === "radarr") return posInt(row.movie?.id) !== null;
+  const eps = rowEpisodes(row);
+  return posInt(row.series?.id) !== null && eps.length > 0 && eps.every((e) => e.id !== null);
+}
+
+function validPath(v: unknown): string | null {
+  return typeof v === "string" && v.length > 0 && v.length <= MAX_PATH ? v : null;
+}
+
+/** /api/v3/manualimport → what the import dialog shows. Rows without a path are dropped. */
+export function importCandidates(service: QueueService, raw: unknown): ImportCandidate[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ImportCandidate[] = [];
+  for (const r of raw as ManualImportRow[]) {
+    if (!r || typeof r !== "object") continue;
+    const path = validPath(r.path);
+    if (path === null) continue;
+    const episodes = service === "sonarr" ? rowEpisodes(r).map(({ seasonNumber, episodeNumber }) => ({ seasonNumber, episodeNumber })) : [];
+    let target: string | null = null;
+    if (service === "radarr" && r.movie && typeof r.movie.title === "string" && r.movie.title) {
+      const year = posInt(r.movie.year);
+      target = year ? `${r.movie.title} (${year})` : r.movie.title;
+    } else if (service === "sonarr" && r.series && typeof r.series.title === "string" && r.series.title) {
+      target = r.series.title;
+    }
+    const languages = Array.isArray(r.languages)
+      ? (r.languages as Array<{ name?: unknown } | null>).map((l) => (typeof l?.name === "string" ? l.name : "")).filter(Boolean).slice(0, 10)
+      : [];
+    const rejections = Array.isArray(r.rejections)
+      ? (r.rejections as Array<{ reason?: unknown } | null>)
+          .map((x) => (typeof x?.reason === "string" ? x.reason.slice(0, MAX_MESSAGE_LEN) : ""))
+          .filter(Boolean)
+          .slice(0, MAX_MESSAGES)
+      : [];
+    const quality = r.quality && typeof r.quality === "object" ? (r.quality as { quality?: { name?: unknown } }).quality?.name : undefined;
+    out.push({
+      path,
+      name: text(r.relativePath) || text(r.name) || path.slice(-200),
+      size: bytes(r.size),
+      quality: typeof quality === "string" && quality ? quality.slice(0, 100) : null,
+      languages,
+      releaseGroup: textOrNull(r.releaseGroup, 100),
+      target,
+      episodes,
+      rejections,
+      importable: isMapped(service, r),
+    });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * The ManualImport command's `files`: the arr's own rows for the chosen paths,
+ * mapped ones only, each carrying back exactly what the arr detected (quality,
+ * languages, release group, flags) — the shape the arr UI sends. `downloadId`
+ * ties the import to the tracked download so the queue item completes.
+ */
+export function manualImportFiles(
+  service: QueueService,
+  raw: unknown,
+  chosen: ReadonlySet<string>,
+  downloadId: string,
+): Array<Record<string, unknown>> {
+  if (!Array.isArray(raw)) return [];
+  const files: Array<Record<string, unknown>> = [];
+  for (const r of raw as ManualImportRow[]) {
+    if (!r || typeof r !== "object") continue;
+    const path = validPath(r.path);
+    if (path === null || !chosen.has(path) || !isMapped(service, r)) continue;
+    const common = {
+      path,
+      folderName: typeof r.folderName === "string" ? r.folderName : undefined,
+      quality: r.quality,
+      languages: Array.isArray(r.languages) ? r.languages : [],
+      releaseGroup: typeof r.releaseGroup === "string" ? r.releaseGroup : undefined,
+      indexerFlags: typeof r.indexerFlags === "number" ? r.indexerFlags : 0,
+      downloadId,
+    };
+    if (service === "radarr") {
+      files.push({ ...common, movieId: posInt(r.movie?.id) });
+    } else {
+      files.push({
+        ...common,
+        seriesId: posInt(r.series?.id),
+        episodeIds: rowEpisodes(r).map((e) => e.id),
+        ...(r.releaseType !== undefined ? { releaseType: r.releaseType } : {}),
+      });
+    }
+  }
+  return files;
+}
+
+/**
+ * What the Import dialog pre-selects: the matched files the arr had no
+ * objection to; when every matched file was refused (the usual blocked
+ * import), all of them — the admin opened Import to override exactly those
+ * refusals. An unmatched file is never pre-selected (it can't be imported).
+ */
+export function defaultImportSelection(files: readonly ImportCandidate[]): Set<string> {
+  const matched = files.filter((f) => f.importable);
+  const clean = matched.filter((f) => f.rejections.length === 0);
+  return new Set((clean.length > 0 ? clean : matched).map((f) => f.path));
+}
+
+/** A download id as Radarr/Sonarr report it (a client hash or job id): printable ASCII, bounded. */
+export function isDownloadId(v: unknown): v is string {
+  return typeof v === "string" && /^[\x21-\x7e]{1,200}$/.test(v);
+}

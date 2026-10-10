@@ -278,5 +278,9 @@
   "apiAdmin.arrHealth.webhookSchema": "{service} bietet keine Webhook-Verbindung an, die Summonarr erkennt",
   "apiAdmin.arrHealth.webhookFailed": "{service} war zum Einrichten des Webhooks nicht erreichbar",
   "apiAdmin.arrOpen.paramsInvalid": "Erwartet: service (radarr oder sonarr), instance und entweder tmdbId oder arrId",
-  "apiAdmin.arrOpen.noAddress": "Diese Instanz hat keine nutzbare Adresse – lege ihre URL in den Einstellungen fest"
+  "apiAdmin.arrOpen.noAddress": "Diese Instanz hat keine nutzbare Adresse – lege ihre URL in den Einstellungen fest",
+  "apiAdmin.queue.importParamsInvalid": "Erwartet: service (radarr oder sonarr), instance und downloadId",
+  "apiAdmin.queue.importBodyInvalid": "Body muss { service, instance, downloadId, paths: 1–2000 Dateipfade aus der Importliste, importMode?: \"auto\" | \"move\" | \"copy\" } sein",
+  "apiAdmin.queue.nothingToImport": "Keine dieser Dateien kann mehr importiert werden – neu laden",
+  "apiAdmin.queue.importFailed": "Import in {service} nicht möglich"
 }
