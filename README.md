@@ -2,7 +2,7 @@
 
 Self-hosted media request aggregator. Browse TMDB (trending, popular, discover, upcoming), request movies and TV, vote on requests, and file issues. Admins approve requests and auto-fulfill via Radarr/Sonarr. Summonarr ingests Plex and Jellyfin libraries plus play history, so users see availability, active sessions, and watch activity in one place.
 
-> **Status:** v0.33.0 — stable and running in production. Found a problem? See [Feedback](#feedback).
+> **Status:** v0.34.0 — stable and running in production. Found a problem? See [Feedback](#feedback).
 
 ## Install
 
@@ -169,6 +169,27 @@ Please report security issues privately per [`SECURITY.md`](./SECURITY.md). In s
 Summonarr is self-hosted and the developer collects no data. The one server the developer runs is the push relay for iOS notifications, which can't be self-hosted and never sees media titles or usernames (see [APNs relay trust](./docker-container/README.md#apns-relay-trust-ios-push)). The iOS app itself talks only to the server you run and to TMDB's image CDN for artwork. See [`PRIVACY.md`](./PRIVACY.md) for the full policy (also used as the App Store privacy policy URL).
 
 ## Changelog
+
+### v0.34.0
+
+**Added**
+
+- **Download Queue** (Admin → Download Queue): every configured Radarr and Sonarr queue in one table, one row per download (a Sonarr season pack is one row), with the downloads Radarr/Sonarr flag first and who requested each title. It shows quality and its Proper/Repack tag, size and what's left, progress, time left, download client and indexer, and optionally languages, custom formats and score, estimated completion and date added (pick them from the Columns menu). Each row expands to show everything, including the release name, download ID and output path.
+- Stuck downloads get the same options as Radarr/Sonarr's own queue:
+  - **Import** a download the arr refused (its Manual Import). Pick the files, and fix any of them first: re-match the movie or the series, season and episodes, and set the quality, languages, release group and release type. Each edit is re-checked by the arr before you import.
+  - **Blocklist & search**, **Blocklist** and **Remove**, with the arr's choice of what happens in the download client: remove the download, move it to the post-import category (when the client has one), or leave it alone.
+  - **Grab now** for a release the arr is holding back (a delay profile), and **Re-check downloads** to retry imports right away once you've fixed what blocked them.
+- **Radarr/Sonarr health** on the queue page: each instance's version, its own health checks, and whether its Summonarr webhook is set up correctly. **Set up / Repair webhook** writes the webhook into Radarr/Sonarr for you (also in Settings → Webhooks). Radarr/Sonarr health warnings and recoveries are now sent to the outbound notification channels (webhook, ntfy, Gotify).
+- **Cutoff unmet** on the Missing page: titles whose file is below their quality profile's cutoff, as Radarr/Sonarr judge it, with a Search that looks for an upgrade of exactly those files.
+- **Pick release** on an approved request: search the indexers on the request's own instance (per season for TV) and grab a specific release.
+- **Open in Radarr/Sonarr** links for admins on queue and missing rows, the request queue and the movie and TV pages, with a new per-instance External URL setting for the address your browser uses.
+- **Trakt**: each user can connect their own Trakt account from their profile with a device code (no redirect URL to configure). Their Trakt watchlist can auto-request titles like the Plex watchlist, and their Trakt watch history feeds For You. This is also how Jellyfin users get a watchlist that requests things. An admin turns it on by adding a Trakt client secret beside the client ID.
+- **Discord**: `/watchlist add` and `/watchlist list` (with a remove menu), `/issue` to report a problem with a library title, and `/recent` for new arrivals. `/watchlist` and `/issue` need a linked account.
+
+**Changed**
+
+- The API docs (Admin → API docs) cover every new route, and the request release search, instance settings and Radarr/Sonarr webhook entries now match what the server does.
+- The database gains two tables (Trakt) and three audit actions. They are added automatically at startup; nothing to do when upgrading.
 
 ### v0.33.0
 
