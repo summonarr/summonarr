@@ -29,6 +29,7 @@ import {
   FileX,
   CircleDashed,
   Download,
+  Server,
 } from "@/components/icons";
 import type { Translator } from "@/lib/i18n/translate";
 import { hasPermission, Permission, effectivePermissions, parsePermissions, type PermissionValue } from "@/lib/permissions";
@@ -146,6 +147,9 @@ export const adminNavItems: NavItem[] = [
   { href: "/admin/library", label: "Library Diff", icon: Library, section: "admin" },
   { href: "/admin/queue", label: "Download Queue", icon: Download, section: "admin" },
   { href: "/admin/missing", label: "Missing", icon: CircleDashed, section: "admin" },
+  { href: "/admin/arr-calendar", label: "Arr Calendar", icon: CalendarDays, section: "admin" },
+  { href: "/admin/arr-history", label: "Download History", icon: Clock, section: "admin" },
+  { href: "/admin/arr-system", label: "Arr System", icon: Server, section: "admin" },
   { href: "/admin/blacklist", label: "Blacklist", icon: Ban, section: "admin" },
   { href: "/admin/cleanup", label: "Library Cleanup", icon: FileX, section: "admin" },
   { href: "/admin/stats", label: "Statistics", icon: BarChart3, section: "admin" },

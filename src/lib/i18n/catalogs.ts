@@ -14,6 +14,7 @@
 import type { Locale } from "./locales";
 import type { Messages } from "./translate";
 import enAdminActivity from "./messages/en/adminActivity.json";
+import enAdminArr from "./messages/en/adminArr.json";
 import enAdminManage from "./messages/en/adminManage.json";
 import enAdminQueue from "./messages/en/adminQueue.json";
 import enApiAdmin from "./messages/en/apiAdmin.json";
@@ -37,6 +38,7 @@ import enSettingsForms from "./messages/en/settingsForms.json";
 import enShared from "./messages/en/shared.json";
 import enTrash from "./messages/en/trash.json";
 import esAdminActivity from "./messages/es/adminActivity.json";
+import esAdminArr from "./messages/es/adminArr.json";
 import esAdminManage from "./messages/es/adminManage.json";
 import esAdminQueue from "./messages/es/adminQueue.json";
 import esApiAdmin from "./messages/es/apiAdmin.json";
@@ -60,6 +62,7 @@ import esSettingsForms from "./messages/es/settingsForms.json";
 import esShared from "./messages/es/shared.json";
 import esTrash from "./messages/es/trash.json";
 import frAdminActivity from "./messages/fr/adminActivity.json";
+import frAdminArr from "./messages/fr/adminArr.json";
 import frAdminManage from "./messages/fr/adminManage.json";
 import frAdminQueue from "./messages/fr/adminQueue.json";
 import frApiAdmin from "./messages/fr/apiAdmin.json";
@@ -83,6 +86,7 @@ import frSettingsForms from "./messages/fr/settingsForms.json";
 import frShared from "./messages/fr/shared.json";
 import frTrash from "./messages/fr/trash.json";
 import deAdminActivity from "./messages/de/adminActivity.json";
+import deAdminArr from "./messages/de/adminArr.json";
 import deAdminManage from "./messages/de/adminManage.json";
 import deAdminQueue from "./messages/de/adminQueue.json";
 import deApiAdmin from "./messages/de/apiAdmin.json";
@@ -106,6 +110,7 @@ import deSettingsForms from "./messages/de/settingsForms.json";
 import deShared from "./messages/de/shared.json";
 import deTrash from "./messages/de/trash.json";
 import ptAdminActivity from "./messages/pt/adminActivity.json";
+import ptAdminArr from "./messages/pt/adminArr.json";
 import ptAdminManage from "./messages/pt/adminManage.json";
 import ptAdminQueue from "./messages/pt/adminQueue.json";
 import ptApiAdmin from "./messages/pt/apiAdmin.json";
@@ -129,6 +134,7 @@ import ptSettingsForms from "./messages/pt/settingsForms.json";
 import ptShared from "./messages/pt/shared.json";
 import ptTrash from "./messages/pt/trash.json";
 import itAdminActivity from "./messages/it/adminActivity.json";
+import itAdminArr from "./messages/it/adminArr.json";
 import itAdminManage from "./messages/it/adminManage.json";
 import itAdminQueue from "./messages/it/adminQueue.json";
 import itApiAdmin from "./messages/it/apiAdmin.json";
@@ -152,6 +158,7 @@ import itSettingsForms from "./messages/it/settingsForms.json";
 import itShared from "./messages/it/shared.json";
 import itTrash from "./messages/it/trash.json";
 import zhAdminActivity from "./messages/zh/adminActivity.json";
+import zhAdminArr from "./messages/zh/adminArr.json";
 import zhAdminManage from "./messages/zh/adminManage.json";
 import zhAdminQueue from "./messages/zh/adminQueue.json";
 import zhApiAdmin from "./messages/zh/apiAdmin.json";
@@ -176,13 +183,13 @@ import zhShared from "./messages/zh/shared.json";
 import zhTrash from "./messages/zh/trash.json";
 
 export const CATALOGS: Record<Locale, Messages> = {
-  en: { ...enAdminActivity, ...enAdminManage, ...enAdminQueue, ...enApiAdmin, ...enApiAuth, ...enApiUser, ...enAppearance, ...enAuth, ...enBrowse, ...enDetail, ...enHome, ...enMedia, ...enNav, ...enNotify, ...enPersonal, ...enProfile, ...enRequest, ...enRequests, ...enSearch, ...enSettings, ...enSettingsForms, ...enShared, ...enTrash },
-  es: { ...esAdminActivity, ...esAdminManage, ...esAdminQueue, ...esApiAdmin, ...esApiAuth, ...esApiUser, ...esAppearance, ...esAuth, ...esBrowse, ...esDetail, ...esHome, ...esMedia, ...esNav, ...esNotify, ...esPersonal, ...esProfile, ...esRequest, ...esRequests, ...esSearch, ...esSettings, ...esSettingsForms, ...esShared, ...esTrash },
-  fr: { ...frAdminActivity, ...frAdminManage, ...frAdminQueue, ...frApiAdmin, ...frApiAuth, ...frApiUser, ...frAppearance, ...frAuth, ...frBrowse, ...frDetail, ...frHome, ...frMedia, ...frNav, ...frNotify, ...frPersonal, ...frProfile, ...frRequest, ...frRequests, ...frSearch, ...frSettings, ...frSettingsForms, ...frShared, ...frTrash },
-  de: { ...deAdminActivity, ...deAdminManage, ...deAdminQueue, ...deApiAdmin, ...deApiAuth, ...deApiUser, ...deAppearance, ...deAuth, ...deBrowse, ...deDetail, ...deHome, ...deMedia, ...deNav, ...deNotify, ...dePersonal, ...deProfile, ...deRequest, ...deRequests, ...deSearch, ...deSettings, ...deSettingsForms, ...deShared, ...deTrash },
-  pt: { ...ptAdminActivity, ...ptAdminManage, ...ptAdminQueue, ...ptApiAdmin, ...ptApiAuth, ...ptApiUser, ...ptAppearance, ...ptAuth, ...ptBrowse, ...ptDetail, ...ptHome, ...ptMedia, ...ptNav, ...ptNotify, ...ptPersonal, ...ptProfile, ...ptRequest, ...ptRequests, ...ptSearch, ...ptSettings, ...ptSettingsForms, ...ptShared, ...ptTrash },
-  it: { ...itAdminActivity, ...itAdminManage, ...itAdminQueue, ...itApiAdmin, ...itApiAuth, ...itApiUser, ...itAppearance, ...itAuth, ...itBrowse, ...itDetail, ...itHome, ...itMedia, ...itNav, ...itNotify, ...itPersonal, ...itProfile, ...itRequest, ...itRequests, ...itSearch, ...itSettings, ...itSettingsForms, ...itShared, ...itTrash },
-  zh: { ...zhAdminActivity, ...zhAdminManage, ...zhAdminQueue, ...zhApiAdmin, ...zhApiAuth, ...zhApiUser, ...zhAppearance, ...zhAuth, ...zhBrowse, ...zhDetail, ...zhHome, ...zhMedia, ...zhNav, ...zhNotify, ...zhPersonal, ...zhProfile, ...zhRequest, ...zhRequests, ...zhSearch, ...zhSettings, ...zhSettingsForms, ...zhShared, ...zhTrash },
+  en: { ...enAdminActivity, ...enAdminArr, ...enAdminManage, ...enAdminQueue, ...enApiAdmin, ...enApiAuth, ...enApiUser, ...enAppearance, ...enAuth, ...enBrowse, ...enDetail, ...enHome, ...enMedia, ...enNav, ...enNotify, ...enPersonal, ...enProfile, ...enRequest, ...enRequests, ...enSearch, ...enSettings, ...enSettingsForms, ...enShared, ...enTrash },
+  es: { ...esAdminActivity, ...esAdminArr, ...esAdminManage, ...esAdminQueue, ...esApiAdmin, ...esApiAuth, ...esApiUser, ...esAppearance, ...esAuth, ...esBrowse, ...esDetail, ...esHome, ...esMedia, ...esNav, ...esNotify, ...esPersonal, ...esProfile, ...esRequest, ...esRequests, ...esSearch, ...esSettings, ...esSettingsForms, ...esShared, ...esTrash },
+  fr: { ...frAdminActivity, ...frAdminArr, ...frAdminManage, ...frAdminQueue, ...frApiAdmin, ...frApiAuth, ...frApiUser, ...frAppearance, ...frAuth, ...frBrowse, ...frDetail, ...frHome, ...frMedia, ...frNav, ...frNotify, ...frPersonal, ...frProfile, ...frRequest, ...frRequests, ...frSearch, ...frSettings, ...frSettingsForms, ...frShared, ...frTrash },
+  de: { ...deAdminActivity, ...deAdminArr, ...deAdminManage, ...deAdminQueue, ...deApiAdmin, ...deApiAuth, ...deApiUser, ...deAppearance, ...deAuth, ...deBrowse, ...deDetail, ...deHome, ...deMedia, ...deNav, ...deNotify, ...dePersonal, ...deProfile, ...deRequest, ...deRequests, ...deSearch, ...deSettings, ...deSettingsForms, ...deShared, ...deTrash },
+  pt: { ...ptAdminActivity, ...ptAdminArr, ...ptAdminManage, ...ptAdminQueue, ...ptApiAdmin, ...ptApiAuth, ...ptApiUser, ...ptAppearance, ...ptAuth, ...ptBrowse, ...ptDetail, ...ptHome, ...ptMedia, ...ptNav, ...ptNotify, ...ptPersonal, ...ptProfile, ...ptRequest, ...ptRequests, ...ptSearch, ...ptSettings, ...ptSettingsForms, ...ptShared, ...ptTrash },
+  it: { ...itAdminActivity, ...itAdminArr, ...itAdminManage, ...itAdminQueue, ...itApiAdmin, ...itApiAuth, ...itApiUser, ...itAppearance, ...itAuth, ...itBrowse, ...itDetail, ...itHome, ...itMedia, ...itNav, ...itNotify, ...itPersonal, ...itProfile, ...itRequest, ...itRequests, ...itSearch, ...itSettings, ...itSettingsForms, ...itShared, ...itTrash },
+  zh: { ...zhAdminActivity, ...zhAdminArr, ...zhAdminManage, ...zhAdminQueue, ...zhApiAdmin, ...zhApiAuth, ...zhApiUser, ...zhAppearance, ...zhAuth, ...zhBrowse, ...zhDetail, ...zhHome, ...zhMedia, ...zhNav, ...zhNotify, ...zhPersonal, ...zhProfile, ...zhRequest, ...zhRequests, ...zhSearch, ...zhSettings, ...zhSettingsForms, ...zhShared, ...zhTrash },
 };
 
 export const FALLBACK_MESSAGES: Messages = CATALOGS.en;

@@ -279,6 +279,9 @@ export class ArrResponseError extends Error {
 }
 
 const ARR_FETCH_TIMEOUT_MS = 30_000;
+// A Sonarr season search across many indexers routinely outlasts 30s; cut off,
+// the admin saw a failure while the arr kept searching.
+const RELEASE_SEARCH_TIMEOUT_MS = 120_000;
 
 // Raised from 10 MB — libraries with >3k movies were being silently truncated at the old cap
 const ARR_FETCH_MAX_BYTES = 50 * 1024 * 1024;
@@ -287,7 +290,9 @@ const ARR_FETCH_MAX_BYTES = 50 * 1024 * 1024;
 // reports the failure itself — the Download Queue page re-reads every 20s, and
 // a down instance is one unchanged condition it logs once (guardrail 7b). The
 // error is still thrown, unchanged.
-export type ArrFetchOptions = RequestInit & { quietErrors?: boolean };
+// `timeoutMs`: only for a call that is slow by nature — an interactive release
+// search waits on every indexer the instance has.
+export type ArrFetchOptions = RequestInit & { quietErrors?: boolean; timeoutMs?: number };
 
 export async function arrFetch<T>(cfg: ArrCfg, path: string, options: ArrFetchOptions = {}): Promise<T> {
   const res = await arrRequest(cfg, path, options);
@@ -310,7 +315,7 @@ async function arrRequest(cfg: ArrCfg, path: string, options: ArrFetchOptions): 
     body,
     ...(signal ? { signal } : {}),
     cache: "no-store",
-    timeoutMs: ARR_FETCH_TIMEOUT_MS,
+    timeoutMs: options.timeoutMs ?? ARR_FETCH_TIMEOUT_MS,
     maxResponseBytes: ARR_FETCH_MAX_BYTES,
     headers: { "X-Api-Key": cfg.apiKey, "Content-Type": "application/json", ...(options.headers ?? {}) },
   });
@@ -1076,6 +1081,19 @@ export async function getReleasesForMovie(tmdbId: number, variant: ArrVariant = 
   ]);
 
   return filterAndSortReleases(releases, allowedQualityIds);
+}
+
+// Interactive search by the arr's OWN ids — the admin title manager already
+// holds the movie/series/episode id, so nothing is re-resolved. `query` is the
+// /api/v3/release query (movieId=, seriesId=&seasonNumber=, episodeId=);
+// releases matching the title's own quality profile sort first. Projected
+// through toArrRelease like every other release list.
+export async function searchReleasesByArrId(cfg: ArrCfg, query: string, qualityProfileId?: number | null): Promise<ArrRelease[]> {
+  const [releases, allowedQualityIds] = await Promise.all([
+    arrFetch<ArrRelease[]>(cfg, `/api/v3/release?${query}`, { timeoutMs: RELEASE_SEARCH_TIMEOUT_MS }),
+    getAllowedQualityIds(cfg, qualityProfileId ?? undefined),
+  ]);
+  return filterAndSortReleases(Array.isArray(releases) ? releases : [], allowedQualityIds);
 }
 
 export async function grabMovieRelease(tmdbId: number, guid: string, indexerId: number, variant: ArrVariant = ""): Promise<void> {

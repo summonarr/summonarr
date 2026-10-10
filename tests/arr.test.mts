@@ -232,7 +232,7 @@ test("the Sonarr download check holds EVERY id to a positive-integer contract, u
   );
 });
 
-test("guardrail 5: the 50 MB cap and 30s timeout are pinned and wired into arrFetch", () => {
+test("guardrail 5: the 50 MB cap and 30s default timeout are pinned and wired into arrFetch", () => {
   // The constants are module-private and arrFetch does real network I/O, so a
   // runtime assertion isn't possible here. Pin the source text instead: this
   // fails the suite if anyone lowers the cap (the old 10 MB cap silently
@@ -241,7 +241,11 @@ test("guardrail 5: the 50 MB cap and 30s timeout are pinned and wired into arrFe
   assert.match(source, /const ARR_FETCH_MAX_BYTES = 50 \* 1024 \* 1024;/);
   assert.match(source, /const ARR_FETCH_TIMEOUT_MS = 30_000;/);
   assert.match(source, /maxResponseBytes: ARR_FETCH_MAX_BYTES/);
-  assert.match(source, /timeoutMs: ARR_FETCH_TIMEOUT_MS/);
+  // The 30s default stays wired; a caller may only pass its own (the
+  // interactive release search, pinned at 120s below), never drop the timeout.
+  assert.match(source, /timeoutMs: options\.timeoutMs \?\? ARR_FETCH_TIMEOUT_MS/);
+  assert.match(source, /const RELEASE_SEARCH_TIMEOUT_MS = 120_000;/);
+  assert.match(source, /\/api\/v3\/release\?\$\{query\}`, \{ timeoutMs: RELEASE_SEARCH_TIMEOUT_MS \}/);
 });
 
 test("getCfg normalizes an EMPTY rootFolder to undefined so the `??` fallback actually fires", () => {

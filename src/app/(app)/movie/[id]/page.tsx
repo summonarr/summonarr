@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { cache } from "react";
+import { cache, Fragment } from "react";
 import { getMovieDetails, tmdbLanguageFor, getMovieCredits, getMovieSuggestions, getMovieCollection, getMovieGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
 import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
@@ -17,6 +17,7 @@ import Image from "next/image";
 import { notFound } from "next/navigation";
 import { TrailerButton } from "@/components/media/trailer-button";
 import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
+import { ArrManageButton } from "@/components/admin/arr-title/title-manager";
 import { arrInstancesHolding } from "@/lib/arr-links-data";
 import { prisma } from "@/lib/prisma";
 import { requireAppSession } from "@/lib/require-app-session";
@@ -438,13 +439,20 @@ export default async function MovieDetailPage({
                 <TrailerButton trailerKey={media.trailerKey} trailerUrl={media.trailerUrl} />
               )}
               {arrLinks.map((inst) => (
-                <OpenInArrLink
-                  key={inst.slug || "default"}
-                  service="radarr"
-                  instance={inst.slug}
-                  target={{ tmdbId: media.id }}
-                  label={t("adminManage.openIn", { name: arrInstanceLabel("radarr", inst.name, inst.slug) })}
-                />
+                <Fragment key={inst.slug || "default"}>
+                  <ArrManageButton
+                    service="radarr"
+                    instance={inst.slug}
+                    tmdbId={media.id}
+                    instanceLabel={arrInstanceLabel("radarr", inst.name, inst.slug)}
+                  />
+                  <OpenInArrLink
+                    service="radarr"
+                    instance={inst.slug}
+                    target={{ tmdbId: media.id }}
+                    label={t("adminManage.openIn", { name: arrInstanceLabel("radarr", inst.name, inst.slug) })}
+                  />
+                </Fragment>
               ))}
             </div>
           </div>

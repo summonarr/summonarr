@@ -961,6 +961,21 @@ enum AuditAction {
   ARR_RELEASE_GRAB
   // An admin imported a download Radarr/Sonarr had refused (Admin → Download Queue → Import).
   ARR_QUEUE_IMPORT
+  // An admin changed a movie's or series' settings in Radarr/Sonarr (the title
+  // manager: monitored, profile, root folder, tags, season/episode monitoring).
+  ARR_TITLE_EDIT
+  // An admin deleted a title's files through Radarr/Sonarr.
+  ARR_FILE_DELETE
+  // An admin renamed a title's files to Radarr/Sonarr's naming scheme.
+  ARR_FILE_RENAME
+  // An admin marked a grabbed release failed (blocklisted, re-searched).
+  ARR_MARK_FAILED
+  // An admin removed releases from a Radarr/Sonarr blocklist, or cleared it.
+  ARR_BLOCKLIST_CHANGE
+  // An admin ran a library-wide search (every missing / cutoff-unmet title).
+  ARR_COMMAND
+  // An admin switched an indexer or download client on/off in Radarr/Sonarr.
+  ARR_PROVIDER_CHANGE
 }
 
 // ─── Play History ────────────────────────────────────────────────────────────

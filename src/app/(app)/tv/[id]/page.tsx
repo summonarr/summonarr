@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { cache } from "react";
+import { cache, Fragment } from "react";
 import { getTVDetails, tmdbLanguageFor, getTVCredits, getTVSuggestions, getTVGenres, backdropUrl, posterUrl } from "@/lib/tmdb";
 import Link from "next/link";
 import { RequestButton } from "@/components/media/request-button";
@@ -17,6 +17,7 @@ import Image from "next/image";
 import { notFound } from "next/navigation";
 import { TrailerButton } from "@/components/media/trailer-button";
 import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
+import { ArrManageButton } from "@/components/admin/arr-title/title-manager";
 import { arrInstancesHolding } from "@/lib/arr-links-data";
 import { prisma } from "@/lib/prisma";
 import { requireAppSession } from "@/lib/require-app-session";
@@ -483,13 +484,20 @@ export default async function TVDetailPage({
                 <TrailerButton trailerKey={media.trailerKey} trailerUrl={media.trailerUrl} />
               )}
               {arrLinks.map((inst) => (
-                <OpenInArrLink
-                  key={inst.slug || "default"}
-                  service="sonarr"
-                  instance={inst.slug}
-                  target={{ tmdbId: media.id }}
-                  label={t("adminManage.openIn", { name: arrInstanceLabel("sonarr", inst.name, inst.slug) })}
-                />
+                <Fragment key={inst.slug || "default"}>
+                  <ArrManageButton
+                    service="sonarr"
+                    instance={inst.slug}
+                    tmdbId={media.id}
+                    instanceLabel={arrInstanceLabel("sonarr", inst.name, inst.slug)}
+                  />
+                  <OpenInArrLink
+                    service="sonarr"
+                    instance={inst.slug}
+                    target={{ tmdbId: media.id }}
+                    label={t("adminManage.openIn", { name: arrInstanceLabel("sonarr", inst.name, inst.slug) })}
+                  />
+                </Fragment>
               ))}
             </div>
           </div>
