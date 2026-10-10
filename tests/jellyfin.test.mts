@@ -65,7 +65,7 @@
 //   - the playMethod decision table: TranscodingInfo is authoritative over
 //     PlayState.PlayMethod, absent both → undefined (never a DirectPlay
 //     default), transcodeReason only for Transcode with the humanized
-//     PascalCase reasons (deduped) and the "Container not supported" fallback.
+//     PascalCase reasons (deduped) and the "No reason reported" fallback.
 //
 //   Admin surface (terminateJellyfinSession, getJellyfinAllUsers,
 //   setJellyfinDownloadPolicy, getJellyfinUserCount):
@@ -957,7 +957,7 @@ test("sessions playMethod table: TranscodingInfo is authoritative, absent info n
   assert.equal(byId.get("s3")!.playMethod, "DirectPlay", "fully-direct transcode info preserves a DirectPlay claim");
   assert.equal(byId.get("s4")!.playMethod, "DirectStream", "fully-direct with no DirectPlay claim is DirectStream");
   assert.equal(byId.get("s5")!.playMethod, "Transcode", "any non-direct leg overrides a stale DirectPlay claim");
-  assert.equal(byId.get("s5")!.transcodeReason, "Container not supported", "no TranscodeReasons ⇒ the fallback reason");
+  assert.equal(byId.get("s5")!.transcodeReason, "No reason reported", "no TranscodeReasons ⇒ say so, never a guessed cause");
   assert.equal(byId.get("s3")!.transcodeReason, undefined, "reason only accompanies Transcode");
   assert.equal(byId.get("s2")!.state, "playing", "not-paused (absent IsPaused) reads as playing");
 });
@@ -1109,6 +1109,38 @@ test("sessions bitrate: a transcode still reports the OUTPUT bitrate, not the so
     3_000_000,
     "a 4K source transcoded down pushes the transcode output, not the 44 Mbps source",
   );
+});
+
+// Jellyfin's TranscodeReason enum (MediaBrowser.Model.Session.TranscodeReason,
+// 10.8–10.10). The activity UI translates a stored reason phrase by phrase via
+// TRANSCODE_REASON_KEYS; a phrase missing there shows up in English on every
+// non-English Statistics page. Renaming the humanizer's output, or Jellyfin
+// adding a reason, fails here instead.
+test("sessions: every Jellyfin TranscodeReason humanizes to a phrase the activity UI translates", async () => {
+  const { TRANSCODE_REASON_KEYS } = await import("../src/lib/transcode-reasons.ts");
+  const ENUM = [
+    "ContainerNotSupported", "VideoCodecNotSupported", "AudioCodecNotSupported", "SubtitleCodecNotSupported",
+    "AudioIsExternal", "SecondaryAudioNotSupported", "VideoProfileNotSupported", "VideoLevelNotSupported",
+    "VideoResolutionNotSupported", "VideoBitDepthNotSupported", "VideoFramerateNotSupported", "RefFramesNotSupported",
+    "AnamorphicVideoNotSupported", "InterlacedVideoNotSupported", "AudioChannelsNotSupported", "AudioProfileNotSupported",
+    "AudioSampleRateNotSupported", "AudioBitDepthNotSupported", "ContainerBitrateExceedsLimit", "VideoBitrateNotSupported",
+    "AudioBitrateNotSupported", "UnknownVideoStreamInfo", "UnknownAudioStreamInfo", "DirectPlayError",
+    "VideoRangeTypeNotSupported", "VideoCodecTagNotSupported", "StreamCountExceedsLimit",
+  ];
+  const B = nextBase();
+  respond = () => okJson([
+    {
+      Id: "r-1", UserId: "u", UserName: "u",
+      NowPlayingItem: { Id: "mv-r", Name: "R", Type: "Movie" },
+      PlayState: { PositionTicks: 1, IsPaused: false },
+      TranscodingInfo: { IsVideoDirect: false, IsAudioDirect: false, TranscodeReasons: ENUM },
+    },
+  ]);
+  const [s] = await getJellyfinSessions(B, "k");
+  const phrases = s.transcodeReason!.split(", ");
+  assert.equal(phrases.length, ENUM.length, "one phrase per reason");
+  const untranslated = phrases.filter((p) => !(p in TRANSCODE_REASON_KEYS));
+  assert.deepEqual(untranslated, []);
 });
 
 test("sessions bitrate: absent everywhere stays undefined rather than collapsing to 0", async () => {

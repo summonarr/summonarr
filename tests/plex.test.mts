@@ -24,7 +24,7 @@
 //     episode page entirely;
 //   - getPlexSessions: the EXACT PlexSessionData shape the play-history poller
 //     consumes (full deepEqual), episode title composition, the DirectPlay/
-//     DirectStream/Transcode decision + humanized transcodeReason, "0"/"1"/
+//     DirectStream/Transcode decision + the stream-only transcodeReason, "0"/"1"/
 //     boolean secure-relayed normalization, friendly device naming, and
 //     empty-session defaults;
 //   - getPlexMarkers: split credits markers merge earliest-start/latest-end;
@@ -864,7 +864,9 @@ test("getPlexSessions: episode title composition and the Transcode/DirectStream 
   const [ep, copied, audio] = await getPlexSessions(S, "t");
   assert.equal(ep.title, "Severance — Half Loop");
   assert.equal(ep.playMethod, "Transcode");
-  assert.equal(ep.transcodeReason, "Video codec not supported, Subtitle burn-in");
+  // Plex reports WHICH stream it transcoded, never why — the label must not
+  // claim a cause (it used to say "Video codec not supported" for every one).
+  assert.equal(ep.transcodeReason, "Video transcoded, Subtitle burn-in");
   assert.equal(ep.videoDecision, "transcode");
   assert.equal(ep.audioDecision, "copy");
   assert.equal(ep.parentIndex, 1);
@@ -874,7 +876,7 @@ test("getPlexSessions: episode title composition and the Transcode/DirectStream 
   assert.equal(copied.transcodeReason, undefined);
 
   assert.equal(audio.playMethod, "Transcode");
-  assert.equal(audio.transcodeReason, "Audio codec not supported");
+  assert.equal(audio.transcodeReason, "Audio transcoded");
 });
 
 test("getPlexSessions degrades an empty raw session to safe defaults; sessionKey falls back to Session.id; state and toBool normalize", async () => {

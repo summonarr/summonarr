@@ -4,6 +4,12 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { useCallback, useState } from "react";
 import Link from "next/link";
 import { useT } from "@/components/i18n/i18n-provider";
+import {
+  ACTIVITY_DEFAULT_DAYS,
+  ACTIVITY_MAX_DAYS,
+  ACTIVITY_MIN_DAYS,
+  parseActivityDays,
+} from "@/lib/activity-days";
 
 const DATE_RANGES = [
   { label: "7d", value: "7" },
@@ -29,13 +35,16 @@ const MEDIA_TYPES = [
 // Every tab is a real <Link> (cmd/middle-click opens a new tab, right-click
 // offers "Open link"). History is its own route segment, not a `?tab=` of the
 // overview, so it gets a table-shaped loading.tsx instead of the KPI skeleton.
-const SUB_PAGES: { labelKey: string; href: string; exact?: boolean }[] = [
-  { labelKey: "adminActivity.tab.overview", href: "/admin/activity", exact: true },
-  { labelKey: "adminActivity.tab.history", href: "/admin/activity/history" },
+// `filtered` tabs read the period/source/type filters, so moving between them
+// keeps the current ones instead of resetting to the 30-day default.
+const SUB_PAGES: { labelKey: string; href: string; exact?: boolean; filtered?: boolean }[] = [
+  { labelKey: "adminActivity.tab.overview", href: "/admin/activity", exact: true, filtered: true },
+  { labelKey: "adminActivity.tab.history", href: "/admin/activity/history", filtered: true },
   { labelKey: "adminActivity.tab.users", href: "/admin/activity/users" },
-  { labelKey: "adminActivity.tab.stats", href: "/admin/activity/stats" },
+  { labelKey: "adminActivity.tab.stats", href: "/admin/activity/stats", filtered: true },
   { labelKey: "adminActivity.tab.recentlyAdded", href: "/admin/activity/recent" },
 ];
+const FILTER_PARAMS = ["days", "source", "mediaType"] as const;
 
 // Sub-page nav tabs plus period/source/type filters for the admin activity
 // pages; filters are driven entirely through URL search params.
@@ -45,12 +54,15 @@ export function ActivityFilterBar() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  const currentDays = searchParams.get("days") ?? "30";
+  // The window the server actually rendered, not the raw string: `?days=0` or
+  // `?days=abc` render 30 days, and the bar must say so rather than "Custom: 0".
+  const currentDays = String(parseActivityDays(searchParams.get("days")));
   const currentSource = searchParams.get("source") ?? "";
   const currentMediaType = searchParams.get("mediaType") ?? "";
   const isPreset = DATE_RANGES.some((r) => r.value === currentDays);
+  const defaultDays = String(ACTIVITY_DEFAULT_DAYS);
 
-  const [showCustom, setShowCustom] = useState(!isPreset && currentDays !== "30");
+  const [showCustom, setShowCustom] = useState(!isPreset && currentDays !== defaultDays);
   const [customValue, setCustomValue] = useState(!isPreset ? currentDays : "");
   const [customError, setCustomError] = useState<string | null>(null);
 
@@ -61,7 +73,7 @@ export function ActivityFilterBar() {
   const [syncedDays, setSyncedDays] = useState(currentDays);
   if (syncedDays !== currentDays) {
     setSyncedDays(currentDays);
-    setShowCustom(!isPreset && currentDays !== "30");
+    setShowCustom(!isPreset && currentDays !== defaultDays);
     setCustomValue(!isPreset ? currentDays : "");
     setCustomError(null);
   }
@@ -69,6 +81,17 @@ export function ActivityFilterBar() {
   function isSubPageActive(page: typeof SUB_PAGES[0]): boolean {
     if (page.exact) return pathname === page.href;
     return pathname === page.href || pathname.startsWith(page.href + "/");
+  }
+
+  function subPageHref(page: typeof SUB_PAGES[0]): string {
+    if (!page.filtered) return page.href;
+    const carried = new URLSearchParams();
+    for (const key of FILTER_PARAMS) {
+      const value = searchParams.get(key);
+      if (value) carried.set(key, value);
+    }
+    const qs = carried.toString();
+    return qs ? `${page.href}?${qs}` : page.href;
   }
 
   // No `router.refresh()` after the push, on purpose. These pages are
@@ -103,7 +126,7 @@ export function ActivityFilterBar() {
       setCustomError(t("adminActivity.filter.error.whole"));
       return;
     }
-    if (num < 1 || num > 3650) {
+    if (num < ACTIVITY_MIN_DAYS || num > ACTIVITY_MAX_DAYS) {
       setCustomError(t("adminActivity.filter.error.range"));
       return;
     }
@@ -125,7 +148,7 @@ export function ActivityFilterBar() {
           return (
             <Link
               key={page.labelKey}
-              href={page.href}
+              href={subPageHref(page)}
               aria-current={active ? "page" : undefined}
               className={`inline-flex items-center min-h-8 px-3 py-1.5 text-sm font-medium rounded-md whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                 active
@@ -146,15 +169,14 @@ export function ActivityFilterBar() {
             <span className="text-xs text-zinc-500 mr-1">{t("adminActivity.filter.period")}</span>
             <div className="flex rounded-lg border border-zinc-700 overflow-hidden">
               {DATE_RANGES.map((r) => {
-                const selected =
-                  !showCustom && (currentDays === r.value || (r.value === "30" && !searchParams.has("days")));
+                const selected = !showCustom && currentDays === r.value;
                 return (
                 <button
                   aria-pressed={selected}
                   key={r.value}
                   onClick={() => {
                     setShowCustom(false);
-                    setParam("days", r.value === "30" ? "" : r.value);
+                    setParam("days", r.value === defaultDays ? "" : r.value);
                   }}
                   className={`inline-flex items-center min-h-8 px-2.5 py-1 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--ds-accent-ring)] ${
                     selected
@@ -182,8 +204,8 @@ export function ActivityFilterBar() {
               <div className="flex flex-wrap items-center gap-1 ml-1">
                 <input
                   type="number"
-                  min={1}
-                  max={3650}
+                  min={ACTIVITY_MIN_DAYS}
+                  max={ACTIVITY_MAX_DAYS}
                   value={customValue}
                   onChange={(e) => {
                     setCustomValue(e.target.value);

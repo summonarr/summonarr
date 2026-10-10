@@ -1,4 +1,10 @@
 import { safeFetchTrusted, safeFetchAdminConfigured } from "./safe-fetch";
+import {
+  NO_REASON_REPORTED,
+  PLEX_AUDIO_TRANSCODED,
+  PLEX_SUBTITLE_BURN_IN,
+  PLEX_VIDEO_TRANSCODED,
+} from "./transcode-reasons";
 
 const PLEX_TV_HOSTS = ["plex.tv"];
 
@@ -705,16 +711,18 @@ export async function getPlexSessions(serverUrl: string, token: string): Promise
       playMethod = "DirectStream";
     }
 
-    // Plex's /status/sessions has no single "reason" field — derive it from the
-    // per-stream decisions. Worded to match the humanized Jellyfin
-    // TranscodeReasons vocabulary so both servers share one chart.
+    // Plex's /status/sessions reports WHICH streams it transcoded, never why. A
+    // video transcode is as often a remote client's quality limit as an
+    // unsupported codec, so the label says only what Plex said; it used to claim
+    // "Video codec not supported" for every one, and the Statistics page turned
+    // that into advice. play-history.ts rewrites those older rows the same way.
     let transcodeReason: string | undefined;
     if (playMethod === "Transcode") {
       const reasons: string[] = [];
-      if (ts?.videoDecision === "transcode") reasons.push("Video codec not supported");
-      if (ts?.audioDecision === "transcode") reasons.push("Audio codec not supported");
-      if (subtitleStream?.decision === "burn") reasons.push("Subtitle burn-in");
-      if (reasons.length === 0) reasons.push("Container not supported");
+      if (ts?.videoDecision === "transcode") reasons.push(PLEX_VIDEO_TRANSCODED);
+      if (ts?.audioDecision === "transcode") reasons.push(PLEX_AUDIO_TRANSCODED);
+      if (subtitleStream?.decision === "burn") reasons.push(PLEX_SUBTITLE_BURN_IN);
+      if (reasons.length === 0) reasons.push(NO_REASON_REPORTED);
       transcodeReason = reasons.join(", ");
     }
 

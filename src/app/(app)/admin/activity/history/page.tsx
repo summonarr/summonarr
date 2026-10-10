@@ -7,6 +7,7 @@ import { ActivityHistoryTable } from "@/components/admin/activity-history-table"
 import { ActivityLiveRefresher } from "@/components/admin/activity-live-refresher";
 import { requireFeature } from "@/lib/features";
 import { getTranslator } from "@/lib/i18n/server";
+import { parseActivityDays } from "@/lib/activity-days";
 
 export const dynamic = "force-dynamic";
 
@@ -38,7 +39,7 @@ export default async function ActivityHistoryPage({
   const t = await getTranslator();
 
   const { days: daysParam, source: sourceParam, mediaType: mediaTypeParam, from: fromParam, to: toParam, watched: watchedParam } = await searchParams;
-  const days = Math.min(Math.max(parseInt(daysParam ?? "30", 10) || 30, 1), 3650);
+  const days = parseActivityDays(daysParam);
   const source = sourceParam && ["plex", "jellyfin"].includes(sourceParam) ? sourceParam : undefined;
   const mediaType = mediaTypeParam && ["MOVIE", "TV"].includes(mediaTypeParam) ? mediaTypeParam : undefined;
   // Date deep-link from a calendar-cell "View these plays" link. Seeds the

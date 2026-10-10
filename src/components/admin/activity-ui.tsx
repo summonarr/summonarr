@@ -1225,6 +1225,32 @@ export function fmtTimestamp(iso: string | null, mounted: boolean, locale: strin
   });
 }
 
+/* ── UTC marker ───────────────────────────────────────────────── */
+
+// The activity aggregates bucket by UTC hour and UTC day. Every chart drawn from
+// them says so — the heatmap and calendar always did; without it a viewer west
+// of Greenwich reads their evening peak as "2:00" with nothing to say why.
+export function UtcTag({ title }: { title: string }) {
+  return (
+    <span
+      className="ds-mono"
+      title={title}
+      style={{
+        fontSize: 9.5,
+        letterSpacing: "0.06em",
+        color: "var(--ds-fg-subtle)",
+        border: "1px solid var(--ds-border)",
+        borderRadius: 4,
+        padding: "0 4px",
+        lineHeight: "15px",
+        whiteSpace: "nowrap",
+      }}
+    >
+      UTC
+    </span>
+  );
+}
+
 /* ── Bars / distribution ──────────────────────────────────────── */
 
 export function HorizontalBars({
@@ -1252,16 +1278,25 @@ export function HorizontalBars({
         {t("adminActivity.common.noDataYet")}
       </div>
     );
+  // `contain: inline-size` is load-bearing, as on HourHeatmap: every caller
+  // sits in a `1fr` grid column (minmax(auto, 1fr)), and while the column is
+  // sized a percentage max-width has nothing to resolve against, so a wide
+  // label (230px for transcode reasons) counted at full width and pushed the
+  // card past a phone's gutter — at 360px, the page scrolled sideways. With
+  // containment the list adds no width of its own and the label's maxWidth
+  // then caps it to its share of the real row. The full text stays on hover.
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 7, contain: "inline-size" }}>
       {items.map((it) => (
         <div
           key={it.label}
           style={{ display: "flex", alignItems: "center", gap: 10 }}
         >
           <span
+            title={it.label}
             style={{
               width: labelWidth,
+              maxWidth: "45%",
               fontSize: 12,
               color: "var(--ds-fg-muted)",
               whiteSpace: "nowrap",
@@ -1297,7 +1332,7 @@ export function HorizontalBars({
               fontSize: 11,
               color: "var(--ds-fg-subtle)",
               fontVariantNumeric: "tabular-nums",
-              width: 38,
+              minWidth: 38,
               textAlign: "right",
               flexShrink: 0,
             }}
@@ -1402,10 +1437,13 @@ export function BarColumn({
   data,
   h = 100,
   color = "var(--ds-accent)",
+  titles,
 }: {
   data: number[];
   h?: number;
   color?: string;
+  // Per-bar hover text ("21:00 UTC · 5 plays"). Without it a bar shows its bare count.
+  titles?: string[];
 }) {
   const max = Math.max(...data, 1);
   return (
@@ -1415,7 +1453,7 @@ export function BarColumn({
       {data.map((v, i) => (
         <div
           key={i}
-          title={`${v}`}
+          title={titles?.[i] ?? `${v}`}
           style={{
             flex: 1,
             minWidth: 0,

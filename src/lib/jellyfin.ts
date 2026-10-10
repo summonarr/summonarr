@@ -1,5 +1,6 @@
 import { safeFetchAdminConfigured } from "./safe-fetch";
 import { warnOnChange } from "./log-dedup";
+import { NO_REASON_REPORTED } from "./transcode-reasons";
 
 export interface JellyfinUser {
   id: string;
@@ -676,8 +677,8 @@ export interface JellyfinSessionData {
 }
 
 // Jellyfin TranscodeReasons are PascalCase enum tokens
-// ("AudioCodecNotSupported"). Render to the same sentence-case vocabulary
-// the Plex path derives so both servers share one chart.
+// ("AudioCodecNotSupported"). Render them sentence-case ("Audio codec not
+// supported") — the phrases transcode-reasons.ts translates for the activity UI.
 function humanizeJellyfinReasons(reasons: string[] | undefined): string | undefined {
   if (!reasons || reasons.length === 0) return undefined;
   const phrases = reasons.map((r) => {
@@ -843,9 +844,11 @@ export async function getJellyfinSessions(baseUrl: string, apiKey: string): Prom
         // the source total is the delivered bitrate. Both are "bytes on the
         // wire", so the Bandwidth stat means one thing across play methods.
         bitrate: ti?.Bitrate ?? sourceBitrateBps(np, ps),
+        // No TranscodeReasons ⇒ say so. The old fallback, "Container not
+        // supported", asserted a cause Jellyfin never reported.
         transcodeReason:
           playMethod === "Transcode"
-            ? humanizeJellyfinReasons(ti?.TranscodeReasons) ?? "Container not supported"
+            ? humanizeJellyfinReasons(ti?.TranscodeReasons) ?? NO_REASON_REPORTED
             : undefined,
       };
     });

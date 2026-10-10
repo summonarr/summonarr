@@ -5,9 +5,16 @@
 // fixed "YYYY-MM-DD" strings, never from the current time, so the server and
 // the browser always print the same text (guardrail 16).
 
+import { useMemo } from "react";
 import Link from "next/link";
 import type { PlayHistoryStatsResult } from "@/lib/play-history";
 import { posterUrl } from "@/lib/tmdb-types";
+import {
+  OTHER_REASONS,
+  UNKNOWN_REASON,
+  isPlexStreamOnlyReason,
+  translateTranscodeReason,
+} from "@/lib/transcode-reasons";
 import {
   ActivityCard,
   AreaChart,
@@ -17,11 +24,47 @@ import {
   Poster,
   SectionHeader,
   StreamTypeBars,
+  UtcTag,
 } from "@/components/admin/activity-ui";
 import { KpiStrip, type Kpi } from "@/components/admin/activity-sections";
 import { EmptyState } from "@/components/ui/design";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { Translator } from "@/lib/i18n/translate";
+
+// Only what this page draws. The page builds it from the shared stats result so
+// the fields this tab never renders (heatmap, completion buckets, top episodes,
+// rewatch leaderboard, …) are not serialized into the client payload.
+export type ActivityStatsData = Pick<
+  PlayHistoryStatsResult,
+  | "totalPlays"
+  | "totalWatchTimeHours"
+  | "uniqueViewers"
+  | "totalBandwidthGB"
+  | "rewatchPlays"
+  | "rewatchRate"
+  | "peakConcurrent"
+  | "prevPeriod"
+  | "playsByDay"
+  | "watchTimeByDay"
+  | "bandwidthByDay"
+  | "uniqueViewersByDay"
+  | "topUsers"
+  | "topWatched"
+  | "transcodeRatio"
+  | "transcodeReasons"
+  | "sourceSplit"
+  | "playsByDow"
+  | "playsByHour"
+  | "resolutionBreakdown"
+  | "videoCodecBreakdown"
+  | "audioCodecBreakdown"
+  | "containerBreakdown"
+  | "bitrateBuckets"
+  | "topPlayers"
+  | "playsByPlatform"
+  | "topDevices"
+  | "decadeBreakdown"
+>;
 
 // One decimal in the UI language, so "avg 3,5h" sits beside the
 // locale-formatted "peak 1.234" instead of a hard-coded dot decimal.
@@ -40,33 +83,49 @@ const DOW_LABEL_KEYS = [
   "adminActivity.weekday.sun",
 ];
 
-function shortDay(day: string, locale: string): string {
-  // Parse explicitly as UTC and format in UTC so SSR (UTC) and client (local
-  // TZ) agree on the day label. Mirrors activity-calendar.tsx (guardrail 16).
-  return new Date(`${day.slice(0, 10)}T00:00:00Z`).toLocaleDateString(locale, {
-    month: "short",
-    day: "numeric",
-    timeZone: "UTC",
-  });
+// Parse explicitly as UTC and format in UTC so SSR (UTC) and client (local TZ)
+// agree on the day label. Mirrors activity-calendar.tsx (guardrail 16). ONE
+// formatter per locale: a 3650-day window labels ~15k points, and
+// toLocaleDateString builds a fresh Intl formatter on every call (~380 ms of
+// render at that size, against ~20 ms reusing one).
+function useShortDay(locale: string): (day: string) => string {
+  return useMemo(() => {
+    const fmt = new Intl.DateTimeFormat(locale, { month: "short", day: "numeric", timeZone: "UTC" });
+    return (day: string) => fmt.format(new Date(`${day.slice(0, 10)}T00:00:00Z`));
+  }, [locale]);
 }
 
 // Picks up to five evenly spaced x-axis labels, but never more labels than
 // there are days. Always using five made short ranges repeat a date (a 4-day
 // range printed "Aug 26 · 27 · 28 · 28 · 29"). With at most one label per day,
 // the chosen positions are at least one apart, so no date is printed twice.
-function axisLabels(days: string[], locale: string): string[] {
-  if (days.length < 2) return days.map((d) => shortDay(d, locale));
-  const ticks = Math.min(5, days.length);
+function axisLabels(labels: string[]): string[] {
+  if (labels.length < 2) return labels;
+  const ticks = Math.min(5, labels.length);
   return Array.from({ length: ticks }, (_, i) =>
-    shortDay(days[Math.round((i / (ticks - 1)) * (days.length - 1))], locale),
+    labels[Math.round((i / (ticks - 1)) * (labels.length - 1))],
   );
 }
 
+// The aggregate SQL's catch-all buckets are English literals; translate them
+// at render. Everything else in these charts is a codec, a client or a
+// resolution name, shown as the server reported it.
+function bucketLabel(label: string, t: Translator): string {
+  if (label === UNKNOWN_REASON || label === "unknown") return t("adminActivity.stats.unknown");
+  if (label === "Other") return t("adminActivity.stats.other");
+  return label;
+}
+
+// `complete` is false when play history doesn't cover the previous window
+// (tracking began, or retention purged, inside it): a delta would then compare
+// against a gap, so none is shown.
 function delta(
   t: Translator,
   current: number,
   previous: number,
+  complete: boolean,
 ): Kpi["delta"] {
+  if (!complete) return null;
   if (previous === 0 && current === 0) return null;
   if (previous === 0) return { text: t("adminActivity.kpi.new"), dir: "up" };
   const pct = Math.round(((current - previous) / previous) * 100);
@@ -75,45 +134,62 @@ function delta(
 }
 
 // `labelKey` is a catalog key, translated at render.
+// `labelKey` is a catalog key, translated at render. Anything else the server
+// recorded (no method at all, mostly older Jellyfin rows) is one "Other"
+// segment, so the bars and the "% direct play" header divide by one total.
 const STREAM_META: Record<string, { labelKey: string; color: string }> = {
   DirectPlay: { labelKey: "adminActivity.method.directPlay", color: "var(--ds-success)" },
   DirectStream: { labelKey: "adminActivity.method.remux", color: "var(--ds-info)" },
   Transcode: { labelKey: "adminActivity.method.transcode", color: "var(--ds-warning)" },
 };
+const STREAM_METHODS = ["DirectPlay", "DirectStream", "Transcode"];
 
 export function ActivityStatsRedesign({
   stats,
   days,
 }: {
-  stats: PlayHistoryStatsResult;
+  stats: ActivityStatsData;
   days: number;
 }) {
   const t = useT();
   const locale = useLocale();
+  const shortDay = useShortDay(locale);
+  const hoursSuffix = t("adminActivity.common.hoursSuffix");
+  const prevComplete = stats.prevPeriod.complete;
   const watchHours = Math.round(stats.totalWatchTimeHours);
-  const repeatRate =
-    stats.uniqueTitles > 0
-      ? Math.round((stats.totalPlays / stats.uniqueTitles) * 10) / 10
-      : 0;
+  // Every daily series is padded over the same days (padDailySeries), so one
+  // set of labels serves all four trends and the three KPI sparklines.
+  const dayKeys = stats.playsByDay.map((d) => d.day);
+  const dayLabels = dayKeys.map(shortDay);
+  const labelsFor = (series: { day: string }[]) =>
+    series.length === dayKeys.length && series.every((d, i) => d.day === dayKeys[i])
+      ? dayLabels
+      : series.map((d) => shortDay(d.day));
+  const bandwidthUnit = " GB";
 
   const kpis: Kpi[] = [
     {
       label: t("adminActivity.stat.plays"),
       value: stats.totalPlays.toLocaleString(locale),
-      delta: delta(t, stats.totalPlays, stats.prevPeriod.totalPlays),
+      delta: delta(t, stats.totalPlays, stats.prevPeriod.totalPlays, prevComplete),
       spark: stats.playsByDay.map((d) => d.count),
+      sparkLabels: labelsFor(stats.playsByDay),
+      sparkSuffix: t("adminActivity.common.playsSuffix"),
     },
     {
       label: t("adminActivity.stats.watchHours"),
-      value: `${watchHours.toLocaleString(locale)}h`,
-      delta: delta(t, watchHours, Math.round(stats.prevPeriod.totalWatchTimeHours)),
+      value: `${watchHours.toLocaleString(locale)}${hoursSuffix}`,
+      delta: delta(t, watchHours, Math.round(stats.prevPeriod.totalWatchTimeHours), prevComplete),
       spark: stats.watchTimeByDay.map((d) => d.hours),
+      sparkLabels: labelsFor(stats.watchTimeByDay),
+      sparkSuffix: hoursSuffix,
     },
     {
       label: t("adminActivity.stats.uniqueViewers"),
       value: stats.uniqueViewers.toLocaleString(locale),
-      delta: delta(t, stats.uniqueViewers, stats.prevPeriod.uniqueViewers),
+      delta: delta(t, stats.uniqueViewers, stats.prevPeriod.uniqueViewers, prevComplete),
       spark: stats.uniqueViewersByDay.map((d) => d.count),
+      sparkLabels: labelsFor(stats.uniqueViewersByDay),
     },
     {
       label: t("adminActivity.kpi.bandwidth"),
@@ -122,11 +198,20 @@ export function ActivityStatsRedesign({
           ? `${fmt1(stats.totalBandwidthGB / 1000, locale)} TB`
           : `${fmt1(stats.totalBandwidthGB, locale)} GB`,
       spark: stats.bandwidthByDay.map((d) => d.gb),
+      sparkLabels: labelsFor(stats.bandwidthByDay),
+      sparkSuffix: bandwidthUnit,
     },
     {
-      label: t("adminActivity.stats.repeatRate"),
-      value: `${fmt1(repeatRate, locale)}×`,
-      sub: t("adminActivity.stats.uniqueTitles", { count: stats.uniqueTitles, n: stats.uniqueTitles.toLocaleString(locale) }),
+      // Share of watched plays that re-watch a movie or episode the same viewer
+      // had already watched (play-history.ts) — not plays per title, which
+      // counted every new episode of a show as a "repeat".
+      label: t("adminActivity.stats.rewatchRate"),
+      value: `${fmt1(stats.rewatchRate, locale)}%`,
+      sub: t("adminActivity.stats.rewatchSub", {
+        count: stats.totalPlays,
+        n: stats.rewatchPlays.toLocaleString(locale),
+        total: stats.totalPlays.toLocaleString(locale),
+      }),
     },
     {
       label: t("adminActivity.stats.peakConcurrency"),
@@ -139,40 +224,42 @@ export function ActivityStatsRedesign({
   // oklch literals: the old hand-picked hues duplicated three of the six accent
   // fills (so "Plays" and "Bandwidth" were one colour under the cyan accent)
   // and never got the light-theme darkening the tokens carry (guardrail 42).
+  // `unit` carries its own spacing: the hours suffix sits flush ("12h", as on
+  // the KPI tile) and is translated (zh "小时"); GB keeps a space.
   const trends: {
     label: string;
     data: number[];
     color: string;
     unit: string;
-    days: string[];
+    labels: string[];
   }[] = [
     {
       label: t("adminActivity.stats.playsPerDay"),
       data: stats.playsByDay.map((d) => d.count),
       color: "var(--ds-chart-1)",
       unit: "",
-      days: stats.playsByDay.map((d) => d.day),
+      labels: labelsFor(stats.playsByDay),
     },
     {
       label: t("adminActivity.stats.watchHoursPerDay"),
       data: stats.watchTimeByDay.map((d) => d.hours),
       color: "var(--ds-chart-2)",
-      unit: "h",
-      days: stats.watchTimeByDay.map((d) => d.day),
+      unit: hoursSuffix,
+      labels: labelsFor(stats.watchTimeByDay),
     },
     {
       label: t("adminActivity.stats.bandwidthPerDay"),
       data: stats.bandwidthByDay.map((d) => d.gb),
       color: "var(--ds-chart-3)",
-      unit: "GB",
-      days: stats.bandwidthByDay.map((d) => d.day),
+      unit: bandwidthUnit,
+      labels: labelsFor(stats.bandwidthByDay),
     },
     {
       label: t("adminActivity.stats.uniqueViewersPerDay"),
       data: stats.uniqueViewersByDay.map((d) => d.count),
       color: "var(--ds-chart-4)",
       unit: "",
-      days: stats.uniqueViewersByDay.map((d) => d.day),
+      labels: labelsFor(stats.uniqueViewersByDay),
     },
   ];
 
@@ -182,15 +269,27 @@ export function ActivityStatsRedesign({
   const topTV = stats.topWatched
     .filter((m) => m.mediaType === "TV")
     .slice(0, 8);
+  // The page passes the overall top ten. (The query returns each source's top
+  // ten; the overall top ten always sits inside that union.)
   const userMax = stats.topUsers[0]?.count ?? 1;
   const movieMax = topMovies[0]?.plays ?? 1;
   const tvMax = topTV[0]?.plays ?? 1;
 
-  const streamTypes = ["DirectPlay", "DirectStream", "Transcode"].map((m) => ({
+  const streamTypes = STREAM_METHODS.map((m) => ({
     label: t(STREAM_META[m].labelKey),
     count: stats.transcodeRatio.find((r) => r.method === m)?.count ?? 0,
     color: STREAM_META[m].color,
   }));
+  const otherMethodCount = stats.transcodeRatio
+    .filter((r) => !STREAM_METHODS.includes(r.method))
+    .reduce((s, r) => s + r.count, 0);
+  if (otherMethodCount > 0) {
+    streamTypes.push({
+      label: t("adminActivity.method.other"),
+      count: otherMethodCount,
+      color: "var(--ds-fg-disabled)",
+    });
+  }
   const sourceSplit = stats.sourceSplit.map((r) => ({
     label: r.source === "plex" ? "Plex" : "Jellyfin",
     count: r.count,
@@ -206,7 +305,8 @@ export function ActivityStatsRedesign({
   );
   // transcodeRatio counts every session, but stats.totalPlays counts only
   // watched ones (play-history.ts's `wwhere` filter). Percentages of stream
-  // method must divide by the all-sessions total, not by totalPlays.
+  // method must divide by the all-sessions total, not by totalPlays — and that
+  // total is exactly what the bars below sum to, "Other" segment included.
   const sessionTotal = stats.transcodeRatio.reduce((s, r) => s + r.count, 0);
   const transcodePct =
     sessionTotal > 0 ? Math.round((transcodeTotal / sessionTotal) * 100) : 0;
@@ -214,9 +314,10 @@ export function ActivityStatsRedesign({
     sessionTotal > 0
       ? Math.round(((streamTypes[0]?.count ?? 0) / sessionTotal) * 100)
       : 0;
-  const topReason = [...stats.transcodeReasons].sort(
-    (a, b) => b.count - a.count,
-  )[0];
+  // The SQL orders reasons by count with the rolled-up tail last, so the first
+  // named bucket is the most common reason. "Other reasons" is a bundle, never
+  // a cause, even when the bundle outnumbers any single reason.
+  const topReason = stats.transcodeReasons.find((r) => r.reason !== OTHER_REASONS);
   const topReasonPct =
     transcodeTotal > 0 && topReason
       ? Math.round((topReason.count / transcodeTotal) * 100)
@@ -238,6 +339,9 @@ export function ActivityStatsRedesign({
   // only shown once there is a real peak — never "peak 0:00 · 0 plays".
   const peakCount = Math.max(...hourData, 0);
   const peakHour = hourData.indexOf(peakCount);
+  const hourTitles = hourData.map((count, h) =>
+    t("adminActivity.stats.hourBar", { hour: `${h}:00`, count, n: count.toLocaleString(locale) }),
+  );
 
   return (
     <div>
@@ -248,25 +352,31 @@ export function ActivityStatsRedesign({
         <div className="resp-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           {trends.map((tr) => {
             const peak = Math.max(...tr.data, 0);
-            // Divide by the full window, not t.data.length: the query skips
-            // days with no activity, so the array can be shorter than `days`.
+            // Per 24 hours of the window. The series has days + 1 entries (the
+            // rolling cutoff splits the oldest and newest UTC days), but together
+            // they hold exactly `days` × 24 h of activity, so divide by `days`.
             const avg =
               days > 0 ? tr.data.reduce((s, v) => s + v, 0) / days : 0;
             return (
               <ActivityCard key={tr.label}>
                 <SectionHeader
                   label={tr.label}
-                  sub={t("adminActivity.stats.lastDaysPeak", { days, peak: `${peak.toLocaleString(locale)}${tr.unit}` })}
+                  sub={t("adminActivity.stats.lastDaysPeak", { days, peak: `${fmt1(peak, locale)}${tr.unit}` })}
                   right={
                     <span
-                      className="ds-mono"
-                      style={{
-                        fontSize: 10.5,
-                        color: "var(--ds-fg-subtle)",
-                        fontVariantNumeric: "tabular-nums",
-                      }}
+                      style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
                     >
-                      {t("adminActivity.stats.avg", { value: `${fmt1(avg, locale)}${tr.unit}` })}
+                      <span
+                        className="ds-mono"
+                        style={{
+                          fontSize: 10.5,
+                          color: "var(--ds-fg-subtle)",
+                          fontVariantNumeric: "tabular-nums",
+                        }}
+                      >
+                        {t("adminActivity.stats.avg", { value: `${fmt1(avg, locale)}${tr.unit}` })}
+                      </span>
+                      <UtcTag title={t("adminActivity.stats.utcDaysTitle")} />
                     </span>
                   }
                 />
@@ -274,8 +384,8 @@ export function ActivityStatsRedesign({
                   data={tr.data}
                   h={120}
                   color={tr.color}
-                  labels={tr.days.map((d) => shortDay(d, locale))}
-                  valueSuffix={tr.unit ? ` ${tr.unit}` : ""}
+                  labels={tr.labels}
+                  valueSuffix={tr.unit}
                 />
                 <div
                   className="ds-mono"
@@ -287,7 +397,7 @@ export function ActivityStatsRedesign({
                     color: "var(--ds-fg-subtle)",
                   }}
                 >
-                  {axisLabels(tr.days, locale).map((l, i) => (
+                  {axisLabels(tr.labels).map((l, i) => (
                     <span key={i}>{l}</span>
                   ))}
                 </div>
@@ -303,7 +413,10 @@ export function ActivityStatsRedesign({
           <ActivityCard>
             <SectionHeader
               label={t("adminActivity.stats.topViewers")}
-              sub={t("adminActivity.stats.nOfTotal", { n: stats.topUsers.length, total: stats.uniqueViewers })}
+              sub={t("adminActivity.stats.nOfTotal", {
+                n: stats.topUsers.length.toLocaleString(locale),
+                total: stats.uniqueViewers.toLocaleString(locale),
+              })}
             />
             <div
               style={{ display: "flex", flexDirection: "column", gap: 6 }}
@@ -325,6 +438,7 @@ export function ActivityStatsRedesign({
                   pct={(u.count / userMax) * 100}
                 />
               ))}
+              {stats.topUsers.length === 0 && <Empty />}
             </div>
           </ActivityCard>
           <ActivityCard>
@@ -337,7 +451,7 @@ export function ActivityStatsRedesign({
                   rank={i + 1}
                   avatar={
                     <Poster
-                      src={m.posterPath ? posterUrl(m.posterPath, "w342") : null}
+                      src={m.posterPath ? posterUrl(m.posterPath, "w92") : null}
                       letter={(m.title[0] ?? "?").toUpperCase()}
                       w={26}
                       h={36}
@@ -363,7 +477,7 @@ export function ActivityStatsRedesign({
                   rank={i + 1}
                   avatar={
                     <Poster
-                      src={m.posterPath ? posterUrl(m.posterPath, "w342") : null}
+                      src={m.posterPath ? posterUrl(m.posterPath, "w92") : null}
                       letter={(m.title[0] ?? "?").toUpperCase()}
                       w={26}
                       h={36}
@@ -396,7 +510,7 @@ export function ActivityStatsRedesign({
             <SectionHeader label={t("adminActivity.popover.resolution")} />
             <HorizontalBars
               items={stats.resolutionBreakdown.map((r) => ({
-                label: r.bucket,
+                label: bucketLabel(r.bucket, t),
                 count: r.count,
               }))}
               color="var(--ds-chart-2)"
@@ -407,7 +521,7 @@ export function ActivityStatsRedesign({
             <SectionHeader label={t("adminActivity.field.videoCodec")} />
             <HorizontalBars
               items={stats.videoCodecBreakdown.map((r) => ({
-                label: r.codec,
+                label: bucketLabel(r.codec, t),
                 count: r.count,
               }))}
               labelWidth={70}
@@ -417,7 +531,7 @@ export function ActivityStatsRedesign({
             <SectionHeader label={t("adminActivity.stats.audioCodec")} />
             <HorizontalBars
               items={stats.audioCodecBreakdown.map((r) => ({
-                label: r.codec,
+                label: bucketLabel(r.codec, t),
                 count: r.count,
               }))}
               color="var(--ds-chart-3)"
@@ -428,7 +542,7 @@ export function ActivityStatsRedesign({
             <SectionHeader label={t("adminActivity.field.container")} />
             <HorizontalBars
               items={stats.containerBreakdown.map((r) => ({
-                label: r.container,
+                label: bucketLabel(r.container, t),
                 count: r.count,
               }))}
               color="var(--ds-chart-4)"
@@ -439,7 +553,7 @@ export function ActivityStatsRedesign({
             <SectionHeader label={t("adminActivity.field.bitrate")} sub={t("adminActivity.stats.distribution")} />
             <HorizontalBars
               items={stats.bitrateBuckets.map((r) => ({
-                label: r.bucket,
+                label: bucketLabel(r.bucket, t),
                 count: r.count,
               }))}
               color="var(--ds-chart-2)"
@@ -449,9 +563,7 @@ export function ActivityStatsRedesign({
           <ActivityCard>
             <SectionHeader label={t("adminActivity.stats.topPlayers")} sub={t("adminActivity.stats.clientApps")} />
             <HorizontalBars
-              items={stats.topPlayers
-                .slice(0, 8)
-                .map((r) => ({ label: r.player, count: r.count }))}
+              items={stats.topPlayers.slice(0, 8).map((r) => ({ label: bucketLabel(r.player, t), count: r.count }))}
               color="var(--ds-chart-3)"
               labelWidth={100}
             />
@@ -472,11 +584,15 @@ export function ActivityStatsRedesign({
           <ActivityCard>
             <SectionHeader
               label={t("adminActivity.stats.whyTranscoding")}
-              sub={t("adminActivity.stats.transcodedSessions", { n: transcodeTotal.toLocaleString(locale), pct: transcodePct })}
+              sub={t("adminActivity.stats.transcodedSessions", {
+                count: transcodeTotal,
+                n: transcodeTotal.toLocaleString(locale),
+                pct: transcodePct,
+              })}
             />
             <HorizontalBars
               items={stats.transcodeReasons.map((r) => ({
-                label: r.reason,
+                label: translateTranscodeReason(r.reason, t),
                 count: r.count,
               }))}
               color="var(--ds-warning)"
@@ -533,12 +649,16 @@ export function ActivityStatsRedesign({
                       lineHeight: 1.45,
                     }}
                   >
-                    {topReason.reason === "Unknown" ? (
+                    {/* States only what the data holds: the most common
+                        reason and its share. It used to add "addressing it
+                        would meaningfully cut server transcode load" whatever
+                        the share — and for Plex, whose "reason" was a guess. */}
+                    {topReason.reason === UNKNOWN_REASON ? (
                       <>{t("adminActivity.stats.noReason", { pct: topReasonPct })}</>
                     ) : (
                       <>
                         {(() => {
-                          const [before, after] = t("adminActivity.stats.causedBy", {
+                          const [before, after] = t("adminActivity.stats.topReason", {
                             pct: topReasonPct,
                             reason: "\u0000",
                           }).split("\u0000");
@@ -546,12 +666,15 @@ export function ActivityStatsRedesign({
                             <>
                               {before}
                               <span style={{ color: "var(--ds-fg)" }}>
-                                {topReason.reason.toLowerCase()}
+                                {translateTranscodeReason(topReason.reason, t)}
                               </span>
                               {after}
                             </>
                           );
                         })()}
+                        {isPlexStreamOnlyReason(topReason.reason) && (
+                          <> {t("adminActivity.stats.plexNoReason")}</>
+                        )}
                       </>
                     )}
                   </div>
@@ -589,7 +712,11 @@ export function ActivityStatsRedesign({
           }}
         >
           <ActivityCard>
-            <SectionHeader label={t("adminActivity.stats.dayOfWeek")} sub={t("adminActivity.stats.playsByWeekday")} />
+            <SectionHeader
+              label={t("adminActivity.stats.dayOfWeek")}
+              sub={t("adminActivity.stats.playsByWeekday")}
+              right={<UtcTag title={t("adminActivity.stats.utcDaysTitle")} />}
+            />
             <HorizontalBars items={dowItems} labelWidth={42} />
           </ActivityCard>
           <ActivityCard>
@@ -597,21 +724,28 @@ export function ActivityStatsRedesign({
               label={t("adminActivity.stats.hourOfDay")}
               sub={t("adminActivity.stats.hourDistribution")}
               right={
-                peakCount > 0 ? (
-                  <span
-                    className="ds-mono"
-                    style={{
-                      fontSize: 10.5,
-                      color: "var(--ds-fg-subtle)",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    {t("adminActivity.stats.peakHour", { hour: `${peakHour}:00`, count: peakCount })}
-                  </span>
-                ) : undefined
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  {peakCount > 0 && (
+                    <span
+                      className="ds-mono"
+                      style={{
+                        fontSize: 10.5,
+                        color: "var(--ds-fg-subtle)",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {t("adminActivity.stats.peakHour", {
+                        hour: `${peakHour}:00`,
+                        count: peakCount,
+                        n: peakCount.toLocaleString(locale),
+                      })}
+                    </span>
+                  )}
+                  <UtcTag title={t("adminActivity.heatmap.utcTitle")} />
+                </span>
               }
             />
-            <BarColumn data={hourData} h={120} />
+            <BarColumn data={hourData} h={120} titles={hourTitles} />
             <div
               className="ds-mono"
               style={{
@@ -639,9 +773,7 @@ export function ActivityStatsRedesign({
               sub={t("adminActivity.title.unique", { count: stats.playsByPlatform.length })}
             />
             <HorizontalBars
-              items={stats.playsByPlatform
-                .slice(0, 8)
-                .map((p) => ({ label: p.platform, count: p.count }))}
+              items={stats.playsByPlatform.slice(0, 8).map((p) => ({ label: bucketLabel(p.platform, t), count: p.count }))}
               labelWidth={100}
             />
           </ActivityCard>
@@ -651,9 +783,7 @@ export function ActivityStatsRedesign({
               sub={t("adminActivity.user.known", { count: stats.topDevices.length })}
             />
             <HorizontalBars
-              items={stats.topDevices
-                .slice(0, 8)
-                .map((d) => ({ label: d.device, count: d.count }))}
+              items={stats.topDevices.slice(0, 8).map((d) => ({ label: bucketLabel(d.device, t), count: d.count }))}
               color="var(--ds-chart-2)"
               labelWidth={100}
             />
@@ -665,7 +795,7 @@ export function ActivityStatsRedesign({
             />
             <HorizontalBars
               items={stats.decadeBreakdown.map((d) => ({
-                label: d.decade,
+                label: bucketLabel(d.decade, t),
                 count: d.count,
               }))}
               color="var(--ds-chart-3)"
