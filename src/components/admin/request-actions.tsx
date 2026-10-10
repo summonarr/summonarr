@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { Loader2, Check, X, Ban, AlertTriangle, RefreshCw, RotateCcw, Search, MessageSquare, Trash2, Users, Settings } from "@/components/icons";
+import { Loader2, Check, X, Ban, AlertTriangle, RefreshCw, RotateCcw, Search, MessageSquare, Trash2, Users, Settings, Download } from "@/components/icons";
+import { ReleaseSearchDialog } from "./release-search-dialog";
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 
@@ -38,6 +39,8 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
     setOptimisticStatus(null);
   }, [currentStatus]);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  // Interactive search ("Pick release") on the request's own instance.
+  const [showReleases, setShowReleases] = useState(false);
   const [arrError, setArrError] = useState<string | null>(null);
   const [retryOk, setRetryOk] = useState(false);
   const [showDeclineNote, setShowDeclineNote] = useState(false);
@@ -362,6 +365,16 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           <Button
             size="sm"
             variant="outline"
+            onClick={() => { setArrError(null); setShowReleases(true); }}
+            disabled={loading !== null}
+            className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1"
+          >
+            <Download className="w-3 h-3" />
+            {t("adminQueue.actions.pickRelease")}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
             onClick={retryPush}
             disabled={loading !== null}
             className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-1"
@@ -391,6 +404,7 @@ export function RequestActions({ requestId, currentStatus, mediaType, arrInstanc
           </span>
         )}
         {replyBlock}
+        <ReleaseSearchDialog open={showReleases} onOpenChange={setShowReleases} requestId={requestId} mediaType={mediaType} />
       </div>
     );
   }

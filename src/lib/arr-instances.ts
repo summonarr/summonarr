@@ -40,6 +40,9 @@ export const BUILTIN_ARR_INSTANCE_KEYS: readonly ArrInstanceKey[] = [
 // "available" to search: announced/inCinemas/released) and LanguageProfileId
 // only for Sonarr v3 (v4 removed language profiles) — the shared field union
 // keeps key derivation uniform; readers consume only their service's field.
+// ExternalUrl is the address a BROWSER uses for the instance ("Open in Radarr"
+// links); `Url` is often a Docker-internal hostname the browser can't resolve.
+// It is never fetched by the server, and it is plaintext (not a secret).
 export type ArrSettingField =
   | "Url"
   | "ApiKey"
@@ -47,7 +50,8 @@ export type ArrSettingField =
   | "QualityProfileId"
   | "WebhookSecret"
   | "MinimumAvailability"
-  | "LanguageProfileId";
+  | "LanguageProfileId"
+  | "ExternalUrl";
 
 // The values Radarr's movie resource accepts for minimumAvailability. A stored
 // value outside this set reads as "unset" (getCfg drops it) so a hand-edited

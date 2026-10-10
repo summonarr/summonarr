@@ -38,6 +38,8 @@ interface InstanceView {
   skipLibraryCheck: boolean;
   autoRoute: { animeOnly?: boolean } | null;
   url: string;
+  // Absent on an older server's response.
+  externalUrl?: string;
   rootFolder: string;
   qualityProfileId: string;
   minimumAvailability: string;
@@ -67,6 +69,8 @@ interface Draft {
   slug: string;
   name: string;
   url: string;
+  // The address a browser uses ("Open in Radarr" links); "" = use `url`.
+  externalUrl: string;
   apiKey: string;
   rootFolder: string;
   qualityProfileId: string;
@@ -87,6 +91,7 @@ function toDraft(v: InstanceView): Draft {
     slug: v.slug,
     name: v.name,
     url: v.url,
+    externalUrl: v.externalUrl ?? "",
     apiKey: "",
     rootFolder: v.rootFolder,
     qualityProfileId: v.qualityProfileId,
@@ -213,7 +218,7 @@ function ServiceInstances({ service }: { service: ArrService }) {
       {
         // Create the webhook secret automatically so the admin doesn't have to
         // make one up — they just copy the webhook URL into Radarr/Sonarr.
-        slug: "", name: "", url: "", apiKey: "", rootFolder: "", qualityProfileId: "",
+        slug: "", name: "", url: "", externalUrl: "", apiKey: "", rootFolder: "", qualityProfileId: "",
         minimumAvailability: "", languageProfileId: "", webhookSecret: generateSecret(),
         restricted: false, serverAll: false, skipLibraryCheck: false, animeOnly: false,
         hasApiKey: false, hasWebhookSecret: false, isNew: true,
@@ -257,6 +262,8 @@ function ServiceInstances({ service }: { service: ArrService }) {
       slug: d.slug,
       name: d.name.trim() || d.slug,
       url: d.url.trim(),
+      // null clears it (the links fall back to the connection URL).
+      externalUrl: d.externalUrl.trim() || null,
       apiKey: d.apiKey ? d.apiKey : d.hasApiKey ? MASKED_VALUE : undefined,
       rootFolder: d.rootFolder,
       qualityProfileId: d.qualityProfileId || null,
@@ -391,6 +398,19 @@ function ServiceInstances({ service }: { service: ArrService }) {
                   <p className="text-xs text-zinc-500">{t("settings.form.agents.secretKeep")}</p>
                 )}
               </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor={`${service}-${idx}-external-url`}>{t("settings.form.arr.externalUrl")}</Label>
+              <Input
+                id={`${service}-${idx}-external-url`}
+                type="url"
+                value={d.externalUrl}
+                onChange={(e) => update(idx, { externalUrl: e.target.value })}
+                placeholder={service === "radarr" ? "https://radarr-anime.example.com" : "https://sonarr-anime.example.com"}
+                className="bg-zinc-800 border-zinc-700 font-mono"
+              />
+              <p className="text-xs text-zinc-500">{t("settings.form.arr.externalUrlHelp", { service: label })}</p>
             </div>
 
             <div className="lg:grid lg:grid-cols-2 lg:gap-4 space-y-3 lg:space-y-0">

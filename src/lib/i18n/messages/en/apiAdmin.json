@@ -266,5 +266,17 @@
   "apiAdmin.missing.searchBodyInvalid": "Body must be { service: \"radarr\" | \"sonarr\", instance: string, arrId: positive integer }",
   "apiAdmin.missing.nothingMissing": "Nothing is missing for this title any more — refresh the list",
   "apiAdmin.missing.movieNotFound": "Radarr has no movie with that id",
-  "apiAdmin.missing.searchFailed": "Could not start the search in {service}"
+  "apiAdmin.missing.searchFailed": "Could not start the search in {service}",
+  "apiAdmin.missing.modeInvalid": "mode must be \"missing\" or \"cutoff\"",
+  "apiAdmin.missing.nothingToUpgrade": "Nothing is below cutoff for this title any more — refresh the list",
+  "apiAdmin.queue.removeBodyInvalid": "Body must be { service, instance, ids: positive integers (1–500), action: \"remove\" | \"blocklist\" | \"blocklistSearch\", removeFromClient?: boolean }",
+  "apiAdmin.queue.gone": "That download is no longer in the queue — refresh",
+  "apiAdmin.queue.removeFailed": "Could not remove the download in {service}",
+  "apiAdmin.arrHealth.webhookBodyInvalid": "Body must be { service: \"radarr\" | \"sonarr\", instance: string, baseUrl?: string }",
+  "apiAdmin.arrHealth.baseInvalid": "baseUrl must be an http(s) address with no credentials, query or fragment",
+  "apiAdmin.arrHealth.webhookRefused": "{service} refused the webhook — it could not reach Summonarr at that address",
+  "apiAdmin.arrHealth.webhookSchema": "{service} did not offer a Webhook connection Summonarr recognizes",
+  "apiAdmin.arrHealth.webhookFailed": "Could not reach {service} to set up the webhook",
+  "apiAdmin.arrOpen.paramsInvalid": "Expected service (radarr or sonarr), instance, and one of tmdbId or arrId",
+  "apiAdmin.arrOpen.noAddress": "That instance has no usable address — set its URL in Settings"
 }

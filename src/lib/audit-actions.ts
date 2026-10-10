@@ -54,6 +54,8 @@ export const ACTION_GROUP: Record<AuditAction, AuditGroup> = {
   REQUEST_AUTO: "admin",
   LIBRARY_CLEANUP_DELETE: "admin",
   LIBRARY_CLEANUP_PROTECT: "admin",
+  ARR_QUEUE_REMOVE: "admin",
+  ARR_RELEASE_GRAB: "admin",
   LIBRARY_SYNC: "system",
   CACHE_WARM: "system",
   RATINGS_CACHE_CLEAR: "system",
@@ -116,4 +118,6 @@ export const ACTION_LABELS: Record<AuditAction, ActionLabel> = {
   REQUEST_AUTO:          { label: "Auto-Requested",            color: "bg-sky-500/15 text-sky-400",           icon: "approve" },
   LIBRARY_CLEANUP_DELETE: { label: "Library Cleanup Delete",   color: "bg-red-500/15 text-red-400",             icon: "delete" },
   LIBRARY_CLEANUP_PROTECT: { label: "Cleanup Protection Changed", color: "bg-sky-500/15 text-sky-400",         icon: "role" },
+  ARR_QUEUE_REMOVE:      { label: "Download Removed",          color: "bg-red-500/15 text-red-400",             icon: "delete" },
+  ARR_RELEASE_GRAB:      { label: "Release Grabbed",           color: "bg-sky-500/15 text-sky-400",             icon: "sync" },
 };

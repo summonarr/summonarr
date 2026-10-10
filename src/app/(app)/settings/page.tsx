@@ -11,6 +11,7 @@ import { PageHeader } from "@/components/ui/design";
 import { NotificationAgentsManager } from "@/components/settings/notification-agents-manager";
 import { ArrForm, WebhookSecretForm, WebhookUrls, PlexConnectForm, JellyfinSyncForm, DonationForm, MotdForm, SiteTitleForm, SiteUrlForm, RateLimitForm, SessionForm, EmailForm, DiscordBotForm, OmdbForm, MdblistForm, TraktForm, IpinfoForm, CacheManagementPanel, LibraryMatchForm, RatingsWarmButton, ActivityWarmButton, QuotaForm, EnableUserEmailsToggle, MaintenanceForm, DeletionVoteThresholdForm, DisableLocalLoginToggle, JellyfinRestrictSignInToggle, EnableMachineSessionToggle, Request4kAllToggle, RatingsVisibilityForm, IosPushRelayForm, AnnounceUpdateButton, AuditRetentionForm } from "@/components/settings/settings-ui";
 import { ArrInstancesManager } from "@/components/settings/arr-instances-manager";
+import { ArrHealthPanel } from "@/components/admin/arr-health-panel";
 import { MediaInstancesManager } from "@/components/settings/media-instances-manager";
 import { PlayHistorySettingsForm } from "@/components/settings/play-history-settings";
 import { WatchGradeSettingsForm } from "@/components/settings/watch-grade-settings";
@@ -154,11 +155,11 @@ function SettingsCard({
 }
 
 const ALL_KEYS = [
-  "radarrUrl", "radarrApiKey", "radarrRootFolder", "radarrQualityProfileId", "radarrMinimumAvailability",
-  "sonarrUrl", "sonarrApiKey", "sonarrRootFolder", "sonarrQualityProfileId", "sonarrLanguageProfileId",
+  "radarrUrl", "radarrApiKey", "radarrRootFolder", "radarrQualityProfileId", "radarrMinimumAvailability", "radarrExternalUrl",
+  "sonarrUrl", "sonarrApiKey", "sonarrRootFolder", "sonarrQualityProfileId", "sonarrLanguageProfileId", "sonarrExternalUrl",
   "webhookSecret", "sonarrWebhookSecret", "radarrWebhookSecret",
-  "radarr4kUrl", "radarr4kApiKey", "radarr4kRootFolder", "radarr4kQualityProfileId", "radarr4kMinimumAvailability", "radarr4kWebhookSecret",
-  "sonarr4kUrl", "sonarr4kApiKey", "sonarr4kRootFolder", "sonarr4kQualityProfileId", "sonarr4kLanguageProfileId", "sonarr4kWebhookSecret",
+  "radarr4kUrl", "radarr4kApiKey", "radarr4kRootFolder", "radarr4kQualityProfileId", "radarr4kMinimumAvailability", "radarr4kWebhookSecret", "radarr4kExternalUrl",
+  "sonarr4kUrl", "sonarr4kApiKey", "sonarr4kRootFolder", "sonarr4kQualityProfileId", "sonarr4kLanguageProfileId", "sonarr4kWebhookSecret", "sonarr4kExternalUrl",
   "request4kAll",
   // plexAdminToken is read here so the page can tell the sync buttons whether
   // Plex is configured — the same url+token pair /api/sync/plex itself checks.
@@ -814,6 +815,7 @@ export default async function SettingsPage({
               <ArrForm
                 service="radarr"
                 initialUrl={cfg.radarrUrl ?? ""}
+                initialExternalUrl={cfg.radarrExternalUrl ?? ""}
                 initialApiKey={cfg.radarrApiKey ? "••••••••" : ""}
                 initialRootFolder={cfg.radarrRootFolder ?? ""}
                 initialQualityProfileId={cfg.radarrQualityProfileId ?? ""}
@@ -831,6 +833,7 @@ export default async function SettingsPage({
                 service="radarr"
                 variant="4k"
                 initialUrl={cfg.radarr4kUrl ?? ""}
+                initialExternalUrl={cfg.radarr4kExternalUrl ?? ""}
                 initialApiKey={cfg.radarr4kApiKey ? "••••••••" : ""}
                 initialRootFolder={cfg.radarr4kRootFolder ?? ""}
                 initialQualityProfileId={cfg.radarr4kQualityProfileId ?? ""}
@@ -847,6 +850,7 @@ export default async function SettingsPage({
               <ArrForm
                 service="sonarr"
                 initialUrl={cfg.sonarrUrl ?? ""}
+                initialExternalUrl={cfg.sonarrExternalUrl ?? ""}
                 initialApiKey={cfg.sonarrApiKey ? "••••••••" : ""}
                 initialRootFolder={cfg.sonarrRootFolder ?? ""}
                 initialQualityProfileId={cfg.sonarrQualityProfileId ?? ""}
@@ -864,6 +868,7 @@ export default async function SettingsPage({
                 service="sonarr"
                 variant="4k"
                 initialUrl={cfg.sonarr4kUrl ?? ""}
+                initialExternalUrl={cfg.sonarr4kExternalUrl ?? ""}
                 initialApiKey={cfg.sonarr4kApiKey ? "••••••••" : ""}
                 initialRootFolder={cfg.sonarr4kRootFolder ?? ""}
                 initialQualityProfileId={cfg.sonarr4kQualityProfileId ?? ""}
@@ -1024,6 +1029,9 @@ export default async function SettingsPage({
                     sonarr4kConfigured={!!(cfg.sonarr4kUrl && cfg.sonarr4kApiKey)}
                     legacyHasSecret={!!cfg.webhookSecret}
                   />
+                </div>
+                <div className="border-t border-zinc-800 pt-5">
+                  <ArrHealthPanel variant="webhooks" />
                 </div>
               </div>
             </SettingsCard>

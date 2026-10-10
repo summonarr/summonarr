@@ -17,6 +17,7 @@ import { isMovieDownloadedInRadarr } from "@/lib/arr";
 import { getArrInstances } from "@/lib/arr-instance-registry";
 import { arrSettingKey, DEFAULT_ARR_INSTANCE } from "@/lib/arr-instances";
 import { sanitizeForLog } from "@/lib/sanitize";
+import { forwardArrHealthEvent } from "@/lib/arr-health-notify";
 
 function safeCompare(a: string, b: string): boolean {
   const ha = createHash("sha256").update(a).digest();
@@ -127,16 +128,25 @@ export async function POST(req: NextRequest) {
   }
 
   // Health / HealthRestored are the same shape: a fixed per-issue payload
-  // (level/message/type/wikiUrl — nothing per delivery) that nothing below
-  // processes. An indexer flapping twice inside the 24h replay TTL would
-  // otherwise see its second identical POST answered 409, and Radarr then
-  // records Summonarr's notification as failing and raises its own health
-  // warning — for an event we ignore anyway. Acknowledge before the digest,
-  // like Test. Every OTHER unhandled eventType stays replay-recorded (the
-  // Grab pin in tests/webhook-routes.test.mts): those payloads carry
-  // per-delivery fields, so a byte-identical repeat IS a replay.
+  // (level/message/type/wikiUrl — nothing per delivery). An indexer flapping
+  // twice inside the 24h replay TTL would otherwise see its second identical
+  // POST answered 409, and Radarr then records Summonarr's notification as
+  // failing and raises its own health warning. Acknowledge before the digest,
+  // like Test; the only thing done with one is forwarding it to the admin's
+  // notification channels (arr.health / arr.health_restored), which keeps its
+  // own short dedupe window instead (arr-health-notify.ts). Every OTHER
+  // unhandled eventType stays replay-recorded (the Grab pin in
+  // tests/webhook-routes.test.mts): those payloads carry per-delivery fields,
+  // so a byte-identical repeat IS a replay.
   if (payload.eventType === "Health" || payload.eventType === "HealthRestored") {
-    return NextResponse.json({ ok: true, skipped: true });
+    const forwarded = forwardArrHealthEvent({
+      service: "radarr",
+      instance: arrInstance,
+      instanceName: arrInstance === DEFAULT_ARR_INSTANCE ? null : instances.find((i) => i.slug === arrInstance)?.name ?? arrInstance,
+      eventType: payload.eventType,
+      payload,
+    });
+    return NextResponse.json({ ok: true, health: true, forwarded });
   }
 
   // Canonical-JSON replay digest: a replay with reordered keys still produces the same digest

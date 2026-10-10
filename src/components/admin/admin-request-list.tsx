@@ -8,6 +8,7 @@ import Image from "next/image";
 import { Film, Tv2, Loader2, Check, X, ExternalLink } from "@/components/icons";
 import Link from "next/link";
 import { RequestActions } from "./request-actions";
+import { OpenInArrLink, arrInstanceLabel } from "./open-in-arr";
 import { Chip } from "@/components/ui/design";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { withBasePath } from "@/lib/base-path";
@@ -75,6 +76,8 @@ interface AdminRequestListProps {
   sort?: string;
   /** Display names for non-default instances, keyed by slug (from the instance registry). */
   instanceNames?: Record<string, string>;
+  /** ADMIN viewer: show "Open in Radarr/Sonarr" (the route behind it is ADMIN-only). */
+  canOpenArr?: boolean;
 }
 
 function formatUserLabel(r: Requester, t: Translator) {
@@ -105,7 +108,7 @@ function formatUserLabel(r: Requester, t: Translator) {
 
 // Admin request queue: groups requests by title, drives per-group + batch
 // approve/decline, and paginates. Live-refreshes on request:* SSE events.
-export function AdminRequestList({ requests, page, total, pageSize, statusFilter, typeFilter, sort, instanceNames }: AdminRequestListProps) {
+export function AdminRequestList({ requests, page, total, pageSize, statusFilter, typeFilter, sort, instanceNames, canOpenArr = false }: AdminRequestListProps) {
   const router = useRouter();
   const mounted = useHasMounted();
   const t = useT();
@@ -570,6 +573,7 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
               </div>
 
               <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-1 min-w-0">
                 <Link
                   href={`/${group.mediaType === "MOVIE" ? "movie" : "tv"}/${group.tmdbId}`}
                   className="group inline-flex items-center gap-1 font-medium transition-colors truncate max-w-full"
@@ -586,6 +590,22 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                     }}
                   />
                 </Link>
+                {canOpenArr && (
+                  <OpenInArrLink
+                    service={group.mediaType === "MOVIE" ? "radarr" : "sonarr"}
+                    instance={representativeInstance}
+                    target={{ tmdbId: group.tmdbId }}
+                    label={t("adminManage.openIn", {
+                      name: arrInstanceLabel(
+                        group.mediaType === "MOVIE" ? "radarr" : "sonarr",
+                        instanceLabel(representativeInstance),
+                        representativeInstance,
+                      ),
+                    })}
+                    iconOnly
+                  />
+                )}
+                </div>
 
                 <p
                   className="ds-mono"

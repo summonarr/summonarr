@@ -299,5 +299,19 @@
   "adminQueue.fixMatch.arrBadge": "Radarr/Sonarr ✓",
   "adminQueue.fixMatch.arrShort": "Arr ✓",
   "adminQueue.fixMatch.resolutionNote": "Correspondência corrigida para “{title}”",
-  "adminQueue.fixMatch.autoRequestNote": "Adicionado a partir da correção de correspondência — estava mal correspondido na biblioteca"
+  "adminQueue.fixMatch.autoRequestNote": "Adicionado a partir da correção de correspondência — estava mal correspondido na biblioteca",
+  "adminQueue.actions.pickRelease": "Escolher release",
+  "adminQueue.releases.title": "Escolha um release",
+  "adminQueue.releases.searching": "Buscando nos indexadores…",
+  "adminQueue.releases.failed": "Não foi possível buscar releases",
+  "adminQueue.releases.grabFailed": "Não foi possível capturar o release",
+  "adminQueue.releases.grabbed": "Enviado ao cliente de download. A solicitação fica disponível quando for importado.",
+  "adminQueue.releases.noSeasons": "Esta série ainda não tem temporadas no Sonarr.",
+  "adminQueue.releases.none": "Nenhum release encontrado.",
+  "adminQueue.releases.season": "Temporada",
+  "adminQueue.releases.seasonComplete": "Temporada {number}",
+  "adminQueue.releases.seasonMissing_one": "Temporada {number} · falta {count}",
+  "adminQueue.releases.seasonMissing_other": "Temporada {number} · faltam {count}",
+  "adminQueue.releases.seeders_one": "{count} seeder",
+  "adminQueue.releases.seeders_other": "{count} seeders"
 }

@@ -266,5 +266,17 @@
   "apiAdmin.missing.searchBodyInvalid": "请求体必须是 { service: \"radarr\" | \"sonarr\", instance: string, arrId: 正整数 }",
   "apiAdmin.missing.nothingMissing": "该作品已不再缺失任何内容——请刷新列表",
   "apiAdmin.missing.movieNotFound": "Radarr 中没有该 id 的电影",
-  "apiAdmin.missing.searchFailed": "无法在 {service} 中启动搜索"
+  "apiAdmin.missing.searchFailed": "无法在 {service} 中启动搜索",
+  "apiAdmin.missing.modeInvalid": "mode 必须是 \"missing\" 或 \"cutoff\"",
+  "apiAdmin.missing.nothingToUpgrade": "该条目已没有低于截止质量的内容，请刷新列表",
+  "apiAdmin.queue.removeBodyInvalid": "请求体必须是 { service, instance, ids：正整数（1–500），action：\"remove\" | \"blocklist\" | \"blocklistSearch\"，removeFromClient?：boolean }",
+  "apiAdmin.queue.gone": "该下载已不在队列中，请刷新",
+  "apiAdmin.queue.removeFailed": "无法在 {service} 中移除该下载",
+  "apiAdmin.arrHealth.webhookBodyInvalid": "请求体必须是 { service：\"radarr\" | \"sonarr\"，instance：string，baseUrl?：string }",
+  "apiAdmin.arrHealth.baseInvalid": "baseUrl 必须是不含凭据、查询参数或片段的 http(s) 地址",
+  "apiAdmin.arrHealth.webhookRefused": "{service} 拒绝了该 Webhook：无法通过该地址访问 Summonarr",
+  "apiAdmin.arrHealth.webhookSchema": "{service} 未提供 Summonarr 可识别的 Webhook 连接",
+  "apiAdmin.arrHealth.webhookFailed": "无法连接 {service} 来配置 Webhook",
+  "apiAdmin.arrOpen.paramsInvalid": "需要 service（radarr 或 sonarr）、instance，以及 tmdbId 或 arrId 之一",
+  "apiAdmin.arrOpen.noAddress": "该实例没有可用地址，请在设置中填写其 URL"
 }

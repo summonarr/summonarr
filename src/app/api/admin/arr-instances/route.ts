@@ -37,7 +37,7 @@ const INSTANCE_NAME_MAX_LEN = 100;
 // covered everywhere at once. MinimumAvailability is Radarr-meaningful and
 // LanguageProfileId Sonarr-meaningful only; the unused service's key simply
 // never gets a row (the UI never offers it and getCfg ignores it).
-const FIELDS = ["Url", "ApiKey", "RootFolder", "QualityProfileId", "WebhookSecret", "MinimumAvailability", "LanguageProfileId"] as const;
+const FIELDS = ["Url", "ApiKey", "RootFolder", "QualityProfileId", "WebhookSecret", "MinimumAvailability", "LanguageProfileId", "ExternalUrl"] as const;
 
 interface InstancePayload {
   slug: string;
@@ -47,6 +47,8 @@ interface InstancePayload {
   skipLibraryCheck?: boolean;
   autoRoute?: ArrInstanceConfig["autoRoute"];
   url?: string;
+  // The browser-facing address ("Open in Radarr" links); null clears it.
+  externalUrl?: string | null;
   apiKey?: string;
   rootFolder?: string;
   qualityProfileId?: number | string | null;
@@ -77,6 +79,7 @@ async function readInstanceView(service: ArrService, instance: ArrInstanceConfig
     // embedded credential (older rows may predate the write-time URL check in
     // POST below).
     url: stripUrlUserinfo(map[arrSettingKey(service, instance.slug, "Url")] ?? ""),
+    externalUrl: stripUrlUserinfo(map[arrSettingKey(service, instance.slug, "ExternalUrl")] ?? ""),
     rootFolder: map[arrSettingKey(service, instance.slug, "RootFolder")] ?? "",
     qualityProfileId: map[arrSettingKey(service, instance.slug, "QualityProfileId")] ?? "",
     minimumAvailability: map[arrSettingKey(service, instance.slug, "MinimumAvailability")] ?? "",
@@ -148,6 +151,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     // back on GET.
     if (typeof inst.url === "string" && inst.url.trim().length > 0) {
       const err = validateServerUrl(inst.url.trim(), {}, t);
+      if (err) return NextResponse.json({ error: t("apiAdmin.arrInstances.invalidUrl", { slug: inst.slug, reason: err }) }, { status: 400 });
+    }
+    if (typeof inst.externalUrl === "string" && inst.externalUrl.trim().length > 0) {
+      const err = validateServerUrl(inst.externalUrl.trim(), {}, t);
       if (err) return NextResponse.json({ error: t("apiAdmin.arrInstances.invalidUrl", { slug: inst.slug, reason: err }) }, { status: 400 });
     }
     if (typeof inst.name === "string" && inst.name.trim().length > INSTANCE_NAME_MAX_LEN) {
@@ -230,6 +237,11 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       });
     };
     await set("Url", typeof inst.url === "string" ? inst.url.trim() : undefined, false);
+    await set(
+      "ExternalUrl",
+      inst.externalUrl === undefined ? undefined : inst.externalUrl === null ? "" : String(inst.externalUrl).trim(),
+      false,
+    );
     await set("ApiKey", inst.apiKey, true);
     await set("RootFolder", typeof inst.rootFolder === "string" ? inst.rootFolder : undefined, false);
     // null = explicit clear (the UI sends null for an emptied field); undefined = untouched.

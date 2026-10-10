@@ -115,6 +115,8 @@ const AGENT_TEXT_KEYS: Record<NotifyEvent["event"], { title: string; body: strin
   "vote.threshold": { title: "notify.agent.vote.threshold.title", body: "notify.agent.vote.threshold.body" },
   "arr.manual_interaction": { title: "notify.agent.arr.manual_interaction.title", body: "notify.agent.arr.manual_interaction.body", withText: "notify.agent.arr.manual_interaction.bodyWithText" },
   "arr.grab_completed": { title: "notify.agent.arr.grab_completed.title", body: "notify.agent.arr.grab_completed.body" },
+  "arr.health": { title: "notify.agent.arr.health.title", body: "notify.agent.arr.health.body", withText: "notify.agent.arr.health.bodyWithText" },
+  "arr.health_restored": { title: "notify.agent.arr.health_restored.title", body: "notify.agent.arr.health_restored.body", withText: "notify.agent.arr.health_restored.bodyWithText" },
   "agent.test": { title: "notify.agent.agent.test.title", body: "notify.agent.agent.test.body" },
 };
 

@@ -266,5 +266,17 @@
   "apiAdmin.missing.searchBodyInvalid": "El cuerpo debe ser { service: \"radarr\" | \"sonarr\", instance: string, arrId: entero positivo }",
   "apiAdmin.missing.nothingMissing": "A este título ya no le falta nada: actualiza la lista",
   "apiAdmin.missing.movieNotFound": "Radarr no tiene ninguna película con ese id",
-  "apiAdmin.missing.searchFailed": "No se pudo iniciar la búsqueda en {service}"
+  "apiAdmin.missing.searchFailed": "No se pudo iniciar la búsqueda en {service}",
+  "apiAdmin.missing.modeInvalid": "mode debe ser \"missing\" o \"cutoff\"",
+  "apiAdmin.missing.nothingToUpgrade": "Ya no hay nada por debajo del límite en este título: actualiza la lista",
+  "apiAdmin.queue.removeBodyInvalid": "El cuerpo debe ser { service, instance, ids: enteros positivos (1–500), action: \"remove\" | \"blocklist\" | \"blocklistSearch\", removeFromClient?: boolean }",
+  "apiAdmin.queue.gone": "Esa descarga ya no está en la cola: actualiza",
+  "apiAdmin.queue.removeFailed": "No se pudo quitar la descarga en {service}",
+  "apiAdmin.arrHealth.webhookBodyInvalid": "El cuerpo debe ser { service: \"radarr\" | \"sonarr\", instance: string, baseUrl?: string }",
+  "apiAdmin.arrHealth.baseInvalid": "baseUrl debe ser una dirección http(s) sin credenciales, consulta ni fragmento",
+  "apiAdmin.arrHealth.webhookRefused": "{service} rechazó el webhook: no pudo llegar a Summonarr en esa dirección",
+  "apiAdmin.arrHealth.webhookSchema": "{service} no ofrece una conexión Webhook que Summonarr reconozca",
+  "apiAdmin.arrHealth.webhookFailed": "No se pudo contactar con {service} para configurar el webhook",
+  "apiAdmin.arrOpen.paramsInvalid": "Se esperaba service (radarr o sonarr), instance y tmdbId o arrId",
+  "apiAdmin.arrOpen.noAddress": "Esa instancia no tiene una dirección utilizable: configura su URL en Ajustes"
 }

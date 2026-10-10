@@ -955,6 +955,10 @@ enum AuditAction {
   MFA_CHANGE
   // An admin reset another user's two-factor enrollment (lost device).
   MFA_RESET
+  // An admin removed a download from a Radarr/Sonarr queue (Admin → Download Queue).
+  ARR_QUEUE_REMOVE
+  // An admin grabbed a specific release for a request (the request queue's "Pick release").
+  ARR_RELEASE_GRAB
 }
 
 // ─── Play History ────────────────────────────────────────────────────────────

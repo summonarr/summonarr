@@ -283,7 +283,13 @@ const ARR_FETCH_TIMEOUT_MS = 30_000;
 // Raised from 10 MB — libraries with >3k movies were being silently truncated at the old cap
 const ARR_FETCH_MAX_BYTES = 50 * 1024 * 1024;
 
-export async function arrFetch<T>(cfg: ArrCfg, path: string, options: RequestInit = {}): Promise<T> {
+// `quietErrors`: skip arrRequest's per-response error line because the CALLER
+// reports the failure itself — the Download Queue page re-reads every 20s, and
+// a down instance is one unchanged condition it logs once (guardrail 7b). The
+// error is still thrown, unchanged.
+export type ArrFetchOptions = RequestInit & { quietErrors?: boolean };
+
+export async function arrFetch<T>(cfg: ArrCfg, path: string, options: ArrFetchOptions = {}): Promise<T> {
   const res = await arrRequest(cfg, path, options);
   return res.json() as Promise<T>;
 }
@@ -292,12 +298,12 @@ export async function arrFetch<T>(cfg: ArrCfg, path: string, options: RequestIni
 // Sonarr's DELETE /movie|series/{id} answer 200 with an empty body, which
 // res.json() would throw on. Same transport, timeout, body cap and error
 // contract as arrFetch (ArrResponseError on non-2xx); the body is drained.
-export async function arrFetchNoContent(cfg: ArrCfg, path: string, options: RequestInit = {}): Promise<void> {
+export async function arrFetchNoContent(cfg: ArrCfg, path: string, options: ArrFetchOptions = {}): Promise<void> {
   const res = await arrRequest(cfg, path, options);
   await res.text().catch(() => "");
 }
 
-async function arrRequest(cfg: ArrCfg, path: string, options: RequestInit): Promise<Response> {
+async function arrRequest(cfg: ArrCfg, path: string, options: ArrFetchOptions): Promise<Response> {
   const { signal, method, body } = options;
   const res = await safeFetchAdminConfigured(`${cfg.url}${path}`, {
     method,
@@ -310,7 +316,7 @@ async function arrRequest(cfg: ArrCfg, path: string, options: RequestInit): Prom
   });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
-    console.error(`[arr] ${sanitizeForLog(path)} → ${res.status}`);
+    if (!options.quietErrors) console.error(`[arr] ${sanitizeForLog(path)} → ${res.status}`);
     throw new ArrResponseError(res.status, text);
   }
   return res;
@@ -354,6 +360,12 @@ function pathCollisionTarget(err: unknown): string | null {
   const m = err.body.match(/Path '([^']+)' is already configured for an existing/);
   return m && m[1] ? m[1] : null;
 }
+
+// The title is not in that instance's library (never pushed, or removed there).
+// A plain Error subclass, so every existing `catch` that treated these throws as
+// a generic failure still does; a caller that can say something better (the
+// request release search: "re-push it first") tests for it.
+export class ArrItemNotFoundError extends Error {}
 
 export function arrErrorMessage(err: unknown): string {
   if (err instanceof ArrResponseError) {
@@ -1056,7 +1068,7 @@ export async function getReleasesForMovie(tmdbId: number, variant: ArrVariant = 
 
   const movies = await arrFetch<{ id: number; tmdbId: number }[]>(cfg, `/api/v3/movie?tmdbId=${tmdbId}`);
   const movie = movies.find((m) => m.tmdbId === tmdbId);
-  if (!movie) throw new Error("Movie not found in Radarr library");
+  if (!movie) throw new ArrItemNotFoundError("Movie not found in Radarr library");
 
   const [releases, allowedQualityIds] = await Promise.all([
     arrFetch<ArrRelease[]>(cfg, `/api/v3/release?movieId=${movie.id}`),
@@ -1072,7 +1084,7 @@ export async function grabMovieRelease(tmdbId: number, guid: string, indexerId: 
 
   const movies = await arrFetch<{ id: number; tmdbId: number }[]>(cfg, `/api/v3/movie?tmdbId=${tmdbId}`);
   const movie = movies.find((m) => m.tmdbId === tmdbId);
-  if (!movie) throw new Error("Movie not found in Radarr library");
+  if (!movie) throw new ArrItemNotFoundError("Movie not found in Radarr library");
 
   await arrFetch<unknown>(cfg, "/api/v3/release", {
     method: "POST",
@@ -1228,7 +1240,7 @@ export async function getReleasesForSeries(
 
   const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, `/api/v3/series?tvdbId=${tvdbId}`);
   const series = library.find((s) => s.tvdbId === tvdbId);
-  if (!series) throw new Error("Series not found in Sonarr library");
+  if (!series) throw new ArrItemNotFoundError("Series not found in Sonarr library");
 
   let releasePath: string;
   if (scope === "EPISODE" && seasonNumber != null && episodeNumber != null) {
@@ -1265,7 +1277,7 @@ export async function grabSeriesRelease(
 
   const library = await arrFetch<{ id: number; tvdbId: number }[]>(cfg, `/api/v3/series?tvdbId=${tvdbId}`);
   const series = library.find((s) => s.tvdbId === tvdbId);
-  if (!series) throw new Error("Series not found in Sonarr library");
+  if (!series) throw new ArrItemNotFoundError("Series not found in Sonarr library");
 
   let episodeId: number | undefined;
   if (seasonNumber != null && episodeNumber != null) {
@@ -1280,6 +1292,38 @@ export async function grabSeriesRelease(
     method: "POST",
     body: JSON.stringify({ guid, indexerId, seriesId: series.id, ...(episodeId != null && { episodeId }) }),
   });
+}
+
+export interface SonarrSeasonSummary {
+  seasonNumber: number;
+  /** Aired, monitored episodes in the season (plus any with a file) — Sonarr's own count. */
+  aired: number;
+  /** Of those, how many have no file. */
+  missing: number;
+  monitored: boolean;
+}
+
+// The regular seasons of one series in Sonarr, with their per-season counts —
+// what the request release picker offers (a Sonarr release search is per season
+// or per episode; a series-only search returns the indexers' RSS feed, not the
+// series). Throws ArrItemNotFoundError when the series isn't in the library.
+export async function getSonarrSeasons(tvdbId: number, variant: ArrVariant = ""): Promise<SonarrSeasonSummary[]> {
+  const cfg = await getCfg("sonarr", variant);
+  if (!cfg) throw new Error("Sonarr is not configured");
+  const library = await arrFetch<Array<{ tvdbId: number; seasons?: Array<{ seasonNumber?: unknown; monitored?: unknown; statistics?: { episodeCount?: unknown; episodeFileCount?: unknown } | null }> }>>(
+    cfg, `/api/v3/series?tvdbId=${tvdbId}`,
+  );
+  const series = library.find((s) => s.tvdbId === tvdbId);
+  if (!series) throw new ArrItemNotFoundError("Series not found in Sonarr library");
+  const count = (v: unknown) => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : 0);
+  const out: SonarrSeasonSummary[] = [];
+  for (const s of series.seasons ?? []) {
+    const n = s?.seasonNumber;
+    if (typeof n !== "number" || !Number.isInteger(n) || n <= 0) continue;
+    const aired = count(s.statistics?.episodeCount);
+    out.push({ seasonNumber: n, aired, missing: Math.max(0, aired - count(s.statistics?.episodeFileCount)), monitored: s.monitored === true });
+  }
+  return out.sort((a, b) => a.seasonNumber - b.seasonNumber);
 }
 
 export async function addSeriesToSonarr(tmdbId: number, variant: ArrVariant = "", qualityProfileIdOverride?: number, requesterUserId?: string | null): Promise<number> {

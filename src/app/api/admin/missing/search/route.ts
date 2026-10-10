@@ -3,7 +3,15 @@ import { withAdmin } from "@/lib/api-auth";
 import { ArrResponseError, arrErrorMessage } from "@/lib/arr";
 import { isFeatureEnabled } from "@/lib/features";
 import { readJsonCapped } from "@/lib/body-size";
-import { MissingInstanceError, NothingMissingError, parseMissingService, searchMissing } from "@/lib/arr-missing-data";
+import {
+  MissingInstanceError,
+  NothingMissingError,
+  NothingToUpgradeError,
+  parseMissingMode,
+  parseMissingService,
+  searchCutoff,
+  searchMissing,
+} from "@/lib/arr-missing-data";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 
 const MAX_BODY_BYTES = 4 * 1024;
@@ -14,7 +22,10 @@ const SERVICE_LABEL = { radarr: "Radarr", sonarr: "Sonarr" } as const;
 // MoviesSearch for the movie, or for a series a Sonarr SeasonSearch per season
 // with no file at all plus one EpisodeSearch for every other missing episode
 // (never SeriesSearch — that would also hunt upgrades). 409 when nothing is
-// missing any more. Nothing in Summonarr is written.
+// missing any more. `mode: "cutoff"` is the Cutoff tab's button: an upgrade
+// search for exactly what Radarr/Sonarr say is below cutoff right now (Radarr
+// MoviesSearch; one Sonarr EpisodeSearch), 409 when nothing is. Nothing in
+// Summonarr is written.
 export const POST = withAdmin(async (req) => {
   const t = translatorForRequest(req);
   const parsed = await readJsonCapped<Record<string, unknown>>(req, MAX_BODY_BYTES);
@@ -23,8 +34,10 @@ export const POST = withAdmin(async (req) => {
   const service = parseMissingService(typeof body.service === "string" ? body.service : null);
   const instance = body.instance === undefined ? "" : body.instance;
   const arrId = body.arrId;
+  const mode = parseMissingMode(body.mode);
   if (
     !service ||
+    !mode ||
     typeof instance !== "string" || instance.length > 100 ||
     typeof arrId !== "number" || !Number.isSafeInteger(arrId) || arrId <= 0
   ) {
@@ -35,7 +48,9 @@ export const POST = withAdmin(async (req) => {
     return NextResponse.json({ error: t("apiAdmin.missing.integrationDisabled", { service: label }) }, { status: 404 });
   }
   try {
-    const result = await searchMissing(service, instance, arrId, new Date());
+    const result = mode === "cutoff"
+      ? await searchCutoff(service, instance, arrId)
+      : await searchMissing(service, instance, arrId, new Date());
     return NextResponse.json(result, { status: 202 });
   } catch (err) {
     if (err instanceof MissingInstanceError) {
@@ -43,6 +58,9 @@ export const POST = withAdmin(async (req) => {
     }
     if (err instanceof NothingMissingError) {
       return NextResponse.json({ error: t("apiAdmin.missing.nothingMissing") }, { status: 409 });
+    }
+    if (err instanceof NothingToUpgradeError) {
+      return NextResponse.json({ error: t("apiAdmin.missing.nothingToUpgrade") }, { status: 409 });
     }
     if (err instanceof ArrResponseError && err.status === 404) {
       const key = service === "radarr" ? "apiAdmin.missing.movieNotFound" : "apiAdmin.missing.seriesNotFound";
