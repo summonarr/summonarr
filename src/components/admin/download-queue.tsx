@@ -1,0 +1,895 @@
+"use client";
+
+// Admin → Download Queue. Every configured Radarr and Sonarr instance's queue
+// in one table (GET /api/admin/queue), one row per download, rows Radarr/Sonarr
+// flag first. Refreshes itself every POLL_MS while the tab is visible and no
+// dialog is open. Per row:
+//   Import            — a download the arr would not import on its own: its
+//                       Manual Import, with every correction, in QueueImportDialog.
+//   Grab now          — a release the arr is HOLDING (delay profile, …).
+//   Blocklist & search, Blocklist, Remove — Radarr/Sonarr's own bulk queue
+//                       DELETE (POST /api/admin/queue/remove), confirmed in a
+//                       dialog that opens on the action clicked and offers both
+//                       halves of the arr's own: the blocklist choice and the
+//                       removal method (from the client / change category / ignore).
+// "Re-check downloads" asks every instance to re-check its downloads now.
+//
+// Everything the arr's own queue shows is here: quality (with its PROPER/REPACK
+// tag), languages, custom formats and score, size, progress, time left and ETA,
+// added, protocol, download client, indexer, output path and download id —
+// as columns the admin picks (remembered in this browser) and, per row, in an
+// expandable details panel that always shows all of it.
+//
+// Every time and size is server-supplied and formatted for the viewer's
+// locale; nothing reads the clock while rendering (guardrail 16).
+
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { Button, buttonVariants } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { StyledSelect } from "@/components/ui/styled-select";
+import { Switch } from "@/components/ui/switch";
+import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
+import { Chip, EmptyState, FilterBar, StatCard, type ChipTone } from "@/components/ui/design";
+import {
+  AlertTriangle, Ban, CheckCircle2, ChevronDown, ChevronRight, CircleDashed, Download, FileCheck, List, Loader2, Magnet, Radio,
+  RefreshCcw, RefreshCw, RotateCcw, Trash2, X,
+} from "@/components/icons";
+import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
+import { ArrHealthPanel } from "@/components/admin/arr-health-panel";
+import { QueueImportDialog } from "@/components/admin/queue-import-dialog";
+import { episodeCode, episodeSummary, queueFormatters } from "@/components/admin/queue-format";
+import { withBasePath } from "@/lib/base-path";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import type { QualityTag, QueueItem, QueuePhase, QueueRemoveAction, QueueRemoveMethod } from "@/lib/arr-queue";
+
+type Service = "radarr" | "sonarr";
+type Filter = "all" | "attention" | Service;
+
+interface QueueReport {
+  instances: Array<{ service: Service; slug: string; name: string }>;
+  errors: Array<{ service: Service; instance: string; error: string }>;
+  items: QueueItem[];
+}
+
+const POLL_MS = 20_000;
+const SERVICE_LABEL: Record<Service, string> = { radarr: "Radarr", sonarr: "Sonarr" };
+
+const PHASE_TONE: Record<QueuePhase, ChipTone> = {
+  downloading: "accent",
+  queued: "neutral",
+  paused: "neutral",
+  delay: "neutral",
+  importPending: "approved",
+  importing: "approved",
+  importBlocked: "declined",
+  failed: "declined",
+  clientUnavailable: "declined",
+  unknown: "neutral",
+};
+
+const rowKey = (r: QueueItem) => `${r.service}:${r.instance}:${r.ids[0]}`;
+
+// The table's optional columns, in the arr's own order. Title and the row
+// actions are always shown; everything is also in each row's details panel.
+type ColumnId =
+  | "instance" | "status" | "quality" | "languages" | "customFormats" | "size" | "progress"
+  | "timeLeft" | "eta" | "added" | "downloadClient" | "indexer" | "requestedBy";
+const COLUMNS: ReadonlyArray<{ id: ColumnId; label: string }> = [
+  { id: "instance", label: "adminManage.queue.col.instance" },
+  { id: "status", label: "adminManage.queue.col.status" },
+  { id: "quality", label: "adminManage.queue.col.quality" },
+  { id: "languages", label: "adminManage.queue.col.languages" },
+  { id: "customFormats", label: "adminManage.queue.col.customFormats" },
+  { id: "size", label: "adminManage.queue.col.size" },
+  { id: "progress", label: "adminManage.queue.col.progress" },
+  { id: "timeLeft", label: "adminManage.queue.col.timeLeft" },
+  { id: "eta", label: "adminManage.queue.col.eta" },
+  { id: "added", label: "adminManage.queue.col.added" },
+  { id: "downloadClient", label: "adminManage.queue.col.downloadClient" },
+  { id: "indexer", label: "adminManage.queue.col.indexer" },
+  { id: "requestedBy", label: "adminManage.queue.col.requestedBy" },
+];
+const DEFAULT_HIDDEN: ReadonlySet<ColumnId> = new Set<ColumnId>(["languages", "customFormats", "eta", "added"]);
+const COLUMN_IDS = new Set<string>(COLUMNS.map((c) => c.id));
+const isColumnId = (v: unknown): v is ColumnId => typeof v === "string" && COLUMN_IDS.has(v);
+// Per-viewer convenience only: a blocked or empty store just means the defaults.
+const HIDDEN_COLUMNS_KEY = "admin-queue-hidden-columns";
+
+const QUALITY_TAG_LABEL: Record<QualityTag, string> = {
+  proper: "adminManage.queue.qualityTag.proper",
+  repack: "adminManage.queue.qualityTag.repack",
+  real: "adminManage.queue.qualityTag.real",
+};
+const PROTOCOL_LABEL: Record<QueueItem["protocol"], string> = {
+  torrent: "adminManage.queue.protocol.torrent",
+  usenet: "adminManage.queue.protocol.usenet",
+  unknown: "adminManage.queue.protocol.unknown",
+};
+
+// Only a finished download the arr is holding back can be imported: blocked,
+// or waiting on an import that needs a hand. A tracked download id is required.
+const canImport = (r: QueueItem) => r.downloadId !== null && (r.phase === "importBlocked" || r.phase === "importPending");
+async function readError(res: Response, fallback: string): Promise<string> {
+  const d = (await res.json().catch(() => null)) as { error?: string } | null;
+  return d?.error ?? fallback;
+}
+
+const th: React.CSSProperties = { padding: "8px 10px" };
+const td: React.CSSProperties = { padding: "8px 10px", verticalAlign: "top" };
+
+export function DownloadQueue({ configured }: { configured: boolean }) {
+  const t = useT();
+  const locale = useLocale();
+  const fmt = useMemo(() => queueFormatters(locale), [locale]);
+  const [report, setReport] = useState<QueueReport | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [filter, setFilter] = useState<Filter>("all");
+  const [instance, setInstance] = useState("all");
+  const [query, setQuery] = useState("");
+  const [live, setLive] = useState(true);
+  const [removing, setRemoving] = useState<QueueItem | null>(null);
+  const [importing, setImporting] = useState<QueueItem | null>(null);
+  const [removeAction, setRemoveAction] = useState<QueueRemoveAction>("blocklistSearch");
+  const [removeMethod, setRemoveMethod] = useState<QueueRemoveMethod>("removeFromClient");
+  // Grab now / Re-check: which row (or "recheck") is in flight.
+  const [acting, setActing] = useState<string | null>(null);
+  const [removeBusy, setRemoveBusy] = useState(false);
+  const [removeError, setRemoveError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [hidden, setHidden] = useState<ReadonlySet<ColumnId>>(DEFAULT_HIDDEN);
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  // The table scrolls sideways inside its frame; an expanded row's details are
+  // sized to the frame's VISIBLE width and stick to its left edge, so a phone
+  // (or a table with every column on) never cuts them off.
+  const [frameWidth, setFrameWidth] = useState<number | null>(null);
+  const frameObserver = useRef<ResizeObserver | null>(null);
+  const frameRef = useCallback((el: HTMLDivElement | null) => {
+    frameObserver.current?.disconnect();
+    frameObserver.current = null;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => setFrameWidth(el.clientWidth));
+    ro.observe(el);
+    frameObserver.current = ro;
+  }, []);
+  // Only the newest load may write state — a slow poll must not overwrite the
+  // result of a refresh the admin clicked after it started.
+  const loadSeq = useRef(0);
+
+  const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    setLoading(true);
+    try {
+      const res = await fetch(withBasePath("/api/admin/queue"));
+      if (seq !== loadSeq.current) return;
+      if (!res.ok) {
+        const message = await readError(res, t("adminManage.queue.error.load"));
+        if (seq === loadSeq.current) setError(message);
+        return;
+      }
+      const data = (await res.json()) as QueueReport;
+      if (seq !== loadSeq.current) return;
+      setReport(data);
+      setError("");
+    } catch {
+      if (seq === loadSeq.current) setError(t("adminManage.queue.error.loadNetwork"));
+    } finally {
+      if (seq === loadSeq.current) setLoading(false);
+    }
+  }, [t]);
+
+  useEffect(() => {
+    if (configured) void load();
+  }, [configured, load]);
+
+  // Read after mount so the first render matches the server's (defaults).
+  // Storage can throw (blocked site data, some private windows) — then the
+  // defaults simply stay.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(HIDDEN_COLUMNS_KEY);
+      const ids: unknown = raw ? JSON.parse(raw) : null;
+      if (Array.isArray(ids)) setHidden(new Set(ids.filter(isColumnId)));
+    } catch {}
+  }, []);
+
+  function saveHidden(next: ReadonlySet<ColumnId>) {
+    setHidden(next);
+    try {
+      localStorage.setItem(HIDDEN_COLUMNS_KEY, JSON.stringify([...next]));
+    } catch {}
+  }
+  function toggleColumn(id: ColumnId, on: boolean) {
+    const next = new Set(hidden);
+    if (on) next.delete(id);
+    else next.add(id);
+    saveHidden(next);
+  }
+  function toggleExpanded(key: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  // Poll while live, visible, and no dialog is open (a refresh would
+  // reshuffle the row being confirmed).
+  useEffect(() => {
+    if (!configured || !live || removing || importing) return;
+    const id = window.setInterval(() => {
+      if (document.visibilityState === "visible") void load();
+    }, POLL_MS);
+    return () => window.clearInterval(id);
+  }, [configured, live, removing, importing, load]);
+
+  // The dialog opens on the action the admin clicked; they can still change it there.
+  function openRemove(row: QueueItem, action: QueueRemoveAction) {
+    setRemoving(row);
+    setRemoveAction(action);
+    setRemoveMethod("removeFromClient");
+    setRemoveError("");
+  }
+
+  async function grabNow(row: QueueItem) {
+    setActing(rowKey(row));
+    setNotice("");
+    try {
+      const res = await fetch(withBasePath("/api/admin/queue/grab"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ service: row.service, instance: row.instance, ids: row.ids }),
+      });
+      if (!res.ok) {
+        setError(await readError(res, t("adminManage.queue.grab.failed")));
+        return;
+      }
+      setNotice(t("adminManage.queue.grab.done", { title: row.mediaTitle || row.title }));
+      window.setTimeout(() => void load(), 2_000);
+    } catch {
+      setError(t("adminManage.queue.grab.failed"));
+    } finally {
+      setActing(null);
+    }
+  }
+
+  async function recheck() {
+    setActing("recheck");
+    setNotice("");
+    try {
+      const res = await fetch(withBasePath("/api/admin/queue/recheck"), { method: "POST" });
+      const data = (await res.json().catch(() => null)) as { instances?: number; errors?: unknown[]; error?: string } | null;
+      if (!res.ok) {
+        setError(data?.error ?? t("adminManage.queue.recheck.failed"));
+        return;
+      }
+      setNotice(t("adminManage.queue.recheck.done", { count: (data?.instances ?? 0) - (data?.errors?.length ?? 0) }));
+      window.setTimeout(() => void load(), 5_000);
+    } catch {
+      setError(t("adminManage.queue.recheck.failed"));
+    } finally {
+      setActing(null);
+    }
+  }
+
+  function imported(row: QueueItem, files: number) {
+    setImporting(null);
+    setNotice(t("adminManage.queue.import.done", { title: row.mediaTitle || row.title, count: files }));
+    // The arr imports in the background; give it a moment before re-reading.
+    window.setTimeout(() => void load(), 3_000);
+  }
+
+  async function confirmRemove() {
+    if (!removing) return;
+    setRemoveBusy(true);
+    setRemoveError("");
+    try {
+      const res = await fetch(withBasePath("/api/admin/queue/remove"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          service: removing.service,
+          instance: removing.instance,
+          ids: removing.ids,
+          action: removeAction,
+          method: removing.pending ? "removeFromClient" : removeMethod,
+        }),
+      });
+      if (!res.ok) {
+        setRemoveError(await readError(res, t("adminManage.queue.remove.failed")));
+        return;
+      }
+      const gone = rowKey(removing);
+      setReport((r) => (r ? { ...r, items: r.items.filter((i) => rowKey(i) !== gone) } : r));
+      setNotice(
+        removeAction === "blocklistSearch"
+          ? t("adminManage.queue.remove.doneSearch", { title: removing.mediaTitle || removing.title })
+          : t("adminManage.queue.remove.done", { title: removing.mediaTitle || removing.title }),
+      );
+      setRemoving(null);
+    } catch {
+      setRemoveError(t("adminManage.queue.remove.failed"));
+    } finally {
+      setRemoveBusy(false);
+    }
+  }
+
+  const items = report?.items;
+  const instanceName = useCallback(
+    (service: Service, slug: string) => report?.instances.find((i) => i.service === service && i.slug === slug)?.name ?? slug,
+    [report],
+  );
+  const multiInstance = (report?.instances.length ?? 0) > 1;
+  const shownColumns = COLUMNS.filter((c) => !hidden.has(c.id) && (c.id !== "instance" || multiInstance));
+
+  const protocolIcon = (r: QueueItem) =>
+    r.protocol === "torrent" ? (
+      <Magnet style={{ width: 12, height: 12, flexShrink: 0 }} aria-label={t("adminManage.queue.protocol.torrent")} />
+    ) : r.protocol === "usenet" ? (
+      <Radio style={{ width: 12, height: 12, flexShrink: 0 }} aria-label={t("adminManage.queue.protocol.usenet")} />
+    ) : null;
+  const qualityOf = (r: QueueItem) => (
+    <span className="inline-flex flex-wrap items-center gap-1">
+      <span className="ds-mono" style={{ whiteSpace: "nowrap" }}>{r.quality ?? "—"}</span>
+      {r.qualityTags.map((q) => <Chip key={q}>{t(QUALITY_TAG_LABEL[q])}</Chip>)}
+    </span>
+  );
+  // No custom format matched means a score of 0 — nothing worth a cell; the details panel still shows it.
+  const customFormatsOf = (r: QueueItem) =>
+    r.customFormats.length === 0 ? (
+      "—"
+    ) : (
+      <span className="inline-flex flex-wrap items-center gap-1" style={{ minWidth: 140 }}>
+        {r.customFormats.map((f) => <Chip key={f}>{f}</Chip>)}
+        {r.customFormatScore !== null && (
+          <span className="ds-mono" style={{ color: "var(--ds-fg-muted)" }}>{fmt.score(r.customFormatScore)}</span>
+        )}
+      </span>
+    );
+  const timeLeftOf = (r: QueueItem) => (r.phase === "downloading" ? fmt.duration(r.timeLeftSeconds) : "—");
+  const etaOf = (r: QueueItem) => (r.phase === "downloading" ? fmt.dateTime(r.estimatedCompletion) : "—");
+
+  function cell(c: ColumnId, r: QueueItem, arrLabel: string): React.ReactNode {
+    const small: React.CSSProperties = { ...td, fontSize: 12 };
+    switch (c) {
+      case "instance":
+        return <td style={{ ...small, color: "var(--ds-fg-muted)" }}>{arrLabel}</td>;
+      case "status":
+        return (
+          <td style={{ ...td, maxWidth: 280 }}>
+            <div className="flex flex-wrap items-center gap-1" style={{ minWidth: 150 }}>
+              <Chip tone={PHASE_TONE[r.phase]}>{t(`adminManage.queue.phase.${r.phase}`)}</Chip>
+              {r.attention && (
+                <Chip tone="pending">
+                  <AlertTriangle style={{ width: 11, height: 11 }} aria-hidden /> {t("adminManage.queue.attention")}
+                </Chip>
+              )}
+            </div>
+            {r.messages.length > 0 && (
+              <ul className="m-0 p-0" style={{ listStyle: "none", marginTop: 4, fontSize: 11, color: r.attention ? "var(--ds-warning)" : "var(--ds-fg-subtle)" }}>
+                {r.messages.map((m, i) => <li key={i} style={{ overflowWrap: "anywhere" }}>{m}</li>)}
+              </ul>
+            )}
+          </td>
+        );
+      case "quality":
+        return <td style={small}>{qualityOf(r)}</td>;
+      case "languages":
+        return <td style={{ ...small, color: "var(--ds-fg-muted)" }}>{r.languages.length > 0 ? r.languages.join(", ") : "—"}</td>;
+      case "customFormats":
+        return <td style={{ ...small, maxWidth: 260 }}>{customFormatsOf(r)}</td>;
+      case "size":
+        return (
+          <td className="ds-mono" style={{ ...small, whiteSpace: "nowrap" }}>
+            {r.size > 0 ? fmt.size(r.size) : "—"}
+            {r.sizeLeft > 0 && (
+              <div style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>{t("adminManage.queue.sizeLeft", { size: fmt.size(r.sizeLeft) })}</div>
+            )}
+          </td>
+        );
+      case "progress":
+        return (
+          <td style={td}>
+            <div
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(r.progress * 100)}
+              aria-label={t("adminManage.queue.progressLabel", { title: r.mediaTitle || r.title })}
+              style={{ height: 6, borderRadius: 3, background: "var(--ds-bg-3)", overflow: "hidden" }}
+            >
+              <div style={{ width: `${Math.round(r.progress * 100)}%`, height: "100%", background: r.attention ? "var(--ds-warning)" : "var(--ds-accent)" }} />
+            </div>
+            <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-muted)", marginTop: 3, whiteSpace: "nowrap" }}>
+              {fmt.percent(r.progress)} · {fmt.size(r.size - r.sizeLeft)}
+            </div>
+          </td>
+        );
+      case "timeLeft":
+        return <td className="ds-mono" style={{ ...small, whiteSpace: "nowrap" }}>{timeLeftOf(r)}</td>;
+      case "eta":
+        return <td style={{ ...small, color: "var(--ds-fg-muted)", whiteSpace: "nowrap" }}>{etaOf(r)}</td>;
+      case "added":
+        return <td style={{ ...small, color: "var(--ds-fg-muted)", whiteSpace: "nowrap" }}>{fmt.dateTime(r.added)}</td>;
+      case "downloadClient":
+        return (
+          <td style={small}>
+            <span className="inline-flex items-center gap-1">
+              {protocolIcon(r)}
+              {r.downloadClient ?? "—"}
+            </span>
+          </td>
+        );
+      case "indexer":
+        return <td style={{ ...small, color: "var(--ds-fg-muted)" }}>{r.indexer ?? "—"}</td>;
+      case "requestedBy":
+        return <td style={{ ...small, color: "var(--ds-fg-muted)" }}>{r.requesters.length > 0 ? r.requesters.join(", ") : "—"}</td>;
+    }
+  }
+
+  // Everything Radarr/Sonarr report for the download, whatever columns are shown.
+  function details(r: QueueItem, arrLabel: string): React.ReactNode {
+    const item = (label: string, value: React.ReactNode, opts: { wide?: boolean; mono?: boolean } = {}) => (
+      <div key={label} style={opts.wide ? { gridColumn: "1 / -1" } : undefined}>
+        <dt style={{ fontSize: 11, color: "var(--ds-fg-subtle)" }}>{label}</dt>
+        <dd className={opts.mono ? "ds-mono" : undefined} style={{ margin: 0, overflowWrap: "anywhere" }}>{value}</dd>
+      </div>
+    );
+    // Capped so it stays in view while a wide table is scrolled to its left edge.
+    return (
+      <dl className="grid gap-x-6 gap-y-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", fontSize: 12, margin: 0, maxWidth: 1100 }}>
+        {item(t("adminManage.queue.details.release"), r.title || "—", { wide: true, mono: true })}
+        {r.episodes.length > 0 && item(t("adminManage.queue.details.episodes"), r.episodes.map(episodeCode).join(", "), { wide: true, mono: true })}
+        {item(t("adminManage.queue.col.status"), t(`adminManage.queue.phase.${r.phase}`))}
+        {item(t("adminManage.queue.col.quality"), qualityOf(r))}
+        {item(t("adminManage.queue.col.languages"), r.languages.length > 0 ? r.languages.join(", ") : "—")}
+        {item(t("adminManage.queue.col.customFormats"), r.customFormats.length > 0 ? r.customFormats.join(", ") : "—")}
+        {item(t("adminManage.queue.details.score"), r.customFormatScore !== null ? fmt.score(r.customFormatScore) : "—", { mono: true })}
+        {item(t("adminManage.queue.col.size"), r.size > 0 ? fmt.size(r.size) : "—", { mono: true })}
+        {item(t("adminManage.queue.details.downloaded"), `${fmt.size(r.size - r.sizeLeft)} (${fmt.percent(r.progress)})`, { mono: true })}
+        {item(t("adminManage.queue.details.left"), fmt.size(r.sizeLeft), { mono: true })}
+        {item(t("adminManage.queue.col.timeLeft"), timeLeftOf(r), { mono: true })}
+        {item(t("adminManage.queue.col.eta"), etaOf(r))}
+        {item(t("adminManage.queue.col.added"), fmt.dateTime(r.added))}
+        {item(t("adminManage.queue.details.protocol"), t(PROTOCOL_LABEL[r.protocol]))}
+        {item(t("adminManage.queue.col.downloadClient"), r.downloadClient ?? "—")}
+        {item(t("adminManage.queue.col.indexer"), r.indexer ?? "—")}
+        {item(t("adminManage.queue.col.instance"), arrLabel)}
+        {item(t("adminManage.queue.col.requestedBy"), r.requesters.length > 0 ? r.requesters.join(", ") : "—")}
+        {item(t("adminManage.queue.details.downloadId"), r.downloadId ?? "—", { mono: true })}
+        {item(t("adminManage.queue.details.outputPath"), r.outputPath ?? "—", { wide: true, mono: true })}
+        {r.messages.length > 0 && item(t("adminManage.queue.details.messages"), (
+          <ul className="m-0 p-0" style={{ listStyle: "none" }}>
+            {r.messages.map((m, i) => <li key={i}>{m}</li>)}
+          </ul>
+        ), { wide: true })}
+      </dl>
+    );
+  }
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return (items ?? []).filter(
+      (r) =>
+        (filter === "all" || (filter === "attention" ? r.attention : r.service === filter)) &&
+        (instance === "all" || `${r.service}:${r.instance}` === instance) &&
+        (!q || r.mediaTitle.toLowerCase().includes(q) || r.title.toLowerCase().includes(q)),
+    );
+  }, [items, filter, instance, query]);
+
+  const count = (f: Filter) =>
+    items ? items.filter((r) => (f === "all" ? true : f === "attention" ? r.attention : r.service === f)).length : undefined;
+  const services = new Set((report?.instances ?? []).map((i) => i.service));
+
+  let body: React.ReactNode;
+  if (!configured) {
+    body = (
+      <EmptyState icon={CircleDashed} title={t("adminManage.queue.notConfigured.title")} description={t("adminManage.queue.notConfigured.description")} />
+    );
+  } else if (!report) {
+    body = error ? (
+      <p role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{error}</p>
+    ) : (
+      <div className="flex items-center gap-2" style={{ color: "var(--ds-fg-subtle)", fontSize: 13 }}>
+        <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} /> {t("adminManage.queue.loading")}
+      </div>
+    );
+  } else {
+    const downloading = report.items.filter((i) => i.phase === "downloading").length;
+    const left = report.items.reduce((n, i) => n + i.sizeLeft, 0);
+    body = (
+      <div className="flex flex-col gap-4">
+        <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
+          <StatCard label={t("adminManage.queue.stat.downloads")} value={report.items.length} hint={t("adminManage.queue.stat.downloadsHint", { count: downloading })} />
+          <StatCard label={t("adminManage.queue.stat.attention")} value={report.items.filter((i) => i.attention).length} hint={t("adminManage.queue.stat.attentionHint")} />
+          <StatCard label={t("adminManage.queue.stat.remaining")} value={fmt.size(left)} hint={t("adminManage.queue.stat.remainingHint")} />
+        </div>
+
+        {report.errors.length > 0 && (
+          <p role="status" className="rounded-md bg-amber-500/15 text-amber-400" style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>
+            {t("adminManage.queue.arrErrors", {
+              list: report.errors.map((e) => arrInstanceLabel(e.service, instanceName(e.service, e.instance), e.instance)).join(", "),
+            })}
+          </p>
+        )}
+        {notice && (
+          <p role="status" className="flex items-center gap-1.5 text-green-400" style={{ fontSize: 13, margin: 0 }}>
+            <CheckCircle2 style={{ width: 14, height: 14 }} aria-hidden /> {notice}
+          </p>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2" style={{ fontSize: 13 }}>
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value.slice(0, 200))}
+            placeholder={t("adminManage.queue.filter.titlePlaceholder")}
+            aria-label={t("adminManage.queue.filter.title")}
+            className="w-[220px]"
+          />
+          {multiInstance && (
+            <StyledSelect compact className="w-auto" value={instance} onChange={(e) => setInstance(e.target.value)} aria-label={t("adminManage.queue.filter.instance")}>
+              <option value="all">{t("adminManage.queue.filter.allInstances")}</option>
+              {report.instances.map((i) => (
+                <option key={`${i.service}:${i.slug}`} value={`${i.service}:${i.slug}`}>{arrInstanceLabel(i.service, i.name, i.slug)}</option>
+              ))}
+            </StyledSelect>
+          )}
+          <label className="flex items-center gap-2" style={{ color: "var(--ds-fg)" }}>
+            <Switch checked={live} onCheckedChange={setLive} aria-label={t("adminManage.queue.filter.live")} />
+            {t("adminManage.queue.filter.live")}
+          </label>
+          <DropdownMenu>
+            <DropdownMenuTrigger className={buttonVariants({ variant: "outline", size: "sm" })}>
+              <List aria-hidden />
+              {t("adminManage.queue.columns.button")}
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-56">
+              <DropdownMenuGroup>
+                <DropdownMenuLabel className="px-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                  {t("adminManage.queue.columns.menuLabel")}
+                </DropdownMenuLabel>
+                {COLUMNS.filter((c) => c.id !== "instance" || multiInstance).map((c) => (
+                  <DropdownMenuCheckboxItem key={c.id} checked={!hidden.has(c.id)} onCheckedChange={(on) => toggleColumn(c.id, on)}>
+                    {t(c.label)}
+                  </DropdownMenuCheckboxItem>
+                ))}
+              </DropdownMenuGroup>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => saveHidden(new Set())}>{t("adminManage.queue.columns.showAll")}</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => saveHidden(DEFAULT_HIDDEN)}>{t("adminManage.queue.columns.reset")}</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+
+        {visible.length === 0 ? (
+          report.items.length > 0 ? (
+            <EmptyState icon={CircleDashed} title={t("adminManage.queue.empty.filteredTitle")} description={t("adminManage.queue.empty.filteredDescription")} />
+          ) : (
+            <EmptyState icon={CheckCircle2} title={t("adminManage.queue.empty.title")} description={t("adminManage.queue.empty.description")} />
+          )
+        ) : (
+          <div ref={frameRef} className="resp-table-scroll" style={{ border: "1px solid var(--ds-border)", borderRadius: 10 }}>
+            <table className="w-full" style={{ fontSize: 13, borderCollapse: "collapse", color: "var(--ds-fg)" }}>
+              <thead>
+                <tr style={{ background: "var(--ds-bg-2)", textAlign: "left", color: "var(--ds-fg-subtle)", fontSize: 11 }}>
+                  <th style={th}>{t("adminManage.queue.col.title")}</th>
+                  {shownColumns.map((c) => (
+                    <th key={c.id} style={{ ...th, whiteSpace: "nowrap", ...(c.id === "progress" ? { minWidth: 150 } : {}) }}>{t(c.label)}</th>
+                  ))}
+                  <th style={th} />
+                </tr>
+              </thead>
+              <tbody>
+                {visible.map((r) => {
+                  const detailHref = r.tmdbId !== null ? `/${r.service === "radarr" ? "movie" : "tv"}/${r.tmdbId}` : null;
+                  const name = instanceName(r.service, r.instance);
+                  const arrLabel = arrInstanceLabel(r.service, name, r.instance);
+                  const key = rowKey(r);
+                  const open = expanded.has(key);
+                  const title = r.mediaTitle || r.title;
+                  return (
+                    <Fragment key={key}>
+                      <tr className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
+                        <td style={{ ...td, maxWidth: 380 }}>
+                          <div className="flex items-start gap-1.5" style={{ minWidth: 220 }}>
+                            <button
+                              type="button"
+                              onClick={() => toggleExpanded(key)}
+                              aria-expanded={open}
+                              aria-controls={`queue-details-${key}`}
+                              aria-label={t(open ? "adminManage.queue.details.hide" : "adminManage.queue.details.show", { title })}
+                              className="ds-hover-tint inline-flex shrink-0 items-center justify-center rounded-md text-zinc-400 hover:text-zinc-100 outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+                              style={{ width: 22, height: 22, marginTop: -1 }}
+                            >
+                              {open ? <ChevronDown style={{ width: 14, height: 14 }} aria-hidden /> : <ChevronRight style={{ width: 14, height: 14 }} aria-hidden />}
+                            </button>
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1" style={{ fontWeight: 500 }}>
+                                <span className="min-w-0" style={{ overflowWrap: "anywhere" }}>
+                                  {detailHref ? <Link href={detailHref} className="hover:underline">{title}</Link> : title}
+                                  {r.year ? <span style={{ color: "var(--ds-fg-subtle)", fontWeight: 400 }}> ({r.year})</span> : null}
+                                </span>
+                                {r.arrMediaId !== null && (
+                                  <OpenInArrLink
+                                    service={r.service}
+                                    instance={r.instance}
+                                    target={{ arrId: r.arrMediaId }}
+                                    label={t("adminManage.openIn", { name: arrLabel })}
+                                    iconOnly
+                                  />
+                                )}
+                              </div>
+                              {r.episodes.length > 0 && (
+                                <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-muted)" }}>{episodeSummary(r.episodes)}</div>
+                              )}
+                              <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", overflowWrap: "anywhere" }} title={r.title}>
+                                {r.title}
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+                        {shownColumns.map((c) => <Fragment key={c.id}>{cell(c.id, r, arrLabel)}</Fragment>)}
+                        <td style={{ ...td, textAlign: "right" }}>
+                          <div className="flex flex-wrap justify-end gap-1" style={{ minWidth: 150, maxWidth: 240, marginLeft: "auto" }}>
+                            {canImport(r) && (
+                              <Button
+                                size="xs"
+                                variant="outline"
+                                onClick={() => setImporting(r)}
+                                aria-label={t("adminManage.queue.action.importAria", { title: r.mediaTitle || r.title })}
+                              >
+                                <FileCheck />
+                                {t("adminManage.queue.action.import")}
+                              </Button>
+                            )}
+                            {r.pending && (
+                              <Button
+                                size="xs"
+                                variant="outline"
+                                onClick={() => void grabNow(r)}
+                                disabled={acting === rowKey(r)}
+                                aria-label={t("adminManage.queue.action.grabAria", { title: r.mediaTitle || r.title })}
+                              >
+                                {acting === rowKey(r) ? <Loader2 className="animate-spin" /> : <Download />}
+                                {t("adminManage.queue.action.grab")}
+                              </Button>
+                            )}
+                            {/* A held release was never downloaded — there is nothing to search a replacement FOR yet. */}
+                            {!r.pending && (
+                              <Button
+                                size="xs"
+                                variant="outline"
+                                onClick={() => openRemove(r, "blocklistSearch")}
+                                aria-label={t("adminManage.queue.action.blocklistSearchAria", { title: r.mediaTitle || r.title })}
+                              >
+                                <RotateCcw />
+                                {t("adminManage.queue.action.blocklistSearch")}
+                              </Button>
+                            )}
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              onClick={() => openRemove(r, "blocklist")}
+                              aria-label={t("adminManage.queue.action.blocklistAria", { title: r.mediaTitle || r.title })}
+                            >
+                              <Ban />
+                              {t("adminManage.queue.action.blocklist")}
+                            </Button>
+                            <Button
+                              size="xs"
+                              variant="ghost"
+                              onClick={() => openRemove(r, "remove")}
+                              aria-label={t("adminManage.queue.remove.aria", { title: r.mediaTitle || r.title })}
+                            >
+                              <Trash2 />
+                              {t("adminManage.queue.remove.button")}
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                      {open && (
+                        <tr id={`queue-details-${key}`} style={{ background: "var(--ds-bg-1)" }}>
+                          <td colSpan={shownColumns.length + 2} style={{ padding: 0 }}>
+                            <div
+                              style={{
+                                position: "sticky",
+                                left: 0,
+                                boxSizing: "border-box",
+                                width: frameWidth ?? undefined,
+                                padding: `6px 10px 14px ${frameWidth !== null && frameWidth < 640 ? 10 : 40}px`,
+                              }}
+                            >
+                              {details(r, arrLabel)}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const segments = [
+    { value: "all" as const, label: t("adminManage.queue.tab.all"), count: count("all") },
+    { value: "attention" as const, label: t("adminManage.queue.tab.attention"), count: count("attention") },
+    ...(services.has("sonarr") ? [{ value: "sonarr" as const, label: SERVICE_LABEL.sonarr, count: count("sonarr") }] : []),
+    ...(services.has("radarr") ? [{ value: "radarr" as const, label: SERVICE_LABEL.radarr, count: count("radarr") }] : []),
+  ];
+
+  // Both halves of the arr's own "Remove from queue" dialog.
+  const REMOVE_OPTIONS: Array<{ value: QueueRemoveAction; label: string; help: string }> = [
+    ...(removing?.pending ? [] : [{ value: "blocklistSearch" as const, label: t("adminManage.queue.remove.blocklistSearch"), help: t("adminManage.queue.remove.blocklistSearchHelp") }]),
+    { value: "blocklist", label: t("adminManage.queue.remove.blocklist"), help: t("adminManage.queue.remove.blocklistHelp") },
+    { value: "remove", label: t("adminManage.queue.remove.remove"), help: t("adminManage.queue.remove.removeHelp") },
+  ];
+  const METHOD_OPTIONS: Array<{ value: QueueRemoveMethod; label: string; help: string }> = [
+    { value: "removeFromClient", label: t("adminManage.queue.remove.method.removeFromClient"), help: t("adminManage.queue.remove.method.removeFromClientHelp") },
+    ...(removing?.canChangeCategory
+      ? [{ value: "changeCategory" as const, label: t("adminManage.queue.remove.method.changeCategory"), help: t("adminManage.queue.remove.method.changeCategoryHelp") }]
+      : []),
+    { value: "ignore", label: t("adminManage.queue.remove.method.ignore"), help: t("adminManage.queue.remove.method.ignoreHelp") },
+  ];
+  const radioBox = (on: boolean): React.CSSProperties => ({
+    padding: "8px 10px",
+    border: `1px solid ${on ? "var(--ds-border-strong)" : "var(--ds-border)"}`,
+    background: on ? "var(--ds-bg-2)" : "transparent",
+  });
+
+  return (
+    <div className="flex flex-col gap-6">
+      {configured && (
+        <section
+          aria-label={t("adminManage.arrHealth.title")}
+          style={{ padding: 14, border: "1px solid var(--ds-border)", borderRadius: 10, background: "var(--ds-bg-1)" }}
+        >
+          <ArrHealthPanel variant="full" />
+        </section>
+      )}
+
+      <div className="flex flex-col gap-2">
+        <FilterBar<Filter>
+          segments={segments}
+          active={filter}
+          onChange={setFilter}
+          right={
+            configured ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void recheck()}
+                  disabled={acting === "recheck"}
+                  title={t("adminManage.queue.recheck.hint")}
+                >
+                  {acting === "recheck" ? <Loader2 className="animate-spin" /> : <RefreshCcw />}
+                  {t("adminManage.queue.recheck.button")}
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => void load()} disabled={loading}>
+                  {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                  {t("adminManage.queue.refresh")}
+                </Button>
+              </div>
+            ) : null
+          }
+        />
+        {report && error && <p role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{error}</p>}
+        {body}
+      </div>
+
+      <Dialog open={removing !== null} onOpenChange={(o) => { if (!o && !removeBusy) setRemoving(null); }}>
+        <DialogPortal>
+          <DialogBackdrop />
+          <DialogPopup className="max-w-lg">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-700">
+              <DialogTitle className="text-base font-semibold text-zinc-100">
+                {removeAction === "remove" ? t("adminManage.queue.remove.title") : t("adminManage.queue.remove.titleBlocklist")}
+              </DialogTitle>
+              <DialogClose
+                disabled={removeBusy}
+                aria-label={t("adminQueue.common.close")}
+                title={t("adminQueue.common.close")}
+                className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </DialogClose>
+            </div>
+            {removing && (
+              <div className="flex flex-col gap-4 px-6 py-4">
+                <div>
+                  <p className="m-0 text-sm font-medium text-zinc-100">
+                    {removing.mediaTitle || removing.title}
+                    {removing.episodes.length > 0 && <span className="ds-mono text-zinc-400"> · {episodeSummary(removing.episodes)}</span>}
+                  </p>
+                  <p className="m-0 ds-mono text-zinc-500" style={{ fontSize: 11, overflowWrap: "anywhere" }}>{removing.title}</p>
+                </div>
+                <fieldset className="flex flex-col gap-2 m-0 p-0 border-0">
+                  <legend className="text-xs font-medium text-zinc-400 mb-1">{t("adminManage.queue.remove.blocklistLegend")}</legend>
+                  {REMOVE_OPTIONS.map((o) => (
+                    <label key={o.value} className="flex items-start gap-2.5 rounded-md" style={radioBox(removeAction === o.value)}>
+                      <input
+                        type="radio"
+                        name="queue-remove-action"
+                        value={o.value}
+                        checked={removeAction === o.value}
+                        onChange={() => setRemoveAction(o.value)}
+                        style={{ marginTop: 3 }}
+                      />
+                      <span className="flex flex-col">
+                        <span className="text-sm text-zinc-100">{o.label}</span>
+                        <span className="text-xs text-zinc-500">{o.help}</span>
+                      </span>
+                    </label>
+                  ))}
+                </fieldset>
+                {/* A held release is in no download client — there is no removal method to pick. */}
+                {!removing.pending && (
+                  <fieldset className="flex flex-col gap-2 m-0 p-0 border-0">
+                    <legend className="text-xs font-medium text-zinc-400 mb-1">{t("adminManage.queue.remove.methodLegend")}</legend>
+                    {METHOD_OPTIONS.map((o) => (
+                      <label key={o.value} className="flex items-start gap-2.5 rounded-md" style={radioBox(removeMethod === o.value)}>
+                        <input
+                          type="radio"
+                          name="queue-remove-method"
+                          value={o.value}
+                          checked={removeMethod === o.value}
+                          onChange={() => setRemoveMethod(o.value)}
+                          style={{ marginTop: 3 }}
+                        />
+                        <span className="flex flex-col">
+                          <span className="text-sm text-zinc-100">{o.label}</span>
+                          <span className="text-xs text-zinc-500">{o.help}</span>
+                        </span>
+                      </label>
+                    ))}
+                  </fieldset>
+                )}
+                {removeError && (
+                  <p role="alert" className="m-0 text-xs flex items-center gap-1" style={{ color: "var(--ds-danger)" }}>
+                    <AlertTriangle style={{ width: 12, height: 12 }} aria-hidden /> {removeError}
+                  </p>
+                )}
+              </div>
+            )}
+            <div className="flex items-center justify-between px-6 py-4 border-t border-zinc-700 bg-zinc-900">
+              <button type="button" onClick={() => setRemoving(null)} disabled={removeBusy} className="rounded px-2 py-1 text-sm text-zinc-500 hover:text-zinc-300">
+                {t("shared.common.cancel")}
+              </button>
+              <Button
+                size="sm"
+                onClick={() => void confirmRemove()}
+                disabled={removeBusy}
+                className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]"
+              >
+                {removeBusy ? <Loader2 className="animate-spin" /> : removeAction === "remove" ? <Trash2 /> : removeAction === "blocklist" ? <Ban /> : <RotateCcw />}
+                {removeAction === "blocklistSearch"
+                  ? t("adminManage.queue.remove.confirmBlocklistSearch")
+                  : removeAction === "blocklist"
+                    ? t("adminManage.queue.remove.confirmBlocklist")
+                    : t("adminManage.queue.remove.confirm")}
+              </Button>
+            </div>
+          </DialogPopup>
+        </DialogPortal>
+      </Dialog>
+
+      <QueueImportDialog row={importing} onClose={() => setImporting(null)} onImported={imported} />
+    </div>
+  );
+}

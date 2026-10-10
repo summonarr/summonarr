@@ -77,7 +77,7 @@
   "settings.featureLabel.behavior_watchGrades": "Request watch grades",
   "settings.featureDesc.behavior_watchGrades": "Grade each user A–F on whether they watch what they request, shown to admins on the Users page and the request queue. Display only — never blocks a request. Needs play history tracking; tune it in Media → Watch Grades.",
   "settings.featureLabel.behavior_watchlistAutoRequest": "Watchlist auto-request",
-  "settings.featureDesc.behavior_watchlistAutoRequest": "File a request automatically when a user adds a title to their watchlist — in Summonarr, and on their Plex watchlist (polled by the sync-plex-watchlists cron). Only for users granted an Auto-request permission; each request still goes through quota, blacklist and approval. A Plex watchlist is read with the user's own Plex sign-in (once after this is enabled) or, when Settings → Media → Plex Watchlist allows it, through your Plex server owner's account for Plex friends who opt in.",
+  "settings.featureDesc.behavior_watchlistAutoRequest": "File a request automatically when a user adds a title to their watchlist — in Summonarr, and on their Plex watchlist (polled by the sync-plex-watchlists cron). Only for users granted an Auto-request permission; each request still goes through quota, blacklist and approval. A Plex watchlist is read with the user's own Plex sign-in (once after this is enabled) or, when Settings → Media → Plex Watchlist allows it, through your Plex server owner's account for Plex friends who opt in. Users can also connect Trakt on their profile to auto-request from their Trakt watchlist (polled by the sync-trakt cron).",
   "settings.featureLabel.integration_plex": "Plex",
   "settings.featureDesc.integration_plex": "Enable Plex sign-in, library sync, and availability badges.",
   "settings.featureLabel.integration_jellyfin": "Jellyfin",
@@ -414,5 +414,7 @@
   "settings.arr.removedOpenRequestsItem_one": "{slug} ({count} open request)",
   "settings.arr.removedOpenRequestsItem_other": "{slug} ({count} open requests)",
   "settings.media.tokenPlaceholder.plex": "Paste this server's admin token",
-  "settings.media.tokenPlaceholder.jellyfin": "Paste an API key from this server"
+  "settings.media.tokenPlaceholder.jellyfin": "Paste an API key from this server",
+  "settings.cron.job.trakt.name": "Trakt Sync",
+  "settings.cron.job.trakt.description": "Request new titles from connected users' Trakt watchlists and import their Trakt watch history for For You (needs a Trakt client secret)"
 }

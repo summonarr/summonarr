@@ -88,6 +88,8 @@ const agentPosts: AgentPost[] = [];
 // A Radarr the admin_approve button can push to (the requests-mutation harness's
 // responder, trimmed): lookup → root folder → quality profile → add.
 const RADARR_HOST = "10.0.0.2";
+// What TMDB's /search answers (the /watchlist add and /issue searches); empty by default.
+let tmdbSearchResults: Array<Record<string, unknown>> = [];
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   fetchCalls.push(url);
@@ -110,6 +112,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     throw new Error(`unexpected Radarr fetch ${url.href}`);
   }
   if ((url.hostname === "themoviedb.org" || url.hostname.endsWith(".themoviedb.org"))) {
+    if (url.pathname.startsWith("/3/search/")) return json({ page: 1, total_pages: 1, results: tmdbSearchResults });
     return json({ page: 1, total_pages: 1, results: [], id: 603, title: "The Matrix" });
   }
   // discord.com: editOriginal / role calls.
@@ -171,7 +174,19 @@ shadowPrismaModel(prisma, "discordSearchCache", {
     return {};
   },
   findFirst: async () => null, findMany: async () => [],
-  upsert: async () => ({}), deleteMany: async () => ({ count: 0 }),
+  // Stateful so the /watchlist add and /issue result sets they save can be read
+  // back by the button that follows, and the /issue claim (a keyed deleteMany)
+  // reports whether it won.
+  upsert: async (args: { where: { queryKey: string }; create: { data: string; expiresAt: Date } }) => {
+    rec("discordSearchCache.upsert", args.where.queryKey);
+    pendingRows.set(args.where.queryKey, { data: args.create.data, expiresAt: args.create.expiresAt });
+    return {};
+  },
+  deleteMany: async (args: { where?: { queryKey?: unknown } } = {}) => {
+    const k = args.where?.queryKey;
+    rec("discordSearchCache.deleteMany", k);
+    return { count: typeof k === "string" && pendingRows.delete(k) ? 1 : 0 };
+  },
 });
 
 // The routed instance's *arr-available cache (RadarrAvailableItem /
@@ -325,6 +340,46 @@ shadowPrismaModel(prisma, "notificationAgent", {
   update: async () => ({ id: "agent-1" }),
 });
 
+// ── /watchlist, /issue, /recent fixtures ─────────────────────────────────────
+// Plex library rows: `libraryTmdbIds` answers availability (attachAvailability's
+// OR read) and createIssue's library gate (findFirst); `recentLibraryRows` is
+// what the recently-added read (ordered by addedAt) returns.
+let libraryTmdbIds = new Set<number>();
+let recentLibraryRows: Array<{ tmdbId: number; mediaType: string; addedAt: Date; title: string; year: string | null }> = [];
+shadowPrismaModel(prisma, "plexLibraryItem", {
+  findMany: async (args: { where: { OR?: Array<{ tmdbId: number; mediaType: string }> }; orderBy?: unknown }) => {
+    if (args.where.OR) return args.where.OR.filter((o) => libraryTmdbIds.has(o.tmdbId)).map((o) => ({ tmdbId: o.tmdbId, mediaType: o.mediaType }));
+    if (args.orderBy) return recentLibraryRows.map((r) => ({ ...r }));
+    return [];
+  },
+  findFirst: async (args: { where: { tmdbId: number } }) => (libraryTmdbIds.has(args.where.tmdbId) ? { tmdbId: args.where.tmdbId } : null),
+});
+type WatchRow = { userId: string; tmdbId: number; mediaType: string; title: string; createdAt: Date };
+let watchlistRows: WatchRow[] = [];
+shadowPrismaModel(prisma, "watchlistItem", {
+  findMany: async (args: { where: { userId: string }; take?: number }) =>
+    watchlistRows.filter((w) => w.userId === args.where.userId).slice(0, args.take ?? Infinity).map((w) => ({ ...w })),
+  count: async (args: { where: { userId: string } }) => watchlistRows.filter((w) => w.userId === args.where.userId).length,
+  findFirst: async (args: { where: { userId: string; tmdbId: number; mediaType: string } }) =>
+    watchlistRows.find((w) => w.userId === args.where.userId && w.tmdbId === args.where.tmdbId && w.mediaType === args.where.mediaType) ?? null,
+  create: async (args: { data: WatchRow & { posterPath: string | null } }) => {
+    rec("watchlistItem.create", args.data);
+    watchlistRows.push({ userId: args.data.userId, tmdbId: args.data.tmdbId, mediaType: args.data.mediaType, title: args.data.title, createdAt: new Date() });
+    return { tmdbId: args.data.tmdbId, mediaType: args.data.mediaType, title: args.data.title, posterPath: null, createdAt: new Date() };
+  },
+  deleteMany: async (args: { where: { userId: string; tmdbId: number; mediaType: string } }) => {
+    rec("watchlistItem.deleteMany", args.where);
+    const before = watchlistRows.length;
+    watchlistRows = watchlistRows.filter((w) => !(w.userId === args.where.userId && w.tmdbId === args.where.tmdbId && w.mediaType === args.where.mediaType));
+    return { count: before - watchlistRows.length };
+  },
+});
+let hiddenRows: Array<{ userId: string; tmdbId: number; mediaType: string }> = [];
+shadowPrismaModel(prisma, "hiddenItem", {
+  findMany: async (args: { where: { userId: string } }) => hiddenRows.filter((h) => h.userId === args.where.userId),
+});
+const { clearRecentlyAddedCache } = await import("../src/lib/recently-added.ts");
+
 const interactions = await import("../src/app/api/interactions/route.ts");
 
 // ── invocation ───────────────────────────────────────────────────────────────
@@ -399,6 +454,12 @@ beforeEach(async () => {
   agentRows.length = 0;
   agentPosts.length = 0;
   invalidateAgentCache();
+  tmdbSearchResults = [];
+  libraryTmdbIds = new Set();
+  recentLibraryRows = [];
+  watchlistRows = [];
+  hiddenRows = [];
+  clearRecentlyAddedCache();
 });
 
 // ── 2: unconfigured bot refuses ──────────────────────────────────────────────
@@ -1008,4 +1069,241 @@ test("pick: a filed pick consumes the pending search row", async () => {
   await waitFor(pickReplied, 400);
   assert.equal(opsOf("mediaRequest.create").length, 1);
   assert.deepEqual(opsOf("discordSearchCache.delete").map((o) => o.args), [`p:${sid}:${PICKER}`]);
+});
+
+
+// ═══ /watchlist, /issue, /recent ═════════════════════════════════════════════
+// /watchlist and /issue act on a SITE account (a personal list, the issue
+// tracker), so they need a linked one: a @discord.local shadow row or a
+// deactivated account is refused before anything is written. Both file through
+// the web's own chokepoints (addToWatchlist, createIssue) as that account.
+
+const MEMBER = "444444444444444444";
+const sub = (name: string, options: Array<{ name: string; value: string | number }> = []) => ({ name, type: 1, options });
+const slash = (name: string, options: unknown[], discordUserId = MEMBER, extra: Record<string, unknown> = {}) => ({
+  id: nextInteractionId(),
+  type: 2,
+  application_id: "app-1",
+  token: "interaction-token",
+  member: { user: { id: discordUserId, username: "member" } },
+  data: { name, options },
+  ...extra,
+});
+const click = (customId: string, discordUserId = MEMBER, values?: string[]) => ({
+  id: nextInteractionId(),
+  type: 3,
+  application_id: "app-1",
+  token: "interaction-token",
+  member: { user: { id: discordUserId, username: "member" } },
+  data: { custom_id: customId, ...(values ? { component_type: 3, values } : {}) },
+});
+function linkMember(over: Record<string, unknown> = {}): void {
+  appUsers.push({
+    id: "u-member", email: "member@example.com", name: "Member", discordId: MEMBER, role: "USER",
+    permissions: 0n, deactivatedAt: null, locale: null, mediaServerGrants: null, ...over,
+  });
+}
+const lastEdit = () => discordEdits[discordEdits.length - 1];
+const MATRIX = { id: 603, title: "The Matrix", release_date: "1999-03-31", poster_path: null, overview: "Neo.", vote_average: 8.2 };
+async function run(payload: unknown, done: () => boolean = () => discordEdits.length > 0): Promise<void> {
+  const before = discordEdits.length;
+  await post(payload);
+  await waitFor(() => discordEdits.length > before && done(), 400);
+}
+
+test("/watchlist: an UNLINKED (shadow) Discord user is told to link — nothing is searched or written", async () => {
+  appUsers.push({ id: "shadow", email: `discord_${MEMBER}@discord.local`, name: "s", discordId: MEMBER, role: "USER", permissions: 0n, deactivatedAt: null, locale: null });
+  tmdbSearchResults = [MATRIX];
+  await run(slash("watchlist", [sub("add", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }])]));
+  assert.match(String(lastEdit().content), /link/i);
+  assert.equal(fetchCalls.filter((u) => u.pathname.startsWith("/3/search/")).length, 0);
+  assert.deepEqual(opsOf("watchlistItem.create"), []);
+});
+
+test("/watchlist add: results get Add buttons; the click adds to the LINKED account's watchlist; another user's click does nothing", async () => {
+  linkMember();
+  tmdbSearchResults = [MATRIX];
+  const cmd = slash("watchlist", [sub("add", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }])]);
+  await run(cmd);
+  const buttons = (lastEdit().components as Array<{ components: Array<{ custom_id: string }> }>)[0].components;
+  assert.equal(buttons[0].custom_id, `wladd:${cmd.id}:${MEMBER}:0`);
+
+  // Someone else clicking the same message: ignored outright — nothing added,
+  // and the invoker's message is not rewritten either.
+  const editsBefore = discordEdits.length;
+  await post(click(`wladd:${cmd.id}:${MEMBER}:0`, "555555555555555555"));
+  for (let i = 0; i < 40; i++) await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(opsOf("watchlistItem.create"), []);
+  assert.equal(discordEdits.length, editsBefore, "a foreign click must not touch the invoker's message");
+
+  await run(click(`wladd:${cmd.id}:${MEMBER}:0`), () => opsOf("watchlistItem.create").length > 0 || /watchlist/i.test(JSON.stringify(lastEdit())));
+  const created = opsOf("watchlistItem.create");
+  assert.equal(created.length, 1);
+  assert.deepEqual(
+    { userId: (created[0].args as WatchRow).userId, tmdbId: (created[0].args as WatchRow).tmdbId, mediaType: (created[0].args as WatchRow).mediaType },
+    { userId: "u-member", tmdbId: 603, mediaType: "MOVIE" },
+  );
+  assert.match(String(lastEdit().embeds?.[0]?.description), /Added to your watchlist/);
+});
+
+test("/watchlist add: a DEACTIVATED account's click is refused — the watchlist is never touched", async () => {
+  linkMember();
+  tmdbSearchResults = [MATRIX];
+  const cmd = slash("watchlist", [sub("add", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }])]);
+  await run(cmd);
+  appUsers[0].deactivatedAt = new Date();
+  await run(click(`wladd:${cmd.id}:${MEMBER}:0`));
+  assert.match(String(lastEdit().content), /deactivated/i);
+  assert.deepEqual(opsOf("watchlistItem.create"), []);
+});
+
+test("/watchlist list: newest titles with a remove menu; picking one removes exactly that title and re-renders", async () => {
+  linkMember();
+  watchlistRows = [
+    { userId: "u-member", tmdbId: 603, mediaType: "MOVIE", title: "The Matrix", createdAt: new Date() },
+    { userId: "u-member", tmdbId: 1399, mediaType: "TV", title: "Game of Thrones", createdAt: new Date() },
+    { userId: "someone-else", tmdbId: 11, mediaType: "MOVIE", title: "Not Yours", createdAt: new Date() },
+  ];
+  await run(slash("watchlist", [sub("list")]));
+  const edit = lastEdit();
+  assert.match(String(edit.content), /The Matrix/);
+  assert.doesNotMatch(String(edit.content), /Not Yours/);
+  const menu = (edit.components as Array<{ components: Array<{ custom_id: string; options: Array<{ value: string }> }> }>)[0].components[0];
+  assert.equal(menu.custom_id, `wlrm:${MEMBER}`);
+  assert.deepEqual(menu.options.map((o) => o.value), ["MOVIE:603", "TV:1399"]);
+
+  await run(click(`wlrm:${MEMBER}`, MEMBER, ["TV:1399"]));
+  assert.deepEqual(opsOf("watchlistItem.deleteMany").map((o) => o.args), [{ userId: "u-member", tmdbId: 1399, mediaType: "TV" }]);
+  assert.match(String(lastEdit().content), /Removed \*\*Game of Thrones\*\*/);
+  assert.doesNotMatch(String(lastEdit().content), /Game of Thrones\*\* —/);
+});
+
+test("/watchlist list: a forged menu value is refused before any delete", async () => {
+  linkMember();
+  await run(click(`wlrm:${MEMBER}`, MEMBER, ["MOVIE:603; DROP"]));
+  assert.deepEqual(opsOf("watchlistItem.deleteMany"), []);
+});
+
+test("/issue: only titles in the reporter's library are offered; the pick files ONE issue as the linked account and a second click cannot file another", async () => {
+  linkMember();
+  tmdbSearchResults = [MATRIX, { id: 604, title: "The Matrix Reloaded", release_date: "2003-05-15", poster_path: null, overview: "", vote_average: 7 }];
+  libraryTmdbIds = new Set([603]);
+  const cmd = slash("issue", [
+    { name: "type", value: "movie" },
+    { name: "query", value: "matrix" },
+    { name: "problem", value: "WRONG_AUDIO" },
+    { name: "note", value: "Russian dub only" },
+  ]);
+  await run(cmd);
+  const buttons = (lastEdit().components as Array<{ components: Array<{ custom_id: string }> }>)[0].components;
+  assert.equal(buttons.length, 1, "Reloaded is not in the library, so it is not offered");
+  assert.equal(buttons[0].custom_id, `issuepick:${cmd.id}:${MEMBER}:0`);
+
+  await run(click(`issuepick:${cmd.id}:${MEMBER}:0`), () => /reported|library/i.test(JSON.stringify(lastEdit())));
+  const creates = opsOf("issue.create");
+  assert.equal(creates.length, 1);
+  const data = (creates[0].args as { data: Record<string, unknown> }).data;
+  assert.equal(data.reportedBy, "u-member");
+  assert.equal(data.tmdbId, 603);
+  assert.equal(data.issueType, "WRONG_AUDIO");
+  assert.equal(data.scope, "FULL");
+  assert.equal(data.note, "Russian dub only");
+  assert.match(String(lastEdit().embeds?.[0]?.description), /Issue reported/);
+
+  await run(click(`issuepick:${cmd.id}:${MEMBER}:0`));
+  assert.equal(opsOf("issue.create").length, 1, "the search is claimed — a double click files nothing more");
+  assert.match(String(lastEdit().content), /expired/i);
+});
+
+test("/issue: two SIMULTANEOUS clicks on one search file ONE issue — the claim, not the read, decides", async () => {
+  linkMember();
+  tmdbSearchResults = [MATRIX];
+  libraryTmdbIds = new Set([603]);
+  const cmd = slash("issue", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }, { name: "problem", value: "BAD_VIDEO" }]);
+  await run(cmd);
+  const before = discordEdits.length;
+  // Both handlers read the pending search before either claims it.
+  await Promise.all([post(click(`issuepick:${cmd.id}:${MEMBER}:0`)), post(click(`issuepick:${cmd.id}:${MEMBER}:0`))]);
+  await waitFor(() => discordEdits.length >= before + 2, 400);
+  assert.equal(opsOf("issue.create").length, 1);
+});
+
+test("/issue: an episode without a season is refused before any search", async () => {
+  linkMember();
+  await run(slash("issue", [
+    { name: "type", value: "tv" },
+    { name: "query", value: "dark" },
+    { name: "problem", value: "BAD_VIDEO" },
+    { name: "episode", value: 3 },
+  ]));
+  assert.match(String(lastEdit().content), /season/i);
+  assert.equal(fetchCalls.filter((u) => u.pathname.startsWith("/3/search/")).length, 0);
+});
+
+test("/issue: refused while issues are switched off", async () => {
+  linkMember();
+  settings.set("feature.page.issues", "false");
+  invalidateFeatureFlagCache();
+  await run(slash("issue", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }, { name: "problem", value: "OTHER" }]));
+  assert.match(String(lastEdit().content), /turned off/i);
+  assert.deepEqual(opsOf("issue.create"), []);
+});
+
+test("/recent: newest library titles, filtered by type, minus what the user hid — no link needed", async () => {
+  appUsers.push({ id: "u-viewer", email: "v@example.com", name: "V", discordId: MEMBER, role: "USER", permissions: 0n, deactivatedAt: null, locale: null });
+  recentLibraryRows = [
+    { tmdbId: 1, mediaType: "MOVIE", addedAt: new Date("2026-10-07T00:00:00Z"), title: "Fresh Movie", year: "2026" },
+    { tmdbId: 2, mediaType: "TV", addedAt: new Date("2026-10-06T00:00:00Z"), title: "Fresh Show", year: "2025" },
+    { tmdbId: 3, mediaType: "MOVIE", addedAt: new Date("2026-10-05T00:00:00Z"), title: "Hidden Movie", year: "2024" },
+  ];
+  hiddenRows = [{ userId: "u-viewer", tmdbId: 3, mediaType: "MOVIE" }];
+  await run(slash("recent", []));
+  const all = String(lastEdit().content);
+  assert.match(all, /Fresh Movie\*\* \(2026\)/);
+  assert.match(all, /Fresh Show/);
+  assert.doesNotMatch(all, /Hidden Movie/);
+
+  await run(slash("recent", [{ name: "type", value: "tv" }]));
+  assert.doesNotMatch(String(lastEdit().content), /Fresh Movie/);
+  assert.match(String(lastEdit().content), /Fresh Show/);
+});
+
+test("/recent: refused for a DEACTIVATED account, and for an unlinked user while the bot requires a linked account", async () => {
+  appUsers.push({ id: "u-gone", email: "gone@example.com", name: "G", discordId: MEMBER, role: "USER", permissions: 0n, deactivatedAt: new Date(), locale: null });
+  recentLibraryRows = [{ tmdbId: 1, mediaType: "MOVIE", addedAt: new Date("2026-10-07T00:00:00Z"), title: "Fresh Movie", year: "2026" }];
+  await run(slash("recent", []));
+  assert.match(String(lastEdit().content), /deactivated/i);
+
+  appUsers = [];
+  settings.set("discordRequireLinkedAccount", "true");
+  await run(slash("recent", []));
+  assert.match(String(lastEdit().content), /link/i);
+  assert.doesNotMatch(String(lastEdit().content), /Fresh Movie/);
+});
+
+test("/issue: a refused filing gives the search back — the next pick still works", async () => {
+  linkMember();
+  tmdbSearchResults = [MATRIX];
+  libraryTmdbIds = new Set([603]);
+  const cmd = slash("issue", [{ name: "type", value: "movie" }, { name: "query", value: "matrix" }, { name: "problem", value: "BAD_VIDEO" }]);
+  await run(cmd);
+  // The title leaves the library before the click: createIssue refuses it.
+  libraryTmdbIds = new Set();
+  await run(click(`issuepick:${cmd.id}:${MEMBER}:0`), () => JSON.stringify(lastEdit()).includes("library"));
+  assert.equal(opsOf("issue.create").length, 0);
+  assert.ok(pendingRows.has(`pi:${cmd.id}:${MEMBER}`), "the search survives a refusal");
+  // Back in the library: the same search files.
+  libraryTmdbIds = new Set([603]);
+  await run(click(`issuepick:${cmd.id}:${MEMBER}:0`), () => opsOf("issue.create").length > 0);
+  assert.equal(opsOf("issue.create").length, 1);
+});
+
+test("the welcome channel takes /link only — /watchlist, /issue and /recent are refused there", async () => {
+  linkMember();
+  settings.set("discordWelcomeChannelId", "777777777777777777");
+  for (const name of ["watchlist", "issue", "recent"]) {
+    await run(slash(name, [], MEMBER, { channel_id: "777777777777777777" }));
+    assert.match(String(lastEdit().content), new RegExp(`/${name}`));
+  }
+  assert.deepEqual(opsOf("watchlistItem.create"), []);
 });

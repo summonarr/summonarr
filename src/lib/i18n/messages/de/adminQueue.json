@@ -299,5 +299,19 @@
   "adminQueue.fixMatch.arrBadge": "Radarr/Sonarr ✓",
   "adminQueue.fixMatch.arrShort": "Arr ✓",
   "adminQueue.fixMatch.resolutionNote": "Zuordnung korrigiert zu „{title}“",
-  "adminQueue.fixMatch.autoRequestNote": "Aus der Zuordnungskorrektur hinzugefügt — war in der Bibliothek falsch zugeordnet"
+  "adminQueue.fixMatch.autoRequestNote": "Aus der Zuordnungskorrektur hinzugefügt — war in der Bibliothek falsch zugeordnet",
+  "adminQueue.actions.pickRelease": "Release wählen",
+  "adminQueue.releases.title": "Ein Release wählen",
+  "adminQueue.releases.searching": "Indexer werden durchsucht…",
+  "adminQueue.releases.failed": "Releases konnten nicht gesucht werden",
+  "adminQueue.releases.grabFailed": "Das Release konnte nicht geholt werden",
+  "adminQueue.releases.grabbed": "An den Download-Client gesendet. Die Anfrage wird verfügbar, sobald es importiert ist.",
+  "adminQueue.releases.noSeasons": "Diese Serie hat in Sonarr noch keine Staffeln.",
+  "adminQueue.releases.none": "Keine Releases gefunden.",
+  "adminQueue.releases.season": "Staffel",
+  "adminQueue.releases.seasonComplete": "Staffel {number}",
+  "adminQueue.releases.seasonMissing_one": "Staffel {number} · {count} fehlt",
+  "adminQueue.releases.seasonMissing_other": "Staffel {number} · {count} fehlen",
+  "adminQueue.releases.seeders_one": "{count} Seeder",
+  "adminQueue.releases.seeders_other": "{count} Seeder"
 }

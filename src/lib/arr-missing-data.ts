@@ -2,20 +2,29 @@
 // the chosen service (guardrail 32 — every instance, addressed by its slug),
 // judged by the pure rules in arr-missing.ts. Every call goes through
 // arrFetch (guardrail 5). Nothing is cached and nothing is written.
-import { arrErrorMessage, arrFetch, getArrCfg } from "./arr";
+import { arrErrorMessage, arrFetch, getArrCfg, type ArrCfg } from "./arr";
 import { getSyncableArrInstances } from "./arr-instance-registry";
 import { settleLimit } from "./concurrency";
 import { isFeatureEnabled } from "./features";
 import { prisma } from "./prisma";
 import {
+  cutoffMovie,
+  cutoffSeriesFromEpisodes,
   missingEpisodes,
   missingMovie,
   missingSeries,
+  planCutoffSearch,
   planSeriesSearch,
+  qualityProfileInfo,
+  type CutoffMovie,
+  type CutoffSeries,
   type MissingEpisode,
   type MissingMovie,
   type MissingSeries,
+  type RadarrCutoffRow,
   type RadarrMovieRow,
+  type SonarrCutoffRecord,
+  type SonarrEpisodeFileRow,
   type SonarrEpisodeRow,
   type SonarrSeriesRow,
 } from "./arr-missing";
@@ -24,6 +33,15 @@ export type MissingService = "radarr" | "sonarr";
 
 export function parseMissingService(v: string | null | undefined): MissingService | null {
   return v === "radarr" || v === "sonarr" ? v : null;
+}
+
+/** "missing" (no file, should have one) or "cutoff" (has a file below the profile's cutoff). */
+export type MissingMode = "missing" | "cutoff";
+
+/** Absent means "missing" — the page's original and only mode before cutoff existed. */
+export function parseMissingMode(v: unknown): MissingMode | null {
+  if (v === undefined || v === null || v === "" || v === "missing") return "missing";
+  return v === "cutoff" ? "cutoff" : null;
 }
 
 export interface MissingReport<T> {
@@ -61,9 +79,12 @@ async function cachedPosterPaths(mediaType: "MOVIE" | "TV", tmdbIds: number[]): 
   return out;
 }
 
+// `read` fetches one instance's raw listing and judges it; the default is the
+// Missing mode's single library listing.
 async function loadReport<T extends { tmdbId: number | null; posterPath: string | null }>(
   service: MissingService,
   judge: (rows: unknown[], instance: string) => T[],
+  read?: (cfg: ArrCfg, instance: string) => Promise<T[]>,
 ): Promise<MissingReport<T>> {
   const enabled = await isFeatureEnabled(`feature.integration.${service}`);
   const configured = enabled ? await getSyncableArrInstances(service) : [];
@@ -72,6 +93,7 @@ async function loadReport<T extends { tmdbId: number | null; posterPath: string 
   const settled = await settleLimit(instances, LISTING_CONCURRENCY, async (inst) => {
     const cfg = await getArrCfg(service, inst.slug);
     if (!cfg) throw new Error("not configured");
+    if (read) return read(cfg, inst.slug);
     const rows = await arrFetch<unknown>(cfg, path);
     return judge(Array.isArray(rows) ? rows : [], inst.slug);
   });
@@ -123,6 +145,62 @@ export async function loadMissingSeries(): Promise<MissingReport<MissingSeries>>
     return out;
   });
   report.items.sort((a, b) => (b.lastAired ?? "").localeCompare(a.lastAired ?? "") || a.title.localeCompare(b.title));
+  return report;
+}
+
+// ── cutoff unmet ─────────────────────────────────────────────────────────────
+
+// /api/v3/wanted/cutoff is paged; same ceiling idea as the queue reads.
+const CUTOFF_PAGE_SIZE = 500;
+const CUTOFF_MAX_PAGES = 40;
+
+async function readCutoffPages(cfg: ArrCfg, service: MissingService): Promise<unknown[]> {
+  const include = service === "sonarr" ? "&includeSeries=true&includeEpisodeFile=true" : "";
+  const records: unknown[] = [];
+  for (let page = 1; page <= CUTOFF_MAX_PAGES; page++) {
+    const res = await arrFetch<{ records?: unknown; totalRecords?: unknown }>(
+      cfg, `/api/v3/wanted/cutoff?page=${page}&pageSize=${CUTOFF_PAGE_SIZE}&monitored=true${include}`,
+    );
+    const batch = Array.isArray(res?.records) ? res.records : [];
+    records.push(...batch);
+    const total = typeof res?.totalRecords === "number" ? res.totalRecords : 0;
+    if (batch.length === 0 || page * CUTOFF_PAGE_SIZE >= total) break;
+  }
+  return records;
+}
+
+// The profile names are labels only: a failed read leaves them blank rather
+// than failing the instance's listing.
+async function readProfiles(cfg: ArrCfg) {
+  try {
+    return qualityProfileInfo(await arrFetch<unknown>(cfg, "/api/v3/qualityprofile"));
+  } catch {
+    return qualityProfileInfo([]);
+  }
+}
+
+/** Radarr movies whose file is below the profile cutoff, monitored only, by title. */
+export async function loadCutoffMovies(): Promise<MissingReport<CutoffMovie>> {
+  const report = await loadReport<CutoffMovie>("radarr", () => [], async (cfg, instance) => {
+    const [records, profiles] = await Promise.all([readCutoffPages(cfg, "radarr"), readProfiles(cfg)]);
+    const out: CutoffMovie[] = [];
+    for (const row of records as RadarrCutoffRow[]) {
+      const m = row && typeof row === "object" ? cutoffMovie(row, instance, profiles) : null;
+      if (m) out.push(m);
+    }
+    return out;
+  });
+  report.items.sort((a, b) => a.title.localeCompare(b.title));
+  return report;
+}
+
+/** Sonarr series with monitored episodes below the profile cutoff, most episodes first. */
+export async function loadCutoffSeries(): Promise<MissingReport<CutoffSeries>> {
+  const report = await loadReport<CutoffSeries>("sonarr", () => [], async (cfg, instance) => {
+    const [records, profiles] = await Promise.all([readCutoffPages(cfg, "sonarr"), readProfiles(cfg)]);
+    return cutoffSeriesFromEpisodes(records as SonarrCutoffRecord[], instance, profiles);
+  });
+  report.items.sort((a, b) => b.episodes.length - a.episodes.length || a.title.localeCompare(b.title));
   return report;
 }
 
@@ -183,4 +261,37 @@ export async function searchMissing(service: MissingService, instance: string, a
   }
   if (plan.episodeIds.length > 0) await command({ name: "EpisodeSearch", episodeIds: plan.episodeIds });
   return { commands: plan.seasons.length + (plan.episodeIds.length > 0 ? 1 : 0), seasons: plan.seasons, episodes: plan.episodeIds.length };
+}
+
+/** Nothing is below cutoff any more (upgraded, file removed, or unmonitored). */
+export class NothingToUpgradeError extends Error {}
+
+// The Cutoff mode's per-row Search: queue an UPGRADE search for exactly what
+// Radarr/Sonarr say is below cutoff right now, re-judged live (a row whose file
+// was upgraded since the page loaded is refused, not searched again).
+// Radarr: MoviesSearch for the movie. Sonarr: one EpisodeSearch for the
+// monitored episodes whose file is below cutoff — planCutoffSearch.
+export async function searchCutoff(service: MissingService, instance: string, arrId: number): Promise<MissingSearchResult> {
+  const cfg = await configuredCfg(service, instance);
+  const command = (body: Record<string, unknown>) =>
+    arrFetch<unknown>(cfg, "/api/v3/command", { method: "POST", body: JSON.stringify(body) });
+
+  if (service === "radarr") {
+    const row = await arrFetch<{ hasFile?: unknown; monitored?: unknown; movieFile?: { qualityCutoffNotMet?: unknown } | null }>(cfg, `/api/v3/movie/${arrId}`);
+    if (!row || row.hasFile !== true || row.monitored !== true || row.movieFile?.qualityCutoffNotMet !== true) throw new NothingToUpgradeError();
+    await command({ name: "MoviesSearch", movieIds: [arrId] });
+    return { commands: 1, seasons: [], episodes: 0 };
+  }
+
+  const [episodes, files] = await Promise.all([
+    arrFetch<unknown>(cfg, `/api/v3/episode?seriesId=${arrId}`),
+    arrFetch<unknown>(cfg, `/api/v3/episodefile?seriesId=${arrId}`),
+  ]);
+  const ids = planCutoffSearch(
+    Array.isArray(episodes) ? (episodes as Array<SonarrEpisodeRow & { episodeFileId?: unknown }>) : [],
+    Array.isArray(files) ? (files as SonarrEpisodeFileRow[]) : [],
+  );
+  if (ids.length === 0) throw new NothingToUpgradeError();
+  await command({ name: "EpisodeSearch", episodeIds: ids });
+  return { commands: 1, seasons: [], episodes: ids.length };
 }

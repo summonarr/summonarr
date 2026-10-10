@@ -27,6 +27,7 @@ export const SETTINGS_SENSITIVE_KEYS: readonly string[] = [
   "omdbApiKey",
   "mdblistApiKey",
   "traktClientId",
+  "traktClientSecret",
   "ipinfoToken",
   "resendApiKey",
   "smtpPassword",

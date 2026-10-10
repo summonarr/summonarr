@@ -436,8 +436,9 @@ _cron_loop() {
   SCRUB_AUDIT_PII_NEXT=$((NOW_INIT + 900))
   TRASH_SYNC_NEXT=$((NOW_INIT + 360))
   PLEX_WATCHLIST_NEXT=$((NOW_INIT + 420))
+  TRAKT_SYNC_NEXT=$((NOW_INIT + 540))
 
-  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  Recommendations: ${WARM_RECOMMENDATIONS_INTERVAL:-43200}s  Library: ${WARM_LIBRARY_INTERVAL:-86400}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s  PlexWatchlist: ${PLEX_WATCHLIST_SYNC_INTERVAL:-1800}s"
+  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  Recommendations: ${WARM_RECOMMENDATIONS_INTERVAL:-43200}s  Library: ${WARM_LIBRARY_INTERVAL:-86400}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s  PlexWatchlist: ${PLEX_WATCHLIST_SYNC_INTERVAL:-1800}s  Trakt: ${TRAKT_SYNC_INTERVAL:-1800}s"
   while true; do
     sleep 60
     NOW=$(date +%s)
@@ -494,6 +495,13 @@ _cron_loop() {
     if [ "$NOW" -ge "$PLEX_WATCHLIST_NEXT" ]; then
       _cron_sync "${PLEX_WATCHLIST_SYNC_URL:-${CRON_BASE}/api/cron/sync-plex-watchlists}" "sync-plex-watchlists" quiet && rc=0 || rc=$?
       PLEX_WATCHLIST_NEXT=$(_cron_next "$rc" "$NOW" "${PLEX_WATCHLIST_SYNC_INTERVAL:-1800}" 1800)
+    fi
+    # Per-user Trakt: watchlist auto-request + watch history for For You. A no-op
+    # until both Trakt app credentials are saved and a feature that uses them is
+    # on; quiet so the no-op doesn't log.
+    if [ "$NOW" -ge "$TRAKT_SYNC_NEXT" ]; then
+      _cron_sync "${TRAKT_SYNC_URL:-${CRON_BASE}/api/cron/sync-trakt}" "sync-trakt" quiet && rc=0 || rc=$?
+      TRAKT_SYNC_NEXT=$(_cron_next "$rc" "$NOW" "${TRAKT_SYNC_INTERVAL:-1800}" 1800)
     fi
   done
 }

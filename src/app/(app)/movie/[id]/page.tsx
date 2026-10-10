@@ -16,6 +16,8 @@ import { CollectionRow } from "@/components/media/collection-row";
 import Image from "next/image";
 import { notFound } from "next/navigation";
 import { TrailerButton } from "@/components/media/trailer-button";
+import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
+import { arrInstancesHolding } from "@/lib/arr-links-data";
 import { prisma } from "@/lib/prisma";
 import { requireAppSession } from "@/lib/require-app-session";
 import { attachAllAvailability } from "@/lib/attach-all";
@@ -201,6 +203,12 @@ export default async function MovieDetailPage({
       blacklisted,
     }),
   ]);
+  // "Open in Radarr" for an admin, one link per configured instance whose
+  // synced cache holds the title. A cosmetic shortcut (JWT-level session is
+  // fine — guardrail 29); the route behind it is ADMIN-gated itself.
+  const arrLinks = hasPermission(session.user.permissions, Permission.ADMIN)
+    ? await arrInstancesHolding("radarr", media.id).catch(() => [])
+    : [];
 
   const backdrop = backdropUrl(media.backdropPath, "original");
   const poster = posterUrl(media.posterPath, "w500");
@@ -429,6 +437,15 @@ export default async function MovieDetailPage({
               {(media.trailerKey || media.trailerUrl) && (
                 <TrailerButton trailerKey={media.trailerKey} trailerUrl={media.trailerUrl} />
               )}
+              {arrLinks.map((inst) => (
+                <OpenInArrLink
+                  key={inst.slug || "default"}
+                  service="radarr"
+                  instance={inst.slug}
+                  target={{ tmdbId: media.id }}
+                  label={t("adminManage.openIn", { name: arrInstanceLabel("radarr", inst.name, inst.slug) })}
+                />
+              ))}
             </div>
           </div>
         </div>

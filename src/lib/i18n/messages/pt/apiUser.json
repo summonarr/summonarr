@@ -166,5 +166,10 @@
   "apiUser.votes.reasonTooLong": "reason deve ser um texto com menos de 200 caracteres",
   "apiUser.watchlist.alreadyAdded": "Já está na sua lista",
   "apiUser.playHistory.exportTruncated": "Exportação truncada em {max} linhas — restrinja startDate/endDate e exporte novamente",
-  "apiUser.common.tmdbIdOutOfRange": "tmdbId está fora do intervalo"
+  "apiUser.common.tmdbIdOutOfRange": "tmdbId está fora do intervalo",
+  "apiUser.requests.releases.invalidStatus": "Só solicitações aprovadas ou disponíveis podem escolher um release",
+  "apiUser.requests.releases.notInArr": "O {service} ainda não tem este título — reenvie a solicitação primeiro",
+  "apiUser.requests.releases.seasonInvalid": "season deve ser um número inteiro",
+  "apiUser.requests.releases.releaseRequired": "release deve ser um identificador de uma busca de releases",
+  "apiUser.requests.releases.handleExpired": "Esse resultado da busca expirou — busque de novo"
 }

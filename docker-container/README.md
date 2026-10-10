@@ -172,6 +172,7 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | `SCRUB_AUDIT_PII_INTERVAL`   | `86400` | Audit-log PII scrubber.                                            |
 | `TRASH_SYNC_INTERVAL`        | `86400` | TRaSH-Guides quality profile refresh.                              |
 | `PLEX_WATCHLIST_SYNC_INTERVAL` | `1800` | Plex watchlist auto-request (a no-op unless *Watchlist auto-request* is enabled in Features). |
+| `TRAKT_SYNC_INTERVAL` | `1800` | Per-user Trakt: watchlist auto-request and watch history for *For You* (a no-op until a Trakt client ID and secret are saved in Settings). |
 
 ### Advanced / rarely needed
 
@@ -179,7 +180,7 @@ All intervals are in seconds and already have sensible defaults. The compose fil
 | ------------------------------ | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `BASE_PATH`                    | **build-time only**; starts with `/`, no trailing `/` | Serve under a subpath, e.g. `/request`. Baked into the client bundle at build — setting it as a runtime env var on the prebuilt image has no effect. See [Sub-path deployment](#sub-path-deployment-base_path). |
 | `TRUSTED_PROXY_HOPS`           | integer; default `1`             | Number of trusted reverse proxies in front of the app. Selects which `X-Forwarded-For` entry (Nth from the right) is the real client IP for per-IP rate limiting. Only relevant when `TRUST_PROXY=true`; raise it if you chain proxies (e.g. Cloudflare → Nginx). |
-| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=0.33.0` (no `v` — the published tags are bare semver).                                                                                                   |
+| `SUMMONARR_VERSION`            | image tag; default `latest`      | Pin the GHCR image tag. Example: `SUMMONARR_VERSION=0.34.0` (no `v` — the published tags are bare semver).                                                                                                   |
 | `DELAYED_JOBS_MAX_PENDING`     | integer; default `500`           | Upper bound on queued+running jobs. Raise only if you see delayed-job drops in the logs.                                                                        |
 | `DELAYED_JOBS_MAX_QUEUE`       | integer; default `100`           | Max jobs waiting to be picked up (included in pending).                                                                                                         |
 | `DELAYED_JOBS_MAX_CONCURRENCY` | integer; default `4`             | Concurrent workers draining the queue.                                                                                                                          |
@@ -280,7 +281,9 @@ Endpoints:
 | Sonarr  | `${AUTH_URL}/api/webhooks/sonarr?token=<secret>` |
 | Radarr  | `${AUTH_URL}/api/webhooks/radarr?token=<secret>` |
 
-In Radarr/Sonarr add this under **Settings → Connect → + → Webhook** (method **POST**, leave the header fields blank) and enable the **On Grab / On Import / On Movie/Series Delete / Manual Interaction Required** triggers. The load-bearing event is the import/grab (`Download`), which flips a request to *Available*. Before applying the flip the handler cross-checks the title against Radarr/Sonarr's own API — but that check is fail-open: if Radarr/Sonarr is unreachable (or the HD/4K variant isn't configured) the flip proceeds optimistically, so the API check is a best-effort guard, not a hard barrier against a forged event. The `?token` secret is the real authentication. The token rides in the URL; see [Security hardening](#security-hardening-operational) for keeping it out of logs. No HMAC payload signing — none of the upstream services sign their bodies.
+The quickest way is **Admin → Download Queue** (or **Settings → Integrations → Webhooks**): each Radarr/Sonarr instance has a **Set up webhook** button that creates this entry for you — with the right token and triggers, pointed at the Summonarr address you give it (use the address Radarr/Sonarr reach Summonarr on, e.g. `http://summonarr:3000` on a shared Docker network) — and the same panel flags an instance whose webhook is missing, carries an old token, or lacks a trigger. Radarr/Sonarr test the URL before saving, so a successful setup means they reached Summonarr.
+
+To add it by hand instead: in Radarr/Sonarr go to **Settings → Connect → + → Webhook** (method **POST**, leave the header fields blank) and enable **On Import / On Upgrade / On Movie (Series) Delete / On Movie File Delete** (Radarr) **/ On Health Issue / On Health Restored / On Manual Interaction Required**. On Grab is not used. The load-bearing event is the import/grab (`Download`), which flips a request to *Available*. Before applying the flip the handler cross-checks the title against Radarr/Sonarr's own API — but that check is fail-open: if Radarr/Sonarr is unreachable (or the HD/4K variant isn't configured) the flip proceeds optimistically, so the API check is a best-effort guard, not a hard barrier against a forged event. The `?token` secret is the real authentication. The token rides in the URL; see [Security hardening](#security-hardening-operational) for keeping it out of logs. No HMAC payload signing — none of the upstream services sign their bodies.
 
 ## Security hardening (operational)
 
@@ -586,7 +589,7 @@ Before upgrading across a minor version, skim the commit history for `feat`/`per
 Pin to a specific version instead of `latest` by setting `SUMMONARR_VERSION` in `.env`:
 
 ```dotenv
-SUMMONARR_VERSION=0.33.0
+SUMMONARR_VERSION=0.34.0
 ```
 
 To pick up new variables added to `.env.example` between releases, re-fetch it side-by-side and diff:

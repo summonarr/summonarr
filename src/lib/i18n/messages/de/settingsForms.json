@@ -204,6 +204,8 @@
   "settings.form.arr.connectedVersion": "Verbunden · v{version}",
   "settings.form.arr.url": "{service}-URL",
   "settings.form.arr.apiKeyHelp": "Zu finden unter {service} → Settings → General → Security",
+  "settings.form.arr.externalUrl": "Externe URL (optional)",
+  "settings.form.arr.externalUrlHelp": "Die Adresse, die dein Browser für {service} nutzt – für die Links „In {service} öffnen“. Leer lassen, um die URL oben zu verwenden.",
   "settings.form.arr.defaults": "Standard-Bibliothekseinstellungen",
   "settings.form.arr.refresh": "Aktualisieren",
   "settings.form.arr.optionsFailed": "Optionen konnten nicht geladen werden – prüfen Sie Ihre Verbindung oben.",
@@ -367,6 +369,8 @@
   "settings.form.agents.event.vote.threshold": "Schwelle für Löschstimmen erreicht",
   "settings.form.agents.event.arr.manual_interaction": "Manueller Import erforderlich",
   "settings.form.agents.event.arr.grab_completed": "Ersatz-Download abgeschlossen",
+  "settings.form.agents.event.arr.health": "Radarr/Sonarr-Zustandsproblem",
+  "settings.form.agents.event.arr.health_restored": "Radarr/Sonarr-Zustand wiederhergestellt",
   "settings.form.announce.sentWithFailures_one": "An {sent} Gerät gesendet, {failed} fehlgeschlagen",
   "settings.form.announce.sentWithFailures_other": "An {sent} Geräte gesendet, {failed} fehlgeschlagen",
   "settings.form.apiKey.removed": "Schlüssel entfernt",
@@ -398,5 +402,7 @@
   "settings.form.maintenance.enableHelp": "Solange er aktiv ist, können nur Administratoren die Seite nutzen; alle anderen sehen die Wartungsseite mit der Nachricht unten.",
   "settings.form.maintenance.enableTitle": "Wartungsmodus",
   "settings.form.plex.disconnectConfirm": "Plex trennen? Zum erneuten Verbinden ist eine neue Anmeldung bei plex.tv nötig.",
-  "settings.form.plex.disconnectConfirmAction": "Ja, trennen"
+  "settings.form.plex.disconnectConfirmAction": "Ja, trennen",
+  "settings.form.apiKey.traktSecret.label": "Trakt-Client-Secret",
+  "settings.form.apiKey.traktSecret.help": "Ermöglicht Benutzern, ihr eigenes Trakt-Konto in ihrem Profil zu verbinden, um automatisch aus ihrer Trakt-Merkliste anzufragen und ihren Trakt-Verlauf für Empfehlungen zu nutzen. Kopieren Sie das Client-Secret derselben App unter {link}."
 }

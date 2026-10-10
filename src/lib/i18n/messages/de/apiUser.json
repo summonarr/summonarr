@@ -166,5 +166,10 @@
   "apiUser.votes.reasonTooLong": "reason muss eine Zeichenkette mit weniger als 200 Zeichen sein",
   "apiUser.watchlist.alreadyAdded": "Bereits auf Ihrer Merkliste",
   "apiUser.playHistory.exportTruncated": "Export bei {max} Zeilen abgeschnitten – startDate/endDate eingrenzen und erneut exportieren",
-  "apiUser.common.tmdbIdOutOfRange": "tmdbId liegt außerhalb des gültigen Bereichs"
+  "apiUser.common.tmdbIdOutOfRange": "tmdbId liegt außerhalb des gültigen Bereichs",
+  "apiUser.requests.releases.invalidStatus": "Nur genehmigte oder verfügbare Anfragen können ein Release wählen",
+  "apiUser.requests.releases.notInArr": "{service} hat diesen Titel noch nicht – sende die Anfrage zuerst erneut",
+  "apiUser.requests.releases.seasonInvalid": "season muss eine ganze Zahl sein",
+  "apiUser.requests.releases.releaseRequired": "release muss eine Kennung aus einer Release-Suche sein",
+  "apiUser.requests.releases.handleExpired": "Dieses Suchergebnis ist abgelaufen – suche erneut"
 }

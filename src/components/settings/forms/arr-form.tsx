@@ -14,6 +14,9 @@ import { useT } from "@/components/i18n/i18n-provider";
 interface ArrFormProps {
   service: "radarr" | "sonarr";
   initialUrl: string;
+  // The address a browser uses for the instance ("Open in Radarr" links). "" =
+  // use initialUrl's address.
+  initialExternalUrl?: string;
   initialApiKey: string;
   initialRootFolder: string;
   initialQualityProfileId: string;
@@ -43,6 +46,7 @@ const MINIMUM_AVAILABILITY_OPTIONS = [
 export function ArrForm({
   service,
   initialUrl,
+  initialExternalUrl = "",
   initialApiKey,
   initialRootFolder,
   initialQualityProfileId,
@@ -55,6 +59,7 @@ export function ArrForm({
   const label      = `${service === "radarr" ? "Radarr" : "Sonarr"}${variant === "4k" ? " 4K" : ""}`;
   const idPrefix   = `${service}${v}`;
   const urlKey     = `${service}${v}Url`;
+  const externalKey = `${service}${v}ExternalUrl`;
   const keyKey     = `${service}${v}ApiKey`;
   const folderKey  = `${service}${v}RootFolder`;
   const profileKey = `${service}${v}QualityProfileId`;
@@ -67,6 +72,10 @@ export function ArrForm({
   const errorKey   = `${service}${v}Error`;
 
   const [url,    setUrl]    = useState(initialUrl);
+  const [externalUrl, setExternalUrl] = useState(initialExternalUrl);
+  // Sent only when it changed since the last save, so an untouched blank
+  // field doesn't write an empty row (and an audit entry) on every Save & Test.
+  const [savedExternalUrl, setSavedExternalUrl] = useState(initialExternalUrl);
   const [apiKey, setApiKey] = useState(initialApiKey);
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [message, setMessage] = useState("");
@@ -114,12 +123,19 @@ export function ArrForm({
       const res = await fetch(withBasePath("/api/settings"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [urlKey]: url, [keyKey]: apiKey }),
+        // An emptied external URL is sent as "" — the route clears it and the
+        // links fall back to the connection URL.
+        body: JSON.stringify({
+          [urlKey]: url,
+          [keyKey]: apiKey,
+          ...(externalUrl.trim() !== savedExternalUrl ? { [externalKey]: externalUrl.trim() } : {}),
+        }),
       });
 
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string } & Record<string, string | undefined>;
 
       if (res.ok && data.ok) {
+        setSavedExternalUrl(externalUrl.trim());
         const version = data[versionKey];
         setMessage(version ? t("settings.form.arr.connectedVersion", { version }) : t("settings.form.common.saved"));
         setStatus("ok");
@@ -191,6 +207,18 @@ export function ArrForm({
               className="bg-zinc-800 border-zinc-700 font-mono"
             />
             <p className="text-xs text-zinc-500">{t("settings.form.arr.apiKeyHelp", { service: label })}</p>
+          </div>
+          <div className="space-y-1.5 lg:col-span-2">
+            <Label htmlFor={`${idPrefix}-external-url`}>{t("settings.form.arr.externalUrl")}</Label>
+            <Input
+              id={`${idPrefix}-external-url`}
+              type="url"
+              value={externalUrl}
+              onChange={(e) => { setExternalUrl(e.target.value); setStatus("idle"); }}
+              placeholder={service === "radarr" ? "https://radarr.example.com" : "https://sonarr.example.com"}
+              className="bg-zinc-800 border-zinc-700 font-mono"
+            />
+            <p className="text-xs text-zinc-500">{t("settings.form.arr.externalUrlHelp", { service: label })}</p>
           </div>
         </div>
         <div className="flex items-center gap-3">

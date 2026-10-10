@@ -27,6 +27,9 @@ const SETTINGS_SCHEMA = [
   ["siteTitle",                     false],
   ["siteUrl",                       false],
   ["radarrUrl",                     false],
+  // The address a BROWSER uses for the instance — the "Open in Radarr" links.
+  // Never fetched by the server. Blank = fall back to radarrUrl.
+  ["radarrExternalUrl",             false],
   ["radarrApiKey",                  true ],
   ["radarrRootFolder",              false],
   ["radarrQualityProfileId",        false],
@@ -34,6 +37,7 @@ const SETTINGS_SCHEMA = [
   // (announced/inCinemas/released). Empty = don't send, Radarr's default.
   ["radarrMinimumAvailability",     false],
   ["sonarrUrl",                     false],
+  ["sonarrExternalUrl",             false],
   ["sonarrApiKey",                  true ],
   ["sonarrRootFolder",              false],
   ["sonarrQualityProfileId",        false],
@@ -45,12 +49,14 @@ const SETTINGS_SCHEMA = [
   // Optional 4K instances (second Radarr/Sonarr). Sensitive keys must also be
   // listed in SETTINGS_SENSITIVE_KEYS (boot alignment check enforces it).
   ["radarr4kUrl",                   false],
+  ["radarr4kExternalUrl",           false],
   ["radarr4kApiKey",                true ],
   ["radarr4kRootFolder",            false],
   ["radarr4kQualityProfileId",      false],
   ["radarr4kMinimumAvailability",   false],
   ["radarr4kWebhookSecret",         true ],
   ["sonarr4kUrl",                   false],
+  ["sonarr4kExternalUrl",           false],
   ["sonarr4kApiKey",                true ],
   ["sonarr4kRootFolder",            false],
   ["sonarr4kQualityProfileId",      false],
@@ -112,6 +118,9 @@ const SETTINGS_SCHEMA = [
   ["omdbApiKey",                    true ],
   ["mdblistApiKey",                 true ],
   ["traktClientId",                 true ],
+  // The Trakt app's secret — with the client id, what lets users connect their
+  // own Trakt accounts (src/lib/trakt-user.ts).
+  ["traktClientSecret",             true ],
   ["ratingsHiddenSources",          false],
   ["ipinfoToken",                   true ],
   // vapidPrivateKey is deliberately NOT here: push.ts generates the VAPID pair
@@ -246,6 +255,10 @@ const URL_KEYS = new Set<string>([
   "radarr4kUrl",
   "sonarrUrl",
   "sonarr4kUrl",
+  "radarrExternalUrl",
+  "radarr4kExternalUrl",
+  "sonarrExternalUrl",
+  "sonarr4kExternalUrl",
   "plexServerUrl",
   "jellyfinUrl",
   "discordInviteUrl",
@@ -745,6 +758,9 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     "ipinfoToken",
     "omdbApiKey",
     "mdblistApiKey",
+    // Removing it switches per-user Trakt connections off (the cron and the
+    // profile card both need it); readers treat "" as unset.
+    "traktClientSecret",
     // Webhook secrets must be clearable or the admin form silently lies: it
     // offers a blank field to remove the secret, the write is skipped as an
     // empty value, and the UI still reports Saved while the OLD secret stays
@@ -764,6 +780,12 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     "radarr4kMinimumAvailability",
     "sonarrLanguageProfileId",
     "sonarr4kLanguageProfileId",
+    // Blank = the "Open in Radarr/Sonarr" links use the connection URL again
+    // (arrBrowserBase skips an empty value).
+    "radarrExternalUrl",
+    "radarr4kExternalUrl",
+    "sonarrExternalUrl",
+    "sonarr4kExternalUrl",
     // Blank = fall back to the 90-day default in getAuditPiiRetentionDays,
     // exactly what the form's helper text promises.
     "auditPiiRetentionDays",

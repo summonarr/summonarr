@@ -166,5 +166,10 @@
   "apiUser.votes.reasonTooLong": "reason 必须是少于 200 个字符的字符串",
   "apiUser.watchlist.alreadyAdded": "已在你的待看清单中",
   "apiUser.playHistory.exportTruncated": "导出已在 {max} 行处截断——请缩小 startDate/endDate 范围后重新导出",
-  "apiUser.common.tmdbIdOutOfRange": "tmdbId 超出范围"
+  "apiUser.common.tmdbIdOutOfRange": "tmdbId 超出范围",
+  "apiUser.requests.releases.invalidStatus": "只有已批准或已可用的请求才能选择发布",
+  "apiUser.requests.releases.notInArr": "{service} 中还没有该条目，请先重新推送请求",
+  "apiUser.requests.releases.seasonInvalid": "season 必须是整数",
+  "apiUser.requests.releases.releaseRequired": "release 必须是发布搜索返回的标识",
+  "apiUser.requests.releases.handleExpired": "该搜索结果已过期，请重新搜索"
 }

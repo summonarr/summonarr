@@ -153,5 +153,10 @@
   "apiAuth.setup.sessionMismatch": "El Upload-id no coincide con la sesión activa.",
   "apiAuth.setup.stateLost": "Se perdió el estado de la subida entre el último fragmento y la importación.",
   "apiAuth.setup.tooManyAttempts": "Demasiados intentos de importación inicial. Inténtalo de nuevo más tarde.",
-  "apiAuth.signIn.accountDisabled": "Esta cuenta ha sido desactivada. Ponte en contacto con un administrador."
+  "apiAuth.signIn.accountDisabled": "Esta cuenta ha sido desactivada. Ponte en contacto con un administrador.",
+  "apiAuth.profile.trakt.toggleBoolean": "Envía watchlistAutoRequest y/o historySeeds como valores booleanos",
+  "apiAuth.profile.trakt.notConnected": "Trakt no está conectado",
+  "apiAuth.profile.trakt.unavailable": "Trakt no está disponible en este servidor",
+  "apiAuth.profile.trakt.busy": "Trakt está ocupado en este momento. Inténtalo de nuevo en unos minutos.",
+  "apiAuth.profile.trakt.unreachable": "No se pudo contactar con Trakt. Inténtalo de nuevo."
 }

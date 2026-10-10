@@ -95,6 +95,8 @@ const baseTx = {
   hiddenItem: { deleteMany: record("hiddenItem", "deleteMany") },
   notification: { deleteMany: record("notification", "deleteMany") },
   userRecommendation: { deleteMany: record("userRecommendation", "deleteMany") },
+  traktWatchedItem: { deleteMany: record("traktWatchedItem", "deleteMany") },
+  traktConnection: { deleteMany: record("traktConnection", "deleteMany") },
   verificationToken: { deleteMany: record("verificationToken", "deleteMany") },
   userTotp: { deleteMany: record("userTotp", "deleteMany") },
   webAuthnCredential: { deleteMany: record("webAuthnCredential", "deleteMany") },
@@ -161,6 +163,9 @@ const PURGE_OPS = [
   "hiddenItem.deleteMany",
   "notification.deleteMany",
   "userRecommendation.deleteMany",
+  // Trakt (guardrail 34c): the imported history and the connection row.
+  "traktWatchedItem.deleteMany",
+  "traktConnection.deleteMany",
   "verificationToken.deleteMany",
   "user.updateMany",
 ];

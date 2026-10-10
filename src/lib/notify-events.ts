@@ -19,6 +19,8 @@ export const NOTIFY_EVENT_KEYS = [
   "vote.threshold",
   "arr.manual_interaction",
   "arr.grab_completed",
+  "arr.health",
+  "arr.health_restored",
 ] as const;
 export type SubscribableEvent = (typeof NOTIFY_EVENT_KEYS)[number];
 export type NotifyEventKey = SubscribableEvent | "agent.test";
@@ -265,6 +267,8 @@ const NTFY_TAGS: Record<NotifyEventKey, string> = {
   "vote.threshold": "wastebasket",
   "arr.manual_interaction": "raised_hand",
   "arr.grab_completed": "arrow_down",
+  "arr.health": "rotating_light",
+  "arr.health_restored": "white_check_mark",
   "agent.test": "bell",
 };
 

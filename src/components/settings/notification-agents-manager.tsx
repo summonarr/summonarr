@@ -58,6 +58,8 @@ const EVENT_LABEL_KEYS: Record<(typeof NOTIFY_EVENT_KEYS)[number], string> = {
   "vote.threshold": "settings.form.agents.event.vote.threshold",
   "arr.manual_interaction": "settings.form.agents.event.arr.manual_interaction",
   "arr.grab_completed": "settings.form.agents.event.arr.grab_completed",
+  "arr.health": "settings.form.agents.event.arr.health",
+  "arr.health_restored": "settings.form.agents.event.arr.health_restored",
 };
 
 const DEFAULT_PRIORITY: Record<AgentKind, string> = { webhook: "", ntfy: "3", gotify: "5" };

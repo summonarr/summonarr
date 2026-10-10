@@ -12,11 +12,13 @@ import { AuthSessions } from "@/components/profile/auth-sessions";
 import { ChangePassword } from "@/components/profile/change-password";
 import { DeleteAccount } from "@/components/profile/delete-account";
 import { AutoRequestPrefs } from "@/components/profile/auto-request-prefs";
+import { TraktConnect } from "@/components/profile/trakt-connect";
 import { CalendarFeed } from "@/components/profile/calendar-feed";
 import { isFeatureEnabled } from "@/lib/features";
 import { canAutoRequest, hasPermission, Permission } from "@/lib/permissions";
 import { WATCHLIST_AUTO_REQUEST_FEATURE_KEY } from "@/lib/auto-request";
 import { getPlexWatchlistConnection } from "@/lib/plex-watchlist";
+import { getTraktProfileState } from "@/lib/trakt-user";
 import { CALENDAR_FEATURE_KEY } from "@/lib/calendar-feed";
 import { TwoFactorSettings } from "@/components/profile/two-factor";
 import { getMfaState } from "@/lib/mfa/mfa-store";
@@ -97,6 +99,11 @@ export default async function ProfilePage() {
       )
     : null;
   const discordInviteUrl = discordInviteSetting?.value || null;
+  // The Trakt card: shown while the admin's Trakt app is configured and the
+  // user has a use for it — or while they are connected, so they can always
+  // disconnect even after the admin switched the uses off.
+  const trakt = await getTraktProfileState(session.user.id, session.user.permissions);
+  const showTrakt = trakt.available || trakt.connected || trakt.status === "reauth";
 
   // Jellyfin users verify a notification address by emailed link; the pending
   // address lives only in the VerificationToken row (/api/profile/notification-email
@@ -294,6 +301,25 @@ export default async function ProfilePage() {
                 serverSource={plexWatchlistConnection?.serverSource ?? false}
                 serverOptedIn={plexWatchlistConnection?.serverOptedIn ?? false}
                 serverStatus={plexWatchlistConnection?.serverStatus ?? null}
+              />
+            </ProfileCard>
+          )}
+
+          {showTrakt && (
+            <ProfileCard
+              id="trakt"
+              title={t("profile.trakt.title")}
+              description={t("profile.trakt.description")}
+            >
+              <TraktConnect
+                connected={trakt.connected}
+                username={trakt.username}
+                watchlistAutoRequest={trakt.watchlistAutoRequest}
+                historySeeds={trakt.historySeeds}
+                status={trakt.status}
+                syncedAt={trakt.syncedAt}
+                uses={trakt.uses}
+                isJellyfin={isJellyfinUser || user?.mediaServer === "jellyfin"}
               />
             </ProfileCard>
           )}

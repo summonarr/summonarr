@@ -311,6 +311,7 @@ export default async function AdminPage({
           typeFilter={typeFilter}
           sort={sort}
           instanceNames={instanceNames}
+          canOpenArr={hasPermission(session.user.permissions, Permission.ADMIN)}
         />
       )}
     </div>

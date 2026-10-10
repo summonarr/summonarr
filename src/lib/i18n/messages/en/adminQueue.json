@@ -299,5 +299,19 @@
   "adminQueue.fixMatch.arrBadge": "Radarr/Sonarr ✓",
   "adminQueue.fixMatch.arrShort": "Arr ✓",
   "adminQueue.fixMatch.resolutionNote": "Match corrected to “{title}”",
-  "adminQueue.fixMatch.autoRequestNote": "Added from fix-match — was incorrectly matched in library"
+  "adminQueue.fixMatch.autoRequestNote": "Added from fix-match — was incorrectly matched in library",
+  "adminQueue.actions.pickRelease": "Pick release",
+  "adminQueue.releases.title": "Pick a release",
+  "adminQueue.releases.searching": "Searching indexers…",
+  "adminQueue.releases.failed": "Could not search for releases",
+  "adminQueue.releases.grabFailed": "Could not grab the release",
+  "adminQueue.releases.grabbed": "Sent to the download client. The request turns available once it's imported.",
+  "adminQueue.releases.noSeasons": "This series has no seasons in Sonarr yet.",
+  "adminQueue.releases.none": "No releases found.",
+  "adminQueue.releases.season": "Season",
+  "adminQueue.releases.seasonComplete": "Season {number}",
+  "adminQueue.releases.seasonMissing_one": "Season {number} · {count} missing",
+  "adminQueue.releases.seasonMissing_other": "Season {number} · {count} missing",
+  "adminQueue.releases.seeders_one": "{count} seeder",
+  "adminQueue.releases.seeders_other": "{count} seeders"
 }

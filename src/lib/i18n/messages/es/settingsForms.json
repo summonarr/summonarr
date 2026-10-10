@@ -204,6 +204,8 @@
   "settings.form.arr.connectedVersion": "Conectado · v{version}",
   "settings.form.arr.url": "URL de {service}",
   "settings.form.arr.apiKeyHelp": "Está en {service} → Settings → General → Security",
+  "settings.form.arr.externalUrl": "URL externa (opcional)",
+  "settings.form.arr.externalUrlHelp": "La dirección que usa tu navegador para {service}, para los enlaces «Abrir en {service}». Déjala vacía para usar la URL de arriba.",
   "settings.form.arr.defaults": "Ajustes predeterminados de la biblioteca",
   "settings.form.arr.refresh": "Actualizar",
   "settings.form.arr.optionsFailed": "No se pudieron cargar las opciones; comprueba la conexión de arriba.",
@@ -367,6 +369,8 @@
   "settings.form.agents.event.vote.threshold": "Umbral de votos de eliminación alcanzado",
   "settings.form.agents.event.arr.manual_interaction": "Importación manual necesaria",
   "settings.form.agents.event.arr.grab_completed": "Descarga de reemplazo completada",
+  "settings.form.agents.event.arr.health": "Problema de estado de Radarr/Sonarr",
+  "settings.form.agents.event.arr.health_restored": "Estado de Radarr/Sonarr restablecido",
   "settings.form.announce.sentWithFailures_one": "Enviado a {sent} dispositivo, {failed} con error",
   "settings.form.announce.sentWithFailures_other": "Enviado a {sent} dispositivos, {failed} con error",
   "settings.form.apiKey.removed": "Clave eliminada",
@@ -398,5 +402,7 @@
   "settings.form.maintenance.enableHelp": "Mientras está activo, solo los administradores pueden usar el sitio; el resto ve la página de mantenimiento con el mensaje de abajo.",
   "settings.form.maintenance.enableTitle": "Modo de mantenimiento",
   "settings.form.plex.disconnectConfirm": "¿Desconectar Plex? Para volver a conectar hará falta iniciar sesión de nuevo en plex.tv.",
-  "settings.form.plex.disconnectConfirmAction": "Sí, desconectar"
+  "settings.form.plex.disconnectConfirmAction": "Sí, desconectar",
+  "settings.form.apiKey.traktSecret.label": "Client Secret de Trakt",
+  "settings.form.apiKey.traktSecret.help": "Permite que los usuarios conecten sus propias cuentas de Trakt en su perfil para solicitar automáticamente desde su lista de seguimiento de Trakt y usar su historial de Trakt en las recomendaciones. Copia el Client Secret de la misma app en {link}."
 }

@@ -64,6 +64,11 @@ export const BACKUP_TABLES = [
   "WatchlistItem",
   "HiddenItem",
   "AutoRequestLedger",
+  // Trakt connection state + imported watch history. The connection's tokens
+  // live in Account (above) as enc:v1 ciphertext, restorable only under the same
+  // TOKEN_ENCRYPTION_KEY — a mismatch just means the user reconnects Trakt.
+  "TraktConnection",
+  "TraktWatchedItem",
   "Notification",
   "UserRecommendation",
   // The server-wide "For You" graph (recommendation-graph.ts). Derived data —

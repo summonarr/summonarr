@@ -227,8 +227,16 @@ shadowPrismaModel(prisma, "mediaServerUser", {
 
 // ── stored Plex tokens (Account rows) ───────────────────────────────────────
 const plexTokens = new Map<string, string>();
+// Trakt grants (src/lib/trakt-user.ts) — the Trakt cron files through the same
+// fileAutoRequestTitles body, so its end-to-end filing is pinned here, beside Plex's.
+type TraktAccount = { id: string; access_token: string; refresh_token: string; expires_at: number };
+const traktAccounts = new Map<string, TraktAccount>();
 shadowPrismaModel(prisma, "account", {
   findFirst: async (args: { where: { userId: string; provider: string } }) => {
+    if (args.where.provider === "trakt") {
+      const a = traktAccounts.get(args.where.userId);
+      return a ? { ...a } : null;
+    }
     const t = plexTokens.get(args.where.userId);
     return args.where.provider === "plex" && t ? { id: `acct-${args.where.userId}`, access_token: t } : null;
   },
@@ -238,6 +246,20 @@ shadowPrismaModel(prisma, "account", {
     return { count: 1 };
   },
   upsert: async (args: unknown) => { rec("account.upsert", args); return {}; },
+});
+
+// ── Trakt connections ───────────────────────────────────────────────────────
+type TraktConn = { watchlistAutoRequest: boolean; historySeeds: boolean; historyActivityAt: Date | null; historyImportedAt: Date | null };
+const traktConns = new Map<string, TraktConn>();
+shadowPrismaModel(prisma, "traktConnection", {
+  findMany: async () =>
+    [...traktConns.entries()]
+      .filter(([userId]) => {
+        const u = users.get(userId);
+        return u && !u.deactivatedAt && !u.purgedAt && traktAccounts.has(userId);
+      })
+      .map(([userId, c]) => ({ userId, ...c, user: { ...users.get(userId)! } })),
+  updateMany: async (args: unknown) => { rec("traktConnection.updateMany", args); return { count: 1 }; },
 });
 
 // ── the ledger ───────────────────────────────────────────────────────────────
@@ -323,6 +345,7 @@ shadowPrismaModel(prisma, "watchlistItem", {
 const { POST: postWatchlist } = await import("../src/app/api/watchlist/route.ts");
 const autoRequest = await import("../src/lib/auto-request.ts");
 const plexWatchlist = await import("../src/lib/plex-watchlist.ts");
+const traktUser = await import("../src/lib/trakt-user.ts");
 
 const afterTasks: unknown[] = [];
 function inScope<T>(fn: () => Promise<T>): Promise<T> {
@@ -359,6 +382,8 @@ beforeEach(() => {
   settings.clear();
   ledger.clear();
   plexTokens.clear();
+  traktAccounts.clear();
+  traktConns.clear();
   users.clear();
   requestCount = 0;
   existingRequest = null;
@@ -593,6 +618,42 @@ test("cron: files new watchlist titles; the ledger stops every re-request on the
   const second = await inScope(() => plexWatchlist.syncPlexWatchlists());
   assert.equal(second.requested, 0);
   assert.equal(second.alreadyHandled, 2);
+  assert.equal(opsOf("mediaRequest.create").length, 0, "a filed title is never re-filed");
+});
+
+test("trakt cron: files new Trakt watchlist titles through the chokepoint as trakt-watchlist — and the SHARED ledger never re-files a title the Plex cron already filed", async () => {
+  settings.set(FLAG, "true");
+  settings.set("feature.page.forYou", "false");
+  settings.set("traktClientId", "trakt-client");
+  settings.set("traktClientSecret", "trakt-secret");
+  const u = addUser();
+  traktAccounts.set(u.id, { id: `trakt-${u.id}`, access_token: "trakt-tok", refresh_token: "trakt-ref", expires_at: Math.floor(Date.now() / 1000) + 86_400 });
+  traktConns.set(u.id, { watchlistAutoRequest: true, historySeeds: false, historyActivityAt: null, historyImportedAt: null });
+  // The Plex cron filed The Matrix last week; it is on the Trakt watchlist too.
+  ledger.set(lkey(u.id, 603, "MOVIE"), {
+    userId: u.id, tmdbId: 603, mediaType: "MOVIE", source: "plex-watchlist", outcome: "requested", requestId: "req-plex", attempts: 1, updatedAt: new Date(),
+  });
+  respond = (url) => {
+    if (url.hostname !== "api.trakt.tv") throw new Error(`unexpected fetch ${url}`);
+    if (url.pathname === "/sync/watchlist/movies/added/desc") {
+      return json([{ type: "movie", movie: { title: "The Matrix", ids: { tmdb: 603 } } }, { type: "movie", movie: { title: "Tron", ids: { tmdb: 20526 } } }]);
+    }
+    if (url.pathname === "/sync/watchlist/shows/added/desc") return json([{ type: "show", show: { title: "Dark", ids: { tmdb: 70523 } } }]);
+    throw new Error(`unexpected trakt path ${url.pathname}`);
+  };
+
+  const first = await inScope(() => traktUser.syncTraktUsers());
+  assert.equal(first.requested, 2);
+  assert.equal(first.alreadyHandled, 1, "603 was filed from Plex — never again from Trakt");
+  const notes = opsOf("mediaRequest.create").map((o) => (o.args as { data: { note: string } }).data.note);
+  assert.deepEqual(notes, ["Auto-requested from Trakt watchlist", "Auto-requested from Trakt watchlist"]);
+  assert.equal(ledger.get(lkey(u.id, 20526, "MOVIE"))!.source, "trakt-watchlist");
+  assert.equal(ledger.get(lkey(u.id, 70523, "TV"))!.source, "trakt-watchlist");
+
+  ops.length = 0;
+  const second = await inScope(() => traktUser.syncTraktUsers());
+  assert.equal(second.requested, 0);
+  assert.equal(second.alreadyHandled, 3);
   assert.equal(opsOf("mediaRequest.create").length, 0, "a filed title is never re-filed");
 });
 

@@ -48,6 +48,7 @@ const SENSITIVE_KEYS = [
   "omdbApiKey",
   "mdblistApiKey",
   "traktClientId",
+  "traktClientSecret",
   "ipinfoToken",
   "resendApiKey",
   "smtpPassword",

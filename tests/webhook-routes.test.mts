@@ -121,6 +121,7 @@ const { arrSettingKey } = await import("../src/lib/arr-instances.ts");
 const { POST: radarrPOST } = await import("../src/app/api/webhooks/radarr/route.ts");
 const { POST: sonarrPOST } = await import("../src/app/api/webhooks/sonarr/route.ts");
 const { invalidateAgentCache } = await import("../src/lib/notify-agents.ts");
+const { _resetArrHealthDedupeForTests } = await import("../src/lib/arr-health-notify.ts");
 
 type Req = InstanceType<typeof NextRequest>;
 
@@ -983,23 +984,66 @@ test("radarr Test event short-circuits BEFORE the replay digest — repeated Tes
 });
 
 test("Health / HealthRestored are acknowledged BEFORE the replay digest on both routes — an indexer flapping twice is never 409'd", async () => {
-  // Fixed per-issue payload, nothing processed: a second identical delivery
-  // inside the 24h TTL must not be refused (Radarr/Sonarr would then mark
-  // Summonarr's notification as failing). Reverting the carve-out makes the
-  // second POST 409 and records a digest.
+  // Fixed per-issue payload: a second identical delivery inside the 24h TTL
+  // must not be refused (Radarr/Sonarr would then mark Summonarr's notification
+  // as failing). Reverting the carve-out makes the second POST 409 and records
+  // a digest. The only thing done with one is the channel forward (next test),
+  // which keeps its own short dedupe window — so the repeat answers
+  // `forwarded: false`, still 200.
+  _resetArrHealthDedupeForTests();
   for (const [route, service, secret] of [[radarrPOST, "radarr", RADARR_SECRET], [sonarrPOST, "sonarr", SONARR_SECRET]] as const) {
     for (const eventType of ["Health", "HealthRestored"]) {
       const payload = { eventType, level: "warning", message: "Indexers unavailable due to failures", type: "IndexerStatusCheck" };
       for (let i = 0; i < 2; i++) {
         const { res, body, tasks } = await post(route, webhookReq(service, { token: secret, body: payload }));
         assert.equal(res.status, 200, `${service} ${eventType} delivery ${i + 1} must be acknowledged`);
-        assert.deepEqual(body, { ok: true, skipped: true });
+        assert.deepEqual(body, { ok: true, health: true, forwarded: i === 0 }, `${service} ${eventType} delivery ${i + 1}`);
         assert.equal(tasks.length, 0);
       }
     }
   }
   assert.equal(replayCreates.length, 0, "Health events must never be digest-recorded");
   assert.equal(requestUpdateManyCalls.length, 0);
+});
+
+test("a check that fails, recovers and fails again inside the window is forwarded EVERY time — only a repeat of the same state is held back", async () => {
+  _resetArrHealthDedupeForTests();
+  const send = async (eventType: string) => (await post(radarrPOST, webhookReq("radarr", {
+    token: RADARR_SECRET,
+    body: { eventType, level: "error", message: "Indexers unavailable due to failures", type: "IndexerStatusCheck" },
+  }))).body;
+  assert.equal((await send("Health")).forwarded, true);
+  assert.equal((await send("HealthRestored")).forwarded, true);
+  assert.equal((await send("Health")).forwarded, true, "the re-failure must not be swallowed by the first failure's entry");
+  assert.equal((await send("Health")).forwarded, false, "a repeat of the current state is");
+});
+
+test("Health / HealthRestored reach the outbound channels as arr.health / arr.health_restored, naming the firing instance", async () => {
+  // The secret that matched names the instance (guardrail 32); the event text
+  // carries the service, the instance's display name and Radarr's own message.
+  _resetArrHealthDedupeForTests();
+  agentRows.push(agentRow("arr.health", "arr.health_restored"));
+  fetchHandler = (raw) => {
+    if (raw === AGENT_URL) return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    throw new Error(`unexpected fetch ${raw}`);
+  };
+  await post(radarrPOST, webhookReq("radarr", {
+    token: RADARR_4K_SECRET,
+    body: { eventType: "Health", level: "error", message: "Indexers unavailable due to failures", type: "IndexerStatusCheck" },
+  }));
+  await post(sonarrPOST, webhookReq("sonarr", {
+    token: SONARR_SECRET,
+    body: { eventType: "HealthRestored", level: "warning", message: "Download client unavailable", type: "DownloadClientCheck" },
+  }));
+  for (let i = 0; i < 400 && agentPosts().length < 2; i++) await drainMicrotasks();
+  const posts = fetchCalls
+    .filter((c) => c.url === AGENT_URL && typeof c.init?.body === "string")
+    .map((c) => JSON.parse(c.init!.body as string) as { event: string; text: string | null; request: { instance: string } | null })
+    .sort((a, b) => a.event.localeCompare(b.event));
+  assert.deepEqual(posts.map((p) => [p.event, p.request?.instance, p.text]), [
+    ["arr.health", "4k", "Radarr (4K) — error: Indexers unavailable due to failures"],
+    ["arr.health_restored", "", "Sonarr: Download client unavailable"],
+  ]);
 });
 
 test("radarr replay: an identical Download delivered twice → 409 with no double processing", async () => {

@@ -299,5 +299,19 @@
   "adminQueue.fixMatch.arrBadge": "Radarr/Sonarr ✓",
   "adminQueue.fixMatch.arrShort": "Arr ✓",
   "adminQueue.fixMatch.resolutionNote": "匹配已更正为“{title}”",
-  "adminQueue.fixMatch.autoRequestNote": "来自匹配修复——此前在媒体库中匹配错误"
+  "adminQueue.fixMatch.autoRequestNote": "来自匹配修复——此前在媒体库中匹配错误",
+  "adminQueue.actions.pickRelease": "选择发布",
+  "adminQueue.releases.title": "选择一个发布",
+  "adminQueue.releases.searching": "正在搜索索引器…",
+  "adminQueue.releases.failed": "无法搜索发布",
+  "adminQueue.releases.grabFailed": "无法抓取该发布",
+  "adminQueue.releases.grabbed": "已发送到下载客户端。导入完成后，该请求会变为可用。",
+  "adminQueue.releases.noSeasons": "该剧集在 Sonarr 中还没有任何季。",
+  "adminQueue.releases.none": "未找到发布。",
+  "adminQueue.releases.season": "季",
+  "adminQueue.releases.seasonComplete": "第 {number} 季",
+  "adminQueue.releases.seasonMissing_one": "第 {number} 季 · 缺 {count} 集",
+  "adminQueue.releases.seasonMissing_other": "第 {number} 季 · 缺 {count} 集",
+  "adminQueue.releases.seeders_one": "{count} 个做种",
+  "adminQueue.releases.seeders_other": "{count} 个做种"
 }

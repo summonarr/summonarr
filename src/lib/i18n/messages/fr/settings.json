@@ -77,7 +77,7 @@
   "settings.featureLabel.behavior_watchGrades": "Notes de visionnage des demandes",
   "settings.featureDesc.behavior_watchGrades": "Attribuer à chaque utilisateur une note de A à F selon qu'il regarde ce qu'il demande, affichée aux administrateurs sur la page Utilisateurs et dans la file des demandes. Affichage uniquement — ne bloque jamais une demande. Nécessite le suivi de l'historique de lecture ; ajustez-la dans Médias → Notes de visionnage.",
   "settings.featureLabel.behavior_watchlistAutoRequest": "Demande automatique depuis la liste de suivi",
-  "settings.featureDesc.behavior_watchlistAutoRequest": "Créer automatiquement une demande lorsqu'un utilisateur ajoute un titre à sa liste de suivi — dans Summonarr, et dans sa liste de suivi Plex (interrogée par la tâche cron sync-plex-watchlists). Uniquement pour les utilisateurs disposant d'une autorisation de demande automatique ; chaque demande passe toujours par le quota, la liste noire et l'approbation. La liste de suivi Plex est lue avec la connexion Plex de l'utilisateur (une fois après l'activation) ou, si Paramètres → Médias → Liste de suivi Plex l'autorise, via le compte du propriétaire de votre serveur Plex pour les amis Plex qui l'acceptent.",
+  "settings.featureDesc.behavior_watchlistAutoRequest": "Créer automatiquement une demande lorsqu'un utilisateur ajoute un titre à sa liste de suivi — dans Summonarr, et dans sa liste de suivi Plex (interrogée par la tâche cron sync-plex-watchlists). Uniquement pour les utilisateurs disposant d'une autorisation de demande automatique ; chaque demande passe toujours par le quota, la liste noire et l'approbation. La liste de suivi Plex est lue avec la connexion Plex de l'utilisateur (une fois après l'activation) ou, si Paramètres → Médias → Liste de suivi Plex l'autorise, via le compte du propriétaire de votre serveur Plex pour les amis Plex qui l'acceptent. Les utilisateurs peuvent aussi connecter Trakt depuis leur profil pour demander automatiquement depuis leur liste de suivi Trakt (interrogée par la tâche sync-trakt).",
   "settings.featureLabel.integration_plex": "Plex",
   "settings.featureDesc.integration_plex": "Activer la connexion Plex, la synchronisation de la bibliothèque et les badges de disponibilité.",
   "settings.featureLabel.integration_jellyfin": "Jellyfin",
@@ -414,5 +414,7 @@
   "settings.arr.removedOpenRequestsItem_one": "{slug} ({count} demande ouverte)",
   "settings.arr.removedOpenRequestsItem_other": "{slug} ({count} demandes ouvertes)",
   "settings.media.tokenPlaceholder.plex": "Collez le jeton administrateur de ce serveur",
-  "settings.media.tokenPlaceholder.jellyfin": "Collez une clé API de ce serveur"
+  "settings.media.tokenPlaceholder.jellyfin": "Collez une clé API de ce serveur",
+  "settings.cron.job.trakt.name": "Synchronisation Trakt",
+  "settings.cron.job.trakt.description": "Demande les nouveaux titres des listes de suivi Trakt des utilisateurs connectés et importe leur historique Trakt pour Pour vous (nécessite un Client Secret Trakt)"
 }

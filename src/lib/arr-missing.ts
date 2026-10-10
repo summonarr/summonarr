@@ -270,3 +270,182 @@ export function planSeriesSearch(rows: readonly SonarrEpisodeRow[], nowMs: numbe
   }
   return plan;
 }
+
+// ── cutoff unmet ─────────────────────────────────────────────────────────────
+//
+// The Missing page's second mode: titles that HAVE a file, but one below the
+// quality profile's cutoff — what Radarr/Sonarr would replace given the chance.
+// The listing is Radarr/Sonarr's own /api/v3/wanted/cutoff (monitored titles
+// only, as the arr UI shows it); the verdict per file is the arr's own
+// `qualityCutoffNotMet`, never a quality comparison of ours — cutoff also
+// weighs custom-format scores we would have to re-implement to agree with it.
+
+export interface QualityProfileInfo {
+  name: string;
+  /** The quality (or quality group) the profile stops upgrading at. */
+  cutoff: string | null;
+}
+
+type ProfileItem = { id?: unknown; name?: unknown; quality?: { id?: unknown; name?: unknown } | null; items?: unknown };
+
+function cutoffName(items: unknown, cutoff: unknown): string | null {
+  if (!Array.isArray(items) || typeof cutoff !== "number") return null;
+  for (const it of items as ProfileItem[]) {
+    if (!it || typeof it !== "object") continue;
+    // A quality GROUP carries its own id and name; a single quality is keyed by its quality id.
+    if (Array.isArray(it.items) && it.items.length > 0 && it.id === cutoff) return str(it.name) || null;
+    if (it.quality && it.quality.id === cutoff) return str(it.quality.name) || null;
+  }
+  return null;
+}
+
+/** /api/v3/qualityprofile → profile id → its name and cutoff label. */
+export function qualityProfileInfo(raw: unknown): Map<number, QualityProfileInfo> {
+  const out = new Map<number, QualityProfileInfo>();
+  if (!Array.isArray(raw)) return out;
+  for (const p of raw as Array<{ id?: unknown; name?: unknown; cutoff?: unknown; items?: unknown } | null>) {
+    const id = posInt(p?.id);
+    if (id === null || !p) continue;
+    out.set(id, { name: str(p.name), cutoff: cutoffName(p.items, p.cutoff) });
+  }
+  return out;
+}
+
+const qualityName = (file: unknown): string | null => {
+  const q = file && typeof file === "object" ? (file as { quality?: { quality?: { name?: unknown } | null } | null }).quality : null;
+  const name = q?.quality?.name;
+  return typeof name === "string" && name !== "" ? name.slice(0, 100) : null;
+};
+
+export type RadarrCutoffRow = RadarrMovieRow & { qualityProfileId?: unknown; movieFile?: unknown };
+
+export interface CutoffMovie {
+  instance: string;
+  arrId: number;
+  tmdbId: number | null;
+  title: string;
+  year: number | null;
+  posterPath: string | null;
+  /** The quality of the file on disk. */
+  quality: string | null;
+  profile: string | null;
+  cutoff: string | null;
+}
+
+export function cutoffMovie(row: RadarrCutoffRow, instance: string, profiles: ReadonlyMap<number, QualityProfileInfo>): CutoffMovie | null {
+  const arrId = posInt(row.id);
+  if (arrId === null || row.hasFile !== true) return null;
+  const file = row.movieFile && typeof row.movieFile === "object" ? (row.movieFile as { qualityCutoffNotMet?: unknown }) : null;
+  // The listing is the cutoff endpoint, but a row whose own file says the
+  // cutoff IS met (changed between pages) is not listed.
+  if (file && file.qualityCutoffNotMet === false) return null;
+  const profile = profiles.get(posInt(row.qualityProfileId) ?? -1);
+  return {
+    instance,
+    arrId,
+    tmdbId: posInt(row.tmdbId),
+    title: str(row.title),
+    year: posInt(row.year),
+    posterPath: tmdbPosterPathFromImages(row.images),
+    quality: qualityName(row.movieFile),
+    profile: profile?.name || null,
+    cutoff: profile?.cutoff ?? null,
+  };
+}
+
+export type SonarrCutoffRecord = {
+  id?: unknown;
+  seriesId?: unknown;
+  seasonNumber?: unknown;
+  episodeNumber?: unknown;
+  title?: unknown;
+  hasFile?: unknown;
+  episodeFile?: unknown;
+  series?: { id?: unknown; tmdbId?: unknown; tvdbId?: unknown; title?: unknown; year?: unknown; qualityProfileId?: unknown; monitored?: unknown } | null;
+};
+
+export interface CutoffEpisode {
+  seasonNumber: number;
+  episodeNumber: number;
+  title: string;
+  quality: string | null;
+}
+
+export interface CutoffSeries {
+  instance: string;
+  arrId: number;
+  tmdbId: number | null;
+  tvdbId: number | null;
+  title: string;
+  year: number | null;
+  posterPath: string | null;
+  profile: string | null;
+  cutoff: string | null;
+  episodes: CutoffEpisode[];
+}
+
+/** One instance's cutoff-unmet episode records → one row per series, its episodes in order. */
+export function cutoffSeriesFromEpisodes(
+  records: readonly SonarrCutoffRecord[],
+  instance: string,
+  profiles: ReadonlyMap<number, QualityProfileInfo>,
+): CutoffSeries[] {
+  const bySeries = new Map<number, CutoffSeries>();
+  for (const r of records) {
+    if (!r || typeof r !== "object" || r.hasFile !== true) continue;
+    const seriesId = posInt(r.seriesId) ?? posInt(r.series?.id);
+    const seasonNumber = typeof r.seasonNumber === "number" && Number.isInteger(r.seasonNumber) && r.seasonNumber >= 0 ? r.seasonNumber : null;
+    const episodeNumber = typeof r.episodeNumber === "number" && Number.isInteger(r.episodeNumber) && r.episodeNumber >= 0 ? r.episodeNumber : null;
+    if (seriesId === null || seasonNumber === null || episodeNumber === null) continue;
+    const file = r.episodeFile && typeof r.episodeFile === "object" ? (r.episodeFile as { qualityCutoffNotMet?: unknown }) : null;
+    if (file && file.qualityCutoffNotMet === false) continue;
+    let row = bySeries.get(seriesId);
+    if (!row) {
+      const profile = profiles.get(posInt(r.series?.qualityProfileId) ?? -1);
+      row = {
+        instance,
+        arrId: seriesId,
+        tmdbId: posInt(r.series?.tmdbId),
+        tvdbId: posInt(r.series?.tvdbId),
+        title: str(r.series?.title),
+        year: posInt(r.series?.year),
+        posterPath: null,
+        profile: profile?.name || null,
+        cutoff: profile?.cutoff ?? null,
+        episodes: [],
+      };
+      bySeries.set(seriesId, row);
+    }
+    row.episodes.push({ seasonNumber, episodeNumber, title: str(r.title), quality: qualityName(r.episodeFile) });
+  }
+  const out = [...bySeries.values()];
+  for (const s of out) s.episodes.sort((a, b) => a.seasonNumber - b.seasonNumber || a.episodeNumber - b.episodeNumber);
+  return out;
+}
+
+export type SonarrEpisodeFileRow = { id?: unknown; qualityCutoffNotMet?: unknown };
+
+/**
+ * The cutoff Search for one series, judged LIVE: the monitored episodes whose
+ * file Sonarr itself says is below cutoff (`episodeFileId` → that file's
+ * `qualityCutoffNotMet`). Searched as one EpisodeSearch — never SeasonSearch or
+ * SeriesSearch, which would also look for episodes that are fine.
+ */
+export function planCutoffSearch(
+  episodes: ReadonlyArray<SonarrEpisodeRow & { episodeFileId?: unknown }>,
+  files: readonly SonarrEpisodeFileRow[],
+): number[] {
+  const below = new Set<number>();
+  for (const f of files) {
+    const id = posInt(f?.id);
+    if (id !== null && f.qualityCutoffNotMet === true) below.add(id);
+  }
+  const ids: number[] = [];
+  for (const e of episodes) {
+    const id = posInt(e?.id);
+    const fileId = posInt(e?.episodeFileId);
+    if (id === null || fileId === null || e.hasFile !== true || e.monitored !== true) continue;
+    if (below.has(fileId)) ids.push(id);
+  }
+  return ids.sort((a, b) => a - b);
+}

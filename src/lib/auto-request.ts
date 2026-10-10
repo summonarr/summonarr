@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import type { SummonarrSession } from "@/lib/api-auth";
-import { canAutoRequest, effectivePermissions } from "@/lib/permissions";
+import { AUTO_REQUEST_MASK, Permission, canAutoRequest, effectivePermissions } from "@/lib/permissions";
 import { isFeatureEnabled } from "@/lib/features";
 import { maintenanceGuard } from "@/lib/maintenance";
 import { checkRateLimit, parseRateLimit } from "@/lib/rate-limit";
@@ -16,16 +16,21 @@ import { instanceDefaultLocale, translatorFor } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
 
 // Watchlist auto-request (Overseerr's "Auto-Request"): a title a user adds to
-// their watchlist is filed as a request on their behalf. Two sources:
+// their watchlist is filed as a request on their behalf. Three sources:
 //
-//   - "watchlist":      a Summonarr watchlist add (POST /api/watchlist), filed
-//                        inline so the add can report the outcome;
-//   - "plex-watchlist": the user's plex.tv watchlist, polled by
-//                        /api/cron/sync-plex-watchlists (src/lib/plex-watchlist.ts).
+//   - "watchlist":       a Summonarr watchlist add (POST /api/watchlist, or
+//                         /watchlist add in Discord), filed inline so the add can
+//                         report the outcome;
+//   - "plex-watchlist":  the user's plex.tv watchlist, polled by
+//                         /api/cron/sync-plex-watchlists (src/lib/plex-watchlist.ts);
+//   - "trakt-watchlist": the user's Trakt watchlist, polled by
+//                         /api/cron/sync-trakt (src/lib/trakt-user.ts) — also the
+//                         Jellyfin user's route to a watchlist of titles the
+//                         library doesn't hold (Jellyfin has no such list).
 //
 // Gated three ways: the global feature flag (default OFF), an AUTO_REQUEST*
-// permission bit for the media type, and — for the Plex source — the user's own
-// profile toggle. Every auto-request goes through createMediaRequest, the same
+// permission bit for the media type, and — for the Plex and Trakt sources — the
+// user's own profile toggle. Every auto-request goes through createMediaRequest, the same
 // chokepoint POST /api/requests uses, so it inherits every gate a manual request
 // has (base REQUEST bits, instance access, quota, blacklist, content cap,
 // duplicates, auto-approve) and can never do anything the user couldn't do by
@@ -56,7 +61,9 @@ import type { Translator } from "@/lib/i18n/translate";
 
 export const WATCHLIST_AUTO_REQUEST_FEATURE_KEY = "feature.behavior.watchlistAutoRequest";
 
-export type AutoRequestSource = "watchlist" | "plex-watchlist";
+export type AutoRequestSource = "watchlist" | "plex-watchlist" | "trakt-watchlist";
+// The sources a cron polls (everything but the inline Summonarr add).
+export type PolledAutoRequestSource = Exclude<AutoRequestSource, "watchlist">;
 
 export type AutoRequestOutcome =
   | "requested"
@@ -100,6 +107,7 @@ export function shouldAttemptAutoRequest(
 export const AUTO_REQUEST_NOTES: Record<AutoRequestSource, string> = {
   watchlist: "Auto-requested from watchlist",
   "plex-watchlist": "Auto-requested from Plex watchlist",
+  "trakt-watchlist": "Auto-requested from Trakt watchlist",
 };
 
 export interface AutoRequestAttempt {
@@ -205,8 +213,8 @@ async function fileRequest(opts: {
 
   const ctx = opts.ctx ?? (await loadRequestContext(session.user.id));
 
-  // A user-driven add shares the manual request rate limit; the cron is
-  // server-driven and bounded per run instead (plex-watchlist.ts).
+  // A user-driven add shares the manual request rate limit; the crons are
+  // server-driven and bounded per run instead (fileAutoRequestTitles).
   if (source === "watchlist") {
     const limit = parseRateLimit(ctx.settings.rateLimitRequests, 20);
     if (!checkRateLimit(`requests:${session.user.id}`, limit, 60 * 1000)) {
@@ -249,4 +257,81 @@ export async function maybeAutoRequestWatchlistAdd(
   }
   if (!enabled) return null;
   return autoRequestTitle({ session, tmdbId, mediaType, source: "watchlist", t });
+}
+
+// ── the polled sources' shared body ─────────────────────────────────────────
+
+// New titles filed per user per run. A first sync of a long watchlist would
+// otherwise file hundreds of requests at once; the rest follow on later runs.
+export const MAX_AUTO_REQUESTS_PER_USER_PER_RUN = 20;
+
+// A user a cron acts for: the fields sessionForUser needs.
+export type AutoRequestCronUser = { id: string; role: string; permissions: bigint; name: string | null; email: string };
+
+// Holds an AUTO_REQUEST* bit (or the ADMIN superbit) on the EFFECTIVE mask —
+// what a cron's candidate query cannot express in SQL.
+export function hasAutoRequestBit(u: { role: string; permissions: bigint }): boolean {
+  const perms = effectivePermissions(u.role, u.permissions);
+  return (perms & (AUTO_REQUEST_MASK | Permission.ADMIN)) !== 0n;
+}
+
+export interface AutoRequestTally {
+  requested: number;
+  refused: number;
+  // Titles on a list the ledger says not to retry yet (or ever).
+  alreadyHandled: number;
+  outcomes: Partial<Record<AutoRequestOutcome, number>>;
+}
+
+// File one polled list's titles for one user: one entry per title, only the
+// media types they may auto-request, only titles the ledger says are due, at
+// most MAX_AUTO_REQUESTS_PER_USER_PER_RUN, sequentially. Shared by every polled
+// source so the ledger rule, the per-run cap and the dedupe can't drift between
+// them (guardrail 34b) — and since the ledger is keyed per (user, title), a
+// title on two of a user's lists is filed once whichever cron sees it first.
+export async function fileAutoRequestTitles(
+  user: AutoRequestCronUser,
+  items: ReadonlyArray<{ tmdbId: number | null; mediaType: "MOVIE" | "TV" }>,
+  source: PolledAutoRequestSource,
+  tally: AutoRequestTally,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  const session = sessionForUser(user);
+  // A list cannot hold duplicates, but a degraded page overlap could.
+  const seen = new Set<string>();
+  const titles: Array<{ tmdbId: number; mediaType: "MOVIE" | "TV" }> = [];
+  for (const item of items) {
+    if (item.tmdbId === null) continue;
+    if (!canAutoRequest(session.user.permissions, item.mediaType)) continue;
+    const key = `${item.mediaType}:${item.tmdbId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    titles.push({ tmdbId: item.tmdbId, mediaType: item.mediaType });
+  }
+  if (titles.length === 0) return;
+
+  const ledger = await prisma.autoRequestLedger.findMany({
+    where: { userId: user.id, tmdbId: { in: [...new Set(titles.map((t) => t.tmdbId))] } },
+    select: { tmdbId: true, mediaType: true, outcome: true, updatedAt: true },
+  });
+  const byKey = new Map(ledger.map((r) => [`${r.mediaType}:${r.tmdbId}`, r]));
+  const now = Date.now();
+  const due = titles.filter((t) => {
+    const attempt = shouldAttemptAutoRequest(byKey.get(`${t.mediaType}:${t.tmdbId}`), now);
+    if (!attempt) tally.alreadyHandled++;
+    return attempt;
+  });
+  if (due.length === 0) return;
+
+  // One context read per user, reused across titles (quota/grants/settings).
+  const ctx = await loadRequestContext(user.id);
+  // Sequential: each filing is several queries and, for an auto-approver, a
+  // Radarr/Sonarr push. The per-run cap bounds the first sync of a long list.
+  for (const t of due.slice(0, MAX_AUTO_REQUESTS_PER_USER_PER_RUN)) {
+    if (signal?.aborted) return; // guardrail 41 — return, never throw
+    const attempt = await autoRequestTitle({ session, tmdbId: t.tmdbId, mediaType: t.mediaType, source, ctx });
+    tally.outcomes[attempt.outcome] = (tally.outcomes[attempt.outcome] ?? 0) + 1;
+    if (attempt.outcome === "requested") tally.requested++;
+    else tally.refused++;
+  }
 }

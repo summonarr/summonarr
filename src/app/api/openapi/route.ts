@@ -65,6 +65,21 @@ const spec = {
         enum: ["PENDING", "APPROVED", "DECLINED", "AVAILABLE"],
       },
       UserRole: { type: "string", enum: ["USER", "ADMIN", "ISSUE_ADMIN"] },
+      QueueImportFile: {
+        type: "object",
+        description: "One file of a queued download, chosen by the path Radarr/Sonarr reported, with optional corrections (ids only — the objects are read from the instance)",
+        required: ["path"],
+        properties: {
+          path: { type: "string", maxLength: 4096 },
+          movieId: { type: "integer", minimum: 1, description: "Radarr: re-match to this movie" },
+          seriesId: { type: "integer", minimum: 1, description: "Sonarr: re-match to this series (requires episodeIds)" },
+          episodeIds: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, maxItems: 500, description: "Sonarr: the episodes the file holds" },
+          qualityId: { type: "integer", minimum: 0 },
+          languageIds: { type: "array", items: { type: "integer", minimum: -2 }, maxItems: 50 },
+          releaseGroup: { type: "string", maxLength: 100 },
+          releaseType: { type: "string", enum: ["unknown", "singleEpisode", "multiEpisode", "seasonPack"], description: "Sonarr only" },
+        },
+      },
       WatchGradeSpread: {
         type: "object",
         nullable: true,
@@ -192,7 +207,8 @@ const spec = {
     { name: "Admin – Debug", description: "Pipeline inspection" },
     { name: "Admin – Fix Match", description: "Manual metadata correction" },
     { name: "Admin – Cleanup", description: "Library cleanup: rule-based candidates and admin-confirmed deletion (ADMIN only)" },
-    { name: "Admin – Missing", description: "Radarr/Sonarr titles that should already have a file: released movies and aired episodes (ADMIN only)" },
+    { name: "Admin – Missing", description: "Radarr/Sonarr titles that should already have a file: released movies and aired episodes — or, in cutoff mode, files below the quality profile's cutoff (ADMIN only)" },
+    { name: "Admin – Downloads", description: "Radarr/Sonarr download queues, health checks, the Summonarr webhook connection and \"Open in\" links (ADMIN only)" },
     { name: "Discord", description: "Discord OAuth / role sync" },
     { name: "Settings", description: "Application settings (ADMIN only)" },
     { name: "Webhooks", description: "Inbound webhooks from media servers / ARR" },
@@ -507,6 +523,114 @@ const spec = {
           "404": { description: "Not found" },
           "409": { description: "Self-cancel only — the request left PENDING between the read and the delete" },
           "503": { description: "Maintenance mode (non-ADMIN callers)" },
+        },
+      },
+    },
+
+    "/requests/{id}/releases": {
+      get: {
+        tags: ["Requests"],
+        summary: "Interactive release search for an approved request (MANAGE_REQUESTS)",
+        description:
+          "On the request's own Radarr/Sonarr instance. MOVIE: `{ releases }`. TV without `season`: `{ seasons }` " +
+          "(Sonarr's per-season counts, regular seasons only — no indexer is hit); TV with `season`: `{ releases }` for " +
+          "that season. Sonarr has no whole-series release search, so a season is always required. Releases are projected " +
+          "(no indexer download URL), and each `guid` is an OPAQUE handle (32 hex chars) bound to this request, instance " +
+          "and season for 30 minutes — never the indexer's guid, which some indexers build from the apikey'd download " +
+          "link. Only APPROVED or AVAILABLE requests (409 otherwise); 409 when the title is not in the arr yet. Searches " +
+          "are rate limited per admin.",
+        parameters: [
+          { name: "id", in: "path", required: true, schema: { type: "string" } },
+          { name: "season", in: "query", schema: { type: "integer", minimum: 0 } },
+        ],
+        responses: {
+          "200": {
+            description: "Releases, or for TV without a season the season list",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    releases: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          guid: { type: "string", pattern: "^[0-9a-f]{32}$", description: "Opaque handle — POST it back to grab" },
+                          title: { type: "string" },
+                          size: { type: "number" },
+                          indexerId: { type: "integer" },
+                          indexer: { type: "string" },
+                          quality: { type: "object", properties: { quality: { type: "object", properties: { id: { type: "integer" }, name: { type: "string" } } }, revision: { type: "object", properties: { version: { type: "integer" } } } } },
+                          qualityWeight: { type: "integer" },
+                          protocol: { type: "string", enum: ["torrent", "usenet"] },
+                          seeders: { type: "integer", nullable: true },
+                          leechers: { type: "integer", nullable: true },
+                          age: { type: "integer", description: "Days" },
+                          rejected: { type: "boolean" },
+                          rejections: { type: "array", items: { type: "string" } },
+                          downloadAllowed: { type: "boolean" },
+                        },
+                      },
+                    },
+                    seasons: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          seasonNumber: { type: "integer" },
+                          aired: { type: "integer", description: "Aired monitored episodes (plus any with a file) — Sonarr's own count" },
+                          missing: { type: "integer" },
+                          monitored: { type: "boolean" },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "400": { description: "Invalid season, or the request names an instance that no longer exists" },
+          "403": { description: "Missing MANAGE_REQUESTS" },
+          "404": { description: "No such request" },
+          "409": { description: "Request not approved/available, or the title is not in the arr" },
+          "422": { description: "Instance not configured, or the series' TVDB id can't be resolved" },
+          "429": { description: "Rate limited" },
+          "502": { description: "The arr could not be reached" },
+        },
+      },
+      post: {
+        tags: ["Requests"],
+        summary: "Grab one release for an approved request (MANAGE_REQUESTS)",
+        description:
+          "Sends the release (by the handle a GET on this route returned) to the download client through the request's own instance. " +
+          "The request's status is untouched — the Download webhook / sync flips it when the file lands. Audited " +
+          "ARR_RELEASE_GRAB; the guid is never recorded (some indexers embed the apikey in it).",
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["release"],
+                properties: {
+                  release: { type: "string", pattern: "^[0-9a-f]{32}$", description: "The handle from the GET's `guid`" },
+                  season: { type: "integer", minimum: 0, description: "TV: the season the release was searched for" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Grabbed" },
+          "400": { description: "Invalid body, or the request names an instance that no longer exists" },
+          "403": { description: "Missing MANAGE_REQUESTS" },
+          "404": { description: "No such request" },
+          "409": { description: "Request not approved/available, or the title is not in the arr" },
+          "410": { description: "Unknown or expired handle, or one from a different search — search again" },
+          "422": { description: "Instance not configured, or the series' TVDB id can't be resolved" },
+          "502": { description: "The arr could not be reached or refused the grab" },
         },
       },
     },
@@ -1430,6 +1554,116 @@ const spec = {
       },
     },
 
+    // Per-user Trakt (src/lib/trakt-user.ts, guardrail 34c).
+    "/profile/trakt": {
+      get: {
+        tags: ["Profile"],
+        summary: "Read the caller's Trakt connection",
+        responses: {
+          "200": {
+            description: "Connection state and the two uses",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    available: { type: "boolean", description: "The admin saved a Trakt client id AND secret, and the caller has a use for a connection" },
+                    uses: {
+                      type: "object",
+                      properties: {
+                        watchlist: { type: "boolean", description: "feature.behavior.watchlistAutoRequest is on and the caller holds an AUTO_REQUEST* bit" },
+                        history: { type: "boolean", description: "feature.page.forYou is on" },
+                      },
+                    },
+                    connected: { type: "boolean", description: "A Trakt grant is stored for the caller" },
+                    username: { type: "string", nullable: true },
+                    watchlistAutoRequest: { type: "boolean", description: "File new Trakt watchlist titles as requests" },
+                    historySeeds: { type: "boolean", description: "Seed For You from the Trakt watch history" },
+                    status: { type: "string", nullable: true, enum: ["ok", "error", "reauth"], description: "The last sync's verdict; \"reauth\" means Trakt refused the grant — reconnect" },
+                    syncedAt: { type: "string", format: "date-time", nullable: true },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      patch: {
+        tags: ["Profile"],
+        summary: "Turn either Trakt use on or off",
+        description: "Turning historySeeds off deletes the imported Trakt history at once; turning it back on re-imports it on the next sync. Returns the same body as GET.",
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: { type: "object", properties: { watchlistAutoRequest: { type: "boolean" }, historySeeds: { type: "boolean" } } } } },
+        },
+        responses: {
+          "200": { description: "Saved — the connection state" },
+          "400": { description: "Neither field sent, or one is not a boolean" },
+          "404": { description: "Trakt is not connected" },
+        },
+      },
+      delete: {
+        tags: ["Profile"],
+        summary: "Disconnect Trakt",
+        description: "Deletes the stored grant, the connection and the imported watch history, then revokes the token at Trakt (best-effort). Idempotent.",
+        responses: { "200": { description: "Disconnected" } },
+      },
+    },
+    "/profile/trakt/device": {
+      post: {
+        tags: ["Profile"],
+        summary: "Start connecting Trakt (device-code flow)",
+        description: "Answers the short code the user enters at the verification URL. The device code itself stays on the server. Poll POST /profile/trakt/device/poll every `interval` seconds until it answers connected, expired, denied or conflict.",
+        responses: {
+          "200": {
+            description: "The code to show",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    userCode: { type: "string" },
+                    verificationUrl: { type: "string", description: "Always a trakt.tv https URL" },
+                    expiresIn: { type: "integer", description: "Seconds until the code expires" },
+                    interval: { type: "integer", description: "Seconds between polls" },
+                  },
+                },
+              },
+            },
+          },
+          "400": { description: "Trakt is not available on this server (no client id/secret, or nothing to use it for)" },
+          "429": { description: "Too many starts, or Trakt is rate limiting" },
+          "502": { description: "Trakt could not be reached" },
+        },
+      },
+    },
+    "/profile/trakt/device/poll": {
+      post: {
+        tags: ["Profile"],
+        summary: "Poll a pending Trakt connection",
+        description: "The server paces the real Trakt calls itself, so polling faster than the interval only gets \"pending\".",
+        responses: {
+          "200": {
+            description: "The connection's state",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    state: { type: "string", enum: ["pending", "connected", "expired", "denied", "conflict"], description: "conflict: that Trakt account is connected to another account here" },
+                    username: { type: "string", description: "Present when connected" },
+                  },
+                },
+              },
+            },
+          },
+          "400": { description: "Trakt is not available on this server" },
+          "429": { description: "Polling too fast, or Trakt is rate limiting" },
+          "502": { description: "Trakt could not be reached" },
+        },
+      },
+    },
+
     "/push/vapid-key": {
       get: {
         tags: ["Push"],
@@ -1880,7 +2114,14 @@ const spec = {
       get: {
         tags: ["Admin – Settings"],
         summary: "List all Radarr/Sonarr instances with connection state (ADMIN)",
-        responses: { "200": { description: "Instance lists keyed by service (secrets masked as has* flags)" } },
+        responses: {
+          "200": {
+            description:
+              "Instance lists keyed by service. Each carries its registry entry plus url, externalUrl, rootFolder, " +
+              "qualityProfileId, minimumAvailability, languageProfileId (stored strings, \"\" when unset); secrets only as " +
+              "hasApiKey / hasWebhookSecret.",
+          },
+        },
       },
       post: {
         tags: ["Admin – Settings"],
@@ -1907,10 +2148,17 @@ const spec = {
                         skipLibraryCheck: { type: "boolean" },
                         autoRoute: { type: "object", nullable: true, properties: { animeOnly: { type: "boolean" }, genreIds: { type: "array", items: { type: "integer" } }, originalLanguages: { type: "array", items: { type: "string" } } } },
                         url: { type: "string" },
+                        externalUrl: {
+                          type: "string",
+                          nullable: true,
+                          description: "The address a BROWSER uses for the instance (Open in Radarr/Sonarr links) — never fetched by the server; blank or null falls back to url",
+                        },
                         apiKey: { type: "string", description: "Write-only; send the mask sentinel to keep unchanged" },
                         rootFolder: { type: "string" },
                         qualityProfileId: { type: "integer", nullable: true },
                         webhookSecret: { type: "string", description: "Write-only; send the mask sentinel to keep unchanged" },
+                        minimumAvailability: { type: "string", nullable: true, enum: ["", "announced", "inCinemas", "released", null], description: "Radarr only; \"\" or null clears (Radarr's default)" },
+                        languageProfileId: { type: "integer", nullable: true, description: "Sonarr v3 only; null clears" },
                       },
                     },
                   },
@@ -2279,7 +2527,19 @@ const spec = {
           "series with at least one aired, monitored, regular-season episode that has no file — Sonarr's own per-season " +
           "statistics, specials excluded, the same completion rule the sync uses. `monitored` is reported, not filtered " +
           "on. An instance whose listing failed is named in `errors` and contributes no items. Nothing is cached or written.",
-        parameters: [{ name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } }],
+        parameters: [
+          { name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } },
+          {
+            name: "mode",
+            in: "query",
+            schema: { type: "string", enum: ["missing", "cutoff"], default: "missing" },
+            description:
+              "`cutoff` lists instead what HAS a file below the quality profile's cutoff — Radarr/Sonarr's own " +
+              "/api/v3/wanted/cutoff, monitored titles only, judged by the arr's `qualityCutoffNotMet`. Cutoff items carry " +
+              "`quality` (radarr: the file's), `profile`, `cutoff` and, for sonarr, `episodes` (seasonNumber, episodeNumber, title, quality) " +
+              "in place of the missing-mode counts.",
+          },
+        ],
         responses: {
           "200": {
             description: "The report. `items` are movies for radarr, series for sonarr.",
@@ -2344,6 +2604,49 @@ const spec = {
                               },
                             },
                           },
+                          {
+                            type: "object",
+                            description: "Radarr movie, mode=cutoff",
+                            properties: {
+                              instance: { type: "string" },
+                              arrId: { type: "integer" },
+                              tmdbId: { type: "integer", nullable: true },
+                              title: { type: "string" },
+                              year: { type: "integer", nullable: true },
+                              posterPath: { type: "string", nullable: true },
+                              quality: { type: "string", nullable: true, description: "The quality of the file on disk" },
+                              profile: { type: "string", nullable: true, description: "The movie's quality profile" },
+                              cutoff: { type: "string", nullable: true, description: "That profile's cutoff (a quality or a quality group)" },
+                            },
+                          },
+                          {
+                            type: "object",
+                            description: "Sonarr series, mode=cutoff",
+                            properties: {
+                              instance: { type: "string" },
+                              arrId: { type: "integer" },
+                              tmdbId: { type: "integer", nullable: true },
+                              tvdbId: { type: "integer", nullable: true },
+                              title: { type: "string" },
+                              year: { type: "integer", nullable: true },
+                              posterPath: { type: "string", nullable: true },
+                              profile: { type: "string", nullable: true },
+                              cutoff: { type: "string", nullable: true },
+                              episodes: {
+                                type: "array",
+                                description: "Monitored episodes whose file is below cutoff, in order",
+                                items: {
+                                  type: "object",
+                                  properties: {
+                                    seasonNumber: { type: "integer" },
+                                    episodeNumber: { type: "integer" },
+                                    title: { type: "string" },
+                                    quality: { type: "string", nullable: true },
+                                  },
+                                },
+                              },
+                            },
+                          },
                         ],
                       },
                     },
@@ -2352,7 +2655,7 @@ const spec = {
               },
             },
           },
-          "400": { description: "service is not radarr or sonarr" },
+          "400": { description: "service is not radarr or sonarr, or mode is not missing or cutoff" },
           "403": { description: "Not ADMIN" },
         },
       },
@@ -2424,6 +2727,15 @@ const spec = {
                   service: { type: "string", enum: ["radarr", "sonarr"] },
                   instance: { type: "string", description: "Instance slug; absent or empty = the default" },
                   arrId: { type: "integer", minimum: 1, description: "Radarr movie id / Sonarr series id from the report" },
+                  mode: {
+                    type: "string",
+                    enum: ["missing", "cutoff"],
+                    default: "missing",
+                    description:
+                      "`cutoff`: an UPGRADE search for exactly what Radarr/Sonarr say is below cutoff right now — Radarr " +
+                      "`MoviesSearch`; Sonarr one `EpisodeSearch` for the monitored episodes whose file has `qualityCutoffNotMet`. " +
+                      "409 when nothing is below cutoff any more.",
+                  },
                 },
               },
             },
@@ -2448,8 +2760,483 @@ const spec = {
           "400": { description: "Invalid body" },
           "403": { description: "Not ADMIN" },
           "404": { description: "Integration disabled, unknown instance, or no such movie/series" },
-          "409": { description: "Nothing is missing for this title any more" },
+          "409": { description: "Nothing is missing (or, in cutoff mode, below cutoff) for this title any more" },
           "502": { description: "The search could not be queued" },
+        },
+      },
+    },
+
+    "/admin/queue": {
+      get: {
+        tags: ["Admin – Downloads"],
+        summary: "Every Radarr/Sonarr download queue, one row per download (ADMIN)",
+        description:
+          "A live, paged /api/v3/queue read per configured Radarr and Sonarr instance (integrations switched off are " +
+          "not read). Sonarr's per-episode records for one download fold into one row carrying every record id. Rows " +
+          "Radarr/Sonarr flag (warning/error tracked status, blocked or failed import, failed or unreachable client) " +
+          "have `attention: true` and sort first. `requesters` names the users with a non-declined request for the title " +
+          "on that instance. An instance whose queue could not be read is named in `errors`; its downloads are absent, " +
+          "not finished. Nothing is cached or written.",
+        responses: {
+          "200": {
+            description: "The queues",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    instances: { type: "array", items: { type: "object", properties: { service: { type: "string", enum: ["radarr", "sonarr"] }, slug: { type: "string" }, name: { type: "string" } } } },
+                    errors: { type: "array", items: { type: "object", properties: { service: { type: "string" }, instance: { type: "string" }, error: { type: "string" } } } },
+                    items: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          service: { type: "string", enum: ["radarr", "sonarr"] },
+                          instance: { type: "string" },
+                          ids: { type: "array", items: { type: "integer" }, description: "Every queue record id of the download" },
+                          downloadId: { type: "string", nullable: true },
+                          title: { type: "string", description: "Release name" },
+                          mediaTitle: { type: "string" },
+                          year: { type: "integer", nullable: true },
+                          tmdbId: { type: "integer", nullable: true },
+                          tvdbId: { type: "integer", nullable: true },
+                          arrMediaId: { type: "integer", nullable: true, description: "Radarr movie id / Sonarr series id" },
+                          episodes: { type: "array", items: { type: "object", properties: { seasonNumber: { type: "integer" }, episodeNumber: { type: "integer" } } } },
+                          quality: { type: "string", nullable: true },
+                          qualityTags: { type: "array", items: { type: "string", enum: ["proper", "repack", "real"] }, description: "The release revision as the arr tags it beside the quality" },
+                          languages: { type: "array", items: { type: "string" } },
+                          customFormats: { type: "array", items: { type: "string" }, description: "Custom formats the release matched" },
+                          customFormatScore: { type: "integer", nullable: true },
+                          size: { type: "number" },
+                          sizeLeft: { type: "number" },
+                          progress: { type: "number", minimum: 0, maximum: 1 },
+                          timeLeftSeconds: { type: "integer", nullable: true },
+                          estimatedCompletion: { type: "string", format: "date-time", nullable: true },
+                          added: { type: "string", format: "date-time", nullable: true },
+                          phase: { type: "string", enum: ["downloading", "queued", "paused", "delay", "importPending", "importing", "importBlocked", "failed", "clientUnavailable", "unknown"] },
+                          trackedStatus: { type: "string", enum: ["ok", "warning", "error"], nullable: true },
+                          messages: { type: "array", items: { type: "string" } },
+                          protocol: { type: "string", enum: ["torrent", "usenet", "unknown"] },
+                          downloadClient: { type: "string", nullable: true },
+                          indexer: { type: "string", nullable: true },
+                          outputPath: { type: "string", nullable: true, description: "Where the download client put the files, as the arr sees the path" },
+                          attention: { type: "boolean" },
+                          pending: { type: "boolean", description: "Held by Radarr/Sonarr (delay profile, client unavailable, fallback) — Grab now applies; not yet in a download client" },
+                          canChangeCategory: { type: "boolean", description: "The download client has a post-import category, so the `changeCategory` removal method is available" },
+                          requesters: { type: "array", items: { type: "string" } },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "403": { description: "Not ADMIN" },
+        },
+      },
+    },
+
+    "/admin/queue/remove": {
+      post: {
+        tags: ["Admin – Downloads"],
+        summary: "Remove a download from a Radarr/Sonarr queue (ADMIN)",
+        description:
+          "One bulk `DELETE /api/v3/queue/bulk` on that instance carrying every record id of the download, with every flag " +
+          "explicit (the arr defaults removeFromClient to true). `remove`: off the queue, no blocklist. `blocklist`: remove " +
+          "and blocklist the release, no new search. `blocklistSearch`: remove, blocklist, and let Radarr/Sonarr search for a " +
+          "replacement (their own \"redownload failed\" behaviour, which honours that arr setting). `method` is the arr " +
+          "dialog's removal method: `removeFromClient` deletes the download (and its files) from the client, `changeCategory` " +
+          "leaves it in the client under its post-import category (only when the client has one — the row's " +
+          "`canChangeCategory`), `ignore` leaves it in the client untouched while the arr stops tracking it. With no `method`, " +
+          "the older `removeFromClient` boolean is read (true/absent → removeFromClient, false → ignore). Audited " +
+          "ARR_QUEUE_REMOVE after the arr accepted it.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["service", "ids", "action"],
+                properties: {
+                  service: { type: "string", enum: ["radarr", "sonarr"] },
+                  instance: { type: "string", description: "Instance slug; absent or empty = the default" },
+                  ids: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, maxItems: 5000 },
+                  action: { type: "string", enum: ["remove", "blocklist", "blocklistSearch"] },
+                  method: { type: "string", enum: ["removeFromClient", "changeCategory", "ignore"], default: "removeFromClient" },
+                  removeFromClient: { type: "boolean", deprecated: true, description: "Read only when `method` is absent" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Removed" },
+          "400": { description: "Invalid body" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled or unknown instance" },
+          "409": { description: "The download is no longer in the queue" },
+          "502": { description: "The arr could not be reached" },
+        },
+      },
+    },
+
+    "/admin/queue/import": {
+      get: {
+        tags: ["Admin – Downloads"],
+        summary: "The files of a download Radarr/Sonarr would not import on their own (ADMIN)",
+        description:
+          "Radarr/Sonarr's `/api/v3/manualimport?downloadId=` for one queue download: each file's path, what the arr matched " +
+          "it to (movie, or series + episodes), quality, languages, release group, and the reasons it refused to import it. " +
+          "`importable` is false for a file the arr could not match to a title — correct it (POST with `movieId` / `seriesId` + " +
+          "`episodeIds`) first. Also returns the instance's own qualities (in its weight order) and languages for the " +
+          "per-file editor; those two are empty when the arr would not list them.",
+        parameters: [
+          { name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } },
+          { name: "instance", in: "query", schema: { type: "string" }, description: "Instance slug; empty = the default" },
+          { name: "downloadId", in: "query", required: true, schema: { type: "string", maxLength: 200 } },
+        ],
+        responses: {
+          "200": {
+            description: "The files",
+            content: { "application/json": { schema: { type: "object", properties: { files: { type: "array", items: {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+                name: { type: "string" },
+                size: { type: "number" },
+                quality: { type: "string", nullable: true },
+                languages: { type: "array", items: { type: "string" } },
+                releaseGroup: { type: "string", nullable: true },
+                target: { type: "string", nullable: true },
+                episodes: { type: "array", items: { type: "object", properties: { seasonNumber: { type: "integer" }, episodeNumber: { type: "integer" } } } },
+                rejections: { type: "array", items: { type: "string" } },
+                importable: { type: "boolean" },
+                movieId: { type: "integer", nullable: true, description: "Radarr's movie id the file is matched to" },
+                seriesId: { type: "integer", nullable: true, description: "Sonarr's series id the file is matched to" },
+                episodeIds: { type: "array", items: { type: "integer" } },
+                qualityId: { type: "integer", nullable: true },
+                languageIds: { type: "array", items: { type: "integer" } },
+                releaseType: { type: "string", nullable: true, description: "Sonarr only" },
+              },
+            } },
+              qualities: { type: "array", items: { type: "object", properties: { id: { type: "integer" }, name: { type: "string" } } } },
+              languages: { type: "array", items: { type: "object", properties: { id: { type: "integer" }, name: { type: "string" } } } },
+            } } } },
+          },
+          "400": { description: "Invalid parameters" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled or unknown instance" },
+          "409": { description: "The download is no longer in the queue" },
+          "502": { description: "The arr could not be reached" },
+        },
+      },
+      post: {
+        tags: ["Admin – Downloads"],
+        summary: "Import a download Radarr/Sonarr refused (ADMIN)",
+        description:
+          "Queues the arr's `ManualImport` command for the chosen files, overriding its refusal. The file list is RE-READ " +
+          "from the arr and only its own rows whose path is chosen are sent — a path selects, it is never passed upstream " +
+          "itself. Each file may carry corrections, the arr's own Manual Import fields: `movieId` (Radarr), `seriesId` + " +
+          "`episodeIds` (Sonarr; `episodeIds` alone keeps the matched series), `qualityId`, `languageIds`, `releaseGroup`, " +
+          "`releaseType` (Sonarr). They are IDS: every movie, series, episode, quality and language object in the command is " +
+          "read from the instance itself, and an id it doesn't have is 400 with nothing sent. The older `paths: string[]` " +
+          "body (no corrections) still works. 409 when none of the chosen files is importable. Audited ARR_QUEUE_IMPORT " +
+          "(count, mode and how many were corrected — no paths). Returns once the command is queued.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["service", "downloadId"],
+                properties: {
+                  service: { type: "string", enum: ["radarr", "sonarr"] },
+                  instance: { type: "string" },
+                  downloadId: { type: "string", maxLength: 200 },
+                  files: { type: "array", minItems: 1, maxItems: 2000, items: { $ref: "#/components/schemas/QueueImportFile" } },
+                  paths: { type: "array", deprecated: true, items: { type: "string", maxLength: 4096 }, minItems: 1, maxItems: 2000, description: "Read only when `files` is absent" },
+                  importMode: { type: "string", enum: ["auto", "move", "copy"], default: "auto" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "202": { description: "Import queued", content: { "application/json": { schema: { type: "object", properties: { files: { type: "integer" } } } } } },
+          "400": { description: "Invalid body" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled or unknown instance" },
+          "409": { description: "Nothing chosen is importable any more, or the download is gone" },
+          "502": { description: "The arr could not be reached or refused the command" },
+        },
+      },
+    },
+
+    "/admin/queue/import/preview": {
+      post: {
+        tags: ["Admin – Downloads"],
+        summary: "Re-check a file's import corrections with Radarr/Sonarr (ADMIN)",
+        description:
+          "The chosen files with their corrections applied (each checked against the instance's own catalogs, as for the " +
+          "import itself) and RE-JUDGED by the arr's manual-import reprocess (`POST /api/v3/manualimport`): fresh refusal " +
+          "reasons and, for Sonarr, the episodes it resolves. `rechecked` is false when the arr could not reprocess (an older " +
+          "version without the endpoint, or a file with no title to look up) — the corrections still show, with the arr's " +
+          "earlier verdict. Imports nothing and writes nothing.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["service", "downloadId", "files"],
+                properties: {
+                  service: { type: "string", enum: ["radarr", "sonarr"] },
+                  instance: { type: "string" },
+                  downloadId: { type: "string", maxLength: 200 },
+                  files: { type: "array", minItems: 1, maxItems: 2000, items: { $ref: "#/components/schemas/QueueImportFile" } },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "The corrected files, as the import dialog lists them",
+            content: { "application/json": { schema: { type: "object", properties: {
+              files: { type: "array", items: { type: "object", description: "Same shape as GET /admin/queue/import's files" } },
+              rechecked: { type: "boolean" },
+            } } } },
+          },
+          "400": { description: "Invalid body, or a correction names something the instance doesn't have" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled or unknown instance" },
+          "409": { description: "The download is no longer in the queue" },
+          "502": { description: "The arr could not be reached" },
+        },
+      },
+    },
+
+    "/admin/queue/import/targets": {
+      get: {
+        tags: ["Admin – Downloads"],
+        summary: "Titles a queued file can be re-matched to (ADMIN)",
+        description:
+          "The arr's own lookup (`/api/v3/movie/lookup` or `/api/v3/series/lookup`) for `term`, keeping only titles the " +
+          "instance already has — a manual import needs the movie/series in the arr. At most 25.",
+        parameters: [
+          { name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } },
+          { name: "instance", in: "query", schema: { type: "string" } },
+          { name: "term", in: "query", required: true, schema: { type: "string", minLength: 1, maxLength: 100 } },
+        ],
+        responses: {
+          "200": {
+            description: "Matching library titles",
+            content: { "application/json": { schema: { type: "object", properties: { results: { type: "array", items: { type: "object", properties: {
+              id: { type: "integer", description: "Radarr movie id / Sonarr series id" },
+              title: { type: "string" },
+              year: { type: "integer", nullable: true },
+            } } } } } } },
+          },
+          "400": { description: "Invalid parameters" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled or unknown instance" },
+          "502": { description: "The arr could not be reached" },
+        },
+      },
+    },
+
+    "/admin/queue/import/episodes": {
+      get: {
+        tags: ["Admin – Downloads"],
+        summary: "A Sonarr series' episodes, for re-matching a queued file (ADMIN)",
+        parameters: [
+          { name: "instance", in: "query", schema: { type: "string" }, description: "Sonarr instance slug; empty = the default" },
+          { name: "seriesId", in: "query", required: true, schema: { type: "integer", minimum: 1 }, description: "Sonarr's own series id" },
+        ],
+        responses: {
+          "200": {
+            description: "Episodes in season/episode order",
+            content: { "application/json": { schema: { type: "object", properties: { episodes: { type: "array", items: { type: "object", properties: {
+              id: { type: "integer" },
+              seasonNumber: { type: "integer" },
+              episodeNumber: { type: "integer" },
+              title: { type: "string" },
+              hasFile: { type: "boolean" },
+            } } } } } } },
+          },
+          "400": { description: "Invalid series id" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Sonarr disabled, unknown instance, or the series is not in Sonarr" },
+          "502": { description: "Sonarr could not be reached" },
+        },
+      },
+    },
+
+    "/admin/queue/grab": {
+      post: {
+        tags: ["Admin – Downloads"],
+        summary: "Grab a release Radarr/Sonarr are holding (ADMIN)",
+        description:
+          "Sends a PENDING queue item (held by a delay profile, an unavailable download client, or a fallback) to the " +
+          "download client now — the arr's own `POST /api/v3/queue/grab/bulk`, one call for every id. 409 when it is no " +
+          "longer pending. Audited ARR_RELEASE_GRAB (`source: \"queue\"`) after the arr accepted it.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["service", "ids"],
+                properties: {
+                  service: { type: "string", enum: ["radarr", "sonarr"] },
+                  instance: { type: "string" },
+                  ids: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, maxItems: 500 },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Sent to the download client" },
+          "400": { description: "Invalid body" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled or unknown instance" },
+          "409": { description: "The release is no longer pending" },
+          "502": { description: "The arr could not be reached" },
+        },
+      },
+    },
+
+    "/admin/queue/recheck": {
+      post: {
+        tags: ["Admin – Downloads"],
+        summary: "Ask every Radarr/Sonarr to re-check its downloads now (ADMIN)",
+        description:
+          "Queues `RefreshMonitoredDownloads` (what the arr runs every minute on its own) on every configured, enabled " +
+          "instance — how to retry a blocked import after fixing its cause without waiting. Not awaited; an instance that " +
+          "refused is named in `errors`. No body. Not audited (it changes nothing the arr wasn't about to do); 6 per minute per admin.",
+        responses: {
+          "202": {
+            description: "Queued",
+            content: { "application/json": { schema: { type: "object", properties: {
+              instances: { type: "integer" },
+              errors: { type: "array", items: { type: "object", properties: { service: { type: "string" }, instance: { type: "string" }, error: { type: "string" } } } },
+            } } } },
+          },
+          "403": { description: "Not ADMIN" },
+          "429": { description: "Too many re-checks" },
+        },
+      },
+    },
+
+    "/admin/arr-health": {
+      get: {
+        tags: ["Admin – Downloads"],
+        summary: "Radarr/Sonarr health and the Summonarr webhook verdict, per instance (ADMIN)",
+        description:
+          "For every configured instance: its version (/api/v3/system/status), Radarr/Sonarr's own non-ok health checks " +
+          "(/api/v3/health, errors first, wiki links https only), and whether its Connect list holds a Summonarr webhook " +
+          "(`ok`: enabled for every event Summonarr handles and carrying the token Summonarr accepts; `missing`; " +
+          "`tokenMismatch`; `eventsMissing`; `unknown` when the list could not be read). The token is never returned. " +
+          "`webhookBase` is the address the setup form pre-fills (AUTH_URL + BASE_PATH).",
+        responses: {
+          "200": {
+            description: "The report",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    webhookBase: { type: "string", nullable: true },
+                    instances: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          service: { type: "string", enum: ["radarr", "sonarr"] },
+                          slug: { type: "string" },
+                          name: { type: "string" },
+                          reachable: { type: "boolean" },
+                          error: { type: "string", nullable: true },
+                          version: { type: "string", nullable: true },
+                          checks: { type: "array", items: { type: "object", properties: { source: { type: "string" }, level: { type: "string", enum: ["notice", "warning", "error"] }, message: { type: "string" }, wikiUrl: { type: "string", nullable: true } } } },
+                          webhook: { type: "object", properties: { state: { type: "string", enum: ["ok", "missing", "tokenMismatch", "eventsMissing", "unknown"] }, missingEvents: { type: "array", items: { type: "string" } } } },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "403": { description: "Not ADMIN" },
+        },
+      },
+    },
+
+    "/admin/arr-health/webhook": {
+      post: {
+        tags: ["Admin – Downloads"],
+        summary: "Create or repair Summonarr's webhook in a Radarr/Sonarr instance (ADMIN)",
+        description:
+          "Writes a Webhook Connect entry pointing at /api/webhooks/<service>?token=<the instance's secret>, built from the " +
+          "instance's own /api/v3/notification/schema, with Summonarr's events switched on (Download, Upgrade, the delete " +
+          "events, Health issue/restored, Manual interaction required). An existing entry pointing at the endpoint is " +
+          "updated in place, keeping its other settings; one already correct is left alone. An instance with no webhook " +
+          "secret gets one generated. Radarr/Sonarr test the URL before saving, so 422 carries their reason (`detail`, the " +
+          "token masked). Audited SETTINGS_CHANGE with the base address, never the token.",
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                required: ["service"],
+                properties: {
+                  service: { type: "string", enum: ["radarr", "sonarr"] },
+                  instance: { type: "string", description: "Instance slug; absent or empty = the default" },
+                  baseUrl: { type: "string", description: "Summonarr's address as the arr reaches it; default AUTH_URL + BASE_PATH" },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": {
+            description: "Done",
+            content: { "application/json": { schema: { type: "object", properties: { outcome: { type: "string", enum: ["created", "updated", "unchanged"] }, secretGenerated: { type: "boolean" } } } } },
+          },
+          "400": { description: "Invalid body or base address" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Integration disabled or unknown instance" },
+          "422": { description: "The arr refused the entry (`detail` is its reason)" },
+          "502": { description: "The arr could not be reached, or offered no recognizable Webhook template" },
+        },
+      },
+    },
+
+    "/admin/arr/open": {
+      get: {
+        tags: ["Admin – Downloads"],
+        summary: "Redirect to a title in a Radarr/Sonarr instance's web UI (ADMIN)",
+        description:
+          "Resolves the title on that instance on click and answers 302: a library title opens its movie/series page, one " +
+          "the instance doesn't have opens Add New for the TMDB id. The host is the instance's External URL setting, else " +
+          "its connection URL — admin-configured, never taken from the request. When the arr can't be read the redirect " +
+          "lands on the instance's home page.",
+        parameters: [
+          { name: "service", in: "query", required: true, schema: { type: "string", enum: ["radarr", "sonarr"] } },
+          { name: "instance", in: "query", schema: { type: "string" }, description: "Instance slug; empty = the default" },
+          { name: "tmdbId", in: "query", schema: { type: "integer", minimum: 1 }, description: "Exactly one of tmdbId or arrId" },
+          { name: "arrId", in: "query", schema: { type: "integer", minimum: 1 }, description: "Radarr movie id / Sonarr series id" },
+        ],
+        responses: {
+          "302": { description: "To the arr's web UI" },
+          "400": { description: "Invalid parameters" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "Unknown instance, or no usable address" },
         },
       },
     },
@@ -2496,7 +3283,7 @@ const spec = {
                     type: "array",
                     items: {
                       type: "string",
-                      enum: ["request.created", "request.approved", "request.declined", "request.available", "issue.created", "issue.reply", "issue.resolved", "vote.threshold", "arr.manual_interaction", "arr.grab_completed"],
+                      enum: ["request.created", "request.approved", "request.declined", "request.available", "issue.created", "issue.reply", "issue.resolved", "vote.threshold", "arr.manual_interaction", "arr.grab_completed", "arr.health", "arr.health_restored"],
                     },
                   },
                   config: { type: "object" },
@@ -2526,7 +3313,7 @@ const spec = {
                     type: "array",
                     items: {
                       type: "string",
-                      enum: ["request.created", "request.approved", "request.declined", "request.available", "issue.created", "issue.reply", "issue.resolved", "vote.threshold", "arr.manual_interaction", "arr.grab_completed"],
+                      enum: ["request.created", "request.approved", "request.declined", "request.available", "issue.created", "issue.reply", "issue.resolved", "vote.threshold", "arr.manual_interaction", "arr.grab_completed", "arr.health", "arr.health_restored"],
                     },
                   },
                   config: { type: "object" },
@@ -3254,23 +4041,31 @@ const spec = {
     "/webhooks/radarr": {
       post: {
         tags: ["Webhooks"],
-        summary: "Radarr webhook (movie grabbed / imported / deleted)",
+        summary: "Radarr webhook (movie grabbed / imported / deleted, health)",
+        description:
+          "Authenticated by the instance's webhook secret, as `?token=` or a Bearer header. `Health` / `HealthRestored` " +
+          "deliveries are forwarded to the outbound notification channels as `arr.health` / `arr.health_restored` and answer " +
+          "{ ok: true, health: true, forwarded } — `forwarded` is false when held back (a repeat of the same state for the same check within 10 minutes, or a delivery with no message). " +
+          "`ManualInteractionRequired` alerts admins. A byte-identical repeat of any other delivery is refused as a replay.",
         security: [],
         parameters: [{ name: "token", in: "query", schema: { type: "string" } }],
         requestBody: { content: { "application/json": { schema: { type: "object" } } } },
-        responses: { "200": { description: "Processed" }, "401": { description: "Invalid token" } },
+        responses: { "200": { description: "Processed" }, "401": { description: "Invalid token" }, "409": { description: "Replayed delivery" } },
       },
     },
     "/webhooks/sonarr": {
       post: {
         tags: ["Webhooks"],
-        summary: "Sonarr webhook (episode grabbed / imported / deleted)",
+        summary: "Sonarr webhook (episode grabbed / imported / deleted, health)",
         description:
+          "Authenticated by the instance's webhook secret, as `?token=` or a Bearer header. `Health` / `HealthRestored` " +
+          "deliveries are forwarded to the outbound notification channels as `arr.health` / `arr.health_restored` and answer " +
+          "{ ok: true, health: true, forwarded }; a byte-identical repeat of any other delivery is refused as a replay. " +
           "A Download event flips the series' APPROVED requests to AVAILABLE only once Sonarr confirms the series COMPLETE (every aired regular-season episode on disk). Mid-import deliveries answer { skipped: true, reason: \"incomplete\", episodeFileCount, episodeCount }; an unverifiable delivery (Sonarr unreachable) answers { deferred: true } and is re-checked after the library scan settles.",
         security: [],
         parameters: [{ name: "token", in: "query", schema: { type: "string" } }],
         requestBody: { content: { "application/json": { schema: { type: "object" } } } },
-        responses: { "200": { description: "Processed" }, "401": { description: "Invalid token" } },
+        responses: { "200": { description: "Processed" }, "401": { description: "Invalid token" }, "409": { description: "Replayed delivery" } },
       },
     },
 

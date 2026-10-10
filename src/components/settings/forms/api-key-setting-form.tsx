@@ -25,7 +25,10 @@ export function ApiKeySettingForm({
 }: {
   initialApiKey: string;
   settingKey: string;
-  testService: string;
+  // The /api/settings/test-ratings service to check the saved key against. Omit
+  // for a credential nothing can test on its own (a client secret) — the Test
+  // button is then not rendered.
+  testService?: string;
   label: string;
   inputId: string;
   help: React.ReactNode;
@@ -173,10 +176,12 @@ export function ApiKeySettingForm({
         <Button type="submit" disabled={busy || !dirty} className="bg-indigo-600 hover:bg-indigo-500">
           {status === "saving" ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />{t("settings.form.common.saving")}</> : t("settings.form.common.save")}
         </Button>
-        <Button type="button" variant="outline" onClick={handleTest} disabled={busy || (!dirty && !keyIsSet)} className="border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-2">
-          {testStatus === "testing" ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-          {dirty ? t("settings.form.common.saveAndTest") : t("settings.form.apiKey.test")}
-        </Button>
+        {testService && (
+          <Button type="button" variant="outline" onClick={handleTest} disabled={busy || (!dirty && !keyIsSet)} className="border-zinc-700 text-zinc-400 hover:text-zinc-100 gap-2">
+            {testStatus === "testing" ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
+            {dirty ? t("settings.form.common.saveAndTest") : t("settings.form.apiKey.test")}
+          </Button>
+        )}
         <SaveStatusMessage
           status={saveStatus}
           okLabel={status === "removed" ? t("settings.form.apiKey.removed") : undefined}

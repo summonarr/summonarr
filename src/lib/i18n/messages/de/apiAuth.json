@@ -153,5 +153,10 @@
   "apiAuth.setup.sessionMismatch": "Die Upload-ID stimmt nicht mit der aktiven Sitzung überein.",
   "apiAuth.setup.stateLost": "Der Upload-Status ging zwischen dem letzten Block und dem Import verloren.",
   "apiAuth.setup.tooManyAttempts": "Zu viele Importversuche bei der Einrichtung. Versuchen Sie es später erneut.",
-  "apiAuth.signIn.accountDisabled": "Dieses Konto wurde deaktiviert. Wenden Sie sich an einen Administrator."
+  "apiAuth.signIn.accountDisabled": "Dieses Konto wurde deaktiviert. Wenden Sie sich an einen Administrator.",
+  "apiAuth.profile.trakt.toggleBoolean": "Senden Sie watchlistAutoRequest und/oder historySeeds als boolesche Werte",
+  "apiAuth.profile.trakt.notConnected": "Trakt ist nicht verbunden",
+  "apiAuth.profile.trakt.unavailable": "Trakt ist auf diesem Server nicht verfügbar",
+  "apiAuth.profile.trakt.busy": "Trakt ist gerade ausgelastet. Bitte versuchen Sie es in ein paar Minuten erneut.",
+  "apiAuth.profile.trakt.unreachable": "Trakt ist nicht erreichbar. Bitte versuchen Sie es erneut."
 }

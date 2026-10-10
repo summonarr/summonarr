@@ -1,6 +1,6 @@
-// Route-level unit tests for all twelve POST /api/cron/* handlers:
+// Route-level unit tests for all thirteen POST /api/cron/* handlers:
 //   purge-auth-sessions, scrub-audit-pii, sync-download-policies,
-//   sync-plex-watchlists, trash-diagnostic, trash-sync, warm-activity, warm-library,
+//   sync-plex-watchlists, sync-trakt, trash-diagnostic, trash-sync, warm-activity, warm-library,
 //   warm-list-cache, warm-mdblist, warm-omdb, warm-recommendations
 //
 // These are the internet-facing entry points the container's own cron loop
@@ -160,6 +160,8 @@ for (const model of [
   "userRecommendation", "watchlistItem", "titleSuggestion", "recommendationTitle",
   // sync-plex-watchlists: stored Plex tokens + the auto-request ledger.
   "account", "autoRequestLedger",
+  // sync-trakt: the per-user Trakt connection and its imported history.
+  "traktConnection", "traktWatchedItem",
 ]) {
   shadowPrismaModel(prisma, model, counter(model));
 }
@@ -219,6 +221,7 @@ const ROUTES: CronRoute[] = [
   await load("scrub-audit-pii", 2002),
   await load("sync-download-policies", 2009),
   await load("sync-plex-watchlists", AL.PLEX_WATCHLIST_LOCK_ID),
+  await load("sync-trakt", AL.TRAKT_SYNC_LOCK_ID),
   await load("trash-diagnostic", null),
   await load("trash-sync", AL.TRASH_SYNC_LOCK_ID),
   await load("warm-activity", null),
@@ -254,8 +257,8 @@ beforeEach(() => {
 
 // ── the matrix itself must not pass vacuously ────────────────────────────────
 
-test("all twelve cron routes loaded and expose a POST handler", () => {
-  assert.equal(ROUTES.length, 12);
+test("all thirteen cron routes loaded and expose a POST handler", () => {
+  assert.equal(ROUTES.length, 13);
   for (const r of ROUTES) assert.equal(typeof r.POST, "function", `${r.name} has no POST`);
 });
 
@@ -375,7 +378,7 @@ for (const route of LOCKING) {
 // run outlasts its tick. The warm-* routes record inside the work callback and
 // never recorded their skips; these now agree with them. sync-plex-watchlists
 // still answers a plain 200 skip and is recorded — not changed here.
-for (const name of ["trash-sync", "sync-download-policies"]) {
+for (const name of ["trash-sync", "sync-download-policies", "sync-trakt"]) {
   test(`${name}: a BUSY lock writes NO cron:lastRun ledger row`, async () => {
     const route = ROUTES.find((r) => r.name === name)!;
     lockAcquire = () => false;
