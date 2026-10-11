@@ -5,6 +5,7 @@ import { requireFeature } from "@/lib/features";
 import { getTranslator } from "@/lib/i18n/server";
 import { PageHeader } from "@/components/ui/design";
 import { LibraryCleanup } from "@/components/admin/library-cleanup";
+import { parseCleanupView } from "@/lib/library-cleanup-view";
 
 export const dynamic = "force-dynamic";
 
@@ -12,11 +13,18 @@ export const dynamic = "force-dynamic";
 // managers too, so the role decision is re-made here with the DB-checked
 // authActive() (guardrail 29). The report itself loads client-side because it
 // makes live Radarr/Sonarr calls.
-export default async function LibraryCleanupPage() {
+export default async function LibraryCleanupPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
   await requireFeature("feature.admin.cleanup");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
   const t = await getTranslator();
+  // Filters and sort live in the URL; every value is whitelisted on parse.
+  const sp = await searchParams;
+  const initialView = parseCleanupView({ get: (name) => (typeof sp[name] === "string" ? (sp[name] as string) : null) });
 
   return (
     <div className="ds-page-enter">
@@ -24,7 +32,7 @@ export default async function LibraryCleanupPage() {
         title={t("adminManage.cleanup.title")}
         subtitle={t("adminManage.cleanup.subtitle")}
       />
-      <LibraryCleanup />
+      <LibraryCleanup initialView={initialView} />
     </div>
   );
 }

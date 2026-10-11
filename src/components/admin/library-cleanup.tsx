@@ -18,7 +18,7 @@ import { StyledSelect } from "@/components/ui/styled-select";
 import { Switch } from "@/components/ui/switch";
 import { EmptyState, SectionHeader, StatCard } from "@/components/ui/design";
 import { Poster } from "@/components/admin/activity-ui";
-import { FileX, Loader2, Shield, ShieldOff, Trash2 } from "@/components/icons";
+import { ArrowDown, ArrowUp, ArrowUpDown, FileX, Loader2, Shield, ShieldOff, Trash2 } from "@/components/icons";
 import {
   CleanupPlanPanel,
   CleanupResultPanel,
@@ -30,12 +30,46 @@ import {
   useCleanupDelete,
 } from "@/components/admin/cleanup-delete";
 import {
+  CLEANUP_EXCLUSION_LABELS,
   CLEANUP_NUMERIC_BOUNDS,
   CLEANUP_RULE_LABELS,
   type CleanupExclusion,
   type CleanupRule,
   type CleanupSettings,
 } from "@/lib/library-cleanup";
+import {
+  CLEANUP_SIZE_FILTERS,
+  CLEANUP_SORT_KEYS,
+  CLEANUP_VIEW_DEFAULTS,
+  cleanupArrKey,
+  cleanupFiltersActive,
+  defaultCleanupSortDir,
+  filterCleanupRows,
+  serializeCleanupView,
+  sortCleanupRows,
+  type CleanupSizeFilter,
+  type CleanupSortKey,
+  type CleanupViewState,
+} from "@/lib/library-cleanup-view";
+
+// Literal key maps — the i18n dead-string check can't see a built key.
+const SORT_KEYS: Record<CleanupSortKey, string> = {
+  size: "adminManage.cleanup.sort.size",
+  idle: "adminManage.cleanup.sort.idle",
+  added: "adminManage.cleanup.sort.added",
+  lastPlayed: "adminManage.cleanup.sort.lastPlayed",
+  plays: "adminManage.cleanup.sort.plays",
+  votes: "adminManage.cleanup.sort.votes",
+  title: "adminManage.cleanup.sort.title",
+};
+const SIZE_KEYS: Record<CleanupSizeFilter, string> = {
+  any: "adminManage.cleanup.filter.size.any",
+  "1g": "adminManage.cleanup.filter.size.1g",
+  "10g": "adminManage.cleanup.filter.size.10g",
+  "50g": "adminManage.cleanup.filter.size.50g",
+  "100g": "adminManage.cleanup.filter.size.100g",
+  unknown: "adminManage.cleanup.filter.size.unknown",
+};
 
 type Row = {
   tmdbId: number;
@@ -82,7 +116,7 @@ const inputStyle: React.CSSProperties = {
   border: "1px solid var(--ds-border)",
   borderRadius: 6,
 };
-export function LibraryCleanup() {
+export function LibraryCleanup({ initialView = CLEANUP_VIEW_DEFAULTS }: { initialView?: CleanupViewState }) {
   const t = useT();
   const locale = useLocale();
   const day = useMemo(() => dayFormatter(locale), [locale]);
@@ -92,10 +126,9 @@ export function LibraryCleanup() {
   const [error, setError] = useState("");
   const [draft, setDraft] = useState<CleanupSettings | null>(null);
   const [savingRules, setSavingRules] = useState(false);
-  const [typeFilter, setTypeFilter] = useState<"all" | "MOVIE" | "TV">("all");
-  const [view, setView] = useState<"candidates" | "held" | "all">("candidates");
-  const [ruleFilter, setRuleFilter] = useState<"any" | CleanupRule>("any");
-  const [query, setQuery] = useState("");
+  // Every filter and the sort, in one object that round-trips through the URL.
+  const [vs, setVs] = useState<CleanupViewState>(initialView);
+  const patchView = (p: Partial<CleanupViewState>) => setVs((prev) => ({ ...prev, ...p }));
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busyKey, setBusyKey] = useState<string | null>(null);
 
@@ -125,18 +158,31 @@ export function LibraryCleanup() {
     void load();
   }, [load]);
 
-  const visible = useMemo(() => {
-    if (!report) return [];
-    const q = query.trim().toLowerCase();
-    return report.rows.filter((r) => {
-      if (view === "candidates" && !r.candidate) return false;
-      if (view === "held" && r.candidate) return false;
-      if (typeFilter !== "all" && r.mediaType !== typeFilter) return false;
-      if (ruleFilter !== "any" && !r.matched.includes(ruleFilter)) return false;
-      if (q && !r.title.toLowerCase().includes(q)) return false;
-      return true;
-    });
-  }, [report, view, typeFilter, ruleFilter, query]);
+  // A filtered view survives a reload and can be shared (house style: URL state).
+  useEffect(() => {
+    const qs = serializeCleanupView(vs);
+    window.history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname);
+  }, [vs]);
+
+  const visible = useMemo(
+    () => (report ? sortCleanupRows(filterCleanupRows(report.rows, vs), vs.sort, vs.dir) : []),
+    [report, vs],
+  );
+  // The servers and Radarr/Sonarr instances that occur in this report.
+  const serverOptions = useMemo(() => [...new Set((report?.rows ?? []).flatMap((r) => r.servers))].sort(), [report]);
+  const arrOptions = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of report?.rows ?? []) for (const a of r.arr) m.set(cleanupArrKey(a.service, a.instance), instanceLabel(a.service, a.instance));
+    return [...m.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [report]);
+
+  function sortOn(key: CleanupSortKey) {
+    setVs((prev) =>
+      prev.sort === key
+        ? { ...prev, dir: prev.dir === "asc" ? "desc" : "asc" }
+        : { ...prev, sort: key, dir: defaultCleanupSortDir(key) },
+    );
+  }
 
   const selectableVisible = visible.filter((r) => r.candidate && r.arr.length > 0);
   const selectedRows = report ? report.rows.filter((r) => selected.has(keyOf(r))) : [];
@@ -238,6 +284,24 @@ export function LibraryCleanup() {
   const setBool = (field: "unwatchedEnabled" | "neverWatchedEnabled" | "votesEnabled" | "excludeAiring" | "requireUpstreamCheck", v: boolean) =>
     setDraft((d) => (d ? { ...d, [field]: v } : d));
   const dirty = JSON.stringify(draft) !== JSON.stringify(report.settings);
+  // A clickable column header; shares its state with the Sort select.
+  const sortHead = (k: CleanupSortKey, label: string, align?: "right") => {
+    const active = vs.sort === k;
+    const Icon = !active ? ArrowUpDown : vs.dir === "asc" ? ArrowUp : ArrowDown;
+    return (
+      <th style={{ padding: "8px 10px", textAlign: align ?? "left", whiteSpace: "nowrap" }} aria-sort={active ? (vs.dir === "asc" ? "ascending" : "descending") : "none"}>
+        <button
+          type="button"
+          onClick={() => sortOn(k)}
+          className="inline-flex items-center gap-1 hover:text-zinc-100"
+          style={{ font: "inherit", color: active ? "var(--ds-fg)" : "inherit" }}
+        >
+          {label}
+          <Icon style={{ width: 11, height: 11, opacity: active ? 1 : 0.5 }} />
+        </button>
+      </th>
+    );
+  };
 
   return (
     <div className="flex flex-col gap-6">
@@ -324,40 +388,100 @@ export function LibraryCleanup() {
         </div>
       </section>
 
-      {/* ── filters + bulk action ───────────────────────────────────── */}
-      <div className="flex flex-wrap items-center gap-2" style={{ fontSize: 13 }}>
-        <StyledSelect compact className="w-auto" value={view} onChange={(e) => setView(e.target.value as typeof view)} aria-label={t("adminManage.cleanup.filter.show")}>
-          <option value="candidates">{t("adminManage.cleanup.stat.candidates")}</option>
-          <option value="held">{t("adminManage.cleanup.stat.held")}</option>
-          <option value="all">{t("adminManage.cleanup.filter.allMatched")}</option>
-        </StyledSelect>
-        <StyledSelect compact className="w-auto" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value as typeof typeFilter)} aria-label={t("adminManage.cleanup.filter.mediaType")}>
-          <option value="all">{t("adminManage.cleanup.filter.moviesAndTv")}</option>
-          <option value="MOVIE">{t("nav.movies")}</option>
-          <option value="TV">{t("adminManage.cleanup.tv")}</option>
-        </StyledSelect>
-        <StyledSelect compact className="w-auto" value={ruleFilter} onChange={(e) => setRuleFilter(e.target.value as typeof ruleFilter)} aria-label={t("adminManage.cleanup.filter.rule")}>
-          <option value="any">{t("adminManage.cleanup.filter.anyRule")}</option>
-          {(Object.keys(CLEANUP_RULE_LABELS) as CleanupRule[]).map((r) => (
-            <option key={r} value={r}>{t(`adminManage.cleanup.ruleLabel.${r}`)}</option>
-          ))}
-        </StyledSelect>
-        {/* Input is the h-8 twin of the compact selects beside it; the old
-            hand-rolled 26px field sat visibly shorter in the same row. */}
-        <Input
-          value={query}
-          onChange={(e) => setQuery(e.target.value.slice(0, 200))}
-          placeholder={t("adminManage.cleanup.filter.titlePlaceholder")}
-          aria-label={t("adminManage.cleanup.filter.title")}
-          className="w-[200px]"
-        />
-        <div className="flex-1" />
-        <Button size="sm" variant="destructive" onClick={() => void del.dryRun()} disabled={selectedRows.length === 0 || del.planning || del.executing}>
-          {del.planning ? <Loader2 className="animate-spin" /> : <Trash2 />}
-          {selectedRows.length > 0
-            ? t("adminManage.cleanup.deleteSelectedSize", { count: selectedRows.length, size: formatBytes(selectedBytes) })
-            : t("adminManage.cleanup.deleteSelected", { count: 0 })}
-        </Button>
+      {/* ── filters + sort + bulk action ────────────────────────────── */}
+      <div className="flex flex-col gap-2" style={{ fontSize: 13 }}>
+        <div className="flex flex-wrap items-center gap-2">
+          <StyledSelect compact className="w-auto" value={vs.view} onChange={(e) => patchView({ view: e.target.value as CleanupViewState["view"] })} aria-label={t("adminManage.cleanup.filter.show")}>
+            <option value="candidates">{t("adminManage.cleanup.stat.candidates")}</option>
+            <option value="held">{t("adminManage.cleanup.stat.held")}</option>
+            <option value="all">{t("adminManage.cleanup.filter.allMatched")}</option>
+          </StyledSelect>
+          <StyledSelect compact className="w-auto" value={vs.type} onChange={(e) => patchView({ type: e.target.value as CleanupViewState["type"] })} aria-label={t("adminManage.cleanup.filter.mediaType")}>
+            <option value="all">{t("adminManage.cleanup.filter.moviesAndTv")}</option>
+            <option value="MOVIE">{t("nav.movies")}</option>
+            <option value="TV">{t("adminManage.cleanup.tv")}</option>
+          </StyledSelect>
+          <StyledSelect compact className="w-auto" value={vs.rule} onChange={(e) => patchView({ rule: e.target.value as CleanupViewState["rule"] })} aria-label={t("adminManage.cleanup.filter.rule")}>
+            <option value="any">{t("adminManage.cleanup.filter.anyRule")}</option>
+            {(Object.keys(CLEANUP_RULE_LABELS) as CleanupRule[]).map((r) => (
+              <option key={r} value={r}>{t(`adminManage.cleanup.ruleLabel.${r}`)}</option>
+            ))}
+          </StyledSelect>
+          <StyledSelect compact className="w-auto" value={vs.excl} onChange={(e) => patchView({ excl: e.target.value as CleanupViewState["excl"] })} aria-label={t("adminManage.cleanup.filter.heldBy")}>
+            <option value="any">{t("adminManage.cleanup.filter.heldByAny")}</option>
+            <option value="none">{t("adminManage.cleanup.filter.heldByNone")}</option>
+            {(Object.keys(CLEANUP_EXCLUSION_LABELS) as CleanupExclusion[]).map((x) => (
+              <option key={x} value={x}>{t(`adminManage.cleanup.exclusionLabel.${x}`)}</option>
+            ))}
+          </StyledSelect>
+          {/* Input is the h-8 twin of the compact selects beside it; the old
+              hand-rolled 26px field sat visibly shorter in the same row. */}
+          <Input
+            value={vs.q}
+            onChange={(e) => patchView({ q: e.target.value.slice(0, 200) })}
+            placeholder={t("adminManage.cleanup.filter.titlePlaceholder")}
+            aria-label={t("adminManage.cleanup.filter.title")}
+            className="w-[200px]"
+          />
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {serverOptions.length > 1 && (
+            <StyledSelect compact className="w-auto" value={vs.server} onChange={(e) => patchView({ server: e.target.value })} aria-label={t("adminManage.cleanup.filter.server")}>
+              <option value="">{t("adminManage.cleanup.filter.serverAny")}</option>
+              {serverOptions.map((sv) => <option key={sv} value={sv}>{sv}</option>)}
+            </StyledSelect>
+          )}
+          <StyledSelect compact className="w-auto" value={vs.arr} onChange={(e) => patchView({ arr: e.target.value })} aria-label={t("adminManage.cleanup.filter.arr")}>
+            <option value="">{t("adminManage.cleanup.filter.arrAny")}</option>
+            {arrOptions.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            <option value="none">{t("adminManage.cleanup.filter.arrNone")}</option>
+          </StyledSelect>
+          <StyledSelect compact className="w-auto" value={vs.size} onChange={(e) => patchView({ size: e.target.value as CleanupSizeFilter })} aria-label={t("adminManage.cleanup.filter.size")}>
+            {CLEANUP_SIZE_FILTERS.map((f) => <option key={f} value={f}>{t(SIZE_KEYS[f])}</option>)}
+          </StyledSelect>
+          <label className="inline-flex items-center gap-1.5" style={{ color: "var(--ds-fg)" }}>
+            <input type="checkbox" checked={vs.deletable} onChange={(e) => patchView({ deletable: e.target.checked })} />
+            {t("adminManage.cleanup.filter.deletableOnly")}
+          </label>
+          <span className="inline-flex items-center gap-1">
+            <StyledSelect
+              compact
+              className="w-auto"
+              value={vs.sort}
+              onChange={(e) => {
+                const sort = e.target.value as CleanupSortKey;
+                patchView({ sort, dir: defaultCleanupSortDir(sort) });
+              }}
+              aria-label={t("adminManage.cleanup.sort.label")}
+            >
+              {CLEANUP_SORT_KEYS.map((k) => <option key={k} value={k}>{t(SORT_KEYS[k])}</option>)}
+            </StyledSelect>
+            <Button
+              size="icon-sm"
+              variant="outline"
+              onClick={() => patchView({ dir: vs.dir === "asc" ? "desc" : "asc" })}
+              aria-label={t("adminManage.cleanup.sort.reverse")}
+              title={t("adminManage.cleanup.sort.reverse")}
+            >
+              {vs.dir === "asc" ? <ArrowUp /> : <ArrowDown />}
+            </Button>
+          </span>
+          {cleanupFiltersActive(vs) && (
+            <Button size="sm" variant="ghost" onClick={() => setVs({ ...CLEANUP_VIEW_DEFAULTS, sort: vs.sort, dir: vs.dir })}>
+              {t("adminManage.cleanup.filter.reset")}
+            </Button>
+          )}
+          <span style={{ color: "var(--ds-fg-subtle)", fontSize: 12 }}>
+            {t("adminManage.cleanup.showing", { shown: visible.length, total: report.rows.length })}
+          </span>
+          <div className="flex-1" />
+          <Button size="sm" variant="destructive" onClick={() => void del.dryRun()} disabled={selectedRows.length === 0 || del.planning || del.executing}>
+            {del.planning ? <Loader2 className="animate-spin" /> : <Trash2 />}
+            {selectedRows.length > 0
+              ? t("adminManage.cleanup.deleteSelectedSize", { count: selectedRows.length, size: formatBytes(selectedBytes) })
+              : t("adminManage.cleanup.deleteSelected", { count: 0 })}
+          </Button>
+        </div>
       </div>
 
       {(error || del.error) && <p role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{error || del.error}</p>}
@@ -387,13 +511,13 @@ export function LibraryCleanup() {
                     disabled={selectableVisible.length === 0}
                   />
                 </th>
-                <th style={{ padding: "8px 10px" }}>{t("adminManage.cleanup.col.title")}</th>
+                {sortHead("title", t("adminManage.cleanup.col.title"))}
                 <th style={{ padding: "8px 10px" }}>{t("adminManage.cleanup.col.on")}</th>
-                <th style={{ padding: "8px 10px" }}>{t("adminManage.cleanup.col.added")}</th>
-                <th style={{ padding: "8px 10px" }}>{t("adminManage.cleanup.col.lastPlayed")}</th>
-                <th style={{ padding: "8px 10px", textAlign: "right" }}>{t("adminManage.cleanup.col.plays")}</th>
-                <th style={{ padding: "8px 10px", textAlign: "right" }}>{t("adminManage.cleanup.col.votes")}</th>
-                <th style={{ padding: "8px 10px", textAlign: "right" }}>{t("adminManage.cleanup.col.size")}</th>
+                {sortHead("added", t("adminManage.cleanup.col.added"))}
+                {sortHead("lastPlayed", t("adminManage.cleanup.col.lastPlayed"))}
+                {sortHead("plays", t("adminManage.cleanup.col.plays"), "right")}
+                {sortHead("votes", t("adminManage.cleanup.col.votes"), "right")}
+                {sortHead("size", t("adminManage.cleanup.col.size"), "right")}
                 <th style={{ padding: "8px 10px" }}>{t("adminManage.cleanup.col.why")}</th>
                 <th style={{ padding: "8px 10px" }} />
               </tr>
@@ -433,11 +557,11 @@ export function LibraryCleanup() {
                         {r.arr.length > 0 ? r.arr.map((a) => instanceLabel(a.service, a.instance)).join(", ") : t("adminManage.cleanup.notInArr")}
                       </div>
                     </td>
-                    <td className="ds-mono" style={{ padding: "6px 10px", fontSize: 12 }}>{day(r.addedAt)}</td>
-                    <td className="ds-mono" style={{ padding: "6px 10px", fontSize: 12 }}>{r.lastPlayedAt ? day(r.lastPlayedAt) : t("adminManage.cleanup.never")}</td>
-                    <td className="ds-mono" style={{ padding: "6px 10px", fontSize: 12, textAlign: "right" }}>{r.playCount}</td>
-                    <td className="ds-mono" style={{ padding: "6px 10px", fontSize: 12, textAlign: "right" }}>{r.votes}</td>
-                    <td className="ds-mono" style={{ padding: "6px 10px", fontSize: 12, textAlign: "right" }}>{formatBytes(r.sizeOnDisk)}</td>
+                    <td className="ds-mono" style={{ padding: "6px 10px", fontSize: 12, whiteSpace: "nowrap" }}>{day(r.addedAt)}</td>
+                    <td className="ds-mono" style={{ padding: "6px 10px", fontSize: 12, whiteSpace: "nowrap" }}>{r.lastPlayedAt ? day(r.lastPlayedAt) : t("adminManage.cleanup.never")}</td>
+                    <td className="ds-mono" style={{ padding: "6px 10px", fontSize: 12, textAlign: "right", whiteSpace: "nowrap" }}>{r.playCount}</td>
+                    <td className="ds-mono" style={{ padding: "6px 10px", fontSize: 12, textAlign: "right", whiteSpace: "nowrap" }}>{r.votes}</td>
+                    <td className="ds-mono" style={{ padding: "6px 10px", fontSize: 12, textAlign: "right", whiteSpace: "nowrap" }}>{formatBytes(r.sizeOnDisk)}</td>
                     <td style={{ padding: "6px 10px" }}>
                       <div className="flex flex-wrap gap-1">
                         {r.matched.map((m) => (
