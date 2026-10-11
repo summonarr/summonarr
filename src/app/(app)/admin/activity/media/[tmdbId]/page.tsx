@@ -1,6 +1,7 @@
 import { authActive } from "@/lib/auth";
 import { redirect, notFound } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
+import { requireFeature } from "@/lib/features";
 import { getMediaPlayStats } from "@/lib/play-history";
 import { resolvePosterMap, posterPathKey } from "@/lib/poster-cache";
 import {
@@ -53,6 +54,7 @@ export default async function MediaActivityPage({
   params: Promise<{ tmdbId: string }>;
   searchParams: Promise<{ type?: string }>;
 }) {
+  await requireFeature("feature.admin.activity");
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");
 
