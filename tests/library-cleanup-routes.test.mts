@@ -241,6 +241,9 @@ const settingsRoute = await import("../src/app/api/admin/cleanup/settings/route.
 const protectRoute = await import("../src/app/api/admin/cleanup/protect/route.ts");
 const deleteRoute = await import("../src/app/api/admin/cleanup/delete/route.ts");
 const neverWatchedRoute = await import("../src/app/api/admin/never-watched/route.ts");
+// The listing's 502/503/504 retry pauses 2 s in production; no test should wait.
+const { _setArrListingRetryDelayForTests } = await import("../src/lib/library-cleanup-arr.ts");
+_setArrListingRetryDelayForTests(0);
 
 // ── request scope ────────────────────────────────────────────────────────────
 const afterTasks: unknown[] = [];
@@ -657,4 +660,39 @@ test("never-watched report: a failed Sonarr listing names its reason and clears 
   } finally {
     Date.now = realNow;
   }
+});
+
+// A gateway in front of Sonarr answers 502/503/504 while Sonarr restarts or
+// drops a long /series response. The listing retries ONCE on exactly those;
+// a status waiting can't fix (a bad key's 401) is never retried.
+const seriesListings = () => calls.filter((c) => c.origin === SONARR && c.method === "GET" && c.path === "/api/v3/series").length;
+
+test("listing retry: a transient 502 from Sonarr's gateway is retried once and the listing succeeds", async () => {
+  const token = await mintSession();
+  let served = 0;
+  listingStatus = (origin) => (origin === SONARR && served++ === 0 ? 502 : 200);
+  const before = seriesListings();
+  const body = await (await nwCall(token, "state=all&fresh=1")).json() as { arrErrors: unknown[] };
+  assert.deepEqual(body.arrErrors, [], "the retry's answer is used — no banner for a blip");
+  assert.equal(seriesListings() - before, 2);
+});
+
+for (const status of [503, 504] as const) {
+  test(`listing retry: a persistent ${status} is tried exactly twice, then reported`, async () => {
+    const token = await mintSession();
+    listingStatus = (origin) => (origin === SONARR ? status : 200);
+    const before = seriesListings();
+    const body = await (await nwCall(token, "state=all&fresh=1")).json() as { arrErrors: Array<{ service: string; error: string }> };
+    assert.equal(seriesListings() - before, 2, "one retry, not a loop");
+    assert.deepEqual(body.arrErrors.map((e) => [e.service, e.error]), [["sonarr", `Arr service returned a non-200 response (${status})`]]);
+  });
+}
+
+test("listing retry: a 401 (bad API key) is not retried — waiting can't fix it", async () => {
+  const token = await mintSession();
+  listingStatus = (origin) => (origin === SONARR ? 401 : 200);
+  const before = seriesListings();
+  const body = await (await nwCall(token, "state=all&fresh=1")).json() as { arrErrors: Array<{ error: string }> };
+  assert.equal(seriesListings() - before, 1);
+  assert.equal(body.arrErrors.length, 1);
 });

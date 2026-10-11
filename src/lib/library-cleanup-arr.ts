@@ -3,7 +3,7 @@
 // arrFetch/arrFetchNoContent (guardrail 5), and every instance is addressed by
 // its arrInstance slug (guardrail 32): a title can sit in the default, the 4K
 // and a named instance at once, and a cleanup removes it from every one.
-import { arrFetch, arrFetchNoContent, getArrCfg, resolveTmdbToTvdb } from "./arr";
+import { ArrResponseError, arrFetch, arrFetchNoContent, getArrCfg, resolveTmdbToTvdb, type ArrCfg } from "./arr";
 import { getSyncableArrInstances } from "./arr-instance-registry";
 import { coalesce, mapLimit, settleLimit } from "./concurrency";
 import { isFeatureEnabled } from "./features";
@@ -85,11 +85,35 @@ function sonarrSeasons(rows: SonarrSeriesRow["seasons"]): NwArrSeasonStat[] {
 // Small, fixed: one listing per instance, each up to a library-sized body.
 const LISTING_CONCURRENCY = 3;
 
+// 502/503/504 come from whatever sits in front of Radarr/Sonarr (a reverse
+// proxy, a gateway) when the arr is restarting, busy importing, or drops a
+// long response — the full /movie or /series listing is exactly the request
+// that trips it. The listing is an idempotent GET, so it is retried ONCE after
+// a pause; a second failure is reported as before (a down instance still shows
+// its banner and still refuses deletes). Any other status — a 401 from a bad
+// key, a 404 from a wrong URL — is not retried: waiting can't fix it.
+const LISTING_RETRY_STATUSES = new Set([502, 503, 504]);
+let listingRetryDelayMs = 2_000;
+
+export function _setArrListingRetryDelayForTests(ms: number): void {
+  listingRetryDelayMs = ms;
+}
+
+async function fetchListing<T>(cfg: ArrCfg, path: string): Promise<T> {
+  try {
+    return await arrFetch<T>(cfg, path);
+  } catch (err) {
+    if (!(err instanceof ArrResponseError) || !LISTING_RETRY_STATUSES.has(err.status)) throw err;
+    await new Promise((resolve) => setTimeout(resolve, listingRetryDelayMs));
+    return arrFetch<T>(cfg, path);
+  }
+}
+
 async function listInstance(service: ArrService, instance: string): Promise<ArrLibraryEntry[]> {
   const cfg = await getArrCfg(service, instance);
   if (!cfg) return [];
   if (service === "radarr") {
-    const rows = await arrFetch<RadarrMovieRow[]>(cfg, "/api/v3/movie");
+    const rows = await fetchListing<RadarrMovieRow[]>(cfg, "/api/v3/movie");
     const out: ArrLibraryEntry[] = [];
     for (const r of Array.isArray(rows) ? rows : []) {
       const arrId = posInt(r.id);
@@ -106,7 +130,7 @@ async function listInstance(service: ArrService, instance: string): Promise<ArrL
     }
     return out;
   }
-  const rows = await arrFetch<SonarrSeriesRow[]>(cfg, "/api/v3/series");
+  const rows = await fetchListing<SonarrSeriesRow[]>(cfg, "/api/v3/series");
   const out: ArrLibraryEntry[] = [];
   for (const r of Array.isArray(rows) ? rows : []) {
     const arrId = posInt(r.id);
