@@ -393,9 +393,16 @@ export function NeverWatchedReport({ initialLevel, initialState }: { initialLeve
         </p>
       )}
       {data.arrErrors.length > 0 && (
-        <p role="status" className={bannerClass("warn")} style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>
-          {t("adminManage.cleanup.arrErrors", { list: data.arrErrors.map((e) => arrInstanceLabel(e.service, e.instance)).join(", ") })}
-        </p>
+        <div role="status" className={`${bannerClass("warn")} flex flex-wrap items-center gap-2`} style={{ padding: "8px 12px", fontSize: 13 }}>
+          <span className="flex-1">
+            {t("adminManage.cleanup.arrErrors", { list: data.arrErrors.map((e) => `${arrInstanceLabel(e.service, e.instance)} (${e.error})`).join(", ") })}
+          </span>
+          {/* Re-lists Radarr/Sonarr now instead of waiting out the shared cache. */}
+          <Button size="xs" variant="outline" onClick={() => void reload(true)} disabled={loading}>
+            {loading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+            {t("adminManage.common.retry")}
+          </Button>
+        </div>
       )}
       {!data.cleanupEnabled && (
         <p role="status" className={bannerClass("info")} style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>

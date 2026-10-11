@@ -10,6 +10,7 @@ import { isFeatureEnabled } from "./features";
 import { cleanupKey, sonarrStatusIsAiring, type CleanupMediaType } from "./library-cleanup";
 import type { NwArrSeasonStat } from "./never-watched";
 import { processSingleton } from "./process-singleton";
+import { safeMessage } from "./arr-parse";
 
 export type ArrService = "radarr" | "sonarr";
 
@@ -37,7 +38,9 @@ export interface ArrLibraryIndex {
   // cross-referenced), by tvdbId — reachable only through a TVDB lookup.
   tvdbOnly: Map<number, ArrLibraryEntry[]>;
   // Instances whose listing could not be read this time. Their titles have no
-  // size and no delete target, which the UI reports rather than hides.
+  // size and no delete target, which the UI reports rather than hides. `error`
+  // is browser-safe (one line, credentials masked — safeMessage), because both
+  // admin pages show it: a bare instance name told the admin nothing to act on.
   errors: Array<{ service: ArrService; instance: string; error: string }>;
 }
 
@@ -144,7 +147,7 @@ export async function loadArrLibraryIndex(): Promise<ArrLibraryIndex> {
     const t = targets[i];
     if (s.status === "rejected") {
       const reason = s.reason;
-      index.errors.push({ ...t, error: reason instanceof Error ? reason.message : String(reason) });
+      index.errors.push({ ...t, error: safeMessage(reason instanceof Error ? reason.message : String(reason)) ?? "unknown error" });
       console.warn(`[cleanup] ${t.service} instance "${t.instance}" listing failed:`, reason instanceof Error ? reason.message : reason);
       return;
     }
@@ -169,6 +172,12 @@ export async function loadArrLibraryIndex(): Promise<ArrLibraryIndex> {
 // full on each load — up to 50 MB a body. Concurrent callers share one listing.
 // The DELETE path never uses this: guardrail 14b needs fresh targets.
 const INDEX_TTL_MS = 5 * 60 * 1000;
+// A listing with a failed instance is kept only briefly: Sonarr answers 503 or
+// times out under import load, and holding that for the full TTL kept "could
+// not read Sonarr" on screen for five minutes after it had recovered. Short,
+// not zero, so a page reloaded in a loop against a down instance doesn't
+// re-list every healthy one each time.
+const INDEX_ERROR_TTL_MS = 30 * 1000;
 const indexCache = processSingleton("library-cleanup:arr-index", () => ({ value: null as ArrLibraryIndex | null, at: 0 }));
 
 export function invalidateArrLibraryIndexCache(): void {
@@ -176,7 +185,8 @@ export function invalidateArrLibraryIndexCache(): void {
 }
 
 export async function getCachedArrLibraryIndex(opts: { fresh?: boolean } = {}): Promise<{ index: ArrLibraryIndex; at: Date }> {
-  if (!opts.fresh && indexCache.value && Date.now() - indexCache.at < INDEX_TTL_MS) {
+  const ttl = indexCache.value && indexCache.value.errors.length > 0 ? INDEX_ERROR_TTL_MS : INDEX_TTL_MS;
+  if (!opts.fresh && indexCache.value && Date.now() - indexCache.at < ttl) {
     return { index: indexCache.value, at: new Date(indexCache.at) };
   }
   return coalesce("library-cleanup:arr-index", async () => {

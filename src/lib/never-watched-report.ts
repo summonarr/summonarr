@@ -295,6 +295,10 @@ function seasonRowsFor(t: CleanupTitle, arr: ArrLibraryIndex | null): NwSeasonRo
 //     calls: protect/unprotect, the cleanup settings, a cleanup delete, an
 //     upstream refresh.
 const REPORT_TTL_MS = 2 * 60 * 1000;
+// A report built while a Radarr/Sonarr instance couldn't be listed is kept only
+// as long as the shared index keeps a failed listing (library-cleanup-arr.ts),
+// so "could not read Sonarr" clears soon after Sonarr recovers.
+const REPORT_ERROR_TTL_MS = 30 * 1000;
 const reportCache = processSingleton("never-watched:report", () => ({
   value: null as NeverWatchedReport | null,
   at: 0,
@@ -310,7 +314,8 @@ export function invalidateNeverWatchedReport(): void {
 export async function getNeverWatchedReport(opts: { fresh?: boolean } = {}): Promise<NeverWatchedReport> {
   const generation = currentActivityGeneration();
   const c = reportCache;
-  if (!opts.fresh && c.value && c.generation === generation && Date.now() - c.at < REPORT_TTL_MS) return c.value;
+  const ttl = c.value && c.value.arrErrors.length > 0 ? REPORT_ERROR_TTL_MS : REPORT_TTL_MS;
+  if (!opts.fresh && c.value && c.generation === generation && Date.now() - c.at < ttl) return c.value;
   const version = c.version;
   return coalesce(`never-watched:report:${generation}:${version}:${opts.fresh ? "fresh" : ""}`, async () => {
     const value = await computeNeverWatchedReport({ freshArr: opts.fresh });

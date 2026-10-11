@@ -255,7 +255,7 @@ export function LibraryCleanup() {
       )}
       {report.arrErrors.length > 0 && (
         <p role="status" className="rounded-md bg-amber-500/15 text-amber-400" style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>
-          {t("adminManage.cleanup.arrErrors", { list: report.arrErrors.map((e) => instanceLabel(e.service, e.instance)).join(", ") })}
+          {t("adminManage.cleanup.arrErrors", { list: report.arrErrors.map((e) => `${instanceLabel(e.service, e.instance)} (${e.error})`).join(", ") })}
         </p>
       )}
 

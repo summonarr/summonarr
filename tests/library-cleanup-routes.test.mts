@@ -637,3 +637,24 @@ test("never-watched report: sorted by size, biggest first, unknown sizes last; p
   assert.ok(sizes.indexOf(null) === -1 || sizes.slice(sizes.indexOf(null)).every((n) => n === null), "unknown sizes sort last");
   assert.deepEqual(page1.rows.map((r) => r.sizeOnDisk), sizes.slice(0, 2));
 });
+
+// A Sonarr that answers 503 while importing must not keep "could not read
+// Sonarr" on the page for the shared listing cache's full five minutes: a
+// failed listing (and a report built on one) is kept only briefly, and the
+// banner names the reason instead of a bare instance.
+test("never-watched report: a failed Sonarr listing names its reason and clears soon after Sonarr recovers", async () => {
+  const token = await mintSession();
+  listingStatus = (origin) => (origin === SONARR ? 503 : 200);
+  const down = await (await nwCall(token, "state=all&fresh=1")).json() as { arrErrors: Array<{ service: string; instance: string; error: string }> };
+  assert.deepEqual(down.arrErrors, [{ service: "sonarr", instance: "", error: "Arr service returned a non-200 response (503)" }]);
+
+  listingStatus = () => 200;
+  const realNow = Date.now;
+  Date.now = () => realNow() + 31_000;
+  try {
+    const up = await (await nwCall(token, "state=all")).json() as { arrErrors: unknown[] };
+    assert.deepEqual(up.arrErrors, [], "a recovered Sonarr is listed again without waiting out the 5-minute cache");
+  } finally {
+    Date.now = realNow;
+  }
+});
