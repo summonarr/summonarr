@@ -77,6 +77,12 @@
   "apiUser.issues.modifiedConcurrently": "La incidencia se modificó al mismo tiempo desde otro lugar. Actualiza la página e inténtalo de nuevo.",
   "apiUser.issues.notInLibrary": "Este título no está en la biblioteca — solo se pueden reportar incidencias de contenido disponible.",
   "apiUser.issues.noteTooLong": "note debe ser un texto de menos de 1000 caracteres",
+  "apiUser.issues.replaceFile.bodyInvalid": "Se esperaba una instancia, una lista de ids de archivo y después: markFailed o search",
+  "apiUser.issues.replaceFile.notInScope": "Esos archivos ya no corresponden a esta incidencia — recarga e inténtalo de nuevo",
+  "apiUser.issues.replaceFile.notOnInstance": "{name} no tiene este título — puede que se haya eliminado allí o que la copia notificada esté en otra instancia",
+  "apiUser.issues.replaceFile.resolved": "La incidencia está resuelta — reábrela antes de reemplazar sus archivos",
+  "apiUser.issues.replaceFile.searchFailed_one": "Se eliminó {count} archivo, pero {service} no puso la búsqueda en cola — usa Volver a buscar para buscar de nuevo",
+  "apiUser.issues.replaceFile.searchFailed_other": "Se eliminaron {count} archivos, pero {service} no puso la búsqueda en cola — usa Volver a buscar para buscar de nuevo",
   "apiUser.issues.resolutionEmpty": "resolution no puede estar vacío",
   "apiUser.issues.resolutionTooLong": "resolution debe ser un texto de menos de 1000 caracteres",
   "apiUser.issues.resolvedBeforeGrab": "La incidencia está resuelta — reábrela antes de descargar una versión",
@@ -171,5 +177,10 @@
   "apiUser.requests.releases.notInArr": "{service} aún no tiene este título: vuelve a enviar la solicitud primero",
   "apiUser.requests.releases.seasonInvalid": "season debe ser un número entero",
   "apiUser.requests.releases.releaseRequired": "release debe ser un identificador de una búsqueda de versiones",
-  "apiUser.requests.releases.handleExpired": "Ese resultado de búsqueda ha caducado: vuelve a buscar"
+  "apiUser.requests.releases.handleExpired": "Ese resultado de búsqueda ha caducado: vuelve a buscar",
+  "apiUser.requests.releases.cacheExpired": "{service} ya no tiene estos resultados de búsqueda: los guarda 30 minutos y un reinicio los borra. Vuelve a buscar.",
+  "apiUser.requests.releases.grabRefused": "{service} no pudo capturar esa versión: {reason}",
+  "apiUser.requests.releases.jobGone": "Esa búsqueda ya no está disponible: vuelve a buscar.",
+  "apiUser.requests.releases.grabInProgress": "Esa versión ya se está descargando",
+  "apiUser.requests.arrStatus.invalidStatus": "Solo se pueden comprobar las solicitudes aprobadas o disponibles"
 }

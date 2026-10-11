@@ -103,8 +103,9 @@ async function loadEnabledAgents(): Promise<LoadedAgent[]> {
 // ─── Rendering ──────────────────────────────────────────────────────────────
 
 // Literal keys (not built from the event name) so the i18n dead-string check can
-// see every one of them.
-const AGENT_TEXT_KEYS: Record<NotifyEvent["event"], { title: string; body: string; withText?: string }> = {
+// see every one of them. `noTotal` replaces `body` for a disk event whose
+// Radarr/Sonarr reported no disk size (a root folder no /diskspace entry holds).
+const AGENT_TEXT_KEYS: Record<NotifyEvent["event"], { title: string; body: string; withText?: string; noTotal?: string }> = {
   "request.created": { title: "notify.agent.request.created.title", body: "notify.agent.request.created.body", withText: "notify.agent.request.created.bodyWithText" },
   "request.approved": { title: "notify.agent.request.approved.title", body: "notify.agent.request.approved.body" },
   "request.declined": { title: "notify.agent.request.declined.title", body: "notify.agent.request.declined.body", withText: "notify.agent.request.declined.bodyWithText" },
@@ -117,20 +118,56 @@ const AGENT_TEXT_KEYS: Record<NotifyEvent["event"], { title: string; body: strin
   "arr.grab_completed": { title: "notify.agent.arr.grab_completed.title", body: "notify.agent.arr.grab_completed.body" },
   "arr.health": { title: "notify.agent.arr.health.title", body: "notify.agent.arr.health.body", withText: "notify.agent.arr.health.bodyWithText" },
   "arr.health_restored": { title: "notify.agent.arr.health_restored.title", body: "notify.agent.arr.health_restored.body", withText: "notify.agent.arr.health_restored.bodyWithText" },
+  "arr.disk_low": { title: "notify.agent.arr.disk_low.title", body: "notify.agent.arr.disk_low.body", noTotal: "notify.agent.arr.disk_low.bodyNoTotal" },
+  "arr.disk_ok": { title: "notify.agent.arr.disk_ok.title", body: "notify.agent.arr.disk_ok.body", noTotal: "notify.agent.arr.disk_ok.bodyNoTotal" },
+  "arr.download_failed": { title: "notify.agent.arr.download_failed.title", body: "notify.agent.arr.download_failed.body", withText: "notify.agent.arr.download_failed.bodyWithText" },
+  "arr.queue_attention": { title: "notify.agent.arr.queue_attention.title", body: "notify.agent.arr.queue_attention.body", withText: "notify.agent.arr.queue_attention.bodyWithText" },
   "agent.test": { title: "notify.agent.agent.test.title", body: "notify.agent.agent.test.body" },
 };
 
+// "Radarr", or "Radarr (4K)" for a named instance.
+function arrInstanceLabel(a: NonNullable<NotifyEvent["arr"]>): string {
+  const label = a.service === "radarr" ? "Radarr" : "Sonarr";
+  return a.instanceName ? `${label} (${a.instanceName})` : label;
+}
+
+// Decimal units, as Radarr/Sonarr and most disk tools show them; one decimal.
+function formatBytes(n: number | null | undefined, locale: string): string {
+  if (n === null || n === undefined || !Number.isFinite(n) || n < 0) return "";
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1000 && i < units.length - 1) {
+    v /= 1000;
+    i++;
+  }
+  return `${new Intl.NumberFormat(locale, { maximumFractionDigits: i === 0 ? 0 : 1 }).format(v)} ${units[i]}`;
+}
+
 export function renderAgentText(ev: NotifyEvent, mediaTitle: string | null): { title: string; message: string } {
-  const t = translatorFor(instanceDefaultLocale());
+  const locale = instanceDefaultLocale();
+  const t = translatorFor(locale);
+  const a = ev.arr;
   const vars = {
-    title: mediaTitle ?? "",
+    // An arr event about a download nobody matched to a title has only the release name.
+    title: mediaTitle ?? a?.release ?? "",
     media: ev.media ? mediaLabelT(t, ev.media.type) : "",
     user: ev.actor?.name ?? "",
     text: ev.text ?? "",
     votes: ev.votes ?? 0,
+    instance: a ? arrInstanceLabel(a) : "",
+    release: a?.release ?? "",
+    path: a?.path ?? "",
+    free: formatBytes(a?.freeBytes, locale),
+    total: formatBytes(a?.totalBytes, locale),
+    percent: a?.freePercent != null ? new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(a.freePercent) : "",
   };
   const keys = AGENT_TEXT_KEYS[ev.event];
-  return { title: t(keys.title, vars), message: t(ev.text && keys.withText ? keys.withText : keys.body, vars) };
+  const body =
+    ev.text && keys.withText ? keys.withText
+    : keys.noTotal && (a?.totalBytes == null || a.freePercent == null) ? keys.noTotal
+    : keys.body;
+  return { title: t(keys.title, vars), message: t(body, vars) };
 }
 
 async function buildPayloads(events: NotifyEvent[]): Promise<WebhookPayload[]> {

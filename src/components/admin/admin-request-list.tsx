@@ -9,6 +9,7 @@ import { Film, Tv2, Loader2, Check, X, ExternalLink } from "@/components/icons";
 import Link from "next/link";
 import { RequestActions } from "./request-actions";
 import { OpenInArrLink, arrInstanceLabel } from "./open-in-arr";
+import { ManageTitleButton } from "./arr-title/title-manager";
 import { Chip } from "@/components/ui/design";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { withBasePath } from "@/lib/base-path";
@@ -603,6 +604,21 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                       ),
                     })}
                     iconOnly
+                  />
+                )}
+                {/* Only once it was pushed: a pending title isn't on the instance yet. */}
+                {canOpenArr && (group.aggregateStatus === "APPROVED" || group.aggregateStatus === "AVAILABLE") && (
+                  <ManageTitleButton
+                    service={group.mediaType === "MOVIE" ? "radarr" : "sonarr"}
+                    instance={representativeInstance}
+                    target={{ tmdbId: group.tmdbId }}
+                    instanceLabel={arrInstanceLabel(
+                      group.mediaType === "MOVIE" ? "radarr" : "sonarr",
+                      instanceLabel(representativeInstance),
+                      representativeInstance,
+                    )}
+                    variant="icon"
+                    initialTab={group.aggregateStatus === "AVAILABLE" ? "files" : group.mediaType === "MOVIE" ? "settings" : "seasons"}
                   />
                 )}
                 </div>

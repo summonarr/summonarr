@@ -21,6 +21,12 @@ export const NOTIFY_EVENT_KEYS = [
   "arr.grab_completed",
   "arr.health",
   "arr.health_restored",
+  // The Radarr/Sonarr monitor (src/lib/arr-watch.ts, the arr-watch cron) —
+  // things Radarr/Sonarr Connect has no trigger for.
+  "arr.disk_low",
+  "arr.disk_ok",
+  "arr.download_failed",
+  "arr.queue_attention",
 ] as const;
 export type SubscribableEvent = (typeof NOTIFY_EVENT_KEYS)[number];
 export type NotifyEventKey = SubscribableEvent | "agent.test";
@@ -47,6 +53,32 @@ export interface NotifyEvent {
   // resolution. User-supplied — always escaped by the renderers below.
   text?: string | null;
   votes?: number | null;
+  // The Radarr/Sonarr instance and what it reported, for the arr monitor's
+  // events. Never a release URL, a credential or a download's file path; the
+  // only path is a disk's (the thing a low-disk alert is about).
+  arr?: ArrEventDetail;
+}
+
+export interface ArrEventDetail {
+  service: "radarr" | "sonarr";
+  /** Instance slug ("" = the default instance). */
+  instance: string;
+  /** Registry display name; null for the default instance. */
+  instanceName?: string | null;
+  /** Disk events: the disk (or root folder) the space was measured on. */
+  path?: string | null;
+  freeBytes?: number | null;
+  totalBytes?: number | null;
+  /** Free share of the disk, one decimal; null when the arr reports no size. */
+  freePercent?: number | null;
+  /** The alert level in force when the disk was judged. */
+  thresholdPercent?: number | null;
+  /** Download events: the release name. */
+  release?: string | null;
+  /** Download events: the download client's id for the download. */
+  downloadId?: string | null;
+  /** Sonarr download events: how many episodes the download covers. */
+  episodes?: number | null;
 }
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -183,6 +215,20 @@ export interface WebhookPayload {
   actor: { name: string } | null;
   text: string | null;
   votes: number | null;
+  // Additive within version 1: null on every event but the arr monitor's.
+  arr: {
+    service: "radarr" | "sonarr";
+    instance: string;
+    instanceName: string | null;
+    path: string | null;
+    freeBytes: number | null;
+    totalBytes: number | null;
+    freePercent: number | null;
+    thresholdPercent: number | null;
+    release: string | null;
+    downloadId: string | null;
+    episodes: number | null;
+  } | null;
 }
 
 export function posterUrlOf(posterPath: string | null | undefined): string | null {
@@ -190,9 +236,22 @@ export function posterUrlOf(posterPath: string | null | undefined): string | nul
   return `${TMDB_POSTER_BASE}${posterPath}`;
 }
 
+// The admin page each arr-monitor event is about. Checked BEFORE the media
+// link: a failed or stuck download names a title, but the page that can act on
+// it is the download's, not the title's.
+const ARR_EVENT_PAGE: Partial<Record<NotifyEventKey, (a: ArrEventDetail | undefined) => string>> = {
+  "arr.disk_low": () => "/admin/arr-system?tab=storage",
+  "arr.disk_ok": () => "/admin/arr-system?tab=storage",
+  "arr.download_failed": (a) =>
+    a ? `/admin/arr-history?service=${a.service}&instance=${encodeURIComponent(a.instance)}&kind=failed` : "/admin/arr-history",
+  "arr.queue_attention": () => "/admin/queue",
+};
+
 /** Where a click on the notification should land. */
 export function eventLink(ev: NotifyEvent, siteUrl: string | null): string | null {
   if (!siteUrl) return null;
+  const arrPage = ARR_EVENT_PAGE[ev.event];
+  if (arrPage) return `${siteUrl}${arrPage(ev.arr)}`;
   if (ev.event.startsWith("issue.")) return `${siteUrl}/issues`;
   if (ev.media?.tmdbId) return `${siteUrl}/${ev.media.type === "MOVIE" ? "movie" : "tv"}/${ev.media.tmdbId}`;
   if (ev.event.startsWith("request.")) return `${siteUrl}/requests`;
@@ -221,6 +280,21 @@ export function buildWebhookPayload(ev: NotifyEvent, ctx: PayloadContext): Webho
     actor: ev.actor ? { name: ev.actor.name } : null,
     text: ev.text ?? null,
     votes: ev.votes ?? null,
+    arr: ev.arr
+      ? {
+          service: ev.arr.service,
+          instance: ev.arr.instance,
+          instanceName: ev.arr.instanceName ?? null,
+          path: ev.arr.path ?? null,
+          freeBytes: ev.arr.freeBytes ?? null,
+          totalBytes: ev.arr.totalBytes ?? null,
+          freePercent: ev.arr.freePercent ?? null,
+          thresholdPercent: ev.arr.thresholdPercent ?? null,
+          release: ev.arr.release ?? null,
+          downloadId: ev.arr.downloadId ?? null,
+          episodes: ev.arr.episodes ?? null,
+        }
+      : null,
   };
 }
 
@@ -232,6 +306,8 @@ export const TEMPLATE_FIELDS = [
   "media.type", "media.tmdbId", "media.title", "media.year", "media.posterUrl",
   "request.id", "request.instance", "issue.id", "issue.type",
   "actor.name", "text", "votes",
+  "arr.service", "arr.instance", "arr.instanceName", "arr.path", "arr.freeBytes", "arr.totalBytes",
+  "arr.freePercent", "arr.thresholdPercent", "arr.release", "arr.downloadId", "arr.episodes",
 ] as const;
 
 function fieldValue(p: WebhookPayload, path: string): string {
@@ -269,6 +345,10 @@ const NTFY_TAGS: Record<NotifyEventKey, string> = {
   "arr.grab_completed": "arrow_down",
   "arr.health": "rotating_light",
   "arr.health_restored": "white_check_mark",
+  "arr.disk_low": "floppy_disk",
+  "arr.disk_ok": "white_check_mark",
+  "arr.download_failed": "x",
+  "arr.queue_attention": "warning",
   "agent.test": "bell",
 };
 

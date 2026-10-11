@@ -12,7 +12,7 @@
 // for" is a server-computed day count — nothing here reads the clock while
 // rendering (guardrail 16).
 
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
@@ -21,11 +21,24 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Switch } from "@/components/ui/switch";
+import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
 import { Chip, EmptyState, FilterBar, StatCard } from "@/components/ui/design";
 import { Poster } from "@/components/admin/activity-ui";
 import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
-import { Check, CheckCircle2, ChevronDown, ChevronRight, CircleDashed, Loader2, RefreshCw, Search } from "@/components/icons";
+import { ManageTitleButton } from "@/components/admin/arr-title/title-manager";
+import { manageTabFor } from "@/lib/arr-manage-links";
+import { Check, CheckCircle2, ChevronDown, ChevronRight, CircleDashed, Loader2, RefreshCw, RotateCcw, Search, X } from "@/components/icons";
 import type { CutoffMovie, CutoffSeries, MissingEpisode, MissingMovie, MissingSeries } from "@/lib/arr-missing";
+import { ARR_ERROR_KIND_KEYS, isArrErrorKind, type ArrErrorKind } from "@/lib/arr-error-kind";
+import {
+  BULK_SEARCH_CONFIRM_OVER,
+  BULK_SEARCH_MAX,
+  capSelection,
+  runBulkSearch,
+  searchAttemptFromResponse,
+  type SearchAttempt,
+  type SearchOutcome,
+} from "@/lib/bulk-search-run";
 
 type Service = "sonarr" | "radarr";
 type Mode = "missing" | "cutoff";
@@ -35,7 +48,8 @@ type Report<T> = {
   service: Service;
   enabled: boolean;
   instances: Array<{ slug: string; name: string }>;
-  errors: Array<{ instance: string; error: string }>;
+  // `kind` is what the page shows (translated); `error` is the raw upstream detail.
+  errors: Array<{ instance: string; error: string; kind?: ArrErrorKind }>;
   items: T[];
 };
 type Reports = {
@@ -45,7 +59,21 @@ type Reports = {
   "radarr:cutoff"?: Report<CutoffMovie>;
 };
 type EpisodeState = { loading: boolean; error: string; episodes: MissingEpisode[] };
-type SearchState = { busy: boolean; started: boolean; error: string };
+// `outcome` null while a request is in flight (or before any); `message` is the
+// route's own text — the error for "failed", the 409's reason for "already".
+type SearchState = { busy: boolean; outcome: SearchOutcome | null; message: string };
+type BulkRow = { instance: string; arrId: number; title: string; monitored?: boolean };
+type BulkResult = {
+  key: ReportKey;
+  started: number;
+  already: number;
+  /** Row keys (`${reportKey}|${instance}:${arrId}`) — what "Retry failed" re-selects. */
+  failed: string[];
+  skipped: number;
+  notRun: number;
+  total: number;
+  cancelled: boolean;
+};
 
 type MovieSort = "recent" | "oldest" | "title";
 type SeriesSort = "recent" | "most" | "title";
@@ -109,10 +137,26 @@ export function MissingReport({
   // Keyed `${reportKey}|${instance}:${arrId}` — a Radarr and a Sonarr row can
   // share an instance slug and an arr id, and so can the two modes.
   const [searches, setSearches] = useState<Record<string, SearchState>>({});
+  // Mirrors `searches`, written in the same step: the bulk runner reads a row's
+  // state when it DEQUEUES the row, not from the render the run started in, so
+  // a row a per-row click made busy (or already searched) is skipped.
+  const searchesRef = useRef<Record<string, SearchState>>({});
+  const updateSearches = useCallback((fn: (s: Record<string, SearchState>) => Record<string, SearchState>) => {
+    searchesRef.current = fn(searchesRef.current);
+    setSearches(searchesRef.current);
+  }, []);
   // Rows ticked for "Search selected", keyed like `searches`.
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
-  const [bulk, setBulk] = useState<{ key: ReportKey; done: number; total: number } | null>(null);
-  const [bulkResult, setBulkResult] = useState<{ key: ReportKey; started: number; failed: number } | null>(null);
+  const [bulk, setBulk] = useState<{ key: ReportKey; done: number; total: number; cancelling: boolean } | null>(null);
+  // Rows a running bulk search still has to take: their own Search is disabled
+  // so a click can't search one the run is about to.
+  const [bulkPending, setBulkPending] = useState<ReadonlySet<string>>(new Set());
+  const [bulkResult, setBulkResult] = useState<BulkResult | null>(null);
+  const [confirming, setConfirming] = useState<{ key: ReportKey; count: number; unmonitored: number } | null>(null);
+  // The running bulk search. Aborted by Cancel and when the page unmounts —
+  // without that the loop kept POSTing after the admin navigated away.
+  const bulkAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => bulkAbort.current?.abort(), []);
 
   const current: ReportKey = `${service}:${mode}`;
 
@@ -132,7 +176,7 @@ export function MissingReport({
       // A fresh listing is a fresh start: the rows that were searched may be
       // gone, and any still listed can be searched again; every expanded
       // episode list belongs to the old listing.
-      setSearches((s) => Object.fromEntries(Object.entries(s).filter(([key]) => !key.startsWith(`${k}|`))));
+      updateSearches((s) => Object.fromEntries(Object.entries(s).filter(([key]) => !key.startsWith(`${k}|`))));
       setSelected((prev) => new Set([...prev].filter((key) => !key.startsWith(`${k}|`))));
       setBulkResult((r) => (r?.key === k ? null : r));
       setExpanded((prev) => new Set([...prev].filter((key) => !key.startsWith(`${k}|`))));
@@ -142,7 +186,7 @@ export function MissingReport({
     } finally {
       setLoading((cur) => (cur === k ? null : cur));
     }
-  }, [t]);
+  }, [t, updateSearches]);
 
   const needsLoad = configured[service] && !reports[current] && !errors[current];
   useEffect(() => {
@@ -169,27 +213,37 @@ export function MissingReport({
     syncUrl(service, next);
   }
 
-  async function startSearch(key: ReportKey, row: { instance: string; arrId: number }): Promise<boolean> {
+  // One search request; marks the row busy and reports how it went without
+  // settling it — the bulk runner may wait out a 429 and ask again first.
+  async function requestSearch(key: ReportKey, row: { instance: string; arrId: number }): Promise<SearchAttempt> {
     const [svc, m] = key.split(":") as [Service, Mode];
     const k = `${key}|${rowKey(row)}`;
-    setSearches((s) => ({ ...s, [k]: { busy: true, started: false, error: "" } }));
+    updateSearches((s) => ({ ...s, [k]: { busy: true, outcome: null, message: "" } }));
     try {
       const res = await fetch(withBasePath("/api/admin/missing/search"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ service: svc, instance: row.instance, arrId: row.arrId, mode: m }),
       });
-      if (!res.ok) {
-        const message = await readError(res, t("adminManage.missing.searchError"));
-        setSearches((s) => ({ ...s, [k]: { busy: false, started: false, error: message } }));
-        return false;
-      }
-      setSearches((s) => ({ ...s, [k]: { busy: false, started: true, error: "" } }));
-      return true;
+      if (res.ok) return searchAttemptFromResponse(res.status, "", null);
+      const message = await readError(res, t("adminManage.missing.searchError"));
+      return searchAttemptFromResponse(res.status, message, res.headers.get("Retry-After"));
     } catch {
-      setSearches((s) => ({ ...s, [k]: { busy: false, started: false, error: t("adminManage.missing.searchError") } }));
-      return false;
+      return { outcome: "failed", message: t("adminManage.missing.searchError") };
     }
+  }
+
+  function settleSearch(key: ReportKey, row: { instance: string; arrId: number }, outcome: SearchOutcome, message: string) {
+    const k = `${key}|${rowKey(row)}`;
+    const text = outcome === "failed" ? message || t("adminManage.missing.searchError") : message;
+    updateSearches((s) => ({ ...s, [k]: { busy: false, outcome, message: text } }));
+  }
+
+  // A row's own Search button. A 429 here just says so — only the bulk run
+  // waits it out.
+  async function startSearch(key: ReportKey, row: { instance: string; arrId: number }) {
+    const attempt = await requestSearch(key, row);
+    settleSearch(key, row, attempt.outcome === "rateLimited" ? "failed" : attempt.outcome, attempt.message);
   }
 
   function toggleExpanded(k: string): boolean {
@@ -258,28 +312,41 @@ export function MissingReport({
   const multiInstance = (report?.instances.length ?? 0) > 1;
   const unmonitoredCount = report && mode === "missing" ? (report.items as Array<{ monitored?: boolean }>).filter((i) => i.monitored === false).length : 0;
   const label = SERVICE_LABEL[service];
+  const instanceLabel = (slug: string) => arrInstanceLabel(service, instanceName(slug), slug);
 
   // Once a search has started the button stays done until the next Refresh —
-  // a second click would only queue the same indexer hits again.
+  // a second click would only queue the same indexer hits again. A 409 ("nothing
+  // missing any more") is the title being complete, not a failure: shown in a
+  // neutral tone, and the button stays off — it would only 409 again. A row a
+  // running bulk search has yet to take is off too, or one click and the run
+  // would search it twice.
   const searchCell = (key: ReportKey, r: { instance: string; arrId: number; title: string }) => {
-    const st = searches[`${key}|${rowKey(r)}`];
+    const k = `${key}|${rowKey(r)}`;
+    const st = searches[k];
     const svc = key.split(":")[0] as Service;
     const ariaKey = key.endsWith(":cutoff") ? "adminManage.missing.cutoff.searchAria" : "adminManage.missing.searchAria";
+    const started = st?.outcome === "started";
+    const already = st?.outcome === "already";
     return (
       <td style={{ ...td, textAlign: "right", whiteSpace: "nowrap" }}>
         <Button
           size="xs"
           variant="outline"
           onClick={() => void startSearch(key, r)}
-          disabled={st?.busy || st?.started}
-          aria-label={st?.started ? undefined : t(ariaKey, { service: SERVICE_LABEL[svc], title: r.title })}
+          disabled={st?.busy || started || already || bulkPending.has(k)}
+          aria-label={started || already ? undefined : t(ariaKey, { service: SERVICE_LABEL[svc], title: r.title })}
         >
-          {st?.busy ? <Loader2 className="animate-spin" /> : st?.started ? <Check /> : <Search />}
-          {st?.started ? t("adminManage.missing.searchStarted") : t("adminManage.missing.search")}
+          {st?.busy ? <Loader2 className="animate-spin" /> : started ? <Check /> : already ? <CheckCircle2 /> : <Search />}
+          {started ? t("adminManage.missing.searchStarted") : already ? t("adminArr.missingBulk.rowAlready") : t("adminManage.missing.search")}
         </Button>
-        {st?.error && (
+        {st?.outcome === "failed" && st.message && (
           <div role="alert" style={{ fontSize: 11, color: "var(--ds-danger)", marginTop: 4, whiteSpace: "normal", maxWidth: 220, marginLeft: "auto" }}>
-            {st.error}
+            {st.message}
+          </div>
+        )}
+        {already && st.message && (
+          <div role="status" style={{ fontSize: 11, color: "var(--ds-fg-muted)", marginTop: 4, whiteSpace: "normal", maxWidth: 220, marginLeft: "auto" }}>
+            {st.message}
           </div>
         )}
       </td>
@@ -305,6 +372,20 @@ export function MissingReport({
             target={{ arrId: r.arrId }}
             label={t("adminManage.openIn", { name: arrInstanceLabel(svc, instanceName(r.instance), r.instance) })}
             iconOnly
+          />
+          {/* The title manager on what this mode is about: the file below cutoff, or the missing seasons (a movie's settings). */}
+          <ManageTitleButton
+            service={svc}
+            instance={r.instance}
+            target={{ arrId: r.arrId }}
+            instanceLabel={arrInstanceLabel(svc, instanceName(r.instance), r.instance)}
+            variant="icon"
+            initialTab={manageTabFor(mode, svc)}
+            // Removed from the arr: re-read the list so the row goes (not while
+            // a bulk run is going through it — a fresh listing resets every row).
+            onRemoved={() => {
+              if (!bulkAbort.current) void load(svc, mode);
+            }}
           />
         </div>
         {r.monitored === false && <Chip style={{ marginTop: 2 }}>{t("adminManage.missing.unmonitored")}</Chip>}
@@ -332,53 +413,151 @@ export function MissingReport({
 
   // ── "Search selected" ──────────────────────────────────────────────────────
   // Each ticked row goes through the same per-row search (re-judged live, 409
-  // when nothing is missing any more), two at a time so a long list never
-  // floods the arr's command queue; every row shows its own outcome.
-  const currentRows: ReadonlyArray<{ instance: string; arrId: number; title: string }> =
+  // when nothing is missing any more) via runBulkSearch, two requests at a time.
+  // That pacing is only Summonarr's own: each POST answers 202 once the arr has
+  // QUEUED its command, so Radarr/Sonarr — and every indexer behind them — get
+  // the whole selection within minutes. Hence the cap (BULK_SEARCH_MAX; the
+  // library-wide search in Arr System is the tool for more), the confirmation
+  // above BULK_SEARCH_CONFIRM_OVER titles, and Cancel. Every row shows its own
+  // outcome.
+  const currentRows: ReadonlyArray<BulkRow> =
     current === "radarr:missing" ? movies : current === "sonarr:missing" ? series : current === "radarr:cutoff" ? cutoffMovies : cutoffSeries;
-  const selectable = currentRows.filter((r) => !searches[`${current}|${rowKey(r)}`]?.started);
-  const selectedHere = selectable.filter((r) => selected.has(`${current}|${rowKey(r)}`));
-  const allSelected = selectable.length > 0 && selectedHere.length === selectable.length;
+  const selKey = (r: { instance: string; arrId: number }) => `${current}|${rowKey(r)}`;
+  // A row that is being searched, was searched, or turned out complete can't be
+  // ticked; one a bulk run still holds can't either.
+  const isOpen = (r: BulkRow) => {
+    const k = selKey(r);
+    const st = searches[k];
+    return !st?.busy && st?.outcome !== "started" && st?.outcome !== "already" && !bulkPending.has(k);
+  };
+  const selectable = currentRows.filter(isOpen);
+  // A tick outlives a filter change, so the selection is every ticked row of
+  // this tab and mode — the ones on screen in the order shown, then those the
+  // filters now hide. The cap, the count on the button and the run all use
+  // this one list: counting only the rows on screen let a filter change tick
+  // past the cap, and the run then searched fewer titles than the button said.
+  const shownKeys = new Set(currentRows.map(selKey));
+  const selectedShown = selectable.filter((r) => selected.has(selKey(r)));
+  const selectedHidden = ((report?.items ?? []) as ReadonlyArray<BulkRow>).filter((r) => !shownKeys.has(selKey(r)) && selected.has(selKey(r)) && isOpen(r));
+  const selectedHere = [...selectedShown, ...selectedHidden];
+  const atCap = selectedHere.length >= BULK_SEARCH_MAX;
+  // Every row on screen that the cap leaves room for is ticked.
+  const allSelected = selectedShown.length > 0 && selectedShown.length === Math.min(selectable.length, BULK_SEARCH_MAX - selectedHidden.length);
   const bulkRunning = bulk !== null;
+  const runningHere = bulk?.key === current ? bulk : null;
+  const resultHere = bulkResult?.key === current ? bulkResult : null;
+
+  // "N started, M already complete, K failed" — the shorter forms when nothing
+  // was already complete.
+  const bulkSummary = (r: BulkResult) => {
+    const failed = r.failed.length;
+    if (r.already > 0) {
+      const vars = { started: r.started, already: r.already, failed };
+      return r.key.endsWith(":cutoff") ? t("adminArr.missingBulk.summaryCutoff", vars) : t("adminArr.missingBulk.summary", vars);
+    }
+    if (failed > 0) return t("adminArr.missingBulk.doneWithFailures", { started: r.started, failed });
+    return t("adminArr.missingBulk.done", { count: r.started });
+  };
 
   function toggleSelected(k: string) {
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(k)) next.delete(k);
-      else next.add(k);
+      else if (!atCap) next.add(k);
       return next;
     });
   }
 
+  // The header box: on ticks the rows on screen, in the order shown, as far as
+  // the cap leaves room beside the ticks the filters hide; off unticks the rows
+  // on screen. Hidden ticks stay either way — "Clear selection" drops them too.
   function selectAll(on: boolean) {
     setSelected((prev) => {
-      const next = new Set([...prev].filter((k) => !k.startsWith(`${current}|`)));
-      if (on) for (const r of selectable) next.add(`${current}|${rowKey(r)}`);
+      const next = new Set([...prev].filter((k) => !shownKeys.has(k)));
+      if (on) for (const r of capSelection(selectable, BULK_SEARCH_MAX - selectedHidden.length)) next.add(selKey(r));
       return next;
     });
   }
 
-  async function searchSelected() {
-    const key = current;
-    const rows = [...selectedHere];
-    if (rows.length === 0) return;
+  function clearSelection() {
+    setSelected((prev) => new Set([...prev].filter((k) => !k.startsWith(`${current}|`))));
+  }
+
+  function requestBulk() {
+    const rows = capSelection(selectedHere);
+    // Not while this list is reloading: the fresh listing clears every row's
+    // state and selection, mid-run.
+    if (rows.length === 0 || bulkRunning || loading === current) return;
+    if (rows.length > BULK_SEARCH_CONFIRM_OVER) {
+      setConfirming({ key: current, count: rows.length, unmonitored: rows.filter((r) => r.monitored === false).length });
+      return;
+    }
+    void searchSelected(current, rows);
+  }
+
+  function confirmBulk() {
+    const c = confirming;
+    setConfirming(null);
+    // The dialog is modal, so the selection it described is still the one here.
+    if (c && c.key === current && loading !== current) void searchSelected(current, capSelection(selectedHere));
+  }
+
+  function cancelBulk() {
+    bulkAbort.current?.abort();
+    setBulk((b) => (b ? { ...b, cancelling: true } : b));
+  }
+
+  // Re-ticks exactly the rows the last run could not search.
+  function retryFailed() {
+    if (!bulkResult || bulkResult.key !== current) return;
+    const open = new Set(((report?.items ?? []) as ReadonlyArray<BulkRow>).filter(isOpen).map(selKey));
+    const failed = bulkResult.failed.filter((k) => open.has(k)).slice(0, BULK_SEARCH_MAX);
+    setSelected((prev) => new Set([...[...prev].filter((k) => !k.startsWith(`${current}|`)), ...failed]));
+  }
+
+  async function searchSelected(key: ReportKey, picked: ReadonlyArray<BulkRow>) {
+    const rows = capSelection(picked);
+    if (rows.length === 0 || bulkAbort.current) return;
+    const controller = new AbortController();
+    bulkAbort.current = controller;
+    const keyOf = (r: BulkRow) => `${key}|${rowKey(r)}`;
     setBulkResult(null);
-    setBulk({ key, done: 0, total: rows.length });
-    let next = 0;
-    let done = 0;
-    let started = 0;
-    const worker = async () => {
-      while (next < rows.length) {
-        const row = rows[next++];
-        if (await startSearch(key, row)) started++;
-        done++;
-        setBulk({ key, done, total: rows.length });
-      }
-    };
-    await Promise.all([worker(), worker()]);
-    setBulk(null);
-    setBulkResult({ key, started, failed: rows.length - started });
-    setSelected((prev) => new Set([...prev].filter((k) => !k.startsWith(`${key}|`))));
+    setBulkPending(new Set(rows.map(keyOf)));
+    setBulk({ key, done: 0, total: rows.length, cancelling: false });
+    try {
+      const summary = await runBulkSearch(rows, {
+        signal: controller.signal,
+        attempt: (row) => requestSearch(key, row),
+        skip: (row) => {
+          const st = searchesRef.current[keyOf(row)];
+          return !!st && (st.busy || st.outcome === "started" || st.outcome === "already");
+        },
+        onSettled: (row, outcome, message) => {
+          if (outcome !== "skipped") settleSearch(key, row, outcome, message);
+          setBulkPending((prev) => {
+            const next = new Set(prev);
+            next.delete(keyOf(row));
+            return next;
+          });
+        },
+        onProgress: (done) => setBulk((b) => (b && b.key === key ? { ...b, done } : b)),
+      });
+      setBulkResult({
+        key,
+        started: summary.started,
+        already: summary.already,
+        failed: summary.failed.map(keyOf),
+        skipped: summary.skipped,
+        notRun: summary.notRun,
+        total: rows.length,
+        cancelled: summary.cancelled,
+      });
+    } finally {
+      bulkAbort.current = null;
+      setBulk(null);
+      setBulkPending(new Set());
+      setSelected((prev) => new Set([...prev].filter((k) => !k.startsWith(`${key}|`))));
+    }
   }
 
   const selectHeader = (
@@ -393,15 +572,16 @@ export function MissingReport({
       />
     </th>
   );
-  const selectCell = (r: { instance: string; arrId: number; title: string }) => {
+  const selectCell = (r: BulkRow) => {
     const k = `${current}|${rowKey(r)}`;
     const st = searches[k];
+    const ticked = selected.has(k);
     return (
       <td style={{ ...td, width: 32 }}>
         <input
           type="checkbox"
-          checked={selected.has(k)}
-          disabled={st?.started || st?.busy || bulkRunning}
+          checked={ticked}
+          disabled={st?.busy || st?.outcome === "started" || st?.outcome === "already" || bulkRunning || (!ticked && atCap)}
           onChange={() => toggleSelected(k)}
           aria-label={t("adminArr.missingBulk.selectAria", { title: r.title })}
           className="accent-[var(--ds-accent)]"
@@ -655,9 +835,17 @@ export function MissingReport({
         <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>{stats}</div>
 
         {report.errors.length > 0 && (
-          <p role="status" className="rounded-md bg-amber-500/15 text-amber-400" style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>
-            {t("adminManage.missing.arrErrors", { list: report.errors.map((e) => `${label} (${instanceName(e.instance)})`).join(", ") })}
-          </p>
+          <div role="status" className="rounded-md bg-amber-500/15 text-amber-400" style={{ padding: "8px 12px", fontSize: 13 }}>
+            <p className="m-0">{t("adminManage.missing.arrErrors", { list: report.errors.map((e) => instanceLabel(e.instance)).join(", ") })}</p>
+            {/* Why, translated from the error's kind; the raw upstream text stays in the server log. */}
+            <ul className="m-0" style={{ paddingLeft: 18, marginTop: 4 }}>
+              {report.errors.map((e) => (
+                <li key={e.instance}>
+                  {t(ARR_ERROR_KIND_KEYS[isArrErrorKind(e.kind) ? e.kind : "other"], { name: instanceLabel(e.instance) })}
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
 
         <div className="flex flex-wrap items-center gap-2" style={{ fontSize: 13 }}>
@@ -698,37 +886,72 @@ export function MissingReport({
           )}
         </div>
 
-        {(selectedHere.length > 0 || bulk?.key === current || bulkResult?.key === current) && visibleCount > 0 && (
+        {(runningHere || selectedHere.length > 0 || (resultHere && visibleCount > 0)) && (
           <div
             role="region"
             aria-label={t("adminArr.missingBulk.region")}
-            className="flex flex-wrap items-center gap-2 rounded-lg"
+            className="flex flex-col gap-2 rounded-lg"
             style={{ padding: "8px 12px", fontSize: 13, border: "1px solid var(--ds-border)", background: "var(--ds-bg-1)" }}
           >
-            {bulk?.key === current ? (
-              <span className="flex items-center gap-2" role="status">
-                <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
-                {t("adminArr.missingBulk.progress", { done: bulk.done, total: bulk.total })}
-              </span>
-            ) : selectedHere.length > 0 ? (
-              <>
-                <span>{t("adminArr.missingBulk.selected", { count: selectedHere.length })}</span>
-                <Button size="sm" disabled={bulkRunning} onClick={() => void searchSelected()}>
-                  <Search /> {mode === "cutoff" ? t("adminArr.missingBulk.searchCutoff", { count: selectedHere.length }) : t("adminArr.missingBulk.search", { count: selectedHere.length })}
-                </Button>
-                <Button size="sm" variant="ghost" disabled={bulkRunning} onClick={() => selectAll(false)}>{t("adminArr.missingBulk.clear")}</Button>
-                <span style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>
-                  {mode === "cutoff" ? t("adminArr.missingBulk.hintCutoff") : t("adminArr.missingBulk.hint")}
+            {runningHere ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="flex items-center gap-2" role="status">
+                  <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} />
+                  {runningHere.cancelling
+                    ? t("adminArr.missingBulk.cancelling")
+                    : t("adminArr.missingBulk.progress", { done: runningHere.done, total: runningHere.total })}
                 </span>
+                <Button size="sm" variant="outline" disabled={runningHere.cancelling} onClick={cancelBulk} aria-label={t("adminArr.missingBulk.cancelAria")}>
+                  <X /> {t("adminArr.common.cancel")}
+                </Button>
+              </div>
+            ) : (
+              <>
+                {resultHere && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span role="status" className="flex flex-wrap items-center gap-x-2">
+                      {resultHere.failed.length === 0 && !resultHere.cancelled && <Check style={{ width: 14, height: 14 }} />}
+                      <span>{bulkSummary(resultHere)}</span>
+                      {resultHere.skipped > 0 && <span>{t("adminArr.missingBulk.skipped", { count: resultHere.skipped })}</span>}
+                      {resultHere.cancelled && resultHere.notRun > 0 && (
+                        <span>{t("adminArr.missingBulk.cancelled", { notRun: resultHere.notRun, total: resultHere.total })}</span>
+                      )}
+                    </span>
+                    {resultHere.failed.length > 0 && (
+                      <Button size="sm" variant="outline" onClick={retryFailed}>
+                        <RotateCcw /> {t("adminArr.missingBulk.retryFailed")}
+                      </Button>
+                    )}
+                  </div>
+                )}
+                {selectedHere.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span>{t("adminArr.missingBulk.selected", { count: selectedHere.length })}</span>
+                    {selectedHidden.length > 0 && (
+                      <span style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>{t("adminArr.missingBulk.selectedHidden", { count: selectedHidden.length })}</span>
+                    )}
+                    <Button size="sm" disabled={bulkRunning || loading === current} onClick={requestBulk}>
+                      <Search /> {mode === "cutoff" ? t("adminArr.missingBulk.searchCutoff", { count: selectedHere.length }) : t("adminArr.missingBulk.search", { count: selectedHere.length })}
+                    </Button>
+                    <Button size="sm" variant="ghost" disabled={bulkRunning} onClick={clearSelection}>{t("adminArr.missingBulk.clear")}</Button>
+                    <span style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>
+                      {mode === "cutoff" ? t("adminArr.missingBulk.hintCutoff") : t("adminArr.missingBulk.hint")}
+                    </span>
+                  </div>
+                )}
+                {atCap && (
+                  <p className="m-0" style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>
+                    {t("adminArr.missingBulk.capNote", {
+                      max: BULK_SEARCH_MAX,
+                      action: mode === "cutoff" ? t("adminArr.system.searchAllCutoff") : t("adminArr.system.searchAllMissing"),
+                    })}{" "}
+                    <Link href="/admin/arr-system" className="hover:underline" style={{ color: "var(--ds-accent-text)" }}>
+                      {t("adminArr.missingBulk.capLink")}
+                    </Link>
+                  </p>
+                )}
               </>
-            ) : bulkResult ? (
-              <span role="status" className="flex items-center gap-2">
-                <Check style={{ width: 14, height: 14 }} />
-                {bulkResult.failed > 0
-                  ? t("adminArr.missingBulk.doneWithFailures", { started: bulkResult.started, failed: bulkResult.failed })
-                  : t("adminArr.missingBulk.done", { count: bulkResult.started })}
-              </span>
-            ) : null}
+            )}
           </div>
         )}
 
@@ -791,7 +1014,10 @@ export function MissingReport({
               {modeButton("cutoff", t("adminManage.missing.mode.cutoff"))}
             </div>
             {configured[service] ? (
-              <Button size="sm" variant="outline" onClick={() => void load(service, mode)} disabled={loading === current}>
+              // Off while a bulk search runs on this tab: a Refresh clears every
+              // row's search state, and the rows already searched could be ticked
+              // and searched again.
+              <Button size="sm" variant="outline" onClick={() => void load(service, mode)} disabled={loading === current || bulk?.key === current}>
                 {loading === current ? <Loader2 className="animate-spin" /> : <RefreshCw />}
                 {t("adminManage.missing.refresh")}
               </Button>
@@ -802,7 +1028,75 @@ export function MissingReport({
       {report && errors[current] && (
         <p role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{errors[current]}</p>
       )}
+      {/* A run keeps going on another tab or mode; its progress and Cancel stay reachable here. */}
+      {bulk && bulk.key !== current && (
+        <div role="status" className="flex flex-wrap items-center gap-2" style={{ fontSize: 12, color: "var(--ds-fg-muted)" }}>
+          <Loader2 className="animate-spin" style={{ width: 12, height: 12 }} />
+          {bulk.cancelling
+            ? t("adminArr.missingBulk.cancelling")
+            : t("adminArr.missingBulk.otherRunning", {
+                service: SERVICE_LABEL[bulk.key.split(":")[0] as Service],
+                mode: bulk.key.endsWith(":cutoff") ? t("adminManage.missing.mode.cutoff") : t("adminManage.missing.mode.missing"),
+                done: bulk.done,
+                total: bulk.total,
+              })}
+          <Button size="xs" variant="ghost" disabled={bulk.cancelling} onClick={cancelBulk} aria-label={t("adminArr.missingBulk.cancelAria")}>
+            <X /> {t("adminArr.common.cancel")}
+          </Button>
+        </div>
+      )}
       {body}
+
+      <Dialog open={confirming !== null} onOpenChange={(o) => { if (!o) setConfirming(null); }}>
+        <DialogPortal>
+          <DialogBackdrop />
+          <DialogPopup className="max-w-md">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-700">
+              <DialogTitle className="text-base font-semibold text-zinc-100">
+                {confirming &&
+                  (confirming.key.endsWith(":cutoff")
+                    ? t("adminArr.missingBulk.confirmTitleCutoff", { count: confirming.count })
+                    : t("adminArr.missingBulk.confirmTitle", { count: confirming.count }))}
+              </DialogTitle>
+              <DialogClose
+                aria-label={t("adminArr.common.close")}
+                title={t("adminArr.common.close")}
+                className="text-zinc-500 hover:text-zinc-300 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </DialogClose>
+            </div>
+            {confirming && (
+              <div className="flex flex-col gap-3 px-6 py-4 text-sm text-zinc-400">
+                <p className="m-0">
+                  {t("adminArr.missingBulk.confirmBody", { count: confirming.count, service: SERVICE_LABEL[confirming.key.split(":")[0] as Service] })}
+                </p>
+                {confirming.unmonitored > 0 && (
+                  <p className="m-0 text-amber-400">
+                    {t("adminArr.missingBulk.confirmUnmonitored", {
+                      count: confirming.unmonitored,
+                      service: SERVICE_LABEL[confirming.key.split(":")[0] as Service],
+                    })}
+                  </p>
+                )}
+              </div>
+            )}
+            <div className="flex items-center justify-between px-6 py-4 border-t border-zinc-700 bg-zinc-900">
+              <button type="button" onClick={() => setConfirming(null)} className="rounded px-2 py-1 text-sm text-zinc-500 hover:text-zinc-300">
+                {t("adminArr.common.cancel")}
+              </button>
+              {confirming && (
+                <Button size="sm" onClick={confirmBulk}>
+                  <Search />
+                  {confirming.key.endsWith(":cutoff")
+                    ? t("adminArr.missingBulk.searchCutoff", { count: confirming.count })
+                    : t("adminArr.missingBulk.search", { count: confirming.count })}
+                </Button>
+              )}
+            </div>
+          </DialogPopup>
+        </DialogPortal>
+      </Dialog>
     </div>
   );
 }

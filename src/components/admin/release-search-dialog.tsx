@@ -32,6 +32,11 @@ function ageFormatter(locale: string) {
   return (days: number) => d.format(Math.max(0, Math.round(days)));
 }
 
+const SEARCH_POLL_MS = 2_000;
+const SLOW_SEARCH_MS = 15_000;
+// The server stops waiting on the arr after 120 s; past this the job is lost.
+const SEARCH_GIVE_UP_MS = 5 * 60_000;
+
 // The season to search first: the earliest with something missing, else the latest.
 export function defaultSeason(seasons: readonly SonarrSeasonSummary[]): number | null {
   if (seasons.length === 0) return null;
@@ -83,6 +88,8 @@ export function ReleaseSearchDialog({
   const [filter, setFilter] = useState("");
   const [showRejected, setShowRejected] = useState(false);
   const [grabbed, setGrabbed] = useState(false);
+  // A search past SLOW_SEARCH_MS says it is still going (indexers are slow, not stuck).
+  const [slow, setSlow] = useState(false);
   // Only the newest search may write state — switching seasons quickly must
   // never leave one season's releases offered for another (the grab would then
   // send that release to the wrong season's episodes). Closing the dialog bumps
@@ -107,6 +114,7 @@ export function ReleaseSearchDialog({
     setSelected(null);
     setShowRejected(false);
     setFilter("");
+    setSlow(false);
     try {
       let url: string;
       if (targetKey) {
@@ -117,7 +125,26 @@ export function ReleaseSearchDialog({
       } else {
         url = `/api/requests/${requestId}/releases${s !== null ? `?season=${s}` : ""}`;
       }
-      const res = await fetch(withBasePath(url));
+      // In the background (release-search-jobs.ts): indexers can take a minute
+      // or two, longer than a reverse proxy keeps one request open.
+      url += url.includes("?") ? "&async=1" : "?async=1";
+      let res = await fetch(withBasePath(url));
+      const pollBase = url.split("?")[0];
+      // Time is counted in polls, not read off the clock.
+      let polls = 0;
+      while (res.status === 202) {
+        const pending = (await res.json().catch(() => null)) as { job?: string } | null;
+        if (id !== seq.current) return;
+        if (!pending?.job || polls * SEARCH_POLL_MS > SEARCH_GIVE_UP_MS) {
+          setError(tRef.current("adminQueue.releases.failed"));
+          return;
+        }
+        if (polls * SEARCH_POLL_MS >= SLOW_SEARCH_MS) setSlow(true);
+        polls++;
+        await new Promise((r) => setTimeout(r, SEARCH_POLL_MS));
+        if (id !== seq.current) return;
+        res = await fetch(withBasePath(`${pollBase}?job=${encodeURIComponent(pending.job)}`));
+      }
       const data = (await res.json().catch(() => null)) as { releases?: ArrRelease[]; error?: string } | null;
       if (id !== seq.current) return;
       if (!res.ok || !data?.releases) {
@@ -271,12 +298,14 @@ export function ReleaseSearchDialog({
           {loading === "seasons" || loading === "releases" ? (
             <div className="flex items-center justify-center gap-3 text-sm text-zinc-500 py-16">
               <Loader2 className="w-5 h-5 animate-spin" />
-              {t("adminQueue.releases.searching")}
+              {slow ? t("adminQueue.releases.searchingSlow") : t("adminQueue.releases.searching")}
             </div>
           ) : grabbed ? (
             <div className="flex items-center justify-center gap-2 text-sm text-green-400 py-16 px-6 text-center">
               <Check className="w-4 h-4 shrink-0" />
-              {t("adminQueue.releases.grabbed")}
+              {target
+                ? t("adminQueue.releases.grabbedTitle", { service: target.service === "radarr" ? "Radarr" : "Sonarr" })
+                : t("adminQueue.releases.grabbed")}
             </div>
           ) : error && releases === null ? (
             <div role="alert" className="flex items-center justify-center gap-2 text-sm py-16 px-6 text-center" style={{ color: "var(--ds-danger)" }}>
@@ -329,9 +358,24 @@ export function ReleaseSearchDialog({
                             </span>
                           )}
                           <span className="text-xs text-zinc-500">{age(rel.age)}</span>
+                          {rel.customFormatScore !== null && (rel.customFormatScore !== 0 || rel.customFormats.length > 0) && (
+                            <span
+                              className={`text-xs font-medium px-1.5 py-0.5 rounded ${rel.customFormatScore < 0 ? "bg-red-500/10 text-red-400" : "bg-zinc-800 text-zinc-300"}`}
+                              title={rel.customFormats.length > 0 ? rel.customFormats.join(", ") : undefined}
+                            >
+                              {t("adminQueue.releases.score", { score: rel.customFormatScore > 0 ? `+${rel.customFormatScore}` : String(rel.customFormatScore) })}
+                            </span>
+                          )}
+                          {rel.languages.length > 0 && (
+                            <span className="text-xs text-zinc-500 truncate max-w-[12rem]" title={rel.languages.join(", ")}>{rel.languages.join(", ")}</span>
+                          )}
                         </div>
                         {rel.rejected && rel.rejections.length > 0 && (
-                          <p className="text-xs text-amber-400 mt-0.5 truncate">{rel.rejections[0]}</p>
+                          <ul className="m-0 mt-0.5 p-0 list-none">
+                            {rel.rejections.slice(0, 4).map((r, i) => (
+                              <li key={i} className="text-xs text-amber-400 truncate" title={r}>{r}</li>
+                            ))}
+                          </ul>
                         )}
                       </div>
                       {isSelected && <Check className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />}

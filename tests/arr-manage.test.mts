@@ -23,6 +23,26 @@ test("credentials in upstream text are masked, whatever the parameter is called"
   assert.equal(safeMessage("   "), null);
 });
 
+test("credentials are masked in JSON, header, auth-scheme, encoded and path forms too", () => {
+  const cases = [
+    `{"apiKey":"S1SECRET","name":"x"}`,
+    `{"apiKey": "S1SECRET"}`,
+    "X-Api-Key: S1SECRET",
+    "api_key = S1SECRET",
+    "passkey:S1SECRET",
+    "Authorization: Bearer S1SECRET.part",
+    "Authorization: Basic S1SECRET==",
+    "https://idx.example/api?url=https%3A%2F%2Fx%3Fapikey%3DS1SECRET",
+    "https://bob:pa@ss:S1SECRET@tracker.example/rss",
+    "https://tracker.example/rss/0123456789abcdef0123456789abcdefS1SECRET/feed",
+    "https://tracker.example/announce/S1SECRET0123456789abcdef0123456789abcdef",
+  ];
+  for (const s of cases) assert.ok(!maskSecrets(s).includes("S1SECRET"), s);
+  assert.equal(maskSecrets(`{"apiKey":"abc","name":"x"}`), `{"apiKey":"••••••••","name":"x"}`, "JSON stays JSON");
+  assert.equal(maskSecrets("Unable to connect to indexer: timed out"), "Unable to connect to indexer: timed out", "ordinary prose survives");
+  assert.equal(maskSecrets("https://host.example/movies/Some Title (2020)"), "https://host.example/movies/Some Title (2020)", "short path segments survive");
+});
+
 test("a history record's protocol is read from either spelling", () => {
   assert.equal(protocolOf("1"), "usenet");
   assert.equal(protocolOf("2"), "torrent");

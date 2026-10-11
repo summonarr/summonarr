@@ -15,7 +15,7 @@ import { processSingleton } from "./process-singleton";
 export const RELEASE_HANDLE_TTL_MS = 30 * 60_000;
 const MAX_HANDLES = 20_000;
 
-type Entry = { scope: string; guid: string; indexerId: number; expiresAt: number };
+type Entry = { scope: string; guid: string; indexerId: number; title: string; expiresAt: number; claimed: boolean };
 
 const handles = processSingleton("release-handles", () => new Map<string, Entry>());
 
@@ -30,7 +30,7 @@ function sweep(now: number): void {
  * Copies of `releases` with `guid` replaced by a fresh handle for `scope` (the
  * request, instance and season the search was for). Nothing else changes.
  */
-export function issueReleaseHandles<T extends { guid: string; indexerId: number }>(
+export function issueReleaseHandles<T extends { guid: string; indexerId: number; title?: string }>(
   scope: string,
   releases: readonly T[],
   now: number = Date.now(),
@@ -38,13 +38,16 @@ export function issueReleaseHandles<T extends { guid: string; indexerId: number 
   if (handles.size + releases.length >= MAX_HANDLES) sweep(now);
   return releases.map((r) => {
     const handle = randomBytes(16).toString("hex");
-    handles.set(handle, { scope, guid: r.guid, indexerId: r.indexerId, expiresAt: now + RELEASE_HANDLE_TTL_MS });
+    handles.set(handle, { scope, guid: r.guid, indexerId: r.indexerId, title: (r.title ?? "").slice(0, 300), expiresAt: now + RELEASE_HANDLE_TTL_MS, claimed: false });
     return { ...r, guid: handle };
   });
 }
 
-/** The release behind a handle, or null when unknown, expired, or issued for a different search. */
-export function redeemReleaseHandle(scope: string, handle: string, now: number = Date.now()): { guid: string; indexerId: number } | null {
+/**
+ * The release behind a handle, or null when unknown, expired, or issued for a
+ * different search. `title` is the release name, for the audit (never the guid).
+ */
+export function redeemReleaseHandle(scope: string, handle: string, now: number = Date.now()): { guid: string; indexerId: number; title: string } | null {
   const e = handles.get(handle);
   if (!e) return null;
   if (e.expiresAt <= now) {
@@ -52,7 +55,42 @@ export function redeemReleaseHandle(scope: string, handle: string, now: number =
     return null;
   }
   if (e.scope !== scope) return null;
-  return { guid: e.guid, indexerId: e.indexerId };
+  return { guid: e.guid, indexerId: e.indexerId, title: e.title };
+}
+
+export type ReleaseClaim = { guid: string; indexerId: number; title: string } | "unknown" | "busy";
+
+/**
+ * Claim a handle for ONE grab: the check-and-set is synchronous, so of two
+ * requests racing with the same handle (a double submit, a replay) exactly one
+ * gets the release and the other `"busy"` — they would otherwise both send it
+ * and the download client fetches it twice. `"unknown"` is redeemReleaseHandle's
+ * null. The caller then spends it (`forgetReleaseHandle`) once the arr took the
+ * grab, or hands it back (`releaseReleaseHandle`) when the arr definitely
+ * refused it.
+ */
+export function claimReleaseHandle(scope: string, handle: string, now: number = Date.now()): ReleaseClaim {
+  const picked = redeemReleaseHandle(scope, handle, now);
+  if (!picked) return "unknown";
+  const e = handles.get(handle) as Entry;
+  if (e.claimed) return "busy";
+  e.claimed = true;
+  return picked;
+}
+
+/** Hand a claimed handle back: the arr refused the grab, so the release may be tried again. */
+export function releaseReleaseHandle(handle: string): void {
+  const e = handles.get(handle);
+  if (e) e.claimed = false;
+}
+
+/**
+ * Spend a handle once its grab was accepted — or once its outcome is unknown
+ * (a timeout: the arr may well have taken it) — so the same release is never
+ * sent to the arr twice.
+ */
+export function forgetReleaseHandle(handle: string): void {
+  handles.delete(handle);
 }
 
 /** Test seam. */

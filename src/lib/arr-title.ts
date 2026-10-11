@@ -305,6 +305,10 @@ export function parseTitleEdit(service: ArrService, body: Record<string, unknown
       seasons.push({ seasonNumber: n, monitored: r.monitored });
     }
     edit.seasons = seasons;
+    // Season monitoring is its own write (a read-modify-write of the series)
+    // after the editor's; combined, a failure between the two would leave an
+    // edit half applied and unaudited. The manager never sends them together.
+    if (Object.keys(edit).length > 1) return null;
   }
   return edit;
 }

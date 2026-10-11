@@ -393,8 +393,11 @@
   "settings.featureLabel.integration_webhooks": "Canales de webhook, ntfy y Gotify",
   "settings.featureDesc.integration_webhooks": "Envía los eventos de solicitudes y problemas a los canales de webhook, ntfy y Gotify configurados en Ajustes → Notificaciones.",
   "settings.nav.notificationAgents": "Webhooks y ntfy",
+  "settings.nav.arrAlerts": "Alertas de Radarr/Sonarr",
   "settings.section.notificationAgents.title": "Canales de webhook, ntfy y Gotify",
   "settings.section.notificationAgents.description": "Reenvía los eventos de solicitudes, problemas y descargas a tus propios servicios. Cada canal elige los eventos que recibe; las entregas fallidas se reintentan tres veces.",
+  "settings.section.arrAlerts.title": "Alertas de Radarr/Sonarr",
+  "settings.section.arrAlerts.description": "Summonarr revisa periódicamente cada instancia de Radarr y Sonarr y avisa a los canales de arriba suscritos a esos eventos cuando hay poco espacio en disco, una descarga falla o una descarga pasa a requerir atención. El enlace a la Cola de descargas del menú de administración muestra cuántas descargas requieren atención.",
   "settings.nav.plexWatchlist": "Lista de Plex",
   "settings.section.plexWatchlist.title": "Lista de Plex",
   "settings.section.plexWatchlist.description": "Cómo lee la solicitud automática las listas de Plex. Siempre se usa el inicio de sesión de Plex del propio usuario cuando existe; estos interruptores añaden la cuenta del propietario de tu servidor Plex como segunda vía.",
@@ -420,5 +423,7 @@
   "settings.cron.job.trakt.name": "Sincronización de Trakt",
   "settings.cron.job.trakt.description": "Solicita títulos nuevos de las listas de seguimiento de Trakt de los usuarios conectados e importa su historial de Trakt para Para ti (requiere un Client Secret de Trakt)",
   "settings.cron.job.upstreamWatch.name": "Historial de visionado de los servidores",
-  "settings.cron.job.upstreamWatch.description": "Lee los registros de visionado propios de cada servidor Plex y Jellyfin, para que un título visto antes de instalar Summonarr (o mientras estaba caído) nunca aparezca como no visto"
+  "settings.cron.job.upstreamWatch.description": "Lee los registros de visionado propios de cada servidor Plex y Jellyfin, para que un título visto antes de instalar Summonarr (o mientras estaba caído) nunca aparezca como no visto",
+  "settings.cron.job.arrWatch.name": "Supervisión de Radarr/Sonarr",
+  "settings.cron.job.arrWatch.description": "Revisa cada instancia de Radarr y Sonarr en busca de poco espacio en disco, descargas fallidas y descargas que requieren atención, y avisa a los canales de notificación suscritos a ellas"
 }

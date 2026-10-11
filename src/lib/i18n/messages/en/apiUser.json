@@ -77,6 +77,12 @@
   "apiUser.issues.modifiedConcurrently": "Issue was modified concurrently. Refresh and try again.",
   "apiUser.issues.notInLibrary": "This title isn't in the library — issues can only be filed for available media.",
   "apiUser.issues.noteTooLong": "note must be a string under 1000 characters",
+  "apiUser.issues.replaceFile.bodyInvalid": "Expected an instance, a list of file ids, and then: markFailed or search",
+  "apiUser.issues.replaceFile.notInScope": "Those files aren't this issue's any more — reload and try again",
+  "apiUser.issues.replaceFile.notOnInstance": "{name} doesn't have this title — it may have been removed there, or the reported copy is on another instance",
+  "apiUser.issues.replaceFile.resolved": "Issue is resolved — reopen it before replacing its files",
+  "apiUser.issues.replaceFile.searchFailed_one": "Deleted {count} file, but {service} didn't queue the search — use Refetch to search again",
+  "apiUser.issues.replaceFile.searchFailed_other": "Deleted {count} files, but {service} didn't queue the search — use Refetch to search again",
   "apiUser.issues.resolutionEmpty": "resolution must not be empty",
   "apiUser.issues.resolutionTooLong": "resolution must be a string under 1000 characters",
   "apiUser.issues.resolvedBeforeGrab": "Issue is resolved — reopen it before grabbing a release",
@@ -171,5 +177,10 @@
   "apiUser.requests.releases.notInArr": "{service} doesn't have this title yet — re-push the request first",
   "apiUser.requests.releases.seasonInvalid": "season must be a whole number",
   "apiUser.requests.releases.releaseRequired": "release must be a handle from a release search",
-  "apiUser.requests.releases.handleExpired": "That search result has expired — search again"
+  "apiUser.requests.releases.handleExpired": "That search result has expired — search again",
+  "apiUser.requests.releases.cacheExpired": "{service} no longer has these search results — it keeps them for 30 minutes, and a restart drops them. Search again.",
+  "apiUser.requests.releases.grabRefused": "{service} couldn't grab that release: {reason}",
+  "apiUser.requests.releases.jobGone": "That search is no longer available — search again.",
+  "apiUser.requests.releases.grabInProgress": "That release is already being grabbed",
+  "apiUser.requests.arrStatus.invalidStatus": "Only approved or available requests can be checked"
 }

@@ -13,6 +13,13 @@
 //                       halves of the arr's own: the blocklist choice and the
 //                       removal method (from the client / change category / ignore).
 // "Re-check downloads" asks every instance to re-check its downloads now.
+// A row naming a Radarr/Sonarr title also opens the title manager on its
+// History tab (ArrTitleManager, held here rather than in the row: a finished
+// download leaves the list on the next poll, and the dialog must not go with it).
+//
+// A link may filter the page (/admin/queue?q= or ?service=&instance=&arrId=,
+// parsed on the server — parseQueueLinkFilters); an exact-title filter shows as
+// a removable chip.
 //
 // Everything the arr's own queue shows is here: quality (with its PROPER/REPACK
 // tag), languages, custom formats and score, size, progress, time left and ETA,
@@ -43,22 +50,26 @@ import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogT
 import { Chip, EmptyState, FilterBar, StatCard, type ChipTone } from "@/components/ui/design";
 import {
   AlertTriangle, Ban, CheckCircle2, ChevronDown, ChevronRight, CircleDashed, Download, FileCheck, List, Loader2, Magnet, Radio,
-  RefreshCcw, RefreshCw, RotateCcw, Trash2, X,
+  RefreshCcw, RefreshCw, RotateCcw, Trash2, Wrench, X,
 } from "@/components/icons";
 import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { ArrHealthPanel } from "@/components/admin/arr-health-panel";
 import { QueueImportDialog } from "@/components/admin/queue-import-dialog";
+import { ArrTitleManager } from "@/components/admin/arr-title/title-manager";
 import { episodeCode, episodeSummary, queueFormatters } from "@/components/admin/queue-format";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { QualityTag, QueueItem, QueuePhase, QueueRemoveAction, QueueRemoveMethod } from "@/lib/arr-queue";
+import { ARR_ERROR_KIND_KEYS, isArrErrorKind, type ArrErrorKind } from "@/lib/arr-error-kind";
+import { createLoadGate, type LoadKind } from "@/lib/arr-system";
+import { manageTabFor, matchesQueueTitle, queueLinkKey, type QueueLinkFilters, type QueueTitleFilter } from "@/lib/arr-manage-links";
 
 type Service = "radarr" | "sonarr";
 type Filter = "all" | "attention" | Service;
 
 interface QueueReport {
   instances: Array<{ service: Service; slug: string; name: string }>;
-  errors: Array<{ service: Service; instance: string; error: string }>;
+  errors: Array<{ service: Service; instance: string; error: string; kind?: ArrErrorKind }>;
   items: QueueItem[];
 }
 
@@ -128,7 +139,16 @@ async function readError(res: Response, fallback: string): Promise<string> {
 const th: React.CSSProperties = { padding: "8px 10px" };
 const td: React.CSSProperties = { padding: "8px 10px", verticalAlign: "top" };
 
-export function DownloadQueue({ configured }: { configured: boolean }) {
+const NO_LINK_FILTERS: QueueLinkFilters = { q: "", title: null };
+
+export function DownloadQueue({
+  configured,
+  initialFilters = NO_LINK_FILTERS,
+}: {
+  configured: boolean;
+  /** The filters the page's link asked for (parseQueueLinkFilters). */
+  initialFilters?: QueueLinkFilters;
+}) {
   const t = useT();
   const locale = useLocale();
   const fmt = useMemo(() => queueFormatters(locale), [locale]);
@@ -137,7 +157,29 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [instance, setInstance] = useState("all");
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialFilters.q);
+  const [titleFilter, setTitleFilter] = useState<QueueTitleFilter | null>(initialFilters.title);
+  // The title manager opened from a row, with the row's instance label.
+  const [managing, setManaging] = useState<(QueueTitleFilter & { label: string }) | null>(null);
+  // Following a link to this page while on it (a title manager's "See its
+  // downloads in the queue") re-renders the server page, which hands over a NEW
+  // filters object. When it asks for other filters than the URL holds now
+  // (`linked` — clearTitleFilter edits the URL without a server render), they
+  // replace the ones on screen and close the manager the link was clicked in
+  // (adjust-state-during-render). A re-render of the same URL (router.refresh)
+  // asks for the same filters and leaves the admin's alone.
+  const [seenFilters, setSeenFilters] = useState(initialFilters);
+  const [linked, setLinked] = useState(() => queueLinkKey(initialFilters));
+  if (seenFilters !== initialFilters) {
+    setSeenFilters(initialFilters);
+    const incoming = queueLinkKey(initialFilters);
+    if (incoming !== linked) {
+      setLinked(incoming);
+      setQuery(initialFilters.q);
+      setTitleFilter(initialFilters.title);
+      setManaging(null);
+    }
+  }
   const [live, setLive] = useState(true);
   const [removing, setRemoving] = useState<QueueItem | null>(null);
   const [importing, setImporting] = useState<QueueItem | null>(null);
@@ -164,30 +206,30 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
     frameObserver.current = ro;
   }, []);
   // Only the newest load may write state — a slow poll must not overwrite the
-  // result of a refresh the admin clicked after it started.
-  const loadSeq = useRef(0);
+  // result of a refresh the admin clicked after it started. And a poll tick is
+  // skipped while a load is out: a dark instance holds its page read for the
+  // whole 30 s request timeout, past POLL_MS, and a tick that superseded it
+  // would discard every answer (createLoadGate).
+  const [gate] = useState(createLoadGate);
 
-  const load = useCallback(async () => {
-    const seq = ++loadSeq.current;
+  const load = useCallback(async (kind: LoadKind = "manual") => {
+    const id = gate.begin(kind);
+    if (id === null) return;
     setLoading(true);
+    let next: { report: QueueReport } | { error: string };
     try {
       const res = await fetch(withBasePath("/api/admin/queue"));
-      if (seq !== loadSeq.current) return;
-      if (!res.ok) {
-        const message = await readError(res, t("adminManage.queue.error.load"));
-        if (seq === loadSeq.current) setError(message);
-        return;
-      }
-      const data = (await res.json()) as QueueReport;
-      if (seq !== loadSeq.current) return;
-      setReport(data);
-      setError("");
+      next = res.ok ? { report: (await res.json()) as QueueReport } : { error: await readError(res, t("adminManage.queue.error.load")) };
     } catch {
-      if (seq === loadSeq.current) setError(t("adminManage.queue.error.loadNetwork"));
-    } finally {
-      if (seq === loadSeq.current) setLoading(false);
+      next = { error: t("adminManage.queue.error.loadNetwork") };
     }
-  }, [t]);
+    if (!gate.settle(id)) return;
+    setLoading(false);
+    if ("report" in next) {
+      setReport(next.report);
+      setError("");
+    } else setError(next.error);
+  }, [gate, t]);
 
   useEffect(() => {
     if (configured) void load();
@@ -228,12 +270,26 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
   // Poll while live, visible, and no dialog is open (a refresh would
   // reshuffle the row being confirmed).
   useEffect(() => {
-    if (!configured || !live || removing || importing) return;
+    if (!configured || !live || removing || importing || managing) return;
     const id = window.setInterval(() => {
-      if (document.visibilityState === "visible") void load();
+      if (document.visibilityState === "visible") void load("poll");
     }, POLL_MS);
     return () => window.clearInterval(id);
-  }, [configured, live, removing, importing, load]);
+  }, [configured, live, removing, importing, managing, load]);
+
+  // Drop the exact-title filter, and its parameters from the URL so a reload
+  // shows the whole queue too (any `q` stays). `linked` follows the URL, so a
+  // later link back to the same title applies again.
+  function clearTitleFilter() {
+    setTitleFilter(null);
+    setLinked(queueLinkKey({ q: initialFilters.q, title: null }));
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      for (const k of ["service", "instance", "arrId"]) sp.delete(k);
+      const qs = sp.toString();
+      window.history.replaceState(null, "", qs ? `?${qs}` : window.location.pathname);
+    } catch {}
+  }
 
   // The dialog opens on the action the admin clicked; they can still change it there.
   function openRemove(row: QueueItem, action: QueueRemoveAction) {
@@ -478,18 +534,32 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
       </dl>
     );
   }
+  // The exact-title filter applies before the others: it is what the link was for.
+  const titleRows = useMemo(
+    () => (titleFilter ? (items ?? []).filter((r) => matchesQueueTitle(r, titleFilter)) : (items ?? [])),
+    [items, titleFilter],
+  );
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return (items ?? []).filter(
+    return titleRows.filter(
       (r) =>
         (filter === "all" || (filter === "attention" ? r.attention : r.service === filter)) &&
         (instance === "all" || `${r.service}:${r.instance}` === instance) &&
         (!q || r.mediaTitle.toLowerCase().includes(q) || r.title.toLowerCase().includes(q)),
     );
-  }, [items, filter, instance, query]);
+  }, [titleRows, filter, instance, query]);
+  // The chip names the title by its downloads; with none in the queue, by its instance and id.
+  const titleFilterLabel = titleFilter
+    ? titleRows[0]
+      ? titleRows[0].mediaTitle || titleRows[0].title
+      : t("adminManage.queue.filter.titleById", {
+          name: arrInstanceLabel(titleFilter.service, instanceName(titleFilter.service, titleFilter.instance), titleFilter.instance),
+          id: titleFilter.arrId,
+        })
+    : "";
 
   const count = (f: Filter) =>
-    items ? items.filter((r) => (f === "all" ? true : f === "attention" ? r.attention : r.service === f)).length : undefined;
+    items ? titleRows.filter((r) => (f === "all" ? true : f === "attention" ? r.attention : r.service === f)).length : undefined;
   const services = new Set((report?.instances ?? []).map((i) => i.service));
 
   let body: React.ReactNode;
@@ -517,11 +587,23 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
         </div>
 
         {report.errors.length > 0 && (
-          <p role="status" className="rounded-md bg-amber-500/15 text-amber-400" style={{ padding: "8px 12px", fontSize: 13, margin: 0 }}>
-            {t("adminManage.queue.arrErrors", {
-              list: report.errors.map((e) => arrInstanceLabel(e.service, instanceName(e.service, e.instance), e.instance)).join(", "),
-            })}
-          </p>
+          <div role="status" className="rounded-md bg-amber-500/15 text-amber-400" style={{ padding: "8px 12px", fontSize: 13 }}>
+            <p className="m-0">
+              {t("adminManage.queue.arrErrors", {
+                list: report.errors.map((e) => arrInstanceLabel(e.service, instanceName(e.service, e.instance), e.instance)).join(", "),
+              })}
+            </p>
+            {/* Why, per instance, in the viewer's language — the raw upstream detail stays in the server log. */}
+            <ul className="m-0 p-0" style={{ listStyle: "none", fontSize: 12, marginTop: 2 }}>
+              {report.errors.map((e) => (
+                <li key={`${e.service}:${e.instance}`}>
+                  {t(ARR_ERROR_KIND_KEYS[isArrErrorKind(e.kind) ? e.kind : "other"], {
+                    name: arrInstanceLabel(e.service, instanceName(e.service, e.instance), e.instance),
+                  })}
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
         {notice && (
           <p role="status" className="flex items-center gap-1.5 text-green-400" style={{ fontSize: 13, margin: 0 }}>
@@ -549,6 +631,24 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
             <Switch checked={live} onCheckedChange={setLive} aria-label={t("adminManage.queue.filter.live")} />
             {t("adminManage.queue.filter.live")}
           </label>
+          {titleFilter && (
+            <span
+              className="inline-flex max-w-full min-w-0 items-center gap-1 rounded-full text-xs"
+              style={{ padding: "3px 4px 3px 10px", border: "1px solid var(--ds-accent)", background: "var(--ds-accent-soft)", color: "var(--ds-accent-text)" }}
+            >
+              <span className="min-w-0 truncate">{t("adminManage.queue.filter.onlyTitle", { title: titleFilterLabel })}</span>
+              <button
+                type="button"
+                onClick={clearTitleFilter}
+                aria-label={t("adminManage.queue.filter.clearTitle")}
+                title={t("adminManage.queue.filter.clearTitle")}
+                className="ds-hover-tint inline-flex shrink-0 items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-[var(--ds-accent-ring)]"
+                style={{ width: 20, height: 20 }}
+              >
+                <X style={{ width: 12, height: 12 }} aria-hidden />
+              </button>
+            </span>
+          )}
           <DropdownMenu>
             <DropdownMenuTrigger className={buttonVariants({ variant: "outline", size: "sm" })}>
               <List aria-hidden />
@@ -573,7 +673,18 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
         </div>
 
         {visible.length === 0 ? (
-          report.items.length > 0 ? (
+          titleFilter && titleRows.length === 0 ? (
+            <EmptyState
+              icon={CircleDashed}
+              title={t("adminManage.queue.empty.titleFilterTitle")}
+              description={t("adminManage.queue.empty.titleFilterDescription")}
+              action={
+                <Button size="sm" variant="outline" onClick={clearTitleFilter}>
+                  {t("adminManage.queue.filter.clearTitle")}
+                </Button>
+              }
+            />
+          ) : report.items.length > 0 ? (
             <EmptyState icon={CircleDashed} title={t("adminManage.queue.empty.filteredTitle")} description={t("adminManage.queue.empty.filteredDescription")} />
           ) : (
             <EmptyState icon={CheckCircle2} title={t("adminManage.queue.empty.title")} description={t("adminManage.queue.empty.description")} />
@@ -598,6 +709,7 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
                   const key = rowKey(r);
                   const open = expanded.has(key);
                   const title = r.mediaTitle || r.title;
+                  const arrId = r.arrMediaId;
                   return (
                     <Fragment key={key}>
                       <tr className="hover:bg-zinc-800/20 transition-colors" style={{ borderTop: "1px solid var(--ds-border)" }}>
@@ -642,6 +754,18 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
                         {shownColumns.map((c) => <Fragment key={c.id}>{cell(c.id, r, arrLabel)}</Fragment>)}
                         <td style={{ ...td, textAlign: "right" }}>
                           <div className="flex flex-wrap justify-end gap-1" style={{ minWidth: 150, maxWidth: 240, marginLeft: "auto" }}>
+                            {/* Unknown/unmatched downloads name no title on the instance — nothing to manage. */}
+                            {arrId !== null && (
+                              <Button
+                                size="icon-xs"
+                                variant="ghost"
+                                onClick={() => setManaging({ service: r.service, instance: r.instance, arrId, label: arrLabel })}
+                                title={t("adminArr.manage.button", { name: arrLabel })}
+                                aria-label={t("adminManage.queue.action.manageAria", { title, name: arrLabel })}
+                              >
+                                <Wrench />
+                              </Button>
+                            )}
                             {canImport(r) && (
                               <Button
                                 size="xs"
@@ -890,6 +1014,19 @@ export function DownloadQueue({ configured }: { configured: boolean }) {
       </Dialog>
 
       <QueueImportDialog row={importing} onClose={() => setImporting(null)} onImported={imported} />
+
+      {managing && (
+        <ArrTitleManager
+          open
+          onOpenChange={(o) => { if (!o) setManaging(null); }}
+          service={managing.service}
+          instance={managing.instance}
+          target={{ arrId: managing.arrId }}
+          instanceLabel={managing.label}
+          initialTab={manageTabFor("queue", managing.service)}
+          onRemoved={() => void load()}
+        />
+      )}
     </div>
   );
 }

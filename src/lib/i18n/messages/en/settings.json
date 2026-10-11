@@ -393,8 +393,11 @@
   "settings.featureLabel.integration_webhooks": "Webhook, ntfy & Gotify channels",
   "settings.featureDesc.integration_webhooks": "Send request and issue events to the webhook, ntfy and Gotify channels configured under Settings → Notifications.",
   "settings.nav.notificationAgents": "Webhooks & ntfy",
+  "settings.nav.arrAlerts": "Radarr/Sonarr alerts",
   "settings.section.notificationAgents.title": "Webhook, ntfy & Gotify channels",
   "settings.section.notificationAgents.description": "Forward request, issue and download events to your own services. Each channel picks the events it receives; failed deliveries are retried three times.",
+  "settings.section.arrAlerts.title": "Radarr/Sonarr alerts",
+  "settings.section.arrAlerts.description": "Summonarr checks every Radarr and Sonarr instance on a schedule and sends a low disk, a failed download, or a download that newly needs attention to the channels above that subscribe to those events. The Download Queue link in the admin menu shows how many downloads need attention.",
   "settings.nav.plexWatchlist": "Plex Watchlist",
   "settings.section.plexWatchlist.title": "Plex Watchlist",
   "settings.section.plexWatchlist.description": "How watchlist auto-request reads Plex watchlists. A user's own Plex sign-in is always used when there is one; these switches add your Plex server owner's account as a second way in.",
@@ -420,5 +423,7 @@
   "settings.cron.job.trakt.name": "Trakt Sync",
   "settings.cron.job.trakt.description": "Request new titles from connected users' Trakt watchlists and import their Trakt watch history for For You (needs a Trakt client secret)",
   "settings.cron.job.upstreamWatch.name": "Server Watch History",
-  "settings.cron.job.upstreamWatch.description": "Read each Plex and Jellyfin server's own watch records, so a title watched before Summonarr was installed (or while it was down) is never reported as unwatched"
+  "settings.cron.job.upstreamWatch.description": "Read each Plex and Jellyfin server's own watch records, so a title watched before Summonarr was installed (or while it was down) is never reported as unwatched",
+  "settings.cron.job.arrWatch.name": "Radarr/Sonarr Monitor",
+  "settings.cron.job.arrWatch.description": "Check every Radarr and Sonarr instance for low disk space, failed downloads and downloads that need attention, and alert the notification channels that subscribe to them"
 }

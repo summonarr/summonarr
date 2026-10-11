@@ -6,7 +6,11 @@ import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { issueReleaseHandles, redeemReleaseHandle } from "@/lib/release-handles";
+import { ArrResponseError } from "@/lib/arr";
+import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
+import { grabRefusalResponse } from "@/lib/release-grab";
+import { claimReleaseHandle, forgetReleaseHandle, issueReleaseHandles, releaseReleaseHandle } from "@/lib/release-handles";
+import { answerOf, releaseSearchJobResponse, runningReleaseSearchJob, startReleaseSearchJob } from "@/lib/release-search-jobs";
 
 const SEARCH_LIMIT_PER_MIN = 20;
 const HANDLE_RE = /^[0-9a-f]{32}$/;
@@ -21,10 +25,17 @@ const HANDLE_RE = /^[0-9a-f]{32}$/;
 //       → { releases }: the same projected list as the request "Pick release"
 //       (no indexer download URL), each `guid` replaced by an opaque handle
 //       bound to this title, instance and scope (release-handles.ts).
+//       With `&async=1` → 202 { job } at once and the search runs in the
+//       background (release-search-jobs.ts — a proxy cuts a request held for
+//       the minute or two indexers take); GET ?job=<id> answers 202 while it
+//       runs, then the search's own answer, 404 once the job is gone.
 //   POST { service, instance, id, release: <handle>, season? | episodeId? } —
 //       grab it. 410 when the handle is unknown, expired, or from another
-//       search. Audited ARR_RELEASE_GRAB after the arr accepted it; the guid
-//       is never recorded.
+//       search — or when the arr's own 30-minute search cache no longer has
+//       the release; 409 with the arr's reason when the indexer or download
+//       client refused it. The handle is spent on success. Audited
+//       ARR_RELEASE_GRAB (with the release name) after the arr accepted it;
+//       the guid is never recorded.
 function scopeOf(target: ArrTitleTarget, rawSeason: unknown, rawEpisode: unknown): ReleaseScope | "invalid" {
   const hasSeason = rawSeason !== undefined && rawSeason !== null && rawSeason !== "";
   const hasEpisode = rawEpisode !== undefined && rawEpisode !== null && rawEpisode !== "";
@@ -44,19 +55,31 @@ const handleScope = (target: ArrTitleTarget, scope: ReleaseScope) =>
 export const GET = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const q = req.nextUrl.searchParams;
+  const job = q.get("job");
+  if (job !== null) return releaseSearchJobResponse(session.user.id, job, t);
   const target = await arrTitleGate(q.get("service"), q.get("instance"), q.get("id"), t);
   if (target instanceof NextResponse) return target;
   const scope = scopeOf(target, q.get("season"), q.get("episodeId"));
   if (scope === "invalid") return NextResponse.json({ error: t("apiAdmin.arr.releaseScopeInvalid") }, { status: 400 });
+  const key = handleScope(target, scope);
+  const background = q.get("async") === "1";
+  // Joining a search already running costs no indexer hit, so no rate token.
+  const running = background ? runningReleaseSearchJob(session.user.id, key) : null;
+  if (running) return NextResponse.json({ job: running }, { status: 202 });
   if (!checkRateLimit(`arr-title-releases:${session.user.id}`, SEARCH_LIMIT_PER_MIN, 60_000)) {
     return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
   }
-  try {
-    const releases = await searchTitleReleases(target.service, target.instance, target.arrId, scope);
-    return NextResponse.json({ releases: issueReleaseHandles(handleScope(target, scope), releases) });
-  } catch (err) {
-    return arrFailure(err, target, t, "release search");
-  }
+  const search = async (): Promise<NextResponse> => {
+    try {
+      const releases = await searchTitleReleases(target.service, target.instance, target.arrId, scope);
+      return NextResponse.json({ releases: issueReleaseHandles(key, releases) });
+    } catch (err) {
+      return arrFailure(err, target, t, "release search");
+    }
+  };
+  if (!background) return search();
+  const { jobId } = startReleaseSearchJob(session.user.id, key, async () => answerOf(await search()));
+  return NextResponse.json({ job: jobId }, { status: 202 });
 });
 
 export const POST = withAdmin(async (req, _ctx, session) => {
@@ -72,13 +95,21 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   }
   const scope = scopeOf(target, body.season, body.episodeId);
   if (scope === "invalid") return NextResponse.json({ error: t("apiAdmin.arr.releaseScopeInvalid") }, { status: 400 });
-  const picked = redeemReleaseHandle(handleScope(target, scope), handle);
-  if (!picked) return NextResponse.json({ error: t("apiUser.requests.releases.handleExpired") }, { status: 410 });
+  const picked = claimReleaseHandle(handleScope(target, scope), handle);
+  if (picked === "unknown") return NextResponse.json({ error: t("apiUser.requests.releases.handleExpired") }, { status: 410 });
+  if (picked === "busy") return NextResponse.json({ error: t("apiUser.requests.releases.grabInProgress") }, { status: 409 });
   try {
     await grabTitleRelease(target.service, target.instance, target.arrId, picked, scope);
   } catch (err) {
+    // The arr answered (it refused): the release may be tried again. No answer
+    // (a timeout, the network): it may well have taken it — never send it twice.
+    if (err instanceof ArrResponseError) releaseReleaseHandle(handle);
+    else forgetReleaseHandle(handle);
+    const refused = grabRefusalResponse(err, ARR_SERVICE_LABEL[target.service], t);
+    if (refused) return refused;
     return arrFailure(err, target, t, "release grab");
   }
+  forgetReleaseHandle(handle);
   void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email ?? null,
@@ -89,6 +120,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       instance: target.instance,
       arrId: target.arrId,
       indexerId: picked.indexerId,
+      release: picked.title,
       source: "title",
       ...(scope && "seasonNumber" in scope ? { season: scope.seasonNumber } : {}),
       ...(scope && "episodeId" in scope ? { episodeId: scope.episodeId } : {}),

@@ -1,5 +1,5 @@
-// Route-level unit tests for all fourteen POST /api/cron/* handlers:
-//   purge-auth-sessions, refresh-upstream-watch, scrub-audit-pii, sync-download-policies,
+// Route-level unit tests for all fifteen POST /api/cron/* handlers:
+//   arr-watch, purge-auth-sessions, refresh-upstream-watch, scrub-audit-pii, sync-download-policies,
 //   sync-plex-watchlists, sync-trakt, trash-diagnostic, trash-sync, warm-activity, warm-library,
 //   warm-list-cache, warm-mdblist, warm-omdb, warm-recommendations
 //
@@ -220,6 +220,7 @@ async function load(name: string, lockId: number | null): Promise<CronRoute> {
 const AL = await import("../src/lib/advisory-lock.ts");
 
 const ROUTES: CronRoute[] = [
+  await load("arr-watch", AL.ARR_WATCH_LOCK_ID),
   await load("purge-auth-sessions", 2001),
   await load("refresh-upstream-watch", AL.UPSTREAM_WATCH_LOCK_ID),
   await load("scrub-audit-pii", 2002),
@@ -259,14 +260,19 @@ beforeEach(() => {
   // refresh-upstream-watch also short-circuits before its lock unless a feature
   // that reads its snapshot is on — pin one on rather than lean on a default.
   settings.set("feature.admin.neverWatched", "true");
+  // arr-watch short-circuits before its lock unless a Radarr/Sonarr instance is
+  // configured. An RFC1918 literal: admin-configured SSRF mode, no DNS; every
+  // read answers the stub's 503.
+  settings.set("radarrUrl", "http://10.0.0.5:7878");
+  settings.set("radarrApiKey", "cron-routes-radarr-key");
   invalidateFeatureFlagCache();
   lockAcquire = () => true;
 });
 
 // ── the matrix itself must not pass vacuously ────────────────────────────────
 
-test("all fourteen cron routes loaded and expose a POST handler", () => {
-  assert.equal(ROUTES.length, 14);
+test("all fifteen cron routes loaded and expose a POST handler", () => {
+  assert.equal(ROUTES.length, 15);
   for (const r of ROUTES) assert.equal(typeof r.POST, "function", `${r.name} has no POST`);
 });
 
@@ -386,7 +392,7 @@ for (const route of LOCKING) {
 // run outlasts its tick. The warm-* routes record inside the work callback and
 // never recorded their skips; these now agree with them. sync-plex-watchlists
 // still answers a plain 200 skip and is recorded — not changed here.
-for (const name of ["trash-sync", "sync-download-policies", "sync-trakt", "refresh-upstream-watch"]) {
+for (const name of ["trash-sync", "sync-download-policies", "sync-trakt", "refresh-upstream-watch", "arr-watch"]) {
   test(`${name}: a BUSY lock writes NO cron:lastRun ledger row`, async () => {
     const route = ROUTES.find((r) => r.name === name)!;
     lockAcquire = () => false;

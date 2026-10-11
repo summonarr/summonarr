@@ -438,8 +438,9 @@ _cron_loop() {
   PLEX_WATCHLIST_NEXT=$((NOW_INIT + 420))
   TRAKT_SYNC_NEXT=$((NOW_INIT + 540))
   UPSTREAM_WATCH_NEXT=$((NOW_INIT + 1020))
+  ARR_WATCH_NEXT=$((NOW_INIT + 660))
 
-  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  Recommendations: ${WARM_RECOMMENDATIONS_INTERVAL:-43200}s  Library: ${WARM_LIBRARY_INTERVAL:-86400}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s  PlexWatchlist: ${PLEX_WATCHLIST_SYNC_INTERVAL:-1800}s  Trakt: ${TRAKT_SYNC_INTERVAL:-1800}s  UpstreamWatch: ${UPSTREAM_WATCH_SYNC_INTERVAL:-86400}s"
+  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  Recommendations: ${WARM_RECOMMENDATIONS_INTERVAL:-43200}s  Library: ${WARM_LIBRARY_INTERVAL:-86400}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s  PlexWatchlist: ${PLEX_WATCHLIST_SYNC_INTERVAL:-1800}s  Trakt: ${TRAKT_SYNC_INTERVAL:-1800}s  UpstreamWatch: ${UPSTREAM_WATCH_SYNC_INTERVAL:-86400}s  ArrWatch: ${ARR_WATCH_INTERVAL:-900}s"
   while true; do
     sleep 60
     NOW=$(date +%s)
@@ -510,6 +511,14 @@ _cron_loop() {
     if [ "$NOW" -ge "$UPSTREAM_WATCH_NEXT" ]; then
       _cron_sync "${UPSTREAM_WATCH_SYNC_URL:-${CRON_BASE}/api/cron/refresh-upstream-watch}" "refresh-upstream-watch" quiet && rc=0 || rc=$?
       UPSTREAM_WATCH_NEXT=$(_cron_next "$rc" "$NOW" "${UPSTREAM_WATCH_SYNC_INTERVAL:-86400}" 86400)
+    fi
+    # The Radarr/Sonarr monitor: low disks, failed downloads, downloads newly
+    # needing attention → the notification channels, plus the Download Queue
+    # nav badge. A no-op until a Radarr or Sonarr instance is configured; quiet
+    # so the every-15-minutes run doesn't log.
+    if [ "$NOW" -ge "$ARR_WATCH_NEXT" ]; then
+      _cron_sync "${ARR_WATCH_URL:-${CRON_BASE}/api/cron/arr-watch}" "arr-watch" quiet && rc=0 || rc=$?
+      ARR_WATCH_NEXT=$(_cron_next "$rc" "$NOW" "${ARR_WATCH_INTERVAL:-900}" 900)
     fi
   done
 }

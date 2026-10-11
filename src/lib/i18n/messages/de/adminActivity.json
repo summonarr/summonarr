@@ -406,7 +406,7 @@
   "adminActivity.transcode.none": "Keine Transkodierungen in diesem Zeitraum.",
   "adminActivity.common.hoursSuffix": "h",
   "adminActivity.trackingOff.title": "Die Erfassung des Wiedergabeverlaufs ist deaktiviert",
-  "adminActivity.trackingOff.description": "Es wird nichts aufgezeichnet, daher hat dieses Dashboard keine Wiedergaben, Sehzeit oder Zuschauer anzuzeigen. Aktiviere die Erfassung unter Einstellungen → Medien → Wiedergabeverlauf, um es zu füllen.",
+  "adminActivity.trackingOff.description": "Es wird nichts aufgezeichnet, daher hat dieses Dashboard keine Wiedergaben, Sehzeit oder Zuschauer anzuzeigen. Aktivieren Sie die Erfassung unter Einstellungen → Medien → Wiedergabeverlauf, um es zu füllen.",
   "adminActivity.trackingOff.cta": "Einstellungen zum Wiedergabeverlauf öffnen",
   "adminActivity.common.hoursShort": "{n} h",
   "adminActivity.detail.openPlay": "Wiedergabe öffnen →"

@@ -77,6 +77,12 @@
   "apiUser.issues.modifiedConcurrently": "O problema foi modificado ao mesmo tempo por outra pessoa. Atualize e tente novamente.",
   "apiUser.issues.notInLibrary": "Este título não está na biblioteca — só é possível relatar problemas de mídia disponível.",
   "apiUser.issues.noteTooLong": "note deve ser um texto com menos de 1000 caracteres",
+  "apiUser.issues.replaceFile.bodyInvalid": "Esperado: uma instância, uma lista de ids de arquivo e, depois: markFailed ou search",
+  "apiUser.issues.replaceFile.notInScope": "Esses arquivos não pertencem mais a este problema — recarregue e tente novamente",
+  "apiUser.issues.replaceFile.notOnInstance": "O {name} não tem este título — ele pode ter sido removido lá, ou a cópia relatada está em outra instância",
+  "apiUser.issues.replaceFile.resolved": "O problema está resolvido — reabra-o antes de substituir os arquivos dele",
+  "apiUser.issues.replaceFile.searchFailed_one": "{count} arquivo excluído, mas o {service} não enfileirou a busca — use Baixar de novo para buscar outra vez",
+  "apiUser.issues.replaceFile.searchFailed_other": "{count} arquivos excluídos, mas o {service} não enfileirou a busca — use Baixar de novo para buscar outra vez",
   "apiUser.issues.resolutionEmpty": "resolution não pode estar vazio",
   "apiUser.issues.resolutionTooLong": "resolution deve ser um texto com menos de 1000 caracteres",
   "apiUser.issues.resolvedBeforeGrab": "O problema está resolvido — reabra-o antes de baixar um lançamento",
@@ -171,5 +177,10 @@
   "apiUser.requests.releases.notInArr": "O {service} ainda não tem este título — reenvie a solicitação primeiro",
   "apiUser.requests.releases.seasonInvalid": "season deve ser um número inteiro",
   "apiUser.requests.releases.releaseRequired": "release deve ser um identificador de uma busca de releases",
-  "apiUser.requests.releases.handleExpired": "Esse resultado da busca expirou — busque de novo"
+  "apiUser.requests.releases.handleExpired": "Esse resultado da busca expirou — busque de novo",
+  "apiUser.requests.releases.cacheExpired": "O {service} não tem mais estes resultados de busca — ele os guarda por 30 minutos, e uma reinicialização os descarta. Busque de novo.",
+  "apiUser.requests.releases.grabRefused": "O {service} não conseguiu capturar esse release: {reason}",
+  "apiUser.requests.releases.jobGone": "Essa busca não está mais disponível — busque de novo.",
+  "apiUser.requests.releases.grabInProgress": "Essa versão já está sendo baixada",
+  "apiUser.requests.arrStatus.invalidStatus": "Só solicitações aprovadas ou disponíveis podem ser verificadas"
 }

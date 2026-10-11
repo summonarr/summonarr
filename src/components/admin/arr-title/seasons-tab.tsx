@@ -6,12 +6,15 @@
 // for either. Episodes load per season on expand
 // (GET /api/admin/arr/title/episodes). Air-date verdicts are judged against
 // the server's time when the list was read, never a clock read here (guardrail 16).
+//
+// Rows are wrapping flex rows, not a fixed-width table: at phone width a
+// table's actions sat off-screen.
 
-import { Fragment, useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Chip } from "@/components/ui/design";
-import { AlertTriangle, ChevronDown, ChevronRight, Loader2, Search, Download } from "@/components/icons";
+import { AlertTriangle, ChevronDown, ChevronRight, Loader2, RefreshCw, Search, Download } from "@/components/icons";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import { episodeCode, queueFormatters } from "@/components/admin/queue-format";
 import type { ArrTitle, TitleEpisode, TitleSeason } from "@/lib/arr-title";
@@ -20,6 +23,13 @@ import { arrApi, titleQuery, type TitleRef } from "./shared";
 export type ReleaseScope = { seasonNumber: number } | { episodeId: number };
 
 type EpisodeList = { loading: boolean; error: string; episodes: TitleEpisode[]; loadedAt: number };
+
+// Sonarr's finale kinds, translated (a literal map — never a built key).
+const FINALE_KEYS: Record<string, string> = {
+  series: "adminArr.calendar.seriesFinale",
+  season: "adminArr.calendar.seasonFinale",
+  midseason: "adminArr.calendar.midseasonFinale",
+};
 
 export function SeasonsTab({
   titleRef,
@@ -30,7 +40,7 @@ export function SeasonsTab({
 }: {
   titleRef: TitleRef;
   title: ArrTitle;
-  /** The series as Sonarr has it after a season flip. */
+  /** The series as Sonarr has it after a season or episode flip. */
   onTitle: (title: ArrTitle) => void;
   /** Queue one title command; resolves once the server answered. */
   runCommand: (body: Record<string, unknown>, done: string) => Promise<void>;
@@ -44,19 +54,27 @@ export function SeasonsTab({
   const [lists, setLists] = useState<Record<number, EpisodeList>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
+  // Per season: only the newest read may write its list — expanding and then
+  // flipping a season starts two reads, and a late stale answer must not win.
+  const listSeq = useRef<Record<number, number>>({});
+  const anime = title.seriesType === "anime";
 
   // Newest season first, specials last — Sonarr's own order.
   const seasons = [...title.seasons].sort((a, b) => (a.seasonNumber === 0 ? 1 : b.seasonNumber === 0 ? -1 : b.seasonNumber - a.seasonNumber));
   const seasonLabel = (n: number) => (n === 0 ? t("adminArr.seasons.specials") : t("adminArr.seasons.season", { number: n }));
 
   async function loadEpisodes(n: number) {
+    const seq = (listSeq.current[n] ?? 0) + 1;
+    listSeq.current[n] = seq;
     setLists((l) => ({ ...l, [n]: { loading: true, error: "", episodes: l[n]?.episodes ?? [], loadedAt: l[n]?.loadedAt ?? 0 } }));
     const res = await arrApi<{ episodes: TitleEpisode[]; now: string }>(`/api/admin/arr/title/episodes?${titleQuery(titleRef, { season: n })}`, undefined, t("adminArr.seasons.episodesFailed"));
+    if (listSeq.current[n] !== seq) return;
     setLists((l) => ({
       ...l,
       [n]: res.ok
         ? { loading: false, error: "", episodes: res.data.episodes, loadedAt: Date.parse(res.data.now) || 0 }
-        : { loading: false, error: res.error, episodes: [], loadedAt: 0 },
+        // A failed re-read keeps the list it had.
+        : { loading: false, error: res.error, episodes: l[n]?.episodes ?? [], loadedAt: l[n]?.loadedAt ?? 0 },
     }));
   }
 
@@ -68,13 +86,14 @@ export function SeasonsTab({
       else next.delete(n);
       return next;
     });
-    if (opening && !lists[n]) void loadEpisodes(n);
+    // A list that failed to load is tried again on the next expand.
+    if (opening && (!lists[n] || lists[n].error)) void loadEpisodes(n);
   }
 
   async function setSeasonMonitored(season: TitleSeason, monitored: boolean) {
     setBusy(`season:${season.seasonNumber}`);
     setError("");
-    const res = await arrApi<{ title: ArrTitle }>(
+    const res = await arrApi<{ title: ArrTitle | null }>(
       "/api/admin/arr/title",
       { method: "PATCH", body: { service: titleRef.service, instance: titleRef.instance, id: titleRef.arrId, seasons: [{ seasonNumber: season.seasonNumber, monitored }] } },
       t("adminArr.settings.saveFailed"),
@@ -84,7 +103,7 @@ export function SeasonsTab({
       setError(res.error);
       return;
     }
-    onTitle(res.data.title);
+    if (res.data.title) onTitle(res.data.title);
     // Sonarr set the season's episodes to match; re-read an open list.
     if (lists[season.seasonNumber]) void loadEpisodes(season.seasonNumber);
   }
@@ -92,7 +111,7 @@ export function SeasonsTab({
   async function setEpisodeMonitored(season: number, ep: TitleEpisode, monitored: boolean) {
     setBusy(`episode:${ep.id}`);
     setError("");
-    const res = await arrApi<{ updated: number }>(
+    const res = await arrApi<{ updated: number; title: ArrTitle | null }>(
       "/api/admin/arr/title/episodes",
       { method: "PATCH", body: { service: titleRef.service, instance: titleRef.instance, id: titleRef.arrId, episodeIds: [ep.id], monitored } },
       t("adminArr.settings.saveFailed"),
@@ -107,6 +126,9 @@ export function SeasonsTab({
       if (!cur) return l;
       return { ...l, [season]: { ...cur, episodes: cur.episodes.map((e) => (e.id === ep.id ? { ...e, monitored } : e)) } };
     });
+    // The counts follow monitoring (unmonitoring the one missing aired episode
+    // is what makes a series read complete) — show Sonarr's new ones.
+    if (res.data.title) onTitle(res.data.title);
   }
 
   async function command(key: string, body: Record<string, unknown>, done: string) {
@@ -119,147 +141,156 @@ export function SeasonsTab({
     if (ep.hasFile) return <Chip tone="approved">{t("adminArr.status.downloaded")}</Chip>;
     const aired = ep.airDateUtc !== null && Date.parse(ep.airDateUtc) <= loadedAt;
     if (!aired) return <Chip>{t("adminArr.status.unaired")}</Chip>;
-    if (!ep.monitored) return <Chip>{t("adminArr.status.unmonitored")}</Chip>;
+    // Sonarr never searches an unmonitored episode, or anything of an unmonitored series.
+    if (!ep.monitored || !title.monitored) return <Chip>{t("adminArr.status.unmonitored")}</Chip>;
     return <Chip tone="declined">{t("adminArr.status.missing")}</Chip>;
   }
 
   if (seasons.length === 0) return <p className="m-0 text-sm text-zinc-500">{t("adminArr.seasons.none")}</p>;
 
   return (
-    <div className="grid gap-3">
+    <div className="grid grid-cols-1 gap-3">
+      {!title.monitored && (
+        <p role="note" className="m-0 flex items-start gap-1.5 rounded-lg px-3 py-2 text-xs text-amber-400" style={{ background: "color-mix(in oklab, var(--ds-warning) 10%, transparent)" }}>
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> {t("adminArr.seasons.seriesUnmonitored")}
+        </p>
+      )}
       {error && (
         <p role="alert" className="m-0 flex items-center gap-1.5 text-xs" style={{ color: "var(--ds-danger)" }}>
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> {error}
         </p>
       )}
-      <div className="overflow-x-auto rounded-lg" style={{ border: "1px solid var(--ds-border)" }}>
-        <table className="w-full text-sm" style={{ minWidth: 560 }}>
-          <tbody>
-            {seasons.map((s, i) => {
-              const open = expanded.has(s.seasonNumber);
-              const list = lists[s.seasonNumber];
-              const complete = s.episodeCount > 0 && s.episodeFileCount >= s.episodeCount;
-              return (
-                <Fragment key={s.seasonNumber}>
-                  <tr style={i > 0 ? { borderTop: "1px solid var(--ds-border)" } : undefined}>
-                    <td className="px-3 py-2.5 align-middle">
-                      <button
-                        type="button"
-                        onClick={() => toggle(s.seasonNumber)}
-                        aria-expanded={open}
-                        className="flex items-center gap-1.5 font-medium text-zinc-100 hover:text-zinc-100"
-                      >
-                        {open ? <ChevronDown className="h-4 w-4 text-zinc-500" /> : <ChevronRight className="h-4 w-4 text-zinc-500" />}
-                        {seasonLabel(s.seasonNumber)}
-                      </button>
-                    </td>
-                    <td className="px-3 py-2.5 align-middle">
-                      <Switch
-                        size="sm"
-                        checked={s.monitored}
-                        loading={busy === `season:${s.seasonNumber}`}
-                        disabled={busy !== null}
-                        onCheckedChange={(v) => void setSeasonMonitored(s, v)}
-                        aria-label={t("adminArr.seasons.monitorSeason", { season: seasonLabel(s.seasonNumber) })}
-                      />
-                    </td>
-                    <td className="px-3 py-2.5 align-middle whitespace-nowrap">
-                      <Chip tone={complete ? "approved" : s.episodeFileCount > 0 ? "pending" : "neutral"}>
-                        {t("adminArr.seasons.files", { have: s.episodeFileCount, count: s.episodeCount })}
-                      </Chip>
-                      {s.totalEpisodeCount > s.episodeCount && (
-                        <span className="ml-2 text-xs text-zinc-500">{t("adminArr.seasons.total", { count: s.totalEpisodeCount })}</span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2.5 align-middle text-xs text-zinc-500 whitespace-nowrap">
-                      {s.sizeOnDisk > 0 ? fmt.size(s.sizeOnDisk) : ""}
-                      {s.nextAiring && <span className="ml-2">{t("adminArr.seasons.nextAiring", { date: day.format(Date.parse(s.nextAiring)) })}</span>}
-                    </td>
-                    <td className="px-3 py-2.5 align-middle">
-                      <div className="flex justify-end gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          disabled={busy !== null}
-                          title={t("adminArr.seasons.searchSeason")}
-                          aria-label={t("adminArr.seasons.searchSeasonAria", { season: seasonLabel(s.seasonNumber) })}
-                          onClick={() => void command(`search:${s.seasonNumber}`, { action: "searchSeason", seasonNumber: s.seasonNumber }, t("adminArr.notice.seasonSearch", { season: seasonLabel(s.seasonNumber) }))}
-                        >
-                          {busy === `search:${s.seasonNumber}` ? <Loader2 className="animate-spin" /> : <Search />}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          disabled={busy !== null}
-                          title={t("adminArr.actions.interactive")}
-                          aria-label={t("adminArr.seasons.interactiveAria", { season: seasonLabel(s.seasonNumber) })}
-                          onClick={() => pickRelease({ seasonNumber: s.seasonNumber }, seasonLabel(s.seasonNumber))}
-                        >
-                          <Download />
-                        </Button>
-                      </div>
-                    </td>
-                  </tr>
-                  {open && (
-                    <tr>
-                      <td colSpan={5} className="px-3 pb-3" style={{ background: "var(--ds-bg-1)" }}>
-                        {!list || (list.loading && list.episodes.length === 0) ? (
-                          <div className="flex items-center gap-2 py-3 text-xs text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> {t("adminArr.common.loading")}</div>
-                        ) : list.error ? (
-                          <p role="alert" className="m-0 py-3 text-xs" style={{ color: "var(--ds-danger)" }}>{list.error}</p>
-                        ) : list.episodes.length === 0 ? (
-                          <p className="m-0 py-3 text-xs text-zinc-500">{t("adminArr.seasons.noEpisodes")}</p>
-                        ) : (
-                          <ul className="m-0 grid list-none gap-0 p-0">
-                            {list.episodes.map((ep) => (
-                              <li key={ep.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2" style={{ borderTop: "1px solid var(--ds-border)" }}>
-                                <Switch
-                                  size="sm"
-                                  checked={ep.monitored}
-                                  loading={busy === `episode:${ep.id}`}
-                                  disabled={busy !== null}
-                                  onCheckedChange={(v) => void setEpisodeMonitored(s.seasonNumber, ep, v)}
-                                  aria-label={t("adminArr.seasons.monitorEpisode", { episode: episodeCode(ep) })}
-                                />
-                                <span className="ds-mono text-xs text-zinc-500">{episodeCode(ep)}</span>
-                                <span className="min-w-0 flex-1 truncate text-sm text-zinc-200" title={ep.title}>{ep.title || "—"}</span>
-                                <span className="text-xs text-zinc-500">{ep.airDateUtc ? day.format(Date.parse(ep.airDateUtc)) : t("adminArr.seasons.tba")}</span>
-                                {episodeChip(ep, list.loadedAt)}
-                                <span className="flex gap-1">
-                                  <Button
-                                    variant="ghost"
-                                    size="icon-xs"
-                                    disabled={busy !== null}
-                                    title={t("adminArr.seasons.searchEpisode")}
-                                    aria-label={t("adminArr.seasons.searchEpisodeAria", { episode: episodeCode(ep) })}
-                                    onClick={() => void command(`ep:${ep.id}`, { action: "searchEpisodes", episodeIds: [ep.id] }, t("adminArr.notice.episodeSearch", { episode: episodeCode(ep) }))}
-                                  >
-                                    {busy === `ep:${ep.id}` ? <Loader2 className="animate-spin" /> : <Search />}
-                                  </Button>
-                                  <Button
-                                    variant="ghost"
-                                    size="icon-xs"
-                                    disabled={busy !== null}
-                                    title={t("adminArr.actions.interactive")}
-                                    aria-label={t("adminArr.seasons.interactiveEpisodeAria", { episode: episodeCode(ep) })}
-                                    onClick={() => pickRelease({ episodeId: ep.id }, `${episodeCode(ep)} · ${ep.title}`)}
-                                  >
-                                    <Download />
-                                  </Button>
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </td>
-                    </tr>
+      <ul className="m-0 list-none overflow-hidden rounded-lg p-0" style={{ border: "1px solid var(--ds-border)" }}>
+        {seasons.map((s, i) => {
+          const open = expanded.has(s.seasonNumber);
+          const list = lists[s.seasonNumber];
+          const complete = s.episodeCount > 0 && s.episodeFileCount >= s.episodeCount;
+          const searchHint = !title.monitored || !s.monitored ? t("adminArr.seasons.searchUnmonitored") : t("adminArr.seasons.searchSeason");
+          return (
+            <li key={s.seasonNumber} style={i > 0 ? { borderTop: "1px solid var(--ds-border)" } : undefined}>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2.5">
+                <button
+                  type="button"
+                  onClick={() => toggle(s.seasonNumber)}
+                  aria-expanded={open}
+                  className="flex min-w-[7rem] items-center gap-1.5 font-medium text-zinc-100 hover:text-zinc-100"
+                >
+                  {open ? <ChevronDown className="h-4 w-4 text-zinc-500" /> : <ChevronRight className="h-4 w-4 text-zinc-500" />}
+                  {seasonLabel(s.seasonNumber)}
+                </button>
+                <Switch
+                  size="sm"
+                  checked={s.monitored}
+                  loading={busy === `season:${s.seasonNumber}`}
+                  disabled={busy !== null}
+                  onCheckedChange={(v) => void setSeasonMonitored(s, v)}
+                  aria-label={t("adminArr.seasons.monitorSeason", { season: seasonLabel(s.seasonNumber) })}
+                />
+                <span className="whitespace-nowrap">
+                  <Chip tone={complete ? "approved" : s.episodeFileCount > 0 ? "pending" : "neutral"}>
+                    {t("adminArr.seasons.files", { have: s.episodeFileCount, count: s.episodeCount })}
+                  </Chip>
+                  {s.totalEpisodeCount > s.episodeCount && (
+                    <span className="ml-2 text-xs text-zinc-500">{t("adminArr.seasons.total", { count: s.totalEpisodeCount })}</span>
                   )}
-                </Fragment>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+                </span>
+                <span className="text-xs text-zinc-500 whitespace-nowrap">
+                  {s.sizeOnDisk > 0 ? fmt.size(s.sizeOnDisk) : ""}
+                  {s.nextAiring && <span className="ml-2">{t("adminArr.seasons.nextAiring", { date: day.format(Date.parse(s.nextAiring)) })}</span>}
+                </span>
+                <span className="ml-auto flex gap-1">
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    disabled={busy !== null}
+                    title={searchHint}
+                    aria-label={t("adminArr.seasons.searchSeasonAria", { season: seasonLabel(s.seasonNumber) })}
+                    onClick={() => void command(`search:${s.seasonNumber}`, { action: "searchSeason", seasonNumber: s.seasonNumber }, t("adminArr.notice.seasonSearch", { season: seasonLabel(s.seasonNumber) }))}
+                  >
+                    {busy === `search:${s.seasonNumber}` ? <Loader2 className="animate-spin" /> : <Search />}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    disabled={busy !== null}
+                    title={t("adminArr.actions.interactive")}
+                    aria-label={t("adminArr.seasons.interactiveAria", { season: seasonLabel(s.seasonNumber) })}
+                    onClick={() => pickRelease({ seasonNumber: s.seasonNumber }, seasonLabel(s.seasonNumber))}
+                  >
+                    <Download />
+                  </Button>
+                </span>
+              </div>
+              {open && (
+                <div className="px-3 pb-3" style={{ background: "var(--ds-bg-1)" }}>
+                  {!list || (list.loading && list.episodes.length === 0) ? (
+                    <div className="flex items-center gap-2 py-3 text-xs text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> {t("adminArr.common.loading")}</div>
+                  ) : list.error && list.episodes.length === 0 ? (
+                    <p role="alert" className="m-0 flex flex-wrap items-center gap-2 py-3 text-xs" style={{ color: "var(--ds-danger)" }}>
+                      {list.error}
+                      <Button variant="ghost" size="xs" onClick={() => void loadEpisodes(s.seasonNumber)}>
+                        <RefreshCw /> {t("adminArr.common.retry")}
+                      </Button>
+                    </p>
+                  ) : list.episodes.length === 0 ? (
+                    <p className="m-0 py-3 text-xs text-zinc-500">{t("adminArr.seasons.noEpisodes")}</p>
+                  ) : (
+                    // grid-cols-1 (minmax(0, 1fr)): an implicit grid column sizes to the
+                    // rows' max-content and pushed the episode rows past the dialog edge.
+                    <ul className="m-0 grid grid-cols-1 list-none gap-0 p-0">
+                      {list.error && <li role="alert" className="py-2 text-xs" style={{ color: "var(--ds-danger)" }}>{list.error}</li>}
+                      {list.episodes.map((ep) => (
+                        <li key={ep.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 py-2" style={{ borderTop: "1px solid var(--ds-border)" }}>
+                          <Switch
+                            size="sm"
+                            checked={ep.monitored}
+                            loading={busy === `episode:${ep.id}`}
+                            disabled={busy !== null}
+                            onCheckedChange={(v) => void setEpisodeMonitored(s.seasonNumber, ep, v)}
+                            aria-label={t("adminArr.seasons.monitorEpisode", { episode: episodeCode(ep) })}
+                          />
+                          <span className="ds-mono text-xs text-zinc-500">
+                            {episodeCode(ep)}
+                            {/* Anime is named and matched by absolute number — Sonarr leads with it. */}
+                            {anime && ep.absoluteEpisodeNumber !== null && ` (#${ep.absoluteEpisodeNumber})`}
+                          </span>
+                          {/* A floor on the title's width makes a narrow row wrap rather than squeeze it to nothing. */}
+                          <span className="min-w-[8rem] flex-1 truncate text-sm text-zinc-200" title={ep.title}>{ep.title || "—"}</span>
+                          <span className="whitespace-nowrap text-xs text-zinc-500">{ep.airDateUtc ? day.format(Date.parse(ep.airDateUtc)) : t("adminArr.seasons.tba")}</span>
+                          {ep.finaleType && FINALE_KEYS[ep.finaleType] && <Chip tone="accent">{t(FINALE_KEYS[ep.finaleType])}</Chip>}
+                          {episodeChip(ep, list.loadedAt)}
+                          <span className="flex gap-1">
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              disabled={busy !== null}
+                              title={t("adminArr.seasons.searchEpisode")}
+                              aria-label={t("adminArr.seasons.searchEpisodeAria", { episode: episodeCode(ep) })}
+                              onClick={() => void command(`ep:${ep.id}`, { action: "searchEpisodes", episodeIds: [ep.id] }, t("adminArr.notice.episodeSearch", { episode: episodeCode(ep) }))}
+                            >
+                              {busy === `ep:${ep.id}` ? <Loader2 className="animate-spin" /> : <Search />}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              disabled={busy !== null}
+                              title={t("adminArr.actions.interactive")}
+                              aria-label={t("adminArr.seasons.interactiveEpisodeAria", { episode: episodeCode(ep) })}
+                              onClick={() => pickRelease({ episodeId: ep.id }, `${episodeCode(ep)} · ${ep.title}`)}
+                            >
+                              <Download />
+                            </Button>
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }

@@ -6,8 +6,13 @@
 // folders and "monitor new seasons". Every choice comes from the instance
 // (the server refuses anything else); only the changed fields are sent
 // (PATCH /api/admin/arr/title).
+//
+// The form holds the admin's EDITS, not a copy of the title: a field they
+// haven't touched always shows the title as the arr last reported it, so a
+// background re-read (after a refresh, Radarr unmonitoring a movie whose file
+// vanished) can never be saved back over the arr as if the admin had chosen it.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { StyledSelect } from "@/components/ui/styled-select";
 import { Switch } from "@/components/ui/switch";
@@ -21,7 +26,6 @@ type Draft = {
   monitored: boolean;
   qualityProfileId: number | null;
   rootFolderPath: string | null;
-  moveFiles: boolean;
   tags: number[];
   minimumAvailability: string | null;
   seriesType: string | null;
@@ -52,7 +56,6 @@ function draftOf(title: ArrTitle): Draft {
     monitored: title.monitored,
     qualityProfileId: title.qualityProfileId,
     rootFolderPath: title.rootFolderPath,
-    moveFiles: true,
     tags: [...title.tags].sort((a, b) => a - b),
     minimumAvailability: title.minimumAvailability,
     seriesType: title.seriesType,
@@ -82,13 +85,18 @@ export function SettingsTab({
   rootFolders,
   tags,
   onSaved,
+  onDirtyChange,
 }: {
   titleRef: TitleRef;
   title: ArrTitle;
-  qualityProfiles: Choice[];
-  rootFolders: RootFolderChoice[];
-  tags: Choice[];
-  onSaved: (title: ArrTitle) => void;
+  /** null: the instance didn't answer that list — the field is disabled. */
+  qualityProfiles: Choice[] | null;
+  rootFolders: RootFolderChoice[] | null;
+  tags: Choice[] | null;
+  /** The title as the arr now has it — null when the save landed but its re-read failed. */
+  onSaved: (title: ArrTitle | null) => void;
+  /** Tells the manager there are unsaved edits (closing asks first). */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const t = useT();
   const locale = useLocale();
@@ -96,21 +104,22 @@ export function SettingsTab({
   // A release date is a calendar date (Radarr stores midnight UTC) — shown as that date, in UTC.
   const releaseDay = useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeZone: "UTC" }), [locale]);
   const base = useMemo(() => draftOf(title), [title]);
-  const [draft, setDraft] = useState<Draft>(base);
+  const [edits, setEdits] = useState<Partial<Draft>>({});
+  const draft: Draft = { ...base, ...edits };
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [saved, setSaved] = useState(false);
+  const [saved, setSaved] = useState<"plain" | "moving" | null>(null);
+  // A root-folder change waits here for the admin's explicit choice about the files.
+  const [confirmMove, setConfirmMove] = useState(false);
   const isMovie = titleRef.service === "radarr";
+  const service = isMovie ? "Radarr" : "Sonarr";
 
   // What changed, as the PATCH body's fields.
-  const changes = useMemo(() => {
+  const changes = (() => {
     const c: Record<string, unknown> = {};
     if (draft.monitored !== base.monitored) c.monitored = draft.monitored;
     if (draft.qualityProfileId !== base.qualityProfileId && draft.qualityProfileId !== null) c.qualityProfileId = draft.qualityProfileId;
-    if (draft.rootFolderPath !== base.rootFolderPath && draft.rootFolderPath !== null) {
-      c.rootFolderPath = draft.rootFolderPath;
-      c.moveFiles = draft.moveFiles;
-    }
+    if (draft.rootFolderPath !== base.rootFolderPath && draft.rootFolderPath !== null) c.rootFolderPath = draft.rootFolderPath;
     if (!sameTags(draft.tags, base.tags)) c.tags = draft.tags;
     if (isMovie) {
       if (draft.minimumAvailability !== base.minimumAvailability && draft.minimumAvailability !== null) c.minimumAvailability = draft.minimumAvailability;
@@ -120,21 +129,36 @@ export function SettingsTab({
       if (draft.monitorNewItems !== base.monitorNewItems && draft.monitorNewItems !== null) c.monitorNewItems = draft.monitorNewItems;
     }
     return c;
-  }, [draft, base, isMovie]);
+  })();
   const dirty = Object.keys(changes).length > 0;
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   function update(patch: Partial<Draft>) {
-    setDraft((d) => ({ ...d, ...patch }));
-    setSaved(false);
+    setEdits((e) => ({ ...e, ...patch }));
+    setSaved(null);
     setError("");
+    setConfirmMove(false);
   }
 
-  async function save() {
+  async function save(moveFiles?: boolean) {
+    // Moving a title's files is the one irreversible part of an edit: it gets
+    // its own explicit choice, nothing pre-selected (Radarr's/Sonarr's own UI
+    // asks the same question).
+    if (changes.rootFolderPath !== undefined && moveFiles === undefined) {
+      setConfirmMove(true);
+      return;
+    }
+    setConfirmMove(false);
     setSaving(true);
     setError("");
-    const res = await arrApi<{ title: ArrTitle }>(
+    const res = await arrApi<{ title: ArrTitle | null }>(
       "/api/admin/arr/title",
-      { method: "PATCH", body: { service: titleRef.service, instance: titleRef.instance, id: titleRef.arrId, ...changes } },
+      {
+        method: "PATCH",
+        body: { service: titleRef.service, instance: titleRef.instance, id: titleRef.arrId, ...changes, ...(moveFiles !== undefined ? { moveFiles } : {}) },
+      },
       t("adminArr.settings.saveFailed"),
     );
     setSaving(false);
@@ -142,20 +166,26 @@ export function SettingsTab({
       setError(res.error);
       return;
     }
-    setDraft(draftOf(res.data.title));
-    setSaved(true);
+    setEdits({});
+    setSaved(moveFiles ? "moving" : "plain");
     onSaved(res.data.title);
   }
 
   // The current values stay selectable even when the instance's list lacks them
   // (an old profile, a root folder spelled without its trailing slash).
-  const rootOptions = rootFolders.some((r) => r.path === title.rootFolderPath) || !title.rootFolderPath
-    ? rootFolders
-    : [{ path: title.rootFolderPath, freeSpace: null, accessible: true }, ...rootFolders];
-  const rootChanged = draft.rootFolderPath !== base.rootFolderPath;
+  const rootList = rootFolders ?? [];
+  const rootOptions = rootList.some((r) => r.path === title.rootFolderPath) || !title.rootFolderPath
+    ? rootList
+    : [{ path: title.rootFolderPath, freeSpace: null, accessible: true }, ...rootList];
+  const target = rootList.find((r) => r.path === draft.rootFolderPath) ?? null;
+  // The files won't fit where they're going — a warning, never a block: the
+  // arr may count free space differently (same disk, hardlinks).
+  const noSpace = target?.freeSpace != null && title.sizeOnDisk > target.freeSpace;
+  const unavailable = <p className="m-0 mt-1 text-xs text-amber-400">{t("adminArr.settings.listUnavailable", { service })}</p>;
 
   return (
-    <div className="grid gap-5">
+    // Disabled while saving: a change made mid-save would be cleared by its answer.
+    <fieldset disabled={saving} className="m-0 grid gap-5 border-0 p-0">
       <Field label={t("adminArr.settings.monitored")} hint={isMovie ? t("adminArr.settings.monitoredHintMovie") : t("adminArr.settings.monitoredHintSeries")}>
         <Switch checked={draft.monitored} onCheckedChange={(v) => update({ monitored: v })} aria-label={t("adminArr.settings.monitored")} />
       </Field>
@@ -167,10 +197,12 @@ export function SettingsTab({
           onChange={(e) => update({ qualityProfileId: Number(e.target.value) })}
           aria-label={t("adminArr.settings.qualityProfile")}
           className="sm:max-w-sm"
+          disabled={qualityProfiles === null}
         >
-          {draft.qualityProfileId === null && <option value="">—</option>}
-          {qualityProfiles.map((p) => <option key={p.id} value={String(p.id)}>{p.name}</option>)}
+          {(draft.qualityProfileId === null || qualityProfiles === null) && <option value={draft.qualityProfileId === null ? "" : String(draft.qualityProfileId)}>—</option>}
+          {(qualityProfiles ?? []).map((p) => <option key={p.id} value={String(p.id)}>{p.name}</option>)}
         </StyledSelect>
+        {qualityProfiles === null && unavailable}
       </Field>
 
       {isMovie ? (
@@ -230,6 +262,7 @@ export function SettingsTab({
           onChange={(e) => update({ rootFolderPath: e.target.value })}
           aria-label={t("adminArr.settings.rootFolder")}
           className="sm:max-w-md"
+          disabled={rootFolders === null}
         >
           {draft.rootFolderPath === null && <option value="">—</option>}
           {rootOptions.map((r) => (
@@ -238,26 +271,13 @@ export function SettingsTab({
             </option>
           ))}
         </StyledSelect>
-        {rootChanged && (
-          <label className="mt-2 flex items-start gap-2 text-sm text-zinc-300">
-            <input
-              type="checkbox"
-              checked={draft.moveFiles}
-              onChange={(e) => update({ moveFiles: e.target.checked })}
-              className="mt-0.5 accent-[var(--ds-accent)]"
-            />
-            <span>
-              {t("adminArr.settings.moveFiles")}
-              <span className="block text-xs text-zinc-500">
-                {draft.moveFiles ? t("adminArr.settings.moveFilesOn") : t("adminArr.settings.moveFilesOff")}
-              </span>
-            </span>
-          </label>
-        )}
+        {rootFolders === null && unavailable}
       </Field>
 
       <Field label={t("adminArr.settings.tags")}>
-        {tags.length === 0 ? (
+        {tags === null ? (
+          unavailable
+        ) : tags.length === 0 ? (
           <span className="text-xs text-zinc-500">{t("adminArr.settings.noTags")}</span>
         ) : (
           <div className="flex flex-wrap gap-1.5">
@@ -298,6 +318,36 @@ export function SettingsTab({
         </Field>
       )}
 
+      {confirmMove && draft.rootFolderPath !== null && (
+        <div role="alertdialog" aria-label={t("adminArr.settings.moveConfirmTitle", { path: draft.rootFolderPath })} className="grid gap-3 rounded-lg p-3" style={{ border: "1px solid var(--ds-warning)", background: "color-mix(in oklab, var(--ds-warning) 10%, transparent)" }}>
+          <div className="grid gap-1 text-sm">
+            <span className="font-medium text-zinc-100">{t("adminArr.settings.moveConfirmTitle", { path: draft.rootFolderPath })}</span>
+            <span className="text-xs text-zinc-400">
+              {t("adminArr.settings.moveConfirmBody", { current: title.path ?? base.rootFolderPath ?? "—", size: fmt.size(title.sizeOnDisk) })}
+            </span>
+            {noSpace && target && (
+              <span className="flex items-center gap-1.5 text-xs text-amber-400">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                {t("adminArr.settings.moveNoSpace", { path: target.path, free: fmt.size(target.freeSpace ?? 0), size: fmt.size(title.sizeOnDisk) })}
+              </span>
+            )}
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <button type="button" onClick={() => void save(true)} disabled={saving} className="ds-hover-tint rounded-md px-3 py-2 text-left text-sm" style={{ border: "1px solid var(--ds-border)", background: "var(--ds-bg-2)" }}>
+              <span className="block text-zinc-100">{t("adminArr.settings.moveFiles")}</span>
+              <span className="block text-xs text-zinc-500">{t("adminArr.settings.moveFilesOn")}</span>
+            </button>
+            <button type="button" onClick={() => void save(false)} disabled={saving} className="ds-hover-tint rounded-md px-3 py-2 text-left text-sm" style={{ border: "1px solid var(--ds-border)", background: "var(--ds-bg-2)" }}>
+              <span className="block text-zinc-100">{t("adminArr.settings.moveNo")}</span>
+              <span className="block text-xs text-zinc-500">{t("adminArr.settings.moveFilesOff")}</span>
+            </button>
+          </div>
+          <div>
+            <Button variant="ghost" size="sm" onClick={() => setConfirmMove(false)} disabled={saving}>{t("adminArr.common.cancel")}</Button>
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center justify-end gap-3 border-t pt-4" style={{ borderColor: "var(--ds-border)" }}>
         {error && (
           <p role="alert" className="m-0 mr-auto flex items-center gap-1.5 text-xs" style={{ color: "var(--ds-danger)" }}>
@@ -306,17 +356,17 @@ export function SettingsTab({
         )}
         {saved && !dirty && (
           <p className="m-0 mr-auto flex items-center gap-1.5 text-xs text-green-400">
-            <Check className="h-3.5 w-3.5" /> {t("adminArr.settings.saved")}
+            <Check className="h-3.5 w-3.5 shrink-0" /> {saved === "moving" ? t("adminArr.settings.moveStarted", { service }) : t("adminArr.settings.saved")}
           </p>
         )}
-        <Button variant="ghost" size="sm" onClick={() => update(base)} disabled={!dirty || saving}>
+        <Button variant="ghost" size="sm" onClick={() => { setEdits({}); setConfirmMove(false); setError(""); }} disabled={!dirty || saving}>
           {t("adminArr.settings.reset")}
         </Button>
-        <Button size="sm" onClick={() => void save()} disabled={!dirty || saving}>
+        <Button size="sm" onClick={() => void save()} disabled={!dirty || saving || confirmMove}>
           {saving && <Loader2 className="animate-spin" />}
           {t("adminArr.settings.save")}
         </Button>
       </div>
-    </div>
+    </fieldset>
   );
 }

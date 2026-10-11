@@ -18,6 +18,7 @@ import { AlertTriangle, CheckCircle2, ExternalLink, Link, Loader2, RefreshCw, XC
 import { withBasePath } from "@/lib/base-path";
 import { useT } from "@/components/i18n/i18n-provider";
 import type { ArrHealthCheck, WebhookState } from "@/lib/arr-health";
+import { ARR_ERROR_KIND_KEYS, isArrErrorKind, type ArrErrorKind } from "@/lib/arr-error-kind";
 
 type Service = "radarr" | "sonarr";
 
@@ -27,6 +28,8 @@ interface InstanceHealth {
   name: string;
   reachable: boolean;
   error: string | null;
+  /** Why it failed, for the translated line; the raw `error` is the fallback. */
+  errorKind?: ArrErrorKind | null;
   version: string | null;
   checks: ArrHealthCheck[];
   webhook: { state: WebhookState | "unknown"; missingEvents: string[] };
@@ -185,7 +188,9 @@ export function ArrHealthPanel({ variant }: { variant: "full" | "webhooks" }) {
               </div>
 
               {inst.error && (
-                <p className="m-0 text-xs" style={{ color: inst.reachable ? "var(--ds-fg-subtle)" : "var(--ds-danger)" }}>{inst.error}</p>
+                <p className="m-0 text-xs" style={{ color: inst.reachable ? "var(--ds-fg-subtle)" : "var(--ds-danger)" }}>
+                  {isArrErrorKind(inst.errorKind) ? t(ARR_ERROR_KIND_KEYS[inst.errorKind], { name: label }) : inst.error}
+                </p>
               )}
 
               {wh === "eventsMissing" && inst.webhook.missingEvents.length > 0 && (

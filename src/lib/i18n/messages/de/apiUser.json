@@ -77,6 +77,12 @@
   "apiUser.issues.modifiedConcurrently": "Das Problem wurde gleichzeitig geändert. Aktualisieren Sie die Seite und versuchen Sie es erneut.",
   "apiUser.issues.notInLibrary": "Dieser Titel ist nicht in der Bibliothek – Probleme können nur für verfügbare Medien gemeldet werden.",
   "apiUser.issues.noteTooLong": "note muss eine Zeichenkette mit weniger als 1000 Zeichen sein",
+  "apiUser.issues.replaceFile.bodyInvalid": "Erwartet: eine Instanz, eine Liste von Datei-IDs und dann: markFailed oder search",
+  "apiUser.issues.replaceFile.notInScope": "Diese Dateien gehören nicht mehr zu diesem Problem – neu laden und erneut versuchen",
+  "apiUser.issues.replaceFile.notOnInstance": "{name} hat diesen Titel nicht – er wurde dort möglicherweise entfernt, oder die gemeldete Kopie liegt auf einer anderen Instanz",
+  "apiUser.issues.replaceFile.resolved": "Das Problem ist gelöst – öffnen Sie es erneut, bevor Sie seine Dateien ersetzen",
+  "apiUser.issues.replaceFile.searchFailed_one": "{count} Datei gelöscht, aber {service} hat die Suche nicht eingereiht – suchen Sie mit „Neu suchen“ erneut",
+  "apiUser.issues.replaceFile.searchFailed_other": "{count} Dateien gelöscht, aber {service} hat die Suche nicht eingereiht – suchen Sie mit „Neu suchen“ erneut",
   "apiUser.issues.resolutionEmpty": "resolution darf nicht leer sein",
   "apiUser.issues.resolutionTooLong": "resolution muss eine Zeichenkette mit weniger als 1000 Zeichen sein",
   "apiUser.issues.resolvedBeforeGrab": "Das Problem ist gelöst – öffnen Sie es erneut, bevor Sie ein Release herunterladen",
@@ -168,8 +174,13 @@
   "apiUser.playHistory.exportTruncated": "Export bei {max} Zeilen abgeschnitten – startDate/endDate eingrenzen und erneut exportieren",
   "apiUser.common.tmdbIdOutOfRange": "tmdbId liegt außerhalb des gültigen Bereichs",
   "apiUser.requests.releases.invalidStatus": "Nur genehmigte oder verfügbare Anfragen können ein Release wählen",
-  "apiUser.requests.releases.notInArr": "{service} hat diesen Titel noch nicht – sende die Anfrage zuerst erneut",
+  "apiUser.requests.releases.notInArr": "{service} hat diesen Titel noch nicht – senden Sie die Anfrage zuerst erneut",
   "apiUser.requests.releases.seasonInvalid": "season muss eine ganze Zahl sein",
   "apiUser.requests.releases.releaseRequired": "release muss eine Kennung aus einer Release-Suche sein",
-  "apiUser.requests.releases.handleExpired": "Dieses Suchergebnis ist abgelaufen – suche erneut"
+  "apiUser.requests.releases.handleExpired": "Dieses Suchergebnis ist abgelaufen – suchen Sie erneut",
+  "apiUser.requests.releases.cacheExpired": "{service} hat diese Suchergebnisse nicht mehr – es behält sie 30 Minuten, ein Neustart verwirft sie. Bitte erneut suchen.",
+  "apiUser.requests.releases.grabRefused": "{service} konnte dieses Release nicht holen: {reason}",
+  "apiUser.requests.releases.jobGone": "Diese Suche ist nicht mehr verfügbar – bitte erneut suchen.",
+  "apiUser.requests.releases.grabInProgress": "Dieses Release wird bereits geholt",
+  "apiUser.requests.arrStatus.invalidStatus": "Nur genehmigte oder verfügbare Anfragen können geprüft werden"
 }

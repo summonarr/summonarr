@@ -2,7 +2,9 @@
 // the chosen service (guardrail 32 — every instance, addressed by its slug),
 // judged by the pure rules in arr-missing.ts. Every call goes through
 // arrFetch (guardrail 5). Nothing is cached and nothing is written.
-import { arrErrorMessage, arrFetch, getArrCfg, type ArrCfg } from "./arr";
+import { arrErrorKind, arrErrorMessage, arrFetch, getArrCfg, type ArrCfg } from "./arr";
+import { commandIdsOf, postArrCommand } from "./arr-admin";
+import type { ArrErrorKind } from "./arr-error-kind";
 import { getSyncableArrInstances } from "./arr-instance-registry";
 import { settleLimit } from "./concurrency";
 import { isFeatureEnabled } from "./features";
@@ -50,7 +52,7 @@ export interface MissingReport<T> {
   enabled: boolean;
   instances: Array<{ slug: string; name: string }>;
   /** Instances whose listing could not be read; their titles are absent, not "complete". */
-  errors: Array<{ instance: string; error: string }>;
+  errors: Array<{ instance: string; error: string; kind: ArrErrorKind }>;
   items: T[];
 }
 
@@ -105,7 +107,7 @@ async function loadReport<T extends { tmdbId: number | null; posterPath: string 
       return;
     }
     const error = arrErrorMessage(s.reason);
-    report.errors.push({ instance: instances[i].slug, error });
+    report.errors.push({ instance: instances[i].slug, error, kind: arrErrorKind(s.reason) });
     console.warn(`[missing] ${service} instance "${instances[i].slug}" listing failed:`, error);
   });
 
@@ -240,15 +242,32 @@ export interface MissingSearchResult {
 // than sent hunting for an upgrade. Commands go through arrFetch (guardrail 5);
 // Radarr/Sonarr run them in the background, so this returns once they're queued.
 export async function searchMissing(service: MissingService, instance: string, arrId: number, now: Date): Promise<MissingSearchResult> {
+  const { commands, seasons, episodes } = await searchMissingTracked(service, instance, arrId, now);
+  return { commands, seasons, episodes };
+}
+
+/**
+ * searchMissing, plus the arr's id for every command it queued — the title
+ * manager follows them live (GET /api/admin/arr/commands). The Missing page's
+ * own answer stays searchMissing's.
+ */
+export async function searchMissingTracked(
+  service: MissingService,
+  instance: string,
+  arrId: number,
+  now: Date,
+): Promise<MissingSearchResult & { commandIds: number[] }> {
   const cfg = await configuredCfg(service, instance);
-  const command = (body: Record<string, unknown>) =>
-    arrFetch<unknown>(cfg, "/api/v3/command", { method: "POST", body: JSON.stringify(body) });
+  const queued: Array<{ id: number | null }> = [];
+  const command = async (body: Record<string, unknown>) => {
+    queued.push(await postArrCommand(cfg, body));
+  };
 
   if (service === "radarr") {
     const row = await arrFetch<RadarrMovieRow>(cfg, `/api/v3/movie/${arrId}`);
     if (!row || typeof row !== "object" || !missingMovie(row, instance, now.getTime())) throw new NothingMissingError();
     await command({ name: "MoviesSearch", movieIds: [arrId] });
-    return { commands: 1, seasons: [], episodes: 0 };
+    return { commands: 1, seasons: [], episodes: 0, commandIds: commandIdsOf(queued) };
   }
 
   const rows = await arrFetch<unknown>(cfg, `/api/v3/episode?seriesId=${arrId}`);
@@ -260,7 +279,12 @@ export async function searchMissing(service: MissingService, instance: string, a
     await command({ name: "SeasonSearch", seriesId: arrId, seasonNumber });
   }
   if (plan.episodeIds.length > 0) await command({ name: "EpisodeSearch", episodeIds: plan.episodeIds });
-  return { commands: plan.seasons.length + (plan.episodeIds.length > 0 ? 1 : 0), seasons: plan.seasons, episodes: plan.episodeIds.length };
+  return {
+    commands: plan.seasons.length + (plan.episodeIds.length > 0 ? 1 : 0),
+    seasons: plan.seasons,
+    episodes: plan.episodeIds.length,
+    commandIds: commandIdsOf(queued),
+  };
 }
 
 /** Nothing is below cutoff any more (upgraded, file removed, or unmonitored). */

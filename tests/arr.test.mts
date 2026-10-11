@@ -244,8 +244,13 @@ test("guardrail 5: the 50 MB cap and 30s default timeout are pinned and wired in
   // The 30s default stays wired; a caller may only pass its own (the
   // interactive release search, pinned at 120s below), never drop the timeout.
   assert.match(source, /timeoutMs: options\.timeoutMs \?\? ARR_FETCH_TIMEOUT_MS/);
-  assert.match(source, /const RELEASE_SEARCH_TIMEOUT_MS = 120_000;/);
+  assert.match(source, /export const RELEASE_SEARCH_TIMEOUT_MS = 120_000;/);
   assert.match(source, /\/api\/v3\/release\?\$\{query\}`, \{ timeoutMs: RELEASE_SEARCH_TIMEOUT_MS \}/);
+  // EVERY interactive release read waits that long — the request "Pick release"
+  // and the issue Replace too (their background job was pointless at 30s).
+  const releaseReads = [...source.matchAll(/arrFetch<ArrRelease\[\]>\(([^)]*)\)/g)].map((m) => m[1]);
+  assert.ok(releaseReads.length >= 3, "the three /api/v3/release reads are found");
+  for (const call of releaseReads) assert.match(call, /timeoutMs: RELEASE_SEARCH_TIMEOUT_MS/, call);
 });
 
 test("getCfg normalizes an EMPTY rootFolder to undefined so the `??` fallback actually fires", () => {

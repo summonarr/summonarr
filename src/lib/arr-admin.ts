@@ -4,9 +4,11 @@
 // (arr-calendar-data.ts) and the system page (arr-system-data.ts). Every call
 // goes through arrFetch (guardrail 5) on an instance the registry lists and
 // has a connection for (guardrail 32).
-import { arrFetch, getArrCfg, type ArrCfg } from "./arr";
+import { ArrResponseError, arrFetch, getArrCfg, type ArrCfg } from "./arr";
+import { projectCommandState, type ArrCommandState } from "./arr-command-status";
 import { getSyncableArrInstances } from "./arr-instance-registry";
 import type { ArrService } from "./arr-instances";
+import { mapLimit } from "./concurrency";
 import { isFeatureEnabled } from "./features";
 
 export type { ArrService };
@@ -54,4 +56,47 @@ export async function postArrCommand(cfg: ArrCfg, body: Record<string, unknown>)
   const res = await arrFetch<{ id?: unknown } | null>(cfg, "/api/v3/command", { method: "POST", body: JSON.stringify(body) });
   const id = res && typeof res === "object" && typeof res.id === "number" && Number.isSafeInteger(res.id) ? res.id : null;
   return { id };
+}
+
+/**
+ * The arr's ids for the commands a route queued, for the browser to follow
+ * (GET /api/admin/arr/commands): deduplicated — a duplicate push answers with
+ * the command already queued — and without the ones the arr sent no id for.
+ */
+export function commandIdsOf(queued: ReadonlyArray<{ id: number | null }>): number[] {
+  return [...new Set(queued.map((c) => c.id).filter((id): id is number => id !== null))];
+}
+
+// The status line polls every 2 s; a dark instance is given up on well before
+// the next poll would stack behind it.
+const COMMAND_READ_TIMEOUT_MS = 10_000;
+/**
+ * Reads of one status poll in flight at once (guardrail 31): a long series'
+ * "search missing" follows dozens of commands, and the poll repeats every 2 s.
+ */
+export const COMMAND_READ_CONCURRENCY = 6;
+
+/**
+ * The commands a page is following, each read on its own (GET
+ * /api/v3/command/{id}) — at most COMMAND_READ_CONCURRENCY at a time, in the
+ * order asked. Projected to the fields Arr System shows, never the command
+ * body (guardrail 5e). An id the arr answers 404 for is "gone": it forgets a
+ * finished command after a while. Any other failure fails the read, and the
+ * ids not yet started are never sent — a dark instance costs one round of
+ * timeouts, not one per id. Polled, so a failure is not logged per read (the
+ * route reports it).
+ */
+export async function readArrCommands(service: ArrService, instance: string, ids: readonly number[]): Promise<ArrCommandState[]> {
+  const cfg = await configuredArrCfg(service, instance);
+  let failure: { err: unknown } | null = null;
+  return mapLimit(ids, COMMAND_READ_CONCURRENCY, async (id): Promise<ArrCommandState> => {
+    if (failure) throw failure.err;
+    try {
+      return projectCommandState(await arrFetch<unknown>(cfg, `/api/v3/command/${id}`, { quietErrors: true, timeoutMs: COMMAND_READ_TIMEOUT_MS }), id);
+    } catch (err) {
+      if (err instanceof ArrResponseError && err.status === 404) return { id, status: "gone" };
+      failure ??= { err };
+      throw err;
+    }
+  });
 }

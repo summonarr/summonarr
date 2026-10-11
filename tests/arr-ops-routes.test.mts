@@ -1080,3 +1080,38 @@ test("a TV handle is good only for the season it was searched for", async () => 
   assert.equal(ok.status, 200);
   assert.deepEqual(arrCalls().find((c) => c.method === "POST")!.body, { guid: "g-s2", indexerId: 3, seriesId: 8 });
 });
+
+test("request releases in the BACKGROUND: async=1 answers 202 with a job; the poll returns the search's own answer to its owner only", async () => {
+  requests = [{ id: "r1", mediaType: "MOVIE", tmdbId: 603, tvdbId: null, status: "APPROVED", arrInstance: "", user: { name: "A", email: "a@x" } }];
+  responder = (c) => {
+    if (c.path === "/api/v3/movie") return json([{ id: 44, tmdbId: 603 }]);
+    if (c.path === "/api/v3/release") return json([release("https://indexer.example/get?apikey=SECRET-KEY&id=9")]);
+    return undefined;
+  };
+  const token = await mintSession();
+  const other = await mintSession();
+  const start = await call(releasesRoute.GET, token, "/requests/r1/releases?async=1", { ctx: idCtx("r1") });
+  assert.equal(start.status, 202);
+  const { job } = (await start.json()) as { job: string };
+  assert.equal((await call(releasesRoute.GET, other, `/requests/r1/releases?job=${job}`, { ctx: idCtx("r1") })).status, 404, "someone else's job reads as unknown");
+  let body: { releases?: Array<{ guid: string }> } | null = null;
+  for (let i = 0; i < 50 && body === null; i++) {
+    const poll = await call(releasesRoute.GET, token, `/requests/r1/releases?job=${job}`, { ctx: idCtx("r1") });
+    if (poll.status === 202) await new Promise((r) => setTimeout(r, 5));
+    else {
+      assert.equal(poll.status, 200);
+      const text = await poll.text();
+      assert.ok(!text.includes("SECRET-KEY"));
+      body = JSON.parse(text) as { releases: Array<{ guid: string }> };
+    }
+  }
+  assert.match(body?.releases?.[0]?.guid ?? "", /^[0-9a-f]{32}$/);
+  // The handle the job issued grabs like a synchronous search's would.
+  responder = (c) => {
+    if (c.path === "/api/v3/movie") return json([{ id: 44, tmdbId: 603 }]);
+    if (c.method === "POST" && c.path === "/api/v3/release") return json({ message: "Couldn't find requested release in cache" }, 404);
+    return undefined;
+  };
+  const grab = await call(releasesRoute.POST, token, "/requests/r1/releases", { method: "POST", body: { release: body!.releases![0].guid }, ctx: idCtx("r1") });
+  assert.equal(grab.status, 410, "the arr's expired search cache is 'search again', not a generic failure");
+});

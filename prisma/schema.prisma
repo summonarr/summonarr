@@ -1018,6 +1018,10 @@ enum AuditAction {
   ARR_COMMAND
   // An admin switched an indexer or download client on/off in Radarr/Sonarr.
   ARR_PROVIDER_CHANGE
+  // An admin added a title to a Radarr/Sonarr instance by hand (no request).
+  ARR_TITLE_ADD
+  // An admin removed a title from one Radarr/Sonarr instance (files optionally deleted).
+  ARR_TITLE_DELETE
 }
 
 // ─── Play History ────────────────────────────────────────────────────────────

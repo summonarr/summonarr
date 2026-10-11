@@ -18,7 +18,8 @@ import { notFound } from "next/navigation";
 import { TrailerButton } from "@/components/media/trailer-button";
 import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { ArrManageButton } from "@/components/admin/arr-title/title-manager";
-import { arrInstancesHolding } from "@/lib/arr-links-data";
+import { ArrAddButton } from "@/components/admin/arr-title/add-dialog";
+import { arrInstancesForTitle, parseManageLink } from "@/lib/arr-links-data";
 import { getAdminTitleNeverWatched } from "@/lib/never-watched-report";
 import { NeverWatchedChip } from "@/components/admin/never-watched-chip";
 import { prisma } from "@/lib/prisma";
@@ -92,10 +93,15 @@ export async function generateMetadata({
 
 export default async function MovieDetailPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { id } = await params;
+  // `?manage=<service>:<slug>&tab=` opens the title manager on that instance
+  // (a link from an admin list); it only ever selects among this page's own.
+  const sp = await searchParams;
   const { session, t, locale, media, collectionName } = await loadMovie(id);
 
   // Which Plex/Jellyfin servers this viewer may see. Everything downstream keys off the two
@@ -211,11 +217,16 @@ export default async function MovieDetailPage({
   // fine — guardrail 29); the route behind it is ADMIN-gated itself.
   const [arrLinks, neverWatched] = await Promise.all([
     hasPermission(session.user.permissions, Permission.ADMIN)
-      ? arrInstancesHolding("radarr", media.id).catch(() => [])
+      // Nothing while the integration is switched off — every route behind
+      // the links would answer "integration disabled".
+      ? isFeatureEnabled("feature.integration.radarr")
+        .then((on) => (on ? arrInstancesForTitle("radarr", media.id) : []))
+        .catch(() => [])
       : Promise.resolve([]),
     // ADMIN-only "never watched" chip (guardrail 14d) — null for anyone else.
     getAdminTitleNeverWatched(session.user.permissions, media.id, "MOVIE"),
   ]);
+  const manageLink = parseManageLink(sp.manage, sp.tab, "radarr");
 
   const backdrop = backdropUrl(media.backdropPath, "original");
   const poster = posterUrl(media.posterPath, "w500");
@@ -445,22 +456,34 @@ export default async function MovieDetailPage({
               {(media.trailerKey || media.trailerUrl) && (
                 <TrailerButton trailerKey={media.trailerKey} trailerUrl={media.trailerUrl} />
               )}
-              {arrLinks.map((inst) => (
-                <Fragment key={inst.slug || "default"}>
-                  <ArrManageButton
-                    service="radarr"
-                    instance={inst.slug}
-                    tmdbId={media.id}
-                    instanceLabel={arrInstanceLabel("radarr", inst.name, inst.slug)}
-                  />
-                  <OpenInArrLink
-                    service="radarr"
-                    instance={inst.slug}
-                    target={{ tmdbId: media.id }}
-                    label={t("adminManage.openIn", { name: arrInstanceLabel("radarr", inst.name, inst.slug) })}
-                  />
-                </Fragment>
-              ))}
+              {arrLinks.map((inst) => {
+                const label = arrInstanceLabel("radarr", inst.name, inst.slug);
+                const deep = manageLink !== null && manageLink.instance === inst.slug;
+                // An instance holding the title: manage it there. Any other
+                // configured one: add it there, with the arr's own choices.
+                return inst.holds || deep ? (
+                  <Fragment key={inst.slug || "default"}>
+                    <ArrManageButton
+                      service="radarr"
+                      instance={inst.slug}
+                      tmdbId={media.id}
+                      instanceLabel={label}
+                      autoOpen={deep}
+                      initialTab={deep ? manageLink.tab : undefined}
+                    />
+                    {inst.holds && (
+                      <OpenInArrLink
+                        service="radarr"
+                        instance={inst.slug}
+                        target={{ tmdbId: media.id }}
+                        label={t("adminManage.openIn", { name: label })}
+                      />
+                    )}
+                  </Fragment>
+                ) : (
+                  <ArrAddButton key={inst.slug || "default"} service="radarr" instance={inst.slug} tmdbId={media.id} instanceLabel={label} />
+                );
+              })}
             </div>
           </div>
         </div>

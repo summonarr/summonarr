@@ -2,22 +2,32 @@
 // (the titles they manage, not TMDB's) turned into one dated list: a Sonarr
 // entry per episode airing, a Radarr entry per release date (in cinemas,
 // physical, digital) that falls in the window. Each carries whether the arr
-// already has the file. Zero I/O; the data half is arr-calendar-data.ts.
-import { bool, isoOrNull, nonNegInt, posInt, text, textOrNull } from "./arr-parse";
+// already has the file, and — from the instance's download queue — whether one
+// is on its way. Zero I/O; the data half is arr-calendar-data.ts, the viewer's
+// days (local placement, the window, grouping) are arr-calendar-days.ts.
+import { bool, bytes, isoOrNull, nonNegInt, posInt, text, textOrNull } from "./arr-parse";
 import { tmdbPosterPathFromImages } from "./arr-missing";
+import { queuePhase } from "./arr-queue";
 import type { ArrService } from "./arr-instances";
 
 export type CalendarKind = "episode" | "cinema" | "physical" | "digital";
 
 /**
  *   downloaded  — the arr has the file.
+ *   downloading — no file, but the instance's download queue holds it (a failed
+ *                 download doesn't count: the arr will look again).
  *   missing     — the date has passed, it is monitored, and there is no file
- *                 (a cinema date never counts: no home release exists yet).
+ *                 (a cinema date never counts: no home release exists yet; an
+ *                 episode counts only once it has finished airing, and only in
+ *                 a regular season — the Missing page's rule).
+ *   airing      — an episode on the air right now (air time + runtime).
+ *   aired       — a special (season 0) that has aired with no file: never
+ *                 "missing", as on the Missing page.
  *   unmonitored — no file, and the arr is not looking for one.
  *   upcoming    — still in the future.
  *   released    — a cinema date that has passed, no file yet (expected).
  */
-export type CalendarStatus = "downloaded" | "missing" | "unmonitored" | "upcoming" | "released";
+export type CalendarStatus = "downloaded" | "downloading" | "missing" | "airing" | "aired" | "unmonitored" | "upcoming" | "released";
 
 export interface CalendarEntry {
   /** Stable across reloads: service, instance, id and kind. */
@@ -44,6 +54,8 @@ export interface CalendarEntry {
   monitored: boolean;
   hasFile: boolean;
   status: CalendarStatus;
+  /** 0..1 while `downloading` (null when the queue doesn't know the size); null otherwise. */
+  progress: number | null;
 }
 
 /** The longest window one request may ask for. */
@@ -59,14 +71,56 @@ export function parseCalendarWindow(rawStart: string | null, rawEnd: string | nu
   return { start: new Date(start), end: new Date(end) };
 }
 
+const DAY_MS = 86_400_000;
+
+/**
+ * The instants asked of the arr for a window of the viewer's days. Sonarr's
+ * calendar is on `airDateUtc`, a real instant: the window as given. A movie's
+ * release date is a calendar DATE (Radarr stores midnight UTC), while the
+ * window is the viewer's local days: Radarr's is padded by a day either side so
+ * a date on the window's edge in any time zone (UTC−12…UTC+14) comes back; the
+ * page keeps the ones inside its own days (entriesInWindow).
+ */
+export function calendarFetchWindow(service: ArrService, start: Date, end: Date): { from: Date; to: Date } {
+  if (service === "sonarr") return { from: start, to: end };
+  return { from: new Date(start.getTime() - DAY_MS), to: new Date(end.getTime() + DAY_MS) };
+}
+
+/** The calendar request for one instance. Sonarr's carries the series (title, runtime, monitored) but not the files or images. */
+export function calendarPath(service: ArrService, from: Date, to: Date, unmonitored: boolean): string {
+  const q = new URLSearchParams({ start: from.toISOString(), end: to.toISOString(), unmonitored: String(unmonitored) });
+  if (service === "sonarr") {
+    q.set("includeSeries", "true");
+    q.set("includeEpisodeFile", "false");
+    q.set("includeEpisodeImages", "false");
+  }
+  return `/api/v3/calendar?${q.toString()}`;
+}
+
 type Raw = Record<string, unknown>;
 const obj = (v: unknown): Raw | null => (v && typeof v === "object" && !Array.isArray(v) ? (v as Raw) : null);
 
-function statusOf(kind: CalendarKind, dateMs: number, nowMs: number, hasFile: boolean, monitored: boolean): CalendarStatus {
+/** How long an airing is assumed to last when neither the episode nor the series says. */
+export const DEFAULT_RUNTIME_MINUTES = 60;
+// A runtime is minutes; anything past a day is a bad value, not a broadcast.
+const MAX_RUNTIME_MINUTES = 24 * 60;
+
+function statusOf(
+  kind: CalendarKind,
+  dateMs: number,
+  nowMs: number,
+  hasFile: boolean,
+  monitored: boolean,
+  episode?: { endMs: number; regular: boolean },
+): CalendarStatus {
   if (hasFile) return "downloaded";
   if (dateMs > nowMs) return "upcoming";
+  // Still on the air: nothing could have been released, let alone grabbed.
+  if (episode && nowMs < episode.endMs) return "airing";
   if (!monitored) return "unmonitored";
-  return kind === "cinema" ? "released" : "missing";
+  if (kind === "cinema") return "released";
+  if (episode && !episode.regular) return "aired";
+  return "missing";
 }
 
 /**
@@ -111,6 +165,7 @@ export function radarrCalendarEntries(instance: string, raw: unknown, startMs: n
         monitored,
         hasFile,
         status: statusOf(kind, ms, nowMs, hasFile, monitored),
+        progress: null,
       });
     }
   }
@@ -131,6 +186,10 @@ export function sonarrCalendarEntries(instance: string, raw: unknown, nowMs: num
     const hasFile = bool(e.hasFile);
     // An episode of an unmonitored series is unmonitored whatever its own flag says.
     const monitored = bool(e.monitored) && (series ? series.monitored !== false : true);
+    const seasonNumber = nonNegInt(e.seasonNumber);
+    const airMs = Date.parse(iso);
+    // The episode's own runtime (Sonarr v4), else the series', else an hour.
+    const runtime = Math.min(posInt(e.runtime) ?? posInt(series?.runtime) ?? DEFAULT_RUNTIME_MINUTES, MAX_RUNTIME_MINUTES);
     out.push({
       key: `sonarr:${instance}:${episodeId}:episode`,
       service: "sonarr",
@@ -144,17 +203,62 @@ export function sonarrCalendarEntries(instance: string, raw: unknown, nowMs: num
       tmdbId: posInt(series?.tmdbId),
       tvdbId: posInt(series?.tvdbId),
       posterPath: null,
-      seasonNumber: nonNegInt(e.seasonNumber),
+      seasonNumber,
       episodeNumber: nonNegInt(e.episodeNumber),
       episodeTitle: textOrNull(e.title, 300),
       finaleType: textOrNull(e.finaleType, 20),
       network: textOrNull(series?.network, 200),
       monitored,
       hasFile,
-      status: statusOf("episode", Date.parse(iso), nowMs, hasFile, monitored),
+      // A special (season 0) is never "missing" — the Missing page counts
+      // regular seasons only (missingEpisodeParts in arr-missing.ts).
+      status: statusOf("episode", airMs, nowMs, hasFile, monitored, { endMs: airMs + runtime * 60_000, regular: seasonNumber !== null && seasonNumber > 0 }),
+      progress: null,
     });
   }
   return out;
+}
+
+/** What one instance's download queue holds: progress (0..1, null when the size is unknown) by Radarr movie id / Sonarr episode id. */
+export interface CalendarQueue {
+  movies: Map<number, number | null>;
+  episodes: Map<number, number | null>;
+}
+
+/**
+ * Raw /api/v3/queue records of ONE instance → what is on its way. A Radarr
+ * record names its movie (`movieId`), a Sonarr record its episode
+ * (`episodeId`; a season pack is one record per episode). A download that
+ * failed is left out — the arr blocklists it and looks again, so the entry
+ * keeps its own status (and its Search).
+ */
+export function calendarQueue(service: ArrService, records: readonly unknown[]): CalendarQueue {
+  const q: CalendarQueue = { movies: new Map(), episodes: new Map() };
+  for (const x of records) {
+    const r = obj(x);
+    if (!r || queuePhase(r.status, r.trackedDownloadState) === "failed") continue;
+    const id = posInt(service === "radarr" ? r.movieId : r.episodeId);
+    if (id === null) continue;
+    const size = bytes(r.size);
+    const progress = size > 0 ? Math.max(0, Math.min(1, (size - Math.min(bytes(r.sizeleft), size)) / size)) : null;
+    const map = service === "radarr" ? q.movies : q.episodes;
+    const prior = map.get(id);
+    // Two records for one title (a pack and a single, say): the furthest along.
+    map.set(id, prior == null ? progress : progress === null ? prior : Math.max(prior, progress));
+  }
+  return q;
+}
+
+/** Mark the entries of the SAME instance whose title is downloading. An entry with its file keeps "downloaded" (a queued upgrade is not news here). */
+export function applyCalendarQueue(entries: CalendarEntry[], queue: CalendarQueue): void {
+  for (const e of entries) {
+    if (e.hasFile) continue;
+    const id = e.service === "radarr" ? e.arrId : e.episodeId;
+    const map = e.service === "radarr" ? queue.movies : queue.episodes;
+    if (id === null || !map.has(id)) continue;
+    e.status = "downloading";
+    e.progress = map.get(id) ?? null;
+  }
 }
 
 /** By date, then title, then episode. */

@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import { withIssueAdmin } from "@/lib/api-auth";
+import { grabRefusalResponse } from "@/lib/release-grab";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import {
+  arrErrorMessage,
   getReleasesForMovie,
   getReleasesForSeries,
   grabMovieRelease,
@@ -87,7 +89,7 @@ export const GET = withIssueAdmin(async (req, { params }: RouteContext, _session
   } catch (err) {
     // The detail (which includes raw upstream `err.message`) goes to the log;
     // the client gets the translated generic, like the refetch path.
-    console.error("[releases] Fetch failed:", err);
+    console.error("[releases] Fetch failed:", arrErrorMessage(err));
     return NextResponse.json({ error: t("apiUser.issues.arrFailed") }, { status: 502 });
   }
 });
@@ -192,8 +194,13 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
       );
     }
   } catch (err) {
+    // The arr's own refusals say what to do: search again (its 30-minute
+    // search cache no longer has the release) or why the indexer or client
+    // refused it (masked).
+    const refused = grabRefusalResponse(err, service === "radarr" ? "Radarr" : "Sonarr", t);
+    if (refused) return refused;
     // Detail to the log, translated generic to the client (see the GET catch).
-    console.error("[releases] Grab failed:", err);
+    console.error("[releases] Grab failed:", arrErrorMessage(err));
     return NextResponse.json({ error: t("apiUser.issues.arrFailed") }, { status: 502 });
   }
 

@@ -77,6 +77,12 @@
   "apiUser.issues.modifiedConcurrently": "问题已被同时修改。请刷新后重试。",
   "apiUser.issues.notInLibrary": "此作品不在媒体库中——只能为可观看的媒体报告问题。",
   "apiUser.issues.noteTooLong": "note 必须是少于 1000 个字符的字符串",
+  "apiUser.issues.replaceFile.bodyInvalid": "需要一个实例、一个文件 id 列表，以及：markFailed 或 search",
+  "apiUser.issues.replaceFile.notInScope": "这些文件已不属于此问题——请重新加载后重试",
+  "apiUser.issues.replaceFile.notOnInstance": "{name} 中没有此作品——可能已在其中被移除，或报告的副本位于另一个实例上",
+  "apiUser.issues.replaceFile.resolved": "问题已解决——请先重新打开再替换其文件",
+  "apiUser.issues.replaceFile.searchFailed_one": "已删除 {count} 个文件，但 {service} 未将搜索排队——请使用“重新获取”再次搜索",
+  "apiUser.issues.replaceFile.searchFailed_other": "已删除 {count} 个文件，但 {service} 未将搜索排队——请使用“重新获取”再次搜索",
   "apiUser.issues.resolutionEmpty": "resolution 不能为空",
   "apiUser.issues.resolutionTooLong": "resolution 必须是少于 1000 个字符的字符串",
   "apiUser.issues.resolvedBeforeGrab": "问题已解决——请先重新打开再抓取发布",
@@ -171,5 +177,10 @@
   "apiUser.requests.releases.notInArr": "{service} 中还没有该条目，请先重新推送请求",
   "apiUser.requests.releases.seasonInvalid": "season 必须是整数",
   "apiUser.requests.releases.releaseRequired": "release 必须是发布搜索返回的标识",
-  "apiUser.requests.releases.handleExpired": "该搜索结果已过期，请重新搜索"
+  "apiUser.requests.releases.handleExpired": "该搜索结果已过期，请重新搜索",
+  "apiUser.requests.releases.cacheExpired": "{service} 已不再保留这些搜索结果——它只保留 30 分钟，重启也会清除它们。请重新搜索。",
+  "apiUser.requests.releases.grabRefused": "{service} 无法抓取该发布：{reason}",
+  "apiUser.requests.releases.jobGone": "该搜索已不可用——请重新搜索。",
+  "apiUser.requests.releases.grabInProgress": "该发布版本正在获取中",
+  "apiUser.requests.arrStatus.invalidStatus": "只有已批准或可观看的请求才能检查"
 }

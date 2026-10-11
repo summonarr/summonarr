@@ -13,9 +13,19 @@ import {
   searchMissing,
 } from "@/lib/arr-missing-data";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { tooManyRequests } from "@/lib/http";
+import { sanitizeForLog } from "@/lib/sanitize";
 
 const MAX_BODY_BYTES = 4 * 1024;
 const SERVICE_LABEL = { radarr: "Radarr", sonarr: "Sonarr" } as const;
+// Every search hits every indexer on the instance, and the page's "Search
+// selected" fires one request per title — so it is bounded per admin like the
+// title manager's commands (30/min), but high enough that one capped bulk run
+// (BULK_SEARCH_MAX, 100 titles) fits inside a window. The page waits out the
+// Retry-After and retries a rate-limited row once.
+const LIMIT_PER_MIN = 120;
+const LIMIT_WINDOW_MS = 60_000;
 
 // Admin → Missing, one row's Search button (ADMIN). Queues a search on that
 // instance for exactly what the title is missing, re-judged live: a Radarr
@@ -25,8 +35,9 @@ const SERVICE_LABEL = { radarr: "Radarr", sonarr: "Sonarr" } as const;
 // missing any more. `mode: "cutoff"` is the Cutoff tab's button: an upgrade
 // search for exactly what Radarr/Sonarr say is below cutoff right now (Radarr
 // MoviesSearch; one Sonarr EpisodeSearch), 409 when nothing is. Nothing in
-// Summonarr is written.
-export const POST = withAdmin(async (req) => {
+// Summonarr is written. 429 (with Retry-After) past LIMIT_PER_MIN per admin; a
+// malformed body is refused first and spends none of the budget.
+export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const parsed = await readJsonCapped<Record<string, unknown>>(req, MAX_BODY_BYTES);
   if (parsed instanceof NextResponse) return parsed;
@@ -42,6 +53,10 @@ export const POST = withAdmin(async (req) => {
     typeof arrId !== "number" || !Number.isSafeInteger(arrId) || arrId <= 0
   ) {
     return NextResponse.json({ error: t("apiAdmin.missing.searchBodyInvalid") }, { status: 400 });
+  }
+  if (!checkRateLimit(`missing-search:${session.user.id}`, LIMIT_PER_MIN, LIMIT_WINDOW_MS)) {
+    // Retry-After mirrors the limiter's window (http.ts contract).
+    return tooManyRequests(LIMIT_WINDOW_MS / 1000, t("apiAdmin.common.tooManyRequestsLater"));
   }
   const label = SERVICE_LABEL[service];
   if (!(await isFeatureEnabled(`feature.integration.${service}`))) {
@@ -66,7 +81,8 @@ export const POST = withAdmin(async (req) => {
       const key = service === "radarr" ? "apiAdmin.missing.movieNotFound" : "apiAdmin.missing.seriesNotFound";
       return NextResponse.json({ error: t(key) }, { status: 404 });
     }
-    console.warn(`[missing] ${service} instance "${instance}" search failed:`, arrErrorMessage(err));
+    // The slug is the browser's: never written raw into a log line (CR/LF, ANSI).
+    console.warn(`[missing] ${service} instance "${sanitizeForLog(instance)}" search failed:`, arrErrorMessage(err));
     return NextResponse.json({ error: t("apiAdmin.missing.searchFailed", { service: label }) }, { status: 502 });
   }
 });

@@ -15,6 +15,7 @@ import { getTranslator } from "@/lib/i18n/server";
 import { LocaleSync } from "@/components/i18n/locale-sync";
 import { hasPermission, Permission } from "@/lib/permissions";
 import { getFeatureFlags, type FeatureFlags } from "@/lib/features";
+import { readArrWatchNavBadges } from "@/lib/arr-watch-data";
 import { DONATION_SETTING_KEYS, hasDonationLinks } from "@/lib/donations";
 import { parseHiddenRatingSources } from "@/lib/ratings-visibility";
 import { RatingsVisibilityProvider } from "@/components/media/ratings-visibility";
@@ -67,15 +68,20 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   let maintenanceMessage = "";
   let featureFlags: FeatureFlags | undefined;
   let hiddenRatingSources: string[] = [];
+  let navBadges: Awaited<ReturnType<typeof readArrWatchNavBadges>>;
   try {
     // The discordId lookup runs in parallel with the settings/flags reads
     // instead of after them, saving a full DB round-trip per page. The cost:
     // sites with no Discord invite do one small extra lookup they don't need.
-    const [rows, flags, user] = await Promise.all([
+    const [rows, flags, user, badges] = await Promise.all([
       readLayoutSettings(),
       getFeatureFlags(),
       prisma.user.findUnique({ where: { id: session.user.id }, select: { discordId: true, locale: true } }),
+      // The Download Queue's "needs attention" count (the Radarr/Sonarr
+      // monitor's last run) — one row read, admins only; never throws.
+      isAdmin ? readArrWatchNavBadges() : Promise.resolve(undefined),
     ]);
+    navBadges = badges;
     const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
     hiddenRatingSources = parseHiddenRatingSources(cfg.ratingsHiddenSources);
     motdBody            = cfg.motdEnabled === "true" ? (cfg.motdBody ?? "") : "";
@@ -126,10 +132,10 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           "never stored" and overwrite a real choice. */}
       {localeKnown && <LocaleSync stored={storedLocale} />}
       <NavigationProgress />
-      <Sidebar siteTitle={siteTitle} featureFlags={featureFlags} />
+      <Sidebar siteTitle={siteTitle} featureFlags={featureFlags} navBadges={navBadges} />
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
         <Header />
-        <MobileNav featureFlags={featureFlags} />
+        <MobileNav featureFlags={featureFlags} navBadges={navBadges} />
         {maintenanceEnabled && isAdmin && (
           <MaintenanceBanner message={maintenanceMessage} />
         )}

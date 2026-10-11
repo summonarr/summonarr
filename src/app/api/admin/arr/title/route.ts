@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { withAdmin } from "@/lib/api-auth";
 import { arrFailure, arrGate, arrTitleGate, parseArrId } from "@/lib/arr-admin-http";
 import { editedFields, parseTitleEdit } from "@/lib/arr-title";
-import { editTitle, findTitleId, loadTitle } from "@/lib/arr-title-data";
+import { editTitle, findTitle, loadTitle } from "@/lib/arr-title-data";
 import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
@@ -14,12 +14,15 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 //   GET ?service&instance&id     — by the arr's own id, or
 //   GET ?service&instance&tmdbId — resolved on the instance (the detail pages).
 //       → { title, qualityProfiles, rootFolders, tags }: the title's settings,
-//         its seasons (Sonarr), and the instance's own choices for each field.
-//         404 when the instance doesn't have the title.
+//         its seasons (Sonarr), and the instance's own choices for each field
+//         (a list the instance failed to answer is null — the form disables
+//         that field). 404 when the instance doesn't have the title.
 //   PATCH { service, instance, id, …fields } — change any of: monitored,
 //       qualityProfileId, rootFolderPath (+ moveFiles), tags (replace),
 //       minimumAvailability (Radarr), seriesType / seasonFolder /
-//       monitorNewItems / seasons [{seasonNumber, monitored}] (Sonarr).
+//       monitorNewItems / seasons [{seasonNumber, monitored}] (Sonarr) —
+//       seasons on their own (400 combined with any other field: the two are
+//       separate writes, and a half-applied edit could not be audited honestly).
 //       Every value must be one the instance offers (400 otherwise, nothing
 //       written). → { title } as the arr now has it. Audited ARR_TITLE_EDIT
 //       after the arr accepted it (guardrail 26).
@@ -32,11 +35,11 @@ export const GET = withAdmin(async (req) => {
   const tmdbId = parseArrId(q.get("tmdbId"));
   if ((id === null) === (tmdbId === null)) return NextResponse.json({ error: t("apiAdmin.arr.idInvalid") }, { status: 400 });
   try {
-    const arrId = id ?? (await findTitleId(target.service, target.instance, tmdbId as number));
-    if (arrId === null) {
+    const found = id !== null ? { arrId: id, raw: null } : await findTitle(target.service, target.instance, tmdbId as number);
+    if (found === null) {
       return NextResponse.json({ error: t("apiAdmin.arr.titleNotFound", { service: ARR_SERVICE_LABEL[target.service] }) }, { status: 404 });
     }
-    return NextResponse.json(await loadTitle(target.service, target.instance, arrId));
+    return NextResponse.json(await loadTitle(target.service, target.instance, found.arrId, found.raw));
   } catch (err) {
     return arrFailure(err, target, t, "title read");
   }
@@ -71,7 +74,7 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
       service: target.service,
       instance: target.instance,
       arrId: target.arrId,
-      title: title.title,
+      title: title?.title ?? null,
       fields: applied,
       ...(applied.includes("rootFolderPath") ? { rootFolderPath: edit.rootFolderPath, moveFiles: edit.moveFiles === true } : {}),
       ...(edit.seasons ? { seasons: edit.seasons } : {}),

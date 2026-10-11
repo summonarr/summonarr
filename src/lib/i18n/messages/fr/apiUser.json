@@ -77,6 +77,12 @@
   "apiUser.issues.modifiedConcurrently": "Le signalement a été modifié en même temps ailleurs. Actualisez la page et réessayez.",
   "apiUser.issues.notInLibrary": "Ce titre n'est pas dans la bibliothèque — les signalements ne concernent que les médias disponibles.",
   "apiUser.issues.noteTooLong": "note doit être un texte de moins de 1000 caractères",
+  "apiUser.issues.replaceFile.bodyInvalid": "Attendu : une instance, une liste d'id de fichiers, puis : markFailed ou search",
+  "apiUser.issues.replaceFile.notInScope": "Ces fichiers ne relèvent plus de ce signalement — rechargez et réessayez",
+  "apiUser.issues.replaceFile.notOnInstance": "{name} n'a pas ce titre — il y a peut-être été supprimé, ou la copie signalée est sur une autre instance",
+  "apiUser.issues.replaceFile.resolved": "Le signalement est résolu — rouvrez-le avant de remplacer ses fichiers",
+  "apiUser.issues.replaceFile.searchFailed_one": "{count} fichier supprimé, mais {service} n'a pas mis la recherche en file d'attente — utilisez Retélécharger pour relancer la recherche",
+  "apiUser.issues.replaceFile.searchFailed_other": "{count} fichiers supprimés, mais {service} n'a pas mis la recherche en file d'attente — utilisez Retélécharger pour relancer la recherche",
   "apiUser.issues.resolutionEmpty": "resolution ne doit pas être vide",
   "apiUser.issues.resolutionTooLong": "resolution doit être un texte de moins de 1000 caractères",
   "apiUser.issues.resolvedBeforeGrab": "Le signalement est résolu — rouvrez-le avant de récupérer une release",
@@ -171,5 +177,10 @@
   "apiUser.requests.releases.notInArr": "{service} n'a pas encore ce titre — renvoyez d'abord la demande",
   "apiUser.requests.releases.seasonInvalid": "season doit être un nombre entier",
   "apiUser.requests.releases.releaseRequired": "release doit être un identifiant issu d'une recherche de versions",
-  "apiUser.requests.releases.handleExpired": "Ce résultat de recherche a expiré — relancez la recherche"
+  "apiUser.requests.releases.handleExpired": "Ce résultat de recherche a expiré — relancez la recherche",
+  "apiUser.requests.releases.cacheExpired": "{service} n'a plus ces résultats de recherche — il les conserve 30 minutes, et un redémarrage les efface. Relancez la recherche.",
+  "apiUser.requests.releases.grabRefused": "{service} n'a pas pu récupérer cette version : {reason}",
+  "apiUser.requests.releases.jobGone": "Cette recherche n'est plus disponible — relancez-la.",
+  "apiUser.requests.releases.grabInProgress": "Cette version est déjà en cours de récupération",
+  "apiUser.requests.arrStatus.invalidStatus": "Seules les demandes approuvées ou disponibles peuvent être vérifiées"
 }

@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { withPermission } from "@/lib/api-auth";
 import {
   ArrItemNotFoundError,
+  ArrResponseError,
+  arrErrorMessage,
   getReleasesForMovie,
   getReleasesForSeries,
   getSonarrSeasons,
@@ -19,7 +21,9 @@ import { maintenanceGuard } from "@/lib/maintenance";
 import { Permission } from "@/lib/permissions";
 import { prisma } from "@/lib/prisma";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { issueReleaseHandles, redeemReleaseHandle } from "@/lib/release-handles";
+import { grabRefusalResponse } from "@/lib/release-grab";
+import { claimReleaseHandle, forgetReleaseHandle, issueReleaseHandles, releaseReleaseHandle } from "@/lib/release-handles";
+import { answerOf, releaseSearchJobResponse, runningReleaseSearchJob, startReleaseSearchJob } from "@/lib/release-search-jobs";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -44,8 +48,16 @@ const MAX_SEASON = 1_000;
 //          season. Sonarr has no whole-series release search — a series-only
 //          query returns the indexers' RSS feed, not this show — so a season
 //          is always required.
+//   `&async=1` on a release search → 202 { job } at once; the search runs in
+//          the background (release-search-jobs.ts: a reverse proxy cuts a
+//          request held for the minute or two indexers take) and GET ?job=<id>
+//          answers 202 while it runs, then the search's own answer, 404 once
+//          the job is gone. Without it the answer is synchronous, as before.
 //   POST { release: <handle>, season? } → grabs it. 410 when the handle is
-//          unknown, expired, or from another search. Audited (ARR_RELEASE_GRAB)
+//          unknown, expired, or from another search — or when the arr's own
+//          30-minute search cache no longer has the release; 409 with the
+//          arr's reason when the indexer or download client refused it. The
+//          handle is spent on success. Audited (ARR_RELEASE_GRAB)
 //          after Radarr/Sonarr accepted it; the request's status is untouched —
 //          the Download webhook / sync flips it when the file lands, as always.
 //
@@ -103,36 +115,52 @@ function arrFailure(err: unknown, t: Translator, service: "radarr" | "sonarr", w
     );
   }
   // The detail (raw upstream text) goes to the log; the client gets the translated generic.
-  console.error(`[request-releases] ${where} failed:`, err);
+  // arrErrorMessage, never the error object: Node prints an ArrResponseError's
+  // whole upstream body, which can quote an indexer URL with its apikey.
+  console.error(`[request-releases] ${where} failed:`, arrErrorMessage(err));
   return NextResponse.json({ error: t("apiUser.issues.arrFailed") }, { status: 502 });
 }
 
 export const GET = withPermission(Permission.MANAGE_REQUESTS)(async (req, { params }: RouteContext, session) => {
   const t = translatorForRequest(req);
+  const job = req.nextUrl.searchParams.get("job");
+  if (job !== null) return releaseSearchJobResponse(session.user.id, job, t);
   const { id } = await params;
   const loaded = await loadRequest(id, t);
   if (loaded instanceof NextResponse) return loaded;
   const service = loaded.mediaType === "MOVIE" ? "radarr" : "sonarr";
   const season = parseSeason(req.nextUrl.searchParams.get("season"));
   if (season === null) return NextResponse.json({ error: t("apiUser.requests.releases.seasonInvalid") }, { status: 400 });
+  const background = req.nextUrl.searchParams.get("async") === "1";
 
   try {
-    if (loaded.mediaType === "MOVIE") {
-      if (!checkRateLimit(`request-releases:${session.user.id}`, SEARCH_LIMIT_PER_MIN, 60_000)) {
-        return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
-      }
-      const releases = await getReleasesForMovie(loaded.tmdbId, loaded.arrInstance);
-      return NextResponse.json({ releases: issueReleaseHandles(handleScope(loaded, undefined), releases) });
+    let tvdbId: number | null = null;
+    if (loaded.mediaType === "TV") {
+      tvdbId = await tvdbIdFor(loaded);
+      if (!tvdbId) return NextResponse.json({ error: t("apiUser.issues.tvdbUnresolved") }, { status: 422 });
+      // The season list costs one library read, no indexer hit — not rate limited.
+      if (season === undefined) return NextResponse.json({ seasons: await getSonarrSeasons(tvdbId, loaded.arrInstance) });
     }
-    const tvdbId = await tvdbIdFor(loaded);
-    if (!tvdbId) return NextResponse.json({ error: t("apiUser.issues.tvdbUnresolved") }, { status: 422 });
-    // The season list costs one library read, no indexer hit — not rate limited.
-    if (season === undefined) return NextResponse.json({ seasons: await getSonarrSeasons(tvdbId, loaded.arrInstance) });
+    const key = handleScope(loaded, loaded.mediaType === "MOVIE" ? undefined : season);
+    // Joining a search already running costs no indexer hit, so no rate token.
+    const running = background ? runningReleaseSearchJob(session.user.id, key) : null;
+    if (running) return NextResponse.json({ job: running }, { status: 202 });
     if (!checkRateLimit(`request-releases:${session.user.id}`, SEARCH_LIMIT_PER_MIN, 60_000)) {
       return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
     }
-    const releases = await getReleasesForSeries(tvdbId, "SEASON", season, null, loaded.arrInstance);
-    return NextResponse.json({ releases: issueReleaseHandles(handleScope(loaded, season), releases) });
+    const search = async (): Promise<NextResponse> => {
+      try {
+        const releases = loaded.mediaType === "MOVIE"
+          ? await getReleasesForMovie(loaded.tmdbId, loaded.arrInstance)
+          : await getReleasesForSeries(tvdbId as number, "SEASON", season as number, null, loaded.arrInstance);
+        return NextResponse.json({ releases: issueReleaseHandles(key, releases) });
+      } catch (err) {
+        return arrFailure(err, t, service, "search");
+      }
+    };
+    if (!background) return await search();
+    const { jobId } = startReleaseSearchJob(session.user.id, key, async () => answerOf(await search()));
+    return NextResponse.json({ job: jobId }, { status: 202 });
   } catch (err) {
     return arrFailure(err, t, service, "search");
   }
@@ -159,8 +187,9 @@ export const POST = withPermission(Permission.MANAGE_REQUESTS)(async (req, { par
   if (loaded instanceof NextResponse) return loaded;
   const service = loaded.mediaType === "MOVIE" ? "radarr" : "sonarr";
   // A movie search has no season; a TV handle is only good for its own season.
-  const picked = redeemReleaseHandle(handleScope(loaded, loaded.mediaType === "MOVIE" ? undefined : season), handle);
-  if (!picked) return NextResponse.json({ error: t("apiUser.requests.releases.handleExpired") }, { status: 410 });
+  const picked = claimReleaseHandle(handleScope(loaded, loaded.mediaType === "MOVIE" ? undefined : season), handle);
+  if (picked === "unknown") return NextResponse.json({ error: t("apiUser.requests.releases.handleExpired") }, { status: 410 });
+  if (picked === "busy") return NextResponse.json({ error: t("apiUser.requests.releases.grabInProgress") }, { status: 409 });
   const { guid, indexerId } = picked;
 
   try {
@@ -168,12 +197,23 @@ export const POST = withPermission(Permission.MANAGE_REQUESTS)(async (req, { par
       await grabMovieRelease(loaded.tmdbId, guid, indexerId, loaded.arrInstance);
     } else {
       const tvdbId = await tvdbIdFor(loaded);
-      if (!tvdbId) return NextResponse.json({ error: t("apiUser.issues.tvdbUnresolved") }, { status: 422 });
+      if (!tvdbId) {
+        releaseReleaseHandle(handle);
+        return NextResponse.json({ error: t("apiUser.issues.tvdbUnresolved") }, { status: 422 });
+      }
       await grabSeriesRelease(tvdbId, guid, indexerId, season ?? null, null, loaded.arrInstance);
     }
   } catch (err) {
+    // The arr answered (it refused, or doesn't have the title): the release may
+    // be tried again. No answer (a timeout, the network): it may well have taken
+    // it — never send it twice.
+    if (err instanceof ArrResponseError || err instanceof ArrItemNotFoundError) releaseReleaseHandle(handle);
+    else forgetReleaseHandle(handle);
+    const refused = grabRefusalResponse(err, service === "radarr" ? "Radarr" : "Sonarr", t);
+    if (refused) return refused;
     return arrFailure(err, t, service, "grab");
   }
+  forgetReleaseHandle(handle);
 
   // The guid is never recorded: some indexers use the download link — apikey
   // included — as the guid.
@@ -182,7 +222,7 @@ export const POST = withPermission(Permission.MANAGE_REQUESTS)(async (req, { par
     userName: session.user.name ?? session.user.email ?? null,
     action: "ARR_RELEASE_GRAB",
     target: `request:${loaded.id}`,
-    details: { service, instance: loaded.arrInstance, indexerId, ...(season !== undefined ? { season } : {}) },
+    details: { service, instance: loaded.arrInstance, indexerId, release: picked.title, ...(season !== undefined ? { season } : {}) },
     ...auditContext(req, session),
   });
   return NextResponse.json({ ok: true });

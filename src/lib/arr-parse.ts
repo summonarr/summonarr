@@ -85,10 +85,26 @@ export function protocolOf(v: unknown): Protocol {
  * user:password of a URL. Masked wherever free text from upstream is relayed —
  * an indexer's failure text can quote the request URL it tried.
  */
-const SECRET_PARAM = /(?<![A-Za-z0-9])([A-Za-z_-]*(?:api[_-]?key|token|pass(?:key|word)?|auth(?:key)?|rsskey|secret|sig|key)|r)=([^&\s\]\)"'<>]+)/gi;
-const URL_USERINFO = /(\/\/)[^/@\s:]+:[^/@\s]+@/g;
+// The forms a credential takes in upstream text, each masked:
+//   apikey=S · apikey%3DS (a URL quoted inside another URL)
+//   "apiKey": "S" · api_key = S · X-Api-Key: S · passkey:S (JSON, headers, logs)
+//   Bearer S / Basic S
+//   //user:S@host — userinfo up to the LAST @ before the path, so a password
+//     containing @ is masked whole
+//   /<32+ char token>/ — a passkey carried as a path segment (tracker RSS/announce)
+const SECRET_NAME = "[A-Za-z_-]*(?:api[_-]?key|token|pass(?:key|word)?|auth(?:key)?|rsskey|secret|sig|key)";
+const SECRET_PARAM = new RegExp(`(?<=^|[^A-Za-z0-9]|%[0-9A-Fa-f]{2})(${SECRET_NAME}|r)(=|%3[dD])([^&\\s\\]\\)"'<>]+)`, "gi");
+const SECRET_PAIR = new RegExp(`(?<![A-Za-z0-9])(["']?)(${SECRET_NAME})\\1(\\s*[:=]\\s*)(["']?)([^"'&\\s,;\\]\\)}<>]+)\\4`, "gi");
+const AUTH_SCHEME = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/g;
+const URL_USERINFO = /(\/\/)(?=[^/\s?#]*:)[^/\s?#]*@/g;
+const PATH_TOKEN = /\/[A-Za-z0-9_-]{32,}(?=[/?#\s"'<>]|$)/g;
 export function maskSecrets(s: string): string {
-  return s.replace(SECRET_PARAM, (_m, name: string) => `${name}=••••••••`).replace(URL_USERINFO, "$1••••••••@");
+  return s
+    .replace(SECRET_PARAM, (_m, name: string, eq: string) => `${name}${eq}••••••••`)
+    .replace(SECRET_PAIR, (_m, q: string, name: string, sep: string, vq: string) => `${q}${name}${q}${sep}${vq}••••••••${vq}`)
+    .replace(AUTH_SCHEME, "$1 ••••••••")
+    .replace(URL_USERINFO, "$1••••••••@")
+    .replace(PATH_TOKEN, "/••••••••");
 }
 
 /** Upstream free text for the browser: one line, credentials masked, bounded. */

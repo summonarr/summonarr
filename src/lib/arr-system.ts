@@ -70,6 +70,22 @@ export function isTaskName(v: unknown): v is string {
   return typeof v === "string" && TASK_NAME.test(v);
 }
 
+/**
+ * A scheduled task the page confirms before running: the update check
+ * (Radarr's ApplicationCheckUpdate, Sonarr's ApplicationUpdateCheck) INSTALLS
+ * an available update and restarts the arr when run by hand, and a library
+ * refresh (RefreshMovie / RefreshSeries) re-reads every title's metadata and
+ * rescans every file. Anchored on the name: Sonarr's UpdateSceneMapping is a
+ * harmless list download, not an update.
+ */
+export type TaskRisk = "update" | "refreshLibrary";
+
+export function taskRisk(taskName: string): TaskRisk | null {
+  if (/^Application\w*Update/.test(taskName)) return "update";
+  if (/^Refresh(Movie|Series)$/.test(taskName)) return "refreshLibrary";
+  return null;
+}
+
 // ── commands ─────────────────────────────────────────────────────────────────
 
 export type CommandStatus = "queued" | "started" | "completed" | "failed" | "aborted" | "cancelled" | "orphaned" | "unknown";
@@ -91,11 +107,20 @@ export interface ArrCommandRow {
   message: string | null;
 }
 
+/** How many FINISHED commands are listed; queued and running ones are always kept. */
 export const MAX_COMMANDS = 30;
+/** A runaway bound on queued + running commands, far past anything an instance queues. */
+export const MAX_ACTIVE_COMMANDS = 500;
+
+const isActive = (c: ArrCommandRow) => c.status === "queued" || c.status === "started";
 
 /**
- * /api/v3/command → the instance's recent commands, newest first. The command
- * BODY is never projected (it can hold paths, ids and import details).
+ * /api/v3/command → the instance's commands: queued and running first, then
+ * finished ones, each newest first. Only the finished ones are capped at
+ * `limit`: a library-wide search started an hour ago sorts behind every
+ * command finished since, and cutting it off the list would re-enable its
+ * task's Run button while it still runs. The command BODY is never projected
+ * (it can hold paths, ids and import details).
  */
 export function projectCommands(raw: unknown, limit = MAX_COMMANDS): ArrCommandRow[] {
   if (!Array.isArray(raw)) return [];
@@ -122,7 +147,9 @@ export function projectCommands(raw: unknown, limit = MAX_COMMANDS): ArrCommandR
     });
   }
   const at = (c: ArrCommandRow) => c.started ?? c.queued ?? "";
-  return out.sort((a, b) => at(b).localeCompare(at(a)) || b.id - a.id).slice(0, limit);
+  out.sort((a, b) => at(b).localeCompare(at(a)) || b.id - a.id);
+  // A caller asking for more (cancelCommand's lookup) gets every active one too.
+  return [...out.filter(isActive).slice(0, Math.max(MAX_ACTIVE_COMMANDS, limit)), ...out.filter((c) => !isActive(c)).slice(0, limit)];
 }
 
 // ── the page's library-wide searches ─────────────────────────────────────────
@@ -138,12 +165,19 @@ export function isBulkAction(v: unknown): v is ArrBulkAction {
   return v === "searchMissing" || v === "searchCutoff";
 }
 
-/** The arr command for a bulk action. `monitored: true` keeps Sonarr to monitored episodes (its default is ALL). */
+/**
+ * The arr command for a bulk action.
+ *   Sonarr — its commands take `monitored`; sent explicitly, so the scope
+ *     never rests on a default.
+ *   Radarr — MissingMoviesSearch / CutoffUnmetMoviesSearch have NO such field
+ *     (Radarr searches monitored movies only, hard-coded), so none is sent.
+ *     Every command started through the API is a MANUAL search, and a manual
+ *     search ignores Minimum Availability: announced and in-cinema movies are
+ *     searched too. The page says so before it starts one.
+ */
 export function bulkActionCommand(service: ArrService, action: ArrBulkAction): Record<string, unknown> {
   if (service === "radarr") {
-    return action === "searchMissing"
-      ? { name: "MissingMoviesSearch", monitored: true }
-      : { name: "CutoffUnmetMoviesSearch", monitored: true };
+    return action === "searchMissing" ? { name: "MissingMoviesSearch" } : { name: "CutoffUnmetMoviesSearch" };
   }
   return action === "searchMissing"
     ? { name: "MissingEpisodeSearch", monitored: true }
@@ -160,13 +194,9 @@ export function parseProviderKind(v: unknown): ProviderKind | null {
 
 export const PROVIDER_PATH: Record<ProviderKind, string> = { indexer: "/api/v3/indexer", downloadClient: "/api/v3/downloadclient" };
 
-export interface IndexerStatus {
-  /** The arr has stopped using it until then, after repeated failures. */
-  disabledTill: string | null;
-  initialFailure: string | null;
-  mostRecentFailure: string | null;
-}
-
+// Which indexers are failing is NOT read here: neither Radarr nor Sonarr has an
+// /api/v3/indexerstatus endpoint. The arr's own IndexerStatusCheck /
+// IndexerLongTermStatusCheck say it, in the health panel above the page.
 export interface ArrIndexer {
   id: number;
   name: string;
@@ -178,8 +208,15 @@ export interface ArrIndexer {
   enableAutomaticSearch: boolean;
   enableInteractiveSearch: boolean;
   tags: number[];
-  status: IndexerStatus | null;
+  /**
+   * Synced from Prowlarr, which names the indexers it pushes "<name> (Prowlarr)".
+   * Read from the name alone — never `fields`. Prowlarr's next full sync turns
+   * a change made here back.
+   */
+  managedByProwlarr: boolean;
 }
+
+const PROWLARR_SUFFIX = /\(Prowlarr\)\s*$/;
 
 export interface ArrDownloadClient {
   id: number;
@@ -194,34 +231,18 @@ export interface ArrDownloadClient {
   tags: number[];
 }
 
-function statusMap(raw: unknown): Map<number, IndexerStatus> {
-  const out = new Map<number, IndexerStatus>();
-  if (!Array.isArray(raw)) return out;
-  for (const x of raw) {
-    const r = obj(x);
-    const id = posInt(r?.indexerId ?? r?.providerId);
-    if (!r || id === null) continue;
-    out.set(id, {
-      disabledTill: isoOrNull(r.disabledTill),
-      initialFailure: isoOrNull(r.initialFailure),
-      mostRecentFailure: isoOrNull(r.mostRecentFailure),
-    });
-  }
-  return out;
-}
-
-/** /api/v3/indexer (+ /api/v3/indexerstatus) → the indexers, by priority then name. Never `fields`. */
-export function projectIndexers(raw: unknown, statusRaw: unknown = []): ArrIndexer[] {
+/** /api/v3/indexer → the indexers, by priority then name. Never `fields`. */
+export function projectIndexers(raw: unknown): ArrIndexer[] {
   if (!Array.isArray(raw)) return [];
-  const statuses = statusMap(statusRaw);
   const out: ArrIndexer[] = [];
   for (const x of raw) {
     const r = obj(x);
     const id = posInt(r?.id);
     if (!r || id === null) continue;
+    const name = text(r.name, 200);
     out.push({
       id,
-      name: text(r.name, 200) || `#${id}`,
+      name: name || `#${id}`,
       implementation: textOrNull(r.implementationName, 100) ?? textOrNull(r.implementation, 100),
       protocol: protocolOf(r.protocol),
       priority: int(r.priority),
@@ -229,7 +250,7 @@ export function projectIndexers(raw: unknown, statusRaw: unknown = []): ArrIndex
       enableAutomaticSearch: bool(r.enableAutomaticSearch),
       enableInteractiveSearch: bool(r.enableInteractiveSearch),
       tags: idsOf(r.tags, 100),
-      status: statuses.get(id) ?? null,
+      managedByProwlarr: PROWLARR_SUFFIX.test(name),
     });
   }
   return out.sort((a, b) => (a.priority ?? 25) - (b.priority ?? 25) || a.name.localeCompare(b.name));
@@ -292,26 +313,70 @@ export function withProviderEnabled(raw: unknown, change: ProviderEnableChange):
   return { ...r, ...change };
 }
 
+/**
+ * Did the arr's own copy, read back after a save we stopped waiting for, take
+ * the change? Every switched flag must read as asked.
+ */
+export function providerChangeApplied(raw: unknown, change: ProviderEnableChange): boolean {
+  const r = obj(raw);
+  if (!r) return false;
+  return Object.entries(change).every(([k, v]) => r[k] === v);
+}
+
 export interface ProviderTestResult {
   id: number;
+  /** It works: no failure, or only warnings. */
   ok: boolean;
+  /** It works, but the arr warned — every failure it reported is a warning. */
+  warning: boolean;
   /** The arr's validation failures, credentials masked. */
   messages: string[];
 }
 
-function failureMessages(v: unknown): string[] {
-  if (!Array.isArray(v)) return [];
-  const out: string[] = [];
-  for (const x of v) {
-    const r = obj(x);
-    const m = safeMessage(r?.errorMessage ?? r?.message, 300);
-    if (m && !out.includes(m)) out.push(m);
-    if (out.length >= 5) break;
-  }
-  return out;
+/** An arr's validation failures: masked messages, and whether every one is only a warning. */
+export interface ValidationFailures {
+  /** Deduplicated, at most five. */
+  messages: string[];
+  /**
+   * True when there is at least one failure and EVERY one is a warning —
+   * judged over the whole list, messageless and unreadable entries included
+   * (those count as errors), so a dropped message can never turn an error into
+   * "warnings only".
+   */
+  warningsOnly: boolean;
 }
 
-/** /api/v3/{indexer,downloadclient}/testall → one result per provider. */
+// NzbDroneValidationFailure carries `isWarning`, which is what the arr itself
+// decides on (its result's IsValid counts the non-warnings); FluentValidation's
+// `severity` ("warning", or 1 as a number) is the fallback.
+function isWarningFailure(r: Raw | null): boolean {
+  if (!r) return false;
+  if (typeof r.isWarning === "boolean") return r.isWarning;
+  return (typeof r.severity === "string" && r.severity.toLowerCase() === "warning") || r.severity === 1;
+}
+
+export function projectFailures(v: unknown): ValidationFailures {
+  const list = Array.isArray(v) ? v : [];
+  const messages: string[] = [];
+  let warningsOnly = list.length > 0;
+  for (const x of list) {
+    const r = obj(x);
+    if (!isWarningFailure(r)) warningsOnly = false;
+    const m = safeMessage(r?.errorMessage ?? r?.message, 300);
+    if (m && !messages.includes(m) && messages.length < 5) messages.push(m);
+  }
+  return { messages, warningsOnly };
+}
+
+/** A test outcome from the arr's verdict and its failures. */
+export function testResultOf(id: number, isValid: boolean, failures: ValidationFailures): ProviderTestResult {
+  return { id, ok: isValid || failures.warningsOnly, warning: !isValid && failures.warningsOnly, messages: failures.messages };
+}
+
+/**
+ * /api/v3/{indexer,downloadclient}/testall → one result per provider. The arr
+ * marks a provider with only warnings invalid; here it is working, with warnings.
+ */
 export function projectTestAll(raw: unknown): ProviderTestResult[] {
   if (!Array.isArray(raw)) return [];
   const out: ProviderTestResult[] = [];
@@ -319,20 +384,43 @@ export function projectTestAll(raw: unknown): ProviderTestResult[] {
     const r = obj(x);
     const id = posInt(r?.id);
     if (!r || id === null) continue;
-    out.push({ id, ok: r.isValid === true, messages: failureMessages(r.validationFailures) });
+    out.push(testResultOf(id, r.isValid === true, projectFailures(r.validationFailures)));
   }
   return out;
 }
 
-/** The validation failures in a 400 body from a test or a save (a list of {errorMessage}), masked. */
-export function validationMessagesFromBody(body: string): string[] {
+/** The validation failures in a 400 body from a test or a save (a list of {errorMessage, isWarning}), masked. */
+export function validationFailuresFromBody(body: string): ValidationFailures {
   try {
     const parsed = JSON.parse(body) as unknown;
-    return failureMessages(Array.isArray(parsed) ? parsed : [parsed]);
+    return projectFailures(Array.isArray(parsed) ? parsed : [parsed]);
   } catch {
     const m = safeMessage(body, 300);
-    return m ? [m] : [];
+    return { messages: m ? [m] : [], warningsOnly: false };
   }
+}
+
+export function validationMessagesFromBody(body: string): string[] {
+  return validationFailuresFromBody(body).messages;
+}
+
+// ── tags ─────────────────────────────────────────────────────────────────────
+
+export interface ArrTag { id: number; label: string }
+
+/** /api/v3/tag → id and label, to name the tags indexers and clients carry. */
+export function projectTags(raw: unknown): ArrTag[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ArrTag[] = [];
+  for (const x of raw) {
+    const r = obj(x);
+    const id = posInt(r?.id);
+    const label = textOrNull(r?.label, 100);
+    if (id === null || label === null || out.some((t) => t.id === id)) continue;
+    out.push({ id, label });
+    if (out.length >= 1_000) break;
+  }
+  return out;
 }
 
 // ── storage ──────────────────────────────────────────────────────────────────
@@ -344,6 +432,7 @@ export interface ArrRootFolder {
   path: string;
   accessible: boolean;
   freeSpace: number | null;
+  /** The size of the disk the folder sits on (see projectRootFolders), null when no disk holds it. */
   totalSpace: number | null;
   /** Folders in the root the arr has no title for (bounded; `unmappedCount` is the true count). */
   unmappedFolders: UnmappedFolder[];
@@ -354,7 +443,41 @@ export interface ArrDisk { path: string; label: string | null; freeSpace: number
 
 export const MAX_UNMAPPED = 500;
 
-export function projectRootFolders(raw: unknown): ArrRootFolder[] {
+// A path compared as a path: either separator, no trailing one, and a Windows
+// drive path case-insensitively ("C:\Movies" and "c:/movies/" are one place).
+function comparablePath(p: string): string {
+  let s = p.replace(/\\/g, "/");
+  while (s.length > 1 && s.endsWith("/")) s = s.slice(0, -1);
+  return /^[A-Za-z]:/.test(s) ? s.toLowerCase() : s;
+}
+
+/**
+ * The disk a folder sits on: the /diskspace entry whose path is the LONGEST
+ * whole-segment prefix of the folder's ("/mnt/media" holds "/mnt/media/movies",
+ * never "/mnt/media2/movies"; "/" holds everything when nothing nearer does).
+ */
+export function diskFor(path: string, disks: readonly ArrDisk[]): ArrDisk | null {
+  const p = comparablePath(path);
+  let best: ArrDisk | null = null;
+  let bestLen = -1;
+  for (const d of disks) {
+    const dp = comparablePath(d.path);
+    const holds = p === dp || p.startsWith(dp.endsWith("/") ? dp : `${dp}/`);
+    if (holds && dp.length > bestLen) {
+      best = d;
+      bestLen = dp.length;
+    }
+  }
+  return best;
+}
+
+/**
+ * /api/v3/rootfolder → the root folders. Neither arr's RootFolderResource has a
+ * total size, so it comes from the disk the folder sits on (`disks`, the same
+ * instance's /api/v3/diskspace) — without one the page could show free space
+ * but never how full the disk is.
+ */
+export function projectRootFolders(raw: unknown, disks: readonly ArrDisk[] = []): ArrRootFolder[] {
   if (!Array.isArray(raw)) return [];
   const out: ArrRootFolder[] = [];
   for (const x of raw) {
@@ -376,7 +499,7 @@ export function projectRootFolders(raw: unknown): ArrRootFolder[] {
       path,
       accessible: r.accessible !== false,
       freeSpace: bytesOrNull(r.freeSpace),
-      totalSpace: bytesOrNull(r.totalSpace),
+      totalSpace: bytesOrNull(r.totalSpace) ?? diskFor(path, disks)?.totalSpace ?? null,
       unmappedFolders: unmapped.sort((a, b) => a.name.localeCompare(b.name)),
       unmappedCount: list.length,
     });
@@ -394,4 +517,44 @@ export function projectDisks(raw: unknown): ArrDisk[] {
     out.push({ path, label: textOrNull(r.label, 200), freeSpace: bytesOrNull(r.freeSpace), totalSpace: bytesOrNull(r.totalSpace) });
   }
   return out.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+// ── polling ──────────────────────────────────────────────────────────────────
+
+export type LoadKind = "poll" | "manual";
+
+/**
+ * Which load of a polled admin report runs, and which may write state — shared
+ * by the Arr System tabs and the Download Queue. Pure; no I/O.
+ *
+ * A POLL tick is skipped while a load is in flight. A dark instance holds its
+ * read for the whole request timeout, longer than the poll interval, and a
+ * tick that superseded it would discard it — every load was discarded by the
+ * next, the report never arrived and the spinner (and the disabled Reload)
+ * never cleared. A MANUAL load — Reload, or the re-read after an action —
+ * always starts and supersedes whatever is in flight. Only the newest load may
+ * write state.
+ */
+export interface LoadGate {
+  /** The new load's id, or null when this poll tick is skipped. */
+  begin(kind: LoadKind): number | null;
+  /** True when `id` is still the newest load: it may write state, and polls may start again. */
+  settle(id: number): boolean;
+}
+
+export function createLoadGate(): LoadGate {
+  let seq = 0;
+  let inFlight: number | null = null;
+  return {
+    begin(kind) {
+      if (kind === "poll" && inFlight !== null) return null;
+      inFlight = ++seq;
+      return inFlight;
+    },
+    settle(id) {
+      if (id !== inFlight) return false;
+      inFlight = null;
+      return true;
+    },
+  };
 }

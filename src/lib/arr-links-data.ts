@@ -65,12 +65,14 @@ export async function resolveArrOpenUrl(service: ArrLinkService, instance: strin
 }
 
 /**
- * The configured instances whose synced wanted/available cache holds this
- * title, in registry order — which "Open in …" links a detail page offers an
- * admin. Cache rows, not a live call: the page render must not wait on
- * Radarr/Sonarr, and the link itself resolves live on click.
+ * Every configured instance, in registry order, and whether its synced
+ * wanted/available cache holds this title — a detail page offers an admin
+ * "Manage in" / "Open in" for a holder and "Add to" for the rest. Cache rows,
+ * not a live call: the page render must not wait on Radarr/Sonarr, and every
+ * action resolves live on click (a title added since the last sync reads as
+ * not held until the next one; its Add answers "already there").
  */
-export async function arrInstancesHolding(service: ArrLinkService, tmdbId: number): Promise<Array<{ slug: string; name: string }>> {
+export async function arrInstancesForTitle(service: ArrLinkService, tmdbId: number): Promise<Array<{ slug: string; name: string; holds: boolean }>> {
   const where = { tmdbId };
   const select = { arrInstance: true } as const;
   const [configured, wanted, available] = await Promise.all([
@@ -79,5 +81,27 @@ export async function arrInstancesHolding(service: ArrLinkService, tmdbId: numbe
     service === "radarr" ? prisma.radarrAvailableItem.findMany({ where, select }) : prisma.sonarrAvailableItem.findMany({ where, select }),
   ]);
   const holding = new Set([...wanted, ...available].map((r) => r.arrInstance));
-  return configured.filter((i) => holding.has(i.slug)).map((i) => ({ slug: i.slug, name: i.name }));
+  return configured.map((i) => ({ slug: i.slug, name: i.name, holds: holding.has(i.slug) }));
+}
+
+/** The configured instances whose synced cache holds this title (arrInstancesForTitle's holders). */
+export async function arrInstancesHolding(service: ArrLinkService, tmdbId: number): Promise<Array<{ slug: string; name: string }>> {
+  return (await arrInstancesForTitle(service, tmdbId)).filter((i) => i.holds).map(({ slug, name }) => ({ slug, name }));
+}
+
+/**
+ * A detail-page deep link to the title manager — `?manage=<service>:<slug>`
+ * (`:` alone for the default instance) and an optional `&tab=` — or null when
+ * it names nothing valid. Only ever selects among the page's own instances.
+ */
+export function parseManageLink(
+  manage: unknown,
+  tab: unknown,
+  service: ArrLinkService,
+): { instance: string; tab: "settings" | "seasons" | "files" | "history" | undefined } | null {
+  if (typeof manage !== "string") return null;
+  const m = /^(radarr|sonarr):([a-z0-9_-]{0,40})$/.exec(manage);
+  if (!m || m[1] !== service) return null;
+  const tabs = ["settings", "seasons", "files", "history"] as const;
+  return { instance: m[2], tab: typeof tab === "string" && (tabs as readonly string[]).includes(tab) ? (tab as (typeof tabs)[number]) : undefined };
 }

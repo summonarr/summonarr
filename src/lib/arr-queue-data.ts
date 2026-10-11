@@ -4,7 +4,8 @@
 // mutation the page offers: removing a download through Radarr/Sonarr's own
 // bulk queue DELETE. Every call goes through arrFetch (guardrail 5). Nothing is
 // cached, and nothing in Summonarr is written except the audit row the route adds.
-import { ArrResponseError, arrErrorMessage, arrFetch, arrFetchNoContent, getArrCfg, type ArrCfg } from "./arr";
+import { ArrResponseError, arrErrorKind, arrErrorMessage, arrFetch, arrFetchNoContent, getArrCfg, type ArrCfg } from "./arr";
+import type { ArrErrorKind } from "./arr-error-kind";
 import { getSyncableArrInstances } from "./arr-instance-registry";
 import { settleLimit } from "./concurrency";
 import { isFeatureEnabled } from "./features";
@@ -43,19 +44,22 @@ export interface QueueReport {
   /** Configured instances that were read, per service (an integration switched off reads none). */
   instances: Array<{ service: QueueService; slug: string; name: string }>;
   /** Instances whose queue could not be read — their downloads are absent, not finished. */
-  errors: Array<{ service: QueueService; instance: string; error: string }>;
+  errors: Array<{ service: QueueService; instance: string; error: string; kind: ArrErrorKind }>;
   items: QueueItem[];
 }
 
 // Same page shape and ceiling as the queue-membership reads in arr.ts: 250 per
 // page, at most 40 pages (10k records) per instance.
 const PAGE_SIZE = 250;
+const QUEUE_READ_TIMEOUT_MS = 20_000;
 const MAX_PAGES = 40;
 const LISTING_CONCURRENCY = 4;
 const REQUESTER_CHUNK = 1_000;
 const MAX_REQUESTERS_PER_ROW = 5;
 
-async function readQueuePages(service: QueueService, instance: string): Promise<unknown[]> {
+// Exported for the arr monitor (arr-watch-data.ts), which judges the same
+// records through the same fold (foldQueueRecords) as this page.
+export async function readQueuePages(service: QueueService, instance: string): Promise<unknown[]> {
   const cfg = await getArrCfg(service, instance);
   if (!cfg) throw new Error("not configured");
   // Unknown items — downloads the arr can't match to a title — are included:
@@ -66,8 +70,10 @@ async function readQueuePages(service: QueueService, instance: string): Promise<
   const records: unknown[] = [];
   for (let page = 1; page <= MAX_PAGES; page++) {
     // Quiet: loadDownloadQueue reports a failed instance once (warnOnChange).
+    // The page re-reads every 20 s: a dark instance answers "unreachable" well
+    // inside that instead of holding every poll for the 30 s default.
     const res = await arrFetch<{ records?: unknown; totalRecords?: unknown }>(
-      cfg, `/api/v3/queue?page=${page}&pageSize=${PAGE_SIZE}&${include}`, { quietErrors: true },
+      cfg, `/api/v3/queue?page=${page}&pageSize=${PAGE_SIZE}&${include}`, { quietErrors: true, timeoutMs: QUEUE_READ_TIMEOUT_MS },
     );
     const batch = Array.isArray(res?.records) ? res.records : [];
     records.push(...batch);
@@ -150,7 +156,7 @@ export async function loadDownloadQueue(): Promise<QueueReport> {
       return;
     }
     const error = arrErrorMessage(s.reason);
-    report.errors.push({ service: inst.service, instance: inst.slug, error });
+    report.errors.push({ service: inst.service, instance: inst.slug, error, kind: arrErrorKind(s.reason) });
     warnOnChange(logKey, error, `[queue] ${inst.service} instance "${inst.slug}" queue read failed: ${error}`);
   });
   await attachRequesters(report.items);
@@ -205,16 +211,16 @@ export async function grabPending(service: QueueService, instance: string, ids: 
  * way to retry an import after fixing what blocked it (a permission, a disk, a
  * mapping changed in the arr) without waiting. Commands are queued, not awaited.
  */
-export async function recheckDownloads(): Promise<{ instances: number; errors: Array<{ service: QueueService; instance: string; error: string }> }> {
+export async function recheckDownloads(): Promise<{ instances: number; errors: Array<{ service: QueueService; instance: string; error: string; kind: ArrErrorKind }> }> {
   const instances = await enabledInstances();
   const settled = await settleLimit(instances, LISTING_CONCURRENCY, async (inst) => {
     const cfg = await getArrCfg(inst.service, inst.slug);
     if (!cfg) throw new Error("not configured");
     await arrFetch<unknown>(cfg, "/api/v3/command", { method: "POST", body: JSON.stringify({ name: "RefreshMonitoredDownloads" }) });
   });
-  const errors: Array<{ service: QueueService; instance: string; error: string }> = [];
+  const errors: Array<{ service: QueueService; instance: string; error: string; kind: ArrErrorKind }> = [];
   settled.forEach((r, i) => {
-    if (r.status === "rejected") errors.push({ service: instances[i].service, instance: instances[i].slug, error: arrErrorMessage(r.reason) });
+    if (r.status === "rejected") errors.push({ service: instances[i].service, instance: instances[i].slug, error: arrErrorMessage(r.reason), kind: arrErrorKind(r.reason) });
   });
   return { instances: instances.length, errors };
 }

@@ -1,17 +1,23 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { StyledSelect } from "@/components/ui/styled-select";
-import { Dialog, DialogBackdrop, DialogClose, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogBackdrop, DialogClose, DialogContent, DialogPopup, DialogPortal, DialogTitle } from "@/components/ui/dialog";
+import { Chip } from "@/components/ui/design";
 import {
   Loader2, Check, RefreshCw, AlertTriangle, Clock, Trash2,
-  Download, ChevronDown, ChevronUp, Magnet, Radio, Search, X,
+  Download, ChevronDown, ChevronUp, Magnet, Radio, Search, X, FileX,
 } from "@/components/icons";
 import type { ArrRelease } from "@/lib/arr";
+import type { ReplaceableFile, ReplaceFollowUp } from "@/lib/issue-replace";
 import { withBasePath } from "@/lib/base-path";
-import { useT } from "@/components/i18n/i18n-provider";
+import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { episodeSummary, queueFormatters } from "@/components/admin/queue-format";
+import { ManageTitleButton } from "@/components/admin/arr-title/title-manager";
+import { arrInstanceLabel } from "@/components/admin/open-in-arr";
+import { manageTabFor } from "@/lib/arr-manage-links";
 
 interface IssueActionsProps {
   issueId: string;
@@ -26,6 +32,12 @@ interface IssueActionsProps {
   // Configured Radarr/Sonarr instances for this issue's service (default first).
   // More than one ⇒ the Replace panel shows an instance picker.
   instances?: { slug: string; name: string }[];
+  // The viewer is an ADMIN: "Replace file" deletes files, which issue admins
+  // can't (the route is withAdmin). Cosmetic — the route decides.
+  isAdmin?: boolean;
+  // ADMIN only: the title's TMDB id and the configured instances whose synced
+  // cache holds it — one "Manage" icon each, opening the title manager there.
+  manage?: { tmdbId: number; holders: { slug: string; name: string }[] };
 }
 
 // i18n keys, translated at render.
@@ -57,6 +69,8 @@ export function IssueActions({
   episodeNumber,
   libraryConfirmed,
   instances,
+  isAdmin = false,
+  manage,
 }: IssueActionsProps) {
   const router = useRouter();
   const t = useT();
@@ -65,7 +79,7 @@ export function IssueActions({
   const [arrError, setArrError] = useState<string | null>(null);
   const [refetchOk, setRefetchOk] = useState(false);
 
-  const [panel, setPanel] = useState<"resolve" | "delete" | "replace" | null>(null);
+  const [panel, setPanel] = useState<"resolve" | "delete" | "replace" | "replaceFile" | null>(null);
   const [resolution, setResolution] = useState("");
 
   // `instances` lists only the CONFIGURED Radarr/Sonarr servers, default first.
@@ -274,6 +288,13 @@ export function IssueActions({
   const canRefetch = mediaType === "MOVIE" || !!tvdbId;
 
   const canReplace = mediaType === "MOVIE" || !!tvdbId || scope === "EPISODE";
+  const serviceName = mediaType === "MOVIE" ? "Radarr" : "Sonarr";
+  // A search only ever takes an UPGRADE of a file still on disk, so Refetch
+  // can't replace a broken file that's already at the profile's cutoff — say
+  // so, and point at the action that can.
+  const refetchHint = isAdmin
+    ? t("adminQueue.issueActions.refetchHint")
+    : t("adminQueue.issueActions.refetchHintIssueAdmin");
   const isResolved = currentStatus === "RESOLVED";
   const isInProgress = currentStatus === "IN_PROGRESS";
 
@@ -307,12 +328,27 @@ export function IssueActions({
 
       {panel === null && (
         <div className="flex items-center gap-2 flex-wrap justify-end">
+          {isAdmin && manage?.holders.map((h) => {
+            const service = mediaType === "MOVIE" ? "radarr" : "sonarr";
+            return (
+              <ManageTitleButton
+                key={h.slug}
+                service={service}
+                instance={h.slug}
+                target={{ tmdbId: manage.tmdbId }}
+                instanceLabel={arrInstanceLabel(service, h.name, h.slug)}
+                variant="icon"
+                initialTab={manageTabFor("issue", service)}
+              />
+            );
+          })}
           {canRefetch && !isResolved && (
             <Button
               size="sm"
               variant="outline"
               onClick={triggerRefetch}
               disabled={loading !== null}
+              title={refetchHint}
               className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-amber-400 hover:border-amber-500/50 gap-1"
             >
               {loading === "refetch" ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
@@ -334,6 +370,19 @@ export function IssueActions({
             >
               <Download className="w-3 h-3" />
               {libraryConfirmed && scope === "EPISODE" ? t("adminQueue.issueActions.replaceEpisode") : t("adminQueue.issueActions.replace")}
+            </Button>
+          )}
+
+          {isAdmin && !isResolved && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => { setArrError(null); setPanel("replaceFile"); }}
+              disabled={loading !== null}
+              className="h-7 px-3 text-xs border-zinc-700 text-zinc-400 hover:text-red-400 hover:border-red-500/50 gap-1"
+            >
+              <FileX className="w-3 h-3" />
+              {t("adminQueue.issueActions.replaceFile")}
             </Button>
           )}
 
@@ -592,10 +641,24 @@ export function IssueActions({
         </DialogPortal>
       </Dialog>
 
+      {panel === "replaceFile" && (
+        <ReplaceFileDialog
+          issueId={issueId}
+          serviceName={serviceName}
+          instance={instance}
+          instances={instanceOptions}
+          onInstanceChange={setPickedInstance}
+          onClose={() => setPanel(null)}
+        />
+      )}
+
       {panel === null && refetchOk && (
-        <span className="flex items-center gap-1 text-[11px] text-green-400">
-          <Check className="w-3 h-3" />
-          {t("adminQueue.issueActions.searchTriggered")}
+        <span className="flex flex-col items-end gap-0.5 text-right">
+          <span className="flex items-center gap-1 text-[11px] text-green-400">
+            <Check className="w-3 h-3" />
+            {t("adminQueue.issueActions.searchTriggered")}
+          </span>
+          <span className="max-w-60 text-[10px] text-zinc-500">{refetchHint}</span>
         </span>
       )}
       {arrError && (
@@ -605,5 +668,424 @@ export function IssueActions({
         </span>
       )}
     </div>
+  );
+}
+
+// GET /api/issues/[id]/files — the in-scope files on one instance.
+interface FileListing {
+  files: ReplaceableFile[];
+  /** The title's files outside the issue's scope — not offered, only counted. */
+  otherFiles: number;
+  /** Sonarr's series type: "anime" numbers episodes its own way (the issue's numbers are the media server's). */
+  seriesType: string | null;
+}
+
+// POST /api/issues/[id]/files — what happened (also carried by a 502 beside `error`).
+interface ReplaceResult {
+  deleted: number;
+  requested: number;
+  marked: number;
+  unmarked: number;
+  searched: boolean;
+  redownload: boolean | null;
+  /** Marks the arr's own redownload searches for. */
+  redownloading: number;
+  /** What the delete unmonitored and was monitored again. */
+  remonitored: number;
+  /** That re-monitor failed: the files were searched for by name, and may stay unmonitored. */
+  remonitorFailed: boolean;
+  nothingMissing: boolean;
+}
+
+const CONFIRM_NAMES = 5;
+
+// Sonarr's own titles for a file's episodes — how the admin checks that the
+// issue's numbering (the media server's) names the same episodes as Sonarr's.
+const episodeTitles = (f: ReplaceableFile): string =>
+  f.episodes.map((e) => e.title).filter((x): x is string => typeof x === "string" && x !== "").join(" · ");
+
+// "Replace file" (ADMIN): delete the files the issue is about so Radarr/Sonarr
+// fetch new ones — while a file is on disk a search only takes an upgrade of
+// it. The server re-reads the files and history and checks every id against
+// the issue's scope before anything is deleted (/api/issues/[id]/files).
+function ReplaceFileDialog({
+  issueId,
+  serviceName,
+  instance,
+  instances,
+  onInstanceChange,
+  onClose,
+}: {
+  issueId: string;
+  serviceName: string;
+  instance: string;
+  instances: { slug: string; name: string }[];
+  onInstanceChange: (slug: string) => void;
+  onClose: () => void;
+}) {
+  const t = useT();
+  const router = useRouter();
+  const locale = useLocale();
+  const fmt = useMemo(() => queueFormatters(locale), [locale]);
+  const [busy, setBusy] = useState<"list" | "replace" | null>("list");
+  const [listing, setListing] = useState<FileListing | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
+  const [confirm, setConfirm] = useState<ReplaceFollowUp | null>(null);
+  const [result, setResult] = useState<ReplaceResult | null>(null);
+  // Only the newest read may write state — switching instances twice must not
+  // let the older answer land on the newer instance's picker.
+  const reqRef = useRef(0);
+
+  const load = useCallback(async (target: string) => {
+    const reqId = ++reqRef.current;
+    try {
+      const res = await fetch(withBasePath(`/api/issues/${issueId}/files?instance=${encodeURIComponent(target)}`));
+      const data = (await res.json().catch(() => ({}))) as Partial<FileListing> & { error?: string };
+      if (reqId !== reqRef.current) return;
+      if (!res.ok || !Array.isArray(data.files)) {
+        setListing(null);
+        setError(data.error ?? t("adminQueue.issueActions.replaceFileLoadFailed"));
+        return;
+      }
+      const files = data.files;
+      setListing({
+        files,
+        otherFiles: typeof data.otherFiles === "number" ? data.otherFiles : 0,
+        seriesType: typeof data.seriesType === "string" ? data.seriesType : null,
+      });
+      setSelected((prev) => new Set([...prev].filter((id) => files.some((f) => f.id === id))));
+    } catch {
+      if (reqId === reqRef.current) {
+        setListing(null);
+        setError(t("shared.thread.networkError"));
+      }
+    } finally {
+      if (reqId === reqRef.current) setBusy((b) => (b === "list" ? null : b));
+    }
+  }, [issueId, t]);
+
+  // Read on open and whenever the instance changes.
+  useEffect(() => {
+    void load(instance);
+  }, [load, instance]);
+
+  function reset() {
+    setBusy("list");
+    setListing(null);
+    setSelected(new Set());
+    setConfirm(null);
+    setResult(null);
+    setError(null);
+  }
+
+  function pickInstance(next: string) {
+    reset();
+    onInstanceChange(next);
+  }
+
+  function retry() {
+    reset();
+    void load(instance);
+  }
+
+  function toggle(id: number) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+    setConfirm(null);
+  }
+
+  async function replace(then: ReplaceFollowUp) {
+    setBusy("replace");
+    setError(null);
+    let reload = false;
+    try {
+      const res = await fetch(withBasePath(`/api/issues/${issueId}/files`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instance, fileIds: [...selected], then }),
+      });
+      const data = (await res.json().catch(() => ({}))) as Partial<ReplaceResult> & { error?: string };
+      // A 502 can still carry what WAS done (files deleted before the search
+      // failed, or a delete that stopped part-way) — show it either way.
+      if (typeof data.deleted === "number" && data.deleted > 0) {
+        setResult({
+          deleted: data.deleted,
+          requested: data.requested ?? data.deleted,
+          marked: data.marked ?? 0,
+          unmarked: data.unmarked ?? 0,
+          searched: data.searched === true,
+          redownload: typeof data.redownload === "boolean" ? data.redownload : null,
+          redownloading: typeof data.redownloading === "number" ? data.redownloading : 0,
+          remonitored: typeof data.remonitored === "number" ? data.remonitored : 0,
+          remonitorFailed: data.remonitorFailed === true,
+          nothingMissing: data.nothingMissing === true,
+        });
+        setSelected(new Set());
+        router.refresh();
+      }
+      if (!res.ok) {
+        setError(data.error ?? t("adminQueue.issueActions.replaceFileFailed"));
+        // Some files may be gone: show what's left.
+        reload = true;
+      }
+    } catch {
+      setError(t("shared.thread.networkError"));
+      reload = true;
+    } finally {
+      setBusy(null);
+      setConfirm(null);
+    }
+    if (reload) {
+      setBusy("list");
+      void load(instance);
+    }
+  }
+
+  const files = listing?.files ?? [];
+  const done = result !== null && error === null;
+  const isSeries = serviceName === "Sonarr";
+  const chosen = files.filter((f) => selected.has(f.id));
+  const chosenSize = chosen.reduce((n, f) => n + f.size, 0);
+  const allSelected = files.length > 0 && files.every((f) => selected.has(f.id));
+  const fileName = (f: ReplaceableFile) => {
+    if (!isSeries || f.episodes.length === 0) return f.relativePath;
+    const titles = episodeTitles(f);
+    return `${episodeSummary(f.episodes)}${titles ? ` · ${titles}` : ""} · ${f.relativePath}`;
+  };
+
+  return (
+    <Dialog open onOpenChange={(o) => { if (!o && busy !== "replace") onClose(); }}>
+      <DialogPortal>
+        <DialogBackdrop />
+        <DialogPopup className="max-w-2xl">
+          <div className="flex items-center justify-between gap-3 px-4 py-4 sm:px-6 border-b border-zinc-700 flex-shrink-0">
+            <DialogTitle className="text-base font-semibold text-zinc-100">
+              {t("adminQueue.issueActions.replaceFile")}
+            </DialogTitle>
+            <div className="flex items-center gap-3">
+              {instances.length > 1 && (
+                <StyledSelect
+                  compact
+                  value={instance}
+                  onChange={(e) => pickInstance(e.target.value)}
+                  disabled={busy !== null}
+                  aria-label={t("adminQueue.issueActions.instance")}
+                  className="w-auto md:text-xs"
+                >
+                  {instances.map((i) => (
+                    <option key={i.slug || "default"} value={i.slug}>{i.name}</option>
+                  ))}
+                </StyledSelect>
+              )}
+              <DialogClose
+                disabled={busy === "replace"}
+                aria-label={t("adminQueue.common.close")}
+                title={t("adminQueue.common.close")}
+                className="text-zinc-500 hover:text-zinc-300 disabled:opacity-40 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </DialogClose>
+            </div>
+          </div>
+
+          <DialogContent className="grid gap-3 p-4 sm:p-6">
+            <p className="m-0 text-xs text-zinc-400">
+              {t("adminQueue.issueActions.replaceFileIntro", { service: serviceName })}
+            </p>
+
+            {result && (
+              <div className="grid gap-1 text-xs">
+                <span className="flex items-center gap-1.5 text-green-400">
+                  <Check className="h-3.5 w-3.5 shrink-0" />
+                  {t("adminQueue.issueActions.replaceFileDeleted", { count: result.deleted })}
+                  {result.marked > 0 && ` · ${t("adminQueue.issueActions.replaceFileMarked", { count: result.marked })}`}
+                </span>
+                {result.remonitored > 0 && (
+                  <span className="pl-5 text-zinc-400">{t("adminQueue.issueActions.replaceFileRemonitored", { service: serviceName })}</span>
+                )}
+                {result.remonitorFailed && (
+                  <span className="pl-5 text-amber-400">{t("adminQueue.issueActions.replaceFileRemonitorFailed", { service: serviceName })}</span>
+                )}
+                {result.redownloading > 0 && (
+                  <span className="pl-5 text-zinc-400">{t("adminQueue.issueActions.replaceFileRedownload", { service: serviceName })}</span>
+                )}
+                {result.searched && (
+                  <span className="pl-5 text-zinc-400">{t("adminQueue.issueActions.replaceFileSearched")}</span>
+                )}
+                {result.unmarked > 0 && (
+                  <span className="pl-5 text-amber-400">{t("adminQueue.issueActions.replaceFileUnmarked", { count: result.unmarked })}</span>
+                )}
+                {result.nothingMissing && (
+                  <span className="pl-5 text-amber-400">{t("adminQueue.issueActions.replaceFileNothingMissing", { service: serviceName })}</span>
+                )}
+              </div>
+            )}
+
+            {error && (
+              <p role="alert" className="m-0 flex flex-wrap items-center gap-1.5 text-xs text-red-400">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0 flex-1">{error}</span>
+                {listing === null && busy === null && (
+                  <Button variant="ghost" size="sm" onClick={retry}><RefreshCw /> {t("adminArr.common.retry")}</Button>
+                )}
+              </p>
+            )}
+
+            {busy === "list" ? (
+              <div className="flex items-center justify-center gap-3 py-10 text-sm text-zinc-500">
+                <Loader2 className="h-5 w-5 animate-spin" />
+                {t("adminQueue.issueActions.replaceFileLoading")}
+              </div>
+            ) : listing === null || done ? null : files.length === 0 ? (
+              <p className="m-0 py-6 text-center text-sm text-zinc-500">{t("adminQueue.issueActions.replaceFileNone")}</p>
+            ) : (
+              <>
+                {isSeries && listing.seriesType === "anime" && (
+                  <p className="m-0 flex items-start gap-1.5 text-xs text-amber-400">
+                    <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0" />
+                    {t("adminQueue.issueActions.replaceFileAnimeNumbering", { service: serviceName })}
+                  </p>
+                )}
+                <label className="flex items-center gap-2 text-xs text-zinc-400">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={(e) => { setSelected(e.target.checked ? new Set(files.map((f) => f.id)) : new Set()); setConfirm(null); }}
+                    disabled={busy !== null}
+                    className="accent-[var(--ds-accent)]"
+                  />
+                  {t("adminArr.files.selectAll")}
+                </label>
+                <ul className="m-0 grid list-none gap-0 rounded-lg p-0" style={{ border: "1px solid var(--ds-border)" }}>
+                  {files.map((f, i) => (
+                    <li key={f.id} className="flex items-start gap-3 px-3 py-2.5" style={i > 0 ? { borderTop: "1px solid var(--ds-border)" } : undefined}>
+                      <input
+                        type="checkbox"
+                        checked={selected.has(f.id)}
+                        onChange={() => toggle(f.id)}
+                        disabled={busy !== null}
+                        className="mt-1 accent-[var(--ds-accent)]"
+                        aria-label={t("adminQueue.issueActions.replaceFileSelectAria", { name: f.relativePath })}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          {isSeries && f.episodes.length > 0 && <span className="ds-mono text-xs text-zinc-500">{episodeSummary(f.episodes)}</span>}
+                          <span className="min-w-0 break-all text-sm text-zinc-100" title={f.path ?? undefined}>{f.relativePath}</span>
+                        </div>
+                        {isSeries && episodeTitles(f) !== "" && (
+                          <div className="mt-0.5 break-words text-xs text-zinc-400">{episodeTitles(f)}</div>
+                        )}
+                        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-zinc-500">
+                          {f.quality && <Chip tone={f.qualityCutoffNotMet ? "pending" : "accent"}>{f.quality}</Chip>}
+                          {f.qualityCutoffNotMet && <Chip tone="pending">{t("adminArr.files.cutoffUnmet")}</Chip>}
+                          <span>{fmt.size(f.size)}</span>
+                          {f.languages.length > 0 && <span>{f.languages.join(", ")}</span>}
+                          {f.releaseGroup && <span>{f.releaseGroup}</span>}
+                        </div>
+                        {f.grab === null ? (
+                          <div className="mt-1 text-xs text-amber-400">{t("adminQueue.issueActions.replaceFileGrabUnknown")}</div>
+                        ) : f.grab.failed ? (
+                          <div className="mt-1 text-xs text-amber-400">{t("adminQueue.issueActions.replaceFileGrabFailed")}</div>
+                        ) : (
+                          <div className="mt-1 break-all text-xs text-zinc-500" title={f.grab.event.sourceTitle}>
+                            {t("adminQueue.issueActions.replaceFileGrab", { release: f.grab.event.sourceTitle })}
+                          </div>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+                {listing.otherFiles > 0 && (
+                  <p className="m-0 text-xs text-zinc-500">{t("adminQueue.issueActions.replaceFileOther", { count: listing.otherFiles })}</p>
+                )}
+              </>
+            )}
+
+          </DialogContent>
+
+          {listing !== null && files.length > 0 && !done && (
+            // The confirm takes the footer's place, so it can never be scrolled
+            // out of view below a long file list.
+            <div className="grid px-4 py-4 sm:px-6 border-t border-zinc-700 bg-zinc-900 flex-shrink-0">
+              {confirm && chosen.length > 0 ? (
+                <div
+                  role="alertdialog"
+                  aria-label={t("adminQueue.issueActions.replaceFileConfirmTitle")}
+                  className="grid gap-2 rounded-lg px-3 py-2.5 text-sm"
+                  style={{ background: "color-mix(in oklab, var(--ds-danger) 12%, transparent)", border: "1px solid var(--ds-danger)" }}
+                >
+                  <span className="flex items-center gap-2 font-medium text-zinc-100">
+                    <AlertTriangle className="h-4 w-4 shrink-0" style={{ color: "var(--ds-danger)" }} />
+                    {t("adminQueue.issueActions.replaceFileConfirmTitle")}
+                  </span>
+                  <ul className="m-0 grid list-none gap-0.5 p-0 text-xs text-zinc-100">
+                    {chosen.slice(0, CONFIRM_NAMES).map((f) => (
+                      <li key={f.id} className="break-all">{fileName(f)}</li>
+                    ))}
+                    {chosen.length > CONFIRM_NAMES && (
+                      <li className="text-zinc-400">{t("adminArr.files.andMore", { count: chosen.length - CONFIRM_NAMES })}</li>
+                    )}
+                  </ul>
+                  <span className="text-xs text-zinc-400">
+                    {t("adminQueue.issueActions.replaceFileConfirmSize", { size: fmt.size(chosenSize) })}
+                    {" · "}
+                    {confirm === "markFailed"
+                      ? t("adminQueue.issueActions.replaceFileConfirmBlocklist", { service: serviceName })
+                      : t("adminQueue.issueActions.replaceFileConfirmSearch", { service: serviceName })}
+                  </span>
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <Button variant="ghost" size="sm" onClick={() => setConfirm(null)} disabled={busy !== null}>
+                      {t("shared.common.cancel")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      className="bg-red-600 text-[var(--ds-on-status)] hover:bg-[var(--ds-danger-hover)]"
+                      onClick={() => void replace(confirm)}
+                      disabled={busy !== null}
+                    >
+                      {busy === "replace" ? <Loader2 className="animate-spin" /> : <Trash2 />}
+                      {t("adminQueue.issueActions.replaceFileConfirmButton")}
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setConfirm("search")}
+                    disabled={selected.size === 0 || busy !== null}
+                    className="h-auto min-h-7 whitespace-normal py-1.5 text-left"
+                  >
+                    <Search />
+                    {t("adminQueue.issueActions.replaceFileSearch")}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setConfirm("markFailed")}
+                    disabled={selected.size === 0 || busy !== null}
+                    className="h-auto min-h-7 whitespace-normal py-1.5 text-left"
+                  >
+                    <FileX />
+                    {t("adminQueue.issueActions.replaceFileBlocklist", { service: serviceName })}
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+          {done && (
+            <div className="flex justify-end px-4 py-4 sm:px-6 border-t border-zinc-700 bg-zinc-900 flex-shrink-0">
+              <Button size="sm" onClick={onClose}>{t("adminQueue.common.close")}</Button>
+            </div>
+          )}
+        </DialogPopup>
+      </DialogPortal>
+    </Dialog>
   );
 }

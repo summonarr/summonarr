@@ -17,6 +17,9 @@ export const TRAKT_SYNC_LOCK_ID = 2031;
 // "Refresh" on the never-watched page share it). Same reasoning: a
 // parallel-branch-safe id, not the next free one.
 export const UPSTREAM_WATCH_LOCK_ID = 2041;
+// The Radarr/Sonarr monitor (arr-watch cron): disk space, failed downloads,
+// newly stuck downloads. Same reasoning: a parallel-branch-safe id.
+export const ARR_WATCH_LOCK_ID = 2051;
 
 // 30 minutes — generous enough for legitimate full-library syncs but bounds the worst-case lock hold.
 const DEFAULT_WORK_TIMEOUT_MS = 30 * 60 * 1000;

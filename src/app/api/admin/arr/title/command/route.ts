@@ -3,7 +3,7 @@ import { withAdmin } from "@/lib/api-auth";
 import { ArrResponseError } from "@/lib/arr";
 import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
 import { arrFailure, arrTitleGate, parseIdArray, parseSeasonNumber } from "@/lib/arr-admin-http";
-import { MissingInstanceError, NothingMissingError, searchMissing } from "@/lib/arr-missing-data";
+import { MissingInstanceError, NothingMissingError, searchMissingTracked } from "@/lib/arr-missing-data";
 import { parseTitleCommand } from "@/lib/arr-title";
 import { refreshTitle, searchEpisodes, searchMovie, searchSeason } from "@/lib/arr-title-data";
 import { readJsonCapped } from "@/lib/body-size";
@@ -16,14 +16,19 @@ const MAX_EPISODES = 1_000;
 const LIMIT_PER_MIN = 30;
 
 // Admin title manager, the title's buttons (ADMIN). Queues one Radarr/Sonarr
-// command on the title's own instance → 202 { commands }.
+// command on the title's own instance → 202 { commands, commandIds } — the
+// arr's ids for what it queued, which the page follows live
+// (GET /api/admin/arr/commands) instead of guessing when it finished.
 //   Radarr: action "search" (MoviesSearch — the movie's own Search, an upgrade
 //           search when it has a file) or "refresh" (RefreshMovie).
 //   Sonarr: "refresh" (RefreshSeries); "searchMissing" — exactly what the
 //           series is missing, re-judged live (the Missing page's plan, never
 //           SeriesSearch; 409 when nothing is); "searchSeason" + seasonNumber
 //           (SeasonSearch); "searchEpisodes" + episodeIds (one EpisodeSearch —
-//           every id must be one of the series' episodes).
+//           every id must be one of the series' episodes; with
+//           `missingOnly: true` only the ones that have aired and still have no
+//           file — 409 when none is left — so the calendar's Search never turns
+//           into an upgrade search).
 // Not audited, like the Missing page's search: it asks the arr to do what it
 // does on its own schedule.
 export const POST = withAdmin(async (req, _ctx, session) => {
@@ -53,9 +58,10 @@ export const POST = withAdmin(async (req, _ctx, session) => {
       case "searchSeason":
         return NextResponse.json(await searchSeason(instance, arrId, season as number), { status: 202 });
       case "searchEpisodes":
-        return NextResponse.json(await searchEpisodes(instance, arrId, episodeIds as number[]), { status: 202 });
+        return NextResponse.json(await searchEpisodes(instance, arrId, episodeIds as number[], { missingOnly: body.missingOnly === true }), { status: 202 });
       case "searchMissing": {
-        const result = await searchMissing("sonarr", instance, arrId, new Date());
+        // { commands, seasons, episodes, commandIds } — one id per season searched whole, plus one.
+        const result = await searchMissingTracked("sonarr", instance, arrId, new Date());
         return NextResponse.json(result, { status: 202 });
       }
     }

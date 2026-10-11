@@ -64,6 +64,8 @@ export const ACTION_GROUP: Record<AuditAction, AuditGroup> = {
   ARR_BLOCKLIST_CHANGE: "admin",
   ARR_COMMAND: "admin",
   ARR_PROVIDER_CHANGE: "admin",
+  ARR_TITLE_ADD: "admin",
+  ARR_TITLE_DELETE: "admin",
   LIBRARY_SYNC: "system",
   CACHE_WARM: "system",
   RATINGS_CACHE_CLEAR: "system",
@@ -136,4 +138,6 @@ export const ACTION_LABELS: Record<AuditAction, ActionLabel> = {
   ARR_BLOCKLIST_CHANGE:  { label: "Arr Blocklist Changed",     color: "bg-amber-500/15 text-amber-400",         icon: "role" },
   ARR_COMMAND:           { label: "Arr Library Search",        color: "bg-sky-500/15 text-sky-400",             icon: "sync" },
   ARR_PROVIDER_CHANGE:   { label: "Arr Indexer/Client Changed", color: "bg-amber-500/15 text-amber-400",        icon: "role" },
+  ARR_TITLE_ADD:         { label: "Added to Radarr/Sonarr",    color: "bg-green-500/15 text-green-400",         icon: "approve" },
+  ARR_TITLE_DELETE:      { label: "Removed from Radarr/Sonarr", color: "bg-red-500/15 text-red-400",            icon: "delete" },
 };

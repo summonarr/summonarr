@@ -12,7 +12,8 @@ const MAX_EPISODES = 5_000;
 //   GET ?service=sonarr&instance&id&season → { episodes, now } of that season.
 //   PATCH { service: "sonarr", instance, id, episodeIds, monitored } —
 //       monitor or unmonitor episodes; every id must be one of the series'
-//       episodes (409 otherwise, nothing written). Audited ARR_TITLE_EDIT.
+//       episodes (409 otherwise, nothing written). → { updated, title }: the
+//       series re-read, since its counts follow monitoring. Audited ARR_TITLE_EDIT.
 export const GET = withAdmin(async (req) => {
   const t = translatorForRequest(req);
   const q = req.nextUrl.searchParams;
@@ -42,8 +43,9 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiAdmin.arr.episodesBodyInvalid") }, { status: 400 });
   }
   const monitored = body.monitored;
+  let result;
   try {
-    await setEpisodesMonitored(target.instance, target.arrId, episodeIds, monitored);
+    result = await setEpisodesMonitored(target.instance, target.arrId, episodeIds, monitored);
   } catch (err) {
     return arrFailure(err, target, t, "episode monitor");
   }
@@ -55,5 +57,5 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
     details: { service: target.service, instance: target.instance, arrId: target.arrId, fields: ["episodes"], episodes: episodeIds.length, monitored },
     ...auditContext(req, session),
   });
-  return NextResponse.json({ updated: episodeIds.length });
+  return NextResponse.json(result);
 });

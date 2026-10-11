@@ -3,17 +3,19 @@
 // pages would need every instance's whole history to order one page honestly.
 // Every call goes through arrFetch on a CONFIGURED instance (guardrails 5, 32).
 // Nothing is cached except blocklist titles an older arr did not embed.
-import { arrFetch, arrFetchNoContent, type ArrCfg } from "./arr";
-import { configuredArrCfg, postArrCommand, type ArrService } from "./arr-admin";
+import { ArrResponseError, arrFetch, arrFetchNoContent, type ArrCfg } from "./arr";
+import { commandIdsOf, configuredArrCfg, postArrCommand, type ArrService } from "./arr-admin";
 import {
   historyEventQuery,
   pageOf,
   projectBlocklistRecords,
   projectHistoryRecords,
+  removedBlocklistEntry,
   type ArrHistoryEvent,
   type ArrPage,
   type BlocklistEntry,
   type HistoryFilterKind,
+  type RemovedBlocklistEntry,
 } from "./arr-history";
 import { settleLimit } from "./concurrency";
 import { processSingleton } from "./process-singleton";
@@ -71,10 +73,7 @@ export async function loadBlocklistPage(
 ): Promise<ArrPage<BlocklistEntry>> {
   const cfg = await configuredArrCfg(service, instance);
   const include = service === "radarr" ? "&includeMovie=true" : "&includeSeries=true";
-  const raw = await arrFetch<unknown>(
-    cfg,
-    `/api/v3/blocklist?page=${paging.page}&pageSize=${paging.pageSize}&sortKey=date&sortDirection=descending${include}`,
-  );
+  const raw = await readBlocklist(cfg, paging.page, paging.pageSize, include);
   const page = pageOf(raw, (records) => projectBlocklistRecords(service, instance, records), paging);
   const missing = [...new Set(page.records.filter((r) => r.mediaTitle === "" && r.arrMediaId !== null).map((r) => r.arrMediaId as number))];
   if (missing.length > 0) {
@@ -99,33 +98,70 @@ export async function loadBlocklistPage(
 /** Some of the ids are not on the instance's blocklist (removed meanwhile, or never were). */
 export class BlocklistGoneError extends Error {}
 
+/**
+ * The instance has no /blocklist API: Radarr before v4 and Sonarr v3 builds
+ * before August 2021 called it the blacklist (/blacklist, ClearBlacklist) and
+ * answer /blocklist with 404 — which must not read as "that item is gone".
+ */
+export class BlocklistUnsupportedError extends Error {}
+
+// The arr's own list order, the one the Blocklist tab pages through.
+const BLOCKLIST_ORDER = "sortKey=date&sortDirection=descending";
+
+async function readBlocklist(cfg: ArrCfg, page: number, pageSize: number, include = ""): Promise<unknown> {
+  try {
+    return await arrFetch<unknown>(cfg, `/api/v3/blocklist?page=${page}&pageSize=${pageSize}&${BLOCKLIST_ORDER}${include}`);
+  } catch (err) {
+    if (err instanceof ArrResponseError && err.status === 404) throw new BlocklistUnsupportedError();
+    throw err;
+  }
+}
+
 const BLOCKLIST_SCAN_PAGE = 1_000;
 const BLOCKLIST_SCAN_PAGES = 20;
 
 /**
  * Remove releases from the blocklist (Radarr/Sonarr's bulk DELETE), so they
  * can be grabbed again. Every id must be on the instance's blocklist as it
- * reads now (newest first — the page the admin is looking at is found early;
- * guardrail 5e), else BlocklistGoneError and nothing is sent.
+ * reads now (guardrail 5e), else BlocklistGoneError and nothing is sent.
+ * `viewed` is the page the admin picked them from: it is re-read first, and
+ * the newest-first scan (up to BLOCKLIST_SCAN_PAGES × BLOCKLIST_SCAN_PAGE
+ * records, every one embedding its movie/series) runs only for ids that page
+ * no longer holds. Resolves to what was removed, in `ids` order, for the audit.
  */
-export async function removeFromBlocklist(service: ArrService, instance: string, ids: readonly number[]): Promise<void> {
+export async function removeFromBlocklist(
+  service: ArrService,
+  instance: string,
+  ids: readonly number[],
+  viewed: { page: number; pageSize: number } | null = null,
+): Promise<RemovedBlocklistEntry[]> {
   const cfg = await configuredArrCfg(service, instance);
   const wanted = new Set(ids);
+  const found = new Map<number, RemovedBlocklistEntry>();
+  const take = async (page: number, pageSize: number) => {
+    const raw = (await readBlocklist(cfg, page, pageSize)) as { records?: unknown; totalRecords?: unknown } | null;
+    const records: unknown[] = Array.isArray(raw?.records) ? raw.records : [];
+    for (const r of records) {
+      const entry = removedBlocklistEntry(service, r);
+      if (entry && wanted.delete(entry.id)) found.set(entry.id, entry);
+    }
+    return { count: records.length, total: typeof raw?.totalRecords === "number" ? raw.totalRecords : 0 };
+  };
+  if (viewed) await take(viewed.page, viewed.pageSize);
   for (let page = 1; page <= BLOCKLIST_SCAN_PAGES && wanted.size > 0; page++) {
-    const raw = await arrFetch<{ records?: unknown; totalRecords?: unknown } | null>(
-      cfg, `/api/v3/blocklist?page=${page}&pageSize=${BLOCKLIST_SCAN_PAGE}&sortKey=date&sortDirection=descending`,
-    );
-    const records = Array.isArray(raw?.records) ? (raw.records as Array<{ id?: unknown } | null>) : [];
-    for (const r of records) if (typeof r?.id === "number") wanted.delete(r.id);
-    const total = typeof raw?.totalRecords === "number" ? raw.totalRecords : 0;
-    if (records.length === 0 || page * BLOCKLIST_SCAN_PAGE >= total) break;
+    const { count, total } = await take(page, BLOCKLIST_SCAN_PAGE);
+    if (count === 0 || page * BLOCKLIST_SCAN_PAGE >= total) break;
   }
   if (wanted.size > 0) throw new BlocklistGoneError();
   await arrFetchNoContent(cfg, "/api/v3/blocklist/bulk", { method: "DELETE", body: JSON.stringify({ ids: [...ids] }) });
+  return ids.map((id) => found.get(id) as RemovedBlocklistEntry);
 }
 
-/** Empty the instance's whole blocklist (the arr's own ClearBlocklist command). */
-export async function clearBlocklist(service: ArrService, instance: string): Promise<void> {
+/**
+ * Empty the instance's whole blocklist (the arr's own ClearBlocklist command).
+ * Answers the command's id — the page follows it and re-reads the list once it ends.
+ */
+export async function clearBlocklist(service: ArrService, instance: string): Promise<{ commandIds: number[] }> {
   const cfg = await configuredArrCfg(service, instance);
-  await postArrCommand(cfg, { name: "ClearBlocklist" });
+  return { commandIds: commandIdsOf([await postArrCommand(cfg, { name: "ClearBlocklist" })]) };
 }

@@ -13,17 +13,24 @@ const LIMIT_PER_MIN = 10;
 // Admin → Arr System → Tasks (ADMIN).
 //   GET → { instances, errors, results: [{ service, instance, tasks, commands }] }:
 //       every configured instance's scheduled tasks (last/next run, duration)
-//       and its recent commands (newest first; the command body is never sent).
+//       and its commands — every queued or running one, then the 30 most recent
+//       finished, each newest first (the command body is never sent).
 //   POST { service, instance, task } → 202 { id } — run one of the instance's
 //       scheduled tasks now (RssSync, Backup, RefreshMovie, …). The name must be
 //       one the instance lists as a scheduled task, read now (400 otherwise) —
 //       never an arbitrary command.
+//       The page confirms the two that do more than they say: the update check
+//       (Radarr ApplicationCheckUpdate, Sonarr ApplicationUpdateCheck) and a
+//       library refresh (RefreshMovie / RefreshSeries) — taskRisk.
 //   POST { service, instance, action: "searchMissing" | "searchCutoff" } → 202 —
 //       search EVERY monitored missing title, or every monitored title below
-//       its cutoff (upgrades). Hits every indexer for each.
+//       its cutoff (upgrades). Hits every indexer for each. Radarr's commands
+//       take no `monitored` (it searches monitored movies only) and, started
+//       from the API, ignore Minimum Availability — bulkActionCommand.
 //   Both are audited ARR_COMMAND after the arr accepted them.
 //   DELETE ?service&instance&commandId — cancel a command still QUEUED (409
-//       once it started or finished). Not audited.
+//       once it started or finished — including when it starts between our
+//       read and the arr's cancel). Not audited.
 // Runs are rate-limited per admin.
 export const GET = withAdmin(async () => {
   return NextResponse.json(await loadTasks());
@@ -48,8 +55,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     const result = isTask
       ? await runTask(target.service, target.instance, task as string)
       : await runBulkAction(target.service, target.instance, action as "searchMissing" | "searchCutoff");
-    // Audited both ways: a task such as ApplicationUpdateCheck can install an
-    // arr update when run by hand, and a library-wide search hits every indexer.
+    // Audited both ways: the update check (Radarr ApplicationCheckUpdate,
+    // Sonarr ApplicationUpdateCheck) installs an available update and restarts
+    // the arr when run by hand, and a library-wide search hits every indexer.
     void logAudit({
       userId: session.user.id,
       userName: session.user.name ?? session.user.email ?? null,

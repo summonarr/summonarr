@@ -966,10 +966,11 @@ test("releases GET returns ONLY the ArrRelease field list — an upstream downlo
   assert.equal(body.length, 1, "a downloadAllowed=false release is still filtered out");
   assert.deepEqual(
     Object.keys(body[0]).sort(),
-    ["age", "downloadAllowed", "guid", "indexer", "indexerId", "leechers", "protocol", "qualityWeight", "quality", "rejected", "rejections", "seeders", "size", "title"].sort(),
+    ["age", "customFormatScore", "customFormats", "downloadAllowed", "guid", "indexer", "indexerId", "languages", "leechers", "protocol", "qualityWeight", "quality", "rejected", "rejections", "releaseWeight", "seeders", "size", "title"].sort(),
     "exactly the ArrRelease field list",
   );
   assert.deepEqual(body[0].quality, { quality: { id: 19, name: "Remux-2160p" }, revision: { version: 1 } }, "nested quality is projected too");
+  assert.deepEqual(body[0].languages, ["English"], "languages are projected as NAMES only");
   assert.equal(body[0].guid, "g1");
 });
 

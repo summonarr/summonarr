@@ -7,11 +7,14 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 // Admin → Calendar (ADMIN): what Radarr and Sonarr have coming up (and just
 // had), from their own calendars — every configured instance, live.
 //   GET ?start=<ISO>&end=<ISO>[&unmonitored=1] — at most MAX_CALENDAR_DAYS.
-//   → { instances, errors, entries }: one entry per episode airing and per
-//   movie release date (in cinemas / physical / digital) in the window, each
-//   with whether the arr has the file (downloaded / missing / upcoming /
-//   unmonitored / released). An instance that could not be read is named in
-//   `errors` — its titles are absent, not "nothing airing".
+//   → { instances, errors, entries, now }: one entry per episode airing and
+//   per movie release date (in cinemas / physical / digital) in the window,
+//   each with whether the arr has the file or is downloading it (downloaded /
+//   downloading / missing / airing / aired / upcoming / unmonitored /
+//   released — see CalendarStatus). An instance that could not be read is named
+//   in `errors` with the KIND of failure (the page translates it) — its titles
+//   are absent, not "nothing airing". `now` is the server's clock, which the
+//   page's "today" follows.
 export const GET = withAdmin(async (req) => {
   const t = translatorForRequest(req);
   const q = req.nextUrl.searchParams;

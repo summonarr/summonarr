@@ -3,7 +3,7 @@
 // parsing the target and ids, and ONE mapping from the data layers' errors to
 // responses. Route files may only export handlers, so it lives here.
 import { NextResponse } from "next/server";
-import { ArrResponseError, arrErrorMessage } from "./arr";
+import { ArrResponseError, arrErrorKind, arrErrorMessage } from "./arr";
 import { ArrInstanceError, ARR_SERVICE_LABEL, parseArrService, type ArrService } from "./arr-admin";
 import { TitleEditError } from "./arr-title";
 import { AlreadyFailedError, NotAGrabError, NotOnTitleError, TitleNotFoundError } from "./arr-title-data";
@@ -12,6 +12,7 @@ import { CommandNotQueuedError, ProviderNotFoundError, ProviderRejectedError, Un
 import { validationMessagesFromBody } from "./arr-system";
 import { isFeatureEnabled } from "./features";
 import type { Translator } from "./i18n/translate";
+import { warnOnChange } from "./log-dedup";
 import { sanitizeForLog } from "./sanitize";
 
 export type ArrTarget = { service: ArrService; instance: string };
@@ -70,9 +71,12 @@ export async function arrTitleGate(rawService: unknown, rawInstance: unknown, ra
 /**
  * Every data-layer error → its response. The arr's own refusal reason (a 400's
  * validation messages) is relayed masked; anything unexpected is logged with
- * the upstream detail and answered with the translated generic.
+ * the upstream detail and answered with the translated generic. A POLLED route
+ * passes `warnKey`: the same failure on every poll is one unchanged condition,
+ * logged once through warnOnChange (guardrail 7b) — the route forgets the key
+ * when a read succeeds.
  */
-export function arrFailure(err: unknown, target: ArrTarget, t: Translator, what: string): NextResponse {
+export function arrFailure(err: unknown, target: ArrTarget, t: Translator, what: string, opts: { warnKey?: string } = {}): NextResponse {
   const service = ARR_SERVICE_LABEL[target.service];
   if (err instanceof ArrInstanceError) {
     return NextResponse.json({ error: t("apiAdmin.missing.instanceUnknown", { service }) }, { status: 404 });
@@ -116,6 +120,29 @@ export function arrFailure(err: unknown, target: ArrTarget, t: Translator, what:
   if (err instanceof ArrResponseError && err.status === 404) {
     return NextResponse.json({ error: t("apiAdmin.arr.goneUpstream", { service }) }, { status: 404 });
   }
-  console.warn(`[arr-admin] ${target.service} instance "${sanitizeForLog(target.instance)}" ${what} failed:`, arrErrorMessage(err));
-  return NextResponse.json({ error: t("apiAdmin.arr.failed", { service }) }, { status: 502 });
+  // A 409 is the arr refusing in its own words ("Unable to cancel task",
+  // "Getting release from indexer failed") — relayed masked, like a 400.
+  if (err instanceof ArrResponseError && err.status === 409) {
+    const messages = validationMessagesFromBody(err.body);
+    const reason = messages.join(" ") || t("apiAdmin.arr.noReason");
+    return NextResponse.json({ error: t("apiAdmin.arr.rejected", { service, reason }), messages }, { status: 409 });
+  }
+  if (opts.warnKey) {
+    const detail = arrErrorMessage(err);
+    warnOnChange(opts.warnKey, detail, `[arr-admin] ${target.service} instance "${sanitizeForLog(target.instance)}" ${what} failed: ${detail}`);
+  } else {
+    console.warn(`[arr-admin] ${target.service} instance "${sanitizeForLog(target.instance)}" ${what} failed:`, arrErrorMessage(err));
+  }
+  switch (arrErrorKind(err)) {
+    case "auth":
+      return NextResponse.json({ error: t("apiAdmin.arr.failedAuth", { service }) }, { status: 502 });
+    case "timeout":
+      return NextResponse.json({ error: t("apiAdmin.arr.failedTimeout", { service }) }, { status: 504 });
+    case "unreachable":
+      return NextResponse.json({ error: t("apiAdmin.arr.failedUnreachable", { service }) }, { status: 502 });
+    case "server":
+      return NextResponse.json({ error: t("apiAdmin.arr.failedServer", { service }) }, { status: 502 });
+    default:
+      return NextResponse.json({ error: t("apiAdmin.arr.failed", { service }) }, { status: 502 });
+  }
 }

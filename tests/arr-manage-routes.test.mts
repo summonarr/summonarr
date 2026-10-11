@@ -20,8 +20,9 @@
 //      indexer's or client's `fields`, a release guid (opaque handles), and
 //      credentials inside upstream messages (masked).
 //   5. Writes are audited after the arr accepted them, never before.
-//   6. A task run names one of the instance's own scheduled tasks; a
-//      library-wide search sends `monitored: true`.
+//   6. A task run names one of the instance's own scheduled tasks; a Sonarr
+//      library-wide search sends `monitored: true` (Radarr's take no such
+//      field — tests/arr-fix-system.test.mts).
 //
 // Harness: the same as tests/arr-ops-routes.test.mts.
 import { test, beforeEach } from "node:test";
@@ -229,6 +230,10 @@ const EPISODES = [
   { id: 201, seriesId: 21, seasonNumber: 2, episodeNumber: 1, title: "Seven Thirty-Seven", monitored: true, hasFile: true, episodeFileId: 503, airDateUtc: "2009-03-09T02:00:00Z" },
   { id: 202, seriesId: 21, seasonNumber: 2, episodeNumber: 2, title: "Grilled", monitored: true, hasFile: false, episodeFileId: 0, airDateUtc: "2009-03-16T02:00:00Z" },
 ];
+// Another series' episode, reachable by id — the per-id check must refuse it.
+const OTHER_SERIES_EPISODES = [
+  { id: 901, seriesId: 99, seasonNumber: 1, episodeNumber: 1, title: "Elsewhere", monitored: true, hasFile: false, episodeFileId: 0, airDateUtc: "2010-01-01T00:00:00Z" },
+];
 const radarrBase: Responder = (c) => {
   if (c.origin !== RADARR || c.method !== "GET") return undefined;
   if (c.path === "/api/v3/movie" && c.query.get("tmdbId") === "603") return json([movie()]);
@@ -245,6 +250,11 @@ const sonarrBase: Responder = (c) => {
   if (c.path === "/api/v3/episode" && c.query.get("seriesId") === "21") {
     const season = c.query.get("seasonNumber");
     return json(season === null ? EPISODES : EPISODES.filter((e) => String(e.seasonNumber) === season));
+  }
+  const oneEpisode = /^\/api\/v3\/episode\/(\d+)$/.exec(c.path);
+  if (oneEpisode) {
+    const ep = [...EPISODES, ...OTHER_SERIES_EPISODES].find((e) => String(e.id) === oneEpisode[1]);
+    return ep ? json(ep) : new Response("{}", { status: 404 });
   }
   if (c.path === "/api/v3/qualityprofile") return json(PROFILES);
   if (c.path === "/api/v3/rootfolder") return json(TV_ROOTS);
@@ -689,28 +699,58 @@ test("the blocklist names titles the arr didn't embed, removes in ONE bulk call,
 test("the calendar reads every instance, names a failed one, and judges each entry's status", async () => {
   const token = await mintSession();
   responder = (c) => {
+    // Sonarr's queue holds episode 204; Radarr's can't be read at all (the
+    // stub throws) — its entries keep the statuses the calendar gives them.
+    if (c.path === "/api/v3/queue" && c.origin === SONARR) {
+      return json({ page: 1, pageSize: 250, totalRecords: 2, records: [
+        { id: 1, seriesId: 21, episodeId: 204, size: 1000, sizeleft: 250, status: "downloading", trackedDownloadState: "downloading" },
+        { id: 2, seriesId: 21, episodeId: 202, size: 1000, sizeleft: 0, status: "completed", trackedDownloadState: "failedPending" },
+      ] });
+    }
     if (c.path !== "/api/v3/calendar") return undefined;
     if (c.origin === RADARR_4K) return new Response("down", { status: 503 });
     if (c.origin === RADARR) {
       return json([{ id: 11, tmdbId: 603, title: "The Matrix", monitored: true, hasFile: false, inCinemas: "2026-10-02T00:00:00Z", digitalRelease: "2026-10-03T00:00:00Z", physicalRelease: "2027-01-01T00:00:00Z" }]);
     }
     return json([
-      { id: 202, seriesId: 21, seasonNumber: 2, episodeNumber: 2, title: "Grilled", airDateUtc: "2026-10-04T02:00:00Z", monitored: true, hasFile: false, series: { title: "Breaking Bad", tvdbId: 81189, monitored: true } },
-      { id: 203, seriesId: 21, seasonNumber: 2, episodeNumber: 3, title: "Bit by a Dead Bee", airDateUtc: "2099-10-04T02:00:00Z", monitored: true, hasFile: false, series: { title: "Breaking Bad", tvdbId: 81189, monitored: true } },
+      { id: 202, seriesId: 21, seasonNumber: 2, episodeNumber: 2, title: "Grilled", airDateUtc: "2026-10-04T02:00:00Z", monitored: true, hasFile: false, series: { title: "Breaking Bad", tvdbId: 81189, monitored: true, runtime: 47 } },
+      { id: 204, seriesId: 21, seasonNumber: 2, episodeNumber: 4, title: "Down", airDateUtc: "2026-10-05T02:00:00Z", monitored: true, hasFile: false, series: { title: "Breaking Bad", tvdbId: 81189, monitored: true, runtime: 47 } },
+      { id: 203, seriesId: 21, seasonNumber: 2, episodeNumber: 3, title: "Bit by a Dead Bee", airDateUtc: "2099-10-04T02:00:00Z", monitored: true, hasFile: false, series: { title: "Breaking Bad", tvdbId: 81189, monitored: true, runtime: 47 } },
     ]);
   };
   tmdbCacheRows.set("tvdb-to-tmdb:81189", JSON.stringify({ tmdbId: 1396 }));
   const res = await call(calendarRoute.GET, token, "/admin/arr/calendar?start=2026-10-01T00:00:00Z&end=2026-11-30T00:00:00Z");
   assert.equal(res.status, 200);
-  const body = await res.json() as { errors: Array<{ service: string; instance: string }>; entries: Array<{ kind: string; status: string; tmdbId: number | null }> };
-  assert.deepEqual(body.errors.map((e) => `${e.service}:${e.instance}`), ["radarr:4k"]);
+  const body = await res.json() as {
+    errors: Array<{ service: string; instance: string; kind: string }>;
+    entries: Array<{ kind: string; status: string; tmdbId: number | null; progress: number | null }>;
+    now: string;
+  };
+  assert.deepEqual(body.errors.map((e) => `${e.service}:${e.instance}:${e.kind}`), ["radarr:4k:unreachable"], "a failed instance is named with the KIND of failure the page translates");
   assert.deepEqual(body.entries.map((e) => [e.kind, e.status]), [
     ["cinema", "released"],
     ["digital", "missing"],
     ["episode", "missing"],
+    ["episode", "downloading"],
     ["episode", "upcoming"],
-  ]);
+  ], "a failed download (202) is not on its way; an unreadable queue (Radarr) leaves statuses alone");
+  assert.equal(body.entries[3].progress, 0.75);
   assert.equal(body.entries[2].tmdbId, 1396, "the series' TMDB id is filled from the tvdb→tmdb map");
+  assert.ok(Number.isFinite(Date.parse(body.now)), "the report carries the server's clock");
+
+  // The window asked of each arr: Radarr's padded a day either side (a release
+  // DATE is midnight UTC, the page's window is local days); Sonarr's as given,
+  // with the series (title, runtime, monitored) included.
+  const calendarQuery = (origin: string) => {
+    const c = calls.find((x) => x.path === "/api/v3/calendar" && x.origin === origin);
+    assert.ok(c, origin);
+    return Object.fromEntries(c.query);
+  };
+  assert.deepEqual(calendarQuery(RADARR), { start: "2026-09-30T00:00:00.000Z", end: "2026-12-01T00:00:00.000Z", unmonitored: "false" });
+  assert.deepEqual(calendarQuery(SONARR), {
+    start: "2026-10-01T00:00:00.000Z", end: "2026-11-30T00:00:00.000Z", unmonitored: "false",
+    includeSeries: "true", includeEpisodeFile: "false", includeEpisodeImages: "false",
+  });
 
   assert.equal((await call(calendarRoute.GET, token, "/admin/arr/calendar?start=2026-01-01T00:00:00Z&end=2026-06-01T00:00:00Z")).status, 400, "longer than the window cap");
 });
@@ -770,17 +810,19 @@ test("indexers and download clients never reach the browser with their settings 
   settings.set("feature.integration.sonarr", "false");
   invalidateFeatureFlagCache();
   const token = await mintSession();
+  // Neither arr has an /api/v3/indexerstatus endpoint; which indexers are
+  // failing is the health panel's (tests/arr-fix-system.test.mts).
   responder = (c) => {
     if (c.path === "/api/v3/indexer") return json([INDEXER]);
-    if (c.path === "/api/v3/indexerstatus") return json([{ indexerId: 3, disabledTill: "2026-10-10T12:00:00Z", mostRecentFailure: "2026-10-10T11:00:00Z" }]);
     if (c.path === "/api/v3/downloadclient") return json([CLIENT]);
+    if (c.path === "/api/v3/tag") return json([]);
     return undefined;
   };
   const text = await (await call(providersRoute.GET, token, "/admin/arr/providers")).text();
   assert.ok(!text.includes(APIKEY));
   assert.ok(!text.includes("nzbgeek.info"));
-  const result = (JSON.parse(text) as { results: Array<{ indexers: Array<{ status: { disabledTill: string } | null }>; downloadClients: unknown[] }> }).results[0];
-  assert.equal(result.indexers[0].status?.disabledTill, "2026-10-10T12:00:00.000Z");
+  const result = (JSON.parse(text) as { results: Array<{ indexers: unknown[]; downloadClients: unknown[] }> }).results[0];
+  assert.equal(result.indexers.length, 1);
   assert.equal(result.downloadClients.length, 1);
 });
 
@@ -836,7 +878,7 @@ test("testing one provider sends the arr's own resource to its test endpoint ser
   assert.deepEqual(writes().map((c) => [c.path, c.body]), [["/api/v3/indexer/test", INDEXER]]);
 
   const all = await call(testRoute.POST, token, "/admin/arr/providers/test", { method: "POST", body: { service: "radarr", kind: "downloadClient" } });
-  assert.deepEqual(((await all.json()) as { results: unknown[] }).results, [{ id: 1, ok: true, messages: [] }]);
+  assert.deepEqual(((await all.json()) as { results: unknown[] }).results, [{ id: 1, ok: true, warning: false, messages: [] }]);
 
   const mixed = await call(testRoute.POST, token, "/admin/arr/providers/test", { method: "POST", body: { service: "radarr", kind: "indexer" } });
   assert.equal(mixed.status, 200, "one failing indexer is a result, not a refusal");
@@ -895,4 +937,321 @@ test("storage lists root folders (free space, unmapped folders) and disks for ev
   };
   const body = await (await call(storageRoute.GET, token, "/admin/arr/storage")).json() as { results: Array<{ service: string; rootFolders: Array<{ unmappedCount: number }>; disks: unknown[] }> };
   assert.deepEqual(body.results.map((r) => [r.service, r.rootFolders[0].unmappedCount, r.disks.length]), [["sonarr", 1, 1]]);
+});
+
+// ── 8: review fixes (title manager, releases, error wording) ─────────────────
+
+test("an upstream failure is worded by KIND — the API key, a timeout, an unreachable host — and a 409 relays the arr's own reason, masked", async () => {
+  const token = await mintSession();
+  const get = () => call(titleRoute.GET, token, "/admin/arr/title?service=radarr&id=11");
+  responder = (c) => (c.path === "/api/v3/movie/11" ? json({ message: "Unauthorized" }, 401) : radarrBase(c));
+  const auth = await get();
+  assert.equal(auth.status, 502);
+  assert.match(((await auth.json()) as { error: string }).error, /API key/);
+
+  responder = (c) => {
+    if (c.path === "/api/v3/movie/11") throw Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+    return radarrBase(c);
+  };
+  const slow = await get();
+  assert.equal(slow.status, 504);
+  assert.match(((await slow.json()) as { error: string }).error, /in time/);
+
+  responder = (c) => {
+    if (c.path === "/api/v3/movie/11") throw new TypeError("fetch failed");
+    return radarrBase(c);
+  };
+  const down = await get();
+  assert.equal(down.status, 502);
+  assert.match(((await down.json()) as { error: string }).error, /reach/);
+
+  responder = both((c) => (c.method === "POST" && c.path === "/api/v3/command" ? json({ message: `Unable to cancel task apikey=${APIKEY}` }, 409) : undefined), radarrBase);
+  const refused = await call(commandRoute.POST, token, "/admin/arr/title/command", { method: "POST", body: { service: "radarr", id: 11, action: "search" } });
+  assert.equal(refused.status, 409);
+  const text = await refused.text();
+  assert.match(text, /Unable to cancel task/);
+  assert.ok(!text.includes(APIKEY));
+});
+
+test("the calendar's missing-only episode search skips episodes that have a file or haven't aired, and is 409 when none is left", async () => {
+  const token = await mintSession();
+  responder = both(commandResponder, sonarrBase);
+  const post = (episodeIds: number[]) => call(commandRoute.POST, token, "/admin/arr/title/command", { method: "POST", body: { service: "sonarr", id: 21, action: "searchEpisodes", episodeIds, missingOnly: true } });
+  assert.equal((await post([201, 202])).status, 202);
+  assert.deepEqual(writes().map((c) => c.body), [{ name: "EpisodeSearch", episodeIds: [202] }], "201 has a file — an upgrade search nobody asked for");
+  calls = [];
+  assert.equal((await post([201])).status, 409);
+  assert.deepEqual(writes(), []);
+});
+
+test("a single-episode action checks that ONE episode (no whole-series read) and refuses another series' episode", async () => {
+  const token = await mintSession();
+  responder = both(commandResponder, sonarrBase);
+  const post = (episodeIds: number[]) => call(commandRoute.POST, token, "/admin/arr/title/command", { method: "POST", body: { service: "sonarr", id: 21, action: "searchEpisodes", episodeIds } });
+  assert.equal((await post([901])).status, 409, "an episode of series 99, reached by id, is not series 21's");
+  assert.deepEqual(writes(), []);
+  calls = [];
+  assert.equal((await post([202])).status, 202);
+  assert.ok(!arrCalls().some((c) => c.path === "/api/v3/episode" && c.query.has("seriesId")), "no full episode list for one id");
+  assert.ok(arrCalls().some((c) => c.path === "/api/v3/episode/202"));
+});
+
+test("episode monitoring answers the re-read series, so its counts follow monitoring", async () => {
+  const token = await mintSession();
+  let unmonitored = false;
+  responder = both((c) => {
+    if (c.method === "PUT" && c.path === "/api/v3/episode/monitor") {
+      unmonitored = true;
+      return json([]);
+    }
+    if (c.path === "/api/v3/series/21" && unmonitored) {
+      // Sonarr's count drops the unmonitored, unaired-or-missing episode: season 2 reads complete.
+      return json(series({ seasons: [
+        { seasonNumber: 1, monitored: true, statistics: { episodeCount: 2, episodeFileCount: 2, totalEpisodeCount: 2 } },
+        { seasonNumber: 2, monitored: true, statistics: { episodeCount: 1, episodeFileCount: 1, totalEpisodeCount: 2 } },
+      ] }));
+    }
+    return undefined;
+  }, sonarrBase);
+  const res = await call(episodesRoute.PATCH, token, "/admin/arr/title/episodes", { method: "PATCH", body: { service: "sonarr", id: 21, episodeIds: [202], monitored: false } });
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { updated: number; title: { episodeCount: number; episodeFileCount: number } };
+  assert.equal(body.updated, 1);
+  assert.deepEqual([body.title.episodeFileCount, body.title.episodeCount], [3, 3]);
+});
+
+test("season monitoring combined with any other field is 400 — two writes, so a half-applied edit couldn't be audited honestly", async () => {
+  const token = await mintSession();
+  const res = await call(titleRoute.PATCH, token, "/admin/arr/title", { method: "PATCH", body: { service: "sonarr", id: 21, monitored: false, seasons: [{ seasonNumber: 1, monitored: false }] } });
+  assert.equal(res.status, 400);
+  assert.deepEqual(arrCalls(), []);
+});
+
+test("the title GET by TMDB id reuses the resource it found (no second read), and a failing choice list doesn't stop it opening", async () => {
+  const token = await mintSession();
+  responder = (c) => (c.path === "/api/v3/tag" ? json({ message: "boom" }, 500) : radarrBase(c));
+  const res = await call(titleRoute.GET, token, "/admin/arr/title?service=radarr&tmdbId=603");
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as { title: { arrId: number }; tags: unknown; qualityProfiles: unknown[] };
+  assert.equal(body.title.arrId, 11);
+  assert.equal(body.tags, null, "an unreadable list is null — the form disables that field");
+  assert.equal(body.qualityProfiles.length, 2);
+  assert.ok(!arrCalls().some((c) => c.path === "/api/v3/movie/11"), "the tmdbId read already returned the movie");
+});
+
+test("files: ids ride in a JSON body, a row naming another title is dropped, and a Radarr delete that stops part-way audits what it deleted", async () => {
+  const token = await mintSession();
+  responder = both((c) => {
+    if (c.method === "GET" && c.path === "/api/v3/moviefile") {
+      return json([
+        { id: 7, movieId: 11, relativePath: "a.mkv", size: 1 },
+        { id: 8, movieId: 11, relativePath: "b.mkv", size: 1 },
+        { id: 9, movieId: 12, relativePath: "someone-else.mkv", size: 1 },
+      ]);
+    }
+    if (c.method === "DELETE" && c.path === "/api/v3/moviefile/7") return new Response("", { status: 200 });
+    if (c.method === "DELETE" && c.path === "/api/v3/moviefile/8") return json({ message: "locked" }, 500);
+    return undefined;
+  }, radarrBase);
+  const list = (await (await call(filesRoute.GET, token, "/admin/arr/title/files?service=radarr&id=11")).json()) as { files: Array<{ id: number }> };
+  assert.deepEqual(list.files.map((f) => f.id).sort(), [7, 8], "a file of movie 12 is not this movie's");
+  assert.equal((await call(filesRoute.DELETE, token, "/admin/arr/title/files?service=radarr&id=11", { method: "DELETE", body: { fileIds: [9] } })).status, 409);
+  assert.deepEqual(writes(), []);
+
+  const res = await call(filesRoute.DELETE, token, "/admin/arr/title/files?service=radarr&id=11", { method: "DELETE", body: { fileIds: [7, 8] } });
+  assert.equal(res.status, 502);
+  assert.equal(((await res.json()) as { deleted: number }).deleted, 1);
+  assert.equal(audits.length, 1);
+  assert.deepEqual((JSON.parse(audits[0].details as string) as { fileIds: number[] }).fileIds, [7], "exactly what was deleted is audited");
+});
+
+test("a rename preview row naming another title is never renamed into this one", async () => {
+  const token = await mintSession();
+  responder = both((c) => {
+    if (c.method === "GET" && c.path === "/api/v3/rename") {
+      return json([
+        { movieId: 11, movieFileId: 7, existingPath: "matrix.mkv", newPath: "The Matrix (1999).mkv" },
+        { movieId: 12, movieFileId: 70, existingPath: "other.mkv", newPath: "The Matrix (1999).mkv" },
+      ]);
+    }
+    if (c.method === "POST" && c.path === "/api/v3/command") return json({ id: 1 }, 201);
+    return undefined;
+  }, radarrBase);
+  const preview = (await (await call(renameRoute.GET, token, "/admin/arr/title/rename?service=radarr&id=11")).json()) as { files: Array<{ fileId: number }> };
+  assert.deepEqual(preview.files.map((f) => f.fileId), [7]);
+  assert.equal((await call(renameRoute.POST, token, "/admin/arr/title/rename", { method: "POST", body: { service: "radarr", id: 11, fileIds: [70] } })).status, 409);
+  assert.deepEqual(writes(), []);
+});
+
+test("Sonarr v4's per-series history (no embedded episode) gets its S/E from the episode list; another series' record is dropped", async () => {
+  const token = await mintSession();
+  responder = both((c) => {
+    if (c.path === "/api/v3/history/series") {
+      return json([
+        { id: 80, seriesId: 21, episodeId: 202, eventType: "grabbed", date: "2026-10-02T10:00:00Z", sourceTitle: "Breaking.Bad.S02E02", downloadId: "X" },
+        { id: 81, seriesId: 99, episodeId: 901, eventType: "grabbed", date: "2026-10-02T11:00:00Z", sourceTitle: "Elsewhere.S01E01", downloadId: "Y" },
+      ]);
+    }
+    return undefined;
+  }, sonarrBase);
+  const res = await call(titleHistoryRoute.GET, token, "/admin/arr/title/history?service=sonarr&id=21");
+  const events = ((await res.json()) as { events: Array<{ id: number; episode: { seasonNumber: number; episodeNumber: number } | null }> }).events;
+  assert.deepEqual(events.map((e) => [e.id, e.episode?.seasonNumber, e.episode?.episodeNumber]), [[80, 2, 2]]);
+});
+
+test("a torrent grabbed again after an earlier failure (same info hash) can still be marked failed", async () => {
+  const token = await mintSession();
+  const history = [
+    { id: 50, seriesId: 21, eventType: "grabbed", date: "2026-09-01T10:00:00Z", sourceTitle: "Breaking.Bad.S02E02", downloadId: "HASH" },
+    { id: 51, seriesId: 21, eventType: "downloadFailed", date: "2026-09-01T11:00:00Z", sourceTitle: "Breaking.Bad.S02E02", downloadId: "HASH" },
+    { id: 60, seriesId: 21, eventType: "grabbed", date: "2026-10-01T10:00:00Z", sourceTitle: "Breaking.Bad.S02E02", downloadId: "HASH" },
+  ];
+  responder = both((c) => {
+    if (c.path === "/api/v3/history/series") return json(history);
+    if (c.method === "POST" && c.path === "/api/v3/history/failed/60") return json({});
+    return undefined;
+  }, sonarrBase);
+  const res = await call(failedRoute.POST, token, "/admin/arr/history/failed", { method: "POST", body: { service: "sonarr", arrId: 21, historyId: 60 } });
+  assert.equal(res.status, 200);
+  assert.deepEqual(writes().map((c) => c.path), ["/api/v3/history/failed/60"]);
+  // The OLD grab, whose failure came after it, is still refused.
+  calls = [];
+  assert.equal((await call(failedRoute.POST, token, "/admin/arr/history/failed", { method: "POST", body: { service: "sonarr", arrId: 21, historyId: 50 } })).status, 409);
+});
+
+test("interactive search keeps the arr's own ranking (releaseWeight), and projects score, formats and languages by NAME", async () => {
+  const token = await mintSession();
+  const rel = (guid: string, over: Record<string, unknown>) => ({ ...RELEASE, guid, title: guid, ...over });
+  responder = both((c) => (c.path === "/api/v3/release" && c.method === "GET"
+    ? json([
+      rel("low-score", { qualityWeight: 500, seeders: 900, releaseWeight: 2, customFormatScore: -100 }),
+      rel("arr-pick", { qualityWeight: 100, seeders: 1, releaseWeight: 0, customFormatScore: 1500, customFormats: [{ id: 1, name: "HDR10+" }], languages: [{ id: 1, name: "English" }] }),
+      rel("middle", { qualityWeight: 300, seeders: 50, releaseWeight: 1 }),
+    ])
+    : undefined), radarrBase);
+  const res = await call(releasesRoute.GET, token, "/admin/arr/title/releases?service=radarr&id=11");
+  const releases = ((await res.json()) as { releases: Array<{ title: string; customFormatScore: number | null; customFormats: string[]; languages: string[]; releaseWeight: number | null }> }).releases;
+  assert.deepEqual(releases.map((r) => r.title), ["arr-pick", "middle", "low-score"], "the arr's order, not qualityWeight/seeders");
+  assert.deepEqual([releases[0].customFormatScore, releases[0].customFormats, releases[0].languages], [1500, ["HDR10+"], ["English"]]);
+});
+
+test("a grab the arr refuses says what to do: 410 search again (its 30-minute cache), 409 with its reason; a used handle can't grab twice", async () => {
+  const token = await mintSession();
+  let grabStatus = 404;
+  responder = both((c) => {
+    if (c.path === "/api/v3/release" && c.method === "GET") return json([RELEASE]);
+    if (c.path === "/api/v3/release" && c.method === "POST") {
+      return grabStatus === 200 ? json({}) : json({ message: grabStatus === 409 ? "Getting release from indexer failed" : "Couldn't find requested release in cache" }, grabStatus);
+    }
+    return undefined;
+  }, radarrBase);
+  const search = async () => ((await (await call(releasesRoute.GET, token, "/admin/arr/title/releases?service=radarr&id=11")).json()) as { releases: Array<{ guid: string }> }).releases[0].guid;
+  const grab = (release: string) => call(releasesRoute.POST, token, "/admin/arr/title/releases", { method: "POST", body: { service: "radarr", id: 11, release } });
+
+  const expired = await grab(await search());
+  assert.equal(expired.status, 410);
+  assert.match(((await expired.json()) as { error: string }).error, /search again/i);
+  grabStatus = 409;
+  const refused = await grab(await search());
+  assert.equal(refused.status, 409);
+  assert.match(((await refused.json()) as { error: string }).error, /Getting release from indexer failed/);
+  assert.equal(audits.length, 0);
+
+  grabStatus = 200;
+  const handle = await search();
+  assert.equal((await grab(handle)).status, 200);
+  assert.equal((JSON.parse(audits[0].details as string) as { release: string }).release, RELEASE.title, "the audit names the release (never the guid)");
+  assert.equal((await grab(handle)).status, 410, "the handle was spent");
+});
+
+test("a handle grabs ONCE: a second grab racing the first is 409 with nothing sent; a refusal hands it back, an unknown outcome spends it", async () => {
+  const token = await mintSession();
+  let open: (() => void) | null = null;
+  let gate = new Promise<void>((r) => { open = r; });
+  let grabStatus = 200;
+  let posts = 0;
+  responder = both(((c: Call) => {
+    if (c.path === "/api/v3/release" && c.method === "GET") return json([RELEASE]);
+    if (c.path === "/api/v3/release" && c.method === "POST") {
+      posts++;
+      if (grabStatus === 0) return gate.then(() => Promise.reject(new TypeError("fetch failed")));
+      return gate.then(() => (grabStatus === 200 ? json({}) : json({ message: "Download client refused it" }, grabStatus)));
+    }
+    return undefined;
+  }) as unknown as Responder, radarrBase);
+  const search = async () => ((await (await call(releasesRoute.GET, token, "/admin/arr/title/releases?service=radarr&id=11")).json()) as { releases: Array<{ guid: string }> }).releases[0].guid;
+  const grab = (release: string) => call(releasesRoute.POST, token, "/admin/arr/title/releases", { method: "POST", body: { service: "radarr", id: 11, release } });
+
+  // Two grabs of one handle in flight: the first parks inside the arr call.
+  const handle = await search();
+  const first = grab(handle);
+  for (let i = 0; i < 50 && posts === 0; i++) await new Promise((r) => setTimeout(r, 2));
+  // The racing grab must answer at once. Give it a short window, then open the
+  // gate whatever happened, so a grab that reached the arr fails the test
+  // instead of parking it forever.
+  const racing = grab(handle);
+  const second = await Promise.race([racing, new Promise<"parked">((r) => setTimeout(() => r("parked"), 1_000))]);
+  (open as unknown as () => void)();
+  assert.notEqual(second, "parked", "the racing grab reached the arr instead of answering 409");
+  const secondRes = second as Response;
+  assert.equal(secondRes.status, 409);
+  assert.match(((await secondRes.json()) as { error: string }).error, /already being grabbed/i);
+  assert.equal((await first).status, 200);
+  assert.equal(posts, 1, "the racing grab sent nothing — the client never fetches it twice");
+
+  // The arr refused it: the handle is handed back, so the same release can be tried again.
+  gate = Promise.resolve();
+  grabStatus = 409;
+  const refusedHandle = await search();
+  assert.equal((await grab(refusedHandle)).status, 409);
+  grabStatus = 200;
+  assert.equal((await grab(refusedHandle)).status, 200, "handed back after a definite refusal");
+
+  // No answer at all (the arr may well have taken it): spent, never re-sent.
+  grabStatus = 0;
+  const lostHandle = await search();
+  posts = 0;
+  assert.notEqual((await grab(lostHandle)).status, 200);
+  grabStatus = 200;
+  assert.equal((await grab(lostHandle)).status, 410);
+  assert.equal(posts, 1);
+});
+
+test("a background interactive search answers 202 with a job, joins a running one, and only its owner can read it", async () => {
+  const token = await mintSession();
+  const other = await mintSession();
+  let release: (() => void) | null = null;
+  const gate = new Promise<void>((r) => { release = r; });
+  let searches = 0;
+  responder = both(((c: Call) => {
+    if (c.path === "/api/v3/release" && c.method === "GET") {
+      searches++;
+      return gate.then(() => json([RELEASE]));
+    }
+    return undefined;
+  }) as unknown as Responder, radarrBase);
+  const start = await call(releasesRoute.GET, token, "/admin/arr/title/releases?service=radarr&id=11&async=1");
+  assert.equal(start.status, 202);
+  const { job } = (await start.json()) as { job: string };
+  assert.match(job, /^[0-9a-f]{32}$/);
+  const again = await call(releasesRoute.GET, token, "/admin/arr/title/releases?service=radarr&id=11&async=1");
+  assert.equal(((await again.json()) as { job: string }).job, job, "the same search while it runs is joined");
+  const running = await call(releasesRoute.GET, token, `/admin/arr/title/releases?job=${job}`);
+  assert.equal(running.status, 202);
+  assert.equal((await call(releasesRoute.GET, other, `/admin/arr/title/releases?job=${job}`)).status, 404, "another admin can't read it");
+
+  (release as unknown as () => void)();
+  for (let i = 0; i < 50; i++) {
+    const poll = await call(releasesRoute.GET, token, `/admin/arr/title/releases?job=${job}`);
+    if (poll.status === 202) {
+      await new Promise((r) => setTimeout(r, 5));
+      continue;
+    }
+    assert.equal(poll.status, 200);
+    const body = (await poll.json()) as { releases: Array<{ guid: string }> };
+    assert.match(body.releases[0].guid, /^[0-9a-f]{32}$/, "the job's answer carries handles, never the guid");
+    break;
+  }
+  assert.equal(searches, 1, "joining cost no second indexer search");
+  assert.equal((await call(releasesRoute.GET, token, `/admin/arr/title/releases?job=${"0".repeat(32)}`)).status, 404);
 });

@@ -47,6 +47,33 @@ export interface NavItem {
   // component reads this flag today; tests/nav-items.test.mts checks the set.
   mobileBottomBar?: boolean;
   section: "browse" | "personal" | "admin";
+  // Admin items only: the group the sidebar and the drawer file it under.
+  group?: AdminNavGroup;
+}
+
+export type AdminNavGroup = "requests" | "downloads" | "library" | "insights" | "system";
+
+// The admin groups in display order, each with its translated header. Literal
+// keys so the i18n dead-string check sees them.
+export const ADMIN_NAV_GROUPS: ReadonlyArray<{ id: AdminNavGroup; i18nKey: string }> = [
+  { id: "requests", i18nKey: "nav.adminGroup.requests" },
+  { id: "downloads", i18nKey: "nav.adminGroup.downloads" },
+  { id: "library", i18nKey: "nav.adminGroup.library" },
+  { id: "insights", i18nKey: "nav.adminGroup.insights" },
+  { id: "system", i18nKey: "nav.adminGroup.system" },
+];
+
+/**
+ * Admin items (already filtered for this viewer) split into their groups, in
+ * group order; a group with nothing visible is left out, so a delegated user
+ * never sees an empty header. Item order within a group is kept.
+ */
+export function groupAdminNavItems<T extends Pick<NavItem, "group">>(
+  items: readonly T[],
+): Array<{ id: AdminNavGroup; i18nKey: string; items: T[] }> {
+  return ADMIN_NAV_GROUPS
+    .map((g) => ({ ...g, items: items.filter((i) => (i.group ?? "system") === g.id) }))
+    .filter((g) => g.items.length > 0);
 }
 
 // Map of nav item href → feature flag that controls its visibility. Items not
@@ -78,6 +105,20 @@ export const NAV_ITEM_FEATURE_KEY: Record<string, string> = {
   "/admin/trash-guides": "trashGuidesEnabled",
 };
 
+// The Radarr/Sonarr pages read nothing while both integrations are off, so the
+// nav leaves them out. Either integration is enough — hence a separate any-of
+// map rather than a NAV_ITEM_FEATURE_KEY entry, which takes a single flag.
+const ARR_INTEGRATION_FLAGS = ["feature.integration.radarr", "feature.integration.sonarr"] as const;
+
+/** href → flags of which AT LEAST ONE must be on for the item to show. Same fail-open rule: only an explicit `false` counts as off. */
+export const NAV_ITEM_ANY_FEATURE_KEYS: Record<string, readonly string[]> = {
+  "/admin/queue":        ARR_INTEGRATION_FLAGS,
+  "/admin/missing":      ARR_INTEGRATION_FLAGS,
+  "/admin/arr-calendar": ARR_INTEGRATION_FLAGS,
+  "/admin/arr-history":  ARR_INTEGRATION_FLAGS,
+  "/admin/arr-system":   ARR_INTEGRATION_FLAGS,
+};
+
 /**
  * Filter nav items by an admin-controlled feature flag map. Pass `undefined`
  * or an empty map to show everything (fail-open, so nav never disappears
@@ -89,6 +130,8 @@ export function filterNavByFeatures<T extends { href: string }>(
 ): T[] {
   if (!flags) return [...items];
   return items.filter((item) => {
+    const anyOf = NAV_ITEM_ANY_FEATURE_KEYS[item.href];
+    if (anyOf && !anyOf.some((k) => flags[k] !== false)) return false;
     const key = NAV_ITEM_FEATURE_KEY[item.href];
     if (!key) return true;
     // Missing key in the flag map means "no row stored yet" → fall back to
@@ -97,6 +140,13 @@ export function filterNavByFeatures<T extends { href: string }>(
     return flags[key] !== false;
   });
 }
+
+// href → the screen-reader label for a count badge on that item (the layout
+// passes the counts — e.g. the Radarr/Sonarr monitor's downloads needing
+// attention). Literal keys, pluralized on `count`.
+export const NAV_BADGE_LABEL_KEYS: Record<string, string> = {
+  "/admin/queue": "nav.badge.queueAttention",
+};
 
 export function navItemLabel(item: Pick<NavItem, "label" | "i18nKey">, t: Translator): string {
   return item.i18nKey ? t(item.i18nKey) : item.label;
@@ -141,26 +191,30 @@ export const userNavItems: NavItem[] = [
   { href: "/profile", i18nKey: "nav.profile", label: "Profile", icon: UserCircle, section: "personal" },
 ];
 
+// In group order (ADMIN_NAV_GROUPS) — the mobile tab bar opens the FIRST item a
+// viewer can see, so the request queue stays first.
 export const adminNavItems: NavItem[] = [
-  { href: "/admin", label: "Requested", icon: ShieldCheck, exact: true, section: "admin" },
-  { href: "/admin/issues", label: "Issues", icon: AlertTriangle, section: "admin" },
-  { href: "/admin/users", label: "Users", icon: Users, section: "admin" },
-  { href: "/admin/library", label: "Library Diff", icon: Library, section: "admin" },
-  { href: "/admin/queue", label: "Download Queue", icon: Download, section: "admin" },
-  { href: "/admin/missing", label: "Missing", icon: CircleDashed, section: "admin" },
-  { href: "/admin/arr-calendar", label: "Arr Calendar", icon: CalendarDays, section: "admin" },
-  { href: "/admin/arr-history", label: "Download History", icon: Clock, section: "admin" },
-  { href: "/admin/arr-system", label: "Arr System", icon: Server, section: "admin" },
-  { href: "/admin/blacklist", label: "Blacklist", icon: Ban, section: "admin" },
-  { href: "/admin/never-watched", label: "Never Watched", icon: EyeOff, section: "admin" },
-  { href: "/admin/cleanup", label: "Library Cleanup", icon: FileX, section: "admin" },
-  { href: "/admin/stats", label: "Statistics", icon: BarChart3, section: "admin" },
-  { href: "/admin/activity", label: "Activity", icon: Activity, section: "admin" },
-  { href: "/admin/audit-log", label: "Audit Log", icon: ScrollText, section: "admin" },
-  { href: "/admin/backup", label: "Backup", icon: HardDrive, section: "admin" },
-  { href: "/admin/trash-guides", label: "TRaSH Guides", icon: Sparkles, section: "admin" },
-  { href: "/admin/api-docs", label: "API Docs", icon: FileText, section: "admin" },
-  { href: "/settings", label: "Settings", icon: Settings, section: "admin" },
+  { href: "/admin", label: "Requested", icon: ShieldCheck, exact: true, section: "admin", group: "requests" },
+  { href: "/admin/issues", label: "Issues", icon: AlertTriangle, section: "admin", group: "requests" },
+  { href: "/admin/users", label: "Users", icon: Users, section: "admin", group: "requests" },
+  // Summonarr's own list of titles nobody may request — not Radarr/Sonarr's
+  // release Blocklist (Download History), hence the longer name.
+  { href: "/admin/blacklist", label: "Request Blacklist", icon: Ban, section: "admin", group: "requests" },
+  { href: "/admin/queue", label: "Download Queue", icon: Download, section: "admin", group: "downloads" },
+  { href: "/admin/missing", label: "Missing", icon: CircleDashed, section: "admin", group: "downloads" },
+  { href: "/admin/arr-calendar", label: "Arr Calendar", icon: CalendarDays, section: "admin", group: "downloads" },
+  { href: "/admin/arr-history", label: "Download History", icon: Clock, section: "admin", group: "downloads" },
+  { href: "/admin/arr-system", label: "Arr System", icon: Server, section: "admin", group: "downloads" },
+  { href: "/admin/trash-guides", label: "TRaSH Guides", icon: Sparkles, section: "admin", group: "downloads" },
+  { href: "/admin/library", label: "Library Diff", icon: Library, section: "admin", group: "library" },
+  { href: "/admin/never-watched", label: "Never Watched", icon: EyeOff, section: "admin", group: "library" },
+  { href: "/admin/cleanup", label: "Library Cleanup", icon: FileX, section: "admin", group: "library" },
+  { href: "/admin/stats", label: "Statistics", icon: BarChart3, section: "admin", group: "insights" },
+  { href: "/admin/activity", label: "Activity", icon: Activity, section: "admin", group: "insights" },
+  { href: "/admin/audit-log", label: "Audit Log", icon: ScrollText, section: "admin", group: "insights" },
+  { href: "/admin/backup", label: "Backup", icon: HardDrive, section: "admin", group: "system" },
+  { href: "/admin/api-docs", label: "API Docs", icon: FileText, section: "admin", group: "system" },
+  { href: "/settings", label: "Settings", icon: Settings, section: "admin", group: "system" },
 ];
 
 // The permission each admin destination ACTUALLY requires, mirroring the gate on

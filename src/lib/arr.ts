@@ -1,7 +1,9 @@
 import { prisma } from "./prisma";
 import { arrRequesterTagLabel } from "./arr-tags";
 import { arrSettingKey, isRadarrMinimumAvailability, type ArrInstanceKey, type RadarrMinimumAvailability } from "./arr-instances";
-import { safeFetchAdminConfigured, safeFetchTrusted } from "./safe-fetch";
+import { SafeFetchError, safeFetchAdminConfigured, safeFetchTrusted } from "./safe-fetch";
+import type { ArrErrorKind } from "./arr-error-kind";
+import { int, namesOf } from "./arr-parse";
 import { sanitizeForLog } from "./sanitize";
 import { getCache, getCacheMany, setCache, TTL } from "./tmdb-cache";
 import { tmdbAuth } from "./tmdb-auth";
@@ -198,6 +200,26 @@ export async function getArrCfg(service: "radarr" | "sonarr", variant: ArrVarian
   return { url: cfg.url, apiKey: cfg.apiKey };
 }
 
+/**
+ * An instance's configured add defaults — what a request's add uses — for the
+ * admin's own Add form to preselect. null when the instance isn't configured.
+ */
+export async function getArrAddDefaults(service: "radarr" | "sonarr", variant: ArrVariant = ""): Promise<{
+  rootFolder: string | null;
+  qualityProfileId: number | null;
+  minimumAvailability: string | null;
+  languageProfileId: number | null;
+} | null> {
+  const cfg = await getCfg(service, variant);
+  if (!cfg) return null;
+  return {
+    rootFolder: cfg.rootFolder ?? null,
+    qualityProfileId: cfg.qualityProfileId ?? null,
+    minimumAvailability: cfg.minimumAvailability ?? null,
+    languageProfileId: cfg.languageProfileId ?? null,
+  };
+}
+
 // Whether a given instance is configured (only the default one is expected to be).
 export async function isArrConfigured(service: "radarr" | "sonarr", variant: ArrVariant = ""): Promise<boolean> {
   return (await getCfg(service, variant)) !== null;
@@ -280,8 +302,10 @@ export class ArrResponseError extends Error {
 
 const ARR_FETCH_TIMEOUT_MS = 30_000;
 // A Sonarr season search across many indexers routinely outlasts 30s; cut off,
-// the admin saw a failure while the arr kept searching.
-const RELEASE_SEARCH_TIMEOUT_MS = 120_000;
+// the admin saw a failure while the arr kept searching. EVERY interactive
+// release read uses it — the request "Pick release" and the issue Replace too,
+// not only the title manager's.
+export const RELEASE_SEARCH_TIMEOUT_MS = 120_000;
 
 // Raised from 10 MB — libraries with >3k movies were being silently truncated at the old cap
 const ARR_FETCH_MAX_BYTES = 50 * 1024 * 1024;
@@ -372,6 +396,29 @@ function pathCollisionTarget(err: unknown): string | null {
 // request release search: "re-push it first") tests for it.
 export class ArrItemNotFoundError extends Error {}
 
+/**
+ * What kind of failure this was, for the admin (arr-error-kind.ts). A gateway
+ * in front of the arr answering 502/503 means the arr behind it is down; 504 and
+ * 408 are timeouts wherever they were raised.
+ */
+export function arrErrorKind(err: unknown): ArrErrorKind {
+  if (err instanceof ArrResponseError) {
+    if (err.status === 401 || err.status === 403) return "auth";
+    if (err.status === 404) return "notFound";
+    if (err.status === 408 || err.status === 504) return "timeout";
+    if (err.status === 502 || err.status === 503) return "unreachable";
+    if (err.status >= 500) return "server";
+    return "other";
+  }
+  if (err instanceof SafeFetchError) {
+    if (err.reason === "timeout") return "timeout";
+    if (err.reason === "network" || err.reason === "ssrf-blocked") return "unreachable";
+    return "other";
+  }
+  if (err instanceof Error && err.name === "TimeoutError") return "timeout";
+  return "other";
+}
+
 export function arrErrorMessage(err: unknown): string {
   if (err instanceof ArrResponseError) {
     if (err.status === 401 || err.status === 403) return `Arr authentication failed (${err.status}) — check the API key`;
@@ -426,6 +473,12 @@ async function getAllowedQualityIds(cfg: ArrCfg, profileId?: number): Promise<Se
 // return through, where no caller can forget it. Nested `quality` is projected
 // too so the shape is literally the interface and nothing else.
 export function toArrRelease(r: ArrRelease): ArrRelease {
+  // The fields below the interface's original list are read off the raw
+  // resource defensively: they are newer (Radarr v4+/Sonarr v4) or shaped
+  // differently on older builds (Sonarr v3 sends one `language` object).
+  const raw = r as unknown as Record<string, unknown>;
+  const languages = namesOf(raw.languages);
+  const single = raw.language && typeof raw.language === "object" ? namesOf([raw.language]) : [];
   return {
     guid: r.guid,
     title: r.title,
@@ -437,6 +490,10 @@ export function toArrRelease(r: ArrRelease): ArrRelease {
       revision: { version: r.quality.revision?.version ?? 1 },
     },
     qualityWeight: r.qualityWeight,
+    releaseWeight: int(raw.releaseWeight),
+    customFormatScore: int(raw.customFormatScore),
+    customFormats: namesOf(raw.customFormats),
+    languages: languages.length > 0 ? languages : single,
     protocol: r.protocol,
     seeders: r.seeders ?? null,
     leechers: r.leechers ?? null,
@@ -447,12 +504,24 @@ export function toArrRelease(r: ArrRelease): ArrRelease {
   };
 }
 
+/**
+ * Releases the arr would let us grab, in the arr's OWN order. Radarr/Sonarr
+ * answer an interactive search already prioritised for the title — quality
+ * against the title's profile, custom-format score, protocol, size, age — and
+ * number that order in `releaseWeight`. `qualityWeight` is NOT a substitute:
+ * the arr computes it against its DEFAULT profile, not the title's, and it
+ * knows nothing of custom formats, so sorting on it put releases the arr would
+ * rank last (a low-score WEB-DL tied on quality) at the top, pre-selected.
+ * Releases whose quality the title's profile doesn't allow still go last;
+ * arrs too old to send releaseWeight keep the old quality/seeders order.
+ */
 function filterAndSortReleases(releases: ArrRelease[], allowedIds: Set<number> | null): ArrRelease[] {
   const downloadable = releases.filter((r) => r.downloadAllowed).map(toArrRelease);
   return downloadable.sort((a, b) => {
     const aMatch = allowedIds ? (allowedIds.has(a.quality.quality.id) ? 1 : 0) : 1;
     const bMatch = allowedIds ? (allowedIds.has(b.quality.quality.id) ? 1 : 0) : 1;
     if (bMatch !== aMatch) return bMatch - aMatch;
+    if (a.releaseWeight !== null && b.releaseWeight !== null && a.releaseWeight !== b.releaseWeight) return a.releaseWeight - b.releaseWeight;
     if (b.qualityWeight !== a.qualityWeight) return b.qualityWeight - a.qualityWeight;
     return (b.seeders ?? 0) - (a.seeders ?? 0);
   });
@@ -466,6 +535,12 @@ export interface ArrRelease {
   indexer: string;
   quality: { quality: { id: number; name: string }; revision: { version: number } };
   qualityWeight: number;
+  /** The arr's own ranking of this release for the title (0 = what it would grab first); null on arrs that don't send it. */
+  releaseWeight: number | null;
+  customFormatScore: number | null;
+  /** Custom format and language NAMES only. */
+  customFormats: string[];
+  languages: string[];
   protocol: "torrent" | "usenet";
   seeders: number | null;
   leechers: number | null;
@@ -850,7 +925,7 @@ async function lookupSeriesByTvdbCrossRef<T extends { tmdbId?: number; tvdbId?: 
 
 // `tvdbCrossRef: false` keeps a resolution Sonarr-sourced only — see the webhook's
 // download verify, the one caller that must not let TMDB data decide.
-async function lookupSeriesByTmdbId<T extends { tmdbId?: number; tvdbId?: number }>(
+export async function lookupSeriesByTmdbId<T extends { tmdbId?: number; tvdbId?: number }>(
   cfg: ArrCfg,
   tmdbId: number,
   opts: { tvdbCrossRef?: boolean } = {},
@@ -1076,7 +1151,7 @@ export async function getReleasesForMovie(tmdbId: number, variant: ArrVariant = 
   if (!movie) throw new ArrItemNotFoundError("Movie not found in Radarr library");
 
   const [releases, allowedQualityIds] = await Promise.all([
-    arrFetch<ArrRelease[]>(cfg, `/api/v3/release?movieId=${movie.id}`),
+    arrFetch<ArrRelease[]>(cfg, `/api/v3/release?movieId=${movie.id}`, { timeoutMs: RELEASE_SEARCH_TIMEOUT_MS }),
     getAllowedQualityIds(cfg, cfg.qualityProfileId),
   ]);
 
@@ -1275,7 +1350,7 @@ export async function getReleasesForSeries(
   }
 
   const [releases, allowedQualityIds] = await Promise.all([
-    arrFetch<ArrRelease[]>(cfg, releasePath),
+    arrFetch<ArrRelease[]>(cfg, releasePath, { timeoutMs: RELEASE_SEARCH_TIMEOUT_MS }),
     getAllowedQualityIds(cfg, cfg.qualityProfileId),
   ]);
 

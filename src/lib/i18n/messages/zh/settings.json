@@ -393,8 +393,11 @@
   "settings.featureLabel.integration_webhooks": "Webhook、ntfy 和 Gotify 通道",
   "settings.featureDesc.integration_webhooks": "将请求和问题事件发送到在“设置 → 通知”中配置的 Webhook、ntfy 和 Gotify 通道。",
   "settings.nav.notificationAgents": "Webhook 与 ntfy",
+  "settings.nav.arrAlerts": "Radarr/Sonarr 提醒",
   "settings.section.notificationAgents.title": "Webhook、ntfy 和 Gotify 通道",
   "settings.section.notificationAgents.description": "将请求、问题和下载事件转发到您自己的服务。每个通道可选择接收的事件；发送失败会重试三次。",
+  "settings.section.arrAlerts.title": "Radarr/Sonarr 提醒",
+  "settings.section.arrAlerts.description": "Summonarr 会定期检查每个 Radarr 和 Sonarr 实例，并将磁盘空间不足、下载失败或新出现需要处理的下载，发送到上方订阅了这些事件的通道。管理菜单中的“下载队列”链接会显示有多少下载需要处理。",
   "settings.nav.plexWatchlist": "Plex 待看清单",
   "settings.section.plexWatchlist.title": "Plex 待看清单",
   "settings.section.plexWatchlist.description": "待看清单自动请求如何读取 Plex 待看清单。只要用户自己用 Plex 登录过，就始终使用其本人的登录；这些开关将你的 Plex 服务器所有者账户添加为第二种方式。",
@@ -420,5 +423,7 @@
   "settings.cron.job.trakt.name": "Trakt 同步",
   "settings.cron.job.trakt.description": "从已连接用户的 Trakt 待看清单中请求新作品，并导入其 Trakt 观看记录用于“为你推荐”（需要 Trakt Client Secret）",
   "settings.cron.job.upstreamWatch.name": "服务器观看记录",
-  "settings.cron.job.upstreamWatch.description": "读取每台 Plex 和 Jellyfin 服务器自身的观看记录，确保在安装 Summonarr 之前（或其停止运行期间）看过的作品不会被报告为未观看"
+  "settings.cron.job.upstreamWatch.description": "读取每台 Plex 和 Jellyfin 服务器自身的观看记录，确保在安装 Summonarr 之前（或其停止运行期间）看过的作品不会被报告为未观看",
+  "settings.cron.job.arrWatch.name": "Radarr/Sonarr 监控",
+  "settings.cron.job.arrWatch.description": "检查每个 Radarr 和 Sonarr 实例是否存在磁盘空间不足、下载失败以及需要处理的下载，并提醒订阅了这些事件的通知通道"
 }

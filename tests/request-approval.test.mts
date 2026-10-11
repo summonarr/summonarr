@@ -192,7 +192,14 @@ const DECISION_ROUTES = [
 ];
 const BACKFILL = "src/lib/request-approval.ts";
 // May read the column (or document it), never write it.
-const READERS = ["src/app/api/openapi/route.ts", "src/lib/watch-grade-data.ts", "src/lib/admin-stats-data.ts", "src/app/(app)/admin/stats/page.tsx"];
+const READERS = [
+  "src/app/api/openapi/route.ts",
+  "src/lib/watch-grade-data.ts",
+  "src/lib/admin-stats-data.ts",
+  "src/app/(app)/admin/stats/page.tsx",
+  // The request "Why?" status counts download failures since the approval.
+  "src/app/api/requests/[id]/arr-status/route.ts",
+];
 // Readers that name the column inside raw SQL. The AST write scan below can't
 // see into SQL text, so each one is held to read-only SQL instead: no
 // $executeRaw at all and no UPDATE/INSERT/DELETE statement in its templates.

@@ -14,6 +14,7 @@ import { IssueFixMatchButton } from "@/components/admin/issue-fix-match-button";
 import { LiveRefresh } from "@/components/live-refresh";
 import { requireFeature } from "@/lib/features";
 import { getSyncableArrInstances } from "@/lib/arr-instance-registry";
+import { arrHoldersByTmdbId } from "@/lib/arr-manage-links";
 import { Chip, EmptyState, PageHeader } from "@/components/ui/design";
 import { LocalDateText } from "@/components/local-date";
 import { ISSUE_STATUS_TONE, ISSUE_STATUS_LABEL_KEY, ISSUE_TYPE_LABEL_KEY } from "@/lib/status-labels";
@@ -99,6 +100,10 @@ export default async function AdminIssuesPage({
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.MANAGE_ISSUES)) redirect("/");
   const currentUserId = session.user.id;
+  // "Replace file" deletes files, which only an ADMIN may (its route is
+  // withAdmin, a role check — mirrored here); MANAGE_ISSUES alone keeps
+  // Refetch and Replace. Read from the DB-checked authActive() session above.
+  const isAdmin = session.user.role === "ADMIN";
   const t = await getTranslator();
 
   const { filter: rawFilter, selected: selectedId } = await searchParams;
@@ -174,6 +179,28 @@ export default async function AdminIssuesPage({
     : [[], []];
   const plexSet     = new Set(plexItems.map((i)     => `${i.tmdbId}:${i.mediaType}`));
   const jellyfinSet = new Set(jellyfinItems.map((i) => `${i.tmdbId}:${i.mediaType}`));
+
+  // ADMIN only: which configured Radarr/Sonarr instances hold each listed title,
+  // for the per-instance "Manage" icon — the synced wanted/available cache rows
+  // (arrInstancesHolding's rule, one read per table for the whole list; no live
+  // call — the manager resolves the title live when it opens).
+  const movieIds = [...new Set(allLibraryPairs.filter((p) => p.mediaType === "MOVIE").map((p) => p.tmdbId))];
+  const tvIds = [...new Set(allLibraryPairs.filter((p) => p.mediaType === "TV").map((p) => p.tmdbId))];
+  const holderSelect = { tmdbId: true, arrInstance: true } as const;
+  const [radarrWanted, radarrAvailable, sonarrWanted, sonarrAvailable] = isAdmin
+    ? await Promise.all([
+        movieIds.length > 0 ? prisma.radarrWantedItem.findMany({ where: { tmdbId: { in: movieIds } }, select: holderSelect }) : [],
+        movieIds.length > 0 ? prisma.radarrAvailableItem.findMany({ where: { tmdbId: { in: movieIds } }, select: holderSelect }) : [],
+        tvIds.length > 0 ? prisma.sonarrWantedItem.findMany({ where: { tmdbId: { in: tvIds } }, select: holderSelect }) : [],
+        tvIds.length > 0 ? prisma.sonarrAvailableItem.findMany({ where: { tmdbId: { in: tvIds } }, select: holderSelect }) : [],
+      ])
+    : [[], [], [], []];
+  const radarrHolders = arrHoldersByTmdbId(radarrOptions, [...radarrWanted, ...radarrAvailable]);
+  const sonarrHolders = arrHoldersByTmdbId(sonarrOptions, [...sonarrWanted, ...sonarrAvailable]);
+  const manageFor = (tmdbId: number, mediaType: string) => {
+    const holders = (mediaType === "MOVIE" ? radarrHolders : sonarrHolders).get(tmdbId);
+    return isAdmin && holders ? { tmdbId, holders } : undefined;
+  };
 
   const tabs: { label: string; value: FilterValue; count: number }[] = [
     { label: t(ISSUE_STATUS_LABEL_KEY.OPEN), value: "OPEN", count: countFor("OPEN") },
@@ -293,6 +320,8 @@ export default async function AdminIssuesPage({
               episodeNumber={sel.episodeNumber}
               libraryConfirmed={plexSet.has(key) || jellyfinSet.has(key)}
               instances={instancesFor(sel.mediaType)}
+              isAdmin={isAdmin}
+              manage={manageFor(sel.tmdbId, sel.mediaType)}
             />
           )}
         </div>
@@ -515,6 +544,8 @@ export default async function AdminIssuesPage({
                           episodeNumber={issue.episodeNumber}
                           libraryConfirmed={plexSet.has(`${issue.tmdbId}:${issue.mediaType}`) || jellyfinSet.has(`${issue.tmdbId}:${issue.mediaType}`)}
                           instances={instancesFor(issue.mediaType)}
+                          isAdmin={isAdmin}
+                          manage={manageFor(issue.tmdbId, issue.mediaType)}
                         />
                       </div>
                     </IssueCardShell>
@@ -699,6 +730,8 @@ export default async function AdminIssuesPage({
                       episodeNumber={selectedIssue.episodeNumber}
                       libraryConfirmed={plexSet.has(`${selectedIssue.tmdbId}:${selectedIssue.mediaType}`) || jellyfinSet.has(`${selectedIssue.tmdbId}:${selectedIssue.mediaType}`)}
                       instances={instancesFor(selectedIssue.mediaType)}
+                      isAdmin={isAdmin}
+                      manage={manageFor(selectedIssue.tmdbId, selectedIssue.mediaType)}
                     />
                   </div>
                 </div>

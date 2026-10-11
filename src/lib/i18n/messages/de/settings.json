@@ -393,13 +393,16 @@
   "settings.featureLabel.integration_webhooks": "Webhook-, ntfy- und Gotify-Kanäle",
   "settings.featureDesc.integration_webhooks": "Anfrage- und Problemereignisse an die unter Einstellungen → Benachrichtigungen eingerichteten Webhook-, ntfy- und Gotify-Kanäle senden.",
   "settings.nav.notificationAgents": "Webhooks & ntfy",
+  "settings.nav.arrAlerts": "Radarr/Sonarr-Warnungen",
   "settings.section.notificationAgents.title": "Webhook-, ntfy- und Gotify-Kanäle",
-  "settings.section.notificationAgents.description": "Leite Anfrage-, Problem- und Download-Ereignisse an deine eigenen Dienste weiter. Jeder Kanal wählt seine Ereignisse; fehlgeschlagene Zustellungen werden dreimal wiederholt.",
+  "settings.section.notificationAgents.description": "Leiten Sie Anfrage-, Problem- und Download-Ereignisse an Ihre eigenen Dienste weiter. Jeder Kanal wählt seine Ereignisse; fehlgeschlagene Zustellungen werden dreimal wiederholt.",
+  "settings.section.arrAlerts.title": "Radarr/Sonarr-Warnungen",
+  "settings.section.arrAlerts.description": "Summonarr prüft jede Radarr- und Sonarr-Instanz nach Zeitplan und meldet knappen Speicherplatz, einen fehlgeschlagenen Download oder einen Download, der neu Aufmerksamkeit braucht, an die obigen Kanäle, die diese Ereignisse abonniert haben. Der Link zur Download-Warteschlange im Admin-Menü zeigt, wie viele Downloads Aufmerksamkeit brauchen.",
   "settings.nav.plexWatchlist": "Plex-Merkliste",
   "settings.section.plexWatchlist.title": "Plex-Merkliste",
   "settings.section.plexWatchlist.description": "Wie automatische Anfragen Plex-Merklisten lesen. Die eigene Plex-Anmeldung eines Benutzers wird immer verwendet, wenn vorhanden; diese Schalter fügen das Konto des Plex-Serverbesitzers als zweiten Weg hinzu.",
   "settings.form.plexWatchlistServer.title": "Merklisten von Freunden über den Serverbesitzer lesen",
-  "settings.form.plexWatchlistServer.help": "Benutzer, die sich nie mit Plex angemeldet haben, werden mit dem Plex-Admin-Token gelesen, wenn sie Plex-Freunde deines Servers sind und ihre Merkliste für Freunde sichtbar ist. Jeder Benutzer aktiviert es in seinem Profil.",
+  "settings.form.plexWatchlistServer.help": "Benutzer, die sich nie mit Plex angemeldet haben, werden mit dem Plex-Admin-Token gelesen, wenn sie Plex-Freunde Ihres Servers sind und ihre Merkliste für Freunde sichtbar ist. Jeder Benutzer aktiviert es in seinem Profil.",
   "settings.form.plexWatchlistAutoEnroll.title": "Freunde ohne Nachfrage aufnehmen",
   "settings.form.plexWatchlistAutoEnroll.help": "Liest auch jeden berechtigten Freund, der automatische Anfragen nicht ausgeschaltet hat, selbst wenn er Summonarr nie geöffnet hat. Standardmäßig aus: Anfragen für Personen, die nicht darum gebeten haben, können überraschen.",
   "settings.plexWatchlist.status.never": "Der Weg über den Serverbesitzer ist noch nicht gelaufen.",
@@ -420,5 +423,7 @@
   "settings.cron.job.trakt.name": "Trakt-Synchronisierung",
   "settings.cron.job.trakt.description": "Neue Titel aus den Trakt-Merklisten verbundener Benutzer anfragen und deren Trakt-Verlauf für „Für Sie“ importieren (erfordert ein Trakt-Client-Secret)",
   "settings.cron.job.upstreamWatch.name": "Server-Wiedergabeverlauf",
-  "settings.cron.job.upstreamWatch.description": "Den eigenen Wiedergabeverlauf jedes Plex- und Jellyfin-Servers lesen, damit ein Titel, der vor der Installation von Summonarr (oder während eines Ausfalls) angesehen wurde, nie als nicht angesehen gemeldet wird"
+  "settings.cron.job.upstreamWatch.description": "Den eigenen Wiedergabeverlauf jedes Plex- und Jellyfin-Servers lesen, damit ein Titel, der vor der Installation von Summonarr (oder während eines Ausfalls) angesehen wurde, nie als nicht angesehen gemeldet wird",
+  "settings.cron.job.arrWatch.name": "Radarr/Sonarr-Monitor",
+  "settings.cron.job.arrWatch.description": "Jede Radarr- und Sonarr-Instanz auf knappen Speicherplatz, fehlgeschlagene Downloads und Downloads prüfen, die Aufmerksamkeit brauchen, und die Benachrichtigungskanäle warnen, die sie abonniert haben"
 }
