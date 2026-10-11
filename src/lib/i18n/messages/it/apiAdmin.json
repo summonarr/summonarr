@@ -41,6 +41,8 @@
   "apiAdmin.cleanup.bodyObject": "Il corpo deve essere un oggetto",
   "apiAdmin.cleanup.confirmationRequired": "Conferma obbligatoria",
   "apiAdmin.cleanup.disabled": "La pulizia della libreria è disattivata",
+  "apiAdmin.neverWatched.disabled": "La pagina Mai guardato è disattivata",
+  "apiAdmin.neverWatched.refreshRunning": "Un aggiornamento della cronologia visioni è già in corso — riprova tra un minuto.",
   "apiAdmin.cleanup.fieldBoolean": "{field} deve essere un valore booleano",
   "apiAdmin.cleanup.fieldRange": "{field} deve essere un intero tra {min} e {max}",
   "apiAdmin.cleanup.heldBack": "Trattenuti: {exclusions}",

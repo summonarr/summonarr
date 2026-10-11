@@ -41,6 +41,8 @@
   "apiAdmin.cleanup.bodyObject": "El cuerpo debe ser un objeto",
   "apiAdmin.cleanup.confirmationRequired": "Se requiere confirmación",
   "apiAdmin.cleanup.disabled": "La limpieza de la biblioteca está desactivada",
+  "apiAdmin.neverWatched.disabled": "La página Nunca visto está desactivada",
+  "apiAdmin.neverWatched.refreshRunning": "Ya hay una actualización de los registros de visionado en curso: inténtalo de nuevo en un minuto.",
   "apiAdmin.cleanup.fieldBoolean": "{field} debe ser un booleano",
   "apiAdmin.cleanup.fieldRange": "{field} debe ser un número entero entre {min} y {max}",
   "apiAdmin.cleanup.heldBack": "Retenido: {exclusions}",

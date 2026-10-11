@@ -444,6 +444,21 @@ test("PATCH: the Plex watchlist server-source switches accept only \"true\"/\"fa
   }
 });
 
+test("PATCH: switching a play-history tracking flag ON stamps when it came on (guardrail 14d); re-saving ON does not", async () => {
+  const admin = await mintSession("ADMIN");
+  settings.set("playHistoryPlexEnabled", "false");
+  settings.set("playHistoryJellyfinEnabled", "true");
+  const res = await PATCH(
+    patchReq(JSON.stringify({ playHistoryPlexEnabled: "true", playHistoryJellyfinEnabled: "true" }), admin.header),
+    undefined,
+  );
+  assert.equal(res.status, 200);
+  const stamp = upsertFor("playHistoryPlexTrackedSince");
+  assert.equal(stamp.length, 1, "off → on must record when recording resumed — a play while it was off was never seen");
+  assert.ok(Number.isFinite(new Date(stamp[0].create.value).getTime()), "the stamp is an ISO date");
+  assert.equal(upsertFor("playHistoryJellyfinTrackedSince").length, 0, "already on → no new stamp (it would shrink the window for nothing)");
+});
+
 // ════════════════════════════════════════════════════════════════════════════
 // PATCH — rate limit + per-key write cooldown
 // ════════════════════════════════════════════════════════════════════════════

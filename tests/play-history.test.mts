@@ -298,6 +298,7 @@ function makeSession(overrides: Partial<ActiveSession> = {}): ActiveSession {
     episodeNumber: null,
     episodeTitle: null,
     sourceItemId: "item-1",
+    sourceShowId: null,
     posterPath: null,
     progressPercent: 83,
     progressMs: 2_000_000n,
@@ -630,7 +631,13 @@ test("resolveShowTmdbId: plex keys map via PlexLibraryItem, TV- and serverInstan
   plexLibRow = { tmdbId: 1399 };
   assert.equal(await resolveShowTmdbId("plex", "rk-1399", ""), 1399);
   assert.equal(plexLibCalls.length, 1);
-  assert.deepEqual(plexLibCalls[0].where, { plexRatingKey: "rk-1399", mediaType: "TV", serverInstance: "" });
+  // guardrail 37c: matched against BOTH ratingKey columns — a show in two
+  // sections has a ratingKey per copy and only one is the stored plexRatingKey.
+  assert.deepEqual(plexLibCalls[0].where, {
+    mediaType: "TV",
+    serverInstance: "",
+    OR: [{ plexRatingKey: "rk-1399" }, { plexRatingKeys: { has: "rk-1399" } }],
+  });
   assert.equal(jellyfinLibCalls.length, 0);
 
   // Unmapped: a row without a tmdbId and no row at all both read as null.
@@ -645,7 +652,7 @@ test("resolveShowTmdbId: a named instance's lookup carries ITS serverInstance in
   assert.equal(await resolveShowTmdbId("plex", "42", "remote"), 4589);
   assert.deepEqual(
     plexLibCalls[0].where,
-    { plexRatingKey: "42", mediaType: "TV", serverInstance: "remote" },
+    { mediaType: "TV", serverInstance: "remote", OR: [{ plexRatingKey: "42" }, { plexRatingKeys: { has: "42" } }] },
     "dropping the serverInstance term would attribute the remote server's episode watches to whichever instance's show holds ratingKey 42 in the cache",
   );
 });
@@ -932,6 +939,7 @@ test("recordCompletedSession: writes the full PlayHistory row via createMany({sk
     episodeTitle: null,
     sourceSessionId: "key-1:2026-07-01T20:00:00.000Z", // sessionKey + startedAt — unique per watch instance
     sourceItemId: "item-1",
+    sourceShowId: null,
     platform: "Roku",
     player: "Plex for Roku",
     device: "Roku Ultra",

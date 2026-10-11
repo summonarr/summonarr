@@ -22,6 +22,7 @@ import { WATCH_GRADE_SETTING_KEYS, watchGradeCrossFieldError, watchGradeSettingE
 import { mergedWatchGradeSettings } from "@/lib/watch-grade-data";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
+import { trackingStampsFor } from "@/lib/never-watched";
 
 const SETTINGS_SCHEMA = [
   ["siteTitle",                     false],
@@ -214,6 +215,7 @@ const SETTINGS_SCHEMA = [
   ["feature.admin.backup",            false],
   ["feature.admin.apiDocs",           false],
   ["feature.admin.cleanup",           false],
+  ["feature.admin.neverWatched",      false],
 ] as const satisfies ReadonlyArray<readonly [string, boolean]>;
 
 type AllowedKey = (typeof SETTINGS_SCHEMA)[number][0];
@@ -894,6 +896,13 @@ export const PATCH = withAdmin(async (req, _ctx, session) => {
           update: { value },
           create: { key, value },
         });
+      }
+      // A play while a tracking switch was off was never recorded, so the
+      // never-watched verdict trusts recording only from the moment a switch last
+      // came back on (guardrail 14d). Stamped in the same transaction as the flip.
+      const before = new Map(oldRows.map((r) => [r.key, r.value]));
+      for (const [key, value] of trackingStampsFor(entries, before, new Date())) {
+        await tx.setting.upsert({ where: { key }, update: { value }, create: { key, value } });
       }
       await tx.auditLog.create({
         data: {

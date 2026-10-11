@@ -106,6 +106,8 @@
   "settings.featureDesc.admin_apiDocs": "Show the /admin/api-docs OpenAPI reference and nav link.",
   "settings.featureLabel.admin_cleanup": "Library Cleanup page",
   "settings.featureDesc.admin_cleanup": "Show the /admin/cleanup page: titles nobody watches, ranked by configurable rules, which an admin can delete from Radarr/Sonarr after a dry run. Nothing is ever deleted automatically. Off by default.",
+  "settings.featureLabel.admin_neverWatched": "Never Watched page",
+  "settings.featureDesc.admin_neverWatched": "Show the /admin/never-watched page: every movie, show and season nobody has watched in this server's recorded history, ranked by the space it takes, checked against each media server's own watch records. Read-only; deleting goes through Library Cleanup.",
   "settings.featureLabel.trashGuidesEnabled": "TRaSH Guides",
   "settings.featureDesc.trashGuidesEnabled": "Enable the TRaSH Guides admin page and nightly sync.",
   "settings.features.toggle": "Toggle {label}",
@@ -416,5 +418,7 @@
   "settings.media.tokenPlaceholder.plex": "Paste this server's admin token",
   "settings.media.tokenPlaceholder.jellyfin": "Paste an API key from this server",
   "settings.cron.job.trakt.name": "Trakt Sync",
-  "settings.cron.job.trakt.description": "Request new titles from connected users' Trakt watchlists and import their Trakt watch history for For You (needs a Trakt client secret)"
+  "settings.cron.job.trakt.description": "Request new titles from connected users' Trakt watchlists and import their Trakt watch history for For You (needs a Trakt client secret)",
+  "settings.cron.job.upstreamWatch.name": "Server Watch History",
+  "settings.cron.job.upstreamWatch.description": "Read each Plex and Jellyfin server's own watch records, so a title watched before Summonarr was installed (or while it was down) is never reported as unwatched"
 }

@@ -123,6 +123,7 @@ const {
   cronSkippedResponse,
   CRON_SKIPPED_HEADER,
   parseTrustedOriginEntry,
+  earliestAddedPerEpisode,
 } = await import("../src/lib/cron-auth.ts");
 const { signSessionJwt } = await import("../src/lib/session-jwt.ts");
 const { extractUaFingerprint, serializeFingerprint } = await import(
@@ -906,4 +907,24 @@ test("recordCronRun: a Prisma surface with NO setting.findUnique still records t
   }
   assert.equal(lastLedgerWrite().parsed?.durationMs, 42);
   assert.deepEqual(lastLedgerHistory().map((e) => e.durationMs), [42]);
+});
+
+// Several servers of one source can hold the same episode; the staging insert
+// keeps the FIRST row it sees, so the earliest arrival has to be carried onto it
+// or a season reads as newer than it is (the never-watched report dates by it).
+test("earliestAddedPerEpisode keeps the first row's fields and the earliest addedAt", () => {
+  const early = new Date("2024-01-01T00:00:00Z");
+  const late = new Date("2024-06-01T00:00:00Z");
+  const rows = [
+    { tmdbId: 1, seasonNumber: 1, episodeNumber: 1, episodeName: "first", addedAt: late },
+    { tmdbId: 1, seasonNumber: 1, episodeNumber: 1, episodeName: "second", addedAt: early },
+    { tmdbId: 1, seasonNumber: 1, episodeNumber: 2, addedAt: null },
+    { tmdbId: 1, seasonNumber: 1, episodeNumber: 2, addedAt: late },
+  ];
+  assert.deepEqual(earliestAddedPerEpisode(rows), [
+    { tmdbId: 1, seasonNumber: 1, episodeNumber: 1, episodeName: "first", addedAt: early },
+    { tmdbId: 1, seasonNumber: 1, episodeNumber: 2, addedAt: late },
+  ]);
+  const unique = [{ tmdbId: 2, seasonNumber: 1, episodeNumber: 1 }];
+  assert.equal(earliestAddedPerEpisode(unique), unique, "no duplicates ⇒ the same array, no copy");
 });

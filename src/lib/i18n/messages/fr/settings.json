@@ -106,6 +106,8 @@
   "settings.featureDesc.admin_apiDocs": "Afficher la référence OpenAPI /admin/api-docs et son lien de navigation.",
   "settings.featureLabel.admin_cleanup": "Page Nettoyage de la bibliothèque",
   "settings.featureDesc.admin_cleanup": "Afficher la page /admin/cleanup : les titres que personne ne regarde, classés selon des règles configurables, qu'un administrateur peut supprimer de Radarr/Sonarr après une simulation. Rien n'est jamais supprimé automatiquement. Désactivé par défaut.",
+  "settings.featureLabel.admin_neverWatched": "Page Jamais regardé",
+  "settings.featureDesc.admin_neverWatched": "Afficher la page /admin/never-watched : chaque film, série et saison que personne n'a regardé dans l'historique enregistré de ce serveur, classés selon l'espace occupé et recoupés avec l'historique de visionnage propre à chaque serveur multimédia. En lecture seule ; la suppression passe par le nettoyage de la bibliothèque.",
   "settings.featureLabel.trashGuidesEnabled": "TRaSH Guides",
   "settings.featureDesc.trashGuidesEnabled": "Activer la page d'administration TRaSH Guides et la synchronisation nocturne.",
   "settings.features.toggle": "Basculer {label}",
@@ -416,5 +418,7 @@
   "settings.media.tokenPlaceholder.plex": "Collez le jeton administrateur de ce serveur",
   "settings.media.tokenPlaceholder.jellyfin": "Collez une clé API de ce serveur",
   "settings.cron.job.trakt.name": "Synchronisation Trakt",
-  "settings.cron.job.trakt.description": "Demande les nouveaux titres des listes de suivi Trakt des utilisateurs connectés et importe leur historique Trakt pour Pour vous (nécessite un Client Secret Trakt)"
+  "settings.cron.job.trakt.description": "Demande les nouveaux titres des listes de suivi Trakt des utilisateurs connectés et importe leur historique Trakt pour Pour vous (nécessite un Client Secret Trakt)",
+  "settings.cron.job.upstreamWatch.name": "Historique de visionnage des serveurs",
+  "settings.cron.job.upstreamWatch.description": "Lit l'historique de visionnage propre à chaque serveur Plex et Jellyfin, pour qu'un titre regardé avant l'installation de Summonarr (ou pendant une interruption) ne soit jamais signalé comme non regardé"
 }

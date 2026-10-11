@@ -41,6 +41,8 @@
   "apiAdmin.cleanup.bodyObject": "请求体必须是对象",
   "apiAdmin.cleanup.confirmationRequired": "需要确认",
   "apiAdmin.cleanup.disabled": "媒体库清理已禁用",
+  "apiAdmin.neverWatched.disabled": "从未观看页面已禁用",
+  "apiAdmin.neverWatched.refreshRunning": "观看记录刷新已在运行——请一分钟后重试。",
   "apiAdmin.cleanup.fieldBoolean": "{field} 必须是布尔值",
   "apiAdmin.cleanup.fieldRange": "{field} 必须是 {min} 到 {max} 之间的整数",
   "apiAdmin.cleanup.heldBack": "已保留：{exclusions}",

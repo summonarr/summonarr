@@ -106,6 +106,7 @@ const spec = {
           minAgeDays: { type: "integer", minimum: 0, maximum: 3650 },
           recentRequestDays: { type: "integer", minimum: 0, maximum: 3650 },
           excludeAiring: { type: "boolean" },
+          requireUpstreamCheck: { type: "boolean", description: "Hold back watch-rule candidates until every holding server's own watch records were checked successfully within 7 days (exclusion `upstreamUnchecked`). Default true." },
         },
       },
       IssueType: {
@@ -207,6 +208,7 @@ const spec = {
     { name: "Admin – Debug", description: "Pipeline inspection" },
     { name: "Admin – Fix Match", description: "Manual metadata correction" },
     { name: "Admin – Cleanup", description: "Library cleanup: rule-based candidates and admin-confirmed deletion (ADMIN only)" },
+    { name: "Admin – Never watched", description: "Library titles and seasons nobody has watched in the server's recorded history, checked against each media server's own watch records (ADMIN only, read-only)" },
     { name: "Admin – Arr", description: "Managing Radarr/Sonarr without opening them: a title's settings, files, history and searches; download history and blocklist; the calendar; tasks, indexers, download clients and storage (ADMIN only)" },
     { name: "Admin – Missing", description: "Radarr/Sonarr titles that should already have a file: released movies and aired episodes — or, in cutoff mode, files below the quality profile's cutoff (ADMIN only)" },
     { name: "Admin – Downloads", description: "Radarr/Sonarr download queues, health checks, the Summonarr webhook connection and \"Open in\" links (ADMIN only)" },
@@ -2387,7 +2389,7 @@ const spec = {
                           arr: { type: "array", items: { type: "object", properties: { service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" }, sizeOnDisk: { type: "number" } } } },
                           sizeOnDisk: { type: "number", nullable: true },
                           matched: { type: "array", items: { type: "string", enum: ["unwatched", "neverWatched", "votes"] } },
-                          excludedBy: { type: "array", items: { type: "string", enum: ["recentlyAdded", "activeRequest", "recentlyFulfilled", "watchlisted", "playingNow", "airing", "protected"] } },
+                          excludedBy: { type: "array", items: { type: "string", enum: ["recentlyAdded", "activeRequest", "recentlyFulfilled", "watchlisted", "playingNow", "airing", "protected", "upstreamUnchecked"] } },
                           candidate: { type: "boolean" },
                         },
                       },
@@ -2402,6 +2404,94 @@ const spec = {
           },
           "403": { description: "Not ADMIN" },
           "404": { description: "Library cleanup is disabled" },
+        },
+      },
+    },
+
+    "/admin/never-watched": {
+      get: {
+        tags: ["Admin – Never watched"],
+        summary: "Never-watched report, one page of it (ADMIN)",
+        description:
+          "Every library title — and every season of a show that HAS been watched — with no play in this server's recorded history. " +
+          "A title is judged only when every server holding it is recorded and has history; the claim starts at the later of its " +
+          "earliest arrival and the last holder's recording start. Evidence is a union: plays by tmdb id, by the movie's own item key, " +
+          "by the show's key, sessions playing now, and each media server's own watch records (UpstreamWatchEvidence). States: " +
+          "`neverWatched` (observed since it arrived), `noPlaysSince` (on the shelf before recording began), `possiblyWatched` " +
+          "(only an unattributed play with the same title), `unobservable` (with a reason). `eligible` is exactly what Library " +
+          "cleanup's dry run would include. The whole-library report is cached ~2 minutes; `fresh=1` recomputes it and re-lists " +
+          "Radarr/Sonarr. Nothing is written. 404 while `feature.admin.neverWatched` is off; 60 requests/min per admin.",
+        parameters: [
+          { name: "level", in: "query", schema: { type: "string", enum: ["title", "season"], default: "title" } },
+          { name: "state", in: "query", schema: { type: "string", enum: ["never", "possible", "unknown", "all"], default: "never" } },
+          { name: "type", in: "query", schema: { type: "string", enum: ["all", "movie", "tv"], default: "all" } },
+          { name: "q", in: "query", schema: { type: "string", maxLength: 100 } },
+          { name: "eligible", in: "query", schema: { type: "string", enum: ["1"] }, description: "Only titles Library cleanup could delete now" },
+          { name: "sortBy", in: "query", schema: { type: "string", enum: ["size", "days", "since", "added", "title"], default: "size" } },
+          { name: "sortDir", in: "query", schema: { type: "string", enum: ["asc", "desc"] } },
+          { name: "page", in: "query", schema: { type: "integer", minimum: 1, default: 1 } },
+          { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200, default: 50 } },
+          { name: "fresh", in: "query", schema: { type: "string", enum: ["1"] } },
+        ],
+        responses: {
+          "200": {
+            description: "One page of rows plus the report summary",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    rows: { type: "array", items: { type: "object", description: "kind: \"title\" | \"season\" — see the description" } },
+                    total: { type: "integer" },
+                    query: { type: "object" },
+                    totals: {
+                      type: "object",
+                      properties: {
+                        never: { type: "object", properties: { titles: { type: "integer" }, bytes: { type: "number" }, unsized: { type: "integer" } } },
+                        seasons: { type: "object", properties: { count: { type: "integer" }, bytes: { type: "number" } } },
+                        eligible: { type: "object", properties: { titles: { type: "integer" }, bytes: { type: "number" } } },
+                        possible: { type: "integer" },
+                        unknown: { type: "integer" },
+                        libraryTitles: { type: "integer" },
+                      },
+                    },
+                    coverage: { type: "array", items: { type: "object", properties: { server: { type: "string" }, source: { type: "string", enum: ["plex", "jellyfin"] }, tracked: { type: "boolean" }, since: { type: "string", format: "date-time", nullable: true }, upstream: { type: "object", properties: { health: { type: "string", enum: ["ok", "unreliable", "failed", "stale", "never"] }, fetchedAt: { type: "string", nullable: true }, entries: { type: "integer" }, matched: { type: "integer" }, samples: { type: "integer" }, agreed: { type: "integer" } } } } } },
+                    trackingOn: { type: "boolean" },
+                    historyStart: { type: "string", format: "date-time", nullable: true },
+                    unplacedPlays: { type: "integer" },
+                    softPlays: { type: "integer" },
+                    arrErrors: { type: "array", items: { type: "object" } },
+                    sizesAsOf: { type: "string", format: "date-time", nullable: true },
+                    cleanupEnabled: { type: "boolean" },
+                    neverWatchedDays: { type: "integer" },
+                    requireUpstreamCheck: { type: "boolean" },
+                    computedAt: { type: "string", format: "date-time" },
+                  },
+                },
+              },
+            },
+          },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "The Never Watched page is disabled" },
+          "429": { description: "Rate limited" },
+        },
+      },
+    },
+
+    "/admin/never-watched/refresh": {
+      post: {
+        tags: ["Admin – Never watched"],
+        summary: "Re-read every media server's own watch records now (ADMIN)",
+        description:
+          "Runs the upstream watch-record snapshot (Plex all-account history, Jellyfin per-user played/resumable items) under the " +
+          "same advisory lock as its daily cron. Read-only towards the media servers; never writes play history. A server that " +
+          "fails keeps its previous snapshot. 409 while a run is already in progress.",
+        responses: {
+          "200": { description: "Per-server outcome: { servers: [{ source, instance, ok, entries, matched, samples, agreed, error }], aborted }" },
+          "403": { description: "Not ADMIN" },
+          "404": { description: "The Never Watched page is disabled" },
+          "409": { description: "A refresh is already running" },
+          "429": { description: "Rate limited" },
         },
       },
     },
@@ -4471,6 +4561,14 @@ const spec = {
         summary: "Pre-warm activity calendar cache",
         security: [{ cronSecret: [] }],
         responses: { "200": { description: "Warm result" } },
+      },
+    },
+    "/cron/refresh-upstream-watch": {
+      post: {
+        tags: ["Cron"],
+        summary: "Snapshot each media server's own watch records for the never-watched report",
+        security: [{ cronSecret: [] }],
+        responses: { "200": { description: "Per-server refresh result (skipped while both the Never Watched page and Library Cleanup are off)" } },
       },
     },
     "/cron/warm-library": {

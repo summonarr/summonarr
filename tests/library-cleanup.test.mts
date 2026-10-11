@@ -6,10 +6,11 @@
 //   2. EACH EXCLUSION holds a title back on its own, whatever rule matched.
 //   3. COMBINATION is "any enabled rule, minus every exclusion", and BOTH lists
 //      are reported in full — the admin sees every reason, not the first one.
-//   4. The watch rules only judge what play history actually OBSERVED: a title
-//      added before tracking began is measured from the first recorded play, and
-//      with tracking off (or no history at all) they never match. Without this
-//      an install that just enabled tracking would see its whole library as
+//   4. The watch rules only judge what play history actually OBSERVED (through
+//      the shared never-watched verdict, guardrail 14d): a title added before
+//      tracking began is measured from the first recorded play, and with
+//      tracking off (or no history at all) they never match. Without this an
+//      install that just enabled tracking would see its whole library as
 //      "never watched".
 //   5. The settings write path refuses instead of repairing; the read path
 //      falls back per field.
@@ -23,10 +24,10 @@ import {
   sonarrStatusIsAiring,
   tmdbStatusIsAiring,
   validateCleanupSettingsPatch,
-  type CleanupContext,
   type CleanupSettings,
   type CleanupTitleFacts,
 } from "../src/lib/library-cleanup.ts";
+import { EMPTY_EVIDENCE, judgeTitle, type NwEvidence } from "../src/lib/never-watched.ts";
 
 const NOW = new Date("2026-10-01T00:00:00.000Z");
 const daysAgo = (n: number) => new Date(NOW.getTime() - n * 86_400_000);
@@ -44,16 +45,34 @@ const ALL_RULES: CleanupSettings = {
   recentRequestDays: 0,
   excludeAiring: false,
 };
-const CTX: CleanupContext = { now: NOW, playHistoryTracked: true, historyStart: daysAgo(1000) };
 
-function title(over: Partial<CleanupTitleFacts> = {}): CleanupTitleFacts {
+// The recording environment: one Plex server holding every title, recorded
+// since `historyStart` (null = nothing recorded yet).
+type Env = { now: Date; playHistoryTracked: boolean; historyStart: Date | null };
+const CTX: Env = { now: NOW, playHistoryTracked: true, historyStart: daysAgo(1000) };
+
+// A title as the tests describe it; the verdict the engine reads is derived
+// from it through the REAL never-watched judge, so these pin the two together.
+type RawTitle = Omit<CleanupTitleFacts, "watch" | "evidence" | "upstreamUnchecked"> & {
+  upstreamUnchecked?: readonly string[];
+  evidence?: Partial<NwEvidence>;
+};
+
+function title(over: Partial<RawTitle> = {}): RawTitle {
   return {
     tmdbId: 1, mediaType: "MOVIE", addedAt: daysAgo(400), playCount: 5, lastPlayedAt: daysAgo(10),
     votes: 0, requests: [], watchlisted: false, playingNow: false, airing: null, protected: false,
     ...over,
   };
 }
-const judge = (t: CleanupTitleFacts, s: CleanupSettings = ALL_RULES, ctx: CleanupContext = CTX) => evaluateCleanupTitle(t, s, ctx);
+
+function facts(t: RawTitle, env: Env): CleanupTitleFacts {
+  const coverage = new Map([["plex", { server: "plex", source: "plex" as const, tracked: true, since: env.historyStart }]]);
+  const evidence: NwEvidence = { ...EMPTY_EVIDENCE, plays: t.playCount, lastPlayedAt: t.lastPlayedAt, ...t.evidence };
+  const watch = judgeTitle([{ server: "plex", source: "plex" }], t.addedAt, evidence, { now: env.now, trackingOn: env.playHistoryTracked, coverage });
+  return { ...t, evidence, watch, upstreamUnchecked: t.upstreamUnchecked ?? [] };
+}
+const judge = (t: RawTitle, s: CleanupSettings = ALL_RULES, env: Env = CTX) => evaluateCleanupTitle(facts(t, env), s, { now: env.now });
 
 // ── the rules ───────────────────────────────────────────────────────────────
 
@@ -126,6 +145,44 @@ test("with NO history at all the watch rules never match", () => {
 
 test("an unknown addedAt can't satisfy a watch rule", () => {
   assert.deepEqual(judge(title({ playCount: 0, lastPlayedAt: null, addedAt: null })).matched, []);
+});
+
+// ── evidence beyond tmdb-attributed plays (guardrail 14d) ──────────────────
+
+test("possibly watched (an unattributed play with a matching title) never satisfies neverWatched", () => {
+  const v = judge(
+    title({ playCount: 0, lastPlayedAt: null, addedAt: daysAgo(400), evidence: { softPlays: 2, softLastPlayedAt: daysAgo(300), softServers: ["plex"] } }),
+    { ...ALL_RULES, unwatchedEnabled: false },
+  );
+  assert.deepEqual(v.matched, []);
+});
+
+test("unwatched measures from a soft play too — a title that may have been watched last week isn't idle", () => {
+  const soft = { softPlays: 1, softLastPlayedAt: daysAgo(7), softServers: ["plex"] };
+  assert.deepEqual(judge(title({ playCount: 0, lastPlayedAt: null, addedAt: daysAgo(400), evidence: soft }), { ...ALL_RULES, neverWatchedEnabled: false }).matched, []);
+});
+
+test("an undated play (a server's played flag with no date) blocks the idle rule — it could be yesterday", () => {
+  const v = judge(title({ playCount: 1, lastPlayedAt: null, addedAt: daysAgo(400), evidence: { undated: true } }));
+  assert.deepEqual(v.matched, []);
+});
+
+test("upstreamUnchecked holds back watch-rule candidates while required; the votes rule doesn't need it", () => {
+  const unchecked = title({ playCount: 0, lastPlayedAt: null, addedAt: daysAgo(400), upstreamUnchecked: ["plex"] });
+  const watchOnly = { ...ALL_RULES, votesEnabled: false };
+  const held = judge(unchecked, watchOnly);
+  assert.deepEqual(held.matched, ["unwatched", "neverWatched"]);
+  assert.deepEqual(held.excludedBy, ["upstreamUnchecked"]);
+  assert.equal(held.candidate, false);
+  assert.equal(judge(unchecked, { ...watchOnly, requireUpstreamCheck: false }).candidate, true, "turning the requirement off releases it");
+  const voted = judge({ ...unchecked, votes: 5 });
+  assert.deepEqual(voted.excludedBy, [], "votes are the users' own call — no upstream check");
+  assert.equal(voted.candidate, true);
+});
+
+test("the requirement is ON by default", () => {
+  assert.equal(CLEANUP_SETTING_DEFAULTS.requireUpstreamCheck, true);
+  assert.equal(CLEANUP_SETTING_KEYS.requireUpstreamCheck, "cleanupRequireUpstreamCheck");
 });
 
 // ── the exclusions ──────────────────────────────────────────────────────────

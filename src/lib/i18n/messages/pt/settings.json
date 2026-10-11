@@ -106,6 +106,8 @@
   "settings.featureDesc.admin_apiDocs": "Mostra a referência OpenAPI em /admin/api-docs e o link na navegação.",
   "settings.featureLabel.admin_cleanup": "Página de limpeza da biblioteca",
   "settings.featureDesc.admin_cleanup": "Mostra a página /admin/cleanup: títulos que ninguém assiste, classificados por regras configuráveis, que um administrador pode excluir do Radarr/Sonarr após uma simulação. Nada é excluído automaticamente. Desativado por padrão.",
+  "settings.featureLabel.admin_neverWatched": "Página Nunca assistido",
+  "settings.featureDesc.admin_neverWatched": "Mostra a página /admin/never-watched: cada filme, série e temporada que ninguém assistiu no histórico registrado deste servidor, classificados pelo espaço que ocupam e conferidos com os registros de visualização próprios de cada servidor de mídia. Somente leitura; a exclusão é feita pela limpeza da biblioteca.",
   "settings.featureLabel.trashGuidesEnabled": "TRaSH Guides",
   "settings.featureDesc.trashGuidesEnabled": "Ativa a página de administração do TRaSH Guides e a sincronização noturna.",
   "settings.features.toggle": "Alternar {label}",
@@ -416,5 +418,7 @@
   "settings.media.tokenPlaceholder.plex": "Cole o token de administrador deste servidor",
   "settings.media.tokenPlaceholder.jellyfin": "Cole uma chave de API deste servidor",
   "settings.cron.job.trakt.name": "Sincronização do Trakt",
-  "settings.cron.job.trakt.description": "Solicita novos títulos das listas do Trakt dos usuários conectados e importa o histórico do Trakt para Para você (exige um Client Secret do Trakt)"
+  "settings.cron.job.trakt.description": "Solicita novos títulos das listas do Trakt dos usuários conectados e importa o histórico do Trakt para Para você (exige um Client Secret do Trakt)",
+  "settings.cron.job.upstreamWatch.name": "Histórico de visualização dos servidores",
+  "settings.cron.job.upstreamWatch.description": "Lê os registros de visualização próprios de cada servidor Plex e Jellyfin, para que um título assistido antes da instalação do Summonarr (ou enquanto ele estava fora do ar) nunca seja apontado como não assistido"
 }

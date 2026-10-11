@@ -10,7 +10,7 @@ import { getMediaInstances } from "./media-instance-registry";
 import { isFeatureEnabled } from "./features";
 import { coalesce } from "./concurrency";
 import { processSingleton } from "./process-singleton";
-import { loadArrLibraryIndex, type ArrLibraryEntry } from "./library-cleanup-arr";
+import { getCachedArrLibraryIndex, type ArrLibraryEntry } from "./library-cleanup-arr";
 import { CLEANUP_FEATURE_KEY, computeCleanupReport } from "./library-cleanup-data";
 import { getWatchGradeSummaries } from "./watch-grade-data";
 import { watchGradeSpread, type WatchGradeSpread } from "./watch-grade";
@@ -22,6 +22,8 @@ import {
   mergeDiskGroups,
   type MergedDisk,
 } from "./admin-stats";
+import { NEVER_WATCHED_FEATURE_KEY } from "./never-watched-data";
+import { getNeverWatchedReport } from "./never-watched-report";
 
 type Status = "PENDING" | "APPROVED" | "DECLINED" | "AVAILABLE";
 type Media = "MOVIE" | "TV";
@@ -724,6 +726,8 @@ export interface StorageStats {
   listingErrors: Array<{ service: "radarr" | "sonarr"; slug: string; name: string }>;
   // Present only while Library cleanup is enabled.
   reclaimable: { titles: number; bytes: number } | null;
+  // Present only while the never-watched page is enabled (guardrail 14d).
+  neverWatched: { titles: number; bytes: number; seasons: number; seasonBytes: number } | null;
   computedAt: string;
 }
 
@@ -736,20 +740,22 @@ const storageCache = processSingleton("admin-stats:storage", () => ({ value: nul
 export async function getStorageStats(opts: { fresh?: boolean } = {}): Promise<StorageStats> {
   if (!opts.fresh && storageCache.value && Date.now() - storageCache.at < STORAGE_TTL_MS) return storageCache.value;
   return coalesce("admin-stats:storage", async () => {
-    const value = await computeStorageStats();
+    const value = await computeStorageStats(opts.fresh === true);
     storageCache.value = value;
     storageCache.at = Date.now();
     return value;
   });
 }
 
-async function computeStorageStats(): Promise<StorageStats> {
-  const [disk, index, radarr, sonarr, cleanupOn] = await Promise.all([
+async function computeStorageStats(fresh: boolean): Promise<StorageStats> {
+  const [disk, { index }, radarr, sonarr, cleanupOn, neverWatchedOn] = await Promise.all([
     getArrDiskSpace(),
-    loadArrLibraryIndex(),
+    // Shared with the never-watched report (same 5-minute window).
+    getCachedArrLibraryIndex({ fresh }),
     getArrInstances("radarr"),
     getArrInstances("sonarr"),
     isFeatureEnabled(CLEANUP_FEATURE_KEY),
+    isFeatureEnabled(NEVER_WATCHED_FEATURE_KEY),
   ]);
   const instName = (service: "radarr" | "sonarr", slug: string) =>
     (service === "radarr" ? radarr : sonarr).find((i) => i.slug === slug)?.name ?? slug;
@@ -790,12 +796,28 @@ async function computeStorageStats(): Promise<StorageStats> {
     }
   }
 
+  let neverWatched: StorageStats["neverWatched"] = null;
+  if (neverWatchedOn) {
+    try {
+      const { totals } = await getNeverWatchedReport();
+      neverWatched = {
+        titles: totals.never.titles,
+        bytes: totals.never.bytes,
+        seasons: totals.seasons.count,
+        seasonBytes: totals.seasons.bytes,
+      };
+    } catch (err) {
+      console.warn("[admin-stats] never-watched report failed:", err instanceof Error ? err.message : err);
+    }
+  }
+
   return {
     disks,
     unreachable: disk.unreachable,
     libraries: [...sizes.values()].sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name)),
     listingErrors: index.errors.map((e) => ({ service: e.service, slug: e.instance, name: svcLabel(e.service, e.instance) })),
     reclaimable,
+    neverWatched,
     computedAt: new Date().toISOString(),
   };
 }

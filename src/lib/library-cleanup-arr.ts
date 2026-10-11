@@ -5,9 +5,11 @@
 // and a named instance at once, and a cleanup removes it from every one.
 import { arrFetch, arrFetchNoContent, getArrCfg, resolveTmdbToTvdb } from "./arr";
 import { getSyncableArrInstances } from "./arr-instance-registry";
-import { mapLimit, settleLimit } from "./concurrency";
+import { coalesce, mapLimit, settleLimit } from "./concurrency";
 import { isFeatureEnabled } from "./features";
 import { cleanupKey, sonarrStatusIsAiring, type CleanupMediaType } from "./library-cleanup";
+import type { NwArrSeasonStat } from "./never-watched";
+import { processSingleton } from "./process-singleton";
 
 export type ArrService = "radarr" | "sonarr";
 
@@ -21,6 +23,11 @@ export interface ArrLibraryEntry {
   sizeOnDisk: number;
   // Sonarr only; null for movies and for an unrecognised status.
   airing: boolean | null;
+  // When the arr added the title — one of the arrival dates the never-watched
+  // report takes the earliest of (a media server's own "added" resets on re-add).
+  added?: Date | null;
+  // Sonarr only: per-season file statistics (specials included as season 0).
+  seasons?: NwArrSeasonStat[];
 }
 
 export interface ArrLibraryIndex {
@@ -34,18 +41,43 @@ export interface ArrLibraryIndex {
   errors: Array<{ service: ArrService; instance: string; error: string }>;
 }
 
-type RadarrMovieRow = { id?: unknown; tmdbId?: unknown; title?: unknown; sizeOnDisk?: unknown };
+type RadarrMovieRow = { id?: unknown; tmdbId?: unknown; title?: unknown; sizeOnDisk?: unknown; added?: unknown };
 type SonarrSeriesRow = {
   id?: unknown;
   tmdbId?: unknown;
   tvdbId?: unknown;
   title?: unknown;
   status?: unknown;
+  added?: unknown;
   statistics?: { sizeOnDisk?: unknown } | null;
+  seasons?: Array<{ seasonNumber?: unknown; statistics?: { sizeOnDisk?: unknown; episodeFileCount?: unknown } | null }> | null;
 };
 
 const posInt = (v: unknown): number | null => (typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null);
 const nonNeg = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+
+// The arrs report an unknown date as 0001-01-01; anything before the Unix epoch
+// is that sentinel, not a date.
+function arrDate(v: unknown): Date | null {
+  if (typeof v !== "string" || v.length === 0) return null;
+  const d = new Date(v);
+  return Number.isFinite(d.getTime()) && d.getTime() > 0 ? d : null;
+}
+
+function sonarrSeasons(rows: SonarrSeriesRow["seasons"]): NwArrSeasonStat[] {
+  const out: NwArrSeasonStat[] = [];
+  for (const s of Array.isArray(rows) ? rows : []) {
+    const n = typeof s?.seasonNumber === "number" && Number.isInteger(s.seasonNumber) && s.seasonNumber >= 0 ? s.seasonNumber : null;
+    if (n === null) continue;
+    const files = s.statistics?.episodeFileCount;
+    out.push({
+      seasonNumber: n,
+      sizeOnDisk: nonNeg(s.statistics?.sizeOnDisk),
+      episodeFileCount: typeof files === "number" && Number.isInteger(files) && files > 0 ? files : 0,
+    });
+  }
+  return out;
+}
 
 // Small, fixed: one listing per instance, each up to a library-sized body.
 const LISTING_CONCURRENCY = 3;
@@ -66,6 +98,7 @@ async function listInstance(service: ArrService, instance: string): Promise<ArrL
         title: typeof r.title === "string" ? r.title : "",
         sizeOnDisk: nonNeg(r.sizeOnDisk),
         airing: null,
+        added: arrDate(r.added),
       });
     }
     return out;
@@ -82,6 +115,8 @@ async function listInstance(service: ArrService, instance: string): Promise<ArrL
       title: typeof r.title === "string" ? r.title : "",
       sizeOnDisk: nonNeg(r.statistics?.sizeOnDisk),
       airing: sonarrStatusIsAiring(r.status),
+      added: arrDate(r.added),
+      seasons: sonarrSeasons(r.seasons),
     });
   }
   return out;
@@ -127,6 +162,29 @@ export async function loadArrLibraryIndex(): Promise<ArrLibraryIndex> {
     }
   });
   return index;
+}
+
+// The same index, shared for a few minutes: every read-only view (the
+// never-watched report, the storage stats) would otherwise list every library in
+// full on each load — up to 50 MB a body. Concurrent callers share one listing.
+// The DELETE path never uses this: guardrail 14b needs fresh targets.
+const INDEX_TTL_MS = 5 * 60 * 1000;
+const indexCache = processSingleton("library-cleanup:arr-index", () => ({ value: null as ArrLibraryIndex | null, at: 0 }));
+
+export function invalidateArrLibraryIndexCache(): void {
+  indexCache.value = null;
+}
+
+export async function getCachedArrLibraryIndex(opts: { fresh?: boolean } = {}): Promise<{ index: ArrLibraryIndex; at: Date }> {
+  if (!opts.fresh && indexCache.value && Date.now() - indexCache.at < INDEX_TTL_MS) {
+    return { index: indexCache.value, at: new Date(indexCache.at) };
+  }
+  return coalesce("library-cleanup:arr-index", async () => {
+    const index = await loadArrLibraryIndex();
+    indexCache.value = index;
+    indexCache.at = Date.now();
+    return { index, at: new Date(indexCache.at) };
+  });
 }
 
 // The delete targets for each title: every instance entry carrying its tmdbId,

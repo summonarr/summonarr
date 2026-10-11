@@ -106,6 +106,8 @@
   "settings.featureDesc.admin_apiDocs": "Die OpenAPI-Referenz unter /admin/api-docs und ihren Navigationslink anzeigen.",
   "settings.featureLabel.admin_cleanup": "Seite „Bibliotheksbereinigung“",
   "settings.featureDesc.admin_cleanup": "Die Seite /admin/cleanup anzeigen: Titel, die niemand ansieht, sortiert nach konfigurierbaren Regeln, die ein Admin nach einem Probelauf aus Radarr/Sonarr löschen kann. Es wird nie etwas automatisch gelöscht. Standardmäßig aus.",
+  "settings.featureLabel.admin_neverWatched": "Seite „Nie angesehen“",
+  "settings.featureDesc.admin_neverWatched": "Die Seite /admin/never-watched anzeigen: jeder Film, jede Serie und jede Staffel, die im aufgezeichneten Verlauf dieses Servers niemand angesehen hat, sortiert nach belegtem Speicherplatz und abgeglichen mit dem eigenen Wiedergabeverlauf jedes Medienservers. Nur lesend; gelöscht wird über die Bibliotheksbereinigung.",
   "settings.featureLabel.trashGuidesEnabled": "TRaSH Guides",
   "settings.featureDesc.trashGuidesEnabled": "Die Admin-Seite für TRaSH Guides und die nächtliche Synchronisierung aktivieren.",
   "settings.features.toggle": "{label} umschalten",
@@ -416,5 +418,7 @@
   "settings.media.tokenPlaceholder.plex": "Admin-Token dieses Servers einfügen",
   "settings.media.tokenPlaceholder.jellyfin": "API-Schlüssel dieses Servers einfügen",
   "settings.cron.job.trakt.name": "Trakt-Synchronisierung",
-  "settings.cron.job.trakt.description": "Neue Titel aus den Trakt-Merklisten verbundener Benutzer anfragen und deren Trakt-Verlauf für „Für Sie“ importieren (erfordert ein Trakt-Client-Secret)"
+  "settings.cron.job.trakt.description": "Neue Titel aus den Trakt-Merklisten verbundener Benutzer anfragen und deren Trakt-Verlauf für „Für Sie“ importieren (erfordert ein Trakt-Client-Secret)",
+  "settings.cron.job.upstreamWatch.name": "Server-Wiedergabeverlauf",
+  "settings.cron.job.upstreamWatch.description": "Den eigenen Wiedergabeverlauf jedes Plex- und Jellyfin-Servers lesen, damit ein Titel, der vor der Installation von Summonarr (oder während eines Ausfalls) angesehen wurde, nie als nicht angesehen gemeldet wird"
 }

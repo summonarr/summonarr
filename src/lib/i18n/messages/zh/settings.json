@@ -106,6 +106,8 @@
   "settings.featureDesc.admin_apiDocs": "显示 /admin/api-docs OpenAPI 参考及导航链接。",
   "settings.featureLabel.admin_cleanup": "媒体库清理页面",
   "settings.featureDesc.admin_cleanup": "显示 /admin/cleanup 页面：按可配置规则排序的无人观看的作品，管理员可在试运行后从 Radarr/Sonarr 中删除。不会自动删除任何内容。默认关闭。",
+  "settings.featureLabel.admin_neverWatched": "从未观看页面",
+  "settings.featureDesc.admin_neverWatched": "显示 /admin/never-watched 页面：此服务器记录的历史中无人观看过的每部电影、每部剧集和每一季，按占用空间排序，并与每台媒体服务器自身的观看记录进行核对。只读；删除需通过媒体库清理进行。",
   "settings.featureLabel.trashGuidesEnabled": "TRaSH Guides",
   "settings.featureDesc.trashGuidesEnabled": "启用 TRaSH Guides 管理页面和每晚同步。",
   "settings.features.toggle": "切换{label}",
@@ -416,5 +418,7 @@
   "settings.media.tokenPlaceholder.plex": "粘贴此服务器的管理员令牌",
   "settings.media.tokenPlaceholder.jellyfin": "粘贴此服务器的 API 密钥",
   "settings.cron.job.trakt.name": "Trakt 同步",
-  "settings.cron.job.trakt.description": "从已连接用户的 Trakt 待看清单中请求新作品，并导入其 Trakt 观看记录用于“为你推荐”（需要 Trakt Client Secret）"
+  "settings.cron.job.trakt.description": "从已连接用户的 Trakt 待看清单中请求新作品，并导入其 Trakt 观看记录用于“为你推荐”（需要 Trakt Client Secret）",
+  "settings.cron.job.upstreamWatch.name": "服务器观看记录",
+  "settings.cron.job.upstreamWatch.description": "读取每台 Plex 和 Jellyfin 服务器自身的观看记录，确保在安装 Summonarr 之前（或其停止运行期间）看过的作品不会被报告为未观看"
 }

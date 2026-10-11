@@ -785,6 +785,25 @@ async function StorageSection({ f }: { f: Fmt }) {
               </p>
             </div>
           )}
+          {storage.neverWatched && (
+            <div style={{ marginTop: 16 }}>
+              <SubHeading>{t("adminManage.stats.neverWatched")}</SubHeading>
+              <p style={{ fontSize: 13, color: "var(--ds-fg)", margin: 0 }}>
+                {storage.neverWatched.titles === 0 && storage.neverWatched.seasons === 0
+                  ? t("adminManage.stats.neverWatchedNone")
+                  : t("adminManage.stats.neverWatchedValue", {
+                      size: f.bytes(storage.neverWatched.bytes),
+                      count: storage.neverWatched.titles,
+                      value: f.num(storage.neverWatched.titles),
+                      seasons: f.num(storage.neverWatched.seasons),
+                      seasonSize: f.bytes(storage.neverWatched.seasonBytes),
+                    })}{" "}
+                <Link href="/admin/never-watched" className="hover:underline" style={{ color: "var(--ds-accent-text)" }}>
+                  {t("adminManage.stats.reviewNeverWatched")}
+                </Link>
+              </p>
+            </div>
+          )}
         </div>
       </div>
     </StatsSection>

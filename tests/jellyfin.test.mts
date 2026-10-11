@@ -628,13 +628,13 @@ test("episodes with a provided series map: exact fields query, SeriesId→tmdbId
   const episodes = await getJellyfinTVEpisodes(B, "k", undefined, seriesMap);
   assert.equal(
     sent[0].url,
-    `${B}/Items?IncludeItemTypes=Episode&Recursive=true&Fields=SeriesId,ParentIndexNumber,IndexNumber&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=1000`,
+    `${B}/Items?IncludeItemTypes=Episode&Recursive=true&Fields=SeriesId,ParentIndexNumber,IndexNumber,DateCreated&EnableImages=false&ImageTypeLimit=0&SortBy=DateCreated,SortName&SortOrder=Ascending&StartIndex=0&Limit=1000`,
   );
   assert.deepEqual(
     episodes.sort((a, b) => a.tmdbId - b.tmdbId),
     [
-      { tmdbId: 100, seasonNumber: 1, episodeNumber: 1 },
-      { tmdbId: 200, seasonNumber: 2, episodeNumber: 3 },
+      { tmdbId: 100, seasonNumber: 1, episodeNumber: 1, addedAt: null },
+      { tmdbId: 200, seasonNumber: 2, episodeNumber: 3, addedAt: null },
     ],
   );
 
@@ -671,7 +671,7 @@ test("episodes without a provided map discover the Series set first, then map ep
 
   const episodes = await getJellyfinTVEpisodes(B, "k");
   assert.ok(sent[0].url.includes("IncludeItemTypes=Series"), "series discovery runs first");
-  assert.deepEqual(episodes, [{ tmdbId: 1399, seasonNumber: 1, episodeNumber: 2 }]);
+  assert.deepEqual(episodes, [{ tmdbId: 1399, seasonNumber: 1, episodeNumber: 2, addedAt: null }]);
 });
 
 // The main regression pin for guardrail 37. A show in two libraries has two
@@ -699,9 +699,11 @@ test("a series in two libraries maps BOTH item ids, so the losing copy's episode
     if (url.includes("IncludeItemTypes=Episode")) {
       return okJson({
         Items: [
-          { SeriesId: "ser-tv",    ParentIndexNumber: 1, IndexNumber: 1 },
+          { SeriesId: "ser-tv",    ParentIndexNumber: 1, IndexNumber: 1, DateCreated: "2024-06-02T00:00:00.000Z" },
           { SeriesId: "ser-anime", ParentIndexNumber: 2, IndexNumber: 4 }, // the whole of S2 used to vanish here
-          { SeriesId: "ser-anime", ParentIndexNumber: 1, IndexNumber: 1 }, // same episode via the other copy → deduped
+          // Same episode via the other copy → deduped, and its EARLIER arrival is
+          // the one kept (the never-watched report dates a season by it).
+          { SeriesId: "ser-anime", ParentIndexNumber: 1, IndexNumber: 1, DateCreated: "2024-01-02T00:00:00.000Z" },
           { SeriesId: "ser-other", ParentIndexNumber: 9, IndexNumber: 9 }, // genuinely unknown series → still skipped
         ],
         TotalRecordCount: 4,
@@ -714,8 +716,8 @@ test("a series in two libraries maps BOTH item ids, so the losing copy's episode
   assert.deepEqual(
     episodes.sort((a, b) => a.seasonNumber - b.seasonNumber),
     [
-      { tmdbId: 1399, seasonNumber: 1, episodeNumber: 1 },
-      { tmdbId: 1399, seasonNumber: 2, episodeNumber: 4 },
+      { tmdbId: 1399, seasonNumber: 1, episodeNumber: 1, addedAt: new Date("2024-01-02T00:00:00.000Z") },
+      { tmdbId: 1399, seasonNumber: 2, episodeNumber: 4, addedAt: null },
     ],
     "both copies' episodes land on the one tmdb id, deduped, with unknown series still dropped",
   );
@@ -1315,4 +1317,81 @@ test("download policy failure contracts: a failed user read throws before any PO
     /returned no Policy — refusing to overwrite/,
   );
   assert.equal(sent.length, 1, "no Policy POST is attempted when the read exposed no policy");
+});
+
+// ── getJellyfinUserPlayedItems (the never-watched report's upstream evidence) ─
+// Appended for src/lib/upstream-watch-data.ts. Pins the exact per-user query
+// (encoded user id, Filters, Fields, user data on, images off, a stable sort),
+// sequential paging, parse-while-paging with the raw record count, and the
+// AbortSignal stop (guardrail 41).
+
+const { getJellyfinUserPlayedItems } = await import("../src/lib/jellyfin.ts");
+
+test("getJellyfinUserPlayedItems: the exact per-user query, encoded user id, admin auth; parses movies/episodes and counts every record", async () => {
+  const B = nextBase();
+  respond = () => okJson({
+    Items: [
+      { Type: "Movie", Id: "m1", UserData: { PlayCount: 2, LastPlayedDate: "2025-04-01T00:00:00.0000000Z" } },
+      { Type: "Episode", Id: "e1", SeriesId: "s1", ParentIndexNumber: 3, UserData: { PlayCount: 0 } },
+      { Type: "Folder", Id: "f1" },
+    ],
+    TotalRecordCount: 3,
+  });
+  const res = await getJellyfinUserPlayedItems(`${B}/`, "key-uw", "user 1", "IsPlayed");
+  assert.equal(sent.length, 1);
+  assert.equal(
+    sent[0].url,
+    `${B}/Users/user%201/Items?Recursive=true&IncludeItemTypes=Movie,Episode&Filters=IsPlayed` +
+      "&Fields=SeriesId,ParentIndexNumber&EnableUserData=true&EnableImages=false&SortBy=DateCreated,SortName&SortOrder=Ascending" +
+      "&StartIndex=0&Limit=1000",
+  );
+  assert.equal(sent[0].headers.get("authorization"), adminAuthHeader("key-uw"));
+  assert.equal(res.records, 3);
+  assert.deepEqual(res.items.map((i) => [i.kind, i.itemKey, i.showKey, i.seasonNumber, i.playCount]), [
+    ["movie", "m1", null, null, 2],
+    ["episode", "e1", "s1", 3, 1],
+  ]);
+
+  sent.length = 0;
+  respond = () => okJson({ Items: [], TotalRecordCount: 0 });
+  await getJellyfinUserPlayedItems(B, "key-uw", "u2", "IsResumable");
+  assert.equal(new URL(sent[0].url).searchParams.get("Filters"), "IsResumable");
+});
+
+test("getJellyfinUserPlayedItems pages sequentially by StartIndex until a short page", async () => {
+  const B = nextBase();
+  const page = (n: number, from: number) => Array.from({ length: n }, (_, i) => ({ Type: "Movie", Id: `m${from + i}` }));
+  respond = (url) => {
+    const start = Number(new URL(url).searchParams.get("StartIndex"));
+    if (start === 0) return okJson({ Items: page(1000, 0), TotalRecordCount: 1500 });
+    if (start === 1000) return okJson({ Items: page(500, 1000), TotalRecordCount: 1500 });
+    throw new Error(`unexpected StartIndex ${start}`);
+  };
+  const res = await getJellyfinUserPlayedItems(B, "k", "u", "IsPlayed");
+  assert.equal(sent.length, 2);
+  assert.equal(res.items.length, 1500);
+  assert.equal(res.records, 1500);
+});
+
+test("getJellyfinUserPlayedItems stops paging when its AbortSignal fires and does nothing when already aborted (guardrail 41)", async () => {
+  const B = nextBase();
+  const controller = new AbortController();
+  respond = () => {
+    controller.abort();
+    return okJson({ Items: Array.from({ length: 1000 }, (_, i) => ({ Type: "Movie", Id: `m${i}` })), TotalRecordCount: 5000 });
+  };
+  await getJellyfinUserPlayedItems(B, "k", "u", "IsPlayed", { signal: controller.signal });
+  assert.equal(sent.length, 1, "no second page after the abort");
+
+  sent.length = 0;
+  const res = await getJellyfinUserPlayedItems(B, "k", "u", "IsPlayed", { signal: controller.signal });
+  assert.equal(sent.length, 0);
+  assert.deepEqual(res, { items: [], records: 0 });
+});
+
+test("getJellyfinUserPlayedItems THROWS on a 4xx (no retry) — never an empty list the snapshot would trust", async () => {
+  const B = nextBase();
+  respond = () => okJson({}, 401);
+  await assert.rejects(() => getJellyfinUserPlayedItems(B, "k", "u", "IsPlayed"), /Jellyfin fetch failed: 401/);
+  assert.equal(sent.length, 1);
 });

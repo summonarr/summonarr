@@ -41,6 +41,8 @@
   "apiAdmin.cleanup.bodyObject": "Body must be an object",
   "apiAdmin.cleanup.confirmationRequired": "Confirmation required",
   "apiAdmin.cleanup.disabled": "Library cleanup is disabled",
+  "apiAdmin.neverWatched.disabled": "The Never Watched page is disabled",
+  "apiAdmin.neverWatched.refreshRunning": "A watch-record refresh is already running — try again in a minute.",
   "apiAdmin.cleanup.fieldBoolean": "{field} must be a boolean",
   "apiAdmin.cleanup.fieldRange": "{field} must be an integer between {min} and {max}",
   "apiAdmin.cleanup.heldBack": "Held back: {exclusions}",

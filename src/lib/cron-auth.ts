@@ -191,6 +191,25 @@ export interface EpisodeCacheRow {
   stillPath?: string | null;
   runtime?: number | null;
   overview?: string | null;
+  addedAt?: Date | null;
+}
+
+/**
+ * Several servers of one source can hold the same episode. The staging insert
+ * skips duplicates (first row wins), which would keep whichever server's
+ * `addedAt` happened to come first; the never-watched report dates a season by
+ * the EARLIEST arrival, so carry that onto the surviving row. Every other field
+ * keeps the first row's value, exactly as before.
+ */
+export function earliestAddedPerEpisode<T extends EpisodeCacheRow>(rows: T[]): T[] {
+  const byKey = new Map<string, T>();
+  for (const r of rows) {
+    const key = `${r.tmdbId}:${r.seasonNumber}:${r.episodeNumber}`;
+    const prev = byKey.get(key);
+    if (!prev) byKey.set(key, r);
+    else if (r.addedAt && (!prev.addedAt || r.addedAt < prev.addedAt)) byKey.set(key, { ...prev, addedAt: r.addedAt });
+  }
+  return byKey.size === rows.length ? rows : [...byKey.values()];
 }
 
 /** Staged rows older than this belong to a run that died before its finally block. */
@@ -240,7 +259,7 @@ export async function replaceEpisodeCacheForSource(
   try {
     await batchCreateMany(
       prisma.tVEpisodeCacheStaging,
-      rows.map((r) => ({ ...r, runId, source })),
+      earliestAddedPerEpisode(rows).map((r) => ({ ...r, runId, source })),
     );
 
     await prisma.$transaction(async (tx) => {
@@ -254,8 +273,8 @@ export async function replaceEpisodeCacheForSource(
       // that pin "exactly one delete, scoped to this source".
       await tx.tVEpisodeCache.deleteMany({ where: { source } });
       await tx.$executeRaw`
-        INSERT INTO "TVEpisodeCache" ("source", "tmdbId", "seasonNumber", "episodeNumber", "episodeName", "airDate", "stillPath", "runtime", "overview")
-        SELECT "source", "tmdbId", "seasonNumber", "episodeNumber", "episodeName", "airDate", "stillPath", "runtime", "overview"
+        INSERT INTO "TVEpisodeCache" ("source", "tmdbId", "seasonNumber", "episodeNumber", "episodeName", "airDate", "stillPath", "runtime", "overview", "addedAt")
+        SELECT "source", "tmdbId", "seasonNumber", "episodeNumber", "episodeName", "airDate", "stillPath", "runtime", "overview", "addedAt"
         FROM "TVEpisodeCacheStaging" WHERE "runId" = ${runId}
       `;
     }, { timeout: BATCH_TX_TIMEOUT });

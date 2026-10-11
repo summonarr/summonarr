@@ -9,10 +9,11 @@ import { clearDeletionVotesForTmdbs } from "@/lib/notify-available";
 import { scheduleLibraryScan } from "@/lib/library-scan";
 import { mapLimit } from "@/lib/concurrency";
 import { ArrResponseError, arrErrorMessage } from "@/lib/arr";
-import { deleteArrEntry, loadArrLibraryIndex, resolveArrTargets, type ArrLibraryEntry } from "@/lib/library-cleanup-arr";
+import { deleteArrEntry, invalidateArrLibraryIndexCache, loadArrLibraryIndex, resolveArrTargets, type ArrLibraryEntry } from "@/lib/library-cleanup-arr";
 import { cleanupKey, type CleanupMediaType } from "@/lib/library-cleanup";
 import { CLEANUP_FEATURE_KEY, computeCleanupReport, type CleanupRow, type TitleKey } from "@/lib/library-cleanup-data";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 
 // Library cleanup delete (ADMIN) — the ONLY way anything in this feature is
 // removed, and only ever by an admin's explicit, two-step confirmation:
@@ -268,6 +269,12 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   });
 
   if (results.some((r) => r.blacklisted)) invalidateBlacklistCache();
+  // Read-only views cache the Radarr/Sonarr listing and the never-watched
+  // report; what was just deleted must not keep showing there.
+  if (results.some((r) => r.deleted.length > 0)) {
+    invalidateArrLibraryIndexCache();
+    invalidateNeverWatchedReport();
+  }
   // Let Plex/Jellyfin notice the files are gone; the next library sync then
   // drops their rows (this route never touches library rows itself).
   for (const type of scanTypes) after(() => scheduleLibraryScan(type));

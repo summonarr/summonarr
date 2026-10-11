@@ -4,7 +4,7 @@ import { safeFetchTrusted } from "./safe-fetch";
 import { sanitizeForLog } from "./sanitize";
 import { mapLimit } from "./concurrency";
 import { resolveTvdbToTmdb } from "./arr";
-import type { PlexLegacyGuidRef, PlexLibraryItemData } from "./plex";
+import { withDuplicateRatingKeys, type PlexLegacyGuidRef, type PlexLibraryItemData } from "./plex";
 
 // Resolves the legacy-agent secondary channel (see PlexLegacyGuidRef in
 // plex.ts) to tmdb ids via TMDB /find — com.plexapp.agents.thetvdb:// shows
@@ -114,7 +114,10 @@ export function mergeResolvedLegacyItems(
   ratingKeyToTmdb?: Map<string, number[]>,
 ): void {
   for (const r of resolved) {
-    if (!items.has(r.tmdbId)) items.set(r.tmdbId, r.data);
+    const existing = items.get(r.tmdbId);
+    // The modern-agent row keeps the title; the legacy copy's ratingKey stays
+    // addressable so its plays still resolve (guardrail 37c).
+    items.set(r.tmdbId, existing ? withDuplicateRatingKeys(existing, r.data) : r.data);
     if (ratingKeyToTmdb && !ratingKeyToTmdb.has(r.ratingKey)) {
       ratingKeyToTmdb.set(r.ratingKey, [r.tmdbId]);
     }

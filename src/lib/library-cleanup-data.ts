@@ -15,9 +15,9 @@
 //     must never be restated in a shortcut. The audience rules here are
 //     server-wide instead.
 import { prisma } from "./prisma";
-import { isFeatureEnabled } from "./features";
-import { mediaInstanceLabel } from "./media-instances";
 import type { ArrLibraryEntry, ArrLibraryIndex } from "./library-cleanup-arr";
+import { loadLibraryWatchFacts, type ServerCoverage, type TitleKey } from "./never-watched-data";
+import { latestDate, type NwSeasonVerdict } from "./never-watched";
 import {
   CLEANUP_SETTING_KEYS,
   cleanupKey,
@@ -48,6 +48,20 @@ export interface CleanupTitle extends CleanupTitleFacts {
   year: string | null;
   // Media-server labels holding the title: "plex", "jellyfin", "plex:remote", …
   servers: string[];
+  // Earliest arrival from any source (media servers, Radarr/Sonarr, a fulfilled request).
+  shelfStart: Date | null;
+  // Season verdicts of a watched show, when seasons were requested.
+  seasons?: NwSeasonVerdict[];
+}
+
+// What the load observed about recording, for display.
+export interface CleanupLoadContext {
+  playHistoryTracked: boolean;
+  // Earliest recorded play anywhere (display only — never a window).
+  historyStart: Date | null;
+  coverage: ServerCoverage[];
+  unplacedPlays: number;
+  softPlays: number;
 }
 
 export interface CleanupRow {
@@ -73,87 +87,68 @@ export interface CleanupRow {
   candidate: boolean;
 }
 
-export type TitleKey = { tmdbId: number; mediaType: CleanupMediaType };
-
-const DAY_MS = 86_400_000;
-const TMDB_STATUS_CHUNK = 500;
+export type { TitleKey };
 
 // Every fact the engine needs, aggregated per title. `only` restricts every
 // read to the given titles (the delete route re-judges exactly what it was
-// asked to delete); omitted, the whole library is read.
+// asked to delete); omitted, the whole library is read. The watch facts — who
+// holds it, the evidence it was played, the verdict — come from
+// loadLibraryWatchFacts (guardrail 14d): one definition for the report, the
+// rules and the delete re-check.
 export async function loadCleanupTitles(
   arr: ArrLibraryIndex | null,
   only?: readonly TitleKey[],
-): Promise<{ titles: CleanupTitle[]; ctx: Omit<CleanupContext, "now"> }> {
-  const onlyIds = only ? [...new Set(only.map((k) => k.tmdbId))] : null;
-  const onlyKeys = only ? new Set(only.map((k) => cleanupKey(k.tmdbId, k.mediaType))) : null;
-  const idFilter = onlyIds ? { tmdbId: { in: onlyIds } } : {};
-
-  const [plexRows, jfRows] = await Promise.all([
-    prisma.plexLibraryItem.findMany({
-      where: idFilter,
-      select: { tmdbId: true, mediaType: true, serverInstance: true, title: true, year: true, addedAt: true },
-    }),
-    prisma.jellyfinLibraryItem.findMany({
-      where: idFilter,
-      select: { tmdbId: true, mediaType: true, serverInstance: true, title: true, year: true, addedAt: true },
-    }),
-  ]);
+  opts: { seasons?: boolean; now?: Date } = {},
+): Promise<{ titles: CleanupTitle[]; ctx: CleanupLoadContext }> {
+  const facts = await loadLibraryWatchFacts(arr, { only, seasons: opts.seasons, now: opts.now });
+  const loadCtx: CleanupLoadContext = {
+    playHistoryTracked: facts.ctx.trackingOn,
+    historyStart: facts.historyStart,
+    coverage: facts.coverage,
+    unplacedPlays: facts.unplacedPlays,
+    softPlays: facts.softPlays,
+  };
+  if (facts.titles.length === 0) return { titles: [], ctx: loadCtx };
 
   const byKey = new Map<string, CleanupTitle>();
-  const absorb = (
-    rows: Array<{ tmdbId: number; mediaType: string; serverInstance: string; title: string | null; year: string | null; addedAt: Date | null }>,
-    service: "plex" | "jellyfin",
-  ) => {
-    for (const r of rows) {
-      if (r.mediaType !== "MOVIE" && r.mediaType !== "TV") continue;
-      const key = cleanupKey(r.tmdbId, r.mediaType);
-      if (onlyKeys && !onlyKeys.has(key)) continue;
-      let t = byKey.get(key);
-      if (!t) {
-        t = {
-          tmdbId: r.tmdbId, mediaType: r.mediaType, title: r.title ?? "", posterPath: null, year: r.year,
-          servers: [], addedAt: null, playCount: 0, lastPlayedAt: null, votes: 0, requests: [],
-          watchlisted: false, playingNow: false, airing: null, protected: false,
-        };
-        byKey.set(key, t);
-      }
-      const label = mediaInstanceLabel(service, r.serverInstance);
-      if (!t.servers.includes(label)) t.servers.push(label);
-      // Earliest across servers: the title has been on the shelf since then.
-      if (r.addedAt && (!t.addedAt || r.addedAt < t.addedAt)) t.addedAt = r.addedAt;
-      if (!t.title && r.title) t.title = r.title;
-      if (!t.year && r.year) t.year = r.year;
-    }
-  };
-  absorb(plexRows, "plex");
-  absorb(jfRows, "jellyfin");
+  for (const w of facts.titles) {
+    byKey.set(cleanupKey(w.tmdbId, w.mediaType), {
+      tmdbId: w.tmdbId,
+      mediaType: w.mediaType,
+      title: w.title,
+      posterPath: null,
+      year: w.year,
+      servers: w.servers,
+      addedAt: w.addedAt,
+      shelfStart: w.shelfStart,
+      playCount: w.evidence.plays,
+      lastPlayedAt: w.evidence.lastPlayedAt,
+      watch: w.verdict,
+      evidence: w.evidence,
+      upstreamUnchecked: w.upstreamUnchecked,
+      seasons: w.seasons,
+      votes: 0,
+      requests: [],
+      watchlisted: false,
+      playingNow: w.playingNow,
+      airing: null,
+      protected: false,
+    });
+  }
 
   const ids = [...new Set([...byKey.values()].map((t) => t.tmdbId))];
   // A whole-library read aggregates unfiltered and drops non-library keys in
   // memory: an `IN` list as long as the library would run into Postgres's bind
   // parameter limit on a large one. A targeted read filters on its own few ids.
-  const scoped = onlyIds ? { tmdbId: { in: ids } } : {};
-  const playHistoryTracked = await isFeatureEnabled("playHistoryEnabled");
-  if (ids.length === 0) {
-    return { titles: [], ctx: { playHistoryTracked, historyStart: null } };
-  }
+  const scoped = only ? { tmdbId: { in: ids } } : {};
 
-  const [plays, historyStartAgg, votes, requests, watchlist, active, protections, cores] = await Promise.all([
-    prisma.playHistory.groupBy({
-      by: ["tmdbId", "mediaType"],
-      where: scoped,
-      _count: { _all: true },
-      _max: { startedAt: true },
-    }),
-    prisma.playHistory.aggregate({ _min: { startedAt: true } }),
+  const [votes, requests, watchlist, protections, cores] = await Promise.all([
     prisma.deletionVote.groupBy({ by: ["tmdbId", "mediaType"], where: scoped, _count: { _all: true } }),
     prisma.mediaRequest.findMany({
       where: { ...scoped, status: { in: ["PENDING", "APPROVED", "AVAILABLE"] } },
       select: { tmdbId: true, mediaType: true, status: true, availableAt: true },
     }),
     prisma.watchlistItem.groupBy({ by: ["tmdbId", "mediaType"], where: scoped }),
-    prisma.activeSession.findMany({ where: scoped, select: { tmdbId: true, mediaType: true } }),
     prisma.cleanupProtection.findMany({ where: scoped, select: { tmdbId: true, mediaType: true } }),
     loadCores(ids),
   ]);
@@ -161,12 +156,6 @@ export async function loadCleanupTitles(
   const get = (tmdbId: number | null, mediaType: string | null) =>
     tmdbId == null || mediaType == null ? undefined : byKey.get(cleanupKey(tmdbId, mediaType));
 
-  for (const p of plays) {
-    const t = get(p.tmdbId, p.mediaType);
-    if (!t) continue;
-    t.playCount = p._count._all;
-    t.lastPlayedAt = p._max.startedAt ?? null;
-  }
   for (const v of votes) {
     const t = get(v.tmdbId, v.mediaType);
     if (t) t.votes = v._count._all;
@@ -178,10 +167,6 @@ export async function loadCleanupTitles(
   for (const w of watchlist) {
     const t = get(w.tmdbId, w.mediaType);
     if (t) t.watchlisted = true;
-  }
-  for (const a of active) {
-    const t = get(a.tmdbId, a.mediaType);
-    if (t) t.playingNow = true;
   }
   for (const p of protections) {
     const t = get(p.tmdbId, p.mediaType);
@@ -204,12 +189,11 @@ export async function loadCleanupTitles(
     }
   }
 
-  return {
-    titles: [...byKey.values()],
-    ctx: { playHistoryTracked, historyStart: historyStartAgg._min.startedAt ?? null },
-  };
+  return { titles: [...byKey.values()], ctx: loadCtx };
 }
 
+const DAY_MS = 86_400_000;
+const TMDB_STATUS_CHUNK = 500;
 const CORE_CHUNK = 5_000;
 
 // Poster/title/year from TmdbMediaCore, chunked: that table holds every title
@@ -228,7 +212,7 @@ async function loadCores(ids: readonly number[]) {
 // TMDB's cached status for the shows Sonarr couldn't speak for. Read only for
 // the titles whose verdict it can change (a show that matched a rule), in
 // chunks, because a :details blob is large and a library has thousands.
-async function fillTmdbAiring(titles: CleanupTitle[]): Promise<void> {
+export async function fillTmdbAiring(titles: CleanupTitle[]): Promise<void> {
   const need = titles.filter((t) => t.mediaType === "TV" && t.airing === null);
   for (let i = 0; i < need.length; i += TMDB_STATUS_CHUNK) {
     const chunk = need.slice(i, i + TMDB_STATUS_CHUNK);
@@ -271,8 +255,8 @@ export async function computeCleanupReport(
   only?: readonly TitleKey[],
 ): Promise<CleanupReport> {
   const settings = await loadCleanupSettings();
-  const { titles, ctx: partial } = await loadCleanupTitles(arr, only);
-  const ctx: CleanupContext = { ...partial, now };
+  const { titles, ctx: partial } = await loadCleanupTitles(arr, only, { now });
+  const ctx: CleanupContext = { now };
 
   let verdicts = titles.map((t) => evaluateCleanupTitle(t, settings, ctx));
   if (settings.excludeAiring) {
@@ -289,8 +273,7 @@ export async function computeCleanupReport(
     const v = verdicts[i];
     if (v.matched.length === 0) return;
     const entries = arr?.byKey.get(cleanupKey(t.tmdbId, t.mediaType)) ?? [];
-    const lastActivity = [t.lastPlayedAt, v.observedSince].filter((d): d is Date => d !== null)
-      .reduce<Date | null>((a, d) => (!a || d > a ? d : a), null);
+    const lastActivity = latestDate(t.lastPlayedAt, t.evidence.softLastPlayedAt, v.observedSince);
     rows.push({
       tmdbId: t.tmdbId,
       mediaType: t.mediaType,
@@ -318,8 +301,8 @@ export async function computeCleanupReport(
 
   return {
     settings,
-    playHistoryTracked: ctx.playHistoryTracked,
-    historyStart: ctx.historyStart?.toISOString() ?? null,
+    playHistoryTracked: partial.playHistoryTracked,
+    historyStart: partial.historyStart?.toISOString() ?? null,
     rows,
     libraryTitles: titles.length,
   };

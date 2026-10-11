@@ -41,6 +41,8 @@
   "apiAdmin.cleanup.bodyObject": "Der Inhalt muss ein Objekt sein",
   "apiAdmin.cleanup.confirmationRequired": "Bestätigung erforderlich",
   "apiAdmin.cleanup.disabled": "Bibliotheksbereinigung ist deaktiviert",
+  "apiAdmin.neverWatched.disabled": "Die Seite „Nie angesehen“ ist deaktiviert",
+  "apiAdmin.neverWatched.refreshRunning": "Eine Aktualisierung der Wiedergabedaten läuft bereits – versuchen Sie es in einer Minute erneut.",
   "apiAdmin.cleanup.fieldBoolean": "{field} muss ein boolescher Wert sein",
   "apiAdmin.cleanup.fieldRange": "{field} muss eine ganze Zahl zwischen {min} und {max} sein",
   "apiAdmin.cleanup.heldBack": "Zurückgehalten: {exclusions}",

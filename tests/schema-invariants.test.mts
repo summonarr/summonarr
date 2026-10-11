@@ -429,6 +429,28 @@ test("guardrail 37: JellyfinLibraryItem keeps jellyfinItemIds alongside jellyfin
   );
 });
 
+// ── guardrail 37c: the Plex twin ────────────────────────────────────────────
+//
+// A Plex title in two sections ("Movies" + "4K Movies", "TV" + "Anime") is two
+// Plex items with two ratingKeys; the library keeps one row. Without the array
+// every episode play of the other copy is stored with tmdbId null (the poller
+// resolves the show by ratingKey) and the never-watched report calls a watched
+// show unwatched.
+
+test("guardrail 37c: PlexLibraryItem keeps plexRatingKeys alongside plexRatingKey, defaulted and GIN-indexed", () => {
+  const m = model("PlexLibraryItem");
+  assert.ok(m.fields.includes("plexRatingKey"), "the single canonical ratingKey column must stay — reads OR against it for rows predating the array");
+  assert.ok(m.fields.includes("plexRatingKeys"), "PlexLibraryItem is missing plexRatingKeys; duplicate-section copies become unresolvable again");
+
+  const decl = m.body.split("\n").find((l) => /^\s*plexRatingKeys\s/.test(l)) ?? "";
+  assert.match(decl, /String\[\]/, `plexRatingKeys must be a String[] — got: ${decl.trim()}`);
+  assert.match(decl, /@default\(\[\]\)/, "plexRatingKeys must @default([]) so db push can add it to a populated table");
+  assert.ok(
+    /@@index\(\[plexRatingKeys\][^)]*type:\s*Gin/.test(m.body),
+    "plexRatingKeys needs a GIN index: the poller and the never-watched join OR a has/hasSome over it",
+  );
+});
+
 // ── index hygiene: no @@index that a sibling key already serves ─────────────
 //
 // A Postgres btree answers any query on a LEADING-column prefix of its key, so

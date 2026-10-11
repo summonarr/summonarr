@@ -347,7 +347,7 @@ export default async function SettingsPage({
     const cronTargets = [
       "sync:full", "upcoming-cache", "ratings-sync", "list-cache",
       "activity", "mdblist", "omdb", "recommendations", "library", "audit-log:pii-scrub", "auth-sessions:purge-expired",
-      "trash-sync", "download-policies", "plex-watchlist", "trakt",
+      "trash-sync", "download-policies", "plex-watchlist", "trakt", "upstream-watch",
     ];
     // Primary source: `Setting` rows written by `recordCronRun` on every run
     // (admin- or cron-triggered). Several warm jobs deliberately skip the
@@ -480,6 +480,7 @@ export default async function SettingsPage({
       { name: t("settings.cron.job.trashSync.name"), description: t("settings.cron.job.trashSync.description"), endpoint: "/api/cron/trash-sync", interval: formatInterval(t, process.env.TRASH_SYNC_INTERVAL, "86400"), ...lastRunInfo("trash-sync") },
       { name: t("settings.cron.job.plexWatchlist.name"), description: t("settings.cron.job.plexWatchlist.description"), endpoint: "/api/cron/sync-plex-watchlists", interval: formatInterval(t, process.env.PLEX_WATCHLIST_SYNC_INTERVAL, "1800"), ...lastRunInfo("plex-watchlist") },
       { name: t("settings.cron.job.trakt.name"), description: t("settings.cron.job.trakt.description"), endpoint: "/api/cron/sync-trakt", interval: formatInterval(t, process.env.TRAKT_SYNC_INTERVAL, "1800"), ...lastRunInfo("trakt") },
+      { name: t("settings.cron.job.upstreamWatch.name"), description: t("settings.cron.job.upstreamWatch.description"), endpoint: "/api/cron/refresh-upstream-watch", interval: formatInterval(t, process.env.UPSTREAM_WATCH_SYNC_INTERVAL, "86400"), ...lastRunInfo("upstream-watch") },
       { name: t("settings.cron.job.downloadPolicy.name"), description: t("settings.cron.job.downloadPolicy.description"), endpoint: "/api/cron/sync-download-policies", interval: formatInterval(t, process.env.SYNC_INTERVAL, "3600"), ...lastRunInfo("download-policies") },
     ];
   }

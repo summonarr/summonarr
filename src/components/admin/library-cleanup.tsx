@@ -20,6 +20,16 @@ import { EmptyState, SectionHeader, StatCard } from "@/components/ui/design";
 import { Poster } from "@/components/admin/activity-ui";
 import { FileX, Loader2, Shield, ShieldOff, Trash2 } from "@/components/icons";
 import {
+  CleanupPlanPanel,
+  CleanupResultPanel,
+  arrInstanceLabel as instanceLabel,
+  cleanupKeyOf as keyOf,
+  dayFormatter,
+  formatBytesIn,
+  readApiError as readError,
+  useCleanupDelete,
+} from "@/components/admin/cleanup-delete";
+import {
   CLEANUP_NUMERIC_BOUNDS,
   CLEANUP_RULE_LABELS,
   type CleanupExclusion,
@@ -57,42 +67,6 @@ type Report = {
   totals: { candidates: number; held: number; reclaimableBytes: number };
 };
 
-type Plan = {
-  targetCount: number;
-  reclaimableBytes: number;
-  items: Array<{ tmdbId: number; mediaType: "MOVIE" | "TV"; title: string; targets: Array<{ service: string; instance: string; title: string; sizeOnDisk: number }> }>;
-  skipped: Array<{ tmdbId: number; mediaType: string; title: string | null; reason: string }>;
-};
-
-type ExecResult = {
-  deletedCount: number;
-  partialCount: number;
-  failedCount: number;
-  results: Array<{ tmdbId: number; mediaType: string; title: string; status: "deleted" | "partial" | "failed"; deleted: string[]; failed: Array<{ target: string; error: string }> }>;
-};
-
-const keyOf = (r: { tmdbId: number; mediaType: string }) => `${r.mediaType}:${r.tmdbId}`;
-const instanceLabel = (service: string, instance: string) =>
-  `${service === "radarr" ? "Radarr" : "Sonarr"}${instance ? ` (${instance})` : ""}`;
-
-// Server-supplied ISO timestamp → the viewer's locale. UTC so the day the
-// server recorded is the day shown (no local-midnight shift). `new Date(iso)`
-// parses a fixed string — not a clock read (guardrail 16).
-function dayFormatter(locale: string) {
-  const fmt = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeZone: "UTC" });
-  return (iso: string | null) => (iso ? fmt.format(new Date(iso)) : "—");
-}
-
-// Binary units, locale digits/separators ("92,1 GB" for a German admin).
-function formatBytesIn(n: number | null, locale: string): string {
-  if (n === null) return "—";
-  if (n <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
-  const value = new Intl.NumberFormat(locale, { maximumFractionDigits: i >= 3 ? 1 : 0 }).format(n / 1024 ** i);
-  return `${value} ${units[i]}`;
-}
-
 const panel: React.CSSProperties = {
   padding: 16,
   borderRadius: 10,
@@ -108,11 +82,6 @@ const inputStyle: React.CSSProperties = {
   border: "1px solid var(--ds-border)",
   borderRadius: 6,
 };
-async function readError(res: Response, fallback: string): Promise<string> {
-  const d = (await res.json().catch(() => null)) as { error?: string } | null;
-  return d?.error ?? fallback;
-}
-
 export function LibraryCleanup() {
   const t = useT();
   const locale = useLocale();
@@ -129,11 +98,6 @@ export function LibraryCleanup() {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [plan, setPlan] = useState<Plan | null>(null);
-  const [planning, setPlanning] = useState(false);
-  const [executing, setExecuting] = useState(false);
-  const [blacklist, setBlacklist] = useState(true);
-  const [result, setResult] = useState<ExecResult | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -177,9 +141,16 @@ export function LibraryCleanup() {
   const selectableVisible = visible.filter((r) => r.candidate && r.arr.length > 0);
   const selectedRows = report ? report.rows.filter((r) => selected.has(keyOf(r))) : [];
   const selectedBytes = selectedRows.reduce((n, r) => n + (r.sizeOnDisk ?? 0), 0);
+  const del = useCleanupDelete({
+    items: () => selectedRows.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType })),
+    onDeleted: async () => {
+      setSelected(new Set());
+      await load();
+    },
+  });
 
   function toggle(k: string) {
-    setPlan(null);
+    del.clearPlan();
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(k)) next.delete(k);
@@ -189,7 +160,7 @@ export function LibraryCleanup() {
   }
 
   function toggleAllVisible() {
-    setPlan(null);
+    del.clearPlan();
     const keys = selectableVisible.map(keyOf);
     const allOn = keys.length > 0 && keys.every((k) => selected.has(k));
     setSelected((prev) => {
@@ -216,7 +187,7 @@ export function LibraryCleanup() {
         setError(await readError(res, t("adminManage.cleanup.error.save")));
         return;
       }
-      setPlan(null);
+      del.clearPlan();
       await load();
     } catch {
       setError(t("adminManage.cleanup.error.saveNetwork"));
@@ -241,75 +212,12 @@ export function LibraryCleanup() {
         setError(await readError(res, on ? t("adminManage.cleanup.error.protect") : t("adminManage.cleanup.error.unprotect")));
         return;
       }
-      setPlan(null);
+      del.clearPlan();
       await load();
     } catch {
       setError(t("adminManage.cleanup.error.network"));
     } finally {
       setBusyKey(null);
-    }
-  }
-
-  const itemsBody = () => selectedRows.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType }));
-
-  async function dryRun() {
-    if (selectedRows.length === 0) return;
-    setPlanning(true);
-    setError("");
-    setResult(null);
-    try {
-      const res = await fetch(withBasePath("/api/admin/cleanup/delete"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: itemsBody(), blacklist }),
-      });
-      if (!res.ok) {
-        setError(await readError(res, t("adminManage.cleanup.error.dryRun")));
-        return;
-      }
-      setPlan((await res.json()) as Plan);
-    } catch {
-      setError(t("adminManage.cleanup.error.dryRunNetwork"));
-    } finally {
-      setPlanning(false);
-    }
-  }
-
-  async function execute() {
-    if (!plan) return;
-    setExecuting(true);
-    setError("");
-    try {
-      const res = await fetch(withBasePath("/api/admin/cleanup/delete?execute=true"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: itemsBody(), blacklist, confirmTargets: plan.targetCount }),
-      });
-      if (res.status === 409) {
-        // Something changed since the dry run — show the fresh plan instead.
-        const fresh = (await res.json().catch(() => null)) as (Plan & { error?: string }) | null;
-        setError(t("adminManage.cleanup.error.changed"));
-        // The 409 body carries the fresh targets but no total, so the heading's
-        // size is recomputed from them — a title that dropped out of the plan
-        // must drop out of the number the admin confirms against too.
-        if (fresh?.items) {
-          const reclaimableBytes = fresh.items.reduce((n, it) => n + it.targets.reduce((m, tg) => m + tg.sizeOnDisk, 0), 0);
-          setPlan({ targetCount: fresh.targetCount, reclaimableBytes, items: fresh.items, skipped: fresh.skipped ?? [] });
-        }
-        return;
-      }
-      if (!res.ok) {
-        setError(await readError(res, t("adminManage.cleanup.error.delete")));
-        return;
-      }
-      setResult((await res.json()) as ExecResult);
-      setPlan(null);
-      setSelected(new Set());
-      await load();
-    } catch {
-      setError(t("adminManage.cleanup.error.deleteNetwork"));
-    } finally {
-      setExecuting(false);
     }
   }
 
@@ -327,7 +235,7 @@ export function LibraryCleanup() {
   const anyRuleOn = report.settings.unwatchedEnabled || report.settings.neverWatchedEnabled || report.settings.votesEnabled;
   const setNum = (field: keyof typeof CLEANUP_NUMERIC_BOUNDS, v: string) =>
     setDraft((d) => (d ? { ...d, [field]: v === "" ? 0 : Math.trunc(Number(v)) } : d));
-  const setBool = (field: "unwatchedEnabled" | "neverWatchedEnabled" | "votesEnabled" | "excludeAiring", v: boolean) =>
+  const setBool = (field: "unwatchedEnabled" | "neverWatchedEnabled" | "votesEnabled" | "excludeAiring" | "requireUpstreamCheck", v: boolean) =>
     setDraft((d) => (d ? { ...d, [field]: v } : d));
   const dirty = JSON.stringify(draft) !== JSON.stringify(report.settings);
 
@@ -400,6 +308,10 @@ export function LibraryCleanup() {
             <Switch checked={draft.excludeAiring} onCheckedChange={(v) => setBool("excludeAiring", v)} aria-label={t("adminManage.cleanup.excl.airingAria")} />
             {t("adminManage.cleanup.excl.airing")}
           </label>
+          <label className="flex flex-wrap items-center gap-2">
+            <Switch checked={draft.requireUpstreamCheck} onCheckedChange={(v) => setBool("requireUpstreamCheck", v)} aria-label={t("adminManage.cleanup.excl.upstreamAria")} />
+            {t("adminManage.cleanup.excl.upstream")}
+          </label>
           <p style={{ fontSize: 12, color: "var(--ds-fg-subtle)", margin: 0 }}>
             {t("adminManage.cleanup.excl.alsoHeld")}
           </p>
@@ -440,100 +352,19 @@ export function LibraryCleanup() {
           className="w-[200px]"
         />
         <div className="flex-1" />
-        <Button size="sm" variant="destructive" onClick={dryRun} disabled={selectedRows.length === 0 || planning || executing}>
-          {planning ? <Loader2 className="animate-spin" /> : <Trash2 />}
+        <Button size="sm" variant="destructive" onClick={() => void del.dryRun()} disabled={selectedRows.length === 0 || del.planning || del.executing}>
+          {del.planning ? <Loader2 className="animate-spin" /> : <Trash2 />}
           {selectedRows.length > 0
             ? t("adminManage.cleanup.deleteSelectedSize", { count: selectedRows.length, size: formatBytes(selectedBytes) })
             : t("adminManage.cleanup.deleteSelected", { count: 0 })}
         </Button>
       </div>
 
-      {error && <p role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{error}</p>}
+      {(error || del.error) && <p role="alert" style={{ fontSize: 13, color: "var(--ds-danger)", margin: 0 }}>{error || del.error}</p>}
 
       {/* ── dry run → confirm ──────────────────────────────────────── */}
-      {plan && (
-        <section className="flex flex-col gap-3 rounded-md bg-red-500/10" style={{ padding: 16, border: "1px solid var(--ds-border)" }} aria-labelledby="cleanup-plan">
-          <div id="cleanup-plan" className="-mb-3">
-            <SectionHeader
-              title={
-                <span className="text-red-400">
-                  {t("adminManage.cleanup.plan.title", {
-                    deletions: t("adminManage.cleanup.plan.deletions", { count: plan.targetCount }),
-                    titles: t("adminManage.cleanup.plan.titles", { count: plan.items.length }),
-                    size: formatBytes(plan.reclaimableBytes),
-                  })}
-                </span>
-              }
-            />
-          </div>
-          <p style={{ fontSize: 12, color: "var(--ds-fg)", margin: 0 }}>
-            {t("adminManage.cleanup.plan.warning")}
-          </p>
-          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: "var(--ds-fg)" }}>
-            {plan.items.map((it) => (
-              <li key={keyOf(it)}>
-                {it.title} — {it.targets.map((tg) => `${instanceLabel(tg.service, tg.instance)} (${formatBytes(tg.sizeOnDisk)})`).join(", ")}
-              </li>
-            ))}
-          </ul>
-          {plan.skipped.length > 0 && (
-            <div style={{ fontSize: 12, color: "var(--ds-fg-subtle)" }}>
-              {t("adminManage.cleanup.plan.skipped")}
-              <ul style={{ margin: 0, paddingLeft: 18 }}>
-                {plan.skipped.map((s) => <li key={keyOf(s)}>{s.title ?? `${s.mediaType} ${s.tmdbId}`} — {s.reason}</li>)}
-              </ul>
-            </div>
-          )}
-          <label className="flex items-center gap-2" style={{ fontSize: 13, color: "var(--ds-fg)" }}>
-            <Switch checked={blacklist} onCheckedChange={setBlacklist} aria-label={t("adminManage.cleanup.plan.blacklistAria")} />
-            {t("adminManage.cleanup.plan.blacklist")}
-          </label>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={execute}
-              disabled={executing || plan.targetCount === 0}
-              className="ds-hover-tint inline-flex items-center gap-1.5 rounded-md"
-              style={{
-                padding: "6px 12px",
-                fontSize: 13,
-                fontWeight: 600,
-                background: "var(--ds-danger)",
-                color: "var(--ds-on-status)",
-                opacity: executing || plan.targetCount === 0 ? 0.6 : 1,
-              }}
-            >
-              {executing ? <Loader2 className="animate-spin" style={{ width: 14, height: 14 }} /> : <Trash2 style={{ width: 14, height: 14 }} />}
-              {t("adminManage.cleanup.plan.deleteNow", { count: plan.targetCount })}
-            </button>
-            <Button size="sm" variant="outline" onClick={() => setPlan(null)} disabled={executing}>{t("adminManage.common.cancel")}</Button>
-          </div>
-        </section>
-      )}
-
-      {result && (
-        <section className="flex flex-col gap-2" style={panel} aria-labelledby="cleanup-result">
-          <div id="cleanup-result" className="-mb-3">
-            <SectionHeader
-              title={
-                <>
-                  {t("adminManage.cleanup.result.deleted", { count: result.deletedCount })}
-                  {result.partialCount > 0 ? t("adminManage.cleanup.result.partial", { count: result.partialCount }) : ""}
-                  {result.failedCount > 0 ? t("adminManage.cleanup.result.failed", { count: result.failedCount }) : ""}
-                </>
-              }
-            />
-          </div>
-          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: "var(--ds-fg)" }}>
-            {result.results.map((r) => (
-              <li key={keyOf(r)}>
-                <span className={r.status === "deleted" ? "text-green-400" : "text-red-400"}>{t(`adminManage.cleanup.status.${r.status}`)}</span> — {r.title}
-                {r.failed.length > 0 ? ` ${t("adminManage.cleanup.result.failedOn", { list: r.failed.map((f) => `${f.target}: ${f.error}`).join("; ") })}` : ""}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+      <CleanupPlanPanel del={del} formatBytes={formatBytes} />
+      <CleanupResultPanel result={del.result} />
 
       {/* ── table ───────────────────────────────────────────────────── */}
       {visible.length === 0 ? (

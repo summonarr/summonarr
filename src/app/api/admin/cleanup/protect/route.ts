@@ -8,6 +8,7 @@ import { isFeatureEnabled } from "@/lib/features";
 import { CLEANUP_FEATURE_KEY } from "@/lib/library-cleanup-data";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
 import type { Translator } from "@/lib/i18n/translate";
+import { invalidateNeverWatchedReport } from "@/lib/never-watched-report";
 
 // Per-title "never a cleanup candidate" pins (ADMIN).
 //   POST   → protect   { tmdbId, mediaType, title?, reason? }
@@ -49,6 +50,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     create: { tmdbId, mediaType, ...data },
     update: data,
   });
+  invalidateNeverWatchedReport();
   void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email,
@@ -72,6 +74,7 @@ export const DELETE = withAdmin(async (req, _ctx, session) => {
   }
   const removed = await prisma.cleanupProtection.deleteMany({ where: { tmdbId, mediaType } });
   if (removed.count > 0) {
+    invalidateNeverWatchedReport();
     void logAudit({
       userId: session.user.id,
       userName: session.user.name ?? session.user.email,

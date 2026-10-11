@@ -136,8 +136,15 @@ export async function resolveShowTmdbId(
 ): Promise<number | null> {
   if (!showKey) return null;
   if (source === "plex") {
+    // ORed across both ratingKey columns (guardrail 37c): a show in two
+    // sections has two ratingKeys and only one can be the stored plexRatingKey,
+    // so episodes of the other copy used to be recorded with tmdbId null.
     const item = await prisma.plexLibraryItem.findFirst({
-      where: { plexRatingKey: showKey, mediaType: "TV", serverInstance },
+      where: {
+        mediaType: "TV",
+        serverInstance,
+        OR: [{ plexRatingKey: showKey }, { plexRatingKeys: { has: showKey } }],
+      },
       select: { tmdbId: true },
     });
     return item?.tmdbId ?? null;
@@ -584,6 +591,7 @@ export async function recordCompletedSession(
     episodeTitle: session.episodeTitle,
     sourceSessionId: uniqueSourceSessionId,
     sourceItemId: session.sourceItemId,
+    sourceShowId: session.sourceShowId ?? null,
     platform: session.platform,
     player: session.player,
     device: session.device,
@@ -865,6 +873,16 @@ export async function cleanupStaleSessions(maxAgeMinutes: number): Promise<void>
 
 // Delete PlayHistory rows older than the configured retention window (no-op when
 // retention is unset/0). Returns the number of rows deleted.
+// The moment before which retention deletes recorded plays (null = keep
+// forever). Nothing before it can be evidence, so the never-watched verdict
+// never lets a window start earlier (guardrail 14d).
+export async function getRetentionCutoff(now: Date): Promise<Date | null> {
+  const val = (await loadSettings()).playHistoryRetentionDays;
+  const days = val ? parseInt(val, 10) : 0;
+  if (!days || days <= 0) return null;
+  return new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
+}
+
 export async function purgeOldHistory(): Promise<number> {
   const val = (await loadSettings()).playHistoryRetentionDays;
   const days = val ? parseInt(val, 10) : 0;
@@ -2875,6 +2893,13 @@ function setCached<T>(key: string, data: T, ttlMs: number, generation: number): 
 
 function activityGeneration(): number {
   return activityCacheGeneration.n;
+}
+
+// The current activity-cache generation, for a cache that lives OUTSIDE this
+// module but is fed by the same PlayHistory rows (the never-watched report):
+// it compares generations instead of being cleared, so a finalize still drops it.
+export function currentActivityGeneration(): number {
+  return activityGeneration();
 }
 
 // Read-through for the memoized aggregates. Concurrent cold loads of one key —

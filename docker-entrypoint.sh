@@ -437,8 +437,9 @@ _cron_loop() {
   TRASH_SYNC_NEXT=$((NOW_INIT + 360))
   PLEX_WATCHLIST_NEXT=$((NOW_INIT + 420))
   TRAKT_SYNC_NEXT=$((NOW_INIT + 540))
+  UPSTREAM_WATCH_NEXT=$((NOW_INIT + 1020))
 
-  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  Recommendations: ${WARM_RECOMMENDATIONS_INTERVAL:-43200}s  Library: ${WARM_LIBRARY_INTERVAL:-86400}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s  PlexWatchlist: ${PLEX_WATCHLIST_SYNC_INTERVAL:-1800}s  Trakt: ${TRAKT_SYNC_INTERVAL:-1800}s"
+  echo "Cron started. Sync: ${SYNC_INTERVAL:-3600}s  Upcoming: ${UPCOMING_SYNC_INTERVAL:-86400}s  Ratings: ${RATINGS_SYNC_INTERVAL:-86400}s  ListCache: ${LIST_CACHE_SYNC_INTERVAL:-21600}s  Activity: ${WARM_ACTIVITY_INTERVAL:-1800}s  MDBList: ${WARM_MDBLIST_INTERVAL:-86400}s  OMDB: ${WARM_OMDB_INTERVAL:-86400}s  Recommendations: ${WARM_RECOMMENDATIONS_INTERVAL:-43200}s  Library: ${WARM_LIBRARY_INTERVAL:-86400}s  ScrubPII: ${SCRUB_AUDIT_PII_INTERVAL:-86400}s  Trash: ${TRASH_SYNC_INTERVAL:-86400}s  PlexWatchlist: ${PLEX_WATCHLIST_SYNC_INTERVAL:-1800}s  Trakt: ${TRAKT_SYNC_INTERVAL:-1800}s  UpstreamWatch: ${UPSTREAM_WATCH_SYNC_INTERVAL:-86400}s"
   while true; do
     sleep 60
     NOW=$(date +%s)
@@ -502,6 +503,13 @@ _cron_loop() {
     if [ "$NOW" -ge "$TRAKT_SYNC_NEXT" ]; then
       _cron_sync "${TRAKT_SYNC_URL:-${CRON_BASE}/api/cron/sync-trakt}" "sync-trakt" quiet && rc=0 || rc=$?
       TRAKT_SYNC_NEXT=$(_cron_next "$rc" "$NOW" "${TRAKT_SYNC_INTERVAL:-1800}" 1800)
+    fi
+    # The media servers' own watch records (Plex history, Jellyfin played items) —
+    # read-only evidence for the never-watched report and Library cleanup. A no-op
+    # while both of those features are off; quiet so the no-op doesn't log.
+    if [ "$NOW" -ge "$UPSTREAM_WATCH_NEXT" ]; then
+      _cron_sync "${UPSTREAM_WATCH_SYNC_URL:-${CRON_BASE}/api/cron/refresh-upstream-watch}" "refresh-upstream-watch" quiet && rc=0 || rc=$?
+      UPSTREAM_WATCH_NEXT=$(_cron_next "$rc" "$NOW" "${UPSTREAM_WATCH_SYNC_INTERVAL:-86400}" 86400)
     fi
   done
 }

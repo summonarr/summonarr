@@ -424,12 +424,12 @@ const PLEX_ROW_603 = {
   // serverInstance is part of every row pin: the deletes on these routes are scoped
   // to the instance, so a row written without it lands on the DEFAULT server and
   // silently relocates a named server's whole library.
-  tmdbId: 603, serverInstance: "", mediaType: "MOVIE", filePath: "/data/movies/one.mkv", plexRatingKey: "rk603",
+  tmdbId: 603, serverInstance: "", mediaType: "MOVIE", filePath: "/data/movies/one.mkv", plexRatingKey: "rk603", plexRatingKeys: ["rk603"],
   title: "Evil Movie One", year: "1999", overview: "A hacker learns the truth.",
   contentRating: "R", addedAt: new Date(1_700_000_000 * 1000),
 };
 const PLEX_ROW_604 = {
-  tmdbId: 604, serverInstance: "", mediaType: "MOVIE", filePath: null, plexRatingKey: "rk604",
+  tmdbId: 604, serverInstance: "", mediaType: "MOVIE", filePath: null, plexRatingKey: "rk604", plexRatingKeys: ["rk604"],
   title: "Two", year: null, overview: null, contentRating: null, addedAt: null,
 };
 

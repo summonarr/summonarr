@@ -1,6 +1,7 @@
 import { safeFetchAdminConfigured } from "./safe-fetch";
 import { warnOnChange } from "./log-dedup";
 import { NO_REASON_REPORTED } from "./transcode-reasons";
+import { parseJellyfinPlayedItem, type JellyfinPlayedItem } from "./upstream-watch";
 
 export interface JellyfinUser {
   id: string;
@@ -371,7 +372,10 @@ async function fetchJellyfinPages<T>(
 async function fetchJellyfinPagesSequential<T>(
   baseQuery: string,
   apiKey: string,
-  processItems: (items: T[]) => void,
+  // Return `true` to stop after this page (the plexFetchAllPages convention) —
+  // the upstream-watch walk stops on its AbortSignal (guardrail 41). Every other
+  // caller returns void and pages to the end exactly as before.
+  processItems: (items: T[]) => void | boolean,
   pageSize = EPISODE_PAGE_SIZE,
 ): Promise<void> {
   let startIndex = 0;
@@ -397,10 +401,11 @@ async function fetchJellyfinPagesSequential<T>(
     if (pageNum === 0 && page.total !== null) {
       total = Math.min(page.total, MAX_LIBRARY_ITEMS);
     }
-    processItems(page.items);
+    const stop = processItems(page.items) === true;
     startIndex += page.items.length;
     pageNum++;
 
+    if (stop) break;
     if (page.items.length === 0) { endedNaturally = true; break; }
     if (page.items.length < pageSize) { endedNaturally = true; break; }
   }
@@ -531,12 +536,22 @@ export interface JellyfinTVEpisodeData {
   tmdbId: number;
   seasonNumber: number;
   episodeNumber: number;
+  // DateCreated — when the episode reached the server; dates a season for the
+  // never-watched report. The earliest across copies of a duplicated show.
+  addedAt?: Date | null;
 }
 
 interface JellyfinEpisodeItem {
   SeriesId?: string;
   ParentIndexNumber?: number;
   IndexNumber?: number;
+  DateCreated?: string;
+}
+
+function parseJellyfinDate(raw: unknown): Date | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  const d = new Date(raw);
+  return Number.isFinite(d.getTime()) ? d : null;
 }
 
 // The value for JellyfinLibraryItem.jellyfinItemIds: every id this title
@@ -583,7 +598,7 @@ export async function getJellyfinTVEpisodes(
   if (seriesMap.size === 0) return [];
 
   const episodeMap = new Map<string, JellyfinTVEpisodeData>();
-  const fields = "SeriesId,ParentIndexNumber,IndexNumber";
+  const fields = "SeriesId,ParentIndexNumber,IndexNumber,DateCreated";
 
   const processEpisodes = (batch: JellyfinEpisodeItem[]) => {
     for (const ep of batch) {
@@ -594,12 +609,17 @@ export async function getJellyfinTVEpisodes(
       if (!Number.isInteger(ep.ParentIndexNumber) || (ep.ParentIndexNumber as number) < 1) continue;
       if (!Number.isInteger(ep.IndexNumber) || (ep.IndexNumber as number) < 1) continue;
       const key = `${tmdbId}-${ep.ParentIndexNumber}-${ep.IndexNumber}`;
-      if (!episodeMap.has(key)) {
+      const addedAt = parseJellyfinDate(ep.DateCreated);
+      const prev = episodeMap.get(key);
+      if (!prev) {
         episodeMap.set(key, {
           tmdbId,
           seasonNumber: ep.ParentIndexNumber as number,
           episodeNumber: ep.IndexNumber as number,
+          addedAt,
         });
+      } else if (addedAt && (!prev.addedAt || addedAt < prev.addedAt)) {
+        prev.addedAt = addedAt;
       }
     }
   };
@@ -943,6 +963,45 @@ export async function getJellyfinAllUsers(baseUrl: string, apiKey: string): Prom
     });
   }
   return users;
+}
+
+// One user's played (or started-but-unfinished) movies and episodes — READ-ONLY
+// evidence for the never-watched report (src/lib/upstream-watch.ts explains the
+// use and lists the UNVERIFIED response-shape assumptions). Sequential paging
+// (one user's list can be large and slow to build); parsed while paging.
+export interface JellyfinUserPlayedItems {
+  // Every item the parser could place.
+  items: JellyfinPlayedItem[];
+  // Items the server returned, including any the parser could NOT place — the
+  // count that makes a changed response shape visible (upstream-watch-data.ts).
+  records: number;
+}
+
+export async function getJellyfinUserPlayedItems(
+  baseUrl: string,
+  apiKey: string,
+  userId: string,
+  filter: "IsPlayed" | "IsResumable",
+  opts: { signal?: AbortSignal } = {},
+): Promise<JellyfinUserPlayedItems> {
+  const out: JellyfinUserPlayedItems = { items: [], records: 0 };
+  if (opts.signal?.aborted) return out;
+  const base = baseUrl.replace(/\/+$/, "");
+  await fetchJellyfinPagesSequential<unknown>(
+    `${base}/Users/${encodeURIComponent(userId)}/Items?Recursive=true&IncludeItemTypes=Movie,Episode&Filters=${filter}` +
+      "&Fields=SeriesId,ParentIndexNumber&EnableUserData=true&EnableImages=false&SortBy=DateCreated,SortName&SortOrder=Ascending",
+    apiKey,
+    (batch) => {
+      out.records += batch.length;
+      for (const raw of batch) {
+        const item = parseJellyfinPlayedItem(raw);
+        if (item) out.items.push(item);
+      }
+      // Stop paging on abort (guardrail 41); the caller discards the result.
+      return opts.signal?.aborted === true;
+    },
+  );
+  return out;
 }
 
 export async function setJellyfinDownloadPolicy(

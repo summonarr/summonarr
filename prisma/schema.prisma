@@ -464,6 +464,14 @@ model PlexLibraryItem {
   serverInstance String    @default("")
   filePath      String?
   plexRatingKey String? // Plex internal ratingKey — needed to call fix-match API
+  // EVERY Plex ratingKey this title occupies on this server, plexRatingKey
+  // included — the Plex twin of JellyfinLibraryItem.jellyfinItemIds (guardrail
+  // 37c). A title in two sections ("Movies" + "4K Movies", "TV" + "Anime") is two
+  // Plex items with two ratingKeys, but the @@id below keeps one row, so a play
+  // or a server-side history entry filed under the other copy resolved to
+  // nobody. Rows written before this column existed are `[]`, so every read ORs
+  // it against plexRatingKey rather than replacing it.
+  plexRatingKeys String[] @default([])
   title         String?
   year          String?
   overview      String?
@@ -472,6 +480,7 @@ model PlexLibraryItem {
 
   @@id([tmdbId, mediaType, serverInstance])
   @@index([plexRatingKey]) // play-history sync filters on plexRatingKey every poll
+  @@index([plexRatingKeys], type: Gin) // the same lookups OR a has/hasSome over the array — a btree can't serve those
   @@index([addedAt]) // /admin/activity/recent orders by addedAt desc; without an index this seq-scans the full library every render
   @@index([serverInstance])
 }
@@ -524,6 +533,10 @@ model TVEpisodeCache {
   stillPath   String?
   runtime     Int?
   overview    String?
+  // When the episode's file reached the media server (Plex addedAt / Jellyfin
+  // DateCreated) — the earliest across that source's servers. Dates a season
+  // for the never-watched report; null for rows written before it existed.
+  addedAt     DateTime?
 
   @@id([source, tmdbId, seasonNumber, episodeNumber])
 }
@@ -558,6 +571,7 @@ model TVEpisodeCacheStaging {
   stillPath   String?
   runtime     Int?
   overview    String?
+  addedAt     DateTime?
 
   createdAt DateTime @default(now())
 
@@ -908,6 +922,34 @@ model CleanupProtection {
   @@id([tmdbId, mediaType])
 }
 
+// ─── Upstream watch evidence (never-watched report) ──────────────────────────
+// A read-only snapshot of what each media server ITSELF says was played: Plex's
+// all-account watch history, Jellyfin's per-user played/resumable items. It
+// covers plays Summonarr never saw (before it was installed, while it was down,
+// while tracking was off) and is used ONLY as evidence that a title was
+// watched — never written into PlayHistory (guardrail 19), never read as "zero
+// plays" when it is missing (guardrail 14d).
+//
+// Keyed by the upstream id, never a tmdbId: a movie's own ratingKey/itemId, or
+// for an episode the SHOW's ratingKey/SeriesId plus its season. The join to a
+// library title happens at read time through PlexLibraryItem.plexRatingKey(s) /
+// JellyfinLibraryItem.jellyfinItemId(s), so a later fix-match can't orphan a row.
+// Replaced per (source, serverInstance) only after that server's fetch
+// succeeded; a failed server keeps its previous snapshot.
+model UpstreamWatchEvidence {
+  source         String    @db.VarChar(16) // "plex" | "jellyfin"
+  serverInstance String    @default("") @db.VarChar(32)
+  itemKey        String    @db.VarChar(256)
+  // -1 = the whole item (a movie, or an episode whose season is unknown).
+  seasonNumber   Int       @default(-1)
+  mediaType      MediaType
+  playCount      Int
+  lastPlayedAt   DateTime?
+  fetchedAt      DateTime
+
+  @@id([source, serverInstance, itemKey, seasonNumber])
+}
+
 enum AuditAction {
   REQUEST_APPROVE
   REQUEST_DECLINE
@@ -1062,6 +1104,11 @@ model PlayHistory {
   // Source-specific keys (for deduplication)
   sourceSessionId String?  @db.VarChar(256)
   sourceItemId    String?  @db.VarChar(256)
+  // The SHOW's source key for an episode (Plex grandparentRatingKey / Jellyfin
+  // SeriesId); null for movies and for rows recorded before it existed. Lets a
+  // play whose show wasn't in the library cache yet (tmdbId null) still be
+  // attributed to its show later — the never-watched verdict joins on it.
+  sourceShowId    String?  @db.VarChar(256)
 
   // Playback metadata
   platform  String?        @db.VarChar(256)
@@ -1166,6 +1213,7 @@ model ActiveSession {
   episodeNumber Int?
   episodeTitle  String?  @db.VarChar(500)
   sourceItemId  String?  @db.VarChar(256)
+  sourceShowId  String?  @db.VarChar(256) // copied onto PlayHistory.sourceShowId at finalize
 
   posterPath String?    @db.VarChar(500) // populated from TmdbMediaCore on session create
 

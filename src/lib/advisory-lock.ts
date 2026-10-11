@@ -13,6 +13,10 @@ export const WARM_LIBRARY_LOCK_ID = 2012;
 export const PLEX_WATCHLIST_LOCK_ID = 2021;
 // Same reasoning: a parallel-branch-safe id, not the next free one.
 export const TRAKT_SYNC_LOCK_ID = 2031;
+// The media servers' own watch records (refresh-upstream-watch cron + the admin
+// "Refresh" on the never-watched page share it). Same reasoning: a
+// parallel-branch-safe id, not the next free one.
+export const UPSTREAM_WATCH_LOCK_ID = 2041;
 
 // 30 minutes — generous enough for legitimate full-library syncs but bounds the worst-case lock hold.
 const DEFAULT_WORK_TIMEOUT_MS = 30 * 60 * 1000;

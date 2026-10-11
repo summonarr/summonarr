@@ -181,6 +181,8 @@ const reqMatch = (r: Req, w: ReqWhere = {}) =>
 const requestWrites: Array<{ where: ReqWhere; data: Record<string, unknown> }> = [];
 shadowPrismaModel(prisma, "mediaRequest", {
   findMany: async (args: { where?: ReqWhere }) => requests.filter((r) => reqMatch(r, args.where)).map((r) => ({ ...r })),
+  // The never-watched loader's "fulfilled since" read (an arrival date).
+  groupBy: async () => [],
   updateMany: async (args: { where: ReqWhere; data: Record<string, unknown> }) => {
     requestWrites.push(args);
     seq.push(`mediaRequest.updateMany ${JSON.stringify(args.data)}`);
@@ -191,6 +193,7 @@ shadowPrismaModel(prisma, "mediaRequest", {
 });
 shadowPrismaModel(prisma, "watchlistItem", { groupBy: async () => [] });
 shadowPrismaModel(prisma, "activeSession", { findMany: async () => [] });
+shadowPrismaModel(prisma, "upstreamWatchEvidence", { findMany: async () => [] });
 let protections: Array<{ tmdbId: number; mediaType: string; title: string | null; reason: string | null; createdAt: Date }> = [];
 shadowPrismaModel(prisma, "cleanupProtection", {
   findMany: async (args: { where?: { tmdbId?: { in?: number[] } } }) => protections.filter((p) => inIds(args.where, p.tmdbId)),
@@ -237,6 +240,7 @@ const report = await import("../src/app/api/admin/cleanup/route.ts");
 const settingsRoute = await import("../src/app/api/admin/cleanup/settings/route.ts");
 const protectRoute = await import("../src/app/api/admin/cleanup/protect/route.ts");
 const deleteRoute = await import("../src/app/api/admin/cleanup/delete/route.ts");
+const neverWatchedRoute = await import("../src/app/api/admin/never-watched/route.ts");
 
 // ── request scope ────────────────────────────────────────────────────────────
 const afterTasks: unknown[] = [];
@@ -582,4 +586,54 @@ test("protect then unprotect round-trips and is audited", async () => {
   assert.equal((await call(protectRoute.DELETE as never, token, "/protect?tmdbId=100&mediaType=MOVIE", "DELETE")).status, 200);
   assert.ok(!protections.some((p) => p.tmdbId === 100));
   assert.deepEqual(audits.map((a) => a.action), ["LIBRARY_CLEANUP_PROTECT", "LIBRARY_CLEANUP_PROTECT"]);
+});
+
+// ── never-watched report (guardrail 14d) ─────────────────────────────────────
+// The report lives on the cleanup engine: "eligible" there must be EXACTLY what
+// the delete route's dry run includes, or the page offers deletions the route
+// refuses (or worse, the reverse). `fresh=1` bypasses the report's short cache.
+const nwCall = (token: string | null, query: string) =>
+  inScope(() =>
+    (neverWatchedRoute.GET as never as (r: unknown, c: unknown) => Promise<Response>)(
+      new NextRequest(`http://localhost:3000/api/admin/never-watched?${query}`, {
+        headers: token ? { cookie: `${COOKIE}=${token}` } : {},
+      }),
+      undefined,
+    ),
+  );
+
+test("never-watched report: anonymous 401, non-admin 403, flag off 404", async () => {
+  assert.equal((await nwCall(null, "")).status, 401);
+  assert.equal((await nwCall(await mintSession({ role: "USER", permissions: Permission.MANAGE_USERS }), "")).status, 403);
+  settings.set("feature.admin.neverWatched", "false");
+  invalidateFeatureFlagCache();
+  assert.equal((await nwCall(await mintSession(), "")).status, 404);
+});
+
+test("never-watched report: 'eligible' is exactly the delete dry run's selection, and loading it writes nothing", async () => {
+  const token = await mintSession();
+  const res = await nwCall(token, "state=all&limit=200&fresh=1");
+  assert.equal(res.status, 200);
+  const body = await res.json() as { rows: Array<{ tmdbId: number; mediaType: "MOVIE" | "TV"; eligible: boolean; sizeOnDisk: number | null }>; total: number; cleanupEnabled: boolean };
+  assert.equal(body.cleanupEnabled, true);
+  assert.equal(body.total, body.rows.length);
+  const eligible = body.rows.filter((r) => r.eligible).map((r) => `${r.mediaType}:${r.tmdbId}`).sort();
+  assert.ok(eligible.length > 0, "the fixture has deletable titles");
+  const plan = await (await dryRun(token, { items: body.rows.map((r) => ({ tmdbId: r.tmdbId, mediaType: r.mediaType })) })).json() as { items: Array<{ tmdbId: number; mediaType: string }> };
+  assert.deepEqual(plan.items.map((i) => `${i.mediaType}:${i.tmdbId}`).sort(), eligible);
+  assert.deepEqual(deletes(), []);
+  assert.deepEqual(requestWrites, []);
+  assert.deepEqual(audits, []);
+});
+
+test("never-watched report: sorted by size, biggest first, unknown sizes last; paged", async () => {
+  const token = await mintSession();
+  const page1 = await (await nwCall(token, "state=all&limit=2&fresh=1")).json() as { rows: Array<{ sizeOnDisk: number | null }>; total: number };
+  const all = await (await nwCall(token, "state=all&limit=200")).json() as { rows: Array<{ sizeOnDisk: number | null }> };
+  assert.equal(page1.rows.length, 2);
+  const sizes = all.rows.map((r) => r.sizeOnDisk);
+  const known = sizes.filter((n): n is number => n !== null);
+  assert.deepEqual(known, [...known].sort((a, b) => b - a));
+  assert.ok(sizes.indexOf(null) === -1 || sizes.slice(sizes.indexOf(null)).every((n) => n === null), "unknown sizes sort last");
+  assert.deepEqual(page1.rows.map((r) => r.sizeOnDisk), sizes.slice(0, 2));
 });

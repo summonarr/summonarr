@@ -312,9 +312,13 @@ export default async function ActivityPage({
       (s: typeof sessionsNeedingTmdb[0]) => s.sourceItemId && !resolvedTmdb[`item:${s.serverInstance}:${s.sourceItemId}`],
     );
     if (stillNeedLibrary.length > 0) {
+      // Both ratingKey columns, for the same reason (guardrail 37c).
       const plexPairs = stillNeedLibrary
         .filter((s: typeof stillNeedLibrary[0]) => s.source === "plex")
-        .map((s: typeof stillNeedLibrary[0]) => ({ plexRatingKey: s.sourceItemId!, serverInstance: s.serverInstance }));
+        .flatMap((s: typeof stillNeedLibrary[0]) => [
+          { plexRatingKey: s.sourceItemId!, serverInstance: s.serverInstance },
+          { plexRatingKeys: { has: s.sourceItemId! }, serverInstance: s.serverInstance },
+        ]);
       // Both id columns (guardrail 37): a title in two Jellyfin libraries has an
       // id per copy but only one is the stored `jellyfinItemId`, so a session on
       // the other copy never resolved here. Rows predating `jellyfinItemIds` are
@@ -329,7 +333,7 @@ export default async function ActivityPage({
         plexPairs.length > 0
           ? prisma.plexLibraryItem.findMany({
               where: { OR: plexPairs },
-              select: { tmdbId: true, mediaType: true, plexRatingKey: true, serverInstance: true },
+              select: { tmdbId: true, mediaType: true, plexRatingKey: true, plexRatingKeys: true, serverInstance: true },
             })
           : [],
         jellyfinPairs.length > 0
@@ -341,6 +345,9 @@ export default async function ActivityPage({
       ]);
       for (const i of plexItems) {
         if (i.plexRatingKey) resolvedTmdb[`item:${i.serverInstance}:${i.plexRatingKey}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
+        for (const k of i.plexRatingKeys) {
+          resolvedTmdb[`item:${i.serverInstance}:${k}`] = { tmdbId: i.tmdbId, mediaType: i.mediaType };
+        }
       }
       for (const i of jellyfinItems) {
         // Every id the row answers to — the session's sourceItemId may be any of them.

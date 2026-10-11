@@ -191,13 +191,24 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
   const ratingKeysNeedingLookup = valid
     .filter((s) => s.type !== "episode" && extractTmdbIdFromGuids(s.Guid) == null && !!s.ratingKey)
     .map((s) => s.ratingKey);
+  // ORed across both ratingKey columns (guardrail 37c): a movie in two sections
+  // has two ratingKeys and only one is the stored plexRatingKey.
   const libRows = ratingKeysNeedingLookup.length > 0
     ? await prisma.plexLibraryItem.findMany({
-        where: { plexRatingKey: { in: ratingKeysNeedingLookup }, serverInstance: instance },
-        select: { plexRatingKey: true, tmdbId: true, mediaType: true },
+        where: {
+          serverInstance: instance,
+          OR: [{ plexRatingKey: { in: ratingKeysNeedingLookup } }, { plexRatingKeys: { hasSome: ratingKeysNeedingLookup } }],
+        },
+        select: { plexRatingKey: true, plexRatingKeys: true, tmdbId: true, mediaType: true },
       })
     : [];
-  const libMap = new Map(libRows.map((r) => [r.plexRatingKey, r]));
+  // Keyed by EVERY key a row answers to, or widening the query only finds a row
+  // the map then misses.
+  const libMap = new Map<string | null, (typeof libRows)[number]>();
+  for (const r of libRows) {
+    if (r.plexRatingKey) libMap.set(r.plexRatingKey, r);
+    for (const k of r.plexRatingKeys ?? []) if (!libMap.has(k)) libMap.set(k, r);
+  }
 
   // Resolve media server users in parallel — each upserts independently.
   // isServerAdmin = accountId matches the admin token's plex user id. When
@@ -466,6 +477,9 @@ async function syncPlexSessions(instance: MediaInstanceKey, serverUrl: string, t
           // is write-once here and copied verbatim into PlayHistory.
           episodeTitle: s.type === "episode" ? stripShowPrefix(s.title, s.grandparentTitle) : null,
           sourceItemId: s.ratingKey,
+          // The show's own key, kept so a play recorded before its show reached the
+          // library cache (tmdbId null) can still be attributed later (guardrail 14d).
+          sourceShowId: s.type === "episode" ? (s.grandparentRatingKey || null) : null,
           posterPath,
           progressPercent,
           progressMs: BigInt(s.viewOffset),
@@ -869,6 +883,8 @@ async function syncJellyfinSessions(instance: MediaInstanceKey, baseUrl: string,
           episodeNumber: s.episodeNumber ?? null,
           episodeTitle: s.itemType === "Episode" ? stripShowPrefix(s.title, s.seriesName) : null,
           sourceItemId: s.itemId,
+          // See the Plex create branch.
+          sourceShowId: s.itemType === "Episode" ? (s.seriesId || null) : null,
           posterPath: jfPosterPath,
           progressPercent,
           progressMs: BigInt(positionMs),

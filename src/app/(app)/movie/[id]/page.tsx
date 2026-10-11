@@ -19,6 +19,8 @@ import { TrailerButton } from "@/components/media/trailer-button";
 import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { ArrManageButton } from "@/components/admin/arr-title/title-manager";
 import { arrInstancesHolding } from "@/lib/arr-links-data";
+import { getAdminTitleNeverWatched } from "@/lib/never-watched-report";
+import { NeverWatchedChip } from "@/components/admin/never-watched-chip";
 import { prisma } from "@/lib/prisma";
 import { requireAppSession } from "@/lib/require-app-session";
 import { attachAllAvailability } from "@/lib/attach-all";
@@ -207,9 +209,13 @@ export default async function MovieDetailPage({
   // "Open in Radarr" for an admin, one link per configured instance whose
   // synced cache holds the title. A cosmetic shortcut (JWT-level session is
   // fine — guardrail 29); the route behind it is ADMIN-gated itself.
-  const arrLinks = hasPermission(session.user.permissions, Permission.ADMIN)
-    ? await arrInstancesHolding("radarr", media.id).catch(() => [])
-    : [];
+  const [arrLinks, neverWatched] = await Promise.all([
+    hasPermission(session.user.permissions, Permission.ADMIN)
+      ? arrInstancesHolding("radarr", media.id).catch(() => [])
+      : Promise.resolve([]),
+    // ADMIN-only "never watched" chip (guardrail 14d) — null for anyone else.
+    getAdminTitleNeverWatched(session.user.permissions, media.id, "MOVIE"),
+  ]);
 
   const backdrop = backdropUrl(media.backdropPath, "original");
   const poster = posterUrl(media.posterPath, "w500");
@@ -269,6 +275,7 @@ export default async function MovieDetailPage({
                 showJellyfin={showJellyfin}
                 show4k={show4k}
               />
+              <NeverWatchedChip info={neverWatched} t={t} locale={locale} />
             </div>
 
             <h1

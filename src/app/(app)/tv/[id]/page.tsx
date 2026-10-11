@@ -19,6 +19,8 @@ import { TrailerButton } from "@/components/media/trailer-button";
 import { OpenInArrLink, arrInstanceLabel } from "@/components/admin/open-in-arr";
 import { ArrManageButton } from "@/components/admin/arr-title/title-manager";
 import { arrInstancesHolding } from "@/lib/arr-links-data";
+import { getAdminTitleNeverWatched } from "@/lib/never-watched-report";
+import { NeverWatchedChip } from "@/components/admin/never-watched-chip";
 import { prisma } from "@/lib/prisma";
 import { requireAppSession } from "@/lib/require-app-session";
 import { attachAllAvailability } from "@/lib/attach-all";
@@ -232,9 +234,13 @@ export default async function TVDetailPage({
   // "Open in Sonarr" for an admin, one link per configured instance whose
   // synced cache holds the title. A cosmetic shortcut (JWT-level session is
   // fine — guardrail 29); the route behind it is ADMIN-gated itself.
-  const arrLinks = hasPermission(session.user.permissions, Permission.ADMIN)
-    ? await arrInstancesHolding("sonarr", media.id).catch(() => [])
-    : [];
+  const [arrLinks, neverWatched] = await Promise.all([
+    hasPermission(session.user.permissions, Permission.ADMIN)
+      ? arrInstancesHolding("sonarr", media.id).catch(() => [])
+      : Promise.resolve([]),
+    // ADMIN-only "never watched" chip (guardrail 14d) — null for anyone else.
+    getAdminTitleNeverWatched(session.user.permissions, media.id, "TV"),
+  ]);
   const { showPlex, showJellyfin } = getBadgeVisibility(session, { plex: plexEnabled, jellyfin: jellyfinEnabled });
 
   const backdrop = backdropUrl(media.backdropPath, "original");
@@ -295,6 +301,7 @@ export default async function TVDetailPage({
                 showJellyfin={showJellyfin}
                 show4k={show4k}
               />
+              <NeverWatchedChip info={neverWatched} t={t} locale={locale} />
             </div>
 
             <h1

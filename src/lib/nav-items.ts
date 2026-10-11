@@ -74,6 +74,7 @@ export const NAV_ITEM_FEATURE_KEY: Record<string, string> = {
   "/admin/backup":       "feature.admin.backup",
   "/admin/api-docs":     "feature.admin.apiDocs",
   "/admin/cleanup":      "feature.admin.cleanup",
+  "/admin/never-watched": "feature.admin.neverWatched",
   "/admin/trash-guides": "trashGuidesEnabled",
 };
 
@@ -151,6 +152,7 @@ export const adminNavItems: NavItem[] = [
   { href: "/admin/arr-history", label: "Download History", icon: Clock, section: "admin" },
   { href: "/admin/arr-system", label: "Arr System", icon: Server, section: "admin" },
   { href: "/admin/blacklist", label: "Blacklist", icon: Ban, section: "admin" },
+  { href: "/admin/never-watched", label: "Never Watched", icon: EyeOff, section: "admin" },
   { href: "/admin/cleanup", label: "Library Cleanup", icon: FileX, section: "admin" },
   { href: "/admin/stats", label: "Statistics", icon: BarChart3, section: "admin" },
   { href: "/admin/activity", label: "Activity", icon: Activity, section: "admin" },

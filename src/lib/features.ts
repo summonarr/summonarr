@@ -240,6 +240,13 @@ export const FEATURE_DEFINITIONS: readonly FeatureDefinition[] = [
     defaultEnabled: false,
   },
   {
+    key: "feature.admin.neverWatched",
+    label: "Never Watched page",
+    description: "Show the /admin/never-watched page: every movie, show and season nobody has watched in this server's recorded history, ranked by the space it takes, checked against each media server's own watch records. Read-only; deleting goes through Library Cleanup.",
+    category: "admin",
+    defaultEnabled: true,
+  },
+  {
     key: "trashGuidesEnabled",
     label: "TRaSH Guides",
     description: "Enable the TRaSH Guides admin page and nightly sync.",

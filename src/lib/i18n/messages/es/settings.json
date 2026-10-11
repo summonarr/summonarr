@@ -106,6 +106,8 @@
   "settings.featureDesc.admin_apiDocs": "Muestra la referencia OpenAPI de /admin/api-docs y su enlace en la navegación.",
   "settings.featureLabel.admin_cleanup": "Página Limpieza de biblioteca",
   "settings.featureDesc.admin_cleanup": "Muestra la página /admin/cleanup: títulos que nadie ve, ordenados por reglas configurables, que un administrador puede eliminar de Radarr/Sonarr tras una simulación. Nunca se elimina nada automáticamente. Desactivada por defecto.",
+  "settings.featureLabel.admin_neverWatched": "Página Nunca visto",
+  "settings.featureDesc.admin_neverWatched": "Muestra la página /admin/never-watched: cada película, serie y temporada que nadie ha visto en el historial registrado de este servidor, ordenadas por el espacio que ocupan y contrastadas con los registros de visionado propios de cada servidor multimedia. Solo lectura; la eliminación se hace desde Limpieza de biblioteca.",
   "settings.featureLabel.trashGuidesEnabled": "TRaSH Guides",
   "settings.featureDesc.trashGuidesEnabled": "Activa la página de administración de TRaSH Guides y la sincronización nocturna.",
   "settings.features.toggle": "Activar o desactivar {label}",
@@ -416,5 +418,7 @@
   "settings.media.tokenPlaceholder.plex": "Pega el token de administrador de este servidor",
   "settings.media.tokenPlaceholder.jellyfin": "Pega una clave de API de este servidor",
   "settings.cron.job.trakt.name": "Sincronización de Trakt",
-  "settings.cron.job.trakt.description": "Solicita títulos nuevos de las listas de seguimiento de Trakt de los usuarios conectados e importa su historial de Trakt para Para ti (requiere un Client Secret de Trakt)"
+  "settings.cron.job.trakt.description": "Solicita títulos nuevos de las listas de seguimiento de Trakt de los usuarios conectados e importa su historial de Trakt para Para ti (requiere un Client Secret de Trakt)",
+  "settings.cron.job.upstreamWatch.name": "Historial de visionado de los servidores",
+  "settings.cron.job.upstreamWatch.description": "Lee los registros de visionado propios de cada servidor Plex y Jellyfin, para que un título visto antes de instalar Summonarr (o mientras estaba caído) nunca aparezca como no visto"
 }
