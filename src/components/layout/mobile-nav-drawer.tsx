@@ -19,6 +19,7 @@ import {
   getVisibleAdminItems,
   filterNavByFeatures,
   navItemLabel,
+  navItemHref,
   isNavItemActive,
   type NavItem,
 } from "@/lib/nav-items";
@@ -273,7 +274,7 @@ function NavLink({
   const t = useT();
   return (
     <Link
-      href={item.href}
+      href={navItemHref(item, badge)}
       onClick={onClick}
       aria-current={active ? "page" : undefined}
       className="ds-hover-tint flex items-center gap-3 font-medium transition-colors relative"

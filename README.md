@@ -35,6 +35,7 @@ Then open <http://localhost:3001>. The first user to register is auto-promoted t
 - Encrypted, password-protected database backups (export/import via the admin UI)
 - Radarr and Sonarr webhooks for instant request fulfillment (Plex activity via a real-time SSE stream, Jellyfin via a 5-second poller — no Plex/Jellyfin webhook needed)
 - Optional Discord (bot), SMTP/Resend email, and ratings providers (OMDb, MDBList, Trakt) — all configured in-app
+- Radarr and Sonarr managed from inside Summonarr: Download Queue (with import, blocklist and grab actions), Missing and cutoff-unmet lists with searches, an Arr Calendar, Download History and Blocklist, Arr System (tasks, indexers, clients, storage), a per-title manager on every movie and show, one-click webhook setup, and a monitor that alerts on low disk, failed downloads and stuck imports
 - Admin debug endpoint (`/api/admin/debug/arr-state`) for inspecting the Radarr/Sonarr pipeline end-to-end
 
 ## Architecture at a glance

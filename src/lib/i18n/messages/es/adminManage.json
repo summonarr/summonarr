@@ -836,7 +836,7 @@
   "adminManage.missing.error.loadNetwork": "Error de red al cargar el informe de faltantes.",
   "adminManage.missing.arrErrors": "No se pudo leer {list}: los títulos de esas instancias no aparecen en la lista.",
   "adminManage.missing.notConfigured.title": "{service} no está configurado",
-  "adminManage.missing.notConfigured.description": "Activa y conecta una instancia de {service} en Ajustes para ver lo que le falta.",
+  "adminManage.missing.notConfigured.description": "Activa y conecta una instancia de {service} en Ajustes → Multimedia para ver lo que le falta.",
   "adminManage.missing.filter.title": "Filtrar por título",
   "adminManage.missing.filter.titlePlaceholder": "Filtrar por título…",
   "adminManage.missing.filter.instance": "Instancia",

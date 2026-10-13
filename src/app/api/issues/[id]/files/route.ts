@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { tooManyRequests } from "@/lib/http";
 import type { Issue } from "@/generated/prisma";
 import { withAdmin } from "@/lib/api-auth";
 import { arrErrorMessage, arrFetch } from "@/lib/arr";
@@ -467,7 +468,7 @@ export const POST = withAdmin(async (req, { params }: RouteContext, session) => 
   const running = background === true ? runningArrJob(session.user.id, jobKey(id)) : null;
   if (running) return NextResponse.json({ job: running }, { status: 202 });
   if (!checkRateLimit(`issue-replace-file:${session.user.id}`, LIMIT_PER_MIN, 60_000)) {
-    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
 
   // Re-read the files and the history NOW (guardrail 5e): the page's list may

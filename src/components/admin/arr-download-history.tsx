@@ -394,7 +394,7 @@ export function ArrDownloadHistory({
   }
 
   if (instances.length === 0 || !inst) {
-    return <EmptyState icon={ScrollText} title={t("adminArr.common.noneConfigured")} description={t("adminArr.common.noneConfiguredHint")} />;
+    return <EmptyState icon={ScrollText} title={t("adminArr.common.noneConfigured")} description={t("adminArr.common.noneConfiguredHint")} cta={{ href: "/settings?tab=media#radarr", label: t("adminArr.common.openSettings") }} />;
   }
 
   // A record's own instance, labelled — the Manage icon on each row opens the title there.

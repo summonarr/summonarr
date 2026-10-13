@@ -110,6 +110,8 @@ export interface ArrStatusDownload {
 export interface RequestArrStatus {
   verdict: ArrStatusVerdict;
   service: ArrService;
+  /** The arr's own id for the title (null when it doesn't have it) — the route hands it only to admins, as a queue link. */
+  arrId: number | null;
   /** Why a read failed, when the verdict is `unreachable`. */
   errorKind: ArrErrorKind | null;
   /** The arr's own settings and state; null when the title wasn't read. */
@@ -363,6 +365,7 @@ export function judgeRequestArrStatus(input: ArrStatusInputs): RequestArrStatus 
   const base: RequestArrStatus = {
     verdict: "waiting",
     service: input.service,
+    arrId: null,
     errorKind: null,
     monitored: null,
     hasFile: null,
@@ -384,6 +387,7 @@ export function judgeRequestArrStatus(input: ArrStatusInputs): RequestArrStatus 
   // Untracked by the arr, nothing holds a library title back.
   if (!facts) return done(input.inLibrary ? "ready" : "notInArr");
 
+  base.arrId = facts.title.arrId;
   base.monitored = facts.title.monitored;
   base.hasFile = facts.title.hasFile;
   base.released = facts.released;

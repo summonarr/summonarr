@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { tooManyRequests } from "@/lib/http";
 import { withPermission } from "@/lib/api-auth";
 import { isArrConfigured } from "@/lib/arr";
 import { ArrInstanceError } from "@/lib/arr-admin";
@@ -34,7 +35,7 @@ const STATUS_LIMIT_PER_MIN = 30;
 export const GET = withPermission(Permission.MANAGE_REQUESTS)(async (req, { params }: RouteContext, session) => {
   const t = translatorForRequest(req);
   if (!checkRateLimit(`request-arr-status:${session.user.id}`, STATUS_LIMIT_PER_MIN, 60_000)) {
-    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
   const { id } = await params;
   const row = await prisma.mediaRequest.findUnique({
@@ -62,7 +63,15 @@ export const GET = withPermission(Permission.MANAGE_REQUESTS)(async (req, { para
       requestedBy: row.requestedBy,
       since: row.approvedAt ?? row.createdAt,
     });
-    return NextResponse.json({ ...status, canOpenQueue: hasPermission(session.user.permissions, Permission.ADMIN) });
+    // The arr's row id leaves only with an admin, as the queue link's filter
+    // (guardrail 5g keeps a delegate's view coarse); `queue` is additive.
+    const { arrId, ...coarse } = status;
+    const canOpenQueue = hasPermission(session.user.permissions, Permission.ADMIN);
+    return NextResponse.json({
+      ...coarse,
+      canOpenQueue,
+      queue: canOpenQueue && arrId !== null ? { service, instance: row.arrInstance, arrId } : null,
+    });
   } catch (err) {
     // Configured keys for an instance the registry no longer lists (guardrail 32).
     if (err instanceof ArrInstanceError) return notConfigured(t, service, row.arrInstance);

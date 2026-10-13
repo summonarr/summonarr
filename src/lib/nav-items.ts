@@ -32,12 +32,14 @@ import {
   Server,
 } from "@/components/icons";
 import type { Translator } from "@/lib/i18n/translate";
+import { QUEUE_ATTENTION_HREF } from "@/lib/arr-manage-links";
 import { hasPermission, Permission, effectivePermissions, parsePermissions, type PermissionValue } from "@/lib/permissions";
 
 export interface NavItem {
   href: string;
-  // English label. Admin items are English-only for now; user-facing items
-  // also carry an i18nKey that renderers translate through navItemLabel.
+  // English label. User-facing items — and the Radarr/Sonarr admin pages,
+  // which reuse their page-title keys — also carry an i18nKey that renderers
+  // translate through navItemLabel; the other admin items are English-only.
   label: string;
   i18nKey?: string;
   icon: IconComponent;
@@ -148,6 +150,18 @@ export const NAV_BADGE_LABEL_KEYS: Record<string, string> = {
   "/admin/queue": "nav.badge.queueAttention",
 };
 
+// href → where that item links WHILE it carries a badge: the badge counts the
+// downloads needing attention, so a click lands on the queue's attention tab
+// rather than the unfiltered list. A plain `/admin/queue` once the count is 0.
+export const NAV_BADGE_HREFS: Record<string, string> = {
+  "/admin/queue": QUEUE_ATTENTION_HREF,
+};
+
+/** The link an item renders with — its badge target while it has a count, its own href otherwise. */
+export function navItemHref(item: Pick<NavItem, "href">, badge: number | undefined): string {
+  return badge && badge > 0 ? (NAV_BADGE_HREFS[item.href] ?? item.href) : item.href;
+}
+
 export function navItemLabel(item: Pick<NavItem, "label" | "i18nKey">, t: Translator): string {
   return item.i18nKey ? t(item.i18nKey) : item.label;
 }
@@ -200,11 +214,11 @@ export const adminNavItems: NavItem[] = [
   // Summonarr's own list of titles nobody may request — not Radarr/Sonarr's
   // release Blocklist (Download History), hence the longer name.
   { href: "/admin/blacklist", label: "Request Blacklist", icon: Ban, section: "admin", group: "requests" },
-  { href: "/admin/queue", label: "Download Queue", icon: Download, section: "admin", group: "downloads" },
-  { href: "/admin/missing", label: "Missing", icon: CircleDashed, section: "admin", group: "downloads" },
-  { href: "/admin/arr-calendar", label: "Arr Calendar", icon: CalendarDays, section: "admin", group: "downloads" },
-  { href: "/admin/arr-history", label: "Download History", icon: Clock, section: "admin", group: "downloads" },
-  { href: "/admin/arr-system", label: "Arr System", icon: Server, section: "admin", group: "downloads" },
+  { href: "/admin/queue", label: "Download Queue", i18nKey: "adminManage.queue.title", icon: Download, section: "admin", group: "downloads" },
+  { href: "/admin/missing", label: "Missing", i18nKey: "adminManage.missing.title", icon: CircleDashed, section: "admin", group: "downloads" },
+  { href: "/admin/arr-calendar", label: "Arr Calendar", i18nKey: "adminArr.calendar.title", icon: CalendarDays, section: "admin", group: "downloads" },
+  { href: "/admin/arr-history", label: "Download History", i18nKey: "adminArr.historyPage.title", icon: Clock, section: "admin", group: "downloads" },
+  { href: "/admin/arr-system", label: "Arr System", i18nKey: "adminArr.system.title", icon: Server, section: "admin", group: "downloads" },
   { href: "/admin/trash-guides", label: "TRaSH Guides", icon: Sparkles, section: "admin", group: "downloads" },
   { href: "/admin/library", label: "Library Diff", icon: Library, section: "admin", group: "library" },
   { href: "/admin/never-watched", label: "Never Watched", icon: EyeOff, section: "admin", group: "library" },

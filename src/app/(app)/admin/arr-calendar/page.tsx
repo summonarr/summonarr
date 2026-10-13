@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
@@ -19,6 +20,11 @@ const one = (v: Param): string | undefined => (typeof v === "string" ? v : undef
 // URL (?week=YYYY-MM-DD&filter=&type=&instance=&unmonitored=1, each checked)
 // and the server's "now" (guardrail 16 — the client never reads the clock
 // while rendering; it turns `week` into a local day only after mount).
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getTranslator();
+  return { title: t("adminArr.calendar.title") };
+}
+
 export default async function ArrCalendarPage({
   searchParams,
 }: {

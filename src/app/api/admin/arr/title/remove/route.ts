@@ -1,4 +1,5 @@
 import { NextResponse, after } from "next/server";
+import { tooManyRequests } from "@/lib/http";
 import { withAdmin } from "@/lib/api-auth";
 import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
 import { arrFailure, arrTitleGate } from "@/lib/arr-admin-http";
@@ -48,7 +49,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   // The execute echoes the id it was shown — a removal is never one blind click.
   if (body.confirm !== target.arrId) return NextResponse.json({ error: t("apiAdmin.arr.removeConfirm") }, { status: 400 });
   if (!checkRateLimit(`arr-title-remove:${session.user.id}`, REMOVES_PER_MIN, 60_000)) {
-    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
   let result;
   try {

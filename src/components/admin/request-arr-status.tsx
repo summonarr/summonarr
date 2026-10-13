@@ -24,8 +24,10 @@ import { withBasePath } from "@/lib/base-path";
 import { ARR_ERROR_KIND_KEYS, isArrErrorKind } from "@/lib/arr-error-kind";
 import type { QueuePhase } from "@/lib/arr-queue";
 import { unmonitoredEpisodesOnly, type ArrStatusVerdict, type RequestArrStatus } from "@/lib/request-arr-status";
+import { QUEUE_ATTENTION_HREF, queueTitleHref, type QueueTitleFilter } from "@/lib/arr-manage-links";
 
-type Loaded = RequestArrStatus & { canOpenQueue?: boolean };
+// `arrId` never reaches the browser (the route strips it); an admin gets `queue` instead — the title's own queue filter.
+type Loaded = Omit<RequestArrStatus, "arrId"> & { canOpenQueue?: boolean; queue?: QueueTitleFilter | null };
 
 // Literal maps, never keys built from a value: the i18n dead-key check can't
 // see a built key.
@@ -342,7 +344,7 @@ export function RequestArrStatusPanel({ requestId, mediaType, arrInstance, arrIn
             {status.verdict === "importBlocked" && (
               <p className="mt-1.5 text-[11px]">
                 {status.canOpenQueue ? (
-                  <Link href="/admin/queue" className="inline-flex items-center gap-1 hover:underline" style={{ color: "var(--ds-accent-text)" }}>
+                  <Link href={status.queue ? queueTitleHref(status.queue) : QUEUE_ATTENTION_HREF} className="inline-flex items-center gap-1 hover:underline" style={{ color: "var(--ds-accent-text)" }}>
                     {t("adminQueue.arrStatus.openQueue")}<ExternalLink className="w-3 h-3" />
                   </Link>
                 ) : (

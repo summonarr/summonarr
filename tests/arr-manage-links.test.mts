@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  QUEUE_ATTENTION_HREF,
   QUEUE_QUERY_MAX,
   arrHoldersByTmdbId,
   manageTabFor,
@@ -24,6 +25,8 @@ test("each list opens the manager on its tab, and never on Seasons for Radarr", 
     missing: { radarr: "settings", sonarr: "seasons" },
     calendar: { radarr: "settings", sonarr: "seasons" },
     issue: { radarr: "files", sonarr: "seasons" },
+    requestApproved: { radarr: "settings", sonarr: "seasons" },
+    requestAvailable: { radarr: "files", sonarr: "files" },
   };
   for (const [context, tabs] of Object.entries(expected) as Array<[ManageContext, { radarr: string; sonarr: string }]>) {
     assert.equal(manageTabFor(context, "radarr"), tabs.radarr, `${context} radarr`);
@@ -64,6 +67,15 @@ test("a queue link's title filter needs a known service, a valid slug and a posi
   assert.equal(parseQueueLinkFilters({ service: "radarr", instance: "", arrId: "2147483647" }).title?.arrId, 2147483647);
   // A repeated parameter reads its first value, as URLSearchParams.get does.
   assert.deepEqual(parseQueueLinkFilters({ service: ["sonarr", "radarr"], instance: ["", "4k"], arrId: ["3", "4"] }).title, { service: "sonarr", instance: "", arrId: 3 });
+});
+
+test("a queue link's attention tab is a flag the parser keeps only when set — the nav badge lands on it", () => {
+  assert.equal(QUEUE_ATTENTION_HREF, "/admin/queue?filter=attention");
+  assert.deepEqual(parseQueueLinkFilters({ filter: "attention" }), { q: "", title: null, filter: "attention" });
+  // Any other value is ignored, and the key is ABSENT (a literal { q, title } must deepEqual a parsed plain link).
+  assert.deepEqual(parseQueueLinkFilters({ filter: "all" }), { q: "", title: null });
+  assert.deepEqual(parseQueueLinkFilters({}), { q: "", title: null });
+  assert.notEqual(queueLinkKey({ q: "", title: null, filter: "attention" }), queueLinkKey({ q: "", title: null }), "the tab is part of the link's identity");
 });
 
 test("a queue link's text filter is trimmed, cleaned of control characters and capped", () => {

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { tooManyRequests } from "@/lib/http";
 import { withAdmin } from "@/lib/api-auth";
 import { snapshotted } from "@/lib/arr-snapshot";
 import { arrFailure, arrGate, parseArrId } from "@/lib/arr-admin-http";
@@ -52,7 +53,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const isAction = action !== undefined && task === undefined && isBulkAction(action);
   if (!isTask && !isAction) return NextResponse.json({ error: t("apiAdmin.arr.taskBodyInvalid") }, { status: 400 });
   if (!checkRateLimit(`arr-tasks:${session.user.id}`, LIMIT_PER_MIN, 60_000)) {
-    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
   try {
     const result = isTask

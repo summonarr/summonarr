@@ -5,6 +5,13 @@ import { markHistoryFailed } from "@/lib/arr-title-data";
 import { auditContext, logAudit } from "@/lib/audit";
 import { readJsonCapped } from "@/lib/body-size";
 import { translatorForRequest } from "@/lib/i18n/server-locale";
+import { tooManyRequests } from "@/lib/http";
+import { checkRateLimit } from "@/lib/rate-limit";
+
+// Each mark blocklists a release and, with Redownload Failed on, starts the
+// arr's own search — the title-command budget (30/min per admin, 429 with
+// Retry-After past it).
+const LIMIT_PER_MIN = 30;
 
 // Mark a grab failed (ADMIN) — Radarr/Sonarr's own "Mark as failed" on a
 // history record: the release is blocklisted, its download handled as failed,
@@ -12,7 +19,7 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 //   POST { service, instance, arrId, historyId } — `arrId` is the record's
 //   movie/series id. The record must be a GRAB of that title, as the arr's
 //   history reads now (409 otherwise, nothing sent). Audited ARR_MARK_FAILED
-//   after the arr accepted it (guardrail 26).
+//   after the arr accepted it (guardrail 26). 429 past LIMIT_PER_MIN.
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   const parsed = await readJsonCapped<Record<string, unknown>>(req, 16 * 1024);
@@ -20,6 +27,9 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const body = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   const target = await arrTitleGate(body.service, body.instance, body.arrId, t);
   if (target instanceof NextResponse) return target;
+  if (!checkRateLimit(`arr-history-failed:${session.user.id}`, LIMIT_PER_MIN, 60_000)) {
+    return tooManyRequests(60, t("apiAdmin.common.tooManyRequestsLater"));
+  }
   const historyId = parseArrId(body.historyId);
   if (historyId === null || typeof body.historyId !== "number") {
     return NextResponse.json({ error: t("apiAdmin.arr.idInvalid") }, { status: 400 });

@@ -836,7 +836,7 @@
   "adminManage.missing.error.loadNetwork": "加载缺失报告时出现网络错误。",
   "adminManage.missing.arrErrors": "无法读取 {list}：这些实例上的作品未列出。",
   "adminManage.missing.notConfigured.title": "{service} 尚未设置",
-  "adminManage.missing.notConfigured.description": "在设置中启用并连接一个 {service} 实例，即可查看它缺失的内容。",
+  "adminManage.missing.notConfigured.description": "在“设置 → 媒体”中启用并连接一个 {service} 实例，即可查看它缺失的内容。",
   "adminManage.missing.filter.title": "按标题筛选",
   "adminManage.missing.filter.titlePlaceholder": "按标题筛选…",
   "adminManage.missing.filter.instance": "实例",

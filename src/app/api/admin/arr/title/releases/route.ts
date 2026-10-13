@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { tooManyRequests } from "@/lib/http";
 import { withAdmin } from "@/lib/api-auth";
 import { arrFailure, arrTitleGate, parseArrId, parseSeasonNumber, type ArrTitleTarget } from "@/lib/arr-admin-http";
 import type { GrabProgress } from "@/lib/arr";
@@ -68,7 +69,7 @@ export const GET = withAdmin(async (req, _ctx, session) => {
   const running = background ? runningReleaseSearchJob(session.user.id, key) : null;
   if (running) return NextResponse.json({ job: running }, { status: 202 });
   if (!checkRateLimit(`arr-title-releases:${session.user.id}`, SEARCH_LIMIT_PER_MIN, 60_000)) {
-    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
   const search = async (): Promise<NextResponse> => {
     try {

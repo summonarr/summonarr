@@ -836,7 +836,7 @@
   "adminManage.missing.error.loadNetwork": "Erreur réseau lors du chargement du rapport des manquants.",
   "adminManage.missing.arrErrors": "Impossible de lire {list} : les titres de ces instances ne sont pas listés.",
   "adminManage.missing.notConfigured.title": "{service} n'est pas configuré",
-  "adminManage.missing.notConfigured.description": "Activez et connectez une instance {service} dans les Paramètres pour voir ce qui lui manque.",
+  "adminManage.missing.notConfigured.description": "Activez et connectez une instance {service} dans Paramètres → Médias pour voir ce qui lui manque.",
   "adminManage.missing.filter.title": "Filtrer par titre",
   "adminManage.missing.filter.titlePlaceholder": "Filtrer par titre…",
   "adminManage.missing.filter.instance": "Instance",

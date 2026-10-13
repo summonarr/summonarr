@@ -680,11 +680,12 @@ test("an attention event carries no output path and no file path from the arr's 
   assert.ok(!json.includes("/downloads"), json);
   assert.equal(ev.arr?.instanceName, "4K");
   assert.equal(ev.media?.tmdbId, 438631);
+  assert.equal(ev.arr?.arrId, QI("A", true).arrMediaId, "the arr's own id rides along, so the event's link can name the title");
 });
 
 // ── the catalog, the payload, the link, the text ─────────────────────────────
 
-test("the four monitor events are subscribable and route to the page that can act on them", () => {
+test("the four monitor events are subscribable and route to the page that can act on them", async () => {
   for (const e of ["arr.disk_low", "arr.disk_ok", "arr.download_failed", "arr.queue_attention"]) {
     assert.ok((NOTIFY_EVENT_KEYS as readonly string[]).includes(e), e);
   }
@@ -692,7 +693,13 @@ test("the four monitor events are subscribable and route to the page that can ac
   const arr = { service: "sonarr" as const, instance: "anime" };
   assert.equal(eventLink({ event: "arr.download_failed", media, arr }, "https://s"), "https://s/admin/arr-history?service=sonarr&instance=anime&kind=failed",
     "the arr page wins over the title page — the download is what needs acting on");
-  assert.equal(eventLink({ event: "arr.queue_attention", media, arr }, "https://s"), "https://s/admin/queue");
+  // notify-events is zero-import, so it spells the queue links itself: pinned equal to the page's own link helpers.
+  const { QUEUE_ATTENTION_HREF, queueTitleHref } = await import("../src/lib/arr-manage-links.ts");
+  assert.equal(eventLink({ event: "arr.queue_attention", media, arr }, "https://s"), `https://s${QUEUE_ATTENTION_HREF}`,
+    "a download needing attention lands on the queue's attention tab, the one the nav badge counts");
+  assert.equal(eventLink({ event: "arr.queue_attention", media, arr: { ...arr, arrId: 42 } }, "https://s"), `https://s${queueTitleHref({ service: "sonarr", instance: "anime", arrId: 42 })}`,
+    "and on exactly that title's downloads when the event names the arr's id for it");
+  assert.equal(eventLink({ event: "arr.queue_attention", media, arr: { ...arr, arrId: 42 } }, "https://s"), "https://s/admin/queue?service=sonarr&instance=anime&arrId=42");
   assert.equal(eventLink({ event: "arr.disk_low", arr }, "https://s"), "https://s/admin/arr-system?tab=storage");
   assert.equal(eventLink({ event: "request.approved", media }, "https://s"), "https://s/movie/5", "other events keep their links");
 });
@@ -701,7 +708,8 @@ test("payload: an additive `arr` object on the monitor's events, null on every o
   const ctx = { siteUrl: null, title: "", message: "", mediaTitle: null, timestamp: "" };
   const p = buildWebhookPayload({ event: "arr.disk_low", arr: { service: "radarr", instance: "", path: "/m", freeBytes: 5, totalBytes: 100, freePercent: 5, thresholdPercent: 10 } }, ctx);
   assert.equal(p.version, 1);
-  assert.deepEqual(p.arr, { service: "radarr", instance: "", instanceName: null, path: "/m", freeBytes: 5, totalBytes: 100, freePercent: 5, thresholdPercent: 10, release: null, downloadId: null, episodes: null });
+  // `arrId` is additive within payload version 1 (the queue-attention event names the title's arr id; a disk event has none).
+  assert.deepEqual(p.arr, { service: "radarr", instance: "", instanceName: null, path: "/m", freeBytes: 5, totalBytes: 100, freePercent: 5, thresholdPercent: 10, release: null, downloadId: null, episodes: null, arrId: null });
   assert.equal(buildWebhookPayload({ event: "request.created" }, ctx).arr, null);
 });
 

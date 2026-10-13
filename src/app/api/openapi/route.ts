@@ -628,6 +628,7 @@ const spec = {
                     since: { type: "string", format: "date-time", description: "The request's approval, else its creation" },
                     checkedAt: { type: "string", format: "date-time" },
                     canOpenQueue: { type: "boolean", description: "The caller can open the ADMIN-only Download Queue" },
+                    queue: { type: "object", nullable: true, description: "ADMIN only (null for a delegate, and when the arr doesn't have the title): the Download Queue filter naming exactly this title's downloads — /admin/queue?service=&instance=&arrId=", properties: { service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" }, arrId: { type: "integer" } } },
                   },
                 },
               },
@@ -1084,6 +1085,7 @@ const spec = {
           "403": { description: "Forbidden — ADMIN or ISSUE_ADMIN only" },
           "404": { description: "Issue not found, or (with `?job=`) the job is gone — expired, not the caller's, or a restart; search again" },
           "422": { description: "Instance not configured, TVDB resolution failed, or a TV issue whose scope is FULL, or SEASON/EPISODE without its season/episode number (Sonarr can only search a season or an episode)" },
+          "429": { description: "More than 20 searches a minute by this admin (Retry-After set); joining a search already running costs none" },
           "502": { description: "Radarr/Sonarr could not be reached or failed" },
         },
       },
@@ -2420,8 +2422,24 @@ const spec = {
           },
         },
         responses: {
-          "200": { description: "Saved; includes per-instance connection test results" },
-          "400": { description: "Invalid service or slug" },
+          "200": {
+            description: "Saved. `instances` is the configured set as GET lists it (secrets masked as has* flags), `testResults` one entry per instance whose connection was tested, and `removed` (additive — the iOS app decodes it) one entry per de-registered slug with the PENDING/APPROVED requests it left behind.",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    ok: { type: "boolean" },
+                    instances: { type: "array", items: { type: "object" } },
+                    testResults: { type: "array", items: { type: "object", properties: { slug: { type: "string" }, ok: { type: "boolean" }, message: { type: "string" } } } },
+                    removed: { type: "array", items: { type: "object", properties: { slug: { type: "string" }, openRequests: { type: "integer" } } } },
+                  },
+                },
+              },
+            },
+          },
+          "400": { description: "Invalid service or slug, or `instances` is not an array" },
+          "413": { description: "Request body over the 64 KB cap" },
         },
       },
     },
@@ -3231,7 +3249,7 @@ const spec = {
                   type: "object",
                   properties: {
                     instances: { type: "array", items: { type: "object", properties: { service: { type: "string", enum: ["radarr", "sonarr"] }, slug: { type: "string" }, name: { type: "string" } } } },
-                    errors: { type: "array", items: { type: "object", properties: { service: { type: "string" }, instance: { type: "string" }, error: { type: "string" } } } },
+                    errors: { type: "array", items: { type: "object", properties: { service: { type: "string" }, instance: { type: "string" }, error: { type: "string" }, kind: { type: "string", enum: ["auth", "timeout", "unreachable", "server", "notFound", "other"], description: "Why the read failed — translate this, not the English `error`" } } } },
                     items: {
                       type: "array",
                       items: {
@@ -3458,6 +3476,7 @@ const spec = {
           "403": { description: "Not ADMIN" },
           "404": { description: "Integration disabled or unknown instance" },
           "409": { description: "The download is no longer in the queue" },
+          "429": { description: "More than 30 previews a minute by this admin (each is a manual-import reprocess on the arr; Retry-After set)" },
           "502": { description: "The arr could not be reached" },
         },
       },
@@ -3567,7 +3586,7 @@ const spec = {
             description: "Queued",
             content: { "application/json": { schema: { type: "object", properties: {
               instances: { type: "integer" },
-              errors: { type: "array", items: { type: "object", properties: { service: { type: "string" }, instance: { type: "string" }, error: { type: "string" } } } },
+              errors: { type: "array", items: { type: "object", properties: { service: { type: "string" }, instance: { type: "string" }, error: { type: "string" }, kind: { type: "string", enum: ["auth", "timeout", "unreachable", "server", "notFound", "other"], description: "Why the read failed — translate this, not the English `error`" } } } },
             } } } },
           },
           "403": { description: "Not ADMIN" },
@@ -3607,6 +3626,7 @@ const spec = {
                           name: { type: "string" },
                           reachable: { type: "boolean" },
                           error: { type: "string", nullable: true },
+                          errorKind: { type: "string", nullable: true, enum: ["auth", "timeout", "unreachable", "server", "notFound", "other"], description: "Why the instance could not be read — translate this, not the English `error`" },
                           version: { type: "string", nullable: true },
                           checks: { type: "array", items: { type: "object", properties: { source: { type: "string" }, level: { type: "string", enum: ["notice", "warning", "error"] }, message: { type: "string" }, wikiUrl: { type: "string", nullable: true } } } },
                           webhook: { type: "object", properties: { state: { type: "string", enum: ["ok", "missing", "tokenMismatch", "eventsMissing", "unknown"] }, missingEvents: { type: "array", items: { type: "string" } } } },
@@ -3659,6 +3679,7 @@ const spec = {
           "403": { description: "Not ADMIN" },
           "404": { description: "Integration disabled or unknown instance" },
           "422": { description: "The arr refused the entry (`detail` is its reason)" },
+          "429": { description: "More than 10 setups a minute by this admin (each makes the arr test-POST Summonarr; Retry-After set)" },
           "502": { description: "The arr could not be reached, or offered no recognizable Webhook template" },
         },
       },
@@ -3825,7 +3846,7 @@ const spec = {
           "nothing changed. With `execute: true` and `confirm` echoing the id: removes it, `deleteFiles` and the import-list " +
           "exclusion always sent explicitly. 409 `{ approved }` while an APPROVED request on this instance would make the sync " +
           "add it back (nothing changed). Every AVAILABLE request on this instance is stamped `cleanedUpAt` before the delete " +
-          "(the sync never re-adds it), and unstamped when the delete fails. Audited ARR_TITLE_DELETE.",
+          "(the sync never re-adds it), and unstamped only when the arr DEFINITELY refused the delete and a re-read shows the title still there — an unknown outcome (timeout, 502/504, network) keeps them, since the arr may have taken it (guardrail 14b). Audited ARR_TITLE_DELETE.",
         requestBody: { required: true, content: { "application/json": { schema: { type: "object", required: ["service", "id", "deleteFiles", "addImportExclusion"], properties: {
           service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" }, id: { type: "integer", minimum: 1 },
           deleteFiles: { type: "boolean" }, addImportExclusion: { type: "boolean" }, execute: { type: "boolean" }, confirm: { type: "integer", description: "The id, echoed from the dry run" },
@@ -4077,7 +4098,7 @@ const spec = {
           service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" },
           arrId: { type: "integer", minimum: 1 }, historyId: { type: "integer", minimum: 1 },
         } } } } },
-        responses: { ...ARR_ERRORS, "200": { description: "Marked" }, "400": { description: "Invalid service, instance, arrId or historyId, or the arr refused (its reason, masked)" }, "403": { description: "Not ADMIN" }, "409": { description: "Not a grab, not this title's, or its download already failed" } },
+        responses: { ...ARR_ERRORS, "200": { description: "Marked" }, "400": { description: "Invalid service, instance, arrId or historyId, or the arr refused (its reason, masked)" }, "403": { description: "Not ADMIN" }, "409": { description: "Not a grab, not this title's, or its download already failed" }, "429": { description: "More than 30 marks a minute by this admin (Retry-After set)" } },
       },
     },
 
@@ -4135,7 +4156,7 @@ const spec = {
           service: { type: "string", enum: ["radarr", "sonarr"] }, instance: { type: "string" },
           count: { type: "integer", minimum: 0, description: "Size of the list the admin confirmed clearing — recorded in the ARR_BLOCKLIST_CHANGE audit; missing or malformed is recorded as null" },
         } } } } },
-        responses: { ...ARR_ERRORS, "202": { description: "{ ok, commandIds } — queued; commandIds is the arr's id for its ClearBlocklist command (GET /admin/arr/commands)" }, "403": { description: "Not ADMIN" } },
+        responses: { ...ARR_ERRORS, "202": { description: "{ ok, commandIds } — queued; commandIds is the arr's id for its ClearBlocklist command (GET /admin/arr/commands)" }, "403": { description: "Not ADMIN" }, "429": { description: "More than 10 clears a minute by this admin (Retry-After set)" } },
       },
     },
 
@@ -4863,6 +4884,7 @@ const spec = {
             description:
               "Cache rows, live ARR check, tvdb→tmdb mapping, wanted-table counts, last LIBRARY_SYNC audit row. For type=tv each instance also carries liveCompletion — Sonarr's aired-episode counts (specials excluded) and whether the series reads complete, which is the sole condition for a TV request to flip AVAILABLE.",
           },
+          "400": { description: "tmdbId (a positive integer) and type=movie|tv are required" },
         },
       },
     },

@@ -20,7 +20,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
@@ -153,6 +153,36 @@ test("each gated page enforces the same gate in its own source — the link is h
   }
   const admin = readFileSync(resolve(HERE, "../src/lib/arr-admin.ts"), "utf8");
   assert.ok(admin.includes("isFeatureEnabled(`feature.integration.${service}`)"), "enabledArrInstances no longer honours the integration flags");
+});
+
+test("a NEW Radarr/Sonarr page can't ship ungated — the registry is checked from BOTH sides", () => {
+  // The tests above only visit Object.keys(NAV_ITEM_ANY_FEATURE_KEYS): a sixth
+  // arr page added to the nav without an entry trips nothing but the group
+  // list (which its author then extends), and its page is never asked for a
+  // gate. So every downloads-group item (TRaSH Guides keeps its own single
+  // flag) and every admin page BUILT ON the arr libs — the five page
+  // components, enabledArrInstances, or a page's own arr data module — must be
+  // in the registry. The issues and users pages import the instance registry
+  // for per-instance icons and grants; they are not arr pages and stay out.
+  const gated = new Set(Object.keys(NAV_ITEM_ANY_FEATURE_KEYS));
+  for (const item of adminNavItems) {
+    if (item.group === "downloads" && item.href !== "/admin/trash-guides") {
+      assert.ok(gated.has(item.href), `${item.href} sits in the downloads group but is not in NAV_ITEM_ANY_FEATURE_KEYS`);
+    }
+  }
+  const ARR_PAGE_IMPORT =
+    /from "@\/(components\/admin\/(download-queue|missing-report|arr-calendar|arr-download-history|arr-system)|lib\/(arr-admin|arr-missing-data|arr-calendar-days|arr-history|arr-queue-data|arr-system-data))"/;
+  const adminDir = resolve(HERE, "../src/app/(app)/admin");
+  let found = 0;
+  for (const entry of readdirSync(adminDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const file = resolve(adminDir, entry.name, "page.tsx");
+    if (!existsSync(file)) continue;
+    if (!ARR_PAGE_IMPORT.test(stripComments(readFileSync(file, "utf8")))) continue;
+    found++;
+    assert.ok(gated.has(`/admin/${entry.name}`), `/admin/${entry.name} is built on the Radarr/Sonarr libs but is not in NAV_ITEM_ANY_FEATURE_KEYS`);
+  }
+  assert.equal(found, ARR_PAGES.length, "the import scan must find exactly the registered arr pages — extend ARR_PAGE_IMPORT if a page gates through a new module");
 });
 
 // ── 4: the renderers ─────────────────────────────────────────────────────────

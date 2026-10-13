@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { tooManyRequests } from "@/lib/http";
 import { withAdmin } from "@/lib/api-auth";
 import { ArrResponseError } from "@/lib/arr";
 import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
@@ -48,7 +49,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     return NextResponse.json({ error: t("apiAdmin.arr.commandInvalid") }, { status: 400 });
   }
   if (!checkRateLimit(`arr-title-command:${session.user.id}`, LIMIT_PER_MIN, 60_000)) {
-    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
   const { service, instance, arrId } = target;
   try {

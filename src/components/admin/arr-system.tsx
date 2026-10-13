@@ -988,7 +988,7 @@ export function ArrSystem({ configured, initialTab }: { configured: boolean; ini
   const t = useT();
   const [tab, setTab] = useState<Tab>(initialTab);
   if (!configured) {
-    return <EmptyState icon={Server} title={t("adminArr.common.noneConfigured")} description={t("adminArr.common.noneConfiguredHint")} />;
+    return <EmptyState icon={Server} title={t("adminArr.common.noneConfigured")} description={t("adminArr.common.noneConfiguredHint")} cta={{ href: "/settings?tab=media#radarr", label: t("adminArr.common.openSettings") }} />;
   }
   function switchTab(next: Tab) {
     setTab(next);

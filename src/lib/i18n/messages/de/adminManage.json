@@ -836,7 +836,7 @@
   "adminManage.missing.error.loadNetwork": "Netzwerkfehler beim Laden des Berichts über fehlende Titel.",
   "adminManage.missing.arrErrors": "{list} konnte nicht gelesen werden – Titel dieser Instanzen sind nicht aufgeführt.",
   "adminManage.missing.notConfigured.title": "{service} ist nicht eingerichtet",
-  "adminManage.missing.notConfigured.description": "Aktivieren und verbinden Sie in den Einstellungen eine {service}-Instanz, um zu sehen, was ihr fehlt.",
+  "adminManage.missing.notConfigured.description": "Aktivieren und verbinden Sie unter Einstellungen → Medien eine {service}-Instanz, um zu sehen, was ihr fehlt.",
   "adminManage.missing.filter.title": "Nach Titel filtern",
   "adminManage.missing.filter.titlePlaceholder": "Nach Titel filtern…",
   "adminManage.missing.filter.instance": "Instanz",

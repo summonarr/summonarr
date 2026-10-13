@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
@@ -11,6 +12,11 @@ export const dynamic = "force-dynamic";
 // ADMIN-only (guardrail 29, as the other arr pages). Every tab reads
 // Radarr/Sonarr live from the client; this render only decides whether there
 // is anything to read and which tab the URL asked for.
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getTranslator();
+  return { title: t("adminArr.system.title") };
+}
+
 export default async function ArrSystemPage({ searchParams }: { searchParams: Promise<{ tab?: string | string[] }> }) {
   const session = await authActive();
   if (!session || !hasPermission(session.user.permissions, Permission.ADMIN)) redirect("/");

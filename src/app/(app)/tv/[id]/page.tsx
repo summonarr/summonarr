@@ -505,7 +505,12 @@ export default async function TVDetailPage({
                 const label = arrInstanceLabel("sonarr", inst.name, inst.slug);
                 const deep = manageLink !== null && manageLink.instance === inst.slug;
                 // An instance holding the title: manage it there. Any other
-                // configured one: add it there, with the arr's own choices.
+                // configured one: add it there, with the arr's own choices. A
+                // ?manage= deep link (an external/bookmarked URL — nothing in the
+                // app emits one) opens the manager even on a non-holder: `holds`
+                // is the synced cache, and the manager resolves the title live, so
+                // a title added since the last sync still opens; a true non-holder
+                // gets the dialog's own not-found state.
                 return inst.holds || deep ? (
                   <Fragment key={inst.slug || "default"}>
                     <ArrManageButton

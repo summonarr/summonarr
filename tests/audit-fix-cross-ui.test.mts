@@ -30,8 +30,11 @@ test("C001: the request list gates each row's Open in / Manage on that row's own
     src,
     /const showArrLinks =\s*canOpenArr && \(arrServices\?\.\[group\.mediaType === "MOVIE" \? "radarr" : "sonarr"\] \?\? true\);/,
   );
-  assert.match(src, /\{showArrLinks && \(\s*<OpenInArrLink/);
-  assert.match(src, /\{showArrLinks && \(group\.aggregateStatus === "APPROVED" \|\| group\.aggregateStatus === "AVAILABLE"\) && \(\s*<ManageTitleButton/);
+  // One icon per instance the group's requests name (an HD and a 4K request are two), each still behind the row's service gate.
+  assert.match(src, /\{showArrLinks && groupArrInstances\.map\(\(slug\) => \(\s*<OpenInArrLink/);
+  assert.match(src, /\{showArrLinks && groupArrInstances\.map\(\(slug\) => \{/);
+  assert.match(src, /if \(!available && !onInstance\.some\(\(r\) => r\.status === "APPROVED"\)\) return null;\s*return \(\s*<ManageTitleButton/, "a Manage icon only for an instance the title was pushed to");
+  assert.match(src, /initialTab=\{manageTabFor\(available \? "requestAvailable" : "requestApproved", arrService\)\}/, "the tab comes from manageTabFor, never hand-picked");
   assert.doesNotMatch(src, /\{canOpenArr && /, "no icon renders off the coarse gate alone");
 });
 

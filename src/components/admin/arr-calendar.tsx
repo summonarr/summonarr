@@ -309,7 +309,7 @@ export function ArrCalendar({ instances, today, initialView }: { instances: Inst
   }, [report, scoped, statusFilter, typeFilter]);
 
   if (instances.length === 0) {
-    return <EmptyState icon={CalendarDays} title={t("adminArr.common.noneConfigured")} description={t("adminArr.common.noneConfiguredHint")} />;
+    return <EmptyState icon={CalendarDays} title={t("adminArr.common.noneConfigured")} description={t("adminArr.common.noneConfiguredHint")} cta={{ href: "/settings?tab=media#radarr", label: t("adminArr.common.openSettings") }} />;
   }
 
   // Every instance failed: "nothing on the calendar" would be a claim nobody could make.

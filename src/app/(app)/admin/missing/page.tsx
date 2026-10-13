@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
@@ -19,6 +20,11 @@ async function serviceConfigured(service: "radarr" | "sonarr"): Promise<boolean>
 // decision is re-made here with the DB-checked authActive() (guardrail 29). The
 // report itself loads client-side, per tab, because it makes live Radarr/Sonarr
 // calls; this render only decides which tabs have anything to read.
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getTranslator();
+  return { title: t("adminManage.missing.title") };
+}
+
 export default async function MissingPage({
   searchParams,
 }: {

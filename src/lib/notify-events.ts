@@ -79,6 +79,8 @@ export interface ArrEventDetail {
   downloadId?: string | null;
   /** Sonarr download events: how many episodes the download covers. */
   episodes?: number | null;
+  /** The arr's own id for the title the download is for — the queue link filters to it. */
+  arrId?: number | null;
 }
 
 // ─── Config ─────────────────────────────────────────────────────────────────
@@ -228,6 +230,7 @@ export interface WebhookPayload {
     release: string | null;
     downloadId: string | null;
     episodes: number | null;
+    arrId: number | null;
   } | null;
 }
 
@@ -244,7 +247,14 @@ const ARR_EVENT_PAGE: Partial<Record<NotifyEventKey, (a: ArrEventDetail | undefi
   "arr.disk_ok": () => "/admin/arr-system?tab=storage",
   "arr.download_failed": (a) =>
     a ? `/admin/arr-history?service=${a.service}&instance=${encodeURIComponent(a.instance)}&kind=failed` : "/admin/arr-history",
-  "arr.queue_attention": () => "/admin/queue",
+  // The download's own title when the event names the arr's id for it, else the
+  // attention tab the nav badge counts. Spelled here because this module is
+  // zero-import; tests/arr-watch.test.mts pins both against queueTitleHref /
+  // QUEUE_ATTENTION_HREF (arr-manage-links.ts), the page's own parser.
+  "arr.queue_attention": (a) =>
+    a && typeof a.arrId === "number"
+      ? `/admin/queue?${new URLSearchParams({ service: a.service, instance: a.instance, arrId: String(a.arrId) }).toString()}`
+      : "/admin/queue?filter=attention",
 };
 
 /** Where a click on the notification should land. */
@@ -293,6 +303,7 @@ export function buildWebhookPayload(ev: NotifyEvent, ctx: PayloadContext): Webho
           release: ev.arr.release ?? null,
           downloadId: ev.arr.downloadId ?? null,
           episodes: ev.arr.episodes ?? null,
+          arrId: ev.arr.arrId ?? null,
         }
       : null,
   };
@@ -307,7 +318,7 @@ export const TEMPLATE_FIELDS = [
   "request.id", "request.instance", "issue.id", "issue.type",
   "actor.name", "text", "votes",
   "arr.service", "arr.instance", "arr.instanceName", "arr.path", "arr.freeBytes", "arr.totalBytes",
-  "arr.freePercent", "arr.thresholdPercent", "arr.release", "arr.downloadId", "arr.episodes",
+  "arr.freePercent", "arr.thresholdPercent", "arr.release", "arr.downloadId", "arr.episodes", "arr.arrId",
 ] as const;
 
 function fieldValue(p: WebhookPayload, path: string): string {

@@ -391,7 +391,8 @@ function buildTabs(
   // always points at a page this user is allowed to open (not a hardcoded
   // "/admin" that some delegates would be redirected away from).
   const permsStr = sessionPerms;
-  // Also drop items whose feature flag is off — those pages render a 404.
+  // Also drop items whose feature flag is off — those pages render a 404 (the
+  // Radarr/Sonarr pages an empty state), so the tab must never target one.
   const adminItems = filterNavByFeatures(
     getVisibleAdminItems(permsStr ? { role, permissions: permsStr } : role),
     featureFlags,

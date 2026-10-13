@@ -836,7 +836,7 @@
   "adminManage.missing.error.loadNetwork": "Network error while loading the missing report.",
   "adminManage.missing.arrErrors": "Could not read {list} — titles on those instances are not listed.",
   "adminManage.missing.notConfigured.title": "{service} is not set up",
-  "adminManage.missing.notConfigured.description": "Turn on and connect a {service} instance in Settings to see what it is missing.",
+  "adminManage.missing.notConfigured.description": "Turn on and connect a {service} instance in Settings → Media to see what it is missing.",
   "adminManage.missing.filter.title": "Filter by title",
   "adminManage.missing.filter.titlePlaceholder": "Filter by title…",
   "adminManage.missing.filter.instance": "Instance",

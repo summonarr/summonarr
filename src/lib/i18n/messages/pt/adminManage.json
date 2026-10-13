@@ -836,7 +836,7 @@
   "adminManage.missing.error.loadNetwork": "Erro de rede ao carregar o relatório de itens em falta.",
   "adminManage.missing.arrErrors": "Não foi possível ler {list}: os títulos dessas instâncias não estão na lista.",
   "adminManage.missing.notConfigured.title": "O {service} não está configurado",
-  "adminManage.missing.notConfigured.description": "Ative e conecte uma instância do {service} nas Configurações para ver o que está em falta.",
+  "adminManage.missing.notConfigured.description": "Ative e conecte uma instância do {service} em Configurações → Mídia para ver o que está em falta.",
   "adminManage.missing.filter.title": "Filtrar por título",
   "adminManage.missing.filter.titlePlaceholder": "Filtrar por título…",
   "adminManage.missing.filter.instance": "Instância",

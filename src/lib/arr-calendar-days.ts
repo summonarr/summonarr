@@ -126,8 +126,6 @@ export interface CalendarView {
   unmonitored: boolean;
 }
 
-export const DEFAULT_CALENDAR_VIEW: CalendarView = { week: null, filter: "all", type: "all", instance: "all", unmonitored: false };
-
 /** A YYYY-MM-DD that names a real date, or null. */
 export function parseWeekParam(v: unknown): string | null {
   if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return null;

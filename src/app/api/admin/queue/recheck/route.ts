@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { tooManyRequests } from "@/lib/http";
 import { withAdmin } from "@/lib/api-auth";
 import { recheckDownloads } from "@/lib/arr-queue-data";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -14,7 +15,7 @@ import { translatorForRequest } from "@/lib/i18n/server-locale";
 export const POST = withAdmin(async (req, _ctx, session) => {
   const t = translatorForRequest(req);
   if (!checkRateLimit(`queue-recheck:${session.user.id}`, 6, 60_000)) {
-    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
   return NextResponse.json(await recheckDownloads(), { status: 202 });
 });

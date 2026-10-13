@@ -10,6 +10,7 @@ import Link from "next/link";
 import { RequestActions } from "./request-actions";
 import { OpenInArrLink, arrInstanceLabel } from "./open-in-arr";
 import { ManageTitleButton } from "./arr-title/title-manager";
+import { manageTabFor } from "@/lib/arr-manage-links";
 import { Chip } from "@/components/ui/design";
 import { RatingsBar } from "@/components/media/ratings-bar";
 import { withBasePath } from "@/lib/base-path";
@@ -539,6 +540,9 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
           );
           const mixedInstances =
             new Set(group.requesters.map((r) => r.arrInstance)).size > 1;
+          const arrService = group.mediaType === "MOVIE" ? "radarr" : "sonarr";
+          // Every instance a request of this title names, the default ("") included, once each.
+          const groupArrInstances = [...new Set(group.requesters.map((r) => r.arrInstance))];
           const groupAllPendingSelected =
             pendingIds.length > 0 && pendingIds.every((id) => selected.has(id));
 
@@ -625,37 +629,37 @@ export function AdminRequestList({ requests, page, total, pageSize, statusFilter
                     }}
                   />
                 </Link>
-                {showArrLinks && (
+                {/* One Open-in per instance the group's requests sit on — an HD
+                    and a 4K request for one title are two instances, and the
+                    icons must name both (guardrail 32), never only a representative. */}
+                {showArrLinks && groupArrInstances.map((slug) => (
                   <OpenInArrLink
-                    service={group.mediaType === "MOVIE" ? "radarr" : "sonarr"}
-                    instance={representativeInstance}
+                    key={`open:${slug}`}
+                    service={arrService}
+                    instance={slug}
                     target={{ tmdbId: group.tmdbId }}
-                    label={t("adminManage.openIn", {
-                      name: arrInstanceLabel(
-                        group.mediaType === "MOVIE" ? "radarr" : "sonarr",
-                        instanceLabel(representativeInstance),
-                        representativeInstance,
-                      ),
-                    })}
+                    label={t("adminManage.openIn", { name: arrInstanceLabel(arrService, instanceLabel(slug), slug) })}
                     iconOnly
                   />
-                )}
-                {/* Only once it was pushed: a pending title isn't on the instance yet. */}
-                {showArrLinks && (group.aggregateStatus === "APPROVED" || group.aggregateStatus === "AVAILABLE") && (
-                  <ManageTitleButton
-                    service={group.mediaType === "MOVIE" ? "radarr" : "sonarr"}
-                    instance={representativeInstance}
-                    target={{ tmdbId: group.tmdbId }}
-                    instanceLabel={arrInstanceLabel(
-                      group.mediaType === "MOVIE" ? "radarr" : "sonarr",
-                      instanceLabel(representativeInstance),
-                      representativeInstance,
-                    )}
-                    variant="icon"
-                    initialTab={group.aggregateStatus === "AVAILABLE" ? "files" : group.mediaType === "MOVIE" ? "settings" : "seasons"}
-                    onActiveChange={onManagerActive}
-                  />
-                )}
+                ))}
+                {/* Only once it was pushed there: a pending title isn't on the instance yet. */}
+                {showArrLinks && groupArrInstances.map((slug) => {
+                  const onInstance = group.requesters.filter((r) => r.arrInstance === slug);
+                  const available = onInstance.some((r) => r.status === "AVAILABLE");
+                  if (!available && !onInstance.some((r) => r.status === "APPROVED")) return null;
+                  return (
+                    <ManageTitleButton
+                      key={`manage:${slug}`}
+                      service={arrService}
+                      instance={slug}
+                      target={{ tmdbId: group.tmdbId }}
+                      instanceLabel={arrInstanceLabel(arrService, instanceLabel(slug), slug)}
+                      variant="icon"
+                      initialTab={manageTabFor(available ? "requestAvailable" : "requestApproved", arrService)}
+                      onActiveChange={onManagerActive}
+                    />
+                  );
+                })}
                 </div>
 
                 <p

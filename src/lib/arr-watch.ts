@@ -568,6 +568,7 @@ export function attentionEvent(inst: WatchInstance, item: QueueItem): NotifyEven
       release: item.title || null,
       downloadId: item.downloadId,
       episodes: inst.service === "sonarr" && item.episodes.length > 0 ? item.episodes.length : null,
+      arrId: item.arrMediaId,
     },
   };
 }

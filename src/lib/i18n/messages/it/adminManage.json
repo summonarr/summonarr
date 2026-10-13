@@ -836,7 +836,7 @@
   "adminManage.missing.error.loadNetwork": "Errore di rete durante il caricamento del report dei mancanti.",
   "adminManage.missing.arrErrors": "Impossibile leggere {list}: i titoli di quelle istanze non sono elencati.",
   "adminManage.missing.notConfigured.title": "{service} non è configurato",
-  "adminManage.missing.notConfigured.description": "Attiva e collega un'istanza di {service} nelle Impostazioni per vedere cosa le manca.",
+  "adminManage.missing.notConfigured.description": "Attiva e collega un'istanza di {service} in Impostazioni → Media per vedere cosa le manca.",
   "adminManage.missing.filter.title": "Filtra per titolo",
   "adminManage.missing.filter.titlePlaceholder": "Filtra per titolo…",
   "adminManage.missing.filter.instance": "Istanza",

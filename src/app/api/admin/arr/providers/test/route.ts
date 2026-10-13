@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { tooManyRequests } from "@/lib/http";
 import { withAdmin } from "@/lib/api-auth";
 import { arrFailure, arrGate, parseArrId } from "@/lib/arr-admin-http";
 import { parseProviderKind } from "@/lib/arr-system";
@@ -63,7 +64,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
     ? checkRateLimit(`arr-provider-test-all:${owner}`, TEST_ALL_PER_MIN, 60_000)
     : checkRateLimit(`arr-provider-test:${owner}`, TEST_ONE_PER_MIN, 60_000);
   if (!allowed) {
-    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
   const runTest = async (): Promise<NextResponse> => {
     try {

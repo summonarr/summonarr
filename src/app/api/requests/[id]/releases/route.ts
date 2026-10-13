@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { tooManyRequests } from "@/lib/http";
 import { withPermission } from "@/lib/api-auth";
 import {
   ArrItemNotFoundError,
@@ -146,7 +147,7 @@ export const GET = withPermission(Permission.MANAGE_REQUESTS)(async (req, { para
     const running = background ? runningReleaseSearchJob(session.user.id, key) : null;
     if (running) return NextResponse.json({ job: running }, { status: 202 });
     if (!checkRateLimit(`request-releases:${session.user.id}`, SEARCH_LIMIT_PER_MIN, 60_000)) {
-      return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
+      return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
     }
     const search = async (): Promise<NextResponse> => {
       try {

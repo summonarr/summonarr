@@ -22,13 +22,13 @@ import { useLocale, useT } from "@/components/i18n/i18n-provider";
 import type { ArrRelease, SonarrSeasonSummary } from "@/lib/arr";
 import { RELEASE_SEARCH_POLL_MS, runReleaseSearchJob } from "@/lib/client/release-search-job";
 
-function sizeFormatter(locale: string) {
+export function sizeFormatter(locale: string) {
   const gb = new Intl.NumberFormat(locale, { style: "unit", unit: "gigabyte", unitDisplay: "narrow", maximumFractionDigits: 1 });
   const mb = new Intl.NumberFormat(locale, { style: "unit", unit: "megabyte", unitDisplay: "narrow", maximumFractionDigits: 0 });
   return (bytes: number) => (bytes >= 1e9 ? gb.format(bytes / 1e9) : mb.format(bytes / 1e6));
 }
 
-function ageFormatter(locale: string) {
+export function ageFormatter(locale: string) {
   const d = new Intl.NumberFormat(locale, { style: "unit", unit: "day", unitDisplay: "narrow", maximumFractionDigits: 0 });
   return (days: number) => d.format(Math.max(0, Math.round(days)));
 }

@@ -13,6 +13,7 @@
   "adminArr.error.other": "无法读取 {name}",
   "adminArr.common.noneConfigured": "未配置 Radarr 或 Sonarr",
   "adminArr.common.noneConfiguredHint": "在“设置 → 媒体”中连接 Radarr 或 Sonarr（并保持其集成开启），即可在此管理它们。",
+  "adminArr.common.openSettings": "打开“设置 → 媒体”",
   "adminArr.common.previousPage": "上一页",
   "adminArr.common.nextPage": "下一页",
   "adminArr.common.pageOf": "第 {page} 页，共 {pages} 页",

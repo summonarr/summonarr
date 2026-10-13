@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { authActive } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { hasPermission, Permission } from "@/lib/permissions";
@@ -15,6 +16,11 @@ const first = (v: string | string[] | undefined) => (typeof v === "string" ? v :
 // load client-side — live, paged Radarr/Sonarr reads; this render passes the
 // configured instances and the tab, instance, kind filter and page the URL
 // asked for (a page past the end is corrected by the first load).
+export async function generateMetadata(): Promise<Metadata> {
+  const t = await getTranslator();
+  return { title: t("adminArr.historyPage.title") };
+}
+
 export default async function ArrHistoryPage({
   searchParams,
 }: {

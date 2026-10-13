@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { tooManyRequests } from "@/lib/http";
 import { withAdmin } from "@/lib/api-auth";
 import { ARR_SERVICE_LABEL } from "@/lib/arr-admin";
 import { arrFailure, arrGate, parseArrId } from "@/lib/arr-admin-http";
@@ -49,7 +50,7 @@ export const POST = withAdmin(async (req, _ctx, session) => {
   const add = parseTitleAdd(target.service, body);
   if (!add) return NextResponse.json({ error: t("apiAdmin.arr.addInvalid") }, { status: 400 });
   if (!checkRateLimit(`arr-title-add:${session.user.id}`, ADDS_PER_MIN, 60_000)) {
-    return NextResponse.json({ error: t("apiUser.common.tooManyRequestsLater") }, { status: 429 });
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
   }
   const service = ARR_SERVICE_LABEL[target.service];
   let result;

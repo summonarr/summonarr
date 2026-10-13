@@ -13,6 +13,7 @@
   "adminArr.error.other": "No se pudo leer {name}",
   "adminArr.common.noneConfigured": "No hay Radarr ni Sonarr configurado",
   "adminArr.common.noneConfiguredHint": "Conecta Radarr o Sonarr en Ajustes → Multimedia (y deja su integración activada) para gestionarlos aquí.",
+  "adminArr.common.openSettings": "Abrir Ajustes → Multimedia",
   "adminArr.common.previousPage": "Página anterior",
   "adminArr.common.nextPage": "Página siguiente",
   "adminArr.common.pageOf": "Página {page} de {pages}",

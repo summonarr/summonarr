@@ -931,6 +931,7 @@ export function MissingReport({
         icon={CircleDashed}
         title={t("adminManage.missing.notConfigured.title", { service: label })}
         description={t("adminManage.missing.notConfigured.description", { service: label })}
+        cta={{ href: `/settings?tab=media#${service}`, label: t("adminArr.common.openSettings") }}
       />
     );
   } else if (!report) {
@@ -1004,7 +1005,7 @@ export function MissingReport({
             </ul>
             <p className="m-0" style={{ marginTop: 4 }}>
               {t("adminManage.missing.cutoff.truncatedHint", { action: t("adminArr.system.searchAllCutoff") })}{" "}
-              <Link href="/admin/arr-system" className="underline">{t("adminArr.missingBulk.capLink")}</Link>
+              <Link href="/admin/arr-system?tab=tasks" className="underline">{t("adminArr.missingBulk.capLink")}</Link>
             </p>
           </div>
         )}
@@ -1109,7 +1110,7 @@ export function MissingReport({
                       max: BULK_SEARCH_MAX,
                       action: mode === "cutoff" ? t("adminArr.system.searchAllCutoff") : t("adminArr.system.searchAllMissing"),
                     })}{" "}
-                    <Link href="/admin/arr-system" className="hover:underline" style={{ color: "var(--ds-accent-text)" }}>
+                    <Link href="/admin/arr-system?tab=tasks" className="hover:underline" style={{ color: "var(--ds-accent-text)" }}>
                       {t("adminArr.missingBulk.capLink")}
                     </Link>
                   </p>

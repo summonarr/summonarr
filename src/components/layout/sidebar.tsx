@@ -11,6 +11,7 @@ import {
   getVisibleAdminItems,
   filterNavByFeatures,
   navItemLabel,
+  navItemHref,
   isNavItemActive,
   type NavItem,
 } from "@/lib/nav-items";
@@ -209,7 +210,7 @@ function NavLink({ item, active, badge }: { item: NavItem; active: boolean; badg
   const Icon = item.icon;
   return (
     <Link
-      href={item.href}
+      href={navItemHref(item, badge)}
       aria-current={active ? "page" : undefined}
       // ds-hover-tint draws the hover tint on top of the inline background
       // (so the active highlight stays visible underneath) and adds a

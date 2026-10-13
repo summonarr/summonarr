@@ -13,6 +13,7 @@
   "adminArr.error.other": "Impossible de lire {name}",
   "adminArr.common.noneConfigured": "Aucun Radarr ni Sonarr configuré",
   "adminArr.common.noneConfiguredHint": "Connectez Radarr ou Sonarr dans Paramètres → Médias (et laissez leur intégration activée) pour les gérer ici.",
+  "adminArr.common.openSettings": "Ouvrir Paramètres → Médias",
   "adminArr.common.previousPage": "Page précédente",
   "adminArr.common.nextPage": "Page suivante",
   "adminArr.common.pageOf": "Page {page} sur {pages}",

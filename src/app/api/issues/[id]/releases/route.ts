@@ -2,7 +2,9 @@ import { NextResponse } from "next/server";
 import { withIssueAdmin } from "@/lib/api-auth";
 import { grabDefinitelyRefused, grabRefusalResponse } from "@/lib/release-grab";
 import { claimReleaseHandle, forgetReleaseHandle, issueReleaseHandles, releaseReleaseHandle } from "@/lib/release-handles";
-import { answerOf, releaseSearchJobResponse, startReleaseSearchJob } from "@/lib/release-search-jobs";
+import { answerOf, releaseSearchJobResponse, runningReleaseSearchJob, startReleaseSearchJob } from "@/lib/release-search-jobs";
+import { tooManyRequests } from "@/lib/http";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { readJsonCapped } from "@/lib/body-size";
 import { prisma } from "@/lib/prisma";
 import {
@@ -28,6 +30,9 @@ import { recordIssueGrab } from "@/lib/issue-grab";
 type RouteContext = { params: Promise<{ id: string }> };
 
 const HANDLE_RE = /^[0-9a-f]{32}$/;
+// Interactive searches per admin per minute — the same budget as the request
+// queue's Pick release and the title manager's search (each sweeps every indexer).
+const SEARCH_LIMIT_PER_MIN = 20;
 
 // Each release's `guid` is handed out as an opaque handle bound to this issue,
 // service and instance (release-handles.ts) — the request "Pick release" rule:
@@ -113,6 +118,15 @@ export const GET = withIssueAdmin(async (req, { params }: RouteContext, session)
 
   const key = handleScope(id, service, instance);
   const background = req.nextUrl.searchParams.get("async") === "1";
+  // Joining a search already running costs no indexer hit, so no rate token;
+  // past that, the same per-user budget as the request-queue and title-manager
+  // searches (SEARCH_LIMIT_PER_MIN) — every search sweeps every indexer, and
+  // this one is reachable by MANAGE_ISSUES delegates.
+  const running = background ? runningReleaseSearchJob(session.user.id, key) : null;
+  if (running) return NextResponse.json({ job: running }, { status: 202 });
+  if (!checkRateLimit(`issue-releases:${session.user.id}`, SEARCH_LIMIT_PER_MIN, 60_000)) {
+    return tooManyRequests(60, t("apiUser.common.tooManyRequestsLater"));
+  }
 
   const search = async (): Promise<NextResponse> => {
     try {
@@ -339,10 +353,13 @@ export const POST = withIssueAdmin(async (req, { params }: RouteContext, session
   // to which instance. `grabId` is absent when the IssueGrab row could not be
   // written (see the catch above) — the download still happened. The release
   // NAME is recorded, never the guid (some indexers put the apikey in it).
+  // ARR_RELEASE_GRAB, like every other grab (request queue, title manager,
+  // queue Grab now), so the audit log's "Release Grabbed" filter finds it; the
+  // status flip above keeps its ISSUE_STATUS_CHANGE row.
   void logAudit({
     userId: session.user.id,
     userName: session.user.name ?? session.user.email ?? null,
-    action: "ISSUE_STATUS_CHANGE",
+    action: "ARR_RELEASE_GRAB",
     target: `issue:${id}`,
     details: {
       trigger: "grab",

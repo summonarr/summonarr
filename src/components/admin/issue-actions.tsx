@@ -14,6 +14,7 @@ import type { ArrRelease } from "@/lib/arr";
 import type { ReplaceableFile, ReplaceFollowUp } from "@/lib/issue-replace";
 import { withBasePath } from "@/lib/base-path";
 import { useLocale, useT } from "@/components/i18n/i18n-provider";
+import { ageFormatter, sizeFormatter } from "./release-search-dialog";
 import { episodeSummary, queueFormatters } from "@/components/admin/queue-format";
 import { ManageTitleButton } from "@/components/admin/arr-title/title-manager";
 import { arrInstanceLabel } from "@/components/admin/open-in-arr";
@@ -51,17 +52,6 @@ const REFETCH_LABEL_KEY: Record<string, string> = {
   EPISODE: "adminQueue.issueActions.refetchEpisode",
 };
 
-function formatSize(bytes: number): string {
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
-  return `${(bytes / 1e3).toFixed(0)} KB`;
-}
-
-function formatAge(hours: number): string {
-  if (hours < 24) return `${Math.round(hours)}h`;
-  if (hours < 24 * 30) return `${Math.round(hours / 24)}d`;
-  return `${Math.round(hours / (24 * 30))}mo`;
-}
 
 export function IssueActions({
   issueId,
@@ -78,6 +68,11 @@ export function IssueActions({
 }: IssueActionsProps) {
   const router = useRouter();
   const t = useT();
+  // The release list reads like the request queue's Pick release: sizes and
+  // ages in the viewer's locale, seeders through the plural key.
+  const locale = useLocale();
+  const formatSize = useMemo(() => sizeFormatter(locale), [locale]);
+  const formatAge = useMemo(() => ageFormatter(locale), [locale]);
 
   const [loading, setLoading] = useState<"refetch" | "status" | "delete" | "releases" | "grab" | null>(null);
   const [arrError, setArrError] = useState<string | null>(null);
@@ -624,10 +619,10 @@ export function IssueActions({
                             <span className="text-xs text-zinc-500">{rel.indexer}</span>
                             {rel.protocol === "torrent" && rel.seeders != null && (
                               <span className={`text-xs ${rel.seeders > 5 ? "text-green-400" : rel.seeders > 0 ? "text-yellow-400" : "text-red-400"}`}>
-                                {rel.seeders}S
+                                {t("adminQueue.releases.seeders", { count: rel.seeders })}
                               </span>
                             )}
-                            <span className="text-xs text-zinc-500">{formatAge(rel.age * 24)}</span>
+                            <span className="text-xs text-zinc-500">{formatAge(rel.age)}</span>
                           </div>
                           {rel.rejected && rel.rejections.length > 0 && (
                             <p className="text-xs text-amber-400 mt-0.5 truncate">{rel.rejections[0]}</p>

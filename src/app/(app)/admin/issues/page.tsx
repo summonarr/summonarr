@@ -103,7 +103,7 @@ export default async function AdminIssuesPage({
   // "Replace file" deletes files, which only an ADMIN may (its route is
   // withAdmin, a role check — mirrored here); MANAGE_ISSUES alone keeps
   // Refetch and Replace. Read from the DB-checked authActive() session above.
-  const isAdmin = session.user.role === "ADMIN";
+  const isAdmin = hasPermission(session.user.permissions, Permission.ADMIN);
   const t = await getTranslator();
 
   const { filter: rawFilter, selected: selectedId } = await searchParams;

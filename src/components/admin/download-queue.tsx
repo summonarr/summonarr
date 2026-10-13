@@ -168,7 +168,7 @@ export function DownloadQueue({
   const [report, setReport] = useState<QueueReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useState<Filter>(initialFilters.filter ?? "all");
   const [instance, setInstance] = useState("all");
   const [query, setQuery] = useState(initialFilters.q);
   const [titleFilter, setTitleFilter] = useState<QueueTitleFilter | null>(initialFilters.title);
@@ -190,6 +190,7 @@ export function DownloadQueue({
       setLinked(incoming);
       setQuery(initialFilters.q);
       setTitleFilter(initialFilters.title);
+      setFilter(initialFilters.filter ?? "all");
       setManaging(null);
     }
   }
@@ -619,7 +620,12 @@ export function DownloadQueue({
   let body: React.ReactNode;
   if (!configured) {
     body = (
-      <EmptyState icon={CircleDashed} title={t("adminManage.queue.notConfigured.title")} description={t("adminManage.queue.notConfigured.description")} />
+      <EmptyState
+        icon={CircleDashed}
+        title={t("adminManage.queue.notConfigured.title")}
+        description={t("adminManage.queue.notConfigured.description")}
+        cta={{ href: "/settings?tab=media#radarr", label: t("adminArr.common.openSettings") }}
+      />
     );
   } else if (!report) {
     body = error ? (

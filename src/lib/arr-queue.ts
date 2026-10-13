@@ -27,10 +27,6 @@ export type QueuePhase =
   | "clientUnavailable"
   | "unknown";
 
-export const QUEUE_PHASES: readonly QueuePhase[] = [
-  "downloading", "queued", "paused", "delay", "importPending", "importing", "importBlocked", "failed", "clientUnavailable", "unknown",
-];
-
 export type QualityTag = "proper" | "repack" | "real";
 
 export interface QueueEpisode {

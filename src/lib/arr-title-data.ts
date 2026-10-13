@@ -142,13 +142,8 @@ async function episodesOfSeries(cfg: ArrCfg, seriesId: number, ids: readonly num
  * then Sonarr's lookup, which marks a series it already has with a positive id
  * — trusted only on a row whose tmdbId is this one, never an untagged lone row
  * (this resolves the target of deletes and edits).
- */
-export async function findTitleId(service: ArrService, instance: string, tmdbId: number): Promise<number | null> {
-  return (await findTitle(service, instance, tmdbId))?.arrId ?? null;
-}
-
-/**
- * findTitleId, plus the library resource when the read that found it returned
+ *
+ * Returns the library resource too when the read that found it returned
  * one whole (Radarr's tmdbId filter, Sonarr's tvdbId filter) — loadTitle then
  * doesn't fetch the same resource again. A lookup row is not a library
  * resource and is never reused.
