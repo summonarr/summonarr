@@ -115,6 +115,31 @@ test("f11: a password-less trust-auth DATABASE_URL parses in every operator scri
   }
 });
 
+// `docker compose exec` gets the container's configured env, never the
+// DATABASE_URL docker-entrypoint.sh exports at startup — so the scripts' own
+// usage line (`docker compose exec -w /app summonarr node scripts/…`) read the
+// .env DATABASE_URL the entrypoint ignores (often localhost) and died with
+// ECONNREFUSED 127.0.0.1:5432 on a production run. With POSTGRES_PASSWORD set
+// they now connect exactly as the entrypoint does; explicit PG* still wins.
+test("every operator script connects to the bundled Postgres the way the entrypoint does", () => {
+  const entrypoint = source("docker-entrypoint.sh");
+  assert.match(entrypoint, /export DATABASE_URL="postgresql:\/\/summonarr:\$\{ENCODED_PASSWORD\}@postgres:5432\/summonarr"/);
+  for (const rel of SCRIPTS) {
+    const src = source(rel);
+    assert.match(
+      src,
+      /user = "summonarr";\s*password = process\.env\.POSTGRES_PASSWORD;\s*host = "postgres";\s*port = 5432;\s*database = "summonarr";|return \{ user: "summonarr", password: process\.env\.POSTGRES_PASSWORD, host: "postgres", port: 5432, database: "summonarr" \};/,
+      `${rel}: no bundled-Postgres branch matching the entrypoint`,
+    );
+    const pg = src.indexOf("process.env.PGHOST && process.env.PGUSER");
+    const bundled = src.indexOf("if (process.env.POSTGRES_PASSWORD)");
+    const url = src.indexOf("if (process.env.DATABASE_URL)");
+    assert.ok(pg >= 0 && bundled >= 0 && url >= 0, `${rel}: connection branches not found`);
+    assert.ok(pg < bundled, `${rel}: explicit PG* vars must still win`);
+    assert.ok(bundled < url, `${rel}: the .env DATABASE_URL the entrypoint ignores must not win over POSTGRES_PASSWORD`);
+  }
+});
+
 test("f7: the stale 'entrypoint does not escape' comment is gone — the entrypoint DOES percent-encode", () => {
   const src = source("scripts/encrypt-existing-settings.mjs");
   assert.doesNotMatch(src, /entrypoint's URL doesn't escape/);
