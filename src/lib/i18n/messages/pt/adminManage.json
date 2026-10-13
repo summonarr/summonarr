@@ -947,6 +947,8 @@
   "adminManage.queue.details.hide": "Ocultar os detalhes de {title}",
   "adminManage.queue.details.release": "Release",
   "adminManage.queue.details.episodes": "Episódios",
+  "adminManage.queue.episodeCount_one": "{count} episódio",
+  "adminManage.queue.episodeCount_other": "{count} episódios",
   "adminManage.queue.details.score": "Pontuação dos formatos personalizados",
   "adminManage.queue.details.downloaded": "Baixado",
   "adminManage.queue.details.left": "Falta baixar",

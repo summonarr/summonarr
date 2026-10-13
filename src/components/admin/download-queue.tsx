@@ -828,7 +828,10 @@ export function DownloadQueue({
                                 )}
                               </div>
                               {r.episodes.length > 0 && (
-                                <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-muted)" }}>{episodeSummary(r.episodes)}</div>
+                                <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-muted)" }}>
+                                  {episodeSummary(r.episodes)}
+                                  {r.episodes.length > 1 && <span> · {t("adminManage.queue.episodeCount", { count: r.episodes.length })}</span>}
+                                </div>
                               )}
                               <div className="ds-mono" style={{ fontSize: 11, color: "var(--ds-fg-subtle)", overflowWrap: "anywhere" }} title={r.title}>
                                 {r.title}
